@@ -10,7 +10,16 @@ import { daysBetween } from "../lib/days";
 import { Button, ButtonLink } from "../components/ui/Button";
 import { useAuth } from "../auth";
 import { churchName, useSite } from "../lib/useSite";
+import { opensRoute, pageChunk } from "../components/RouteErrorBoundary";
 import heroSignedOut from "../assets/illustrations/hero-signed-out.svg";
+
+// The event page is its own chunk, started on the first hover or focus of an
+// event row that leads there and loaded by App's route (pageChunk retries a
+// failed start).
+// "/events/new" is NewChurchEvent's route.
+export const eventDetailChunk = pageChunk(() => import("./EventDetail").then((m) => ({ default: m.EventDetail })), {
+  needed: opensRoute("/events/:id", ["/events/new"]),
+});
 
 export function Home() {
   const { user, loading: authLoading } = useAuth();
@@ -81,7 +90,7 @@ export function Home() {
             <p className="text-sm text-text-muted mb-3">{openEvents.length} upcoming {openEvents.length === 1 ? "date" : "dates"} in the next 90 days{openEvents.length > 4 ? "; showing the next 4" : ""}</p>
             <div className="fold-list">
               {openEvents.slice(0, 4).map((ev) => (
-                <Link key={`${ev.eventId}-${ev.date}`} to={ev.dateUrl || `/events/${ev.eventId}`} className="fold-list-row flex gap-4 rounded-sm hover:bg-sunken">
+                <Link key={`${ev.eventId}-${ev.date}`} to={ev.dateUrl || `/events/${ev.eventId}`} onPointerEnter={ev.dateUrl ? undefined : eventDetailChunk.warm} onFocus={ev.dateUrl ? undefined : eventDetailChunk.warm} className="fold-list-row flex gap-4 rounded-sm hover:bg-sunken">
                   <DateBadge at={ev.startsAt} />
                   <div className="min-w-0">
                     <div className="font-bold text-lg">{ev.title || "Church event"}</div>

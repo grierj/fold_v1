@@ -1,17 +1,19 @@
 import { lazy, Suspense } from "react";
 import { Navigate, Route, Routes, useLocation } from "react-router-dom";
 import { Layout } from "./components/Layout";
-import { Home } from "./pages/Home";
+import { Home, eventDetailChunk } from "./pages/Home";
 import { Login } from "./pages/Login";
-import { GroupDetail } from "./pages/GroupDetail";
-import { EventDetail } from "./pages/EventDetail";
 import { MyGroups } from "./pages/MyGroups";
+import { groupDetailChunk } from "./components/GroupCard";
+import { RouteErrorBoundary } from "./components/RouteErrorBoundary";
 import { Skeleton } from "./components/ui/Skeleton";
 import { NotFound } from "./components/Missing";
 import { RequireUser } from "./components/RequireUser";
 import { useAuth } from "./auth";
 import { UnsavedChangesBlocker } from "./lib/unsavedChanges";
 
+const GroupDetail = lazy(groupDetailChunk.route);
+const EventDetail = lazy(eventDetailChunk.route);
 const NewGroup = lazy(() => import("./pages/NewGroup").then((m) => ({ default: m.NewGroup })));
 const NewEvent = lazy(() => import("./pages/NewEvent").then((m) => ({ default: m.NewEvent })));
 const NewChurchEvent = lazy(() => import("./pages/NewChurchEvent").then((m) => ({ default: m.NewChurchEvent })));
@@ -58,6 +60,7 @@ export default function App() {
     // survives. Routes wait for the session check so pages fetch once.
     <Layout key={user ? `${user.id}:${user.status}` : "anon"}>
       <UnsavedChangesBlocker />
+      <RouteErrorBoundary resetKey={location.key}>
       <Suspense fallback={<Skeleton kind="page" label="Loading page…" />}>
       <Routes>
         <Route path="/" element={homeScreenSignIn ? <Navigate to="/login" replace /> : <Home />} />
@@ -75,10 +78,10 @@ export default function App() {
         <Route path="/guest/manage/:token" element={<GuestManage />} />
         <Route path="/email-settings/:token" element={<EmailSettingsPage />} />
         <Route path="/groups/new" element={<RequireUser><NewGroup /></RequireUser>} />
-        <Route path="/groups/:id" element={<GroupDetail />} />
+        <Route path="/groups/:id" element={<Suspense key="group" fallback={<Skeleton kind="page" label="Loading this group…" />}><GroupDetail /></Suspense>} />
         <Route path="/groups/:id/events/new" element={<RequireUser><NewEvent /></RequireUser>} />
         <Route path="/events/new" element={<RequireUser><NewChurchEvent /></RequireUser>} />
-        <Route path="/events/:id" element={<EventDetail />} />
+        <Route path="/events/:id" element={<Suspense key="event" fallback={<Skeleton kind="page" label="Loading this event…" />}><EventDetail /></Suspense>} />
         <Route path="/events/:id/dates/:date" element={<Suspense fallback={<Skeleton kind="page" label="Loading this date…" />}><EventDatePage /></Suspense>} />
         <Route path="/calendar" element={<CalendarPage />} />
         <Route path="/calendar/rooms" element={<RoomCalendarPage />} />
@@ -102,6 +105,7 @@ export default function App() {
         <Route path="*" element={<NotFound />} />
       </Routes>
       </Suspense>
+      </RouteErrorBoundary>
     </Layout>
   );
 }
