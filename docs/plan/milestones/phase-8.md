@@ -72,8 +72,11 @@ types) still lands between feature waves, not during M8.1's page edits.
 ---
 
 **M8.1 — EventDate passes the 3-second test (teardown P0; Luma)**
-Existing surface. No brief yet for the visual end-state; R15-1 owns the
-lazy/bundle slice for these pages.
+Existing surface. Brief:
+[`briefs/m8-1-event-date.md`](../briefs/m8-1-event-date.md) owns the
+visual and interaction end state, viewer cases, API boundaries, slices and
+proof (accepted Nov 18, 2026). This milestone and the brief must agree;
+change them together. R15-1 owns the lazy/bundle slice for these pages.
 
 End goal — a member opening one date of a series, on a 390px phone,
 can answer all of the following from the first viewport, without
@@ -81,21 +84,51 @@ scrolling, and the RSVP action stays reachable in a sticky bar while
 the rest of the page scrolls:
 
 - What is this? Cover image, event title, group name, leader/host line.
+  The cover is the shown group's (`coverSrc`, so a photo-less group gets
+  its standard cover); a church-wide date or a hidden group's date has no
+  cover, and none is introduced (brief 2.3). The leader/host line names a
+  shown group's display-safe leader. For an ordinary reader, a church-wide
+  or hidden-group date shows the church label, never a named host person;
+  an invitation-only reader gets no host line, as today. The series page
+  keeps its existing host disclosure (brief section 1).
 - When? Date, start–end time, and the time zone named when it differs
   from the viewer's.
-- Where? Place or room as recorded, and for remote/hybrid dates the
-  remote state (link available now, available at meeting time, or not
-  remote) — never only buried in the description text.
+- Where? Place or room as recorded, and the remote state on two
+  independent axes (brief 4.3), never only buried in the description
+  text. Remote RSVP: offered, closed for this date, or not remote (in
+  person only); invitation-only readers keep today's single remote flag,
+  so closed is shown to ordinary readers only. Link access: the link is
+  available now, the viewer needs to be Going to see it, or no link is
+  configured. A date can be closed to remote RSVP while the viewer still
+  sees its link. Fold has no time-triggered link release, so the page
+  never promises a link at meeting time.
 - Am I in? The member's own state as the page's hero element, in one of
   three plain sentences: in for the series, in for this date only, or
   not in. Where the series state applies, Undo is offered at the same
   prominence as the RSVP action itself, for as long as Undo exists.
+  Series standing is inferred from the member's coverage of the eligible
+  upcoming dates, with no stored provenance and no migration; Maybe,
+  declined, waitlisted and a cancelled answer stay distinct (brief 2.1).
+  Undo follows the server's receipt, not the displayed standing, so a
+  partial, refused or declined series answer still offers it while the
+  receipt is valid (brief 5.2).
 - Who else is coming? Count first, then names to exactly the extent
   existing attendee-privacy rules allow that viewer.
 - What is different about this date? A cancelled date, and any date
   whose time, place, capacity or visibility differs from the series,
   says so in a plain sentence on its own page. Per-date exceptions are
-  never only discoverable from the series page.
+  never only discoverable from the series page. A cancelled date says so
+  only to a qualified viewer, through a minimal title/date/cancelled
+  tombstone: their own still-standing registration on that exact date
+  (not a household person's they hold), with their current access to it,
+  or an exact-date invitation valid at that cancellation (live and not
+  past its own expiry, or ended only by that cancellation, not an earlier
+  one a restore undid, as the existing records can show) whose
+  account, consent and context checks still pass now. A row whose only
+  authority was an invitation ended for any other reason, or a
+  registration cancelled by a visibility loss, does not qualify. Everyone else keeps the existing
+  unavailable answer, and its calendar download stays unavailable
+  (brief 2.2).
 
 Further end-state criteria:
 
@@ -106,8 +139,22 @@ Further end-state criteria:
   are waiting, and what happens next in plain words (promotion needs
   their explicit confirmation, and by when) — not only inside a later
   notification.
+  *Outstanding follow-up (Grier, Nov 18, 2026):* today a promoted member
+  is moved straight to Going and notified, with no confirmation step and
+  no deadline, and inside the two-hour cutoff a leader promotes by hand
+  (brief section 3). An ordinary promotion's notice is "You're in" with
+  the manage link; an invitee whose row carries a live exact-date grant
+  gets the safe date-changed notice instead. M8.1 ships waitlist copy
+  that names no deadline and describes that actual outcome. The explicit
+  confirmation in this criterion, and when it is due, are unmet and stay
+  outstanding as written. M8.1's completion record names them as unmet
+  rather than claiming them, and they do not block shipping the rest of
+  M8.1 (brief 2.4).
 - The page meets M7.9's criteria for these routes: lazy chunk, bundle
-  budget, no `window.confirm`/`alert`, axe-clean at 390/768/1280.
+  budget, no `window.confirm`/`alert`, axe-clean at 390/768/1280. The
+  confirm criterion covers the `EventDate` and `EventDetail` routes;
+  shared components keep native confirms on other routes, and
+  `GroupDetail` stays with R15-4 (brief 2.5).
 - Deliberately avoided: one-off party framing, hype copy, themed event
   styling (Luma/Partiful). Fold dates are recurring and pastoral; the
   language stays warm and plain. The series page and the per-date page
