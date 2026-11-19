@@ -442,7 +442,7 @@ func TestPushReminderMovedDate(t *testing.T) {
 	}
 	var ev models.Event
 	f.app.DB.First(&ev, f.groupEvent.ID)
-	r, err := f.app.dateReminders(&ev, &f.groupOcc)
+	r, err := f.app.dateReminders(f.app.DB, &ev, &f.groupOcc)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -567,7 +567,7 @@ func TestDateRemindersPushLine(t *testing.T) {
 	f, _, _ := pushReminderFixture(t)
 	var ev models.Event
 	f.app.DB.First(&ev, f.groupEvent.ID)
-	r, err := f.app.dateReminders(&ev, &f.groupOcc)
+	r, err := f.app.dateReminders(f.app.DB, &ev, &f.groupOcc)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -576,7 +576,7 @@ func TestDateRemindersPushLine(t *testing.T) {
 	}
 	f.app.DB.Model(&models.Setting{}).Where("key = ?", settingPushEnabled).Delete(&models.Setting{})
 	f.app.DB.Create(&models.Setting{Key: settingPushEnabled, Value: "false"})
-	if r, _ = f.app.dateReminders(&ev, &f.groupOcc); r.Push != nil || r.PushDueAt != nil {
+	if r, _ = f.app.dateReminders(f.app.DB, &ev, &f.groupOcc); r.Push != nil || r.PushDueAt != nil {
 		t.Fatalf("church off: %+v", r)
 	}
 	// And the sweep plans nothing.

@@ -48,6 +48,12 @@ it is for.
 - `00008` makes `suppressions.address_hash` NOT NULL and drops `address`. Its Down refuses while any
   suppression exists, because the addresses are gone; rolling back to a release that reads `address`
   restores the dump `upgrade.sh` takes (`docs/DEPLOY-DIGITALOCEAN.md` section 6).
+- `00009` adds `occurrence_series_starts` (the series writer's clock evidence, DEC-155) and
+  `events.series_clock_dirty` with the trigger that raises it on any UPDATE naming a rule column. It
+  backfills nothing: the `occurrences.extend` job repairs upcoming dates once a worker runs it. Its
+  Down drops all of it, even when populated; the past and zero-DTSTART evidence is then lost, and
+  only a matching backup restores it. Direct reuse of the upgraded database requires a previous
+  binary that already holds `00008` and meets the recovery floor in `docs/DEPLOY-DIGITALOCEAN.md`.
 - A development database migrated by the pre-squash chain must be recreated before a new binary
   runs on it; there is no converter.
 - `scripts/baseline-proof.sh proof` re-proves a tree against the frozen pre-squash chain with a

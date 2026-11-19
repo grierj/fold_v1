@@ -340,11 +340,17 @@ type Event struct {
 	// DefaultRoomPending: the series room still awaits an admin's approval
 	// (M2.1d), so its new dates go to a request instead of confirming.
 	DefaultRoomPending bool `gorm:"not null;default:false"`
-	CreatedBy          uint `gorm:"not null"`
-	Creator            User `gorm:"foreignKey:CreatedBy"`
-	CreatedAt          time.Time
-	UpdatedAt          time.Time
-	DeletedAt          gorm.DeletedAt `gorm:"index"`
+	// SeriesClockDirty: an UPDATE naming a rule column (starts_local, tzid,
+	// rrule, rrule_until) set it by trigger (migration 00009), so the dates'
+	// OccurrenceSeriesStart rows may be stale and read as unknown until the
+	// writer that set it, or the occurrences.extend repair, settles them.
+	// Clear it only with an UPDATE of this column alone (DEC-155).
+	SeriesClockDirty bool `gorm:"not null;default:false"`
+	CreatedBy        uint `gorm:"not null"`
+	Creator          User `gorm:"foreignKey:CreatedBy"`
+	CreatedAt        time.Time
+	UpdatedAt        time.Time
+	DeletedAt        gorm.DeletedAt `gorm:"index"`
 }
 
 // EventHost is an adult assigned to a church-wide event (DEC-7). Hosts get
@@ -392,6 +398,21 @@ type EventOccurrence struct {
 	CancelSource string `gorm:"type:text;not null;default:''"`
 	CreatedAt    time.Time
 	UpdatedAt    time.Time
+}
+
+// OccurrenceSeriesStart is one instant the series writer generated for a
+// date's original day (DEC-155, migration 00009): every distinct one on a
+// multi-time day, IsFirst on the first in the writer's order. A kept date the
+// rule provably does not generate has one row, the series' written wall clock
+// on that day (WrittenLocal) and where it resolves. TZID is the zone the
+// instant was generated in. No rows means the date's usual clock is unknown.
+// Written only by internal/eventdates; read only by the date page.
+type OccurrenceSeriesStart struct {
+	OccurrenceID uint      `gorm:"primaryKey;autoIncrement:false;uniqueIndex:idx_occurrence_series_starts_first,where:is_first"`
+	StartsAt     time.Time `gorm:"primaryKey;autoIncrement:false"`
+	IsFirst      bool      `gorm:"not null;default:false"`
+	TZID         string    `gorm:"column:tzid;not null"`
+	WrittenLocal *string
 }
 
 // TimeFrozen reports a per-date clock override. A series edit does not
@@ -1062,7 +1083,7 @@ func All() []any {
 		&AccountRequest{}, &GuestSignup{}, &CalendarToken{},
 		&Household{}, &HouseholdAccount{}, &HouseholdPerson{}, &GuardianLink{}, &TeenConsent{},
 		&ContactRequest{}, &ContactGrant{}, &ManagerAddBlock{}, &Consent{}, &Room{}, &RoomBooking{}, &RoomRequest{}, &RoomFeedToken{}, &Job{}, &Suppression{}, &Message{}, &MessageRecipient{},
-		&PushSubscription{}, &EmailAddressOptOut{}, &AdminOperationAttempt{},
+		&PushSubscription{}, &EmailAddressOptOut{}, &AdminOperationAttempt{}, &OccurrenceSeriesStart{},
 	}
 }
 

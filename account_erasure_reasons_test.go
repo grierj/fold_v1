@@ -1897,7 +1897,11 @@ func TestReasonReviewCensus(t *testing.T) {
 // inviteSendAllowed, apiTestMessage, apiPushSubscribe and apiPushTest only
 // count; eraseAuditDetailsIn updates in SQL and auditRetentionReportSQL aggregates (the five new actions
 // are classified in auditIPAttribution); contactHistoryQuery selects only the
-// actions in contactHistoryActions, which has no decision action.
+// actions in contactHistoryActions, which has no decision action;
+// cancelEvidenceIn (the cancelled-date tombstone's evidence) filters to
+// occurrence_access.ended on its registration and event.dates_restored on its
+// event, scans only the audit row's own id into a uint, and reads meta ids as
+// signed numbers it checks before use.
 //
 // legacySavePlanIn (T-301) is the deleted-accounts save's one row locker: inside
 // apiAdminLegacyReasonSave's fenced callback, under the exclusive gate, it locks
@@ -1935,6 +1939,7 @@ var reasonCensusPinned = map[string][]string{
 		"api_contact_history.go:contactHistoryQuery",
 		"api_household_conversion.go:conversionInviterDisabled",
 		"api_message_preview.go:apiTestMessage",
+		"api_occurrence_access.go:cancelEvidenceIn",
 		"api_push.go:apiPushSubscribe",
 		"api_push.go:apiPushTest",
 		"api_registrations.go:previouslyRegisteredPerson",

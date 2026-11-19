@@ -116,26 +116,9 @@ func (a *App) occurrencesForEventsAfterErr(eventIDs []uint, from, to string, sta
 		ids[i] = kept[i].ID
 		kept[i].Event = *byID[kept[i].EventID]
 	}
-	type countRow struct {
-		OccurrenceID uint
-		Status       string
-		N            int64
-	}
-	var counts []countRow
-	if err := a.DB.Model(&models.Registration{}).Joins(listedRegistrations()).
-		Select("registrations.occurrence_id, registrations.status, count(*) as n").
-		Where("registrations.occurrence_id IN ? AND registrations.status NOT IN ?",
-			ids, []string{models.RegCancelled, models.RegRemoved}).
-		Group("registrations.occurrence_id, registrations.status").
-		Scan(&counts).Error; err != nil {
+	countOf, err := registrationCountsByDate(a.DB, ids)
+	if err != nil {
 		return out, false, err
-	}
-	countOf := map[uint]map[string]int64{}
-	for _, r := range counts {
-		if countOf[r.OccurrenceID] == nil {
-			countOf[r.OccurrenceID] = map[string]int64{}
-		}
-		countOf[r.OccurrenceID][r.Status] = r.N
 	}
 	// The viewer's own registration: myRegistration may read waitlisted
 	// or removed, so only cancelled rows are left out. The row id feeds
@@ -246,7 +229,7 @@ func (a *App) occurrencesForEventsAfterErr(eventIDs []uint, from, to string, sta
 		inst.SeatsUsed = used
 		inst.SpotsLeft = spotsLeftFor(inst.Capacity, used)
 		remoteUsed := remoteUsedMap[o.ID]
-		inst.ChildcareFull = ev.ChildcareAvailable && ev.ChildcareCapacity != nil && childcareUsed[o.ID] >= *ev.ChildcareCapacity
+		inst.ChildcareFull = childcareFull(ev, childcareUsed[o.ID])
 		if showChildcare[ev.ID] && ev.ChildcareAvailable {
 			n := childcareUsed[o.ID]
 			inst.ChildcareUsed = &n
@@ -306,6 +289,39 @@ func (o *occurrenceJSON) setMine(db *gorm.DB, r *models.Registration) error {
 		o.MyWaitlistPosition = &pos
 	}
 	return nil
+}
+
+// registrationCountsByDate is each date's row counts by answer over listed
+// subjects, without cancelled or removed rows. registrationCounts decides which
+// of them a viewer sees.
+func registrationCountsByDate(db *gorm.DB, ids []uint) (map[uint]map[string]int64, error) {
+	var counts []struct {
+		OccurrenceID uint
+		Status       string
+		N            int64
+	}
+	if err := db.Model(&models.Registration{}).Joins(listedRegistrations()).
+		Select("registrations.occurrence_id, registrations.status, count(*) as n").
+		Where("registrations.occurrence_id IN ? AND registrations.status NOT IN ?",
+			ids, []string{models.RegCancelled, models.RegRemoved}).
+		Group("registrations.occurrence_id, registrations.status").
+		Scan(&counts).Error; err != nil {
+		return nil, err
+	}
+	countOf := map[uint]map[string]int64{}
+	for _, r := range counts {
+		if countOf[r.OccurrenceID] == nil {
+			countOf[r.OccurrenceID] = map[string]int64{}
+		}
+		countOf[r.OccurrenceID][r.Status] = r.N
+	}
+	return countOf, nil
+}
+
+// childcareFull is whether a limited childcare pool has no places left; an
+// unlimited one is never full.
+func childcareFull(ev *models.Event, used int) bool {
+	return ev.ChildcareAvailable && ev.ChildcareCapacity != nil && used >= *ev.ChildcareCapacity
 }
 
 // registrationCounts is a date's row counts by answer. Going, maybe and
@@ -449,13 +465,9 @@ func (a *App) groupSummaries(viewer *models.User, groups []models.Group) ([]grou
 	for _, row := range counts {
 		members[row.GroupID] = row.Count
 	}
-	var leaders []models.User
-	if err := a.DB.Where("id IN ?", leaderIDs).Find(&leaders).Error; err != nil {
+	names, err := leaderNames(a.DB, leaderIDs)
+	if err != nil {
 		return nil, err
-	}
-	names := make(map[uint]string, len(leaders))
-	for _, leader := range leaders {
-		names[leader.ID] = leader.PublicName()
 	}
 	next, err := nextVisibleDates(a.DB, viewer, ids)
 	if err != nil {
@@ -473,6 +485,20 @@ func (a *App) groupSummaries(viewer *models.User, groups []models.Group) ([]grou
 		})
 	}
 	return out, nil
+}
+
+// leaderNames is the public name of each group's display leader
+// (Group.LeaderID, which grants nothing), by user id.
+func leaderNames(db *gorm.DB, leaderIDs []uint) (map[uint]string, error) {
+	var leaders []models.User
+	if err := db.Where("id IN ?", leaderIDs).Find(&leaders).Error; err != nil {
+		return nil, err
+	}
+	names := make(map[uint]string, len(leaders))
+	for _, leader := range leaders {
+		names[leader.ID] = leader.PublicName()
+	}
+	return names, nil
 }
 
 // nextVisibleDates maps each group to the viewer's first upcoming scheduled
@@ -587,7 +613,7 @@ type eventBody struct {
 // checks it against the window Ensure will really generate, and returns
 // those dates. A rule that passes here cannot fail later as a 500 or leave
 // the daily extender stuck.
-func (a *App) specFrom(body eventBody, base *models.Event, creating bool) (events.Spec, []events.When, error) {
+func (a *App) specFrom(body eventBody, base *models.Event, creating bool) (events.Spec, events.Expansion, error) {
 	spec := events.Spec{TZID: churchZoneOrUTC(a.DB).String()}
 	if base != nil {
 		spec.StartsLocal = base.StartsLocal
@@ -615,10 +641,10 @@ func (a *App) specFrom(body eventBody, base *models.Event, creating bool) (event
 	}
 	spec.StartsLocal = padWallHour(spec.StartsLocal)
 	if creating && (body.StartsLocal == nil || body.DurationMinutes == nil) {
-		return spec, nil, errStartRequired
+		return spec, events.Expansion{}, errStartRequired
 	}
 	if len(spec.RRule) > maxRecurrenceLen {
-		return spec, nil, errRecurrenceRuleTooLong
+		return spec, events.Expansion{}, errRecurrenceRuleTooLong
 	}
 	// Check against the window Ensure and Extend will really generate, so a
 	// rule that passes here cannot fail later as a 500 or a stuck extender.
@@ -627,16 +653,16 @@ func (a *App) specFrom(body eventBody, base *models.Event, creating bool) (event
 	if start, _, err := events.ParseWall(spec.StartsLocal, spec.TZID); err == nil {
 		window = events.WindowEnd(start, now)
 	}
-	whens, err := events.Expand(spec, window)
+	x, err := events.Expand(spec, window)
 	if err != nil {
-		return spec, nil, specAnswer(err)
+		return spec, events.Expansion{}, specAnswer(err)
 	}
-	for _, when := range whens {
+	for _, when := range x.Whens {
 		if _, err := models.ParseCalendarDate(when.OriginalDate); err != nil {
-			return spec, nil, specAnswer(err)
+			return spec, events.Expansion{}, specAnswer(err)
 		}
 	}
-	return spec, whens, nil
+	return spec, x, nil
 }
 
 // padWallHour makes 2026-10-20T9:00 into 2026-10-20T09:00. ParseWall accepts
@@ -992,10 +1018,11 @@ func (a *App) apiUpdateEvent(c *gin.Context) {
 		}
 		me = actor
 		locked = *lockedEv
-		spec, whens, err := a.specFrom(body, &locked, false)
+		spec, x, err := a.specFrom(body, &locked, false)
 		if err != nil {
 			return err
 		}
+		whens := x.Whens
 		title, description, location := locked.Title, locked.Description, locked.Location
 		if body.Title != nil {
 			title = strings.TrimSpace(*body.Title)
@@ -1029,11 +1056,15 @@ func (a *App) apiUpdateEvent(c *gin.Context) {
 		oldCap, oldPlace := locked.Capacity, locked.Location
 		oldRemoteCap := locked.RemoteCapacity
 		oldChildcareCap, oldChildcareAvailable := locked.ChildcareCapacity, locked.ChildcareAvailable
+		oldSchedule := scheduleOf(&locked)
 		applySpec(&locked, spec, body, ed, vid)
+		// The save names the rule columns, so the trigger marks the evidence
+		// dirty; recordSeriesClocks settles it before the transaction ends.
 		if err := tx.Save(&locked).Error; err != nil {
 			return err
 		}
 		var cancelled, moved, restored, added []uint
+		addedDays := map[uint]string{}
 		for _, act := range actions {
 			switch act.Kind {
 			case events.ActionMove:
@@ -1074,7 +1105,11 @@ func (a *App) apiUpdateEvent(c *gin.Context) {
 					return err
 				}
 				added = append(added, row.ID)
+				addedDays[row.ID] = act.When.OriginalDate
 			}
+		}
+		if err := recordSeriesClocks(tx, &locked, x, occs, addedDays, now, oldSchedule); err != nil {
+			return err
 		}
 		err = notifyOccurrences(tx, me.ID, cancelled, notify.OccurrenceCancelled)
 		if err != nil {
@@ -1216,6 +1251,66 @@ func (a *App) apiUpdateEvent(c *gin.Context) {
 	j := toEventJSON(ev)
 	applyEventVideoReveal(&j, ev, false, true) // the locked row was re-checked: only managers reach here
 	c.JSON(http.StatusOK, eventSeriesResponseJSON{Event: j})
+}
+
+// eventSchedule is what an event's dates' clocks depend on.
+type eventSchedule struct{ startsLocal, tzid, rrule, until string }
+
+func scheduleOf(ev *models.Event) eventSchedule {
+	s := eventSchedule{startsLocal: ev.StartsLocal, tzid: ev.TZID, rrule: ev.RRule}
+	if ev.RRuleUntil != nil {
+		s.until = models.FormatCalendarDate(*ev.RRuleUntil)
+	}
+	return s
+}
+
+// recordSeriesClocks writes a series edit's clock evidence (DEC-155) in its
+// transaction, after the dates were moved, cancelled, restored and added: ev
+// is the locked event as saved, x the walk the edit applied, occs the dates
+// as they were before it and added the new rows' original dates. Every date
+// that was upcoming before the edit (ApplySeries' own test), and every added
+// one, gets the evidence x proves for its original day, whatever the edit did
+// to it; a past date keeps what it had. A date x does not prove keeps its
+// evidence only when the schedule did not change and x repeats the walk that
+// wrote it. An edit that makes the event one-time leaves no series to compare
+// with, so those dates lose their evidence: kept, it would describe the old
+// series once the date has passed and a later edit makes the event repeat
+// again. ev.SeriesClockDirty is still the value read under the lock at the
+// start: set, a previous binary changed the series and nothing it left can be
+// vouched for, so all of it goes first. The flag the save's own trigger
+// raised is cleared last.
+func recordSeriesClocks(tx *gorm.DB, ev *models.Event, x events.Expansion, occs []models.EventOccurrence, added map[uint]string, now time.Time, old eventSchedule) error {
+	inherited := ev.SeriesClockDirty
+	if inherited {
+		if err := eventdates.DropClocks(tx, ev.ID); err != nil {
+			return err
+		}
+	}
+	dates := make(map[uint]string, len(occs)+len(added))
+	for _, o := range occs {
+		if o.StartsAt.After(now) {
+			dates[o.ID] = models.FormatCalendarDate(o.OriginalDate)
+		}
+	}
+	for id, day := range added {
+		dates[id] = day
+	}
+	if ev.RRule == "" {
+		ids := make([]uint, 0, len(dates))
+		for id := range dates {
+			ids = append(ids, id)
+		}
+		if err := eventdates.DropDateClocks(tx, ids); err != nil {
+			return err
+		}
+	} else {
+		keep := !inherited && x.Replayable() && scheduleOf(ev) == old
+		if err := eventdates.ReplaceClocks(tx, x, dates, keep); err != nil {
+			return err
+		}
+	}
+	ev.SeriesClockDirty = false
+	return eventdates.ClearDirty(tx, ev.ID)
 }
 
 // lockManagedEventIn requires the contact gate, which serializes role and

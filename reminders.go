@@ -390,14 +390,18 @@ type dateReminderJSON struct {
 	Waiting   int        `json:"waiting"`
 }
 
-// dateReminders reads them in one query. Call it only for a manager.
-func (a *App) dateReminders(ev *models.Event, occ *models.EventOccurrence) (*dateRemindersJSON, error) {
+// dateReminders reads them on db in one query, plus the push switch and the
+// church zone, whose failed reads show their defaults (on, UTC) and leave a
+// transaction usable (lenientReadIn). Call it only for a manager.
+func (a *App) dateReminders(db *gorm.DB, ev *models.Event, occ *models.EventOccurrence) (*dateRemindersJSON, error) {
 	out := &dateRemindersJSON{Minutes: ev.ReminderEmailMinutes, Messages: []dateReminderJSON{}}
 	if ev.ReminderEmailMinutes > 0 {
 		due := occ.StartsAt.Add(-time.Duration(ev.ReminderEmailMinutes) * time.Minute).UTC()
 		out.DueAt = &due
 	}
-	if a.pushEnabled() {
+	pushOn := true
+	lenientReadIn(db, func(sp *gorm.DB) { pushOn = boolSettingIn(sp, settingPushEnabled, true) })
+	if pushOn {
 		on := ev.ReminderPush
 		out.Push = &on
 	}
@@ -411,7 +415,7 @@ func (a *App) dateReminders(ev *models.Event, occ *models.EventOccurrence) (*dat
 		Skipped     int
 		Waiting     int
 	}
-	if err := a.DB.Raw(`SELECT m.id, m.reminder_key, m.status, m.sent_at,
+	if err := db.Raw(`SELECT m.id, m.reminder_key, m.status, m.sent_at,
 		count(r.id) FILTER (WHERE r.copy_of_user_id IS NULL AND r.status IN ?) AS reached,
 		count(r.id) FILTER (WHERE r.copy_of_user_id IS NULL AND r.status IN ?) AS failed,
 		count(r.id) FILTER (WHERE r.copy_of_user_id IS NULL AND r.status = ?) AS skipped,
@@ -455,7 +459,9 @@ func (a *App) dateReminders(ev *models.Event, occ *models.EventOccurrence) (*dat
 		}
 	}
 	if out.Push != nil && *out.Push && !pushWritten {
-		if at, ok := a.pushQuietHours().LastAllowed(occ.StartsAt.Add(-pushReminderLead), churchZoneOrUTC(a.DB), pushReminderMaxMove); ok {
+		zone := time.UTC
+		lenientReadIn(db, func(sp *gorm.DB) { zone = churchZoneOrUTC(sp) })
+		if at, ok := a.pushQuietHours().LastAllowed(occ.StartsAt.Add(-pushReminderLead), zone, pushReminderMaxMove); ok {
 			at = at.UTC()
 			out.PushDueAt = &at
 		}

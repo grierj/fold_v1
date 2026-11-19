@@ -206,6 +206,7 @@ var erasureColumns = []erasureColumn{
 	{"events", "default_room_pending", "T10", "RET", []string{"T10"}},
 	{"events", "reminder_email_minutes", "T10", "RET", []string{"T10"}},
 	{"events", "reminder_push", "T10", "RET", []string{"T10"}},
+	{"events", "series_clock_dirty", "T10", "RET", []string{"T10", "T40"}},
 
 	// T11 groups
 	{"groups", "id", "T11", "RET", []string{"T11"}},
@@ -591,6 +592,15 @@ var erasureColumns = []erasureColumn{
 	// the planned cleanup is not implemented by the schema slice.
 	{"admin_operation_attempts", "attempt_id", "T39", "DEL", []string{"T39"}},
 	{"admin_operation_attempts", "created_at", "T39", "DEL", []string{"T39"}},
+
+	// T40 occurrence_series_starts: the series writer's clock evidence for a
+	// date (DEC-155), derived scheduling data with no person, room or group
+	// data, removed with its date.
+	{"occurrence_series_starts", "occurrence_id", "T40", "NA", []string{"T40"}},
+	{"occurrence_series_starts", "starts_at", "T40", "NA", []string{"T40"}},
+	{"occurrence_series_starts", "is_first", "T40", "NA", []string{"T40"}},
+	{"occurrence_series_starts", "tzid", "T40", "NA", []string{"T40"}},
+	{"occurrence_series_starts", "written_local", "T40", "NA", []string{"T40"}},
 }
 
 type erasureInventoryField struct {

@@ -6,6 +6,8 @@ import (
 	"fold/internal/events"
 	"fold/internal/policy"
 	"fold/models"
+
+	"gorm.io/gorm"
 )
 
 // The date projector (E1). Every surface that shows one date of an event (the
@@ -18,7 +20,7 @@ import (
 //	calendar row          calendarRow
 //	event / group list    occurrenceJSON (the caller adds counts and seats)
 //	date page             dateJSON, rendered again as an .ics entry by
-//	                      dateFeedSingle
+//	                      dateFeedSingle; the JSON read adds datePage's facts
 //	cancelled date page   cancelledDateOf (JSON only, no .ics)
 //	public/group/personal feedSingle
 //
@@ -115,16 +117,32 @@ type groupLabel struct {
 	HostedBy   string
 }
 
+// siteNameOnce reads the church name at most once per render. db, when set,
+// is the caller's transaction or handle; a failed read there shows the
+// default name like App.siteName, and leaves a transaction usable
+// (lenientReadIn).
 type siteNameOnce struct {
 	a    *App
+	db   *gorm.DB
 	name string
 	read bool
 }
 
 func (s *siteNameOnce) get() string {
-	if !s.read {
-		s.name, s.read = s.a.siteName(), true
+	if s.read {
+		return s.name
 	}
+	s.read = true
+	if s.db == nil {
+		s.name = s.a.siteName()
+		return s.name
+	}
+	s.name = defaultSiteName
+	lenientReadIn(s.db, func(sp *gorm.DB) {
+		if name, err := siteNameIn(sp); err == nil {
+			s.name = name
+		}
+	})
 	return s.name
 }
 
@@ -244,6 +262,231 @@ func (p *dateProjection) dateJSON(sn *siteNameOnce, reg models.Registration, now
 		out.GroupID, out.GroupName, out.HostedBy = l.ID, l.Name, l.HostedBy
 	}
 	return out
+}
+
+// pageFacts is what this reader's date page may carry beyond the date itself.
+func (p *dateProjection) pageFacts(viewer *models.User) policy.DatePageFacts {
+	return policy.DatePage(policy.DateReader{Ordinary: p.Ordinary, SeriesVisible: p.SeriesVisible,
+		AttendeeNames: p.Attendees, Manager: p.Manager, Childcare: policy.CanSeeChildcare(asPerson(viewer), p.Facts.view, p.Facts.rel),
+		Recurring: p.Event.RRule != "", SignedIn: viewer != nil})
+}
+
+// datePageLoad is what the handler read for the date page, only where
+// pageFacts allows: counts and places used, the viewer's waitlist position (0
+// for none), the allowed names, the shown group's leader, the series room,
+// the series clock (nil when unknown) and the viewer's series coverage.
+type datePageLoad struct {
+	Counts             map[string]int64
+	Seats, RemoteSeats int
+	Childcare          int
+	WaitlistPosition   int
+	Attendees          []dateAttendeeJSON
+	LeaderName         string
+	UsualRoom          *occurrenceRoomJSON
+	UsualClock         *seriesClock
+	Upcoming, Covered  int
+	SeriesAuthority    bool
+}
+
+// seriesClock is the one piece of the series writer's clock evidence the date
+// page picked for a date (usualClockIn, DEC-155): an instant the writer
+// generated for its original day, the zone it was generated in and, for a
+// kept day the rule does not generate, the series' written wall clock there.
+type seriesClock struct {
+	StartsAt     time.Time `gorm:"column:starts_at"`
+	TZID         string    `gorm:"column:tzid"`
+	WrittenLocal *string   `gorm:"column:written_local"`
+}
+
+// Remote RSVP states of a date (M8.1 brief 4.3).
+const (
+	remoteRSVPOffered = "offered"
+	remoteRSVPClosed  = "closed"
+	remoteRSVPNone    = "none"
+)
+
+// remoteRSVPState says whether a date takes remote answers: offered, closed
+// for this date (remote is on, its effective remote cap is 0), or none.
+func remoteRSVPState(enabled bool, capacity *int) string {
+	switch {
+	case events.RemoteOffered(enabled, capacity):
+		return remoteRSVPOffered
+	case enabled:
+		return remoteRSVPClosed
+	}
+	return remoteRSVPNone
+}
+
+func poolOf(capacity *int, used int) datePoolJSON {
+	return datePoolJSON{Capacity: capacity, Used: used, Left: spotsLeftFor(capacity, used)}
+}
+
+// datePage fills the date page's own facts from d, as show allows. reg is the
+// viewer's own row.
+func (p *dateProjection) datePage(out *dateOccurrenceJSON, show policy.DatePageFacts, d datePageLoad, reg models.Registration) {
+	if show.Header && p.Group != nil {
+		out.GroupHeader = &dateGroupHeaderJSON{ImageURL: p.Group.ImageURL, CoverFocalX: p.Group.CoverFocalX,
+			CoverFocalY: p.Group.CoverFocalY, LeaderName: d.LeaderName}
+	}
+	if show.Attendance {
+		out.Attendance = &dateAttendanceJSON{Registrations: registrationCounts(d.Counts, show.Declined)}
+		if show.Names {
+			out.Attendance.Attendees = d.Attendees
+		}
+	}
+	if show.Capacity {
+		e := p.Eff()
+		seats := &dateSeatsJSON{InPerson: poolOf(e.Capacity, d.Seats), WaitlistEnabled: p.Event.WaitlistEnabled}
+		if p.Event.RemoteAvailable {
+			remote := poolOf(e.RemoteCapacity, d.RemoteSeats)
+			seats.Remote = &remote
+		}
+		if p.Event.ChildcareAvailable {
+			care := &dateChildcareJSON{Full: childcareFull(p.Event, d.Childcare)}
+			if show.ChildcareTotals {
+				totals := poolOf(p.Event.ChildcareCapacity, d.Childcare)
+				care.Totals = &totals
+			}
+			seats.Childcare = care
+		}
+		out.Seats = seats
+		out.RemoteRSVP = remoteRSVPState(p.Event.RemoteAvailable, e.RemoteCapacity)
+		if reg.Status == models.RegWaitlisted && d.WaitlistPosition > 0 {
+			position := d.WaitlistPosition
+			out.MyWaitlistPosition = &position
+		}
+	}
+	if show.Series {
+		out.Series = p.dateSeries(show, d, out.Room)
+	}
+}
+
+// dateSeries is the series as a reader who may see it finds it from this
+// date: its rule and, for a repeating event, the reader's coverage, its usual
+// values and what about this date differs from them.
+func (p *dateProjection) dateSeries(show policy.DatePageFacts, d datePageLoad, room *occurrenceRoomJSON) *dateSeriesJSON {
+	out := &dateSeriesJSON{RecurrenceRule: p.Event.RRule, Changes: []string{}}
+	if show.Coverage {
+		upcoming, covered := d.Upcoming, d.Covered
+		out.UpcomingDates, out.CoveredDates = &upcoming, &covered
+		out.CanAnswerSeries = d.SeriesAuthority && upcoming > 0
+	}
+	if p.Event.RRule == "" {
+		return out
+	}
+	e := p.Eff()
+	usual, usualAt, zone := p.usual(d.UsualRoom, d.UsualClock)
+	actual := dateUsualJSON{StartsLocal: e.StartsLocal, EndsLocal: e.EndsLocal, DurationMinutes: e.DurationMinutes,
+		Location: e.Location, Room: room, Capacity: e.Capacity, RemoteCapacity: e.RemoteCapacity,
+		Visibility: policy.EffectiveVisibility(p.Event.Visibility, p.Occ.VisibilityOverride)}
+	out.Usual = &usual
+	if zone == nil {
+		// No clock to compare: only the shown day against the date's own
+		// original day can differ, and nothing is said about the time.
+		out.Changes = dateChanges(usual, actual, usualAt, e.StartsAt, p.Event.RemoteAvailable)
+		if len(e.StartsLocal) >= 10 && e.StartsLocal[:10] != p.DateString() {
+			out.Changes = append([]string{changeDay}, out.Changes...)
+		}
+		return out
+	}
+	// The date is compared in the zone its clock was written in, so a later
+	// change of the series zone alone reads as no move.
+	compare := actual
+	compare.StartsLocal = events.FormatWall(e.StartsAt, zone)
+	out.Changes = dateChanges(usual, compare, usualAt, e.StartsAt, p.Event.RemoteAvailable)
+	return out
+}
+
+// usual is the series' own values on this date's original day, the instant
+// its usual start names and the zone that clock was written in: the clock is
+// what the series writer generated for that day (clock, picked by
+// usualClockIn: of several times on one day, the one the date starts at,
+// else one in the same minute, else the first), shown in the zone it was
+// generated in, or the series' written wall clock for a kept day the rule
+// does not generate; then duration, place (the group's only when the viewer
+// may see the group, as in Eff), series room, caps and visibility. With no
+// clock (unknown, or dirty: DEC-155) the clock is blank and zone nil.
+func (p *dateProjection) usual(room *occurrenceRoomJSON, clock *seriesClock) (dateUsualJSON, time.Time, *time.Location) {
+	ev := p.Event
+	groupLoc := ""
+	if p.Group != nil {
+		groupLoc = p.Group.Location
+	}
+	u := dateUsualJSON{DurationMinutes: ev.DurationMinutes, Location: events.SeriesPlace(ev.Location, groupLoc), Room: room,
+		Capacity: ev.Capacity, RemoteCapacity: ev.RemoteCapacity, Visibility: ev.Visibility}
+	if clock == nil {
+		return u, time.Time{}, nil
+	}
+	zone := eventZone(clock.TZID)
+	u.StartsLocal = events.FormatWall(clock.StartsAt, zone)
+	if clock.WrittenLocal != nil {
+		u.StartsLocal = *clock.WrittenLocal
+	}
+	u.EndsLocal = events.FormatWall(clock.StartsAt.Add(time.Duration(ev.DurationMinutes)*time.Minute), zone)
+	return u, clock.StartsAt, zone
+}
+
+// Differences between a date and its series (M8.1 brief 4.4).
+const (
+	changeDay            = "day"
+	changeTime           = "time"
+	changeDuration       = "duration"
+	changePlace          = "place"
+	changeRoom           = "room"
+	changeCapacity       = "capacity"
+	changeRemoteCapacity = "remoteCapacity"
+	changeVisibility     = "visibility"
+)
+
+// dateChanges compares what a date is with what its series usually is,
+// value by value, never by whether an override is stored: an override equal to
+// the series value is no change, and each value that differs is one, even
+// alone. Day compares the local dates in the event's zone, whatever the
+// instants: a usual wall clock in a daylight-saving gap names its own day even
+// where time.Date resolves it to the evening before, so a date there is a day
+// change. A date starting at the usual instant (usualAt, dateAt, to the
+// minute) changed no time, even where the usual wall clock does not exist
+// that day. Otherwise time compares the wall clock, and the same wall clock at
+// another instant is the other pass through a repeated fall-back hour, a
+// change of time. The remote cap counts only while the event takes remote
+// answers.
+func dateChanges(usual, date dateUsualJSON, usualAt, dateAt time.Time, remote bool) []string {
+	out := []string{}
+	if len(usual.StartsLocal) == len(events.WallLayout) && len(date.StartsLocal) == len(events.WallLayout) {
+		if usual.StartsLocal[:10] != date.StartsLocal[:10] {
+			out = append(out, changeDay)
+		}
+		if !usualAt.Truncate(time.Minute).Equal(dateAt.Truncate(time.Minute)) &&
+			(usual.StartsLocal[11:] != date.StartsLocal[11:] || usual.StartsLocal == date.StartsLocal) {
+			out = append(out, changeTime)
+		}
+	}
+	if usual.DurationMinutes != date.DurationMinutes {
+		out = append(out, changeDuration)
+	}
+	if usual.Location != date.Location {
+		out = append(out, changePlace)
+	}
+	if roomID(usual.Room) != roomID(date.Room) {
+		out = append(out, changeRoom)
+	}
+	if !intPtrEqual(usual.Capacity, date.Capacity) {
+		out = append(out, changeCapacity)
+	}
+	if remote && !intPtrEqual(usual.RemoteCapacity, date.RemoteCapacity) {
+		out = append(out, changeRemoteCapacity)
+	}
+	if usual.Visibility != date.Visibility {
+		out = append(out, changeVisibility)
+	}
+	return out
+}
+
+func roomID(r *occurrenceRoomJSON) uint {
+	if r == nil {
+		return 0
+	}
+	return r.ID
 }
 
 // cancelledDateOf is the tombstone of a cancelled date for a viewer

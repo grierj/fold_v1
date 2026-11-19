@@ -3,6 +3,7 @@ package main
 import (
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"slices"
 	"strconv"
@@ -281,9 +282,10 @@ func occurrenceDatePath(eventID uint, date string) string {
 	return "/events/" + strconv.FormatUint(uint64(eventID), 10) + "/dates/" + date
 }
 
-// dateOccurrenceJSON never carries host people, series, attendee, contact or
-// management data. Only ordinary reads may attach a group label/link, after an
-// independent groupShownTo check; invitation-only reads omit that metadata.
+// dateOccurrenceJSON never carries host people, contact or management data.
+// Only ordinary reads may attach a group label/link, after an independent
+// groupShownTo check, and only the ordinary JSON read carries the date page's
+// own facts (datePage); invitation-only reads omit all of that.
 type dateOccurrenceJSON struct {
 	ID               uint      `json:"id"`
 	EventID          uint      `json:"eventId"`
@@ -319,6 +321,15 @@ type dateOccurrenceJSON struct {
 	// Reminders is this date's email reminders (M3.6b), only for its
 	// event's managers; absent for everyone else.
 	Reminders *dateRemindersJSON `json:"reminders,omitempty"`
+	// The date page's own facts, as policy.DatePage allows (M8.1 brief 4, 6).
+	// RemoteRSVP is offered, closed (remote is on but this date's remote cap
+	// is 0) or none; a full remote pool is still offered.
+	GroupHeader        *dateGroupHeaderJSON `json:"groupHeader,omitempty"`
+	Attendance         *dateAttendanceJSON  `json:"attendance,omitempty"`
+	Seats              *dateSeatsJSON       `json:"seats,omitempty"`
+	RemoteRSVP         string               `json:"remoteRsvp,omitempty"`
+	MyWaitlistPosition *int                 `json:"myWaitlistPosition,omitempty"`
+	Series             *dateSeriesJSON      `json:"series,omitempty"`
 }
 
 // apiGetOccurrenceDate is the date page's read. A cancelled date answers its
@@ -330,13 +341,13 @@ func (a *App) apiGetOccurrenceDate(c *gin.Context) {
 		return
 	}
 	me := apiUser(c)
-	out, err := a.scheduledDate(me, id, date)
+	read, err := a.scheduledDatePage(me, id, date)
 	if err != nil {
 		fail(c, err)
 		return
 	}
-	if out != nil {
-		c.JSON(http.StatusOK, eventDateResponseJSON{Occurrence: *out})
+	if read != nil {
+		c.JSON(http.StatusOK, eventDateResponseJSON{Occurrence: read.out})
 		return
 	}
 	if me != nil {
@@ -390,36 +401,150 @@ func occurrenceDateParams(c *gin.Context) (uint, string, bool) {
 	return uint(id), date, true
 }
 
-// loadOccurrenceDate is scheduledDate for the calendar download. It answers
-// the error itself when ok is false.
+// loadOccurrenceDate is scheduledDateIn for the calendar download, on a.DB
+// with no snapshot, and its room as the event pages show it (occurrenceRooms:
+// a failed room read leaves the room out). It answers the error itself when
+// ok is false.
 func (a *App) loadOccurrenceDate(c *gin.Context) (dateOccurrenceJSON, bool) {
 	id, date, ok := occurrenceDateParams(c)
 	if !ok {
 		return dateOccurrenceJSON{}, false
 	}
-	out, err := a.scheduledDate(apiUser(c), id, date)
+	read, err := a.scheduledDateIn(a.DB, apiUser(c), id, date, a.now().UTC())
 	if err != nil {
 		fail(c, err)
 		return dateOccurrenceJSON{}, false
 	}
-	if out == nil {
+	if read == nil {
 		jsonError(c, http.StatusNotFound, "event not found")
 		return dateOccurrenceJSON{}, false
 	}
-	return *out, true
+	occID := read.date.Occ.ID
+	read.out.Room = a.occurrenceRooms(a.DB, []uint{occID})[occID]
+	return read.out, true
 }
 
-// scheduledDate authorizes and presents one scheduled date for the date page
-// and its calendar download: nil when the date is not scheduled or me may not
-// see it.
-func (a *App) scheduledDate(me *models.User, id uint, dateStr string) (*dateOccurrenceJSON, error) {
-	now := time.Now().UTC()
-	vs, err := a.dateCandidates(me, a.DB.Where("id = ?", id))
+// scheduledRead is one scheduled date as scheduledDateIn authorized and
+// presented it, with what datePageIn builds on and what it decided and loaded
+// for the date page (show, page).
+type scheduledRead struct {
+	date *dateProjection
+	vs   visibleSet
+	reg  models.Registration
+	out  dateOccurrenceJSON
+	now  time.Time
+	show policy.DatePageFacts
+	page datePageLoad
+}
+
+// scheduledDatePage is the date page's scheduled JSON read: scheduledDateIn,
+// the date's room and datePageIn, all in one read-only Repeatable Read
+// snapshot, so a visibility, membership or roster change committed during the
+// read never pairs the authority that admits a fact with newer facts. The
+// viewer is re-read in the snapshot (sessionCurrent): a session ended before
+// it reads like a signed-out visitor, as the next request would. The room is
+// read in a savepoint, so a failed room read leaves the snapshot usable and
+// the date shows without its room, as on the event pages, unless the series
+// comparison needs it (datePageIn); the reads that show a default when they
+// fail do the same (lenientReadIn). The page is built from what the snapshot
+// decided and loaded after it ends: that projection reads nothing and never
+// walks the recurrence rule; the series clock is the writer's stored evidence
+// (usualClockIn).
+func (a *App) scheduledDatePage(me *models.User, id uint, date string) (*scheduledRead, error) {
+	var read *scheduledRead
+	now := a.now().UTC()
+	err := a.DB.Transaction(func(tx *gorm.DB) error {
+		a.scheduledDateStep("begin")
+		viewer, err := snapshotViewerIn(tx, me)
+		if err != nil {
+			return err
+		}
+		if read, err = a.scheduledDateIn(tx, viewer, id, date, now); err != nil || read == nil {
+			return err
+		}
+		a.scheduledDateStep("authorized")
+		var roomErr error
+		read.out.Room, roomErr = dateRoomIn(tx, read.date.Occ.ID)
+		return a.datePageIn(tx, viewer, read, roomErr)
+	}, &sql.TxOptions{Isolation: sql.LevelRepeatableRead, ReadOnly: true})
+	if err != nil || read == nil {
+		return nil, err
+	}
+	read.date.datePage(&read.out, read.show, read.page, read.reg)
+	return read, nil
+}
+
+// scheduledDateStep runs the test hook at a named point of the scheduled
+// date page's read.
+func (a *App) scheduledDateStep(step string) {
+	if a.hooks.scheduledDateStep != nil {
+		a.hooks.scheduledDateStep(step)
+	}
+}
+
+// snapshotViewerIn re-reads the signed-in viewer on tx: nil for a signed-out
+// visitor and for a session that is not current there (sessionCurrent).
+func snapshotViewerIn(tx *gorm.DB, me *models.User) (*models.User, error) {
+	if me == nil {
+		return nil, nil
+	}
+	var fresh models.User
+	if err := tx.Where("id = ?", me.ID).Limit(1).Find(&fresh).Error; err != nil {
+		return nil, err
+	}
+	if !sessionCurrent(&fresh, me) {
+		return nil, nil
+	}
+	return &fresh, nil
+}
+
+// dateRoomIn is one date's confirmed room (roomsFor), read in a savepoint of
+// tx so a failed read leaves the transaction usable. A failed read returns no
+// room and its error, for the caller to judge.
+func dateRoomIn(tx *gorm.DB, occurrenceID uint) (*occurrenceRoomJSON, error) {
+	var room *occurrenceRoomJSON
+	err := tx.Transaction(func(sp *gorm.DB) error {
+		rooms, err := roomsFor(sp, []uint{occurrenceID})
+		room = rooms[occurrenceID]
+		return err
+	})
 	if err != nil {
 		return nil, err
 	}
-	q := a.DB.Where("event_id = ? AND original_date = ? AND status = ?", id, dateStr, models.OccurrenceScheduled)
-	scoped, err := a.scopedOccurrenceReads(me, q, now)
+	return room, nil
+}
+
+// errLenientReadDone rolls back lenientReadIn's savepoint.
+var errLenientReadDone = errors.New("lenient read done")
+
+// lenientReadIn runs read, whose caller shows a default when it fails (the
+// church name, the push switch, the church zone, whether the viewer may
+// answer). Inside a transaction a failed statement would abort it and fail
+// every later read, so there read runs in a savepoint that is always rolled
+// back: only reads belong here. On a plain handle read runs as is. The
+// caller sets its default first: read does not run when the savepoint cannot
+// be made.
+func lenientReadIn(db *gorm.DB, read func(*gorm.DB)) {
+	if c, ok := db.Statement.ConnPool.(gorm.TxCommitter); !ok || c == nil {
+		read(db)
+		return
+	}
+	_ = db.Transaction(func(sp *gorm.DB) error {
+		read(sp)
+		return errLenientReadDone
+	})
+}
+
+// scheduledDateIn authorizes and presents one scheduled date for the date page
+// and its calendar download, every read on db: nil when the date is not
+// scheduled or me may not see it. Each caller adds the room its own way.
+func (a *App) scheduledDateIn(db *gorm.DB, me *models.User, id uint, dateStr string, now time.Time) (*scheduledRead, error) {
+	vs, err := dateCandidatesIn(db, me, db.Where("id = ?", id))
+	if err != nil {
+		return nil, err
+	}
+	q := db.Where("event_id = ? AND original_date = ? AND status = ?", id, dateStr, models.OccurrenceScheduled)
+	scoped, err := scopedOccurrenceReadsIn(db, me, q, now)
 	if err != nil {
 		return nil, err
 	}
@@ -436,24 +561,211 @@ func (a *App) scheduledDate(me *models.User, id uint, dateStr string) (*dateOccu
 	var reg models.Registration
 	if date.Ordinary {
 		if me != nil {
-			if err := a.DB.Where("user_id = ? AND occurrence_id = ?", me.ID, occ.ID).Limit(1).Find(&reg).Error; err != nil {
+			if err := db.Where("user_id = ? AND occurrence_id = ?", me.ID, occ.ID).Limit(1).Find(&reg).Error; err != nil {
 				return nil, err
 			}
 		}
 	} else {
 		reg = date.Invited.Registration
 	}
-	out := date.dateJSON(&siteNameOnce{a: a}, reg, now)
-	out.Room = a.occurrenceRooms(a.DB, []uint{occ.ID})[occ.ID]
+	out := date.dateJSON(&siteNameOnce{a: a, db: db}, reg, now)
 	if date.Ordinary && date.Manager {
-		if out.Reminders, err = a.dateReminders(date.Event, &occ); err != nil {
+		if out.Reminders, err = a.dateReminders(db, date.Event, &occ); err != nil {
 			return nil, err
 		}
 	}
-	if date.Ordinary {
-		out.CanRegister = me != nil && a.canRegisterDateIn(a.DB, me, date.Event, occ.ID)
+	if date.Ordinary && me != nil {
+		lenientReadIn(db, func(sp *gorm.DB) { out.CanRegister = a.canRegisterDateIn(sp, me, date.Event, occ.ID) })
 	}
-	return &out, nil
+	return &scheduledRead{date: date, vs: vs, reg: reg, out: out, now: now}, nil
+}
+
+// datePageIn decides and loads the date page's own facts for an ordinary JSON
+// read on tx (r.show, r.page; scheduledDatePage builds the page from them),
+// loading only what policy.DatePage lets this reader see: nothing for an
+// invitation-only reader. Every count is read in the read's snapshot, and a
+// failed read is an error, never an empty or available pool. roomErr is the
+// date's failed room read, if any: only the series comparison, which must not
+// claim a room change from a room it could not read, fails on it. The .ics
+// download and the feeds never come here.
+func (a *App) datePageIn(tx *gorm.DB, me *models.User, r *scheduledRead, roomErr error) error {
+	p, occ := r.date, r.date.Occ
+	show := p.pageFacts(me)
+	r.show = show
+	if !show.Header && !show.Attendance && !show.Capacity && !show.Series {
+		return nil
+	}
+	var d datePageLoad
+	var err error
+	if show.Header && p.Group != nil {
+		names, err := leaderNames(tx, []uint{p.Group.LeaderID})
+		if err != nil {
+			return err
+		}
+		d.LeaderName = names[p.Group.LeaderID]
+	}
+	if show.Attendance {
+		counts, err := registrationCountsByDate(tx, []uint{occ.ID})
+		if err != nil {
+			return err
+		}
+		d.Counts = counts[occ.ID]
+	}
+	if show.Names {
+		if d.Attendees, err = dateAttendeesIn(tx, me, p, r.now); err != nil {
+			return err
+		}
+	}
+	if show.Capacity {
+		if d.Seats, err = seatsUsedForMode(tx, occ.ID, models.AttendanceInPerson, 0); err != nil {
+			return err
+		}
+		if p.Event.RemoteAvailable {
+			if d.RemoteSeats, err = seatsUsedForMode(tx, occ.ID, models.AttendanceRemote, 0); err != nil {
+				return err
+			}
+		}
+		if p.Event.ChildcareAvailable && (p.Event.ChildcareCapacity != nil || show.ChildcareTotals) {
+			if d.Childcare, err = childcareUsedFor(tx, occ.ID, 0); err != nil {
+				return err
+			}
+		}
+		if r.reg.ID > 0 && r.reg.Status == models.RegWaitlisted {
+			if d.WaitlistPosition, err = waitlistPosition(tx, occ.ID, r.reg.ID); err != nil {
+				return err
+			}
+		}
+	}
+	if show.Series && p.Event.RRule != "" {
+		if roomErr != nil {
+			return roomErr
+		}
+		if d.UsualRoom, err = usualRoomIn(tx, p.Event); err != nil {
+			return err
+		}
+		// A dirty event (DEC-155) may hold evidence a previous binary made
+		// stale; read in this same snapshot, its clock is unknown.
+		if !p.Event.SeriesClockDirty {
+			if d.UsualClock, err = usualClockIn(tx, occ.ID, occ.StartsAt); err != nil {
+				return err
+			}
+		}
+	}
+	if show.Coverage {
+		if d.Upcoming, d.Covered, d.SeriesAuthority, err = seriesCoverageIn(tx, me, r.vs, p.Event, r.now); err != nil {
+			return err
+		}
+	}
+	r.page = d
+	return nil
+}
+
+// usualClockIn picks a date's usual clock from the series writer's evidence
+// (models.OccurrenceSeriesStart, DEC-155) on tx, in three probes of its
+// primary key or first-row index whatever the series' age, density or number
+// of times a day: the time the date starts at; else the earliest in the UTC
+// minute it starts in (the date editor saves whole minutes, and the two passes
+// through a repeated hour are different UTC minutes); else the first the
+// writer generated. nil when the date has no evidence: its clock is unknown.
+// A failed read is an error. Only the scheduled date page's JSON read calls
+// it; no list, feed or calendar reads the evidence.
+func usualClockIn(tx *gorm.DB, occurrenceID uint, startsAt time.Time) (*seriesClock, error) {
+	at := startsAt.UTC()
+	minute := at.Truncate(time.Minute)
+	var rows []seriesClock
+	if err := tx.Raw(`SELECT starts_at, tzid, written_local FROM (
+		(SELECT starts_at, tzid, written_local, 1 AS pick FROM occurrence_series_starts
+			WHERE occurrence_id = ? AND starts_at = ?)
+		UNION ALL
+		(SELECT starts_at, tzid, written_local, 2 AS pick FROM occurrence_series_starts
+			WHERE occurrence_id = ? AND starts_at >= ? AND starts_at < ? ORDER BY starts_at LIMIT 1)
+		UNION ALL
+		(SELECT starts_at, tzid, written_local, 3 AS pick FROM occurrence_series_starts
+			WHERE occurrence_id = ? AND is_first)
+	) picked ORDER BY pick LIMIT 1`,
+		occurrenceID, at, occurrenceID, minute, minute.Add(time.Minute), occurrenceID).Scan(&rows).Error; err != nil {
+		return nil, err
+	}
+	if len(rows) == 0 {
+		return nil, nil
+	}
+	return &rows[0], nil
+}
+
+// dateAttendeesIn are the date's Going and Maybe names as subjectFacts.attendee
+// lets this viewer see them (pending teens, household people), reduced to what
+// the page's name summary shows: no contact, care or management fields. The
+// household clock is the church day at now, read from tx only when a
+// household person needs it.
+func dateAttendeesIn(tx *gorm.DB, me *models.User, p *dateProjection, now time.Time) ([]dateAttendeeJSON, error) {
+	var rows []models.Registration
+	if err := tx.Model(&models.Registration{}).Select("registrations.*").Joins(listedRegistrations()).
+		Where("registrations.occurrence_id = ? AND registrations.status IN ?", p.Occ.ID, []string{models.RegGoing, models.RegMaybe}).
+		Order("registrations.waitlisted_at ASC NULLS FIRST, registrations.id").Find(&rows).Error; err != nil {
+		return nil, err
+	}
+	facts := newSubjectFacts(time.Time{})
+	var zoneErr error
+	facts.clock = func() time.Time {
+		clock, err := churchClockIn(tx, now)
+		if err != nil {
+			zoneErr = err
+			return now
+		}
+		return clock
+	}
+	if err := facts.load(tx, rows, me); err != nil {
+		return nil, err
+	}
+	out := []dateAttendeeJSON{}
+	for _, r := range rows {
+		if at := facts.attendee(r, *p.Occ, me, p.Manager, false, now); at != nil {
+			out = append(out, dateAttendeeJSON{Name: at.Name, Status: at.Status, GuestCount: at.GuestCount})
+		}
+	}
+	if zoneErr != nil {
+		return nil, zoneErr
+	}
+	return out, nil
+}
+
+// seriesCoverageIn counts the series' upcoming dates me could answer for, with
+// apiRegisterSeries' own boundaries (scheduled, starting after now, and
+// registrable at the date's own visibility, which also needs canSeeDate here),
+// and me's own Going or Maybe answers among exactly those dates, so a date me
+// cannot see moves neither count. authority is that writer's series check.
+// Nothing here marks how an answer was made (M8.1 brief 2.1). The caller asks
+// only for a repeating event (policy.DatePage).
+func seriesCoverageIn(tx *gorm.DB, me *models.User, vs visibleSet, ev *models.Event, now time.Time) (upcoming, covered int, authority bool, err error) {
+	f := vs.of(ev)
+	gp := asGroup(f.group)
+	authority = canRegisterWith(me, viewOf(ev, false), gp, f.rel)
+	var occs []models.EventOccurrence
+	if err := tx.Where("event_id = ? AND status = ? AND starts_at > ?", ev.ID, models.OccurrenceScheduled, now).
+		Order("original_date, id").Find(&occs).Error; err != nil {
+		return 0, 0, false, err
+	}
+	ids := []uint{}
+	for i := range occs {
+		o := &occs[i]
+		if vs.canSeeDate(me, ev, o) && canRegisterWith(me, viewOf(dateEvent(ev, o), false), gp, f.rel) {
+			ids = append(ids, o.ID)
+		}
+	}
+	err = eachIDChunk(ids, func(chunk []uint) error {
+		var n int64
+		if err := tx.Model(&models.Registration{}).
+			Where("user_id = ? AND household_person_id IS NULL AND occurrence_id IN ? AND status IN ?", me.ID, chunk, []string{models.RegGoing, models.RegMaybe}).
+			Count(&n).Error; err != nil {
+			return err
+		}
+		covered += int(n)
+		return nil
+	})
+	if err != nil {
+		return 0, 0, false, err
+	}
+	return len(ids), covered, authority, nil
 }
 
 // cancelledDate is the cancelled-date tombstone for me (M8.1 brief 2.2), or

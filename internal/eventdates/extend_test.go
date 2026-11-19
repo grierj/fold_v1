@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"net/url"
 	"os"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -383,5 +384,311 @@ func TestDateAndWallClockColumnsRefuseBadValues(t *testing.T) {
 	var nullable sql.NullString
 	if err := db.Raw("SELECT to_char(rrule_until, 'YYYY-MM-DD') FROM events WHERE id = ?", ev.ID).Row().Scan(&nullable); err != nil || nullable.Valid {
 		t.Fatalf("a series with no end date has until %v (%v)", nullable, err)
+	}
+}
+
+// clockRow is one stored piece of clock evidence, as text.
+type clockRow struct {
+	Day      string
+	StartsAt string
+	TZID     string `gorm:"column:tzid"`
+	Written  string
+	Xmin     string
+	First    bool
+}
+
+// clocksOf reads event eventID's evidence in date and instant order. xmin
+// tells a rewritten row from an untouched one.
+func clocksOf(t *testing.T, db *gorm.DB, eventID uint) []clockRow {
+	t.Helper()
+	var out []clockRow
+	if err := db.Raw(`SELECT to_char(o.original_date, 'YYYY-MM-DD') AS day,
+		to_char(s.starts_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS') AS starts_at, s.is_first AS first,
+		s.tzid, coalesce(s.written_local, '') AS written, s.xmin::text AS xmin
+		FROM occurrence_series_starts s JOIN event_occurrences o ON o.id = s.occurrence_id
+		WHERE o.event_id = ? ORDER BY o.original_date, s.starts_at`, eventID).Scan(&out).Error; err != nil {
+		t.Fatal(err)
+	}
+	return out
+}
+
+func seriesEvent(t *testing.T, db *gorm.DB, owner models.User, start, tzid, rule, until string) models.Event {
+	t.Helper()
+	ev := models.Event{Title: "Series", Visibility: models.VisibilityPublic, StartsLocal: start,
+		DurationMinutes: 60, TZID: tzid, RRule: rule, CreatedBy: owner.ID}
+	if until != "" {
+		d := calendarDay(t, until)
+		ev.RRuleUntil = &d
+	}
+	if err := db.Create(&ev).Error; err != nil {
+		t.Fatal(err)
+	}
+	return ev
+}
+
+func dirtyOf(t *testing.T, db *gorm.DB, eventID uint) (bool, time.Time) {
+	t.Helper()
+	var row struct {
+		SeriesClockDirty bool
+		UpdatedAt        time.Time
+	}
+	if err := db.Raw(`SELECT series_clock_dirty, updated_at FROM events WHERE id = ?`, eventID).Scan(&row).Error; err != nil {
+		t.Fatal(err)
+	}
+	return row.SeriesClockDirty, row.UpdatedAt
+}
+
+// Ensure inserts one row per original day and records, from the same walk,
+// every distinct time the rule makes that day, the first marked once.
+func TestEnsureRecordsTheWalksClocks(t *testing.T) {
+	db := testdb.Shared(t)
+	owner := testOwner(t, db)
+	now := time.Date(2026, 2, 20, 12, 0, 0, 0, time.UTC)
+	ev := seriesEvent(t, db, owner, "2026-03-04T08:00", "UTC", "FREQ=WEEKLY;BYHOUR=9,10;BYSECOND=30;COUNT=4", "")
+	if err := Ensure(db, &ev, now); err != nil {
+		t.Fatal(err)
+	}
+	if got := dateTexts(t, db, ev.ID); !reflect.DeepEqual(got, []string{"2026-03-04", "2026-03-11"}) {
+		t.Fatalf("dates %v", got)
+	}
+	var starts []string
+	if err := db.Model(&models.EventOccurrence{}).Where("event_id = ?", ev.ID).Order("original_date").
+		Pluck("to_char(starts_at AT TIME ZONE 'UTC', 'HH24:MI:SS')", &starts).Error; err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(starts, []string{"09:00:30", "09:00:30"}) {
+		t.Fatalf("rows start at %v, want each day's first time", starts)
+	}
+	got := clocksOf(t, db, ev.ID)
+	want := []string{"2026-03-04 2026-03-04T09:00:30 true", "2026-03-04 2026-03-04T10:00:30 false",
+		"2026-03-11 2026-03-11T09:00:30 true", "2026-03-11 2026-03-11T10:00:30 false"}
+	if len(got) != len(want) {
+		t.Fatalf("clocks %+v", got)
+	}
+	for i, r := range got {
+		if line := r.Day + " " + r.StartsAt + " " + map[bool]string{true: "true", false: "false"}[r.First]; line != want[i] || r.TZID != "UTC" || r.Written != "" {
+			t.Fatalf("clock %d = %+v, want %s", i, r, want[i])
+		}
+	}
+}
+
+// A series repeating from Go's zero instant keeps the evidence of the walk
+// that wrote each date: a later Extend walks from a later now and must not
+// replace it, and a date with none (written before the store) stays unknown.
+func TestExtendKeepsZeroStartEvidence(t *testing.T) {
+	db := testdb.Shared(t)
+	owner := testOwner(t, db)
+	ev := seriesEvent(t, db, owner, "0001-01-01T00:00", "UTC", "FREQ=YEARLY;BYMONTH=1;BYMONTHDAY=1;BYHOUR=9", "")
+	if err := Ensure(db, &ev, time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+	before := clocksOf(t, db, ev.ID)
+	if len(before) == 0 {
+		t.Fatal("no evidence for a zero-start series' new dates")
+	}
+	var firstID uint
+	if err := db.Model(&models.EventOccurrence{}).Where("event_id = ?", ev.ID).Order("original_date").Limit(1).Pluck("id", &firstID).Error; err != nil {
+		t.Fatal(err)
+	}
+	// The first date loses its evidence, as a date written before the store.
+	if err := db.Where("occurrence_id = ?", firstID).Delete(&models.OccurrenceSeriesStart{}).Error; err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(1100 * time.Millisecond) // a later walk starts at a later second
+	for pass := 0; pass < 2; pass++ {
+		if err := Extend(db, time.Now().UTC(), nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	after := clocksOf(t, db, ev.ID)
+	if len(after) != len(before)-1 || len(after) > 0 && !reflect.DeepEqual(after, before[1:]) {
+		t.Fatalf("evidence changed:\nbefore %+v\nafter  %+v", before[1:], after)
+	}
+}
+
+// A previous binary's edit marks the event dirty. Extend drops every piece of
+// its evidence, rebuilds the upcoming dates' from the current walk, leaves
+// past dates unknown and clears the flag without touching updated_at; a
+// second run writes nothing.
+func TestExtendSettlesADirtyEvent(t *testing.T) {
+	db := testdb.Shared(t)
+	owner := testOwner(t, db)
+	created := time.Date(2026, 2, 1, 12, 0, 0, 0, time.UTC)
+	ev := seriesEvent(t, db, owner, "2026-02-04T19:00", "UTC", "FREQ=WEEKLY", "")
+	if err := Ensure(db, &ev, created); err != nil {
+		t.Fatal(err)
+	}
+	// The previous binary's series edit: a full save that names the rule
+	// columns (here unchanged), then a retime of the upcoming dates.
+	if err := db.Exec(`UPDATE events SET title = 'Edited', starts_local = starts_local, tzid = tzid, rrule = rrule, rrule_until = rrule_until, updated_at = now() WHERE id = ?`, ev.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	dirty, _ := dirtyOf(t, db, ev.ID)
+	if !dirty {
+		t.Fatal("a save naming the rule columns left the event clean")
+	}
+	// A plain column update is not a schedule change.
+	if err := db.Exec(`UPDATE events SET series_clock_dirty = false WHERE id = ?`, ev.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Exec(`UPDATE events SET title = 'Again' WHERE id = ?`, ev.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if dirty, _ := dirtyOf(t, db, ev.ID); dirty {
+		t.Fatal("a title-only update marked the event dirty")
+	}
+	if err := db.Exec(`UPDATE events SET rrule = rrule WHERE id = ?`, ev.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	_, updated := dirtyOf(t, db, ev.ID)
+	var occUpdated []time.Time
+	if err := db.Model(&models.EventOccurrence{}).Where("event_id = ?", ev.ID).Order("id").Pluck("updated_at", &occUpdated).Error; err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, 2, 20, 12, 0, 0, 0, time.UTC)
+	if err := Extend(db, now, nil); err != nil {
+		t.Fatal(err)
+	}
+	dirty, after := dirtyOf(t, db, ev.ID)
+	if dirty || !after.Equal(updated) {
+		t.Fatalf("dirty %v, updated_at %v -> %v", dirty, updated, after)
+	}
+	var occAfter []time.Time
+	if err := db.Model(&models.EventOccurrence{}).Where("event_id = ?", ev.ID).Order("id").Limit(len(occUpdated)).Pluck("updated_at", &occAfter).Error; err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(occAfter, occUpdated) {
+		t.Fatal("settling the evidence changed a date's updated_at")
+	}
+	got := clocksOf(t, db, ev.ID)
+	for _, r := range got {
+		if r.Day < "2026-02-21" {
+			t.Fatalf("a past date kept evidence a previous binary may have made stale: %+v", r)
+		}
+	}
+	upcoming := count(t, db, "event_id = ? AND starts_at > ?", ev.ID, now)
+	if int64(len(got)) != upcoming || upcoming == 0 {
+		t.Fatalf("%d clocks for %d upcoming dates", len(got), upcoming)
+	}
+	if err := Extend(db, now, nil); err != nil {
+		t.Fatal(err)
+	}
+	if again := clocksOf(t, db, ev.ID); !reflect.DeepEqual(again, got) {
+		t.Fatal("a second run rewrote evidence")
+	}
+}
+
+// The repair fills an upcoming date's missing evidence on a live series with
+// nothing to add, and on an ended series whose last date was moved into the
+// future, without adding a date or calling AfterEnsure for it; a second run
+// writes nothing.
+func TestRepairFillsUpcomingDatesOnly(t *testing.T) {
+	db := testdb.Shared(t)
+	owner := testOwner(t, db)
+	created := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	now := time.Date(2026, 2, 20, 12, 0, 0, 0, time.UTC)
+	live := seriesEvent(t, db, owner, "2026-01-07T19:00", "UTC", "FREQ=WEEKLY", "")
+	ended := seriesEvent(t, db, owner, "2026-01-07T19:00", "UTC", "FREQ=WEEKLY", "2026-02-11")
+	for _, ev := range []*models.Event{&live, &ended} {
+		if err := Ensure(db, ev, created); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Extend fully at now first, so nothing is left to add.
+	if err := Extend(db, now, nil); err != nil {
+		t.Fatal(err)
+	}
+	// The ended series' last date moved into the future by a per-date edit.
+	moved := time.Date(2026, 3, 2, 18, 0, 0, 0, time.UTC)
+	if err := db.Model(&models.EventOccurrence{}).Where("event_id = ? AND original_date = ?", ended.ID, "2026-02-11").
+		Updates(map[string]any{"starts_at": moved, "ends_at": moved.Add(time.Hour), "starts_at_override": moved}).Error; err != nil {
+		t.Fatal(err)
+	}
+	// Both lose evidence, as rows written before the store.
+	if err := db.Exec(`DELETE FROM occurrence_series_starts`).Error; err != nil {
+		t.Fatal(err)
+	}
+	liveDates, endedDates := dateTexts(t, db, live.ID), dateTexts(t, db, ended.ID)
+	var calls []uint
+	after := func(_ *gorm.DB, ev *models.Event, added []string) error {
+		calls = append(calls, ev.ID)
+		return nil
+	}
+	if err := Extend(db, now, after); err != nil {
+		t.Fatal(err)
+	}
+	if len(calls) != 0 || !reflect.DeepEqual(dateTexts(t, db, live.ID), liveDates) || !reflect.DeepEqual(dateTexts(t, db, ended.ID), endedDates) {
+		t.Fatalf("the repair added dates or ran AfterEnsure: %v", calls)
+	}
+	endedClocks := clocksOf(t, db, ended.ID)
+	if len(endedClocks) != 1 || endedClocks[0].Day != "2026-02-11" || endedClocks[0].StartsAt != "2026-02-11T19:00:00" || !endedClocks[0].First {
+		t.Fatalf("the ended series' moved date: %+v", endedClocks)
+	}
+	liveClocks := clocksOf(t, db, live.ID)
+	if int64(len(liveClocks)) != count(t, db, "event_id = ? AND starts_at > ?", live.ID, now) {
+		t.Fatalf("live series: %d clocks", len(liveClocks))
+	}
+	for _, r := range liveClocks {
+		if r.Day <= "2026-02-18" {
+			t.Fatalf("a past legacy date was given evidence: %+v", r)
+		}
+	}
+	if err := Extend(db, now, after); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(clocksOf(t, db, ended.ID), endedClocks) || !reflect.DeepEqual(clocksOf(t, db, live.ID), liveClocks) {
+		t.Fatal("a second repair rewrote evidence")
+	}
+}
+
+// Extend picks the live series before it locks each one. A series edit that
+// commits while Extend waits for the event's lock, moving the start four
+// weeks back and ending the series before the cutoff, leaves past dates the
+// rule now makes and the event lacks. Extend rechecks the locked row: it adds
+// none of them and calls no AfterEnsure.
+func TestExtendRechecksTheLockedSeriesIsLive(t *testing.T) {
+	db := testdb.Shared(t)
+	owner := testOwner(t, db)
+	now := time.Date(2026, 2, 20, 12, 0, 0, 0, time.UTC)
+	ev := seriesEvent(t, db, owner, "2026-02-25T19:00", "UTC", "FREQ=WEEKLY", "")
+	if err := Ensure(db, &ev, now); err != nil {
+		t.Fatal(err)
+	}
+	before := dateTexts(t, db, ev.ID)
+	holder := db.Begin()
+	defer holder.Rollback()
+	if err := holder.Exec(`SELECT id FROM events WHERE id = ? FOR UPDATE`, ev.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	var holderPID int
+	if err := holder.Raw(`SELECT pg_backend_pid()`).Scan(&holderPID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := holder.Exec(`UPDATE events SET starts_local = '2026-01-28T19:00', rrule_until = '2026-02-11' WHERE id = ?`, ev.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	var calls []string
+	after := func(_ *gorm.DB, _ *models.Event, added []string) error {
+		calls = append(calls, added...)
+		return nil
+	}
+	done := make(chan error, 1)
+	go func() { done <- Extend(db, now, after) }()
+	testdb.WaitUntil(t, "Extend waiting for the series edit's lock", 5*time.Second, func() bool {
+		var n int64
+		if err := db.Raw(`SELECT count(*) FROM pg_stat_activity WHERE datname = current_database()
+			AND wait_event_type = 'Lock' AND ? = ANY(pg_blocking_pids(pid))`, holderPID).Scan(&n).Error; err != nil {
+			t.Fatal(err)
+		}
+		return n == 1
+	})
+	if err := holder.Commit().Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	if got := dateTexts(t, db, ev.ID); len(calls) != 0 || !reflect.DeepEqual(got, before) {
+		t.Fatalf("Extend added dates to a series the committed edit ended: AfterEnsure %v, dates %v, want %v", calls, got, before)
 	}
 }

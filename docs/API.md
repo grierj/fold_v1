@@ -2516,7 +2516,9 @@ remoteAvailable, guestsAllowed,
 myRegistration, myAttendanceMode?, myGuestCount?,
 videoProvider, videoUrl?, videoHidden,
 canSeeVideo, canSeeAttendees, canDecline, canBlock,
-visibility?, hostedBy?, groupId?, groupName?, canRegister?
+visibility?, hostedBy?, groupId?, groupName?, canRegister?,
+room?, reminders?,
+groupHeader?, attendance?, seats?, remoteRsvp?, myWaitlistPosition?, series?
 ```
 
 Times/title/place are effective for that date. Only ordinary-visibility reads
@@ -2525,18 +2527,120 @@ viewer may independently see the group, otherwise `hostedBy` with the church
 name (including the privacy-safe fallback for an opened hidden-group date).
 This does not authorize the parent series. Invitation-only responses omit all
 of these organizer/ordinary-visibility keys and never fall back to a hidden
-group's place. Neither response includes host identities, attendee/contact
-details, counts, capacities, series title, series start, RRULE/until, sibling
-dates, or management controls. `myRegistration`
+group's place. Neither response includes host identities, contact details,
+care notes, sibling dates or management controls. `myRegistration`
 is the viewer's own status or null. An ordinary reader's own cancelled answer
 is `"cancelled"` with no `myAttendanceMode` or `myGuestCount`, and every
 capability is what an unanswered viewer of the date gets: it is history, not
 an RSVP. A cancelled answer on a scheduled date is not a cancelled date. Video is gated by that date's own RSVP and
 current policy; an invitation does not inherit manager video authority.
-`canSeeAttendees` is always false for invitation-only access, and this endpoint
-never includes attendees even for ordinary viewers. `canDecline`/`canBlock`
+`canSeeAttendees` is always false for invitation-only access. `canDecline`/`canBlock`
 describe current recipient invitation policy for the mutations below. Ordinary
 voluntary RSVP continues to use its existing authority.
+
+**The date page's own facts (M8.1 brief sections 4 and 6).** Only the ordinary
+JSON read carries the last six keys, each as `policy.DatePage` allows; an
+invitation-only read has none of them (its `remoteAvailable` and video fields
+are as above), and `calendar.ics` and the feeds never carry them. Every fact
+of the scheduled JSON read, and the authority that admits it, comes from one
+consistent database snapshot, with the session rechecked against the account
+row in that snapshot: a session already ended there (signed out, password
+changed, account disabled) reads as signed out. A session that ends after the
+snapshot starts is not seen by this read; the next request is signed out. A failed room read leaves `room`
+out, as on the event pages and in `calendar.ics`, except where the series
+comparison below needs the room, which is then a 500. A failed read of the
+church name, the push switch, the reminder's church zone or `canRegister` shows
+its default (the default name, push on, UTC, `canRegister` false) and the rest
+of the date still loads. Household attendee authorization requires a valid
+church zone and returns an error if it cannot be read. Each key is absent when
+not allowed:
+
+- `groupHeader` `{imageUrl, coverFocalX, coverFocalY, leaderName}`: only with
+  `groupId`, for a group the viewer may see. `imageUrl` is `""` for a group
+  with no photo (the page uses its generated cover); the leader is the group's
+  display leader's public name. A church-wide date, or one whose group is
+  hidden from the viewer, has no `groupHeader` and keeps the `hostedBy`
+  church label, never a host's name.
+- `attendance` `{registrations, attendees?}`: `registrations` counts rows by
+  answer over listed accounts, `going`, `maybe` and `waitlisted` always,
+  `declined` only for the event's managers (DEC-64), as on the event pages.
+  `attendees` is present only when `canSeeAttendees` and there is at least one
+  name to show: the Going and Maybe names the existing subject rules allow this viewer (pending teens and
+  household people as on the event pages), each `{name, status, guestCount}`
+  with no contact, care or management field. A name the rules hide is left
+  out, so fewer names than `registrations.going` plus `maybe` means some are
+  private.
+- `seats` `{inPerson, remote?, waitlistEnabled, childcare?}`: each pool is
+  `{capacity, used, left}` for this date (its overrides applied); `capacity`
+  and `left` are `null` when unlimited, `left` is never below 0, and `used`
+  counts places (one per Going party plus its guests), not rows. `remote` is
+  present when the event takes remote answers, `childcare` when it offers
+  childcare: `{full, totals?}`, where `full` says a limited pool has no
+  places left and `totals` (a pool) is only for the event's managers on a
+  date whose series they may see (`policy.CanSeeChildcare`). A failed count
+  read is a 500, never an empty or available pool.
+- `remoteRsvp`: `offered`; `closed` (remote is on for the event but this
+  date's effective remote cap is 0); or `none` (in person only). A full
+  remote pool is still `offered`. Link access is separate and unchanged:
+  `videoUrl` is shown when the viewer may see the link; `videoHidden` true
+  means a link exists but waits until the viewer is Going (`registered_only`;
+  Maybe is not enough; an ordinary manager sees it without an answer); neither
+  means no link is configured. Closing remote answers does not withdraw a link
+  the viewer may already see.
+- `myWaitlistPosition`: the viewer's own 1-based place in line when their own
+  answer is waitlisted, as on the event pages.
+- `series`, only when the viewer may see the series itself (not for a date
+  opened on its own): `{recurrenceRule, upcomingDates?, coveredDates?,
+  canAnswerSeries, usual?, changes}`. For a signed-in viewer of a repeating
+  event, `upcomingDates` counts the series' scheduled dates starting after now that
+  the viewer could answer with `POST /events/:id/series-registrations` (the
+  same time and date-visibility boundaries), and `coveredDates` counts the
+  viewer's own Going or Maybe answers among exactly those dates, so a date
+  hidden from the viewer changes neither number. Nothing stores how an answer
+  was made; "in for the series" is inferred from these counts.
+  `canAnswerSeries` is true when that writer would accept a series answer
+  from the viewer and at least one such date exists. For a repeating event,
+  `usual` is the series' values on this date's original day:
+  `{startsLocal, endsLocal, durationMinutes, location, room, capacity,
+  remoteCapacity, visibility}` (the clock is the time the series writer
+  generated for that day when it wrote the date: creation, the daily
+  extension or a series edit store every distinct time the rule makes on the
+  date's original day, so the page never walks the rule (DEC-155). It is the
+  rule's own hour, as a `BYHOUR` part sets it, with daylight saving included,
+  down to a time that daylight saving moves from the next day's skipped clock
+  onto this one. When the rule makes several times on one day it is the one
+  this date starts at, else the earliest in the same minute (the date editor
+  saves whole minutes), else the first the writer generated. Its wall clock
+  is shown in the zone it was written in, which is the event's zone for every
+  upcoming date; a past date keeps the comparison it had. `startsLocal` and
+  `endsLocal` are empty when the clock is unknown: a date written before the
+  server stored these times and not yet repaired by the daily job (upcoming
+  dates are repaired; past ones stay unknown), a series repeating from
+  `0001-01-01T00:00` UTC whose date predates the store (the recurrence
+  library starts such a series from the moment it is walked), a date at the
+  edge of what the writer walked, or a series a previous server version
+  edited until the next series edit or daily run settles it. An empty clock
+  claims no `time` change, so an empty `changes` then does not mean the time
+  is unchanged; a `day` change is still listed when the shown date is not
+  the date's original day. For a date kept through a series edit that the rule no longer generates, it is
+  the series' start time of day on the date's original day, kept as written
+  even when daylight saving skips that clock there; its place, using the
+  group's place only when the group is shown; its series room while room
+  booking is on and, for a series room still awaiting approval, only while
+  approval is off, when new dates confirm in it directly; both caps, `null`
+  unlimited). `changes` lists what about this date differs from `usual`, in
+  this order: `day`, `time` (the start's local date and time of day; `day`
+  compares local dates even when the instants match: where daylight saving
+  skips the usual clock and that instant falls on the evening before, a date
+  there is a `day` change; a date starting at the usual start's instant
+  changed no time; the same local time at the other pass through a repeated
+  fall-back hour is a `time` change),
+  `duration`, `place`, `room`, `capacity`, `remoteCapacity` (only while the
+  event takes remote answers) and `visibility`. Values are compared, not
+  whether an override is stored: an override equal to the series value is no
+  change, and an unchanged date has `[]`. A one-time event has no `usual`,
+  `upcomingDates` or `coveredDates`, `canAnswerSeries` is false and `changes`
+  is `[]`: the series writer answers only for a repeating event.
 
 Calendar rows for invitation-only dates retain the slim `CalendarOccurrence`
 shape, with `dateUrl` set to `/events/:id/dates/:date`, the recipient's own Going

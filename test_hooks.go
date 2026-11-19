@@ -61,6 +61,11 @@ type testHooks struct {
 	// query (no snapshot yet), "date" right after that query fixed the
 	// snapshot, and "snapshots" and "restores" before each evidence lookup.
 	cancelledDateStep func(step string)
+	// scheduledDateStep runs inside the scheduled date page's read-only
+	// transaction: "begin" before its first query (no snapshot yet) and
+	// "authorized" once the date is authorized and presented, before the
+	// room and the page's own counts, names and coverage are read.
+	scheduledDateStep func(step string)
 
 	// pushRender overrides renderPush in tests (a rendering past the payload
 	// cap); nil uses the stored push text. pushWindow fixes the quiet hours

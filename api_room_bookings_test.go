@@ -498,3 +498,48 @@ func TestDateRoomNeedsActiveGroup(t *testing.T) {
 		t.Fatal("the release should be audited")
 	}
 }
+
+// The date page's series room follows the room switch exactly as a date's
+// confirmed room does (roomsFor), so turning rooms off never reads as a
+// changed room, and the approval switch exactly as the series writer does.
+func TestUsualRoomFollowsTheRoomSwitch(t *testing.T) {
+	app := testApp(t)
+	room := models.Room{Name: "Fellowship Hall", Building: "North"}
+	if err := app.DB.Create(&room).Error; err != nil {
+		t.Fatal(err)
+	}
+	ev := &models.Event{DefaultRoomID: &room.ID}
+	for _, on := range []string{"true", "false"} {
+		if err := setSettingIn(app.DB, settingRoomsEnabled, on); err != nil {
+			t.Fatal(err)
+		}
+		got, err := usualRoomIn(app.DB, ev)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if want := on == "true"; (got != nil) != want || (got != nil && *got != (occurrenceRoomJSON{ID: room.ID, Name: "Fellowship Hall", Building: "North"})) {
+			t.Fatalf("rooms %s: %+v", on, got)
+		}
+	}
+	if got, err := usualRoomIn(app.DB, &models.Event{}); got != nil || err != nil {
+		t.Fatalf("no series room: %+v %v", got, err)
+	}
+	if err := setSettingIn(app.DB, settingRoomsEnabled, "true"); err != nil {
+		t.Fatal(err)
+	}
+	// A series room still flagged pending is the usual room exactly when the
+	// series writer would confirm a new date in it: approval off.
+	pending := &models.Event{DefaultRoomID: &room.ID, DefaultRoomPending: true}
+	for _, on := range []string{"true", "false"} {
+		if err := setSettingIn(app.DB, settingRoomApproval, on); err != nil {
+			t.Fatal(err)
+		}
+		got, err := usualRoomIn(app.DB, pending)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if want := on == "false"; (got != nil) != want || roomApprovalOn(app.DB) != (on == "true") {
+			t.Fatalf("a series room awaiting approval, approval %s: %+v", on, got)
+		}
+	}
+}

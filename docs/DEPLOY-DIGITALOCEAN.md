@@ -1045,6 +1045,42 @@ operator upgrading from `v0.1.0` or later has nothing to check. Read this before
 - **Restoring an older dump** brings back the plaintext addresses it held. That
   is a property of any restore, not of this release.
 
+### Upgrade notes: stored series clocks (M8.1)
+
+The release that holds migration `00009` stores, beside each event date, the
+times its series rule generated for that day, so the date page can say what
+is different about a date without working the rule out again (DEC-155).
+
+- **What changes.** A new table, `occurrence_series_starts`, and a column on
+  `events` with a trigger that marks an event when anything changes its
+  start, zone or rule. The migration fills nothing and changes no date; it
+  takes brief locks on `events` and `event_occurrences`, bounded to 5 seconds
+  each, and fails whole if one is not free, as in the notes above.
+- **The date page fills in after the first daily job.** Until the
+  `occurrences.extend` job runs, a date page shows no usual time and claims
+  no time change. The app queues that job when it starts, but the job only
+  runs once a worker picks it up; on this guide's path that is the app
+  itself, within seconds of `/healthz` answering. The job rebuilds the times
+  of upcoming dates. Past dates written before the upgrade stay without a
+  usual time, and so do dates of a series that repeats from
+  `0001-01-01T00:00` UTC.
+- **Rolling back.** `upgrade.sh --rollback` hands the dump taken before the
+  upgrade and the previous image or commit to `restore.sh`, with the same
+  recovery-floor check and reopen rules as above. Starting the previous
+  release directly on the upgraded database, without a restore, is an option
+  only for a release that already holds `00008` and meets the recovery floor:
+  its migration runner treats the database as current, and its writes keep
+  working, while the trigger marks every series it edits. A rollback to
+  `v0.1.0` still needs its own dump, because `00008` removed the column that
+  release reads. When this release starts again it trusts nothing a marked
+  series holds: the page claims no time for it until the next edit or the
+  daily job settles it.
+- **`fold migrate down-one` loses the stored times.** It drops the table even
+  when it holds rows. Running Up again leaves it empty, and the daily job
+  rebuilds only upcoming dates; the past and `0001-01-01T00:00` times come
+  back only from a backup taken before the Down. The recovery level and the
+  deployment are unchanged.
+
 ## 7. Monitoring
 
 - The metrics agent (`--enable-monitoring`) graphs CPU, memory, and disk in the control panel. Add alert policies there for sustained CPU, memory above about 85%, and disk above about 80%. Alerts are free; the script does not create them.

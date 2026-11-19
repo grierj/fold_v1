@@ -852,6 +852,83 @@ export interface EventDate {
   canSeeAttendees: boolean;
   canDecline: boolean;
   canBlock: boolean;
+  // The date page's own facts (M8.1 brief 4, 6): only on an ordinary read, never for an invitation-only reader.
+  groupHeader?: EventDateGroupHeader;
+  attendance?: EventDateAttendance;
+  seats?: EventDateSeats;
+  remoteRsvp?: EventDateRemoteRsvp;
+  myWaitlistPosition?: number;
+  series?: EventDateSeries;
+}
+
+/** @public Whether a date takes remote answers: closed is remote on with this date's remote cap at 0; a full pool is still offered. */
+export type EventDateRemoteRsvp = "offered" | "closed" | "none";
+
+/** @public A shown group's cover and display-safe leader on its date page; imageUrl is "" without a photo (use coverSrc). */
+export interface EventDateGroupHeader {
+  imageUrl: string;
+  coverFocalX: number;
+  coverFocalY: number;
+  leaderName: string;
+}
+
+/** @public Row counts by answer (declined only for managers) and, when canSeeAttendees, the allowed Going and Maybe names. */
+export interface EventDateAttendance {
+  registrations: Record<string, number>;
+  attendees?: EventDateAttendee[];
+}
+
+/** @public One name in a date's attendance summary. */
+export interface EventDateAttendee {
+  name: string;
+  status: RegistrationStatus;
+  guestCount: number;
+}
+
+/** @public One pool of places; capacity and left are null when unlimited. */
+export interface EventDatePool {
+  capacity: number | null;
+  used: number;
+  left: number | null;
+}
+
+/** @public A date's pools, never merged: remote only when the event takes remote answers, childcare only when offered. */
+export interface EventDateSeats {
+  inPerson: EventDatePool;
+  remote?: EventDatePool;
+  waitlistEnabled: boolean;
+  childcare?: EventDateChildcare;
+}
+
+/** @public Childcare: whether a limited pool is full, and its exact totals only for the event's managers. */
+export interface EventDateChildcare {
+  full: boolean;
+  totals?: EventDatePool;
+}
+
+/** @public The series as this date's reader may see it; coverage counts and usual only for a repeating event, coverage only when signed in. */
+export interface EventDateSeries {
+  recurrenceRule: string;
+  upcomingDates?: number;
+  coveredDates?: number;
+  canAnswerSeries: boolean;
+  usual?: EventDateUsual;
+  changes: EventDateChange[];
+}
+
+/** @public What about a date differs from its series' usual values. */
+export type EventDateChange = "day" | "time" | "duration" | "place" | "room" | "capacity" | "remoteCapacity" | "visibility";
+
+/** @public The series' usual values on this date's original day; startsLocal and endsLocal are "" when the series clock is unknown. */
+export interface EventDateUsual {
+  startsLocal: string;
+  endsLocal: string;
+  durationMinutes: number;
+  location: string;
+  room: OccurrenceRoom | null;
+  capacity: number | null;
+  remoteCapacity: number | null;
+  visibility: Visibility;
 }
 
 /** @public Narrow administrative person picker, checked by TestWebTypesMatchGoJSON. */

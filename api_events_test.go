@@ -1592,6 +1592,16 @@ func TestDatePageTellsACancelledAnswerFromNoAnswerAndACancelledDate(t *testing.T
 	}
 	delete(history, "myRegistration")
 	delete(none, "myRegistration")
+	// Series coverage counts each reader's own answers on the other dates
+	// (the cancelled member is Going on the second); everything about this
+	// date, the series action included, must match.
+	for _, answer := range []map[string]any{history, none} {
+		series, ok := answer["series"].(map[string]any)
+		if !ok {
+			t.Fatalf("fixture: no series facts: %v", answer)
+		}
+		delete(series, "coveredDates")
+	}
 	if !reflect.DeepEqual(history, none) {
 		t.Fatalf("a cancelled answer changed the date's capabilities:\n%v\n%v", history, none)
 	}
@@ -3026,4 +3036,166 @@ func TestEventWritersKeepEventFirstLockOrder(t *testing.T) {
 			}
 		})
 	}
+}
+
+// A series edit writes clock evidence (DEC-155) for every date that was
+// upcoming before it, whatever it did to the date: kept by an override,
+// frozen, cancelled by a person, cancelled by the series, restored, moved
+// into the past; a date already past keeps what it had, known or not. The
+// repair after it changes no clock, notice, audit row, change time or
+// calendar output.
+func TestSeriesEditRecordsEvidenceForEveryUpcomingDate(t *testing.T) {
+	app := testApp(t)
+	leader := newTestUser(t, app, "Lou Leader", "password1234", models.RoleMember)
+	client := loginAPI(t, app, leader.Name, "password1234")
+	group := activeGroup(t, app, leader, "Evening Circle", models.VisibilityPublic, "")
+	start := feedStart(3)
+	ev := createFeedEvent(t, client, group.ID, "Evening Prayer", start, "FREQ=WEEKLY;COUNT=7")
+	eid := itoa(ev.ID)
+	dates := seriesClockTestDates(t, app.DB, ev.ID)
+	day := func(i int) string { return tombstoneDate(dates[i]) }
+	// d1 kept by a title override, d2 frozen at 18:00, d3 cancelled by a
+	// person; d0 and d6 are plain.
+	apiDo(t, client, "PUT", "/api/v1/events/"+eid+"/occurrences/"+day(1), map[string]any{"title": "Special"}, http.StatusOK)
+	moveDateTo(t, client, ev.ID, day(2), day(2)+"T18:00")
+	gormMust(t, app.DB.Model(&dates[3]).Updates(map[string]any{"status": models.OccurrenceCancelled, "cancel_source": models.CancelSourceManual}))
+
+	edit := func(body map[string]any) {
+		t.Helper()
+		apiDo(t, client, "PUT", "/api/v1/events/"+eid, body, http.StatusOK)
+	}
+	wantEvidence := func(i int, hhmm, written string) {
+		t.Helper()
+		rows := clockRowsOf(t, app.DB, dates[i].ID)
+		w := ""
+		if len(rows) == 1 && rows[0].WrittenLocal != nil {
+			w = *rows[0].WrittenLocal
+		}
+		if len(rows) != 1 || !rows[0].IsFirst || rows[0].StartsAt.UTC().Format("15:04") != hhmm || w != written {
+			t.Fatalf("date %d (%s) evidence %+v, want one first row at %s written %q", i, day(i), rows, hhmm, written)
+		}
+	}
+	// The series ends after d3: d4 to d6 are cancelled by the series, and
+	// their evidence is the series' written clock on a day the rule no
+	// longer makes.
+	edit(map[string]any{"rruleUntil": day(3)})
+	for i := 4; i <= 6; i++ {
+		wantEvidence(i, "19:00", day(i)+"T19:00")
+	}
+	wantEvidence(1, "19:00", "")
+	wantEvidence(2, "19:00", "")
+	wantEvidence(3, "19:00", "")
+	// The end is lifted: d4 to d6 are restored with the rule's own times.
+	edit(map[string]any{"rruleUntil": ""})
+	for i := 4; i <= 6; i++ {
+		var o models.EventOccurrence
+		gormMust(t, app.DB.First(&o, dates[i].ID))
+		if o.Status != models.OccurrenceScheduled {
+			t.Fatalf("fixture: date %d is %s", i, o.Status)
+		}
+		wantEvidence(i, "19:00", "")
+	}
+	wantUsual(t, readSeriesDate(t, client, ev.ID, day(2)), "19:00", changeTime)
+
+	// The clock moves to just before d0's start, and the series moves to
+	// 18:00: d0 goes from upcoming into the past in this edit and still gets
+	// its evidence.
+	app.clock = func() time.Time { return dates[0].StartsAt.Add(-30 * time.Minute) }
+	edit(map[string]any{"startsLocal": start.Add(-time.Hour).Format(events.WallLayout)})
+	wantEvidence(0, "18:00", "")
+	wantEvidence(6, "18:00", "")
+	// Later, d0 is past: a known past date keeps its evidence through
+	// another edit, and a past date with none stays unknown.
+	app.clock = func() time.Time { return dates[1].StartsAt.Add(-30 * time.Minute) }
+	gormMust(t, app.DB.Where("occurrence_id = ?", dates[0].ID).Delete(&models.OccurrenceSeriesStart{}))
+	app.clock = func() time.Time { return dates[2].StartsAt.Add(-30 * time.Minute) }
+	before1 := clockRowsOf(t, app.DB, dates[1].ID)
+	edit(map[string]any{"startsLocal": start.Add(-2 * time.Hour).Format(events.WallLayout)})
+	if rows := clockRowsOf(t, app.DB, dates[0].ID); len(rows) != 0 {
+		t.Fatalf("a past date with no evidence was given some: %+v", rows)
+	}
+	if rows := clockRowsOf(t, app.DB, dates[1].ID); !reflect.DeepEqual(rows, before1) {
+		t.Fatalf("a past date's evidence changed: %+v -> %+v", before1, rows)
+	}
+	wantEvidence(5, "17:00", "")
+	app.clock = nil
+
+	// The repair after the edits: give an upcoming date back its legacy
+	// state, then run it twice. Only that date's evidence comes back; no
+	// notice, audit row, change time or calendar output moves.
+	gormMust(t, app.DB.Where("occurrence_id = ?", dates[6].ID).Delete(&models.OccurrenceSeriesStart{}))
+	type sideEffects struct {
+		changed, restored int64
+		eventUpdated      time.Time
+		dateUpdated       []time.Time
+		ics, calendar     string
+	}
+	read := func() sideEffects {
+		t.Helper()
+		var s sideEffects
+		gormMust(t, app.DB.Model(&models.Notification{}).Where("kind = ?", notify.EventChanged).Count(&s.changed))
+		gormMust(t, app.DB.Model(&models.AuditLog{}).Where("action = ?", audit.EventDatesRestored).Count(&s.restored))
+		gormMust(t, app.DB.Raw(`SELECT updated_at FROM events WHERE id = ?`, ev.ID).Scan(&s.eventUpdated))
+		gormMust(t, app.DB.Model(&models.EventOccurrence{}).Where("event_id = ?", ev.ID).Order("id").Pluck("updated_at", &s.dateUpdated))
+		s.ics = apiDo(t, client, "GET", dateReadPath(ev.ID, day(5))+"/calendar.ics", nil, http.StatusOK)
+		from, to := feedDate(start), feedDate(start.AddDate(0, 0, 60))
+		s.calendar = apiDo(t, client, "GET", "/api/v1/calendar?from="+from+"&to="+to, nil, http.StatusOK)
+		return s
+	}
+	before := read()
+	runExtend(t, app)
+	repaired := clockRowsOf(t, app.DB, dates[6].ID)
+	if len(repaired) != 1 || repaired[0].StartsAt.UTC().Format("15:04") != "17:00" {
+		t.Fatalf("the repair gave the upcoming date %+v", repaired)
+	}
+	all := clockCount(t, app.DB)
+	runExtend(t, app)
+	if after := read(); !reflect.DeepEqual(after, before) {
+		t.Fatalf("the repair changed what else the app says:\n%+v\n%+v", before, after)
+	}
+	if clockCount(t, app.DB) != all || !reflect.DeepEqual(clockRowsOf(t, app.DB, dates[6].ID), repaired) {
+		t.Fatal("a second repair rewrote evidence")
+	}
+}
+
+// A past date keeps the evidence it was written with through a change of the
+// series zone, and is compared in that zone, so the zone change alone is not
+// a move; upcoming dates take the new zone's evidence.
+func TestSeriesZoneChangeKeepsAPastDatesComparison(t *testing.T) {
+	app := testApp(t)
+	leader := newTestUser(t, app, "Lou Leader", "password1234", models.RoleMember)
+	client := loginAPI(t, app, leader.Name, "password1234")
+	group := activeGroup(t, app, leader, "Evening Circle", models.VisibilityPublic, "")
+	boise := eventZone("America/Boise")
+	now := time.Now().In(boise)
+	first := time.Date(now.Year(), now.Month(), now.Day(), 19, 0, 0, 0, boise).AddDate(0, 0, -14)
+	w := client.do("POST", "/api/v1/groups/"+itoa(group.ID)+"/events", map[string]any{
+		"title": "Evening Prayer", "startsLocal": first.Format(events.WallLayout), "durationMinutes": 60,
+		"tzid": "America/Boise", "recurrenceRule": "FREQ=WEEKLY;COUNT=5",
+	}, true)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("create: %d %s", w.Code, w.Body.String())
+	}
+	var created struct {
+		Event eventJSON `json:"event"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &created); err != nil {
+		t.Fatal(err)
+	}
+	ev := created.Event
+	dates := seriesClockTestDates(t, app.DB, ev.ID)
+	past, upcoming := dates[0], dates[4]
+	apiDo(t, client, "PUT", "/api/v1/events/"+itoa(ev.ID), map[string]any{"tzid": "UTC"}, http.StatusOK)
+	r := readSeriesDate(t, client, ev.ID, tombstoneDate(past))
+	if r.StartsLocal[:10] == tombstoneDate(past) {
+		t.Fatalf("fixture: the past date still shows on its own day in UTC: %s", r.StartsLocal)
+	}
+	wantUsual(t, r, "19:00")
+	if rows := clockRowsOf(t, app.DB, past.ID); len(rows) != 1 || rows[0].TZID != "America/Boise" {
+		t.Fatalf("the past date's evidence: %+v", rows)
+	}
+	if rows := clockRowsOf(t, app.DB, upcoming.ID); len(rows) != 1 || rows[0].TZID != "UTC" {
+		t.Fatalf("an upcoming date's evidence: %+v", rows)
+	}
+	wantUsual(t, readSeriesDate(t, client, ev.ID, tombstoneDate(upcoming)), "19:00")
 }

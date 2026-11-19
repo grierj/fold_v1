@@ -246,8 +246,8 @@ each by its own authority:
 
       If any of these fails, the ended path is denied and the slice
       reports it rather than guessing. The "qualified after cleanup" case
-      would then need Grier's decision, because no schema change is in
-      scope.
+      would then need Grier's decision, because no schema change for the
+      tombstone is in scope.
     - **Live path (before cleanup).** The grant has no end stamp on the
       cancelled date. No writer commits this state as of `15ab2d6b`, and
       the occurrence records no cancellation time. Validity at the
@@ -291,8 +291,8 @@ each by its own authority:
       writers leave no live grant on the date. If the slice finds a writer
       that commits that state, it stops and reports it for Grier's
       decision rather than adding a comparison. Telling the two apart
-      needs a record that does not exist, and no schema change is in
-      scope.
+      needs a record that does not exist, and no schema change for the
+      tombstone is in scope.
 
   The row's RSVP status never stands in for the grant.
 
@@ -506,6 +506,44 @@ and remote caps, and series visibility. Real values are compared, not
 unchanged date has none. A change to any single one of these produces one,
 even when it is the only change. Only authorized differences are sent.
 
+The usual clock is what the series writer generated for the original day
+when it wrote the date, stored beside the date (DEC-155,
+`occurrence_series_starts`); the read never walks the rule.
+
+- **Writer observation.** Creation (`Ensure`), the daily extension and a
+  series edit record, from the same walk that writes the dates, every
+  distinct instant the rule makes on each written date's original day, the
+  first in the walk's order marked. A series edit writes it for every date
+  that was upcoming before the edit and every date it adds; a past date
+  keeps what it had while upcoming, in the zone it was written in, so a
+  later change of the series zone alone is no move. An edit that makes the
+  event one-time instead drops the evidence of the dates that were
+  upcoming, so the old series' clock never comes back as a past date's usual
+  clock if the event later repeats again. A per-date edit leaves it alone.
+- **Several times on one day.** The date is compared with the time it
+  starts at, else the earliest in the same UTC minute (the date editor saves
+  whole minutes; the two passes through a repeated hour are different
+  minutes), else the first. A series edit adds a new multi-time day once, at
+  its last time, as it moves such a day.
+- **Daylight saving.** A generated time keeps the instant the walk gave it,
+  including one moved onto the day before. A kept day the rule does not
+  generate uses the series start's written wall clock on that day, kept as
+  written even in a gap, with the instant `time.Date` resolves it to.
+- **Edges.** The walk continues a few days past the stored horizon for
+  evidence only, so a day the horizon splits still has all its times. A day
+  the walk does not cover is unknown, never a guessed fallback, and the
+  daily run tries it again.
+- **Zero DTSTART.** rrule-go walks a series starting at Go's zero instant
+  from the current time, so only the walk that wrote a date can vouch for
+  its clock: later runs never replace it and never rebuild a missing one.
+  A new series edit writes fresh evidence with the dates it moves.
+- **Unknown history and repair.** Dates written before the store, and dates
+  of a series a previous binary edited (`series_clock_dirty`), read with an
+  empty clock and claim no time change until the `occurrences.extend` repair
+  rebuilds upcoming dates from the current rule. Past ones stay unknown. An
+  empty clock still reports a `day` change when the shown day is not the
+  original day.
+
 ## 5. Phone priority, sticky action and mobile navigation
 
 ### 5.1 Priority at 390px
@@ -582,6 +620,8 @@ shared `components/ui` controls. Dates are formatted only in `lib/when.ts`.
     and `docs/API.md`, in the same PR.
 - **Unchanged**: `GET …/dates/:date/calendar.ics`, feeds and discovery.
   The date read never fetches a rich parent event to render an exact date.
+  None of them reads the clock evidence; the JSON read picks one row of it
+  in three indexed probes, whatever the rule.
 - **Writes reused, none added**: `PUT /events/:id/dates/:date/registration`,
   `POST /events/:id/dates/:date/decline` and `/block`,
   `PUT /events/:id/registrations`, `POST /events/:id/series-registrations`
@@ -590,7 +630,11 @@ shared `components/ui` controls. Dates are formatted only in `lib/when.ts`.
 - **Hidden groups**: event output never shows a hidden group's name, place or
   id (`a.groupShownTo`, `labelGroup`). A new error a person can act on
   follows DEC-61 (`apiErr` plus `ERROR_COPY`); everything else uses `fail`.
-- **No migration**, no new Go or npm dependency, one embedded binary.
+- **One additive migration**, `00009_occurrence_series_starts.sql`
+  (DEC-155): the clock evidence table and the events flag with its
+  trigger. Up backfills nothing; Down drops the evidence, and the past and
+  zero-DTSTART values it held come back only from a matching backup. No new
+  Go or npm dependency, one embedded binary, the recovery level unchanged.
 
 ## 7. Slices (in order, each checked and reviewed on its own)
 

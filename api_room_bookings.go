@@ -626,6 +626,29 @@ func roomsFor(db *gorm.DB, occurrenceIDs []uint) (map[uint]*occurrenceRoomJSON, 
 	return out, err
 }
 
+// usualRoomIn is the series room (DefaultRoomID) the way roomsFor shows a
+// date's room, under the series writer's own approval rule (bookSeriesRoom):
+// while room booking is on, and, for a room still awaiting approval
+// (DefaultRoomPending), only while approval is off, when new dates confirm in
+// it directly; while approval is on they are only requested. A failed read
+// is an error.
+func usualRoomIn(db *gorm.DB, ev *models.Event) (*occurrenceRoomJSON, error) {
+	if ev.DefaultRoomID == nil {
+		return nil, nil
+	}
+	q := `SELECT r.id, r.name, r.building FROM rooms r WHERE r.id = ? AND ` + settingOnSQL
+	args := []any{*ev.DefaultRoomID, settingRoomsEnabled}
+	if ev.DefaultRoomPending {
+		q += ` AND NOT ` + settingOnSQL
+		args = append(args, settingRoomApproval)
+	}
+	var rows []occurrenceRoomJSON
+	if err := db.Raw(q, args...).Scan(&rows).Error; err != nil || len(rows) == 0 {
+		return nil, err
+	}
+	return &rows[0], nil
+}
+
 func lookupChunkInto(db *gorm.DB, occurrenceIDs []uint, out map[uint]*occurrenceRoomJSON) error {
 	var rows []struct {
 		OccurrenceID uint

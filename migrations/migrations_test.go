@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
+	"reflect"
 	"regexp"
 	"runtime"
 	"sort"
@@ -746,8 +747,8 @@ func TestRegistrationAccessSchemaShape(t *testing.T) {
 	}
 	// The partial unique index lets one request ground one registration only.
 	var tables int
-	if err := a.db.QueryRow(`SELECT count(*) FROM information_schema.tables WHERE table_schema='public' AND table_type='BASE TABLE' AND table_name <> 'goose_db_version'`).Scan(&tables); err != nil || tables != len(models.All()) || tables != 39 {
-		t.Fatalf("tables = %d (%v), models = %d, want 39", tables, err, len(models.All()))
+	if err := a.db.QueryRow(`SELECT count(*) FROM information_schema.tables WHERE table_schema='public' AND table_type='BASE TABLE' AND table_name <> 'goose_db_version'`).Scan(&tables); err != nil || tables != len(models.All()) || tables != 40 {
+		t.Fatalf("tables = %d (%v), models = %d, want 40", tables, err, len(models.All()))
 	}
 }
 
@@ -2841,9 +2842,11 @@ func TestSuppressionContractNeedsTheDumpToRollBack(t *testing.T) {
 		t.Fatalf("previous goose runner changed goose_db_version: before %s, after %s", applied, got)
 	}
 
-	// And the new binary's own Down refuses, so there is no way back that
-	// would lose the addresses silently.
+	// And the new binary's own Down of 00008 refuses, so there is no way back
+	// that would lose the addresses silently. Later files go down first, so
+	// the refusal tested is 00008's own.
 	p := newProvider(t, sqlDB)
+	downTo(t, p, suppressionContractVersion)
 	if _, err := p.Down(ctx); err == nil || !strings.Contains(err.Error(), "restore the upgrade dump") {
 		t.Fatalf("down with a suppression: %v, want a refusal that names the dump", err)
 	}
@@ -4322,4 +4325,293 @@ func testAgesNoteTriggerCoversAddedColumns(t *testing.T, version int64) {
 	if note, probe := probeOf(311); note != "" || probe != 0 {
 		t.Errorf("(iii) request 311 has note %q and probe %d, want empty and 0", note, probe)
 	}
+}
+
+// The 00009 occurrence-series-starts tests (M8.1, DEC-155): an additive
+// table of the series writer's clock evidence, owned by its date, and a flag
+// on events that a trigger raises for any UPDATE naming a rule column, so a
+// previous binary's schedule edit is seen even when the values compare equal.
+
+const seriesStartsVersion = 9
+
+// seriesStartsFixture inserts an event and one date with the previous
+// binary's own statement shapes, and returns their ids.
+func seriesStartsFixture(t *testing.T, db *sql.DB) (eventID, occID int64) {
+	t.Helper()
+	if _, err := db.Exec(`INSERT INTO users(id,email) VALUES (1,'series@example.com')`); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow(`INSERT INTO events (title, description, starts_local, duration_minutes, tzid, rrule, location, visibility, created_by)
+		VALUES ('Weekly', '', '2026-03-04T19:00', 60, 'UTC', 'FREQ=WEEKLY;BYHOUR=9,10', '', 'public', 1) RETURNING id`).Scan(&eventID); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow(`INSERT INTO event_occurrences (event_id, original_date, starts_at, ends_at, status)
+		VALUES ($1, '2026-03-04', '2026-03-04T09:00:00Z', '2026-03-04T10:00:00Z', 'scheduled') RETURNING id`, eventID).Scan(&occID); err != nil {
+		t.Fatal(err)
+	}
+	return eventID, occID
+}
+
+func seriesClockDirty(t *testing.T, db *sql.DB, eventID int64) bool {
+	t.Helper()
+	var dirty bool
+	if err := db.QueryRow(`SELECT series_clock_dirty FROM events WHERE id = $1`, eventID).Scan(&dirty); err != nil {
+		t.Fatal(err)
+	}
+	return dirty
+}
+
+func TestOccurrenceSeriesStartsMigration(t *testing.T) {
+	t.Parallel()
+	_, db, p := freshAt(t, seriesStartsVersion-1)
+	ctx := context.Background()
+	eventID, occID := seriesStartsFixture(t, db)
+	occBefore := snapshotRows[int64](t, db, `SELECT id, to_jsonb(o)::text FROM event_occurrences o`)
+	upTo(t, p, seriesStartsVersion)
+
+	// Up backfills nothing and changes no date; an existing event is clean.
+	if got := snapshotRows[int64](t, db, `SELECT id, to_jsonb(o)::text FROM event_occurrences o`); !reflect.DeepEqual(got, occBefore) {
+		t.Fatalf("Up changed a date:\n%v\n%v", occBefore, got)
+	}
+	var rows int
+	if err := db.QueryRow(`SELECT count(*) FROM occurrence_series_starts`).Scan(&rows); err != nil || rows != 0 {
+		t.Fatalf("evidence after Up = %d, %v, want none", rows, err)
+	}
+	if seriesClockDirty(t, db, eventID) {
+		t.Fatal("an existing event starts dirty")
+	}
+
+	var columns string
+	if err := db.QueryRow(`SELECT string_agg(column_name || ':' || data_type || ':' || is_nullable || ':' || coalesce(column_default, ''), ',' ORDER BY ordinal_position)
+		FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'occurrence_series_starts'`).Scan(&columns); err != nil {
+		t.Fatal(err)
+	}
+	if want := "occurrence_id:bigint:NO:,starts_at:timestamp with time zone:NO:,is_first:boolean:NO:false,tzid:text:NO:,written_local:text:YES:"; columns != want {
+		t.Fatalf("columns = %q, want %q", columns, want)
+	}
+	var pk, fk, first string
+	if err := db.QueryRow(`SELECT pg_get_constraintdef(oid) FROM pg_constraint WHERE conrelid = 'occurrence_series_starts'::regclass AND contype = 'p'`).Scan(&pk); err != nil || pk != "PRIMARY KEY (occurrence_id, starts_at)" {
+		t.Fatalf("primary key = %q, %v", pk, err)
+	}
+	if err := db.QueryRow(`SELECT pg_get_constraintdef(oid) FROM pg_constraint WHERE conrelid = 'occurrence_series_starts'::regclass AND contype = 'f'`).Scan(&fk); err != nil ||
+		!strings.Contains(fk, "REFERENCES event_occurrences(id) ON DELETE CASCADE") {
+		t.Fatalf("foreign key = %q, %v", fk, err)
+	}
+	if err := db.QueryRow(`SELECT indexdef FROM pg_indexes WHERE indexname = 'idx_occurrence_series_starts_first'`).Scan(&first); err != nil ||
+		!strings.HasPrefix(first, "CREATE UNIQUE INDEX") || !strings.HasSuffix(first, "(occurrence_id) WHERE is_first") {
+		t.Fatalf("first-row index = %q, %v", first, err)
+	}
+
+	insert := `INSERT INTO occurrence_series_starts (occurrence_id, starts_at, is_first, tzid, written_local) VALUES ($1, $2, $3, 'UTC', $4)`
+	nine, ten := time.Date(2026, 3, 4, 9, 0, 0, 0, time.UTC), time.Date(2026, 3, 4, 10, 0, 0, 0, time.UTC)
+	if _, err := db.Exec(insert, occID, nine, true, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(insert, occID, ten, false, nil); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name    string
+		at      time.Time
+		first   bool
+		written any
+		code    string
+	}{
+		{"the same instant twice", nine, false, nil, "23505"},
+		{"a second first row", nine.Add(time.Minute), true, nil, "23505"},
+		{"a written clock on a later row", nine.Add(2 * time.Minute), false, "2026-03-04T09:02", "23514"},
+		{"a malformed written clock", nine.Add(3 * time.Minute), true, "9:00", "23514"},
+	} {
+		_, err := db.Exec(insert, occID, tc.at, tc.first, tc.written)
+		if code := pgErrorCode(err); code != tc.code {
+			t.Fatalf("%s: %v, want SQLSTATE %s", tc.name, err, tc.code)
+		}
+	}
+	if _, err := db.Exec(insert, 999999, nine, true, nil); pgErrorCode(err) != "23503" {
+		t.Fatalf("evidence for no date: %v", err)
+	}
+
+	// The previous binary's writes. A per-date move and a title change leave
+	// the event clean; any UPDATE naming a rule column marks it, values equal
+	// or not, and leaves updated_at as the statement sets it.
+	if _, err := db.Exec(`UPDATE event_occurrences SET starts_at = '2026-03-04T11:00:00Z', starts_at_override = '2026-03-04T11:00:00Z' WHERE id = $1`, occID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`UPDATE events SET title = 'Renamed', updated_at = now() WHERE id = $1`, eventID); err != nil {
+		t.Fatal(err)
+	}
+	if seriesClockDirty(t, db, eventID) {
+		t.Fatal("a per-date move or a title change marked the event dirty")
+	}
+	for _, column := range []string{"starts_local", "tzid", "rrule", "rrule_until"} {
+		if _, err := db.Exec(`UPDATE events SET series_clock_dirty = false WHERE id = $1`, eventID); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := db.Exec(`UPDATE events SET `+column+` = `+column+` WHERE id = $1`, eventID); err != nil {
+			t.Fatal(err)
+		}
+		if !seriesClockDirty(t, db, eventID) {
+			t.Fatalf("an UPDATE naming %s left the event clean", column)
+		}
+	}
+	// The previous binary's full save sets every column it knows, which does
+	// not include the flag.
+	if _, err := db.Exec(`UPDATE events SET series_clock_dirty = false WHERE id = $1`, eventID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`UPDATE events SET title = 'Saved', description = '', starts_local = '2026-03-04T19:00', duration_minutes = 60,
+		tzid = 'UTC', rrule = 'FREQ=WEEKLY;BYHOUR=9,10', rrule_until = NULL, location = '', visibility = 'public', updated_at = now() WHERE id = $1`, eventID); err != nil {
+		t.Fatal(err)
+	}
+	if !seriesClockDirty(t, db, eventID) {
+		t.Fatal("a full save left the event clean")
+	}
+	// Even a statement that tries to clear the flag while naming a rule
+	// column leaves it set.
+	if _, err := db.Exec(`UPDATE events SET rrule = rrule, series_clock_dirty = false WHERE id = $1`, eventID); err != nil {
+		t.Fatal(err)
+	}
+	if !seriesClockDirty(t, db, eventID) {
+		t.Fatal("a rule save cleared the flag")
+	}
+
+	// The evidence goes with its date.
+	if _, err := db.Exec(`DELETE FROM event_occurrences WHERE id = $1`, occID); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow(`SELECT count(*) FROM occurrence_series_starts`).Scan(&rows); err != nil || rows != 0 {
+		t.Fatalf("evidence after its date was deleted = %d, %v", rows, err)
+	}
+
+	// The previous binary's goose runner (00001 to 00008) treats the new
+	// schema as current, boots and changes nothing.
+	previous := previousProvider(t, db, seriesStartsVersion)
+	applied := appliedRows(t, db)
+	if results, err := previous.Up(ctx); err != nil || len(results) != 0 {
+		t.Fatalf("previous runner Up = %d results, %v", len(results), err)
+	}
+	if got := appliedRows(t, db); got != applied {
+		t.Fatalf("previous runner changed goose_db_version: %s -> %s", applied, got)
+	}
+
+	// Down removes the trigger, its function, the flag and the table, even
+	// with evidence in it; Up puts them back empty.
+	if err := db.QueryRow(`INSERT INTO event_occurrences (event_id, original_date, starts_at, ends_at, status)
+		VALUES ($1, '2026-03-11', '2026-03-11T09:00:00Z', '2026-03-11T10:00:00Z', 'scheduled') RETURNING id`, eventID).Scan(&occID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(insert, occID, nine.AddDate(0, 0, 7), true, nil); err != nil {
+		t.Fatal(err)
+	}
+	downTo(t, p, seriesStartsVersion-1)
+	var leftovers int
+	if err := db.QueryRow(`SELECT (SELECT count(*) FROM pg_class WHERE relname = 'occurrence_series_starts')
+		+ (SELECT count(*) FROM pg_proc WHERE proname = 'events_series_clock_dirty')
+		+ (SELECT count(*) FROM pg_trigger WHERE tgname = 'events_series_clock_dirty')
+		+ (SELECT count(*) FROM information_schema.columns WHERE table_name = 'events' AND column_name = 'series_clock_dirty')`).Scan(&leftovers); err != nil || leftovers != 0 {
+		t.Fatalf("after Down %d objects remain, %v", leftovers, err)
+	}
+	if _, err := db.Exec(`UPDATE events SET rrule = rrule WHERE id = $1`, eventID); err != nil {
+		t.Fatalf("the previous schema's save after Down: %v", err)
+	}
+	upTo(t, p, seriesStartsVersion)
+	if err := db.QueryRow(`SELECT count(*) FROM occurrence_series_starts`).Scan(&rows); err != nil || rows != 0 {
+		t.Fatalf("evidence after Down and Up = %d, %v: Down loses it", rows, err)
+	}
+	if seriesClockDirty(t, db, eventID) {
+		t.Fatal("Up again starts the event dirty")
+	}
+	if v, err := p.GetDBVersion(ctx); err != nil || v != latestVersion(t) {
+		t.Fatalf("version = %d, %v", v, err)
+	}
+}
+
+// previousProvider is a goose runner holding only the files before version,
+// as the release before it shipped them.
+func previousProvider(t *testing.T, db *sql.DB, version int) *goose.Provider {
+	t.Helper()
+	entries, err := fs.ReadDir(migrations.Files, ".")
+	if err != nil {
+		t.Fatal(err)
+	}
+	files := fstest.MapFS{}
+	for _, e := range entries {
+		v, err := strconv.Atoi(strings.SplitN(e.Name(), "_", 2)[0])
+		if err != nil || !strings.HasSuffix(e.Name(), ".sql") || v >= version {
+			continue
+		}
+		data, err := fs.ReadFile(migrations.Files, e.Name())
+		if err != nil {
+			t.Fatal(err)
+		}
+		files[e.Name()] = &fstest.MapFile{Data: data}
+	}
+	locker, err := lock.NewPostgresSessionLocker(lock.WithLockID(migrations.LockID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, err := goose.NewProvider(goose.DialectPostgres, db, files, goose.WithSessionLocker(locker))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return p
+}
+
+// 00009 alters events before it creates the table whose foreign key needs a
+// lock on event_occurrences. An open writer on event_occurrences (ROW
+// EXCLUSIVE, as any INSERT, UPDATE or DELETE takes) lets that ALTER succeed
+// and then blocks the foreign key, so the migration fails after its 5s
+// lock_timeout with part of its DDL done. Nothing survives: no flag, table,
+// index, function or trigger, and the version stays.
+func TestOccurrenceSeriesStartsMigrationRollsBackOnALockTimeout(t *testing.T) {
+	t.Parallel()
+	name, db, p := freshAt(t, seriesStartsVersion-1)
+	seriesStartsFixture(t, db)
+	holder := holdLock(t, name, `LOCK event_occurrences IN ROW EXCLUSIVE MODE`)
+	var holderPID int
+	if err := holder.QueryRow(`SELECT pg_backend_pid()`).Scan(&holderPID); err != nil {
+		t.Fatal(err)
+	}
+	type outcome struct {
+		elapsed time.Duration
+		err     error
+	}
+	done := make(chan outcome, 1)
+	go func() {
+		elapsed, err := timedUpTo(p, seriesStartsVersion, time.Minute)
+		done <- outcome{elapsed, err}
+	}()
+	// The partial state: the migration's backend holds events (its ALTER
+	// succeeded) while it waits on the holder for event_occurrences.
+	testdb.WaitUntil(t, "00009 holding events and waiting on event_occurrences", 30*time.Second, func() bool {
+		var n int
+		if err := db.QueryRow(`SELECT count(*) FROM pg_locks e JOIN pg_locks w ON w.pid = e.pid
+			WHERE e.locktype = 'relation' AND e.relation = 'events'::regclass AND e.mode = 'AccessExclusiveLock' AND e.granted
+			AND w.locktype = 'relation' AND w.relation = 'event_occurrences'::regclass AND NOT w.granted
+			AND $1 = ANY(pg_blocking_pids(w.pid))`, holderPID).Scan(&n); err != nil {
+			t.Fatal(err)
+		}
+		return n == 1
+	})
+	got := <-done
+	if code := pgErrorCode(got.err); code != "55P03" {
+		t.Fatalf("UpTo(%d) with event_occurrences held: %v (code %q), want lock_not_available 55P03", seriesStartsVersion, got.err, code)
+	}
+	if got.elapsed < 5*time.Second || got.elapsed > 30*time.Second {
+		t.Fatalf("00009 gave up after %s, want at least its 5s lock_timeout and well under 30s", got.elapsed)
+	}
+	if err := holder.Rollback(); err != nil {
+		t.Fatal(err)
+	}
+	var leftovers int
+	if err := db.QueryRow(`SELECT (SELECT count(*) FROM pg_class WHERE relname IN ('occurrence_series_starts', 'idx_occurrence_series_starts_first'))
+		+ (SELECT count(*) FROM pg_proc WHERE proname = 'events_series_clock_dirty')
+		+ (SELECT count(*) FROM pg_trigger WHERE tgname = 'events_series_clock_dirty')
+		+ (SELECT count(*) FROM information_schema.columns WHERE table_name = 'events' AND column_name = 'series_clock_dirty')`).Scan(&leftovers); err != nil || leftovers != 0 {
+		t.Fatalf("a failed 00009 left %d objects, %v", leftovers, err)
+	}
+	if v, err := p.GetDBVersion(context.Background()); err != nil || v != seriesStartsVersion-1 {
+		t.Fatalf("version after the failure = %d, %v", v, err)
+	}
+	upTo(t, p, seriesStartsVersion)
 }

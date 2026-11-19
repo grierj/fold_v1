@@ -317,6 +317,85 @@ type eventDateCancelledResponseJSON struct {
 	Occurrence cancelledDateJSON `json:"occurrence"`
 }
 
+// The scheduled date page's own facts for an ordinary reader (M8.1 brief
+// sections 4 and 6, policy.DatePage). An invitation-only read carries none of
+// them.
+
+// dateGroupHeaderJSON is the cover and display-safe leader name of a group the
+// viewer may see (groupShownTo). imageUrl is "" for a group with no photo.
+type dateGroupHeaderJSON struct {
+	ImageURL    string  `json:"imageUrl"`
+	CoverFocalX float64 `json:"coverFocalX"`
+	CoverFocalY float64 `json:"coverFocalY"`
+	LeaderName  string  `json:"leaderName"`
+}
+
+// dateAttendanceJSON is the date's row counts by answer (registrationCounts:
+// declined only for its managers) and, when canSeeAttendees, the Going and
+// Maybe names the existing subject rules allow (left out when there are none).
+type dateAttendanceJSON struct {
+	Registrations map[string]int64   `json:"registrations"`
+	Attendees     []dateAttendeeJSON `json:"attendees,omitempty"`
+}
+
+type dateAttendeeJSON struct {
+	Name       string `json:"name"`
+	Status     string `json:"status"`
+	GuestCount int    `json:"guestCount"`
+}
+
+// datePoolJSON is one pool of places: capacity and left are null when the pool
+// is unlimited; left never goes below zero. used counts places, not rows.
+type datePoolJSON struct {
+	Capacity *int `json:"capacity"`
+	Used     int  `json:"used"`
+	Left     *int `json:"left"`
+}
+
+// dateSeatsJSON keeps each pool apart: remote only when the event takes
+// remote answers, childcare only when it offers childcare.
+type dateSeatsJSON struct {
+	InPerson        datePoolJSON       `json:"inPerson"`
+	Remote          *datePoolJSON      `json:"remote,omitempty"`
+	WaitlistEnabled bool               `json:"waitlistEnabled"`
+	Childcare       *dateChildcareJSON `json:"childcare,omitempty"`
+}
+
+// dateChildcareJSON: full is whether a limited childcare pool has no places
+// left; totals are the exact numbers, only under policy.CanSeeChildcare.
+type dateChildcareJSON struct {
+	Full   bool          `json:"full"`
+	Totals *datePoolJSON `json:"totals,omitempty"`
+}
+
+// dateSeriesJSON is the series as this date's reader may see it
+// (dateProjection.ShowsSeries). The coverage counts are for a signed-in
+// reader of a repeating event; usual is absent for a one-time event, which
+// has nothing to differ from or answer for.
+type dateSeriesJSON struct {
+	RecurrenceRule  string         `json:"recurrenceRule"`
+	UpcomingDates   *int           `json:"upcomingDates,omitempty"`
+	CoveredDates    *int           `json:"coveredDates,omitempty"`
+	CanAnswerSeries bool           `json:"canAnswerSeries"`
+	Usual           *dateUsualJSON `json:"usual,omitempty"`
+	Changes         []string       `json:"changes"`
+}
+
+// dateUsualJSON is what the series' dates usually are, on this date's original
+// day: the series clock (the writer's stored evidence, DEC-155; startsLocal
+// and endsLocal "" when it is unknown), duration, place, room, both caps and
+// visibility.
+type dateUsualJSON struct {
+	StartsLocal     string              `json:"startsLocal"`
+	EndsLocal       string              `json:"endsLocal"`
+	DurationMinutes int                 `json:"durationMinutes"`
+	Location        string              `json:"location"`
+	Room            *occurrenceRoomJSON `json:"room"`
+	Capacity        *int                `json:"capacity"`
+	RemoteCapacity  *int                `json:"remoteCapacity"`
+	Visibility      string              `json:"visibility"`
+}
+
 type eventHostsResponseJSON struct {
 	Hosts []hostJSON `json:"hosts"`
 }
