@@ -7,11 +7,14 @@ import (
 	"net/http"
 	"reflect"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"fold/internal/audit"
 	"fold/internal/events"
 	"fold/internal/policy"
 	"fold/models"
@@ -279,8 +282,20 @@ func TestOccurrenceDateReadLiveFactsFailClosed(t *testing.T) {
 			if err := tc.mutate(f); err != nil {
 				t.Fatal(err)
 			}
-			w := f.client.do("GET", dateReadPath(f.event.ID, models.FormatCalendarDate(f.dates[1].OriginalDate)), nil, false)
-			if w.Code != 404 && !((tc.name == "disabled" || tc.name == "account deleted") && w.Code == 401) {
+			date := models.FormatCalendarDate(f.dates[1].OriginalDate)
+			w := f.client.do("GET", dateReadPath(f.event.ID, date), nil, false)
+			if tc.name == "cancelled" {
+				// A live grant on a date cancelled before its cleanup shows the
+				// tombstone (M8.1 brief 2.2), and nothing else: no download,
+				// and nothing for anyone without the grant.
+				var got map[string]map[string]any
+				want := map[string]map[string]any{"occurrence": {"title": "Invited date title", "date": date, "cancelled": true}}
+				if w.Code != http.StatusOK || json.Unmarshal(w.Body.Bytes(), &got) != nil || !reflect.DeepEqual(got, want) {
+					t.Fatal(w.Code, w.Body.String())
+				}
+				apiDo(t, f.client, "GET", dateReadPath(f.event.ID, date)+"/calendar.ics", nil, http.StatusNotFound)
+				apiDo(t, f.stranger, "GET", dateReadPath(f.event.ID, date), nil, http.StatusNotFound)
+			} else if w.Code != 404 && !((tc.name == "disabled" || tc.name == "account deleted") && w.Code == 401) {
 				t.Fatal(w.Code, w.Body.String())
 			}
 			reads, err := f.app.scopedOccurrenceReads(f.recipient, f.app.DB.Where("event_id = ?", f.event.ID), time.Now().UTC())
@@ -905,4 +920,607 @@ func TestLoadAccessHistoryOneScanFailsClosedAndFilters(t *testing.T) {
 	if got, err := probe(`{"subjectUserId":5,"occurrenceId":6,"grantedAtMicro":1}`, nil, nil); err != nil || len(got) != 0 {
 		t.Fatalf("a valid row with nothing to match: %v %+v", err, got)
 	}
+}
+
+// tombstoneFixture is an invite-only group's weekly series. Its second date
+// has its own title; dates holds the first three dates by start.
+type tombstoneFixture struct {
+	app       *App
+	adminUser *models.User
+	admin     *apiClient
+	group     uint
+	event     eventJSON
+	dates     []models.EventOccurrence
+}
+
+const tombstoneTitle = "Cancelled date title"
+
+func newTombstoneFixture(t *testing.T) tombstoneFixture {
+	t.Helper()
+	app := testApp(t)
+	adminUser := newTestUser(t, app, "tombstone admin", "password1234", models.RoleAdmin)
+	admin := loginAPI(t, app, adminUser.Name, "password1234")
+	group := createFeedGroup(t, admin, "Tombstone hidden group", models.VisibilityInviteOnly, "Tombstone hidden place")
+	start := feedStart(7)
+	ev := createFeedEvent(t, admin, group, "Tombstone hidden series", start, weeklyRule(start))
+	var dates []models.EventOccurrence
+	if err := app.DB.Where("event_id = ?", ev.ID).Order("starts_at").Limit(3).Find(&dates).Error; err != nil || len(dates) != 3 {
+		t.Fatal(err, len(dates))
+	}
+	gormMust(t, app.DB.Model(&dates[1]).Update("title_override", tombstoneTitle))
+	return tombstoneFixture{app: app, adminUser: adminUser, admin: admin, group: group, event: ev, dates: dates}
+}
+
+func tombstoneDate(occ models.EventOccurrence) string {
+	return models.FormatCalendarDate(occ.OriginalDate)
+}
+
+// member is a signed-in member of the group: ordinary access to every date.
+func (f tombstoneFixture) member(t *testing.T, name string) (*models.User, *apiClient) {
+	t.Helper()
+	u := newTestUser(t, f.app, name, "password1234", models.RoleMember)
+	gormMust(t, f.app.DB.Create(&models.Membership{UserID: u.ID, GroupID: f.group, Role: models.MembershipMember, Status: models.MembershipActive}))
+	return u, loginAPI(t, f.app, name, "password1234")
+}
+
+// invitee holds a manager-add grant on occ alone.
+func (f tombstoneFixture) invitee(t *testing.T, name string, occ models.EventOccurrence) (*models.User, accessRow, *apiClient) {
+	t.Helper()
+	u := newTestUser(t, f.app, name, "password1234", models.RoleMember)
+	access := seedReadInvitation(t, f.app, f.adminUser, u, f.event, occ)
+	return u, access, loginAPI(t, f.app, name, "password1234")
+}
+
+// departed is a member who answered Going on occ and then left the group
+// through the real departure preview and confirmation, keeping occ, so the
+// departure grant and its provenance are the production ones (DEC-74). An
+// invite-only date can be kept only inside the RSVP cutoff, so occ is first
+// moved to start startIn from now (under events.CutoffWindow); the moved row
+// is returned.
+func (f tombstoneFixture) departed(t *testing.T, name string, occ models.EventOccurrence, startIn time.Duration) (accessRow, models.EventOccurrence, *apiClient) {
+	t.Helper()
+	if startIn <= 0 || startIn >= events.CutoffWindow {
+		t.Fatalf("fixture: %s is outside the keep cutoff", startIn)
+	}
+	u, c := f.member(t, name)
+	apiDo(t, c, "PUT", fmt.Sprintf("/api/v1/events/%d/registrations", f.event.ID), map[string]any{"date": tombstoneDate(occ), "status": models.RegGoing}, http.StatusOK)
+	start := time.Now().UTC().Add(startIn).Truncate(time.Second)
+	gormMust(t, f.app.DB.Model(&models.EventOccurrence{}).Where("id = ?", occ.ID).Updates(map[string]any{"starts_at": start, "ends_at": start.Add(time.Hour), "starts_at_override": start}))
+	gormMust(t, f.app.DB.First(&occ, occ.ID))
+	groupPath := fmt.Sprintf("/api/v1/groups/%d", f.group)
+	preview := getDeparturePreview(t, c, groupPath+"/departure-preview", http.StatusOK)
+	if w := confirmDeparturePreview(t, c, "POST", groupPath+"/leave", preview, []uint{occ.ID}, ""); w.Code != http.StatusOK {
+		t.Fatalf("leave keeping %s: %d %s", tombstoneDate(occ), w.Code, w.Body.String())
+	}
+	var regs []models.Registration
+	gormMust(t, f.app.DB.Where("user_id = ? AND occurrence_id = ?", u.ID, occ.ID).Find(&regs))
+	if len(regs) != 1 || regs[0].Status != models.RegGoing {
+		t.Fatalf("the departure changed the kept row: %+v", regs)
+	}
+	access := loadAccessRow(t, f.app.DB, regs[0].ID)
+	if access.Origin != policy.OccurrenceOriginDepartureSelf || access.Status != policy.OccurrenceAccessActive || access.RegistrationID != regs[0].ID ||
+		access.DepartureActorID == nil || *access.DepartureActorID != u.ID || access.DepartureMembershipID == nil {
+		t.Fatalf("the departure did not keep %s: %+v", tombstoneDate(occ), access)
+	}
+	var membership models.Membership
+	gormMust(t, f.app.DB.First(&membership, *access.DepartureMembershipID))
+	if membership.Status != models.MembershipLeft || membership.UserID != u.ID {
+		t.Fatalf("the departure did not mark the membership left: %+v", membership)
+	}
+	return access, occ, c
+}
+
+func (f tombstoneFixture) cancel(t *testing.T, occ models.EventOccurrence) {
+	t.Helper()
+	apiDo(t, f.admin, "POST", fmt.Sprintf("/api/v1/events/%d/cancel", f.event.ID), map[string]any{"date": tombstoneDate(occ)}, http.StatusOK)
+}
+
+// liveGrants counts grants still live on occ: a committed cancellation leaves none.
+func (f tombstoneFixture) liveGrants(t *testing.T, occ models.EventOccurrence) int64 {
+	t.Helper()
+	var n int64
+	gormMust(t, f.app.DB.Model(&models.Registration{}).Where("registrations.occurrence_id = ? AND "+registrationAccessLiveSQL, occ.ID).Count(&n))
+	return n
+}
+
+// wantTombstone compares the whole answer: exactly the three facts.
+func (f tombstoneFixture) wantTombstone(t *testing.T, c *apiClient, occ models.EventOccurrence, title string) {
+	t.Helper()
+	raw := apiDo(t, c, "GET", dateReadPath(f.event.ID, tombstoneDate(occ)), nil, http.StatusOK)
+	var got map[string]map[string]any
+	if err := json.Unmarshal([]byte(raw), &got); err != nil {
+		t.Fatal(err, raw)
+	}
+	want := map[string]map[string]any{"occurrence": {"title": title, "date": tombstoneDate(occ), "cancelled": true}}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("tombstone %s, want %v", raw, want)
+	}
+}
+
+// wantUnavailable is the existing unavailable answer, byte for byte the one a
+// date that never existed gets, and never the title or the cancellation.
+func (f tombstoneFixture) wantUnavailable(t *testing.T, c *apiClient, date string) {
+	t.Helper()
+	missing := apiDo(t, c, "GET", dateReadPath(f.event.ID, "1999-01-01"), nil, http.StatusNotFound)
+	raw := apiDo(t, c, "GET", dateReadPath(f.event.ID, date), nil, http.StatusNotFound)
+	if raw != missing || strings.Contains(raw, tombstoneTitle) || strings.Contains(raw, "Tombstone hidden") || strings.Contains(raw, "cancelled") {
+		t.Fatalf("unavailable answer %s differs from %s", raw, missing)
+	}
+}
+
+func TestCancelledDateTombstoneQualifiedReadersAndDenials(t *testing.T) {
+	f := newTombstoneFixture(t)
+	target := f.dates[1]
+	d := tombstoneDate(target)
+	_, member := f.member(t, "tombstone member")
+	apiDo(t, member, "PUT", fmt.Sprintf("/api/v1/events/%d/registrations", f.event.ID), map[string]any{"date": d, "status": models.RegGoing}, http.StatusOK)
+	_, _, invitee := f.invitee(t, "tombstone invitee", target)
+	_, _, departed := f.departed(t, "tombstone departed", target, 30*time.Minute)
+	_, outsider := f.member(t, "tombstone unrelated member")
+	newTestUser(t, f.app, "tombstone stranger", "password1234", models.RoleMember)
+	stranger := loginAPI(t, f.app, "tombstone stranger", "password1234")
+	anon := newAPIClient(t, f.app)
+
+	// A retained row whose only authority was a grant ended for another
+	// reason keeps its Going status and still shows nothing.
+	ended, endedAccess, endedClient := f.invitee(t, "tombstone removed invitee", target)
+	if err := f.app.contactMutation(contactChange{EventID: f.event.ID}, func(tx *gorm.DB) error {
+		var row models.Registration
+		if err := tx.First(&row, endedAccess.ID).Error; err != nil {
+			return err
+		}
+		return endRegistrationAccessQuietly(tx, &row, accessScopeOf(&models.Event{ID: f.event.ID, GroupID: &f.group}), policy.OccurrenceRemoved, &f.adminUser.ID, time.Now().UTC(), "")
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// A viewer whose only link is a household person's registration they hold.
+	holder := newTestUser(t, f.app, "tombstone household holder", "password1234", models.RoleMember)
+	household := models.Household{Name: "Tombstone household", CreatedBy: holder.ID}
+	gormMust(t, f.app.DB.Create(&household))
+	gormMust(t, f.app.DB.Create(&models.HouseholdAccount{HouseholdID: household.ID, UserID: holder.ID, Relation: models.HouseholdRelationAdult}))
+	birth := time.Now().UTC().AddDate(-30, 0, 0)
+	person := models.HouseholdPerson{HouseholdID: household.ID, FirstName: "Tombstone proxy", Kind: models.HouseholdAdult, BirthDate: &birth, CreatedBy: holder.ID}
+	gormMust(t, f.app.DB.Create(&person))
+	gormMust(t, f.app.DB.Create(&models.Registration{HouseholdPersonID: &person.ID, RegisteredBy: &holder.ID, OccurrenceID: target.ID, Status: models.RegGoing, Source: models.RegSourceWeb, AttendanceMode: models.AttendanceInPerson}))
+	householdClient := loginAPI(t, f.app, holder.Name, "password1234")
+	asked := newTestUser(t, f.app, "tombstone asked", "password1234", models.RoleMember)
+	askedClient := loginAPI(t, f.app, asked.Name, "password1234")
+
+	for _, c := range []*apiClient{member, invitee, departed} {
+		apiDo(t, c, "GET", dateReadPath(f.event.ID, d), nil, http.StatusOK)
+	}
+	f.cancel(t, target)
+	f.cancel(t, f.dates[2])
+	if n := f.liveGrants(t, target); n != 0 {
+		t.Fatalf("the date cancel left %d live grants", n)
+	}
+	if got := loadAccessRow(t, f.app.DB, endedAccess.ID); got.EndReason != policy.OccurrenceRemoved {
+		t.Fatalf("an independently ended grant changed: %+v", got)
+	}
+	var reg models.Registration
+	gormMust(t, f.app.DB.First(&reg, endedAccess.ID))
+	if reg.Status != models.RegGoing || reg.UserID == nil || *reg.UserID != ended.ID {
+		t.Fatalf("the retained row lost its status: %+v", reg)
+	}
+	// A pending ask alone is no authority. It is added after the cancel,
+	// whose reconcile would otherwise end it, and removed before the delete.
+	at := time.Now().UTC()
+	ask := models.ContactRequest{RequesterID: f.adminUser.ID, SubjectUserID: asked.ID, Purpose: "occurrence_add", ContextType: "event", ContextID: f.event.ID, OccurrenceID: &target.ID,
+		Fields: "", AddAttendanceMode: models.AttendanceInPerson, SubjectDecision: "pending", AdminDecision: "not_needed", Status: "pending", CreatedAt: at, ExpiresAt: at.AddDate(0, 0, 14)}
+	gormMust(t, f.app.DB.Create(&ask))
+
+	// Qualified: a registered reader, an invitee after cleanup and a
+	// departure grant the cancel ended. The calendar download stays 404.
+	for _, c := range []*apiClient{member, invitee, departed} {
+		f.wantTombstone(t, c, target, tombstoneTitle)
+		apiDo(t, c, "GET", dateReadPath(f.event.ID, d)+"/calendar.ics", nil, http.StatusNotFound)
+	}
+	// Denied: no own row (an unrelated member, a stranger, signed out, a
+	// role alone), a pending ask, a retained row with an independently ended
+	// grant and a household person's row. A row a visibility loss cancelled
+	// has its own test.
+	for _, c := range []*apiClient{outsider, stranger, anon, f.admin, askedClient, endedClient, householdClient} {
+		f.wantUnavailable(t, c, d)
+	}
+	// Denied: sibling dates (scheduled and cancelled), an impossible date, a
+	// date that never existed and a malformed one.
+	for _, date := range []string{tombstoneDate(f.dates[0]), tombstoneDate(f.dates[2]), "2026-02-30", target.OriginalDate.AddDate(0, 0, 1).Format("2006-01-02")} {
+		f.wantUnavailable(t, invitee, date)
+	}
+	apiDo(t, member, "GET", dateReadPath(f.event.ID, "not-a-date"), nil, http.StatusNotFound)
+	// Discovery and the series stay on their scheduled-date authority.
+	apiDo(t, invitee, "GET", fmt.Sprintf("/api/v1/events/%d", f.event.ID), nil, http.StatusNotFound)
+
+	// Deleted dates: deleting the event removes them, and the tombstone with them.
+	gormMust(t, f.app.DB.Delete(&models.ContactRequest{}, ask.ID))
+	apiDo(t, f.admin, "DELETE", fmt.Sprintf("/api/v1/events/%d", f.event.ID), nil, http.StatusOK)
+	for _, c := range []*apiClient{member, invitee, departed} {
+		f.wantUnavailable(t, c, d)
+	}
+}
+
+// A registration a visibility tightening cancelled (cancelDateLosers) stays
+// cancelled history: it shows nothing once the date is cancelled, even after
+// the person has ordinary access again.
+func TestCancelledDateTombstoneDeniesARowAVisibilityLossCancelled(t *testing.T) {
+	f := newTombstoneFixture(t)
+	target := f.dates[0]
+	d := tombstoneDate(target)
+	datePath := fmt.Sprintf("/api/v1/events/%d/occurrences/%s", f.event.ID, d)
+	apiDo(t, f.admin, "PUT", datePath, map[string]any{"visibility": models.VisibilityPublic}, http.StatusOK)
+	loser := newTestUser(t, f.app, "tombstone visibility loser", "password1234", models.RoleMember)
+	client := loginAPI(t, f.app, loser.Name, "password1234")
+	apiDo(t, client, "PUT", fmt.Sprintf("/api/v1/events/%d/registrations", f.event.ID), map[string]any{"date": d, "status": models.RegGoing}, http.StatusOK)
+	var registered models.Registration
+	gormMust(t, f.app.DB.Where("user_id = ? AND occurrence_id = ?", loser.ID, target.ID).First(&registered))
+	if registered.Status != models.RegGoing {
+		t.Fatalf("fixture: %+v", registered)
+	}
+	// The confirmed switch back to invite-only shuts the person out and
+	// cancels this same row.
+	apiDo(t, f.admin, "PUT", datePath, map[string]any{"visibility": models.VisibilityInviteOnly, "confirm": true}, http.StatusOK)
+	var lost models.Registration
+	gormMust(t, f.app.DB.First(&lost, registered.ID))
+	if lost.Status != models.RegCancelled || lost.UserID == nil || *lost.UserID != loser.ID {
+		t.Fatalf("the tightening did not cancel the row: %+v", lost)
+	}
+	apiDo(t, f.admin, "PUT", datePath, map[string]any{"title": "Tombstone hidden private title"}, http.StatusOK)
+	f.cancel(t, target)
+	f.wantUnavailable(t, client, d)
+	// Ordinary access again, the row still cancelled: the retained row is
+	// not enough.
+	gormMust(t, f.app.DB.Create(&models.Membership{UserID: loser.ID, GroupID: f.group, Role: models.MembershipMember, Status: models.MembershipActive}))
+	f.wantUnavailable(t, client, d)
+	gormMust(t, f.app.DB.First(&lost, registered.ID))
+	if lost.Status != models.RegCancelled {
+		t.Fatalf("the read changed the row: %+v", lost)
+	}
+}
+
+func TestCancelledDateTombstoneLiveGrantBeforeCleanup(t *testing.T) {
+	f := newTombstoneFixture(t)
+	_, _, invitee := f.invitee(t, "unstamped invitee", f.dates[1])
+	_, target, departed := f.departed(t, "unstamped departed", f.dates[1], 30*time.Minute)
+	// No writer commits a cancelled date with a live grant: flip the status
+	// alone to stand for the moment before the cancel's cleanup.
+	gormMust(t, f.app.DB.Model(&models.EventOccurrence{}).Where("id = ?", target.ID).Updates(map[string]any{"status": models.OccurrenceCancelled, "cancel_source": models.CancelSourceManual}))
+	if n := f.liveGrants(t, target); n != 2 {
+		t.Fatalf("fixture: %d live grants", n)
+	}
+	f.wantTombstone(t, invitee, target, tombstoneTitle)
+	f.wantTombstone(t, departed, target, tombstoneTitle)
+	// After the date's end the records cannot tell whether a departure grant
+	// expired before the cancellation; a manager add has no expiry.
+	after := target.EndsAt.Add(time.Hour)
+	f.app.clock = func() time.Time { return after }
+	f.wantUnavailable(t, departed, tombstoneDate(target))
+	f.wantTombstone(t, invitee, target, tombstoneTitle)
+}
+
+func TestCancelledDateTombstoneOutlivesTheDateAndARetime(t *testing.T) {
+	f := newTombstoneFixture(t)
+	access, target, departed := f.departed(t, "retimed departed", f.dates[1], 30*time.Minute)
+	f.cancel(t, target)
+	stamped := loadAccessRow(t, f.app.DB, access.ID)
+	if stamped.EndReason != policy.OccurrenceCancelled || stamped.EndedAt == nil || stamped.Origin != policy.OccurrenceOriginDepartureSelf || stamped.RegistrationID != access.RegistrationID {
+		t.Fatalf("the cancel did not stamp the grant: %+v", stamped)
+	}
+	f.app.clock = func() time.Time { return target.EndsAt.Add(time.Hour) }
+	f.wantTombstone(t, departed, target, tombstoneTitle)
+	f.app.clock = nil
+	// The per-date editor moves the cancelled date to end before the stamp.
+	earlier := stamped.EndedAt.Add(-48 * time.Hour).UTC().Format("2006-01-02T15:04")
+	apiDo(t, f.admin, "PUT", fmt.Sprintf("/api/v1/events/%d/occurrences/%s", f.event.ID, tombstoneDate(target)), map[string]any{"startsLocal": earlier}, http.StatusOK)
+	var moved models.EventOccurrence
+	gormMust(t, f.app.DB.First(&moved, target.ID))
+	if !moved.EndsAt.Before(*stamped.EndedAt) || moved.Status != models.OccurrenceCancelled {
+		t.Fatalf("fixture: retime %+v", moved)
+	}
+	f.wantTombstone(t, departed, target, tombstoneTitle)
+}
+
+func TestCancelledDateTombstoneClockBoundary(t *testing.T) {
+	f := newTombstoneFixture(t)
+	early, before, earlyClient := f.departed(t, "boundary before", f.dates[1], 30*time.Minute)
+	late, at, lateClient := f.departed(t, "boundary at", f.dates[2], time.Hour)
+	f.app.clock = func() time.Time { return before.EndsAt.Add(-time.Microsecond) }
+	f.cancel(t, before)
+	if got := loadAccessRow(t, f.app.DB, early.ID); got.EndReason != policy.OccurrenceCancelled {
+		t.Fatalf("a cancel just before the end: %+v", got)
+	}
+	f.wantTombstone(t, earlyClient, before, tombstoneTitle)
+
+	// At the end the manual cancel is not refused: its first reconcile, with
+	// the date still scheduled, ends the departure grant as expired, and the
+	// cancel then commits with no grant of its own to stamp.
+	f.app.clock = func() time.Time { return at.EndsAt }
+	f.cancel(t, at)
+	if got := loadAccessRow(t, f.app.DB, late.ID); got.EndReason != policy.OccurrenceEnded || got.EndedAt == nil {
+		t.Fatalf("a cancel at the end: %+v", got)
+	}
+	var cancelled models.EventOccurrence
+	gormMust(t, f.app.DB.First(&cancelled, at.ID))
+	if cancelled.Status != models.OccurrenceCancelled {
+		t.Fatalf("the cancel at the end did not commit: %+v", cancelled)
+	}
+	f.wantUnavailable(t, lateClient, tombstoneDate(at))
+}
+
+func TestCancelledDateTombstoneFollowsTheCancellationThatEndedTheGrant(t *testing.T) {
+	f := newTombstoneFixture(t)
+	target := f.dates[1]
+	d := tombstoneDate(target)
+	// A series edit keeps a date with an override of its own, so this one
+	// has none: the series cancels and restores it, under the series title.
+	gormMust(t, f.app.DB.Model(&models.EventOccurrence{}).Where("id = ?", target.ID).Update("title_override", nil))
+	const title = "Tombstone hidden series"
+	restorerUser := newTestUser(t, f.app, "tombstone restorer", "password1234", models.RoleAdmin)
+	restorer := loginAPI(t, f.app, restorerUser.Name, "password1234")
+	_, first, firstClient := f.invitee(t, "restored invitee", target)
+	regranted, again, againClient := f.invitee(t, "regranted invitee", target)
+	eventPath := fmt.Sprintf("/api/v1/events/%d", f.event.ID)
+	// The series edit cancels the date and stamps both grants.
+	apiDo(t, f.admin, "PUT", eventPath, map[string]any{"rruleUntil": tombstoneDate(f.dates[0])}, http.StatusOK)
+	if n := f.liveGrants(t, target); n != 0 {
+		t.Fatalf("the series cancel left %d live grants", n)
+	}
+	f.wantTombstone(t, firstClient, target, title)
+	f.wantTombstone(t, againClient, target, title)
+	// Another admin's real series restore writes event.dates_restored.
+	apiDo(t, restorer, "PUT", eventPath, map[string]any{"rruleUntil": ""}, http.StatusOK)
+	var restore models.AuditLog
+	gormMust(t, f.app.DB.Where("action = ? AND target_type = 'event' AND target_id = ?", audit.EventDatesRestored, f.event.ID).First(&restore))
+	var back models.EventOccurrence
+	gormMust(t, f.app.DB.First(&back, target.ID))
+	if back.Status != models.OccurrenceScheduled || restore.ActorID == nil || *restore.ActorID != restorerUser.ID || !strings.Contains(restore.MetaJSON, itoa(target.ID)) {
+		t.Fatalf("fixture: the restore did not bring the date back: %+v %+v", back, restore)
+	}
+	// The second recipient is invited again on the same registration: a
+	// fresh request, approved by them. The first gets no new grant.
+	ask := createOccurrenceAsk(t, occurrenceReadFixture{app: f.app, issuer: f.adminUser, admin: f.admin, event: f.event}, regranted, target, nil)
+	apiDo(t, againClient, "POST", "/api/v1/add-requests/"+itoa(ask.ID)+"/decision", map[string]string{"party": "subject", "decision": "approved"}, http.StatusOK)
+	var rows []models.Registration
+	gormMust(t, f.app.DB.Where("user_id = ? AND occurrence_id = ?", regranted.ID, target.ID).Find(&rows))
+	if live := loadAccessRow(t, f.app.DB, again.ID); len(rows) != 1 || rows[0].ID != again.ID ||
+		live.Status != policy.OccurrenceAccessActive || live.RequestID == nil || *live.RequestID != ask.ID {
+		t.Fatalf("the reinvitation did not regrant the same row: %+v %+v", rows, live)
+	}
+	f.cancel(t, target)
+	// That registration now has two end snapshots, one each side of the
+	// restore: the reader has to pick the one matching the current grant.
+	var ends []accessSnapshot
+	for _, s := range accessSnapshotsFor(t, f.app.DB, again.ID) {
+		if s.Action == audit.OccurrenceAccessEnded {
+			ends = append(ends, s)
+		}
+	}
+	if len(ends) != 2 || ends[0].ID >= restore.ID || ends[1].ID <= restore.ID ||
+		metaUint(ends[0].Meta["grantedAtMicro"]) == metaUint(ends[1].Meta["grantedAtMicro"]) || ends[1].Meta["endReason"] != policy.OccurrenceCancelled {
+		t.Fatalf("end snapshots around restore %d: %+v", restore.ID, ends)
+	}
+	// The first grant ended under the cancellation the restore undid; the
+	// regranted one ended under this one.
+	check := func(stage string) {
+		t.Helper()
+		f.wantUnavailable(t, firstClient, d)
+		f.wantTombstone(t, againClient, target, title)
+		if got := loadAccessRow(t, f.app.DB, first.ID); got.EndReason != policy.OccurrenceCancelled {
+			t.Fatalf("%s: first grant %+v", stage, got)
+		}
+	}
+	check("recancelled")
+	// The restore's at moves before the first grant's end (a restore that
+	// queued behind the cancellation): ids decide, so nothing changes.
+	firstEnd := loadAccessRow(t, f.app.DB, first.ID).EndedAt
+	gormMust(t, f.app.DB.Model(&models.AuditLog{}).Where("id = ?", restore.ID).Update("at", firstEnd.Add(-time.Hour)))
+	check("restore at moved earlier")
+	// Erasing the restorer through the real admin delete keeps the restore
+	// record's id and dates.
+	var idsBefore string
+	gormMust(t, f.app.DB.Raw("SELECT (meta_json->'occurrenceIds')::text FROM audit_logs WHERE id = ?", restore.ID).Scan(&idsBefore))
+	apiDo(t, f.admin, "DELETE", "/api/v1/admin/users/"+itoa(restorerUser.ID), nil, http.StatusOK)
+	var erased models.User
+	gormMust(t, f.app.DB.Unscoped().First(&erased, restorerUser.ID))
+	var kept struct {
+		Action   string
+		TargetID uint
+		IDs      *string
+	}
+	gormMust(t, f.app.DB.Raw("SELECT action, target_id, (meta_json->'occurrenceIds')::text AS ids FROM audit_logs WHERE id = ?", restore.ID).Scan(&kept))
+	ids, ok := restoredOccurrenceIDs(kept.IDs)
+	if !erased.DeletedAt.Valid || kept.Action != audit.EventDatesRestored || kept.TargetID != f.event.ID || kept.IDs == nil || *kept.IDs != idsBefore ||
+		!ok || !slices.Contains(ids, target.ID) {
+		t.Fatalf("restore record after erasing its actor: %+v %v (deleted %v)", kept, idsBefore, erased.DeletedAt.Valid)
+	}
+	check("restorer erased")
+	// A restore record whose list cannot be read denies every ended grant on
+	// the event: read as a zero, the null would hide this date's restore and
+	// pass the first grant.
+	gormMust(t, f.app.DB.Model(&models.AuditLog{}).Where("id = ?", restore.ID).Update("meta_json", gorm.Expr(`jsonb_set(meta_json, '{occurrenceIds}', '[null]')`)))
+	f.wantUnavailable(t, firstClient, d)
+	f.wantUnavailable(t, againClient, d)
+}
+
+func TestCancelledDateTombstoneEvidenceReader(t *testing.T) {
+	f := newTombstoneFixture(t)
+	target := f.dates[1]
+	d := tombstoneDate(target)
+	_, dup, dupClient := f.invitee(t, "duplicated snapshot", target)
+	_, corrupt, corruptClient := f.invitee(t, "corrupt snapshot", target)
+	_, missing, missingClient := f.invitee(t, "missing snapshot", target)
+	_, healthy, healthyClient := f.invitee(t, "healthy snapshot", target)
+	f.cancel(t, target)
+	for _, c := range []*apiClient{dupClient, corruptClient, missingClient, healthyClient} {
+		f.wantTombstone(t, c, target, tombstoneTitle)
+	}
+
+	// A failed query at either evidence lookup, with the other one and every
+	// earlier read succeeding, answers the error, never the unavailable
+	// response; so does one earlier in the snapshot. The failure is added to
+	// that one statement alone and leaves the transaction healthy, so a reader
+	// that dropped it would commit and answer 404 or the tombstone instead.
+	var armed atomic.Pointer[string]
+	var failed string
+	inject := func(kind string) func(*gorm.DB) {
+		return func(db *gorm.DB) {
+			want := armed.Load()
+			if want == nil {
+				return
+			}
+			statement := kind + ":" + db.Statement.Table + ":" + db.Statement.SQL.String()
+			if strings.Contains(statement, *want) && armed.CompareAndSwap(want, nil) {
+				failed = statement
+				db.AddError(errors.New("injected tombstone lookup failure"))
+			}
+		}
+	}
+	if err := f.app.DB.Callback().Row().Before("gorm:row").Register("tombstone_lookup_failure_row", inject("row")); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = f.app.DB.Callback().Row().Remove("tombstone_lookup_failure_row") })
+	if err := f.app.DB.Callback().Query().Before("gorm:query").Register("tombstone_lookup_failure_query", inject("query")); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = f.app.DB.Callback().Query().Remove("tombstone_lookup_failure_query") })
+	for _, c := range []struct{ step, statement string }{
+		{"snapshots", "endReason"},
+		{"restores", "occurrenceIds"},
+		{"date", "query:registrations:"},
+	} {
+		failed = ""
+		f.app.hooks.cancelledDateStep = func(at string) {
+			if at == c.step {
+				armed.Store(&c.statement)
+			}
+		}
+		apiDo(t, healthyClient, "GET", dateReadPath(f.event.ID, d), nil, http.StatusInternalServerError)
+		armed.Store(nil)
+		if failed == "" {
+			t.Fatalf("the read never ran its %s lookup after reaching that step", c.step)
+		}
+	}
+	f.app.hooks.cancelledDateStep = nil
+	f.wantTombstone(t, healthyClient, target, tombstoneTitle)
+
+	ended := func(registrationID uint) models.AuditLog {
+		t.Helper()
+		var row models.AuditLog
+		gormMust(t, f.app.DB.Where("action = ? AND target_type = ? AND target_id = ?", audit.OccurrenceAccessEnded, accessTargetType, registrationID).First(&row))
+		return row
+	}
+	copyOf := func(row models.AuditLog, meta string) {
+		t.Helper()
+		gormMust(t, f.app.DB.Exec("INSERT INTO audit_logs (actor_id, action, target_type, target_id, meta_json, ip, at) SELECT actor_id, action, target_type, target_id, "+meta+", ip, at FROM audit_logs WHERE id = ?", row.ID))
+	}
+	copyOf(ended(dup.ID), "meta_json")
+	copyOf(ended(corrupt.ID), "meta_json - 'grantedAtMicro'")
+	gormMust(t, f.app.DB.Model(&models.AuditLog{}).Where("id = ?", ended(missing.ID).ID).Update("meta_json", gorm.Expr("jsonb_set(meta_json, '{endReason}', '\"declined\"')")))
+	// A corrupt snapshot on another registration leaves this read alone.
+	gormMust(t, f.app.DB.Create(&models.AuditLog{Action: audit.OccurrenceAccessEnded, TargetType: accessTargetType, TargetID: healthy.ID + 1000, MetaJSON: `{"occurrenceId":"corrupt"}`}))
+	for _, c := range []*apiClient{dupClient, corruptClient, missingClient} {
+		f.wantUnavailable(t, c, d)
+	}
+	f.wantTombstone(t, healthyClient, target, tombstoneTitle)
+
+	// A restore record for the event whose dates cannot be read is a denial,
+	// whatever it names; one that reads as a list of other dates is not.
+	restore := models.AuditLog{Action: audit.EventDatesRestored, TargetType: "event", TargetID: f.event.ID, MetaJSON: `{"dates":[]}`}
+	gormMust(t, f.app.DB.Create(&restore))
+	id := itoa(target.ID)
+	for _, ids := range []string{"", `"not a list"`, `null`, `[]`, `[null]`, `[0]`, `[-1]`, `[1.5]`, `["` + id + `"]`, `[` + id + `, null]`, `{"id":` + id + `}`} {
+		meta := `{"dates":[]}`
+		if ids != "" {
+			meta = `{"dates":[],"occurrenceIds":` + ids + `}`
+		}
+		gormMust(t, f.app.DB.Model(&models.AuditLog{}).Where("id = ?", restore.ID).Update("meta_json", gorm.Expr("?::jsonb", meta)))
+		f.wantUnavailable(t, healthyClient, d)
+	}
+	gormMust(t, f.app.DB.Model(&models.AuditLog{}).Where("id = ?", restore.ID).Update("meta_json", gorm.Expr("?::jsonb", `{"dates":[],"occurrenceIds":[`+itoa(f.dates[2].ID)+`]}`)))
+	f.wantTombstone(t, healthyClient, target, tombstoneTitle)
+}
+
+// The tombstone's facts come from one snapshot: the account and the series
+// title changed together by another connection after the snapshot's first
+// read reach neither this answer nor its decision.
+func TestCancelledDateTombstoneIsOneSnapshot(t *testing.T) {
+	f := newTombstoneFixture(t)
+	target := f.dates[1]
+	// An inherited title, so the title is read after the snapshot is fixed.
+	gormMust(t, f.app.DB.Model(&models.EventOccurrence{}).Where("id = ?", target.ID).Update("title_override", nil))
+	const series = "Tombstone hidden series"
+	invitee, _, client := f.invitee(t, "snapshot invitee", target)
+	f.cancel(t, target)
+	f.wantTombstone(t, client, target, series)
+	fired := false
+	f.app.hooks.cancelledDateStep = func(step string) {
+		if step != "date" || fired {
+			return
+		}
+		fired = true
+		if err := f.app.DB.Transaction(func(tx *gorm.DB) error {
+			if err := tx.Model(&models.User{}).Where("id = ?", invitee.ID).Update("status", models.UserDisabled).Error; err != nil {
+				return err
+			}
+			return tx.Model(&models.Event{}).Where("id = ?", f.event.ID).Update("title", "Tombstone hidden series renamed mid-read").Error
+		}); err != nil {
+			t.Error("commit during the read:", err)
+		}
+	}
+	f.wantTombstone(t, client, target, series)
+	f.app.hooks.cancelledDateStep = nil
+	if !fired {
+		t.Fatal("the read never reached its snapshot")
+	}
+	f.wantUnavailable(t, client, tombstoneDate(target))
+}
+
+// A session ended after the middleware read the account but before the
+// snapshot reads like a signed-out visitor, with the account still active.
+func TestCancelledDateTombstoneRechecksTheSessionInItsSnapshot(t *testing.T) {
+	f := newTombstoneFixture(t)
+	target := f.dates[1]
+	invitee, _, client := f.invitee(t, "session invitee", target)
+	elsewhere := loginAPI(t, f.app, invitee.Name, "password1234")
+	f.cancel(t, target)
+	f.wantTombstone(t, client, target, tombstoneTitle)
+	missing := apiDo(t, client, "GET", dateReadPath(f.event.ID, "1999-01-01"), nil, http.StatusNotFound)
+	fired := false
+	f.app.hooks.cancelledDateStep = func(step string) {
+		if step != "begin" || fired {
+			return
+		}
+		fired = true
+		// Signing out on another device ends every session of the account.
+		apiDo(t, elsewhere, "POST", "/api/v1/auth/logout", nil, http.StatusOK)
+	}
+	raw := apiDo(t, client, "GET", dateReadPath(f.event.ID, tombstoneDate(target)), nil, http.StatusNotFound)
+	f.app.hooks.cancelledDateStep = nil
+	if !fired || raw != missing {
+		t.Fatalf("a session ended before the snapshot got %s (hook ran: %v), want %s", raw, fired, missing)
+	}
+	var fresh models.User
+	gormMust(t, f.app.DB.First(&fresh, invitee.ID))
+	if fresh.Status != models.UserActive || !fresh.CanSignIn() || fresh.LogoutVersion == invitee.LogoutVersion {
+		t.Fatalf("fixture: the account should be active with a new sign-out epoch: %+v", fresh)
+	}
+}
+
+func TestCancelledDateTombstoneRechecksConsentAndContext(t *testing.T) {
+	f := newTombstoneFixture(t)
+	target := f.dates[1]
+	d := tombstoneDate(target)
+	teen := newTestUser(t, f.app, "tombstone teen", "password1234", models.RoleMember)
+	gormMust(t, f.app.DB.Model(teen).Updates(map[string]any{"account_type": models.AccountTeen, "birth_date": time.Now().UTC().AddDate(-15, 0, 0)}))
+	gormMust(t, f.app.DB.Create(&models.TeenConsent{TeenUserID: teen.ID, Scope: models.TeenConsentAccount, Status: models.ConsentGranted, GrantedBy: f.adminUser.ID, GranterRole: models.ConsentAdmin, EvidenceText: "Written guardian consent", At: time.Now().Add(-time.Hour)}))
+	seedReadInvitation(t, f.app, f.adminUser, teen, f.event, target)
+	teenClient := loginAPI(t, f.app, teen.Name, "password1234")
+	_, _, adult := f.invitee(t, "tombstone context invitee", target)
+	f.cancel(t, target)
+	f.wantTombstone(t, teenClient, target, tombstoneTitle)
+	f.wantTombstone(t, adult, target, tombstoneTitle)
+	// The end reason stays occurrence_cancelled; the current checks still apply.
+	gormMust(t, f.app.DB.Create(&models.TeenConsent{TeenUserID: teen.ID, Scope: models.TeenConsentAccount, Status: models.ConsentRevoked, GrantedBy: f.adminUser.ID, GranterRole: models.ConsentAdmin, At: time.Now()}))
+	f.wantUnavailable(t, teenClient, d)
+	gormMust(t, f.app.DB.Model(&models.Group{}).Where("id = ?", f.group).Update("status", models.GroupArchived))
+	f.wantUnavailable(t, adult, d)
 }

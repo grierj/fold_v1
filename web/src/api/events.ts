@@ -2,7 +2,7 @@ import { isString } from "../lib/wireValues";
 import type {
   AttendanceMode,
   DateRegistrationResponse,
-  EventDateResponse,
+  EventDateRead,
   EventDetailResponse,
   EventHostsResponse,
   EventInput,
@@ -71,7 +71,7 @@ export const Events = {
 // One date of an event: /events/:id/dates/:date, where :date is the
 // occurrence's original YYYY-MM-DD.
 export const Dates = {
-  get: (id: Id, date: string) => api<EventDateResponse>(path`/events/${id}/dates/${date}`),
+  get: (id: Id, date: string) => api<EventDateRead>(path`/events/${id}/dates/${date}`),
   // Care options are deliberately absent: the date DTO cannot describe them.
   register: (id: Id, date: string, answer: { status: "going" | "maybe"; attendanceMode?: AttendanceMode; guestCount?: number }) =>
     api<DateRegistrationResponse>(path`/events/${id}/dates/${date}/registration`, { method: "PUT", body: answer }),

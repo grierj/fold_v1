@@ -136,6 +136,12 @@ func newProjectorFixture(t *testing.T) *projectorFixture {
 	reg(f.host, potluck[0], models.RegGoing, 0)
 	reg(f.member, potluck[0], models.RegMaybe, 0)
 	seedReadInvitation(t, app, f.admin, f.invited, eventJSON{ID: f.study.ID}, occs[2])
+	// The date page's other two answers (M8.1 brief 2.1, 2.2): the member's
+	// standing row on the cancelled d2 is their tombstone, and a cancelled
+	// answer with guests on d4 shows only its status. Neither is a seat, a
+	// calendar entry or an attendee, so no other surface changes.
+	reg(f.member, occs[1], models.RegGoing, 0)
+	reg(f.stranger, occs[3], models.RegCancelled, 1)
 
 	// Freeze the change times (they feed DTSTAMP): the event a day before today at
 	// its id in hours, each date at 90 minutes times its id, so either may be later.

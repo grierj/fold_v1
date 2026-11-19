@@ -26,7 +26,9 @@ stubService(Messages, () => ({ options: vi.fn() }));
 const occurrence = (overrides: Partial<EventDate> = {}): EventDate => ({ id: 51, eventId: 7, date: "2026-12-01", dateUrl: "/events/7/dates/2026-12-01", title: "One invited date", location: "Room 2", startsAt: "2026-12-01T19:00:00Z", endsAt: "2026-12-01T20:00:00Z", startsLocal: "2026-12-01T19:00", endsLocal: "2026-12-01T20:00", tzid: "UTC", durationMinutes: 60, remoteAvailable: true, guestsAllowed: 3, myRegistration: "going", myAttendanceMode: "remote", myGuestCount: 1, videoProvider: "link", videoUrl: "https://example.com/private-call", videoHidden: false, canSeeVideo: true, canSeeAttendees: false, canDecline: true, canBlock: true, ...overrides });
 const registration: RegistrationResponse = { registrationId: 8, userId: 2, eventId: 7, occurrenceId: 51, date: "2026-12-01", status: "going", guestCount: 1, attendanceMode: "remote", childcareCount: 2, childcareAgesNote: "Preserve this", waitlistPosition: null };
 
-function mount() { return render(<MemoryRouter initialEntries={["/events/7/dates/2026-12-01"]}><Routes><Route path="/events/:id/dates/:date" element={<EventDatePage />} /><Route path="/login" element={<p>Sign in first</p>} /></Routes></MemoryRouter>); }
+const page = () => <MemoryRouter initialEntries={["/events/7/dates/2026-12-01"]}><Routes><Route path="/events/:id/dates/:date" element={<EventDatePage />} /><Route path="/login" element={<p>Sign in first</p>} /></Routes></MemoryRouter>;
+
+function mount() { return render(page()); }
 
 beforeEach(() => { vi.resetAllMocks(); actor.user = { id: 2 }; actor.canCompose = false; vi.mocked(Dates.get).mockResolvedValue({ occurrence: occurrence() }); vi.mocked(Dates.register).mockResolvedValue({ registration }); vi.mocked(Dates.end).mockResolvedValue({}); vi.spyOn(window, "confirm").mockReturnValue(true); });
 
@@ -232,10 +234,65 @@ it("ignores an initial read that resolves after unmount", async () => {
    expect(window.confirm).not.toHaveBeenCalled();
  });
 
-it("shows a retained cancelled answer when the date is visible again", async () => {
-  vi.mocked(Dates.get).mockResolvedValue({occurrence:occurrence({canRegister:true,canDecline:false,canBlock:false,myRegistration:"cancelled"})});
+it("shows a cancelled own answer on a scheduled date as history, with the controls of an unanswered date", async () => {
+  // The server sends a cancelled row's status alone: no mode or guests to show or prefill (M8.1 brief 2.1).
+  const ordinary = { canRegister: true, canDecline: false, canBlock: false, myAttendanceMode: undefined, myGuestCount: undefined } as const;
+  vi.mocked(Dates.get).mockResolvedValue({ occurrence: occurrence({ ...ordinary, myRegistration: "cancelled" }) });
+  const view = mount(); await screen.findByText("One invited date");
+  expect(screen.getByRole("status")).toHaveTextContent("Your sign-up was cancelled.");
+  const cancelled = { mode: screen.getByLabelText("In person"), guests: screen.getByLabelText("Guests") };
+  expect(cancelled.mode).toBeChecked(); expect(cancelled.guests).toHaveValue(0);
+  expect(screen.queryByText(/Attending:/)).not.toBeInTheDocument();
+
+  for (const name of ["Going", "Maybe", "Can't go"]) expect(screen.getByRole("button", { name })).toHaveAttribute("aria-pressed", "false");
+
+  expect(screen.queryByText(/This date was cancelled/)).not.toBeInTheDocument();
+  view.unmount(); cleanup();
+
+  vi.mocked(Dates.get).mockResolvedValue({ occurrence: occurrence({ ...ordinary, myRegistration: null }) });
+  mount(); await screen.findByText("One invited date");
+  expect(screen.getByRole("status")).toHaveTextContent(/^$/);
+  expect(screen.getByLabelText("In person")).toBeChecked(); expect(screen.getByLabelText("Guests")).toHaveValue(0);
+
+  for (const name of ["Going", "Maybe", "Can't go"]) expect(screen.getByRole("button", { name })).toHaveAttribute("aria-pressed", "false");
+});
+
+it("shows a cancelled date's tombstone: its title, date and the cancellation, with no controls", async () => {
+  // A viewer who may write to people elsewhere still gets no messaging lookup on a tombstone.
+  actor.canCompose = true;
+  vi.mocked(Messages.options).mockResolvedValue({ canCompose: true, canMessageEveryone: false, pushEnabled: true, groups: [], events: [{ id: 7, title: "Prayer night", churchWide: true, dates: [] }] });
+  vi.mocked(Dates.get).mockResolvedValue({ occurrence: { title: "Prayer night", date: "2025-12-01", cancelled: true } });
   mount();
-  expect(await screen.findByText("Your sign-up was cancelled.")).toBeInTheDocument();
+  expect(await screen.findByRole("heading", { level: 1, name: "Prayer night" })).toBeInTheDocument();
+  const date = screen.getByRole("region", { name: "This event date" });
+  expect(within(date).getByText("Monday, December 1, 2025")).toBeInTheDocument();
+  expect(within(date).getByText(/This date was cancelled\./)).toBeInTheDocument();
+  expect(screen.getAllByRole("link").map((a) => a.getAttribute("href"))).toEqual(["/calendar", "/calendar"]);
+  expect(screen.getByRole("link", { name: "Open your calendar" })).toBeInTheDocument();
+  expect(screen.queryAllByRole("button")).toEqual([]);
+  expect(screen.queryByRole("status")).not.toBeInTheDocument();
+  expect(screen.queryByText(/Hosted by|invited|Attending|Guests|video|Reminder|waitlist/i)).not.toBeInTheDocument();
+  expect(Messages.options).not.toHaveBeenCalled();
+  expect(Dates.register).not.toHaveBeenCalled(); expect(Events.register).not.toHaveBeenCalled();
+});
+
+it("asks no messaging capability once a refresh turns a scheduled date into a tombstone, even when composing is newly allowed", async () => {
+  vi.mocked(Messages.options).mockResolvedValue({ canCompose: true, canMessageEveryone: false, pushEnabled: true, groups: [], events: [{ id: 7, title: "One invited date", churchWide: true, dates: [] }] });
+  const view = mount(); await screen.findByText("One invited date");
+  vi.mocked(Dates.get).mockResolvedValue({ occurrence: { title: "Prayer night", date: "2026-12-01", cancelled: true } });
+  fireEvent(window, new Event("focus"));
+  expect(await screen.findByRole("heading", { level: 1, name: "Prayer night" })).toBeInTheDocument();
+  // The same user may now compose (an auth refresh) while this page still shows the tombstone.
+  actor.canCompose = true;
+  view.rerender(page());
+  await act(async () => { await Promise.resolve(); });
+  expect(screen.getByRole("heading", { level: 1, name: "Prayer night" })).toBeInTheDocument();
+  expect(Messages.options).not.toHaveBeenCalled();
+  // A later refresh back to the scheduled date asks again, so the rerender did reach the page.
+  vi.mocked(Dates.get).mockResolvedValue({ occurrence: occurrence() });
+  fireEvent(window, new Event("focus"));
+  expect(await screen.findByRole("link", { name: "Email people going" })).toHaveAttribute("href", "/messages/new?occurrence=51");
+  expect(Messages.options).toHaveBeenCalledTimes(1); expect(Messages.options).toHaveBeenCalledWith(7);
 });
 
 it("lays the date out like the event page card: back link, when line, tile, place and date actions", async () => {

@@ -305,6 +305,18 @@ type eventDateResponseJSON struct {
 	Occurrence dateOccurrenceJSON `json:"occurrence"`
 }
 
+// cancelledDateJSON is the cancelled-date tombstone (M8.1 brief 2.2): exactly
+// the date's effective title, its original date and that it is cancelled.
+type cancelledDateJSON struct {
+	Title     string `json:"title"`
+	Date      string `json:"date"`
+	Cancelled bool   `json:"cancelled"`
+}
+
+type eventDateCancelledResponseJSON struct {
+	Occurrence cancelledDateJSON `json:"occurrence"`
+}
+
 type eventHostsResponseJSON struct {
 	Hosts []hostJSON `json:"hosts"`
 }

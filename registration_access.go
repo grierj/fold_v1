@@ -117,7 +117,7 @@ func accessScopeIn(tx *gorm.DB, occurrenceID uint) (accessScope, error) {
 // struct. Status is synthesized from the end stamp: there is no status column.
 func occurrenceAccessPolicy(r models.Registration, scope accessScope) policy.OccurrenceAccess {
 	out := policy.OccurrenceAccess{OccurrenceID: r.OccurrenceID, EventID: scope.EventID, Organizer: scope.Organizer,
-		Origin: r.AccessOrigin, RegistrationID: r.ID, EndedAt: r.AccessEndedAt}
+		Origin: r.AccessOrigin, RegistrationID: r.ID, EndedAt: r.AccessEndedAt, EndReason: r.AccessEndReason}
 	if r.UserID != nil {
 		out.SubjectUserID = *r.UserID
 	}

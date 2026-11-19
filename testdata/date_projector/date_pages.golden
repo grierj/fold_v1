@@ -913,10 +913,13 @@
     "groupName": "Open Group"
   }
 }
-### Mia Member GET /api/v1/events/1/dates/D+14 -> 404
+### Mia Member GET /api/v1/events/1/dates/D+14 -> 200
 {
-  "code": "not_found",
-  "error": "event not found"
+  "occurrence": {
+    "title": "Open Study",
+    "date": "D+14",
+    "cancelled": true
+  }
 }
 ### Mia Member GET /api/v1/events/1/dates/D+21 -> 200
 {
@@ -1493,7 +1496,7 @@
     "durationMinutes": 90,
     "remoteAvailable": false,
     "guestsAllowed": 2,
-    "myRegistration": null,
+    "myRegistration": "cancelled",
     "videoProvider": "link",
     "videoHidden": true,
     "canSeeVideo": false,

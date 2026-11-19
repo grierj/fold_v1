@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { badgeParts, formatCalendarDay, formatPeriod, formatTime, formatWhen, heldIn, historyDayBounds, zoneNote, formatNextMeeting, minuteOfDay, formatHour, wallClock, wallToInstant, formatWhenIn, shortZoneName } from "./when";
+import { badgeParts, formatCalendarDay, formatDayFull, formatPeriod, formatTime, formatWhen, heldIn, historyDayBounds, zoneNote, formatNextMeeting, minuteOfDay, formatHour, wallClock, wallToInstant, formatWhenIn, shortZoneName } from "./when";
 
 // Saturday Oct 17 2026, 7:00 PM in Los Angeles (PDT, UTC-7) = 02:00 UTC Sunday.
 const laSat7pm = "2026-10-18T02:00:00Z";
@@ -41,6 +41,12 @@ describe("formatWhen", () => {
     expect(formatTime("2026-10-28T23:00:00Z", "Europe/London")).toBe("11:00 PM");
     expect(formatTime("2026-11-05T00:00:00Z", "Europe/London")).toBe("12:00 AM");
     expect(formatTime("2026-11-05T00:00:00Z", "America/New_York")).toBe("7:00 PM");
+  });
+});
+
+describe("formatDayFull", () => {
+  it("names the weekday and year of a stored day without shifting it", () => {
+    expect(formatDayFull("2025-12-01")).toBe("Monday, December 1, 2025");
   });
 });
 

@@ -470,3 +470,77 @@ func TestGroupAddIgnoresOccurrenceBlocks(t *testing.T) {
 		t.Fatal("unrelated date history forced ordinary adult membership into an ask")
 	}
 }
+
+// cancelledFixture is an own, standing row with a manager-add grant ended by
+// this cancellation, on a cancelled date of a live context.
+func cancelledFixture() CancelledDateFacts {
+	p, a, f, now := accessFixture()
+	f.Scheduled = false
+	ended := now.Add(-time.Second)
+	a.Status, a.EndedAt, a.EndReason = OccurrenceAccessEnded, &ended, OccurrenceCancelled
+	return CancelledDateFacts{Viewer: p, Own: true, Standing: true, Access: a, Occurrence: f, Evidence: CancelEvidence{Snapshots: 1}, Now: now}
+}
+
+func TestCanSeeCancelledOccurrence(t *testing.T) {
+	live := func(f *CancelledDateFacts) {
+		f.Access.Status, f.Access.EndedAt, f.Access.EndReason = OccurrenceAccessActive, nil, ""
+	}
+	departure := func(f *CancelledDateFacts) {
+		f.Access.Origin, f.Access.IssuerID, f.Access.RequestID = OccurrenceOriginDepartureSelf, 0, 0
+		f.Access.DepartureMembershipID, f.Access.DepartureActorID = 9, f.Access.SubjectUserID
+	}
+	for _, tt := range []struct {
+		name   string
+		change func(*CancelledDateFacts)
+		want   bool
+	}{
+		{"grant ended by this cancellation", func(*CancelledDateFacts) {}, true},
+		{"ended grant outlives the date's end", func(f *CancelledDateFacts) { f.Now = f.Occurrence.EndsAt.Add(24 * time.Hour) }, true},
+		{"ended departure grant ignores a retimed end", func(f *CancelledDateFacts) {
+			departure(f)
+			f.Occurrence.EndsAt = f.Access.EndedAt.Add(-time.Hour)
+		}, true},
+		{"live manager add before cleanup", live, true},
+		{"live manager add after the date's end", func(f *CancelledDateFacts) { live(f); f.Now = f.Occurrence.EndsAt.Add(time.Hour) }, true},
+		{"live departure grant before the date's end", func(f *CancelledDateFacts) { live(f); departure(f) }, true},
+		{"live departure grant at the date's end", func(f *CancelledDateFacts) { live(f); departure(f); f.Now = f.Occurrence.EndsAt }, false},
+		{"standing row with ordinary access", func(f *CancelledDateFacts) { f.Access = OccurrenceAccess{}; f.Ordinary = true }, true},
+		{"scheduled date is not a tombstone", func(f *CancelledDateFacts) { f.Occurrence.Scheduled = true; f.Ordinary = true }, false},
+		{"deleted date", func(f *CancelledDateFacts) { f.Occurrence.ID = 0; f.Ordinary = true }, false},
+		{"ordinary access without an own row (a role alone)", func(f *CancelledDateFacts) {
+			f.Access, f.Own, f.Standing, f.Ordinary = OccurrenceAccess{}, false, false, true
+		}, false},
+		{"household person's row the viewer holds", func(f *CancelledDateFacts) { f.Own, f.Ordinary = false, true }, false},
+		{"cancelled own row with ordinary access", func(f *CancelledDateFacts) { f.Standing, f.Ordinary = false, true }, false},
+		{"declined own row keeps an ended grant", func(f *CancelledDateFacts) { f.Standing = false }, false},
+		{"signed out", func(f *CancelledDateFacts) { f.Viewer.Person = nil; f.Ordinary = true }, false},
+		{"disabled account on the ordinary path", func(f *CancelledDateFacts) { f.Viewer.Active = false; f.Ordinary = true }, false},
+		{"consent lost after the cancellation", func(f *CancelledDateFacts) { f.Viewer.Active = false }, false},
+		{"someone else's grant", func(f *CancelledDateFacts) { f.Viewer.Person.ID = 9 }, false},
+		{"context changed after the cancellation", func(f *CancelledDateFacts) { f.Occurrence.ContextActive = false }, false},
+		{"organizer changed", func(f *CancelledDateFacts) { f.Occurrence.Organizer.ID++ }, false},
+		{"sibling date", func(f *CancelledDateFacts) { f.Occurrence.ID++ }, false},
+		{"invalid provenance", func(f *CancelledDateFacts) { f.Access.IssuerID = 0 }, false},
+		{"independently declined grant", func(f *CancelledDateFacts) { f.Access.EndReason = OccurrenceDeclined }, false},
+		{"grant ended as context_changed", func(f *CancelledDateFacts) { f.Access.EndReason = OccurrenceContextChanged }, false},
+		{"grant that expired before the cancellation", func(f *CancelledDateFacts) { f.Access.EndReason = OccurrenceEnded }, false},
+		{"no matching end snapshot", func(f *CancelledDateFacts) { f.Evidence.Snapshots = 0 }, false},
+		{"two matching end snapshots", func(f *CancelledDateFacts) { f.Evidence.Snapshots = 2 }, false},
+		{"unreadable evidence", func(f *CancelledDateFacts) { f.Evidence.Unreadable = true }, false},
+		{"ended under an earlier cancellation a restore undid", func(f *CancelledDateFacts) { f.Evidence.RestoredAfter = true }, false},
+		{"end stamp before the grant", func(f *CancelledDateFacts) {
+			early := f.Access.GrantedAt.Add(-time.Second)
+			f.Access.EndedAt = &early
+		}, false},
+		{"end stamp without an ended grant", func(f *CancelledDateFacts) { f.Access.Status = OccurrenceAccessActive }, false},
+		{"no grant and no ordinary access", func(f *CancelledDateFacts) { f.Access = OccurrenceAccess{} }, false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			f := cancelledFixture()
+			tt.change(&f)
+			if got := CanSeeCancelledOccurrence(f); got != tt.want {
+				t.Fatalf("got %v want %v", got, tt.want)
+			}
+		})
+	}
+}

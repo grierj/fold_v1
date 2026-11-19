@@ -56,6 +56,11 @@ type testHooks struct {
 	// full-group refusal and before the password is hashed, with no
 	// transaction open.
 	invitationBeforeHash func()
+	// cancelledDateStep runs inside the cancelled-date read's read-only
+	// transaction, given the point reached: "begin" before its first
+	// query (no snapshot yet), "date" right after that query fixed the
+	// snapshot, and "snapshots" and "restores" before each evidence lookup.
+	cancelledDateStep func(step string)
 
 	// pushRender overrides renderPush in tests (a rendering past the payload
 	// cap); nil uses the stored push text. pushWindow fixes the quiet hours

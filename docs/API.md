@@ -2461,14 +2461,46 @@ account with a live exact-date invitation.
 `:date` is the occurrence's original `YYYY-MM-DD` key, not its rescheduled
 start day. It returns `{occurrence: EventDate}` for ordinary event visibility
 or a current explicit invitation to **that stable occurrence only**. Missing,
-invalid, cancelled, deleted, or unauthorized dates return 404; signed-out
+invalid, deleted, or unauthorized dates return 404; signed-out
 requests for nonpublic dates return 404. GET has no side effects and does not approve an ask.
 Pending asks and ordinary registration rows alone confer no extra visibility.
 
+A cancelled date (M8.1 brief 2.2) returns `{occurrence: CancelledEventDate}`,
+exactly `{title, date, cancelled: true}` (the date's effective title, its
+original `YYYY-MM-DD` and the flag), to a signed-in viewer whose own
+registration on that stable occurrence (not a household person's row they
+hold) still stands (Going, Maybe or waitlisted) and who either:
+
+- has, now and apart from any invitation, the ordinary access the scheduled
+  read requires; or
+- holds an exact-date invitation on that row that passes every current check
+  (account and teen consent, event and group still there, active context)
+  and was valid at this cancellation: still live (a departure grant only
+  before the date's stored end), or ended as `occurrence_cancelled` by this
+  cancellation. That is one matching `occurrence_access.ended` snapshot on
+  the registration and no `event.dates_restored` row for the date with a
+  larger audit id. A grant ended under an earlier cancellation that a
+  restore undid does not count. Unreadable evidence denies: a snapshot on
+  the registration that fails the snapshot check, more than one match, or a
+  restore row for the event whose `occurrenceIds` is not a nonempty array of
+  positive ids (a `null`, zero, negative, fractional or string element
+  included).
+
+Everyone else, a role or ordinary access alone included, gets the same 404 as
+a missing date. Every fact comes from one read-only Repeatable Read snapshot
+that takes no contact gate, and the session is checked against the account
+row in that snapshot: a session ended (signed out, password changed, account
+disabled) before the snapshot gets the 404 too. A failed read is a 500, never
+a 404. The
+tombstone is this JSON read only: `calendar.ics`, feeds, discovery and every
+write keep their scheduled-date behavior.
+
 `GET /api/v1/events/:id/dates/:date/calendar.ics` (DEC-93) downloads that date
 as a one-event iCalendar file (`text/calendar`, `Content-Disposition:
-attachment; filename="event-YYYY-MM-DD.ics"`). It uses the same load as the
-JSON read above, so the same requests get 404 (JSON) and the file carries only
+attachment; filename="event-YYYY-MM-DD.ics"`). It uses the same scheduled-date
+load as the JSON read above, so the same requests get 404 (JSON), and a
+cancelled date is 404 for everyone, a viewer who gets its tombstone included.
+The file carries only
 the date's own title, place, times, remote line, exact-date URL and, when the
 JSON would show it, the video link. `STATUS` is `CONFIRMED` for your Going,
 `TENTATIVE` for Maybe or Waitlisted, and absent otherwise. The `UID` matches
@@ -2496,7 +2528,10 @@ of these organizer/ordinary-visibility keys and never fall back to a hidden
 group's place. Neither response includes host identities, attendee/contact
 details, counts, capacities, series title, series start, RRULE/until, sibling
 dates, or management controls. `myRegistration`
-is the viewer's own status or null. Video is gated by that date's own RSVP and
+is the viewer's own status or null. An ordinary reader's own cancelled answer
+is `"cancelled"` with no `myAttendanceMode` or `myGuestCount`, and every
+capability is what an unanswered viewer of the date gets: it is history, not
+an RSVP. A cancelled answer on a scheduled date is not a cancelled date. Video is gated by that date's own RSVP and
 current policy; an invitation does not inherit manager video authority.
 `canSeeAttendees` is always false for invitation-only access, and this endpoint
 never includes attendees even for ordinary viewers. `canDecline`/`canBlock`

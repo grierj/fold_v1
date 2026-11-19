@@ -1,10 +1,14 @@
 package main
 
 import (
+	"database/sql"
+	"encoding/json"
 	"net/http"
+	"slices"
 	"strconv"
 	"time"
 
+	"fold/internal/audit"
 	"fold/internal/events"
 	"fold/internal/policy"
 	"fold/models"
@@ -317,17 +321,44 @@ type dateOccurrenceJSON struct {
 	Reminders *dateRemindersJSON `json:"reminders,omitempty"`
 }
 
+// apiGetOccurrenceDate is the date page's read. A cancelled date answers its
+// tombstone to a qualified viewer (M8.1 brief 2.2); this JSON read is the only
+// surface that does. Everyone else gets the same 404 as a missing date.
 func (a *App) apiGetOccurrenceDate(c *gin.Context) {
-	if out, ok := a.loadOccurrenceDate(c); ok {
-		c.JSON(http.StatusOK, eventDateResponseJSON{Occurrence: out})
+	id, date, ok := occurrenceDateParams(c)
+	if !ok {
+		return
 	}
+	me := apiUser(c)
+	out, err := a.scheduledDate(me, id, date)
+	if err != nil {
+		fail(c, err)
+		return
+	}
+	if out != nil {
+		c.JSON(http.StatusOK, eventDateResponseJSON{Occurrence: *out})
+		return
+	}
+	if me != nil {
+		tomb, err := a.cancelledDate(me, id, date)
+		if err != nil {
+			fail(c, err)
+			return
+		}
+		if tomb != nil {
+			c.JSON(http.StatusOK, eventDateCancelledResponseJSON{Occurrence: *tomb})
+			return
+		}
+	}
+	jsonError(c, http.StatusNotFound, "event not found")
 }
 
 // apiOccurrenceCalendar downloads one date as an .ics file (DEC-93). It goes
-// through the same load as the date page, so it shows exactly what that page
+// through the date page's scheduled load, so it shows exactly what that page
 // may show: the video link only when the page would, and no description,
-// hosts or attendees. The UID matches the feeds', so a calendar that also
-// subscribes to a feed keeps one copy.
+// hosts or attendees. A cancelled date has no download, even for a viewer
+// who may see its tombstone. The UID matches the feeds', so a calendar that
+// also subscribes to a feed keeps one copy.
 func (a *App) apiOccurrenceCalendar(c *gin.Context) {
 	out, ok := a.loadOccurrenceDate(c)
 	if !ok {
@@ -347,43 +378,66 @@ func (a *App) apiOccurrenceCalendar(c *gin.Context) {
 	c.Data(http.StatusOK, "text/calendar; charset=utf-8", body)
 }
 
-// loadOccurrenceDate authorizes and presents one date for the date page and
-// its calendar download. It answers the error itself when ok is false.
-func (a *App) loadOccurrenceDate(c *gin.Context) (dateOccurrenceJSON, bool) {
+// occurrenceDateParams reads :id and :date, answering 404 itself for a shape
+// that cannot name a date.
+func occurrenceDateParams(c *gin.Context) (uint, string, bool) {
 	id, err := strconv.ParseUint(c.Param("id"), 10, 64)
-	dateStr := c.Param("date")
-	if _, dateErr := models.ParseCalendarDate(dateStr); err != nil || id == 0 || dateErr != nil {
+	date := c.Param("date")
+	if _, dateErr := models.ParseCalendarDate(date); err != nil || id == 0 || dateErr != nil {
+		jsonError(c, http.StatusNotFound, "event not found")
+		return 0, "", false
+	}
+	return uint(id), date, true
+}
+
+// loadOccurrenceDate is scheduledDate for the calendar download. It answers
+// the error itself when ok is false.
+func (a *App) loadOccurrenceDate(c *gin.Context) (dateOccurrenceJSON, bool) {
+	id, date, ok := occurrenceDateParams(c)
+	if !ok {
+		return dateOccurrenceJSON{}, false
+	}
+	out, err := a.scheduledDate(apiUser(c), id, date)
+	if err != nil {
+		fail(c, err)
+		return dateOccurrenceJSON{}, false
+	}
+	if out == nil {
 		jsonError(c, http.StatusNotFound, "event not found")
 		return dateOccurrenceJSON{}, false
 	}
-	me, now := apiUser(c), time.Now().UTC()
+	return *out, true
+}
+
+// scheduledDate authorizes and presents one scheduled date for the date page
+// and its calendar download: nil when the date is not scheduled or me may not
+// see it.
+func (a *App) scheduledDate(me *models.User, id uint, dateStr string) (*dateOccurrenceJSON, error) {
+	now := time.Now().UTC()
 	vs, err := a.dateCandidates(me, a.DB.Where("id = ?", id))
 	if err != nil {
-		jsonError(c, http.StatusInternalServerError, "could not load this date")
-		return dateOccurrenceJSON{}, false
+		return nil, err
 	}
 	q := a.DB.Where("event_id = ? AND original_date = ? AND status = ?", id, dateStr, models.OccurrenceScheduled)
 	scoped, err := a.scopedOccurrenceReads(me, q, now)
 	if err != nil {
-		jsonError(c, http.StatusInternalServerError, "could not load this date")
-		return dateOccurrenceJSON{}, false
+		return nil, err
 	}
 	var occ models.EventOccurrence
-	if err := q.First(&occ).Error; err != nil {
-		jsonError(c, http.StatusNotFound, "event not found")
-		return dateOccurrenceJSON{}, false
+	if err := q.Limit(1).Find(&occ).Error; err != nil || occ.ID == 0 {
+		return nil, err
 	}
 	date, ok := a.projectDate(me, vs, &occ, scoped[occ.ID])
 	if !ok {
-		jsonError(c, http.StatusNotFound, "event not found")
-		return dateOccurrenceJSON{}, false
+		return nil, nil
 	}
+	// An ordinary reader's own row of any status, a cancelled one included
+	// (M8.1 brief 2.1): dateJSON shows that one as history, not an answer.
 	var reg models.Registration
 	if date.Ordinary {
 		if me != nil {
-			if err := a.DB.Where("user_id = ? AND occurrence_id = ? AND status <> ?", me.ID, occ.ID, models.RegCancelled).Limit(1).Find(&reg).Error; err != nil {
-				jsonError(c, http.StatusInternalServerError, "could not load this date")
-				return dateOccurrenceJSON{}, false
+			if err := a.DB.Where("user_id = ? AND occurrence_id = ?", me.ID, occ.ID).Limit(1).Find(&reg).Error; err != nil {
+				return nil, err
 			}
 		}
 	} else {
@@ -393,12 +447,177 @@ func (a *App) loadOccurrenceDate(c *gin.Context) (dateOccurrenceJSON, bool) {
 	out.Room = a.occurrenceRooms(a.DB, []uint{occ.ID})[occ.ID]
 	if date.Ordinary && date.Manager {
 		if out.Reminders, err = a.dateReminders(date.Event, &occ); err != nil {
-			jsonError(c, http.StatusInternalServerError, "could not load this date")
-			return dateOccurrenceJSON{}, false
+			return nil, err
 		}
 	}
 	if date.Ordinary {
 		out.CanRegister = me != nil && a.canRegisterDateIn(a.DB, me, date.Event, occ.ID)
+	}
+	return &out, nil
+}
+
+// cancelledDate is the cancelled-date tombstone for me (M8.1 brief 2.2), or
+// nil when the date is not cancelled or me does not qualify. Every fact comes
+// from one read-only Repeatable Read snapshot that takes no contact gate, so a
+// disable or a title edit committed during the read never pairs with facts it
+// did not commit with, and page reads never queue behind lifecycle writers. A
+// failed read is an error, never "not qualified".
+func (a *App) cancelledDate(me *models.User, eventID uint, date string) (*cancelledDateJSON, error) {
+	var out *cancelledDateJSON
+	now := a.now().UTC()
+	err := a.DB.Transaction(func(tx *gorm.DB) error {
+		var err error
+		out, err = a.cancelledDateIn(tx, me, eventID, date, now)
+		return err
+	}, &sql.TxOptions{Isolation: sql.LevelRepeatableRead, ReadOnly: true})
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// cancelledDateStep runs the test hook at a named point of the tombstone read.
+func (a *App) cancelledDateStep(step string) {
+	if a.hooks.cancelledDateStep != nil {
+		a.hooks.cancelledDateStep(step)
+	}
+}
+
+// cancelledDateIn loads the facts policy.CanSeeCancelledOccurrence judges, all
+// on tx: the exact stable date (the snapshot's first read), the viewer's own
+// row on it, the viewer re-read with current consent, the event and its group,
+// the viewer's ordinary access to the date, and, for a grant ended as
+// occurrence_cancelled, the evidence tying that end to this cancellation. The
+// session is rechecked against the snapshot's row (sessionCurrent): a session
+// ended before the snapshot reads like a signed-out visitor, as the next
+// request would.
+func (a *App) cancelledDateIn(tx *gorm.DB, me *models.User, eventID uint, date string, now time.Time) (*cancelledDateJSON, error) {
+	a.cancelledDateStep("begin")
+	var occ models.EventOccurrence
+	if err := tx.Where("event_id = ? AND original_date = ? AND status = ?", eventID, date, models.OccurrenceCancelled).Limit(1).Find(&occ).Error; err != nil || occ.ID == 0 {
+		return nil, err
+	}
+	a.cancelledDateStep("date")
+	var row models.Registration
+	if err := tx.Where("user_id = ? AND occurrence_id = ?", me.ID, occ.ID).Limit(1).Find(&row).Error; err != nil || row.ID == 0 {
+		return nil, err
+	}
+	facts, err := loadOccurrenceInvitationFacts(tx, []models.Registration{row}, now)
+	if err != nil {
+		return nil, err
+	}
+	viewer, ev := facts.users[me.ID], facts.events[occ.EventID]
+	if !sessionCurrent(viewer, me) || ev.ID == 0 {
+		return nil, nil
+	}
+	vs, err := loadCandidates(tx, viewer, tx.Where("id = ?", ev.ID), false)
+	if err != nil {
+		return nil, err
+	}
+	f := policy.CancelledDateFacts{
+		Viewer:     facts.accounts[me.ID],
+		Own:        row.UserID != nil && *row.UserID == me.ID && row.HouseholdPersonID == nil,
+		Standing:   currentDepartureRegistration(row.Status),
+		Ordinary:   vs.canSeeDate(viewer, vs.ByID[ev.ID], &occ),
+		Access:     occurrenceAccessPolicy(row, accessScopeOf(&ev)),
+		Occurrence: occurrenceFactsOf(&occ, &ev, facts.group(&ev)),
+		Now:        now,
+	}
+	if row.AccessEndedAt != nil && row.AccessEndReason == policy.OccurrenceCancelled {
+		if f.Evidence, err = a.cancelEvidenceIn(tx, row, ev.ID); err != nil {
+			return nil, err
+		}
+	}
+	if !policy.CanSeeCancelledOccurrence(f) {
+		return nil, nil
+	}
+	out := cancelledDateOf(&ev, &occ)
+	return &out, nil
+}
+
+// cancelEvidenceIn reads the two narrow records that tie a grant ended as
+// occurrence_cancelled to the cancellation that ended it (M8.1 brief 2.2):
+// this registration's end snapshots, judged by accessSnapshotValidSQL on its
+// rows alone, and the event's restore records. Audit ids order the two, never
+// their times: both are written under the exclusive contact gate from a
+// CACHE 1 sequence, so the later of the two transactions has the larger id.
+// Missing, duplicated or unreadable evidence is a denial for the policy to
+// make; only a failed query is an error.
+func (a *App) cancelEvidenceIn(tx *gorm.DB, row models.Registration, eventID uint) (policy.CancelEvidence, error) {
+	var out policy.CancelEvidence
+	if row.AccessGrantedAt == nil || row.AccessEndedAt == nil {
+		return out, nil
+	}
+	var snapshots []struct {
+		ID         uint
+		Valid      bool
+		Occurrence *int64
+		Granted    *int64
+		Ended      *int64
+		Reason     *string
+	}
+	query := "SELECT l.id AS id, " + accessSnapshotValidSQL() + " AS valid, " + historyMetaID("occurrenceId") + " AS occurrence, " +
+		historyMetaID("grantedAtMicro") + " AS granted, " + historyMetaID("endedAtMicro") + " AS ended, " +
+		"CASE WHEN jsonb_typeof(l.meta_json->'endReason') = 'string' THEN l.meta_json->>'endReason' END AS reason " +
+		"FROM audit_logs l WHERE l.action = ? AND l.target_type = ? AND l.target_id = ? ORDER BY l.id"
+	a.cancelledDateStep("snapshots")
+	if err := tx.Raw(query, audit.OccurrenceAccessEnded, accessTargetType, row.ID).Scan(&snapshots).Error; err != nil {
+		return out, err
+	}
+	var snapshotID uint
+	for _, s := range snapshots {
+		if !s.Valid {
+			out.Unreadable = true
+			continue
+		}
+		if s.Occurrence != nil && *s.Occurrence == int64(row.OccurrenceID) && s.Granted != nil && *s.Granted == accessMicro(*row.AccessGrantedAt) &&
+			s.Ended != nil && *s.Ended == accessMicro(*row.AccessEndedAt) && s.Reason != nil && *s.Reason == row.AccessEndReason {
+			out.Snapshots++
+			snapshotID = s.ID
+		}
+	}
+	var restores []struct {
+		ID  uint
+		IDs *string
+	}
+	a.cancelledDateStep("restores")
+	if err := tx.Raw("SELECT l.id AS id, (l.meta_json->'occurrenceIds')::text AS ids FROM audit_logs l WHERE l.action = ? AND l.target_type = 'event' AND l.target_id = ? ORDER BY l.id",
+		audit.EventDatesRestored, eventID).Scan(&restores).Error; err != nil {
+		return out, err
+	}
+	for _, r := range restores {
+		ids, ok := restoredOccurrenceIDs(r.IDs)
+		if !ok {
+			out.Unreadable = true
+			continue
+		}
+		if r.ID > snapshotID && slices.Contains(ids, row.OccurrenceID) {
+			out.RestoredAfter = true
+		}
+	}
+	return out, nil
+}
+
+// restoredOccurrenceIDs reads a restore record's occurrenceIds as its writer
+// (restoreSeriesDates) leaves it: a nonempty array of positive ids. Anything
+// else (absent, not an array, empty, or an element that is null, zero,
+// negative, fractional or not a number) is unreadable, and the caller denies:
+// a list Go would read with a zero in place of a null could otherwise hide the
+// restore of this very date.
+func restoredOccurrenceIDs(raw *string) ([]uint, bool) {
+	if raw == nil {
+		return nil, false
+	}
+	var ids []*int64
+	if json.Unmarshal([]byte(*raw), &ids) != nil || len(ids) == 0 {
+		return nil, false
+	}
+	out := make([]uint, 0, len(ids))
+	for _, id := range ids {
+		if id == nil || *id <= 0 {
+			return nil, false
+		}
+		out = append(out, uint(*id))
 	}
 	return out, true
 }

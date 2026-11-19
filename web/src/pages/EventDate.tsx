@@ -6,14 +6,14 @@ import { Dates, Events } from "../api/events";
 import { GuestRegistrationForm } from "../components/GuestRegistrationForm";
 import { EventIntro } from "../components/EventIntro";
 import { useAuth } from "../auth";
-import type { AttendanceMode, EventDate } from "../types";
+import type { AttendanceMode, CancelledEventDate, EventDate } from "../types";
 import { Button, ButtonLink } from "../components/ui/Button";
 import { EmptyState } from "../components/ui/EmptyState";
 import { Choices, Field, FormError, Input, Radio } from "../components/ui/Field";
 import { SegmentButton } from "../components/ui/SegmentButton";
 import { errorText } from "../lib/errors";
 import { useLoad } from "../lib/useLoad";
-import { heldIn } from "../lib/when";
+import { formatDayFull, heldIn } from "../lib/when";
 import { dateLine } from "../lib/repeat";
 import { placeLine } from "../lib/place";
 import { ChevronLeftIcon } from "../components/icons";
@@ -38,7 +38,10 @@ function DateDetail({ id, date }: { id: string; date: string }) {
   // Failed authority refreshes always fail closed, including network errors, and so does
   // coming back to the window: what this person may do here may have changed meanwhile.
   const load = useLoad(() => Dates.get(id, date).then((r) => r.occurrence), [id, date], { refreshOnFocus: true });
-  const occurrence = load.data ?? null;
+  const read = load.data ?? null;
+  // A cancelled date's tombstone has three facts and nothing scheduled: it branches before any time, place or capability is read.
+  const tombstone = read && "cancelled" in read ? read : null;
+  const occurrence = read && !("cancelled" in read) ? read : null;
   const loaded = !load.loading;
   const loadEpoch = load.epoch();
   const current = attempt && attempt.epoch === loadEpoch ? attempt : null;
@@ -98,11 +101,20 @@ function DateDetail({ id, date }: { id: string; date: string }) {
     }
   }
 
+  // Messaging capability is asked only while the current answer is a scheduled date, and stays
+  // asked while a refresh of it is in flight rather than again after each one. Any other settled
+  // answer (a tombstone, including one a refresh brings, or not available) turns it off, already in
+  // the render before the effect clears the flag.
+  const [scheduled, setScheduled] = useState(false);
+  useEffect(() => { if (occurrence) setScheduled(true); else if (loaded) setScheduled(false); }, [occurrence, loaded]);
+  const canEmail = useCanEmailEvent(scheduled && (occurrence || !loaded) ? Number(id) : undefined);
+
+  if (tombstone) return <CancelledDate cancelled={tombstone} />;
+
   const zone = occurrence && heldIn(occurrence.startsAt, occurrence.tzid);
   const when = occurrence ? dateLine(occurrence.startsAt, occurrence.endsAt) : "";
   const place = occurrence ? placeLine(occurrence.room, occurrence.location) : "";
   const standing = occurrence && user ? standingLine(occurrence.myRegistration) : null;
-  const canEmail = useCanEmailEvent(Number(id));
 
   return <div className="fold-page fold-page-narrow space-y-6 wrap-anywhere">
     <div className="fold-page-header">
@@ -147,6 +159,25 @@ function DateDetail({ id, date }: { id: string; date: string }) {
         {occurrence.reminders && <DateReminderLines reminders={occurrence.reminders} />}
       </div>
     </section>}
+  </div>;
+}
+
+// A cancelled date as the server lets a qualified viewer see it (M8.1 brief 2.2): its title, its
+// date and that it was cancelled, with no answer, series, video, attendee, reminder, guest, share or
+// calendar-download controls.
+function CancelledDate({ cancelled }: { cancelled: CancelledEventDate }) {
+  return <div className="fold-page fold-page-narrow space-y-6 wrap-anywhere">
+    <div className="fold-page-header">
+      <div>
+        <ButtonLink variant="link" to="/calendar"><ChevronLeftIcon className="h-4 w-4 shrink-0" /><span aria-hidden="true">Calendar</span><span className="sr-only">Back to calendar</span></ButtonLink>
+        <h1 className="text-3xl font-bold">{cancelled.title}</h1>
+      </div>
+    </div>
+    <section aria-label="This event date" className="space-y-3">
+      <p className="font-medium">{formatDayFull(cancelled.date)}</p>
+      <p>This date was cancelled. Your calendar shows the dates that are still on.</p>
+      <ButtonLink variant="secondary" to="/calendar">Open your calendar</ButtonLink>
+    </section>
   </div>;
 }
 

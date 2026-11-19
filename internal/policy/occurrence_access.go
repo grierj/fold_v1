@@ -222,8 +222,12 @@ type OccurrenceFacts struct {
 	EndsAt        time.Time
 }
 
-func (f OccurrenceFacts) live() bool {
-	return f.ID > 0 && f.EventID > 0 && f.Organizer.valid() && f.ContextActive && f.Scheduled &&
+func (f OccurrenceFacts) live() bool { return f.contextLive() && f.Scheduled }
+
+// contextLive is live() without the date's own status: the date, its event and
+// a live context (church-wide, or an active group) under the current organizer.
+func (f OccurrenceFacts) contextLive() bool {
+	return f.ID > 0 && f.EventID > 0 && f.Organizer.valid() && f.ContextActive &&
 		(f.Organizer.Type != ContactEvent || f.Organizer.ID == f.EventID)
 }
 
@@ -241,6 +245,7 @@ type OccurrenceAccess struct {
 	Status                string
 	GrantedAt             time.Time
 	EndedAt               *time.Time
+	EndReason             string // empty while the grant is live
 }
 
 // ValidOccurrenceAccessOrigin validates immutable provenance shape only. The
@@ -289,17 +294,95 @@ func CanRetainOccurrenceAfterDeparture(origin string, actor, subject *Person, ac
 // live checks close the cleanup window, but cannot detect a historical disable
 // followed by reenable unless the end was recorded.
 func OccurrenceAccessCurrent(actor ContactAccount, a OccurrenceAccess, f OccurrenceFacts, now time.Time) bool {
-	if !actor.Active || actor.Person == nil || actor.Person.ID == 0 || actor.Person.ID != a.SubjectUserID ||
-		!ValidOccurrenceAccessOrigin(a) || a.RegistrationID == 0 ||
-		a.Status != OccurrenceAccessActive || a.EndedAt != nil || a.GrantedAt.IsZero() || now.IsZero() || now.Before(a.GrantedAt) ||
-		!f.live() || a.OccurrenceID != f.ID || a.EventID != f.EventID || a.Organizer != f.Organizer {
+	if !grantHolds(actor, a, f, now) || a.Status != OccurrenceAccessActive || a.EndedAt != nil || !f.Scheduled {
 		return false
 	}
-	// DEC-74 retained-departure authority ends exactly with the occurrence.
-	// A manager invitation selected at departure is first superseded by a new
-	// departure-origin row; unrelated manager invitations keep their established
-	// lifecycle.
+	return unexpired(a, f, now)
+}
+
+// grantHolds is every current check on a grant other than its liveness and the
+// date's own status: the recipient's active account (current consent), valid
+// provenance on a registration, a grant stamp no later than now, and the exact
+// date, event and organizer in a live context.
+func grantHolds(actor ContactAccount, a OccurrenceAccess, f OccurrenceFacts, now time.Time) bool {
+	return actor.Active && actor.Person != nil && actor.Person.ID != 0 && actor.Person.ID == a.SubjectUserID &&
+		ValidOccurrenceAccessOrigin(a) && a.RegistrationID != 0 && !a.GrantedAt.IsZero() && !now.IsZero() && !now.Before(a.GrantedAt) &&
+		f.contextLive() && a.OccurrenceID == f.ID && a.EventID == f.EventID && a.Organizer == f.Organizer
+}
+
+// unexpired is DEC-74: retained-departure authority ends exactly with the
+// occurrence. A manager invitation selected at departure is first superseded by
+// a new departure-origin row; unrelated manager invitations keep their
+// established lifecycle.
+func unexpired(a OccurrenceAccess, f OccurrenceFacts, now time.Time) bool {
 	return a.Origin == OccurrenceOriginManagerAdd || (!f.EndsAt.IsZero() && now.Before(f.EndsAt))
+}
+
+// CancelEvidence is what the audit records say about the end of one grant on
+// a cancelled date (M8.1 brief 2.2). Snapshots counts the
+// occurrence_access.ended rows on the grant's registration that match its
+// current end. Unreadable is a row on that registration failing the snapshot
+// predicate, or a restore record for the date's event whose dates cannot be
+// read. RestoredAfter is a restore of this date recorded with a larger audit
+// id than the matching snapshot: the grant ended under an earlier
+// cancellation that the restore undid.
+type CancelEvidence struct {
+	Snapshots     int
+	Unreadable    bool
+	RestoredAfter bool
+}
+
+// CancelledDateFacts are one read snapshot's facts for one viewer and one
+// date. Own is a registration whose subject is the viewer (never a household
+// person the viewer holds); Standing is its RSVP status still standing
+// (Going, Maybe or waitlisted). Ordinary is the ordinary access to this date
+// that the scheduled read requires (CanSeeEvent at the date's effective
+// visibility), apart from any grant. Access is the row's grant (zero for
+// none); Evidence is loaded only for a grant ended as occurrence_cancelled.
+type CancelledDateFacts struct {
+	Viewer     ContactAccount
+	Own        bool
+	Standing   bool
+	Ordinary   bool
+	Access     OccurrenceAccess
+	Occurrence OccurrenceFacts
+	Evidence   CancelEvidence
+	Now        time.Time
+}
+
+// CanSeeCancelledOccurrence decides the cancelled-date tombstone (M8.1 brief
+// 2.2): a cancelled date shows its title and date to a viewer with their own
+// standing row and either current ordinary access, or an exact-date grant that
+// holds now (date status and expiry aside) and was valid at this cancellation.
+// Ordinary access or a role alone never qualifies, and the RSVP status never
+// stands in for the grant.
+func CanSeeCancelledOccurrence(f CancelledDateFacts) bool {
+	if !f.Viewer.Active || f.Viewer.Person == nil || f.Viewer.Person.ID == 0 || f.Occurrence.ID == 0 || f.Occurrence.Scheduled || !f.Own || !f.Standing {
+		return false
+	}
+	return f.Ordinary || cancelledGrantQualifies(f)
+}
+
+// cancelledGrantQualifies is the grant path. A live grant on a cancelled date
+// started before the cancellation (grants start only on scheduled dates), so it
+// was valid then while it is unexpired now: a departure grant past its date's
+// end cannot show it was unexpired at the cancellation and is denied. An ended
+// grant qualifies only when ended as occurrence_cancelled by this cancellation,
+// which the evidence ties by audit id order; its stamp fixed its validity, so
+// the date's current end is never read.
+func cancelledGrantQualifies(f CancelledDateFacts) bool {
+	a := f.Access
+	if !grantHolds(f.Viewer, a, f.Occurrence, f.Now) {
+		return false
+	}
+	switch {
+	case a.Status == OccurrenceAccessActive && a.EndedAt == nil:
+		return unexpired(a, f.Occurrence, f.Now)
+	case a.Status == OccurrenceAccessEnded && a.EndedAt != nil:
+		return a.EndReason == OccurrenceCancelled && !a.EndedAt.Before(a.GrantedAt) &&
+			f.Evidence.Snapshots == 1 && !f.Evidence.Unreadable && !f.Evidence.RestoredAfter
+	}
+	return false
 }
 
 // CanSeeOccurrence never changes CanSeeEvent or series/group/roster/contact/

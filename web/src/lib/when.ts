@@ -240,6 +240,12 @@ export function formatCalendarDay(day: string): string {
   return fmt(asDate(day), "UTC", { month: "short", day: "numeric" });
 }
 
+// "Tuesday, December 1, 2026", for a stored calendar day shown on its own,
+// such as a cancelled date, which may be in another year.
+export function formatDayFull(day: string): string {
+  return fmt(asDate(day), "UTC", { weekday: "long", month: "long", day: "numeric", year: "numeric" });
+}
+
 // "May 4, 2016", for a birth date stored as YYYY-MM-DD.
 export function formatBirthDate(day: string): string {
   return fmt(asDate(day), "UTC", { month: "long", day: "numeric", year: "numeric" });

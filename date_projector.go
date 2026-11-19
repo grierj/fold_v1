@@ -19,6 +19,7 @@ import (
 //	event / group list    occurrenceJSON (the caller adds counts and seats)
 //	date page             dateJSON, rendered again as an .ics entry by
 //	                      dateFeedSingle
+//	cancelled date page   cancelledDateOf (JSON only, no .ics)
 //	public/group/personal feedSingle
 //
 // A renderer makes no visibility decision of its own. What differs between
@@ -228,6 +229,10 @@ func (p *dateProjection) dateJSON(sn *siteNameOnce, reg models.Registration, now
 		CanBlock:        p.Invited != nil && policy.CanBlockManagerAdds(actor, access)}
 	if reg.ID > 0 {
 		out.MyRegistration = &reg.Status
+	}
+	// A cancelled answer is history, not attendance (M8.1 brief 2.1): its old
+	// mode and guests are never shown or used to prefill the next answer.
+	if reg.ID > 0 && reg.Status != models.RegCancelled {
 		mode := attendanceModeOf(reg.AttendanceMode)
 		out.MyAttendanceMode = &mode
 		out.MyGuestCount = &reg.GuestCount
@@ -239,6 +244,13 @@ func (p *dateProjection) dateJSON(sn *siteNameOnce, reg models.Registration, now
 		out.GroupID, out.GroupName, out.HostedBy = l.ID, l.Name, l.HostedBy
 	}
 	return out
+}
+
+// cancelledDateOf is the tombstone of a cancelled date for a viewer
+// policy.CanSeeCancelledOccurrence admitted: its effective title and original
+// date, and nothing that depends on the viewer.
+func cancelledDateOf(ev *models.Event, occ *models.EventOccurrence) cancelledDateJSON {
+	return cancelledDateJSON{Title: effectiveOccurrenceTitle(ev, occ), Date: models.FormatCalendarDate(occ.OriginalDate), Cancelled: true}
 }
 
 // Calendar statuses (DEC-71, DEC-93).

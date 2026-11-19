@@ -1833,9 +1833,25 @@ export interface OccurrenceResponse {
   occurrence: EventOccurrence;
 }
 
+/** @public Go JSON contract, checked by TestWebTypesMatchGoJSON; read through EventDateRead. */
 export interface EventDateResponse {
   occurrence: EventDate;
 }
+
+/** A cancelled date as a qualified viewer sees it: these three facts and nothing else (M8.1 brief 2.2). */
+export interface CancelledEventDate {
+  title: string;
+  date: string;
+  cancelled: true;
+}
+
+/** @public Go JSON contract, checked by TestWebTypesMatchGoJSON; read through EventDateRead. */
+export interface EventDateCancelledResponse {
+  occurrence: CancelledEventDate;
+}
+
+/** The date page's read: a scheduled date, or a cancelled date's tombstone. Narrow with `"cancelled" in occurrence`. */
+export type EventDateRead = EventDateResponse | EventDateCancelledResponse;
 
 export interface RoomApprovalResponse {
   needApproval: boolean;

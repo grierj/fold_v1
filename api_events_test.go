@@ -1550,20 +1550,64 @@ func TestHiddenSeriesListHidesDescriptionChildcareAndVideo(t *testing.T) {
 }
 
 // The exact-date page shows no cancelled registration as the viewer's answer.
-func TestDatePageIgnoresCancelledRegistration(t *testing.T) {
+// The date page tells three cases apart (M8.1 brief 2.1, 2.2): a scheduled
+// date with the viewer's own cancelled answer, an unanswered scheduled date,
+// and a cancelled date's tombstone. The cancelled answer is history: its
+// status alone, with the capabilities of an unanswered date, and its .ics
+// carries no STATUS, as an unanswered one doesn't.
+func TestDatePageTellsACancelledAnswerFromNoAnswerAndACancelledDate(t *testing.T) {
 	app, admin, _, ev, dates := dateVisibilityFixture(t, models.VisibilityPublic)
-	_ = admin
-	member := newTestUser(t, app, "cancelled-member", "password1234", models.RoleMember)
-	if err := app.DB.Create(&models.Registration{
-		UserID: &member.ID, OccurrenceID: dates[0].ID, Status: models.RegCancelled,
-	}).Error; err != nil {
-		t.Fatal(err)
+	gormMust(t, app.DB.Model(&models.Event{}).Where("id = ?", ev.ID).Updates(map[string]any{"guests_allowed": 3, "remote_available": true}))
+	cancelled := newTestUser(t, app, "cancelled-member", "password1234", models.RoleMember)
+	newTestUser(t, app, "unanswered-member", "password1234", models.RoleMember)
+	gormMust(t, app.DB.Create(&models.Registration{
+		UserID: &cancelled.ID, OccurrenceID: dates[0].ID, Status: models.RegCancelled, AttendanceMode: models.AttendanceRemote, GuestCount: 2,
+	}))
+	gormMust(t, app.DB.Create(&models.Registration{
+		UserID: &cancelled.ID, OccurrenceID: dates[1].ID, Status: models.RegGoing, AttendanceMode: models.AttendanceInPerson,
+	}))
+	withAnswer := loginAPI(t, app, "cancelled-member", "password1234")
+	without := loginAPI(t, app, "unanswered-member", "password1234")
+	path := func(occ models.EventOccurrence) string {
+		return fmt.Sprintf("/api/v1/events/%d/dates/%s", ev.ID, models.FormatCalendarDate(occ.OriginalDate))
 	}
-	c := loginAPI(t, app, "cancelled-member", "password1234")
-	raw := apiDo(t, c, "GET", fmt.Sprintf("/api/v1/events/%d/dates/%s", ev.ID, models.FormatCalendarDate(dates[0].OriginalDate)), nil, http.StatusOK)
-	if strings.Contains(raw, `"myRegistration":"cancelled"`) {
-		t.Fatalf("cancelled registration came back: %s", raw)
+	read := func(c *apiClient, occ models.EventOccurrence) map[string]any {
+		t.Helper()
+		var body struct {
+			Occurrence map[string]any `json:"occurrence"`
+		}
+		if err := json.Unmarshal([]byte(apiDo(t, c, "GET", path(occ), nil, http.StatusOK)), &body); err != nil {
+			t.Fatal(err)
+		}
+		return body.Occurrence
 	}
+	history, none := read(withAnswer, dates[0]), read(without, dates[0])
+	if history["myRegistration"] != models.RegCancelled || none["myRegistration"] != nil {
+		t.Fatalf("answers: %v and %v", history["myRegistration"], none["myRegistration"])
+	}
+	for _, key := range []string{"myAttendanceMode", "myGuestCount"} {
+		if _, ok := history[key]; ok {
+			t.Fatalf("a cancelled answer carries %s: %v", key, history)
+		}
+	}
+	delete(history, "myRegistration")
+	delete(none, "myRegistration")
+	if !reflect.DeepEqual(history, none) {
+		t.Fatalf("a cancelled answer changed the date's capabilities:\n%v\n%v", history, none)
+	}
+	if none["canRegister"] != true {
+		t.Fatalf("fixture: %v", none)
+	}
+	if ics := apiDo(t, withAnswer, "GET", path(dates[0])+"/calendar.ics", nil, http.StatusOK); strings.Contains(ics, "STATUS:") {
+		t.Fatalf("a cancelled answer's download has a STATUS: %s", ics)
+	}
+
+	apiDo(t, admin, "POST", fmt.Sprintf("/api/v1/events/%d/cancel", ev.ID), map[string]any{"date": models.FormatCalendarDate(dates[1].OriginalDate)}, http.StatusOK)
+	if got := read(withAnswer, dates[1]); !reflect.DeepEqual(got, map[string]any{"title": "Open evening", "date": models.FormatCalendarDate(dates[1].OriginalDate), "cancelled": true}) {
+		t.Fatalf("tombstone: %v", got)
+	}
+	apiDo(t, without, "GET", path(dates[1]), nil, http.StatusNotFound)
+	apiDo(t, withAnswer, "GET", path(dates[1])+"/calendar.ics", nil, http.StatusNotFound)
 }
 
 // occurrencesForEvents is occurrencesForEventsErr for tests that only look
