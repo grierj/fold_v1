@@ -15,13 +15,13 @@ import (
 // exist (docs/agents/lifecycles.md); placeBooking and openRoomRequest insert
 // a move's first status (TestRoomStatusHasOneWriter).
 
-var roomSetsStatusRe = regexp.MustCompile(`(?i)(?:^|[\s,."])status"?\s*=`)
+var roomStatusInSetRe = regexp.MustCompile(`(?i)(?:^|[\s,."])status"?\s*=`)
 
 // changeBookings moves the bookings that match where by move, in one UPDATE
 // whose WHERE is the move's from-statuses (policy.RoomBookingMove) and where.
-// It writes the status of the move's end state (none for a move that keeps
-// it), then set with setArgs, and updated_at = now(). It returns the rows
-// moved; the database's error comes back as it is, so trySavepoint can tell
+// It writes the status only when the move changes it (a date that moves and
+// keeps its room, and a waiting booking that becomes lost, keep theirs), then
+// set with setArgs, and updated_at = now(). It returns the rows moved; the database's error comes back as it is, so trySavepoint can tell
 // the exclusion constraint's refusal.
 //
 // The WHERE tests the row's status only. A move that starts from some states
@@ -32,22 +32,28 @@ func changeBookings(tx *gorm.DB, move policy.RoomBookingMove, set string, setArg
 	if !move.Updates() {
 		return 0, fmt.Errorf("room booking move %q changes no booking row", move)
 	}
-	if roomSetsStatusRe.MatchString(set) {
+	if roomStatusInSetRe.MatchString(set) {
 		return 0, fmt.Errorf("room booking move %q: the move decides the status, not the caller's columns", move)
 	}
 	var cols []string
 	var args []any
-	if to := move.To(); to != "" {
+	from := move.FromStatuses()
+	if to := move.To(); to != "" && !(len(from) == 1 && from[0] == to.Status()) {
 		cols, args = append(cols, "status = ?"), append(args, to.Status())
 	}
 	if set != "" {
 		cols, args = append(cols, set), append(args, setArgs...)
 	}
 	cols = append(cols, "updated_at = now()")
-	args = append(append(args, move.FromStatuses()), whereArgs...)
+	args = append(append(args, from), whereArgs...)
 	res := tx.Exec("UPDATE room_bookings SET "+strings.Join(cols, ", ")+" WHERE status IN ? AND ("+where+")", args...)
 	return res.RowsAffected, res.Error
 }
+
+// roomRequestMoveColumns is every column a decision may write beside the
+// status. Naming them keeps the status out of a caller's fields under any
+// spelling gorm resolves (the column, the field, a quoted identifier).
+var roomRequestMoveColumns = map[string]bool{"decided_by": true, "decided_at": true, "reject_reason": true, "updated_at": true}
 
 // moveRoomRequest decides req by move: one UPDATE of req's row whose WHERE
 // adds the move's from-set, writing the move's status and fields together.
@@ -57,8 +63,13 @@ func moveRoomRequest(tx *gorm.DB, req *models.RoomRequest, move policy.RoomReque
 	if err != nil {
 		return false, err
 	}
-	if _, ok := fields["status"]; ok {
-		return false, fmt.Errorf("room request move %q: the move decides the status, not the caller's fields", move)
+	if req == nil || req.ID == 0 {
+		return false, fmt.Errorf("room request move %q: no request to move", move)
+	}
+	for k := range fields {
+		if !roomRequestMoveColumns[k] {
+			return false, fmt.Errorf("room request move %q: %q is not a column a decision writes; the move decides the status", move, k)
+		}
 	}
 	set := make(map[string]any, len(fields)+1)
 	for k, v := range fields {

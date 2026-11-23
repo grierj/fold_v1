@@ -243,6 +243,18 @@ func TestRoomStatusWritersRefuseWhatTheRuleDoesNotHold(t *testing.T) {
 			_, err := moveRoomRequest(tx, &req, policy.RoomRequestConfirm, map[string]any{"status": models.RoomRequestRejected})
 			return err
 		},
+		"the request's status by its field name": func(tx *gorm.DB) error {
+			_, err := moveRoomRequest(tx, &req, policy.RoomRequestConfirm, map[string]any{"Status": models.RoomRequestRejected})
+			return err
+		},
+		"a column no decision writes": func(tx *gorm.DB) error {
+			_, err := moveRoomRequest(tx, &req, policy.RoomRequestConfirm, map[string]any{"room_id": 0})
+			return err
+		},
+		"a request with no id": func(tx *gorm.DB) error {
+			_, err := moveRoomRequest(tx, &models.RoomRequest{}, policy.RoomRequestReject, nil)
+			return err
+		},
 		"opening requests as a set": func(tx *gorm.DB) error {
 			_, err := moveRoomRequestsWhere(tx, policy.RoomRequestOpen, "id = ?", req.ID)
 			return err

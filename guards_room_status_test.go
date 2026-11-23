@@ -31,8 +31,8 @@ import (
 // parameter's map, of a map with computed keys, or of a row struct. Anywhere
 // it reports a Create, CreateInBatches, FirstOrCreate or Save of a row value
 // (an insert writes the status, the column's default included), and raw SQL
-// that inserts into either table, or updates one and sets status or builds
-// its column list at run time.
+// that inserts into either table, or updates one and sets status, or whose
+// SET list runs to the end of its literal (the rest is built at run time).
 //
 // It does not see a row reached through a struct field (bookWholeSeries reads
 // bookings into a struct that embeds one), an interface or a result of a
@@ -66,7 +66,7 @@ var roomStatusTables = map[string]struct{ model, row string }{
 }
 
 var (
-	roomUpdateRe     = regexp.MustCompile(`(?is)\bUPDATE\s+(?:ONLY\s+)?(?:public\.)?"?(room_bookings|room_requests)"?(?:\s+(?:AS\s+)?\w+)?\s+SET\b(.*?)(?:\bWHERE\b|\bFROM\b|\bRETURNING\b|;|$)`)
+	roomUpdateRe     = regexp.MustCompile(`(?is)\bUPDATE\s+(?:ONLY\s+)?(?:public\.)?"?(room_bookings|room_requests)"?(?:\s+(?:AS\s+)?\w+)?\s+SET\b(.*?)(\bWHERE\b|\bFROM\b|\bRETURNING\b|;|$)`)
 	roomInsertRe     = regexp.MustCompile(`(?is)\bINSERT\s+INTO\s+(?:public\.)?"?(room_bookings|room_requests)"?(?:\s|\(|$)`)
 	roomSetsStatusRe = regexp.MustCompile(`(?i)(?:^|[\s,."])status"?\s*=`)
 )
@@ -344,7 +344,7 @@ func roomStatusWrites(p *guardkit.Parsed) []roomStatusWrite {
 				table := strings.ToLower(m[1])
 				if roomSetsStatusRe.MatchString(m[2]) {
 					add(n, fn, "raw UPDATE of "+table+".status")
-				} else if strings.TrimSpace(m[2]) == "" {
+				} else if m[3] == "" {
 					add(n, fn, "raw UPDATE "+table+" with a column list built at run time")
 				}
 			}
@@ -516,6 +516,11 @@ func ask(tx *gorm.DB) error {
 		{"raw SQL in a constant, with an alias", `package main
 const rejectSQL = ` + "`UPDATE room_bookings AS b SET \"status\" = 'rejected' WHERE b.request_id = ?`" + `
 `, "rejectSQL: raw UPDATE of room_bookings.status"},
+		{"a moved date's update, as it was before the writer", `package main
+func moveRoomBookings(tx *gorm.DB, b models.RoomBooking, status string) error {
+	return tx.Exec(` + "`UPDATE room_bookings SET starts_at = ?, ends_at = ?, padded_range = `+paddedRangeSQL+`, status = ?, updated_at = now() WHERE id = ?`" + `,
+		b.StartsAt, b.EndsAt, b.StartsAt, b.SetupMinutes, b.EndsAt, b.TeardownMinutes, status, b.ID).Error
+}`, "moveRoomBookings: raw UPDATE room_bookings with a column list built at run time"},
 		{"raw SQL with its columns built at run time", `package main
 func set(tx *gorm.DB, cols string) error {
 	return tx.Exec("UPDATE room_requests SET " + cols + " WHERE id = 1").Error

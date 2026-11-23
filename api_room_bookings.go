@@ -290,12 +290,10 @@ func (a *App) dateBooking(db *gorm.DB, occurrenceID uint, want int) (*roomBookin
 		return nil, err
 	}
 	requestPending := false
-	if b.RequestID != nil {
-		var status []string
-		if err := db.Model(&models.RoomRequest{}).Where("id = ?", *b.RequestID).Pluck("status", &status).Error; err != nil {
+	if b.RequestID != nil && b.Status == policy.RoomBookingWaiting.Status() {
+		if err := db.Raw("SELECT EXISTS (SELECT 1 FROM room_requests WHERE id = ? AND status IN ?)", *b.RequestID, policy.RoomRequestConfirm.From()).Scan(&requestPending).Error; err != nil {
 			return nil, err
 		}
-		requestPending = len(status) == 1 && policy.RoomRequestUndecided(status[0])
 	}
 	state := policy.RoomBookingStateOf(b.Status, requestPending, b.AllowOverlap)
 	return &roomBookingJSON{RoomID: r.ID, RoomName: r.Name, Building: r.Building, Status: b.Status,
