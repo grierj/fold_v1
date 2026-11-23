@@ -7,13 +7,12 @@ import { ContactDetails } from "../components/ContactDetails";
 import { Badge } from "../components/ui/Badge";
 import { useHousehold } from "../lib/useHousehold";
 import { canDemoteLeader, canMakeLeader, canAskForContact, canRegisterAsGuest, canRemoveMember, groupCanSchedule, isActiveAdult } from "../lib/can";
-import { SeriesEditor } from "../components/SeriesEditor";
-import { useCallback, useEffect, useLayoutEffect, useRef, useState, type ReactNode, type RefObject } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { ApiError } from "../api/core";
 import { Events } from "../api/events";
 import { GroupCover, Groups } from "../api/groups";
-import type { DepartureConfirmation, EventOccurrence, GroupDetailResponse, OpenedDecision, HouseholdPerson, Visibility, VisibilityImpact } from "../types";
+import type { DepartureConfirmation, EventOccurrence, GroupDetailResponse, OpenedDecision, HouseholdPerson, VisibilityImpact } from "../types";
 import { useAuth } from "../auth";
 import { OccurrenceCard } from "../components/OccurrenceCard";
 import { PeopleList } from "../components/PeopleList";
@@ -22,7 +21,6 @@ import { Attendance } from "../components/Attendance";
 import { Menu } from "../components/ui/Menu";
 import { composePath, EMAIL_GOING, EMAIL_MEMBERS } from "../components/messages/composeLinks";
 import { placeLine } from "../lib/place";
-import { EventVisibilityControl } from "../components/EventVisibility";
 import { ROSTER_STALE, visibilityRank } from "../lib/visibilityChange";
 import { useFocusHome, useKeepFocusHome, useLockedFocus } from "../lib/focusHome";
 import { decisionImpact, reviewOutdated } from "../lib/visibilityConsent";
@@ -59,7 +57,6 @@ function EventRow({
   instance,
   seriesDates,
   groupName,
-  groupVisibility,
   canManage,
   showDescription,
   moreDates,
@@ -73,10 +70,6 @@ function EventRow({
   onTerminalRefresh,
   onCancelled,
   onChanged,
-  onEditorReplaced,
-  seriesHeld,
-  onSeriesSending,
-  onSeriesSaved,
   writingDate,
   settlingDate,
   groupId,
@@ -87,7 +80,6 @@ function EventRow({
   // Every loaded date of this series, though only the next is shown (seriesSchedules).
   seriesDates: string;
   groupName: string;
-  groupVisibility: Visibility;
   canManage: boolean;
   showDescription: boolean;
   // A series shows its next date only, plus a link to the rest (DEC-63).
@@ -103,13 +95,6 @@ function EventRow({
   onTerminalRefresh: () => void;
   onCancelled: (eventId: number, date: string) => void;
   onChanged: () => void;
-  // A read replaced this row (a series save moved its first date) while focus was in its editor panel.
-  onEditorReplaced: (eventId: number) => void;
-  // This event's series save is on its way, or the page has not shown it yet (GroupDetailContent's seriesHolds):
-  // no series editor opens or closes, so none opens from data older than the save.
-  seriesHeld: boolean;
-  onSeriesSending: (request: Promise<unknown>) => void;
-  onSeriesSaved: () => Promise<void>;
   // A roster write on this date is on its way, or answered and this page does not show it yet
   // (GroupDetailContent's dateWrites).
   writingDate: boolean;
@@ -125,28 +110,7 @@ function EventRow({
   const { canCompose } = useAuth();
   const [cancelling, setCancelling] = useState(false);
   const [cancelError, setCancelError] = useState<string | null>(null);
-  const [editor, setEditor] = useState<null | "date" | "series">(null);
-  // The series editor and the visibility control share a panel: while either runs, the other is locked and the
-  // panel cannot be closed or switched, so neither's answer is lost.
-  const seriesAction = useAction();
-  const visibilityAction = useAction();
-  const panelBusy = seriesAction.running || visibilityAction.running;
-  const panel = useRef<HTMLDivElement | null>(null);
-  const opener = useRef<HTMLDivElement>(null);
-  // Close took the focused control with the panel: focus goes back to this row's menu, never the page body.
-  const closedPanel = useRef(false);
-  useLayoutEffect(() => {
-    if (editor !== null || !closedPanel.current) return;
-    closedPanel.current = false;
-
-    if (!document.activeElement || document.activeElement === document.body) opener.current?.querySelector("button")?.focus();
-  }, [editor]);
-  const replaced = useRef({ eventId: instance.eventId, onEditorReplaced });
-  replaced.current = { eventId: instance.eventId, onEditorReplaced };
-  // Runs while the removed row is still in the document, before the page's own layout effect looks for the new one.
-  useLayoutEffect(() => () => {
-    if (panel.current?.contains(document.activeElement)) replaced.current.onEditorReplaced(replaced.current.eventId);
-  }, []);
+  const [editingDate, setEditingDate] = useState(false);
   // This date's guarded edit: anything but idle closes Edit; a save whose answer never arrived is reached
   // through its own opener, outside the menu.
   const attempts = useDateAttempts();
@@ -174,18 +138,19 @@ function EventRow({
     <OccurrenceCard at={instance.startsAt} title={name}
       notice={canManage && instance.visibilityOverride && <p className="text-xs text-text-muted">Visibility changed for this date</p>}
       meta={<div className="text-sm text-text-muted">{time}{loc ? ` · ${loc}` : ""}</div>}
-      menu={canManage && <div ref={opener} data-series-opener={instance.eventId}><Menu
+      menu={canManage && <Menu
         tone="quiet"
         label={`More for ${name} on ${instance.date}`}
         items={[
-          { label: "Edit this date", onSelect: () => setEditor(editor === "date" ? null : "date"), disabled: writingDate || settlingDate || editStatus !== "idle" || panelBusy || (editor === "series" && seriesHeld) },
+          { label: "Edit this date", onSelect: () => setEditingDate(!editingDate), disabled: writingDate || settlingDate || editStatus !== "idle" },
           // The event page opens its Manage sign-ups panel for this date (DEC-99).
           { label: "Manage sign-ups", onSelect: () => navigate(`/events/${instance.eventId}?manage=${instance.date}`) },
           ...(canCompose ? [{ label: EMAIL_GOING, onSelect: () => navigate(composePath({ occurrence: instance.id })) }] : []),
-          { label: instance.recurrenceRule ? "Edit series" : "Edit event", onSelect: () => setEditor(editor === "series" ? null : "series"), disabled: panelBusy || seriesHeld },
+          // A series is edited on the event page, which opens its editor (DEC-161).
+          { label: instance.recurrenceRule ? "Edit series" : "Edit event", onSelect: () => navigate(`/events/${instance.eventId}?edit=series`) },
           { label: cancelling ? "Cancelling…" : "Cancel this date", onSelect: () => void cancel(), danger: true, disabled: cancelling },
         ]}
-      /></div>}
+      />}
     >
         {showDescription && instance.description && <p className="text-sm text-text-muted whitespace-pre-wrap">{instance.description}</p>}
         {cancelError && <FormError>{cancelError}</FormError>}
@@ -209,69 +174,16 @@ function EventRow({
             {totalKnown ? `See all ${moreDates + 1} dates` : "See more dates"}
           </Link>
         )}
-        {canManage && editor !== "date" && editStatus === "unsure" && (
-          <Button variant="secondary" layout="w-full sm:w-auto" onClick={() => setEditor("date")}>Check your last change to this date</Button>
+        {canManage && !editingDate && editStatus === "unsure" && (
+          <Button variant="secondary" layout="w-full sm:w-auto" onClick={() => setEditingDate(true)}>Check your last change to this date</Button>
         )}
         {/* The date's own question asks in the app's dialog; every other question on this page stays the browser's. */}
-        {canManage && editor === "date" && <ConfirmProvider><ManagedDateEditor opener={{ eventId: instance.eventId, date: instance.date, occurrenceId: instance.id, groupId }} generation={generation} pageFailed={pageFailed}
-          onSaved={() => {}} onRoomChanged={onChanged} onClose={() => setEditor(null)}
+        {canManage && editingDate && <ConfirmProvider><ManagedDateEditor opener={{ eventId: instance.eventId, date: instance.date, occurrenceId: instance.id, groupId }} generation={generation} pageFailed={pageFailed}
+          onSaved={() => {}} onRoomChanged={onChanged} onClose={() => setEditingDate(false)}
           onRefused={() => {
-            setEditor(null);
+            setEditingDate(false);
             onTerminalRefresh();
           }} /></ConfirmProvider>}
-        {editor === "series" && (
-          <SeriesPanel outer={panel}>
-            <SeriesEditor
-              series={{
-                eventId: instance.eventId,
-                startsLocal: instance.seriesStartsLocal,
-                durationMinutes: instance.seriesDurationMinutes,
-                tzid: instance.tzid,
-                title: instance.seriesTitle,
-                description: instance.description,
-                location: instance.seriesLocation,
-                recurrenceRule: instance.recurrenceRule,
-                rruleUntil: instance.rruleUntil,
-                capacity: instance.capacity,
-                waitlistEnabled: instance.waitlistEnabled,
-                guestsAllowed: instance.guestsAllowed,
-                reminderEmailMinutes: instance.reminderEmailMinutes,
-                reminderPush: instance.reminderPush,
-                childcareAvailable: instance.childcareAvailable, childcareCapacity: instance.childcareCapacity,
-                childcareAges: instance.childcareAges, childcareNotes: instance.childcareNotes,
-                remoteAvailable: instance.remoteAvailable,
-                remoteCapacity: instance.remoteCapacity,
-                videoProvider: instance.videoProvider,
-                videoUrl: instance.videoUrl,
-                videoReveal: instance.videoReveal,
-              }}
-              idPrefix={`${instance.id}`}
-              locationHint="Leave it blank to use the group's location."
-              roomDate={instance.recurrenceRule ? undefined : instance.date}
-              onRoomChanged={onChanged}
-              onSending={onSeriesSending}
-              onSaved={onSeriesSaved}
-              held={seriesHeld}
-              onClose={() => {
-                closedPanel.current = true;
-                setEditor(null);
-              }}
-              action={seriesAction}
-              locked={visibilityAction.running}
-            />
-            <EventVisibilityControl
-              key={`${instance.eventId}-${instance.visibility}-${instance.leaderOpened}`}
-              eventId={instance.eventId}
-              groupName={groupName}
-              groupVisibility={groupVisibility}
-              visibility={instance.seriesVisibility ?? instance.visibility ?? groupVisibility}
-              leaderOpened={instance.leaderOpened}
-              onSaved={onChanged}
-              action={visibilityAction}
-              locked={seriesAction.running}
-            />
-          </SeriesPanel>
-        )}
     </OccurrenceCard>
   );
 }
@@ -279,21 +191,6 @@ function EventRow({
 // The description above the tabs, clamped to three lines. "Read more" shows
 // only when the text really overflows, and is re-checked when the width
 // changes (rotating a phone, resizing the window).
-// The open series panel. A saved visibility re-keys its control when this date's answer comes back: focus that the
-// old control's removal dropped goes to the panel, if it was still there. Only an open panel tracks focus, so a page
-// of rows adds no listeners.
-function SeriesPanel({ outer, children }: { outer: RefObject<HTMLDivElement | null>; children: ReactNode }) {
-  const home = useFocusHome<HTMLDivElement>();
-  useKeepFocusHome(home);
-
-  const ref = useCallback((el: HTMLDivElement | null) => {
-    home.ref.current = el;
-    outer.current = el;
-  }, [home, outer]);
-
-  return <div ref={ref} tabIndex={-1} className="outline-none">{children}</div>;
-}
-
 function ClampedDescription({ text, onReadMore }: { text: string; onReadMore: () => void }) {
   const ref = useRef<HTMLParagraphElement>(null);
   const [overflows, setOverflows] = useState(false);
@@ -423,57 +320,20 @@ function GroupDetailContent() {
   const detail = load.data ?? null;
   useEffect(() => { if (detail) loadedDates.current = detail.upcomingEvents.length; }, [detail]);
 
-  // Where focus that a read dropped goes once the page shows that read: after Save group, the group's menu; after
-  // a read replaced a row with focus in its editor, the event's new row, else the section heading. Never the page
-  // body, and never away from a control the person moved to.
-  const returnTo = useRef<{ eventId: number } | "group" | null>(null);
+  // Where focus that the read after Save group dropped goes once the page shows that read: the group's menu, else
+  // the section heading. Never the page body, and never away from a control the person moved to.
+  const returnToGroup = useRef(false);
   const groupMenu = useRef<HTMLDivElement>(null);
   const eventsHeading = useRef<HTMLHeadingElement>(null);
   useLayoutEffect(() => {
-    const target = returnTo.current;
-
-    if (!target || load.loading) return;
-    returnTo.current = null;
+    if (!returnToGroup.current || load.loading) return;
+    returnToGroup.current = false;
     const active = document.activeElement;
 
     if (active && active !== document.body && active.id !== "main") return;
 
-    const opener = target === "group"
-      ? groupMenu.current?.querySelector("button")
-      : document.querySelector<HTMLElement>(`[data-series-opener="${target.eventId}"] button`);
-
-    (opener ?? eventsHeading.current)?.focus();
+    (groupMenu.current?.querySelector("button") ?? eventsHeading.current)?.focus();
   }, [detail, load.loading]);
-  // A series save holds its event's editors shut from its request until the page shows an answer asked for after
-  // it worked: an editor copies the page's values when it opens, so one opened earlier would save older values back.
-  // The hold is the epoch() read when the save worked (Infinity while it is on its way); it lives here, not in the
-  // row, so a row that goes and comes back (a tab switch) is still held.
-  const [seriesHolds, setSeriesHolds] = useState<ReadonlyMap<number, number>>(() => new Map());
-
-  const seriesHeld = (eventId: number) => {
-    const at = seriesHolds.get(eventId);
-
-    return at !== undefined && !(load.dataEpoch > at);
-  };
-
-  const holdSeries = (eventId: number, at: number) => setSeriesHolds((holds) => new Map(holds).set(eventId, at));
-
-  function seriesSending(eventId: number, request: Promise<unknown>) {
-    holdSeries(eventId, Infinity);
-    request.catch(() => setSeriesHolds((holds) => {
-      if (holds.get(eventId) !== Infinity) return holds;
-      const next = new Map(holds);
-      next.delete(eventId);
-
-      return next;
-    }));
-  }
-
-  async function seriesSaved(eventId: number) {
-    holdSeries(eventId, load.epoch());
-
-    if (await load.reloadCurrent() !== "loaded") throw new Error("The page was not read again.");
-  }
 
   // A guarded edit settled (from here or the event page): the page is asked for again. Any date may be one this
   // group lists, as a read on its way may hold it, so this is decided from the address, never from what is loaded.
@@ -795,7 +655,7 @@ function GroupDetailContent() {
     // The form goes, and the page with it until the read below answers: focus that is still in the form or the
     // review waits on the main region.
     const active = document.activeElement;
-    returnTo.current = "group";
+    returnToGroup.current = true;
 
     if (reviewHome.ref.current?.contains(active) || groupSave.current?.form?.contains(active)) document.getElementById("main")?.focus({ preventScroll: true });
     setEditing(false);
@@ -1063,7 +923,6 @@ function GroupDetailContent() {
                     instance={m}
                     seriesDates={schedules.get(m.eventId) ?? ""}
                     groupName={group.name}
-                    groupVisibility={group.visibility}
                     canManage={canManage}
                     showDescription
                     moreDates={(datesPerEvent.get(m.eventId) ?? 1) - 1}
@@ -1077,10 +936,6 @@ function GroupDetailContent() {
                     onTerminalRefresh={() => void load.retry()}
                     onCancelled={handleCancelled}
                     onChanged={() => void refresh()}
-                    onEditorReplaced={(eventId) => { returnTo.current = { eventId }; }}
-                    seriesHeld={seriesHeld(m.eventId)}
-                    onSeriesSending={(request) => seriesSending(m.eventId, request)}
-                    onSeriesSaved={() => seriesSaved(m.eventId)}
                     writingDate={dateWrites.writing(m.eventId, m.date)}
                     settlingDate={dateWrites.settling(m.eventId, m.date)}
                     groupId={group.id}

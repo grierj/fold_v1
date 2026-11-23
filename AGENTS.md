@@ -147,6 +147,8 @@ section or decision; check it still exists.
   the point of the dialog; empty states say what would appear and offer the next step, never in
   red; status is never color alone; copy is plain, warm, second person. Dates are formatted only
   in `lib/when.ts`. Reference: Meetup, then ChurchTrac; familiar beats original.
+- No screen tells a person to close and reopen something: if the UI no longer allows an action, it
+  closes on its own (Grier, DEC-161; the `closeAndReopen` rule in `TestUIRatchets`).
 - Prove a UI change with `.cursor/skills/verify-ui` and look at the 390px screenshots.
 - Forms: state every input requirement next to the field. Every path that sets a password checks
   it with `checkNewPassword` (`password_rules.go`; 10 characters minimum, 72 bytes maximum,
@@ -418,7 +420,7 @@ table), and a new area gets a new file there and a row in that table, not a row 
 | Pages never show the server's error text; every API error code has wording | `TestPagesNeverShowServerErrorText`, `TestWebErrorCopyCoversEveryCode`, `TestDeclaredAPIErrorsAreComplete`, `TestDeclaredMessagesAreWrittenOnce`, `TestAPIErrorsAreDeclaredAtPackageLevel`, `web/e2e/friendly-errors.spec.ts` |
 | Main pages have no moderate+ axe issues at 390 and 1280 px; every field is labelled | `web/e2e/a11y.spec.ts` over `web/e2e/ui-pages.ts` |
 | No sideways scroll, clipped select or target under 24px; sub-44px controls at 390 only go down | `web/e2e/layout.spec.ts` with `web/e2e/ui-baseline.json` |
-| No new raw controls, `!` overrides, misused danger color, literal `style=` or date formatting outside `lib/when.ts` | `TestUIRatchets` (counts in `ui-ratchet.json`; lower them when a page gets better), `TestUIRatchetsCatchPastMistakes` |
+| No new raw controls, `!` overrides, misused danger color, literal `style=`, date formatting outside `lib/when.ts` or close-and-reopen copy | `TestUIRatchets` (counts in `ui-ratchet.json`; lower them when a page gets better), `TestUIRatchetsCatchPastMistakes` |
 | React forms use the shared `Form`; secret whitespace is never trimmed | `TestReactFormsUseCustomValidation`, `TestReactFormValidationGuard`, `components/ui/Form.test.tsx` |
 | Selected chips are stronger than unselected; field errors are announced | `Chip.test.tsx`, `Field.test.tsx` |
 | A photo-less group's cover comes from `coverSrc` (DEC-66); empty states are never red | `web/src/lib/covers.test.ts`, `EmptyState.test.tsx` |

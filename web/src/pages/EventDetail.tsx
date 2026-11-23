@@ -55,8 +55,12 @@ export function EventDetail() {
 function EventDetailContent() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
   // The group page's "Manage sign-ups" links here with ?manage=<original date> (DEC-99).
-  const manageDate = useSearchParams()[0].get("manage");
+  const manageDate = searchParams.get("manage");
+  // Its "Edit series" / "Edit event" links here with ?edit=series (DEC-161). Read once, so neither a reload after a
+  // save nor Close opens the editor again while the person stays here.
+  const editAsked = useRef(searchParams.get("edit") === "series");
   const { user, loading: authLoading, isAdmin, canCompose } = useAuth();
   const { people, error: householdError, retry: retryHousehold } = useHousehold(user);
   const [deleteError, setDeleteError] = useState<string | null>(null);
@@ -113,6 +117,12 @@ function EventDetailContent() {
 
   const page = load.data ?? null;
   const loading = load.loading;
+  useLayoutEffect(() => {
+    if (!editAsked.current || !page || loading || authLoading) return;
+    editAsked.current = false;
+
+    if (page.canManage) setEditing(true);
+  }, [page, loading, authLoading]);
   useLayoutEffect(() => {
     if (!returnToEdit.current || loading) return;
     returnToEdit.current = false;
@@ -261,6 +271,7 @@ function EventDetailContent() {
           <SeriesEditor
             series={{ ...event, eventId: event.id }}
             idPrefix={`ev${event.id}`}
+            locationHint={event.churchWide ? undefined : "Leave it blank to use the group's location."}
             roomDate={single ? next.date : undefined}
             onRoomChanged={() => { setRoomsRevision((n) => n + 1); void load.reload(); }}
             onSaved={() => {

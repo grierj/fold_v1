@@ -8,6 +8,7 @@ import { useShownInList } from "./ui/ConfirmDialog";
 import type { DateAttempts } from "../lib/dateWrites";
 import { useEditRead, type DateOpener } from "../lib/editBase";
 import { useFocusHome, useKeepFocusHome } from "../lib/focusHome";
+import { useKeptDraft } from "../lib/unsavedChanges";
 
 interface ManagedDateEditorProps {
   opener: DateOpener;
@@ -47,6 +48,9 @@ export function ManagedDateEditor({ opener, generation, pageFailed = false, onSa
 
   // Another route, date or credential, even for a moment (A to B and back to A), ends the draft.
   if (held.current && (held.current.scope !== scope || (read.kind === "ready" && held.current.attempts !== read.attempts))) held.current = null;
+
+  // While the date is read again the editor is off the screen and its draft is kept here.
+  useKeptDraft(() => held.current?.hold.current?.unsent === true, true);
 
   if (!shown) return null;
 

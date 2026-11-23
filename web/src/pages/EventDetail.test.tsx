@@ -792,6 +792,135 @@ describe("EventDetail header actions and ?manage (DEC-99)", () => {
   });
 });
 
+// The group page's "Edit series" / "Edit event" opens the editor here with ?edit=series (DEC-161).
+describe("EventDetail ?edit=series (DEC-161)", () => {
+  const groupEvent: EventDetailResponse = { ...page, canSetVisibility: true, event: { ...page.event, groupId: 3, groupName: "Family group", groupVisibility: "public" } };
+  const link = "/events/7?edit=series";
+
+  beforeEach(() => {
+    vi.resetAllMocks();
+    guarded();
+    vi.mocked(Households.mine).mockResolvedValue({ household: null });
+  });
+
+  it("opens the editor and the visibility control for a manager, in view with focus in its first field", async () => {
+    vi.mocked(Events.get).mockResolvedValue(groupEvent);
+    const scroll = vi.fn();
+    Element.prototype.scrollIntoView = scroll;
+    renderPage(link);
+    const title = await screen.findByLabelText("Title");
+    expect(screen.getByRole("button", { name: "Edit event" })).toHaveAttribute("aria-expanded", "true");
+    expect(title).toHaveFocus();
+    expect(scroll.mock.contexts.some((el) => el instanceof HTMLElement && el.contains(title))).toBe(true);
+    expect(screen.getByRole("button", { name: "Save visibility" })).toBeInTheDocument();
+    expect(screen.getByRole("radio", { name: /^Public \(same as the group\)/ })).toBeChecked();
+    expect(screen.getByLabelText(/^Location/)).toHaveAccessibleDescription("Leave it blank to use the group's location.");
+  });
+
+  it("names no group location for a church-wide event", async () => {
+    vi.mocked(Events.get).mockResolvedValue({ ...page, event: { ...page.event, churchWide: true, hostedBy: "Fold" } });
+    renderPage(link);
+    expect(await screen.findByLabelText(/^Location/)).not.toHaveAccessibleDescription();
+  });
+
+  it("leaves the page plain for someone who cannot manage the event", async () => {
+    vi.mocked(Events.get).mockResolvedValue({ ...groupEvent, canManage: false, canSetVisibility: false });
+    renderPage(link);
+    await screen.findByRole("heading", { level: 1, name: "Hybrid study" });
+    expect(screen.queryByRole("textbox", { name: "Title" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Save series" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Save visibility" })).not.toBeInTheDocument();
+  });
+
+  it("stays closed after Close while the person stays on the page", async () => {
+    vi.mocked(Events.get).mockResolvedValue(groupEvent);
+    renderPage(link);
+    await screen.findByLabelText("Title");
+    await userEvent.click(screen.getByRole("button", { name: "Close" }));
+    const edit = screen.getByRole("button", { name: "Edit event" });
+    expect(edit).toHaveAttribute("aria-expanded", "false");
+    expect(edit).toHaveFocus();
+    expect(screen.queryByRole("textbox", { name: "Title" })).not.toBeInTheDocument();
+  });
+
+  it("stays closed after a save, when the page has been read again", async () => {
+    vi.mocked(Events.get).mockResolvedValue(groupEvent);
+    vi.mocked(Events.update).mockResolvedValue({ event: groupEvent.event });
+    renderPage(link);
+    await userEvent.type(await screen.findByLabelText("Title"), " night{Enter}");
+    await waitFor(() => expect(Events.get).toHaveBeenCalledTimes(2));
+    const edit = await screen.findByRole("button", { name: "Edit event" });
+    expect(Events.update).toHaveBeenCalledExactlyOnceWith(7, expect.objectContaining({ title: "Hybrid study night" }));
+    expect(edit).toHaveAttribute("aria-expanded", "false");
+    expect(screen.queryByRole("textbox", { name: "Title" })).not.toBeInTheDocument();
+    await waitFor(() => expect(edit).toHaveFocus());
+  });
+});
+
+// VC2: the event's visibility control sits under the series editor, whose kept-dates panel can Add, Add back or
+// Remove on one of the event's dates. A write that begins while the preview is on its way opens no review; a write
+// that begins while the review is open closes it.
+describe("EventDetail: the event visibility review and the series editor's panel", () => {
+  const STALE = "A sign-up update started while we were checking. Please review again once it finishes.";
+  const A = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+  const tightening = { visibility: "invite_only" as const, currentVisibility: "public" as const, tightened: [{ id: 7, title: "Hybrid study", visibility: "public" as const, registrants: 1 }], leaderOpened: [], consent: A };
+  const groupEvent: EventDetailResponse = { ...page, canSetVisibility: true, event: { ...page.event, groupId: 3, groupName: "Family group", groupVisibility: "public" } };
+
+  beforeEach(() => {
+    vi.resetAllMocks();
+    vi.restoreAllMocks();
+    guarded();
+    nativePromptsFail();
+    vi.mocked(Households.mine).mockResolvedValue({ household: null });
+    vi.mocked(Events.get).mockResolvedValue(groupEvent);
+    vi.mocked(Events.managedDate).mockImplementation((_id, date) => Promise.resolve(keptRead(date, { removedRegistrations: [removedRow()] })));
+    vi.mocked(Events.visibilityImpact).mockResolvedValue({ visibility: "public", currentVisibility: "public", tightened: [], leaderOpened: [] });
+    vi.spyOn(Site, "get").mockResolvedValue({ name: "Fold", timezone: "UTC", selfSignup: "off", roomsEnabled: false, pushEnabled: true });
+  });
+
+  const save = () => screen.getByRole("button", { name: "Save visibility" });
+  const panelRoster = () => requiredElement(screen.getByText("Old Name", { selector: "p, span, div, strong" }).closest("section[aria-label='Manage sign-ups']"), HTMLElement);
+
+  async function openSeries() {
+    renderPage("/events/7?edit=series");
+    await screen.findByLabelText("Title");
+    vi.mocked(Events.update).mockRejectedValueOnce(kept409([{ date: "2026-12-01", keptCount: 1 }]));
+    await userEvent.click(screen.getByRole("button", { name: "Save series" }));
+    await screen.findByText("Old Name");
+    await userEvent.click(screen.getByRole("radio", { name: /^Invite only/ }));
+  }
+
+  for (const op of ROSTER_OPS) {
+    it(`a panel ${op} that begins during the preview's await opens no review and sends nothing`, async () => {
+      await openSeries();
+      const preview = deferred<typeof tightening>();
+      vi.mocked(Events.visibilityImpact).mockReturnValueOnce(preview.promise);
+      await userEvent.click(save());
+      const write = await startHeld(op, panelRoster, "Old Name");
+      await act(async () => { preview.resolve(tightening); await preview.promise; });
+      expect(screen.queryByRole("dialog", { name: "Making this event invite-only" })).not.toBeInTheDocument();
+      expect(screen.getByText(STALE)).toBeInTheDocument();
+      expect(save()).toBeDisabled();
+      expect(Events.setVisibility).not.toHaveBeenCalled();
+      await act(async () => { ROSTER_ENDS.answered(write); await write.promise.catch(() => {}); });
+      expect(save()).toBeEnabled();
+      expect(screen.getByRole("radio", { name: /^Invite only/ })).toBeChecked();
+    });
+
+    it(`a panel ${op} that begins while the review is open closes it and sends nothing`, async () => {
+      await openSeries();
+      vi.mocked(Events.visibilityImpact).mockResolvedValueOnce(tightening);
+      await userEvent.click(save());
+      await screen.findByRole("dialog", { name: "Making this event invite-only" });
+      const write = await startHeld(op, panelRoster, "Old Name");
+      expect(screen.queryByRole("dialog", { name: "Making this event invite-only" })).not.toBeInTheDocument();
+      expect(screen.getByText(STALE)).toBeInTheDocument();
+      await act(async () => { ROSTER_ENDS.answered(write); await write.promise.catch(() => {}); });
+      expect(Events.setVisibility).not.toHaveBeenCalled();
+    });
+  }
+});
+
 describe("EventDetail shows a booked room as the place (M2.1b)", () => {
   const room = { id: 1, name: "Fellowship Hall", building: "Main" };
   beforeEach(() => {

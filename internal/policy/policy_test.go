@@ -497,6 +497,36 @@ func TestCanSetEventVisibility(t *testing.T) {
 	}
 }
 
+// A group event's series is edited on the event page only (DEC-161): everyone who manages the group, and so gets
+// the group row's "Edit series" / "Edit event", sees that event and gets its editor and visibility control there.
+func TestGroupManagersEditTheirEventsOnTheEventPage(t *testing.T) {
+	for _, admin := range []bool{false, true} {
+		for _, teen := range []bool{false, true} {
+			for _, inactive := range []bool{false, true} {
+				p := &Person{ID: 1, Admin: admin, Teen: teen, Inactive: inactive}
+				for _, r := range []Rel{{}, {Member: true}, {Member: true, Leader: true}, {Removed: true}} {
+					for _, status := range []string{GroupPending, GroupActive, GroupArchived} {
+						for _, vis := range []string{Public, Private, InviteOnly} {
+							if !CanManageGroup(p, r) {
+								continue
+							}
+							g := Group{Status: status, Visibility: vis}
+							for _, host := range []bool{false, true} {
+								ev := EventView{Visibility: vis, Host: host}
+								setVis := CanSetEventVisibility(p, ev, r, Public) || CanSetEventVisibility(p, ev, r, Private)
+								if !CanSeeEvent(p, ev, g, r) || !CanManageEvent(p, ev, r) || !setVis {
+									t.Errorf("person %+v, rel %+v, group %+v, event %+v: sees %v, manages %v, sets visibility %v",
+										*p, r, g, ev, CanSeeEvent(p, ev, g, r), CanManageEvent(p, ev, r), setVis)
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+}
+
 func TestCanAssignHost(t *testing.T) {
 	if !CanAssignHost(admin, adult) {
 		t.Error("admin assigns an adult")

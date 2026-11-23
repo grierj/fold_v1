@@ -145,8 +145,7 @@ chosen when the row is made, or is a setting that may change to any value its ow
   on its way keeps it running and lands its answer as idle, so a cancelled draft's answer never
   shows in the next one. A save that worked but whose reload failed offers nothing against the
   stale data until a reload lands (`web/src/components/GuardianConsentCard.tsx`,
-  `web/src/components/TeenConsentPanel.tsx`, and the group page's series editor, whose follow-up
-  is `useLoad`'s `reloadCurrent`, so an answer to an older ask never counts). Most older forms still keep their own `busy`,
+  `web/src/components/TeenConsentPanel.tsx`). Most older forms still keep their own `busy`,
   `error` and done values; the `busyFlags` ratchet only lets that count fall. It counts
   single-line `useState` declarations by name, so a flag named otherwise (`pending`) or a
   declaration split across lines is not counted.
