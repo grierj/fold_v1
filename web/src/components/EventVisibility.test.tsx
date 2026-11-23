@@ -75,6 +75,52 @@ describe("event tightening", () => {
     expect(setVisibility).not.toHaveBeenCalled();
   });
 
+  describe("keyboard focus while Save is on its way", () => {
+    const tightening = { visibility: "invite_only" as const, currentVisibility: "public" as const, tightened: [{ id: 7, title: "Picnic", visibility: "public" as const, registrants: 1 }], leaderOpened: [], consent: A };
+
+    async function pressSave() {
+      let answer!: (impact: VisibilityImpact) => void;
+      let refuse!: (cause: unknown) => void;
+      visibilityImpact.mockResolvedValueOnce({ ...tightening, tightened: [], visibility: "public" }).mockReturnValueOnce(new Promise<VisibilityImpact>((resolve, reject) => { answer = resolve; refuse = reject; }));
+      render(<EventVisibilityControl eventId={7} groupVisibility="public" visibility="public" onSaved={() => {}} />);
+      await userEvent.click(screen.getByRole("radio", { name: /^Invite only/ }));
+      const save = screen.getByRole("button", { name: "Save visibility" });
+      save.focus();
+      await userEvent.keyboard("{Enter}");
+      // Save is disabled under the keyboard, so the form holds focus, never the page.
+      expect(save).toBeDisabled();
+      expect(document.activeElement).toBe(save.closest("form"));
+
+      return { save, answer, refuse };
+    }
+
+    it("gives focus back to Save when the preview fails", async () => {
+      const { save, refuse } = await pressSave();
+      await act(async () => { refuse(new Error("offline")); });
+      expect(await screen.findByRole("alert")).toBeInTheDocument();
+      expect(save).toHaveFocus();
+    });
+
+    it("gives focus back to Save when there is nothing to review and the save fails or succeeds", async () => {
+      setVisibility.mockRejectedValueOnce(new ApiError(500, "private", { code: "server_error" })).mockResolvedValueOnce({});
+      const { save, answer } = await pressSave();
+      await act(async () => { answer({ ...tightening, tightened: [] }); });
+      expect(await screen.findByRole("alert")).toBeInTheDocument();
+      expect(save).toHaveFocus();
+      visibilityImpact.mockResolvedValueOnce({ ...tightening, tightened: [] });
+      await userEvent.keyboard("{Enter}");
+      await waitFor(() => expect(setVisibility).toHaveBeenCalledTimes(2));
+      await waitFor(() => expect(save).toBeEnabled());
+      expect(save).toHaveFocus();
+    });
+
+    it("lets the review take focus when it opens", async () => {
+      const { answer } = await pressSave();
+      await act(async () => { answer(tightening); });
+      expect(await screen.findByRole("heading", { name: "Making this event invite-only" })).toHaveFocus();
+    });
+  });
+
   it("re-opens the review from a 409's own impact and confirms with its consent, never previewing again", async () => {
     const first = { visibility: "invite_only" as const, currentVisibility: "public" as const, tightened: [{ id: 7, title: "Picnic", visibility: "public" as const, registrants: 1 }], leaderOpened: [], consent: A };
     const fresh = { ...first, tightened: [{ ...first.tightened[0], registrants: 3 }], consent: B };

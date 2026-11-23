@@ -60,10 +60,22 @@ export function EventVisibilityControl({
   const waiting = activity.pendingFor([eventId]) > 0;
   const committing = useRef(false);
   const waitingId = useId();
-  // Save disabled under the keyboard (a sign-up update began) hands focus to the form, never the page.
+  // Save disabled under the keyboard (a sign-up update began, or Save is on its way) hands focus to the form, never
+  // the page. A run that ends with focus still there gives it back to Save, unless a review opened (it takes focus)
+  // or a stale answer said why the form has it.
+  const handedOff = useRef(false);
   useLayoutEffect(() => {
-    if (waiting && document.activeElement === saveButton.current) home.moveHere();
-  }, [waiting, home]);
+    if ((waiting || busy) && document.activeElement === saveButton.current) {
+      home.moveHere();
+      handedOff.current = busy;
+    }
+  }, [waiting, busy, home]);
+  useLayoutEffect(() => {
+    if (busy || !handedOff.current) return;
+    handedOff.current = false;
+
+    if (!waiting && document.activeElement === home.ref.current) saveButton.current?.focus({ preventScroll: true });
+  }, [busy, waiting, home]);
   useEffect(() => {
     let live = true;
     Promise.resolve(Events.visibilityImpact(eventId, visibility)).then((impact) => { if (live) setFutureOverrides(impact?.futureOverrides ?? 0); }).catch(() => {});
@@ -74,6 +86,7 @@ export function EventVisibilityControl({
   const [review, setReview] = useState<{ impact: VisibilityImpact; mark: number } | null>(null);
 
   function show(impact: VisibilityImpact, mark: number) {
+    handedOff.current = false;
     setFutureOverrides(impact.futureOverrides ?? 0);
     setReview({ impact, mark });
   }
@@ -88,6 +101,7 @@ export function EventVisibilityControl({
     const active = document.activeElement;
 
     if (!active || active === document.body || home.ref.current?.contains(active)) home.moveHere();
+    handedOff.current = false;
     setReview(null);
     setError(ROSTER_STALE.event);
   }
