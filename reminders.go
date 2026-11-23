@@ -212,7 +212,7 @@ func (a *App) writeReminder(db *gorm.DB, ev *models.Event, occ *models.EventOccu
 	clean := content.SanitizeHTML(body)
 	// Due as soon as this job runs (now may be a test's clock).
 	at := time.Now()
-	m := models.Message{Channel: models.DeliveryEmail, Status: models.MessageScheduled, Category: models.MessageCategoryReminder,
+	m := models.Message{Channel: models.DeliveryEmail, Status: policy.MessageWriteEmailReminder.To(), Category: models.MessageCategoryReminder,
 		Subject: subject, BodyHTML: clean, BodyText: content.PlainText(clean), Audience: string(aud), ScheduledAt: &at,
 		OccurrenceID: &occ.ID, ReminderKey: &key}
 	res := db.Clauses(clause.OnConflict{Columns: []clause.Column{{Name: "reminder_key"}}, TargetWhere: clause.Where{Exprs: []clause.Expression{clause.Expr{SQL: "reminder_key IS NOT NULL"}}}, DoNothing: true}).Create(&m)
@@ -225,7 +225,7 @@ func (a *App) writeReminder(db *gorm.DB, ev *models.Event, occ *models.EventOccu
 		if err := db.Select("id, status").Where("reminder_key = ?", key).First(&m).Error; err != nil {
 			return 0, err
 		}
-		if m.Status != models.MessageScheduled {
+		if !policy.MessageClaim.Allows(m.Status) {
 			return 0, nil
 		}
 	}
