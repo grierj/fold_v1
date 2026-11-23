@@ -2152,7 +2152,9 @@ func TestRemoteCapacityNullPromotesWaitlist(t *testing.T) {
 			}
 			eventID, date := seedRemoteEvent(t, app, admin, gid, nil, capacity, true)
 			path, field := fmt.Sprintf("/api/v1/events/%d", eventID), "remoteCapacity"
-			save := func(body map[string]any, status int) { apiDo(t, admin, "PUT", path, seriesBody(t, admin, path, body), status) }
+			save := func(body map[string]any, status int) {
+				apiDo(t, admin, "PUT", path, seriesBody(t, admin, path, body), status)
+			}
 			if scope == "date" {
 				field = "remoteCapacityOverride"
 				save = func(body map[string]any, status int) { saveDate(t, admin, eventID, date, body, status, "") }
@@ -2229,7 +2231,9 @@ func TestRemoteCapacityNullDoesNotPromoteDisabledPool(t *testing.T) {
 			eventID, date := seedRemoteEvent(t, app, admin, gid, nil, capacity, true)
 			eventPath := fmt.Sprintf("/api/v1/events/%d", eventID)
 			field := "remoteCapacity"
-			save := func(body map[string]any) { apiDo(t, admin, "PUT", eventPath, seriesBody(t, admin, eventPath, body), http.StatusOK) }
+			save := func(body map[string]any) {
+				apiDo(t, admin, "PUT", eventPath, seriesBody(t, admin, eventPath, body), http.StatusOK)
+			}
 			if scope == "date" {
 				field = "remoteCapacityOverride"
 				save = func(body map[string]any) { saveDate(t, admin, eventID, date, body, http.StatusOK, "") }

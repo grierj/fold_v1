@@ -1409,7 +1409,7 @@ real_prior_refused_at_start() {
 # 00015 beside it, and every visibility change it tries is refused.
 real_prior_running_across_upgrade() {
   local cdir base jar mjar fixture g e5 r s p g3 e6 cid cbase cjar consent t0 since before after status attempt out ok results='[]' label method path body
-  local fenced stale audits notes i
+  local fenced stale audits notes i rev
   crossing_prepare
   cdir="$(crossing_dir)"
   drill_step prior-running/provision
@@ -1478,7 +1478,9 @@ group-event-own-visibility POST /groups/$g3/events {"title":"Crossing E7","start
 zero-loser-group-tightening PUT /groups/$g3 {"visibility":"private"}
 EOF
   # The positive control: a write that changes no visibility still saves.
-  crossing_http_want "$jar" "$base" PUT "/events/$e6" "$(jq -nc --arg d "$(crossing_day 7)" '{title:"Crossing E6 renamed",startsLocal:($d+"T19:00"),durationMinutes:60,tzid:"UTC"}')" 200 >/dev/null
+  # A series save names the read it was made from (DEC-162); a binary from before it ignores the field.
+  rev="$(crossing_http_want "$jar" "$base" GET "/events/$e6" '' 200 | jq -r '.event.revision // ""')"
+  crossing_http_want "$jar" "$base" PUT "/events/$e6" "$(jq -nc --arg d "$(crossing_day 7)" --arg r "$rev" '{title:"Crossing E6 renamed",startsLocal:($d+"T19:00"),durationMinutes:60,tzid:"UTC",revision:$r}')" 200 >/dev/null
   [[ "$(crossing_cpg fold -c "SELECT title FROM events WHERE id = $e6")" == 'Crossing E6 renamed' ]]
   crossing_emit cases.jsonl --arg acceptance A-prior-running-across-upgrade --arg site "$CX_SITE" --argjson requests "$results" \
     '{kind:"positive", acceptance:$acceptance, id:"prior-running-across-upgrade", site:$site, fixture:false, requests:$requests, titleEdit:200,

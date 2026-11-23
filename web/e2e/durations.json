@@ -52,6 +52,7 @@
   "rooms.spec.ts": 4.6,
   "roster.spec.ts": 0.6,
   "screens.spec.ts": 0,
+  "series-revision.spec.ts": 8.0,
   "series-rsvp.spec.ts": 50.4,
   "series-visibility.spec.ts": 2.8,
   "session.spec.ts": 4.1,

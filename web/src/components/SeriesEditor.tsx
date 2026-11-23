@@ -58,6 +58,7 @@ export interface SeriesFields {
 // What the form shows for a read of the event before anything is typed. Its keys are in the order of the draft's.
 function formOf(s: SeriesFields) {
   const picked = bydays(s.recurrenceRule);
+
   const when: WhenInit = {
     date: s.startsLocal.slice(0, 10),
     time: s.startsLocal.slice(11, 16) || "19:00",
@@ -65,6 +66,7 @@ function formOf(s: SeriesFields) {
     recurring: s.recurrenceRule !== "",
     days: picked.length > 0 ? picked : isWeekly(s.recurrenceRule) ? [weekdayCode(s.startsLocal.slice(0, 10))] : [],
   };
+
   const options: EventOptionValues = {
     seats: seatsFrom(s.capacity, s.waitlistEnabled, s.guestsAllowed),
     video: {
@@ -84,13 +86,15 @@ function formOf(s: SeriesFields) {
   };
 }
 
-const same = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b);
+const same = <T,>(a: T, b: T) => JSON.stringify(a) === JSON.stringify(b);
 
 // Each field the stored event changed since `was` takes the stored value; the others keep what was typed.
 function rebased<T extends object>(draft: T, was: T, now: T): T {
   const out = { ...draft };
+  // SAFETY: every T here is a plain object of form values built by formOf or a field's helper, so its own keys are T's keys.
+  const keys = Object.keys(now) as Array<keyof T>;
 
-  for (const key of Object.keys(now) as Array<keyof T>) if (!same(was[key], now[key])) out[key] = now[key];
+  for (const key of keys) if (!same(was[key], now[key])) out[key] = now[key];
 
   return out;
 }
