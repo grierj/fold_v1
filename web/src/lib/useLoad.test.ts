@@ -124,6 +124,14 @@ it("reloadCurrent ends with the newest request a newer ask replaced it with, nev
   expect(await current).toBe("stale");
 });
 
+it("an ask made after the component has gone ends stale at once", async () => {
+  const { result, unmount } = renderHook(() => useLoad(async () => 1, []));
+  await waitFor(() => expect(result.current.data).toBe(1));
+  const { reload, retry, reloadCurrent } = result.current;
+  unmount();
+  expect(await Promise.all([reload(), retry(), reloadCurrent()])).toEqual(["stale", "stale", "stale"]);
+});
+
 it("the epoch moves with every ask, close and change of inputs", async () => {
   const { result, rerender } = renderHook(({ key }) => useLoad(async () => key, [key]), { initialProps: { key: "a" } });
   await waitFor(() => expect(result.current.data).toBe("a"));

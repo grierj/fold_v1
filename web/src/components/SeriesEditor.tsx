@@ -170,7 +170,7 @@ export function SeriesEditor({
   const refreshButton = useRef<HTMLButtonElement>(null);
   // Holds Close and the saved lines, brought into view when focus moves there.
   const outcome = useRef<HTMLDivElement>(null);
-  // A landed refresh removes its button: focus that was on it goes to Close.
+  // A read that lands removes the Refresh button: focus that was on it goes to Close.
   const refocus = useRef(false);
   const againId = `s-again-${idPrefix}`;
   const kept = useKeptRefusal({ initial: null, submit, onRefused: setError, onAuthorityLost });
@@ -189,6 +189,11 @@ export function SeriesEditor({
     if (finished && root.current?.contains(document.activeElement)) showOutcome(stale ? refreshButton.current : close.current);
     // Only when the save finishes; a later change of `stale` is the next effect's.
   }, [finished, root]);
+
+  // The page's own Try again lands a read too, with no call from here. Read in the render that drops the button,
+  // while it is still in the page.
+  if (!stale && refreshButton.current !== null && document.activeElement === refreshButton.current) refocus.current = true;
+
   useLayoutEffect(() => {
     if (stale || !refocus.current) return;
     refocus.current = false;

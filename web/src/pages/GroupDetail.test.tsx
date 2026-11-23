@@ -2411,6 +2411,28 @@ describe("a series save on the group page is not finished until the page shows i
     expect(await menuOffersEditor("Supper night")).toBe(true);
   });
 
+  it("moves focus from Refresh to Close when the page's own Try again lands the read", async () => {
+    server();
+    open();
+    const title = await openEditor();
+    await userEvent.type(title, " night");
+    vi.mocked(Groups.get).mockRejectedValueOnce(new ApiError(500, "down", { code: "server_error" }));
+    await userEvent.click(screen.getByRole("button", { name: "Save series" }));
+    const refresh = await screen.findByRole("button", { name: "Refresh" });
+    const gate = deferred<void>();
+    const answer = vi.mocked(Groups.get).getMockImplementation()!;
+    vi.mocked(Groups.get).mockImplementationOnce(async (...args) => {
+      await gate.promise;
+
+      return answer(...args);
+    });
+    await userEvent.click(screen.getByRole("button", { name: "Try again" }));
+    refresh.focus();
+    await act(async () => { gate.resolve(); await gate.promise; });
+    await waitFor(() => expect(screen.queryByRole("button", { name: "Refresh" })).not.toBeInTheDocument());
+    expect(document.activeElement).toBe(screen.getByRole("button", { name: "Close" }));
+  });
+
   it("keeps the event's opener shut across a tab switch while the reload has failed", async () => {
     server();
     open();

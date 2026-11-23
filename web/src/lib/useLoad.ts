@@ -113,10 +113,26 @@ export function useLoad<T>(fn: () => Promise<T>, deps: DependencyList, options: 
     // Restarts on the caller's deps, which are not known statically.
   }, [...deps, enabled, tick]);
 
-  // Asks still waiting for an effect run when the component goes away.
-  useEffect(() => () => { for (const done of [...waiters.current.splice(0), ...followers.current.splice(0)]) done("stale"); }, []);
+  // Asks still waiting for an effect run when the component goes away, and any made after it has gone (a save that
+  // lands once its page is left): nothing will run to answer them, so they end stale, not never.
+  const gone = useRef(false);
+  useEffect(() => {
+    gone.current = false;
+
+    return () => {
+      gone.current = true;
+
+      for (const done of [...waiters.current.splice(0), ...followers.current.splice(0)]) done("stale");
+    };
+  }, []);
 
   const ask = useCallback((keepData: boolean) => new Promise<LoadOutcome>((done) => {
+    if (gone.current) {
+      done("stale");
+
+      return;
+    }
+
     generation.current++;
     quiet.current = keepData;
 
@@ -129,6 +145,12 @@ export function useLoad<T>(fn: () => Promise<T>, deps: DependencyList, options: 
   const reload = useCallback(() => ask(true), [ask]);
 
   const reloadCurrent = useCallback(() => new Promise<LoadOutcome>((done) => {
+    if (gone.current) {
+      done("stale");
+
+      return;
+    }
+
     followers.current.push(done);
     void ask(true);
   }), [ask]);
