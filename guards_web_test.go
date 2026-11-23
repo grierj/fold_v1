@@ -75,6 +75,7 @@ var tsContracts = []struct {
 	{hostJSON{}, "EventHostRow"},
 	{impactEventJSON{}, "VisibilityImpactEvent"},
 	{visibilityImpactJSON{}, "VisibilityImpact"},
+	{impactResetDateJSON{}, "ImpactResetDate"},
 	{householdJSON{}, "Household"},
 	{householdPersonJSON{}, "HouseholdPerson"}, // Includes the teen conversion block reason.
 	{householdAccountJSON{}, "HouseholdAccount"},
@@ -136,6 +137,7 @@ var tsContracts = []struct {
 	{soleHostEventsJSON{}, "SoleHostedEventsResponse"},
 	{soleLedGroupJSON{}, "SoleLedGroup"},
 	{sessionJSON{}, "SessionResponse"},
+	{sessionBootstrapJSON{}, "SessionBootstrapResponse"},
 	{siteJSON{}, "SiteInfo"},
 	{accountRequestConfirmJSON{}, "AccountRequestConfirmation"},
 	{accountRequestDecisionJSON{}, "AccountRequestDecision"},
@@ -180,6 +182,10 @@ var tsContracts = []struct {
 	{eventSeriesResponseJSON{}, "EventSeriesResponse"},
 	{openEventsResponseJSON{}, "OpenEventsResponse"},
 	{occurrenceResponseJSON{}, "OccurrenceResponse"},
+	{dateNeedsConsentJSON{}, "DateNeedsConsentResponse"},
+	{dateChangedJSON{}, "DateChangedResponse"},
+	{keptDatesConflictJSON{}, "KeptDatesConflictResponse"},
+	{keptDateCountJSON{}, "KeptDateCount"},
 	{eventDateResponseJSON{}, "EventDateResponse"},
 	{cancelledDateJSON{}, "CancelledEventDate"},
 	{dateGroupHeaderJSON{}, "EventDateGroupHeader"},
@@ -489,6 +495,91 @@ func TestErrorTextGuardCatchesRawMessages(t *testing.T) {
 	}
 	if v := errorMessageViolations("web/src/pages/Admin.tsx", `{request.message && <p>{request.message}</p>}`); len(v) != 0 {
 		t.Errorf("an account request's own message was flagged: %v", v)
+	}
+}
+
+// The event and exact-date pages ask every question in the app's labelled
+// dialog (ConfirmProvider), never the browser's prompt. The shared
+// components those pages reach ask through useConfirm, whose fallback on
+// other routes is the one native call, in components/ui/ConfirmDialog.tsx.
+var routeDialogFiles = []string{
+	"web/src/pages/EventDate.tsx",
+	"web/src/pages/EventDetail.tsx",
+	"web/src/components/RsvpButtons.tsx",
+	"web/src/components/SeriesRsvpDialog.tsx",
+	"web/src/components/DateEditor.tsx",
+	"web/src/components/ManageRoster.tsx",
+	"web/src/components/AddRequestForm.tsx",
+}
+
+var nativePromptRe = regexp.MustCompile(`(?:^|[^\w.$])(?:confirm|alert|prompt)\s*\(|\b(?:window|globalThis|self)\s*\.\s*(?:confirm|alert|prompt)\b|\b(?:window|globalThis|self)\s*\[\s*["'\x60](?:confirm|alert|prompt)["'\x60]\s*\]`)
+
+func nativePromptViolations(path, src string) []string {
+	var bad []string
+	for _, match := range nativePromptRe.FindAllStringIndex(src, -1) {
+		start := match[0]
+		if src[start] == '\n' {
+			start++
+		}
+		line := strings.Count(src[:start], "\n") + 1
+		bad = append(bad, fmt.Sprintf("%s:%d: %s", path, line, strings.TrimSpace(src[start:match[1]])))
+	}
+	return bad
+}
+
+func TestRouteQuestionsUseTheAppDialog(t *testing.T) {
+	var bad []string
+	for _, p := range routeDialogFiles {
+		b, err := os.ReadFile(p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		bad = append(bad, nativePromptViolations(p, string(b))...)
+	}
+	if len(bad) > 0 {
+		t.Fatalf("ask with useConfirm from components/ui/ConfirmDialog.tsx, not the browser's confirm or alert:\n%s", strings.Join(bad, "\n"))
+	}
+}
+
+// The guard catches the prompts these pages used before, bare and window-qualified.
+func TestRouteDialogGuardCatchesNativePrompts(t *testing.T) {
+	for _, src := range []string{
+		"    if (!confirm(`Delete “${title}”? This removes every date and its registrations.`)) return;",
+		`    if (!window.confirm(copy)) return;`,
+		`if (window .confirm (copy)) blocker.proceed();`,
+		`const ok = globalThis.confirm("Sure?");`,
+		`const ask = window.confirm;`,
+		`window["confirm"]("Sure?")`,
+		`alert("Saved");`,
+		`window.alert("Saved");`,
+		"confirm\n(copy)",
+		"window\n.\nconfirm(copy)",
+		"alert\n(copy)",
+		"window\n.\nalert(copy)",
+	} {
+		if len(nativePromptViolations("web/src/pages/EventDetail.tsx", src)) == 0 {
+			t.Errorf("%q passed the route dialog check", src)
+		}
+	}
+	// A prompt split across lines is reported at the line it starts on.
+	if v := nativePromptViolations("web/src/pages/EventDetail.tsx", "const a = 1;\nconst b = 2;\nif (window\n  .confirm(copy)) go();\n"); len(v) != 1 || !strings.HasPrefix(v[0], "web/src/pages/EventDetail.tsx:3:") {
+		t.Errorf("a multiline prompt should be reported once at line 3, got %v", v)
+	}
+	if v := nativePromptViolations("web/src/pages/EventDetail.tsx", "ok();\n  if (!confirm\n(copy)) return;\n"); len(v) != 1 || !strings.HasPrefix(v[0], "web/src/pages/EventDetail.tsx:2:") {
+		t.Errorf("a bare multiline prompt should be reported once at line 2, got %v", v)
+	}
+	for _, src := range []string{
+		`if (!(await ask({ title: question, confirmLabel: "Cancel this date", native: question }))) return;`,
+		`const { guardianLink } = await AdminGuardianLinks.confirm(link.id, checkNote.trim());`,
+		`confirmLabel: "Can't go to these dates",`,
+		`<Button onClick={() => void confirmFirst()}>`,
+		`if (!(await beginDelete().ask({ title, tone: "danger", native }))) return;`,
+		`body.confirm = count > 0;`,
+		"const agreed = action.current() &&\n  (count === 0 || await action.ask(request));",
+	} {
+		if v := nativePromptViolations("web/src/pages/EventDetail.tsx", src); len(v) != 0 {
+			t.Errorf("an app-dialog question was flagged: %v", v)
+		}
 	}
 }
 

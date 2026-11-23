@@ -883,11 +883,10 @@ func singleDateCancellation(t *testing.T, eventTitle, dateTitle string) *singleD
 		}
 	}
 	s := &singleDateScene{app: app, day: models.FormatCalendarDate(dates[0].OriginalDate), occ: dates[0], event: ev}
-	path := fmt.Sprintf("/api/v1/events/%d/occurrences/%s", ev.ID, s.day)
 	if dateTitle != "" {
-		apiDo(t, admin, "PUT", path, map[string]any{"title": dateTitle}, 200)
+		saveDate(t, admin, ev.ID, s.day, map[string]any{"title": dateTitle}, http.StatusOK, "")
 	}
-	apiDo(t, admin, "PUT", path, map[string]any{"visibility": "public"}, 200)
+	saveDate(t, admin, ev.ID, s.day, map[string]any{"visibility": "public"}, http.StatusOK, "")
 	s.teen = newTestUser(t, app, "sam", "password1234", models.RoleMember)
 	if err := app.DB.Model(s.teen).Update("account_type", models.AccountTeen).Error; err != nil {
 		t.Fatal(err)
@@ -908,7 +907,8 @@ func singleDateCancellation(t *testing.T, eventTitle, dateTitle string) *singleD
 	if err := app.DB.Create(&models.Registration{OccurrenceID: dates[0].ID, UserID: &s.teen.ID, Status: models.RegGoing}).Error; err != nil {
 		t.Fatal(err)
 	}
-	apiDo(t, admin, "PUT", path, confirmVisibility(t, admin, path, map[string]any{"visibility": nil}), 200)
+	// Back to the invite-only series: the teen is shut out and cancelled.
+	saveDateConsenting(t, admin, ev.ID, s.day, map[string]any{"visibility": nil})
 	return s
 }
 

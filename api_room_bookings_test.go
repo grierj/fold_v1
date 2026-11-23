@@ -207,9 +207,7 @@ func TestRoomBookingMovesWithItsDate(t *testing.T) {
 
 	// Move A an hour later: free, so it stays confirmed at the new time.
 	newStart := f.startOn.Add(time.Hour).Format("2006-01-02T15:04")
-	if w := f.leader.do("PUT", "/api/v1/events/"+itoa(f.eventA.ID)+"/occurrences/"+feedDate(f.startOn), map[string]any{"startsLocal": newStart}, true); w.Code != http.StatusOK {
-		t.Fatalf("move A: %d %s", w.Code, w.Body.String())
-	}
+	saveDate(t, f.leader, f.eventA.ID, feedDate(f.startOn), map[string]any{"startsLocal": newStart}, http.StatusOK, "")
 	var b models.RoomBooking
 	f.app.DB.Joins("JOIN event_occurrences o ON o.id = room_bookings.occurrence_id").Where("o.event_id = ?", f.eventA.ID).First(&b)
 	if b.Status != models.BookingConfirmed || !b.StartsAt.Equal(f.startOn.Add(time.Hour)) {
@@ -220,9 +218,7 @@ func TestRoomBookingMovesWithItsDate(t *testing.T) {
 	// requested and the leader hears about it (the person who moved it
 	// isn't notified of their own change).
 	clash := f.startOn.Add(4 * time.Hour).Format("2006-01-02T15:04")
-	if w := f.admin.do("PUT", "/api/v1/events/"+itoa(f.eventA.ID)+"/occurrences/"+feedDate(f.startOn), map[string]any{"startsLocal": clash}, true); w.Code != http.StatusOK {
-		t.Fatalf("move A onto Other: %d %s", w.Code, w.Body.String())
-	}
+	saveDate(t, f.admin, f.eventA.ID, feedDate(f.startOn), map[string]any{"startsLocal": clash}, http.StatusOK, "")
 	f.app.DB.First(&b, b.ID)
 	if b.Status != models.BookingRequested {
 		t.Fatalf("a booking moved into a conflict should be requested: %+v", b)
@@ -381,9 +377,7 @@ func TestRoomLostNoticeGoesToLiveChurchHosts(t *testing.T) {
 		}
 	}
 	clash := f.startOn.Add(4 * time.Hour).Format("2006-01-02T15:04")
-	if w := f.admin.do("PUT", "/api/v1/events/"+itoa(x.ID)+"/occurrences/"+feedDate(f.startOn), map[string]any{"startsLocal": clash}, true); w.Code != http.StatusOK {
-		t.Fatalf("move X onto Y: %d %s", w.Code, w.Body.String())
-	}
+	saveDate(t, f.admin, x.ID, feedDate(f.startOn), map[string]any{"startsLocal": clash}, http.StatusOK, "")
 	if n := contactCount(t, f.app, &models.Notification{}, "user_id = ? AND kind = ?", adminUser.ID, notify.RoomLost); n != 1 {
 		t.Fatalf("the live host has %d room-lost notices, want 1", n)
 	}

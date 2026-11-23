@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/http/httptest"
 	"reflect"
 	"regexp"
 	"slices"
@@ -303,7 +304,7 @@ func TestOccurrenceDateReadLiveFactsFailClosed(t *testing.T) {
 			} else if w.Code != 404 && !((tc.name == "disabled" || tc.name == "account deleted") && w.Code == 401) {
 				t.Fatal(w.Code, w.Body.String())
 			}
-			reads, err := f.app.scopedOccurrenceReads(f.recipient, f.app.DB.Where("event_id = ?", f.event.ID), time.Now().UTC())
+			reads, err := f.app.scopedOccurrenceReadsIn(f.app.DB, f.recipient, f.app.DB.Where("event_id = ?", f.event.ID), time.Now().UTC())
 			if err != nil || len(reads) != 0 {
 				t.Fatalf("live facts did not close: %v %+v", err, reads)
 			}
@@ -385,7 +386,7 @@ func TestOccurrenceDateReadTeenConsentAndVideoAreCurrent(t *testing.T) {
 		t.Fatal(err)
 	}
 	apiDo(t, client, "GET", path, nil, 404)
-	reads, err := f.app.scopedOccurrenceReads(teen, f.app.DB.Where("event_id = ?", f.event.ID), time.Now().UTC())
+	reads, err := f.app.scopedOccurrenceReadsIn(f.app.DB, teen, f.app.DB.Where("event_id = ?", f.event.ID), time.Now().UTC())
 	if err != nil || len(reads) != 0 {
 		t.Fatal("revoked consent", err, reads)
 	}
@@ -649,7 +650,7 @@ func TestDepartureOccurrenceAccessExactEndAndMoveCannotResurrect(t *testing.T) {
 	if err := missed.app.DB.Model(&models.EventOccurrence{}).Where("id = ?", missed.dates[1].ID).Updates(map[string]any{"starts_at": past.Add(-time.Hour), "ends_at": past}).Error; err != nil {
 		t.Fatal(err)
 	}
-	reads, err := missed.app.scopedOccurrenceReads(missed.recipient, missed.app.DB.Where("id = ?", missed.dates[1].ID), time.Now().UTC())
+	reads, err := missed.app.scopedOccurrenceReadsIn(missed.app.DB, missed.recipient, missed.app.DB.Where("id = ?", missed.dates[1].ID), time.Now().UTC())
 	if err != nil || len(reads) != 0 {
 		t.Fatal("read-time expiry stayed open before persistence", err, reads)
 	}
@@ -1164,8 +1165,7 @@ func TestCancelledDateTombstoneDeniesARowAVisibilityLossCancelled(t *testing.T) 
 	f := newTombstoneFixture(t)
 	target := f.dates[0]
 	d := tombstoneDate(target)
-	datePath := fmt.Sprintf("/api/v1/events/%d/occurrences/%s", f.event.ID, d)
-	apiDo(t, f.admin, "PUT", datePath, map[string]any{"visibility": models.VisibilityPublic}, http.StatusOK)
+	saveDate(t, f.admin, f.event.ID, d, map[string]any{"visibility": models.VisibilityPublic}, http.StatusOK, "")
 	loser := newTestUser(t, f.app, "tombstone visibility loser", "password1234", models.RoleMember)
 	client := loginAPI(t, f.app, loser.Name, "password1234")
 	apiDo(t, client, "PUT", fmt.Sprintf("/api/v1/events/%d/registrations", f.event.ID), map[string]any{"date": d, "status": models.RegGoing}, http.StatusOK)
@@ -1176,13 +1176,13 @@ func TestCancelledDateTombstoneDeniesARowAVisibilityLossCancelled(t *testing.T) 
 	}
 	// The confirmed switch back to invite-only shuts the person out and
 	// cancels this same row.
-	apiDo(t, f.admin, "PUT", datePath, map[string]any{"visibility": models.VisibilityInviteOnly, "confirm": true}, http.StatusOK)
+	saveDateConsenting(t, f.admin, f.event.ID, d, map[string]any{"visibility": models.VisibilityInviteOnly})
 	var lost models.Registration
 	gormMust(t, f.app.DB.First(&lost, registered.ID))
 	if lost.Status != models.RegCancelled || lost.UserID == nil || *lost.UserID != loser.ID {
 		t.Fatalf("the tightening did not cancel the row: %+v", lost)
 	}
-	apiDo(t, f.admin, "PUT", datePath, map[string]any{"title": "Tombstone hidden private title"}, http.StatusOK)
+	saveDate(t, f.admin, f.event.ID, d, map[string]any{"title": "Tombstone hidden private title"}, http.StatusOK, "")
 	f.cancel(t, target)
 	f.wantUnavailable(t, client, d)
 	// Ordinary access again, the row still cancelled: the retained row is
@@ -1227,8 +1227,14 @@ func TestCancelledDateTombstoneOutlivesTheDateAndARetime(t *testing.T) {
 	f.wantTombstone(t, departed, target, tombstoneTitle)
 	f.app.clock = nil
 	// The per-date editor moves the cancelled date to end before the stamp.
+	// No list shows a cancelled date, so its edit base is the manager's read.
 	earlier := stamped.EndedAt.Add(-48 * time.Hour).UTC().Format("2006-01-02T15:04")
-	apiDo(t, f.admin, "PUT", fmt.Sprintf("/api/v1/events/%d/occurrences/%s", f.event.ID, tombstoneDate(target)), map[string]any{"startsLocal": earlier}, http.StatusOK)
+	base := editBaseOf(t, f.admin, f.event.ID, tombstoneDate(target))
+	if !base.Cancelled || base.Title != tombstoneTitle {
+		t.Fatalf("the manager's edit base of a cancelled date: %+v", base)
+	}
+	apiDo(t, departed, "GET", managedDatePath(f.event.ID, tombstoneDate(target)), nil, http.StatusNotFound)
+	wantDateEdit(t, f.admin, f.event.ID, tombstoneDate(target), dateEditBody(newDateAttempt(t), base.Revision, map[string]any{"startsLocal": earlier}), http.StatusOK, "")
 	var moved models.EventOccurrence
 	gormMust(t, f.app.DB.First(&moved, target.ID))
 	if !moved.EndsAt.Before(*stamped.EndedAt) || moved.Status != models.OccurrenceCancelled {
@@ -2477,7 +2483,7 @@ func wantUsual(t *testing.T, r seriesRead, clock string, changes ...string) {
 
 func moveDateTo(t *testing.T, c *apiClient, eventID uint, day, wall string) {
 	t.Helper()
-	apiDo(t, c, "PUT", "/api/v1/events/"+itoa(eventID)+"/occurrences/"+day, map[string]any{"startsLocal": wall}, http.StatusOK)
+	saveDate(t, c, eventID, day, map[string]any{"startsLocal": wall}, http.StatusOK, "")
 }
 
 func seriesClockTestDates(t *testing.T, db *gorm.DB, eventID uint) []models.EventOccurrence {
@@ -3006,4 +3012,536 @@ func TestSeriesClockReadCost(t *testing.T) {
 	gormMust(t, app.DB.Exec(`UPDATE events SET rrule = 'FREQ=NOPE' WHERE id = ?`, short.ID))
 	gormMust(t, app.DB.Exec(`UPDATE events SET series_clock_dirty = false WHERE id = ?`, short.ID))
 	wantUsual(t, readSeriesDate(t, client, short.ID, tombstoneDate(shortOcc)), "19:00")
+}
+
+// invitationStraddle is one invitation-authorized surface R1 reads while a
+// guarded edit commits between its grant read and its date read. prepare
+// seeds what the surface needs and returns its read: the status and body the
+// departed person gets.
+type invitationStraddle struct {
+	name    string
+	status  int
+	prepare func(t *testing.T, f occurrenceReadFixture) func() (int, string)
+}
+
+// TestInvitationReadersNeverStraddleAnEdit (R1): a departed person's kept,
+// invite-only date reaches its old end. The real guarded edit then stamps the
+// grant ended and moves the date, retitles it and gives it a new place, in one
+// commit, at the "grants" seam of each reader: after the reader has read the
+// still-live grant and before it reads the date. Each reader must see one
+// committed state, before or after the edit, and so show nothing of the date:
+// before, the grant had lapsed at the old end; after, it is stamped. A reader
+// that read the grant and the date in separate statements would pair the live
+// grant with the new end and show the moved date. The date page is the control
+// (already one snapshot).
+func TestInvitationReadersNeverStraddleAnEdit(t *testing.T) {
+	const movedTitle, movedPlace = "Moved secret title", "Moved secret place"
+	const oldTitle, oldPlace = "Retained date title", "Retained date place"
+	get := func(c *apiClient, path string) func() (int, string) {
+		return func() (int, string) {
+			w := c.do("GET", path, nil, false)
+			return w.Code, w.Body.String()
+		}
+	}
+	dayOf := func(f occurrenceReadFixture) string { return feedDate(f.dates[1].StartsAt) }
+	calendar := func(extra string) func(t *testing.T, f occurrenceReadFixture) func() (int, string) {
+		return func(t *testing.T, f occurrenceReadFixture) func() (int, string) {
+			from, to := feedDate(f.dates[1].StartsAt.AddDate(0, 0, -1)), feedDate(f.dates[1].StartsAt.AddDate(0, 0, 1))
+			return get(f.client, "/api/v1/calendar?tz=UTC&from="+from+"&to="+to+extra)
+		}
+	}
+	feed := func(scope string) func(t *testing.T, f occurrenceReadFixture) func() (int, string) {
+		return func(t *testing.T, f occurrenceReadFixture) func() (int, string) {
+			return get(f.client, personalFeedPath(t, f.client, scope))
+		}
+	}
+	surfaces := []invitationStraddle{
+		{"date page (control)", http.StatusNotFound, func(t *testing.T, f occurrenceReadFixture) func() (int, string) {
+			return get(f.client, fmt.Sprintf("/api/v1/events/%d/dates/%s", f.event.ID, models.FormatCalendarDate(f.dates[1].OriginalDate)))
+		}},
+		{".ics download", http.StatusNotFound, func(t *testing.T, f occurrenceReadFixture) func() (int, string) {
+			return get(f.client, fmt.Sprintf("/api/v1/events/%d/dates/%s/calendar.ics", f.event.ID, models.FormatCalendarDate(f.dates[1].OriginalDate)))
+		}},
+		{"calendar", http.StatusOK, calendar("")},
+		{"calendar mine", http.StatusOK, calendar("&mine=1")},
+		{"personal feed mine", http.StatusOK, feed(models.CalendarFeedMine)},
+		{"personal feed all", http.StatusOK, feed(models.CalendarFeedAll)},
+		{"room calendar", http.StatusOK, func(t *testing.T, f occurrenceReadFixture) func() (int, string) {
+			bookStraddleRoom(t, f)
+			return get(f.client, "/api/v1/calendar/rooms?date="+dayOf(f))
+		}},
+		{"message read page", http.StatusOK, func(t *testing.T, f occurrenceReadFixture) func() (int, string) {
+			return get(f.client, "/api/v1/messages/"+itoa(seedDateMessage(t, f))+"/read")
+		}},
+	}
+	for _, s := range surfaces {
+		t.Run(s.name, func(t *testing.T) {
+			f := newDepartureReadFixture(t, models.VisibilityInviteOnly, models.RegGoing, policy.OccurrenceOriginDepartureSelf)
+			target := f.dates[1]
+			date := models.FormatCalendarDate(target.OriginalDate)
+			read := s.prepare(t, f)
+			base := editBaseOf(t, f.admin, f.event.ID, date)
+			newMutableClock(f.app, target.EndsAt)
+			newStart := target.StartsAt.Add(2 * time.Hour)
+			var fired atomic.Bool
+			var edit *httptest.ResponseRecorder
+			f.app.hooks.invitationReadStep = func(step string) {
+				// One-shot: the edit's own notices read invitations too.
+				if step != "grants" || !fired.CompareAndSwap(false, true) {
+					return
+				}
+				edit = postDateEdit(f.admin, f.event.ID, date, dateEditBody(newDateAttempt(t), base.Revision,
+					map[string]any{"startsLocal": newStart.UTC().Format("2006-01-02T15:04"), "title": movedTitle, "location": movedPlace}))
+			}
+			code, body := read()
+			if !fired.Load() {
+				t.Fatal("the reader never reached the grants step: no straddle was tried")
+			}
+			if edit.Code != http.StatusOK {
+				t.Fatalf("the edit at the seam: %d %s", edit.Code, edit.Body.String())
+			}
+			if o := occurrenceRow(t, f.app, target.ID); !o.StartsAt.Equal(newStart) {
+				t.Fatalf("the edit did not move the date: %v", o.StartsAt)
+			}
+			for when, got := range map[string][2]any{"during the edit": {code, body}, "after the edit": func() [2]any { c, b := read(); return [2]any{c, b} }()} {
+				c, b := got[0].(int), got[1].(string)
+				if c != s.status {
+					t.Fatalf("%s: status %d, want %d: %s", when, c, s.status, b)
+				}
+				leaks := []string{movedTitle, movedPlace, oldTitle, oldPlace}
+				if s.name != "room calendar" {
+					// A Reserved room slot shows its moved times to anyone (8.1).
+					leaks = append(leaks, newStart.UTC().Format(time.RFC3339), newStart.UTC().Format("20060102T150405Z"))
+				}
+				for _, leak := range leaks {
+					if strings.Contains(b, leak) {
+						t.Fatalf("%s: the reader shows %q: %s", when, leak, b)
+					}
+				}
+				switch s.name {
+				case "room calendar":
+					wantOnlyReservedSlots(t, when, b)
+				case "message read page":
+					wantBlankDateFields(t, when, b)
+				}
+			}
+		})
+		// Before the old end the grant is live, so the same edit is refused
+		// (DEC-156) at the seam: nothing is written, and every reader shows the
+		// date as it was, before, during and after the refused edit.
+		t.Run(s.name+"/refused before the old end", func(t *testing.T) {
+			f := newDepartureReadFixture(t, models.VisibilityInviteOnly, models.RegGoing, policy.OccurrenceOriginDepartureSelf)
+			target := f.dates[1]
+			date := models.FormatCalendarDate(target.OriginalDate)
+			read := s.prepare(t, f)
+			base := editBaseOf(t, f.admin, f.event.ID, date)
+			newMutableClock(f.app, target.EndsAt.Add(-time.Hour))
+			newStart := target.StartsAt.Add(2 * time.Hour)
+			beforeCode, beforeBody := read()
+			if beforeCode != http.StatusOK {
+				t.Fatalf("before the edit: status %d: %s", beforeCode, beforeBody)
+			}
+			state := eventWriterState(t, f.app, f.event.ID)
+			var fired atomic.Bool
+			var edit *httptest.ResponseRecorder
+			f.app.hooks.invitationReadStep = func(step string) {
+				if step != "grants" || !fired.CompareAndSwap(false, true) {
+					return
+				}
+				edit = postDateEdit(f.admin, f.event.ID, date, dateEditBody(newDateAttempt(t), base.Revision,
+					map[string]any{"startsLocal": newStart.UTC().Format("2006-01-02T15:04"), "title": movedTitle, "location": movedPlace}))
+			}
+			code, body := read()
+			if !fired.Load() {
+				t.Fatal("the reader never reached the grants step: no straddle was tried")
+			}
+			if edit.Code != http.StatusConflict || answerCode(t, edit) != "date_kept_after_leaving" {
+				t.Fatalf("the edit at the seam: %d %s", edit.Code, edit.Body.String())
+			}
+			if after := eventWriterState(t, f.app, f.event.ID); after != state {
+				t.Fatalf("the refused edit wrote:\n%s\n%s", state, after)
+			}
+			if got := savedOccurrenceAccess(t, f); got.Status != policy.OccurrenceAccessActive {
+				t.Fatalf("the refused edit ended the grant: %+v", got)
+			}
+			afterCode, afterBody := read()
+			for when, got := range map[string][2]any{"during the edit": {code, body}, "after the edit": {afterCode, afterBody}} {
+				c, b := got[0].(int), got[1].(string)
+				if c != beforeCode || b != beforeBody {
+					t.Fatalf("%s: %d %s, want what it showed before: %d %s", when, c, b, beforeCode, beforeBody)
+				}
+				for _, leak := range []string{movedTitle, movedPlace, newStart.UTC().Format(time.RFC3339), newStart.UTC().Format("20060102T150405Z")} {
+					if strings.Contains(b, leak) {
+						t.Fatalf("%s: the reader shows %q: %s", when, leak, b)
+					}
+				}
+			}
+		})
+	}
+}
+
+// personalFeedPath makes c's calendar link at scope and returns its path.
+func personalFeedPath(t *testing.T, c *apiClient, scope string) string {
+	t.Helper()
+	w := c.do("POST", "/api/v1/me/calendar-feed", map[string]any{"scope": scope}, true)
+	if w.Code != http.StatusOK {
+		t.Fatalf("calendar link: %d %s", w.Code, w.Body.String())
+	}
+	var out calendarFeedResponseJSON
+	decodeJSON(t, w, &out)
+	i := strings.Index(out.CalendarFeed.URL, "/cal/u/")
+	if i < 0 {
+		t.Fatalf("calendar link URL %q", out.CalendarFeed.URL)
+	}
+	return out.CalendarFeed.URL[i:]
+}
+
+// bookStraddleRoom turns rooms on and books the fixture's kept date in a hall.
+func bookStraddleRoom(t *testing.T, f occurrenceReadFixture) {
+	t.Helper()
+	if w := f.admin.do("PUT", "/api/v1/admin/settings/rooms", map[string]any{"enabled": true}, true); w.Code != http.StatusOK {
+		t.Fatalf("rooms on: %d %s", w.Code, w.Body.String())
+	}
+	w := f.admin.do("POST", "/api/v1/admin/rooms", map[string]any{"name": "Straddle Hall", "capacity": 40}, true)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("room: %d %s", w.Code, w.Body.String())
+	}
+	var room struct {
+		Room roomJSON `json:"room"`
+	}
+	decodeJSON(t, w, &room)
+	path := fmt.Sprintf("/api/v1/events/%d/dates/%s/room", f.event.ID, models.FormatCalendarDate(f.dates[1].OriginalDate))
+	if w := f.admin.do("PUT", path, map[string]any{"roomId": room.Room.ID}, true); w.Code != http.StatusOK {
+		t.Fatalf("book the kept date: %d %s", w.Code, w.Body.String())
+	}
+}
+
+// seedDateMessage stores a sent announcement to the kept date's people whose
+// subject and body carry the date's title, time and link fields, with the
+// departed person's direct row sent.
+func seedDateMessage(t *testing.T, f occurrenceReadFixture) uint {
+	t.Helper()
+	aud, _ := json.Marshal(audienceJSON{Type: policy.AudienceOccurrence, OccurrenceID: f.dates[1].ID, Statuses: []string{models.RegGoing}})
+	now := time.Now().UTC()
+	m := models.Message{AuthorID: &f.issuer.ID, Channel: models.DeliveryEmail, Status: models.MessageSent, Category: models.MessageCategoryAnnouncement,
+		Subject: "About {{event_title}}", BodyHTML: `<p>Title:[{{event_title}}] When:[{{event_time}}] Link:[{{manage_link}}]</p>`,
+		BodyText: "Title:[{{event_title}}] When:[{{event_time}}] Link:[{{manage_link}}]", Audience: string(aud), ScheduledAt: &now, SentAt: &now}
+	gormMust(t, f.app.DB.Create(&m))
+	gormMust(t, f.app.DB.Create(&models.MessageRecipient{MessageID: m.ID, UserID: f.recipient.ID, Channel: models.DeliveryEmail,
+		Status: models.RecipientSent, Address: f.recipient.Email, SentAt: &now}))
+	return m.ID
+}
+
+// wantOnlyReservedSlots: every room slot the reader got is Reserved and
+// carries only its times (TestRoomCalendarReservedKeys).
+func wantOnlyReservedSlots(t *testing.T, when, body string) {
+	t.Helper()
+	var cal struct {
+		Rooms []struct {
+			Bookings []map[string]any `json:"bookings"`
+		} `json:"rooms"`
+	}
+	if err := json.Unmarshal([]byte(body), &cal); err != nil {
+		t.Fatalf("%s: room calendar %q: %v", when, body, err)
+	}
+	slots := 0
+	for _, r := range cal.Rooms {
+		for _, b := range r.Bookings {
+			slots++
+			keys := []string{}
+			for k := range b {
+				keys = append(keys, k)
+			}
+			sort.Strings(keys)
+			if !slices.Equal(keys, []string{"endsAt", "reserved", "startsAt"}) || b["reserved"] != true {
+				t.Fatalf("%s: a slot shows more than a Reserved block: %v", when, b)
+			}
+		}
+	}
+	if slots != 1 {
+		t.Fatalf("%s: %d slots, want the one Reserved booking: %s", when, slots, body)
+	}
+}
+
+// wantBlankDateFields: the read page filled no title, time or link for a date
+// the reader cannot see.
+func wantBlankDateFields(t *testing.T, when, body string) {
+	t.Helper()
+	var out messageReadResponseJSON
+	if err := json.Unmarshal([]byte(body), &out); err != nil {
+		t.Fatalf("%s: message %q: %v", when, body, err)
+	}
+	if out.Message.Subject != "About" || !strings.Contains(out.Message.BodyHTML, "Title:[] When:[] Link:[]") {
+		t.Fatalf("%s: the date's fields were filled: %+v", when, out.Message)
+	}
+}
+
+// TestInvitationReadersUseOneConnection: every read a snapshot reader makes,
+// the authority it checks included (a link's scope, a group filter, a role, a
+// message entitlement), goes through its one snapshot transaction. The app is
+// given a pool of one connection: a read on a.DB inside the snapshot would wait
+// for the connection the snapshot holds and fail the request, and the straddle
+// test can perturb only the one read at its seam.
+func TestInvitationReadersUseOneConnection(t *testing.T) {
+	f := newDepartureReadFixture(t, models.VisibilityInviteOnly, models.RegGoing, policy.OccurrenceOriginDepartureSelf)
+	target := f.dates[1]
+	date := models.FormatCalendarDate(target.OriginalDate)
+	bookStraddleRoom(t, f)
+	message := seedDateMessage(t, f)
+	aud, _ := json.Marshal(audienceJSON{Type: policy.AudienceOccurrence, OccurrenceID: target.ID, Statuses: []string{models.RegGoing}})
+	now := time.Now().UTC()
+	reminder := models.Message{Channel: models.DeliveryEmail, Status: models.MessageSent, Category: models.MessageCategoryReminder,
+		Subject: "Reminder: {{event_title}}", BodyHTML: "<p>Where: Stored reminder place</p>", BodyText: "Where: Stored reminder place",
+		Audience: string(aud), ScheduledAt: &now, SentAt: &now, OccurrenceID: &target.ID}
+	gormMust(t, f.app.DB.Create(&reminder))
+	manager := newTestUser(t, f.app, "date manager", "password1234", models.RoleMember)
+	gormMust(t, f.app.DB.Create(&models.Membership{UserID: manager.ID, GroupID: f.group, Role: models.MembershipLeader, Status: models.MembershipActive}))
+	open := models.VisibilityPublic
+	gormMust(t, f.app.DB.Model(&models.EventOccurrence{}).Where("id = ?", target.ID).Update("visibility_override", open))
+	public := createFeedGroup(t, f.admin, "Open circle", models.VisibilityPublic, "Open place")
+	createFeedEvent(t, f.admin, public, "Open night", target.StartsAt.AddDate(0, 0, -1).UTC(), "")
+	mine, all := personalFeedPath(t, f.client, models.CalendarFeedMine), personalFeedPath(t, f.stranger, models.CalendarFeedAll)
+	from, to := feedDate(target.StartsAt.AddDate(0, 0, -7)), feedDate(target.StartsAt.AddDate(0, 0, 1))
+
+	// The managed read's roster date: scheduled and not yet ended, with a
+	// teen whose guardian is the manager, a household child with care notes
+	// and a recoverable row, so every helper the roster reads runs.
+	rosterDate := f.dates[2]
+	roster := seedRosterPeople(t, f.app, f.group, f.event.ID, rosterDate.ID, manager, f.issuer)
+	gormMust(t, f.app.DB.Create(&models.Registration{UserID: &f.other.ID, OccurrenceID: rosterDate.ID, Status: models.RegGoing, AttendanceMode: models.AttendanceInPerson, Source: "web"}))
+
+	// The calendar's kept dates (DEC-157): an admin who is no member reads
+	// Everything over a range holding the kept target and a kept date carried
+	// in from before the range, so keptDatesIn and the carry-in both run.
+	carriedStart := time.Date(target.StartsAt.Year(), target.StartsAt.Month(), target.StartsAt.Day(), 0, 0, 0, 0, time.UTC).AddDate(0, 0, -3).Add(-time.Hour)
+	gormMust(t, f.app.DB.Exec("UPDATE event_occurrences SET starts_at = ?, ends_at = ?, duration_override = 180, title_override = 'Carried kept date' WHERE id = ?",
+		carriedStart, carriedStart.Add(3*time.Hour), f.dates[0].ID))
+	keeper := newTestUser(t, f.app, "carried keeper", "password1234", models.RoleMember)
+	if _, err := keepDateFor(f.app, f.group, f.dates[0].ID, keeper, policy.OccurrenceOriginDepartureSelf, keeper.ID); err != nil {
+		t.Fatal(err)
+	}
+	newTestUser(t, f.app, "calendar admin", "password1234", models.RoleAdmin)
+	calendarAdmin := loginAPI(t, f.app, "calendar admin", "password1234")
+
+	one := oneConnectionPool(t, f.app)
+	f.app.DB = one
+	manage := loginAPI(t, f.app, manager.Name, "password1234")
+
+	for _, r := range []struct {
+		name   string
+		c      *apiClient
+		path   string
+		status int
+		has    string
+	}{
+		{"date page", f.client, fmt.Sprintf("/api/v1/events/%d/dates/%s", f.event.ID, date), http.StatusOK, "Retained date title"},
+		{".ics", f.client, fmt.Sprintf("/api/v1/events/%d/dates/%s/calendar.ics", f.event.ID, date), http.StatusOK, "Retained date title"},
+		{"calendar", f.client, "/api/v1/calendar?tz=UTC&from=" + from + "&to=" + to, http.StatusOK, "Retained date title"},
+		{"calendar mine", f.client, "/api/v1/calendar?tz=UTC&mine=1&from=" + from + "&to=" + to, http.StatusOK, "Retained date title"},
+		{"calendar group filter", f.stranger, "/api/v1/calendar?tz=UTC&group=" + itoa(public) + "&from=" + from + "&to=" + to, http.StatusOK, "Open night"},
+		{"calendar hidden group filter", f.stranger, "/api/v1/calendar?tz=UTC&group=" + itoa(f.group) + "&from=" + from + "&to=" + to, http.StatusNotFound, ""},
+		{"calendar deleted", f.admin, "/api/v1/calendar?tz=UTC&deleted=1&from=" + from + "&to=" + to, http.StatusOK, "Retained date title"},
+		{"personal feed mine", f.client, mine, http.StatusOK, "Retained date title"},
+		{"personal feed all", f.stranger, all, http.StatusOK, "Open night"},
+		{"public feed", f.stranger, "/cal/public.ics", http.StatusOK, "Open night"},
+		{"group feed", f.stranger, "/cal/groups/" + itoa(public) + ".ics", http.StatusOK, "Open night"},
+		{"room calendar", f.client, "/api/v1/calendar/rooms?date=" + feedDate(target.StartsAt), http.StatusOK, "Retained date title"},
+		{"room calendar admin", f.admin, "/api/v1/calendar/rooms?date=" + feedDate(target.StartsAt), http.StatusOK, "Retained date title"},
+		{"message read recipient", f.client, "/api/v1/messages/" + itoa(message) + "/read", http.StatusOK, "Retained date title"},
+		{"message read admin", f.admin, "/api/v1/messages/" + itoa(message) + "/read", http.StatusOK, "Title:["},
+		{"reminder read manager", manage, "/api/v1/messages/" + itoa(reminder.ID) + "/read", http.StatusOK, "Stored reminder place"},
+		{"reminder read refused", f.client, "/api/v1/messages/" + itoa(reminder.ID) + "/read", http.StatusNotFound, ""},
+		{"date visibility preview", manage, fmt.Sprintf("/api/v1/events/%d/occurrences/%s/visibility-impact?visibility=series&startsLocal=%s", f.event.ID, date, target.StartsAt.Add(-time.Hour).UTC().Format("2006-01-02T15:04")), http.StatusOK, `"visibility":"invite_only"`},
+		// A later end on the kept date counts its kept grants on the snapshot too (DEC-156).
+		{"date visibility preview refusing a later end", manage, fmt.Sprintf("/api/v1/events/%d/occurrences/%s/visibility-impact?visibility=series&startsLocal=%s", f.event.ID, date, target.StartsAt.Add(time.Hour).UTC().Format("2006-01-02T15:04")), http.StatusConflict, `"keptDates":[{"date":"` + date + `","keptCount":1}]`},
+	} {
+		t.Run(r.name, func(t *testing.T) {
+			// A read waiting for a second connection gives up with the
+			// context, so the answer is a failure, not a hang.
+			oneConnection(t, f.app, one)
+			w := r.c.do("GET", r.path, nil, false)
+			if w.Code != r.status || !strings.Contains(w.Body.String(), r.has) {
+				t.Fatalf("%s: %d %s; want %d with %q (a read outside the snapshot waits for the one connection)", r.path, w.Code, w.Body.String(), r.status, r.has)
+			}
+		})
+	}
+	t.Run("calendar kept and carried dates", func(t *testing.T) {
+		oneConnection(t, f.app, one)
+		newMutableClock(f.app, carriedStart.Add(30*time.Minute))
+		defer func() { f.app.clock = nil }()
+		q := "/api/v1/calendar?tz=UTC&from=" + feedDate(carriedStart.Add(time.Hour)) + "&to=" + feedDate(target.StartsAt.AddDate(0, 0, 1))
+		w := calendarAdmin.do("GET", q, nil, false)
+		if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), "Carried kept date") || !strings.Contains(w.Body.String(), "Retained date title") {
+			t.Fatalf("%s: %d %s (a read outside the snapshot waits for the one connection)", q, w.Code, w.Body.String())
+		}
+	})
+	// The manager's exact-date read with its roster, inside the child's care
+	// window on the read's clock. A lenient read beside the snapshot would
+	// drop the teen's contact rather than fail, so the rows are checked.
+	t.Run("managed date roster", func(t *testing.T) {
+		oneConnection(t, f.app, one)
+		newMutableClock(f.app, rosterDate.StartsAt.Add(-time.Hour))
+		defer func() { f.app.clock = nil }()
+		w := manage.do("GET", managedDatePath(f.event.ID, models.FormatCalendarDate(rosterDate.OriginalDate)), nil, false)
+		if w.Code != http.StatusOK {
+			t.Fatalf("managed read: %d %s (a read outside the snapshot waits for the one connection)", w.Code, w.Body.String())
+		}
+		var body occurrenceResponseJSON
+		decodeJSON(t, w, &body)
+		if !body.Occurrence.AttendeesVisible || !strings.Contains(w.Body.String(), f.other.PublicName()) {
+			t.Fatalf("managed read has no roster: %s", w.Body.String())
+		}
+		wantRosterPeople(t, body.Occurrence, w.Body.String(), roster)
+	})
+}
+
+// TestDateReadSaysWhoManages: the date read carries canManage only for
+// someone who manages the event, reaching it ordinarily. A member's, a
+// visitor's, an invitation-only reader's and a tombstone's answers have no
+// canManage key at all.
+func TestDateReadSaysWhoManages(t *testing.T) {
+	keyOf := func(t *testing.T, c *apiClient, path string) (bool, any, string) {
+		t.Helper()
+		w := c.do("GET", path, nil, false)
+		if w.Code != http.StatusOK {
+			t.Fatalf("%s: %d %s", path, w.Code, w.Body.String())
+		}
+		var body struct {
+			Occurrence map[string]any `json:"occurrence"`
+		}
+		decodeJSON(t, w, &body)
+		v, ok := body.Occurrence["canManage"]
+		return ok, v, w.Body.String()
+	}
+
+	f := newOccurrenceReadFixture(t)
+	date := models.FormatCalendarDate(f.dates[1].OriginalDate)
+	if ok, v, raw := keyOf(t, f.admin, dateReadPath(f.event.ID, date)); !ok || v != true {
+		t.Fatalf("the manager's read: %s", raw)
+	}
+	if ok, _, raw := keyOf(t, f.client, dateReadPath(f.event.ID, date)); ok {
+		t.Fatalf("the invitation-only read has canManage: %s", raw)
+	}
+	gormMust(t, f.app.DB.Model(&f.dates[1]).Update("status", models.OccurrenceCancelled))
+	for name, c := range map[string]*apiClient{"invited": f.client, "manager": f.admin} {
+		w := c.do("GET", dateReadPath(f.event.ID, date), nil, false)
+		if w.Code == http.StatusOK && strings.Contains(w.Body.String(), "canManage") {
+			t.Fatalf("the %s tombstone has canManage: %s", name, w.Body.String())
+		}
+		if name == "invited" && (w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"cancelled":true`)) {
+			t.Fatalf("the tombstone: %d %s", w.Code, w.Body.String())
+		}
+	}
+
+	k := newKeptCalendar(t)
+	ev, d := k.event(t, "Who manages", 1)
+	day := models.FormatCalendarDate(d[0].OriginalDate)
+	for name, c := range map[string]*apiClient{"member": k.other, "visitor": newAPIClient(t, k.app)} {
+		if ok, _, raw := keyOf(t, c, dateReadPath(ev.ID, day)); ok {
+			t.Fatalf("the %s read has canManage: %s", name, raw)
+		}
+	}
+	for name, c := range map[string]*apiClient{"leader": k.leader, "admin": k.admin} {
+		if ok, v, raw := keyOf(t, c, dateReadPath(ev.ID, day)); !ok || v != true {
+			t.Fatalf("the %s read: %s", name, raw)
+		}
+	}
+}
+
+// TestDatePageAcknowledgesTheReadThatDecided: a participating date page read
+// (M8.1) is acknowledged for the viewer judged by the snapshot whose answer it
+// is: the scheduled date's, the tombstone's, or, for the 404, the last read
+// that ran, so a missing date answers exactly like a hidden one, header
+// included. A session that ends before either snapshot is acknowledged as
+// the signed-out visitor it reads as, never the former owner; a failed read
+// carries no acknowledgment, and a plain read none at all.
+func TestDatePageAcknowledgesTheReadThatDecided(t *testing.T) {
+	f := newTombstoneFixture(t)
+	target := f.dates[1]
+	memberUser, memberPlain := f.member(t, "ack date member")
+	inviteeUser, _, inviteePlain := f.invitee(t, "ack date invitee", target)
+	endedMember, _ := f.member(t, "ack ended member")
+	endedInvitee, _, _ := f.invitee(t, "ack ended invitee", target)
+	f.cancel(t, target)
+	member, invitee := pinnedAs(t, memberPlain), pinnedAs(t, inviteePlain)
+	anonPlain := newAPIClient(t, f.app)
+	anonPlain.fetchCSRF()
+	anon := pinnedAs(t, anonPlain)
+	scheduled := dateReadPath(f.event.ID, tombstoneDate(f.dates[0]))
+	cancelled := dateReadPath(f.event.ID, tombstoneDate(target))
+	missing := dateReadPath(f.event.ID, "1999-01-01")
+
+	for _, c := range []struct {
+		name   string
+		plain  *apiClient
+		pinned *apiClient
+		viewer *models.User
+		path   string
+		status int
+	}{
+		{"a member's scheduled date", memberPlain, member, memberUser, scheduled, http.StatusOK},
+		{"an invitee's tombstone", inviteePlain, invitee, inviteeUser, cancelled, http.StatusOK},
+		{"an invitee's hidden date", inviteePlain, invitee, inviteeUser, scheduled, http.StatusNotFound},
+		{"an invitee's missing date", inviteePlain, invitee, inviteeUser, missing, http.StatusNotFound},
+		{"a signed-out hidden date", anonPlain, anon, nil, scheduled, http.StatusNotFound},
+		{"a signed-out missing date", anonPlain, anon, nil, missing, http.StatusNotFound},
+	} {
+		plain := c.plain.do("GET", c.path, nil, false)
+		wantNoAck(t, "plain: "+c.name, plain)
+		w := c.pinned.do("GET", c.path, nil, false)
+		if w.Code != c.status || w.Body.String() != plain.Body.String() {
+			t.Fatalf("%s: %d %s, plain %d %s", c.name, w.Code, w.Body.String(), plain.Code, plain.Body.String())
+		}
+		wantAck(t, c.name, w, c.pinned, c.viewer)
+	}
+	wantIn(t, "the tombstone", invitee.do("GET", cancelled, nil, false).Body.String(), tombstoneTitle)
+
+	for _, c := range []struct {
+		name string
+		arm  func(end func())
+		path string
+		u    *models.User
+	}{
+		{"the scheduled read", func(end func()) {
+			f.app.hooks.scheduledDateStep = func(step string) {
+				if step == "begin" {
+					end()
+				}
+			}
+		}, scheduled, endedMember},
+		{"the tombstone read", func(end func()) {
+			f.app.hooks.cancelledDateStep = func(step string) {
+				if step == "begin" {
+					end()
+				}
+			}
+		}, cancelled, endedInvitee},
+	} {
+		t.Run("a session ended before "+c.name, func(t *testing.T) {
+			u := c.u
+			client := pinnedAs(t, loginAPI(t, f.app, u.Name, "password1234"))
+			var fired atomic.Bool
+			c.arm(func() {
+				if fired.CompareAndSwap(false, true) {
+					gormMust(t, f.app.DB.Model(&models.User{}).Where("id = ?", u.ID).Update("session_version", gorm.Expr("session_version + 1")))
+				}
+			})
+			w := client.do("GET", c.path, nil, false)
+			f.app.hooks.scheduledDateStep, f.app.hooks.cancelledDateStep = nil, nil
+			signedOut := anonPlain.do("GET", c.path, nil, false)
+			if !fired.Load() || w.Code != http.StatusNotFound || w.Body.String() != signedOut.Body.String() {
+				t.Fatalf("an ended session (fired %t): %d %s, signed out %s", fired.Load(), w.Code, w.Body.String(), signedOut.Body.String())
+			}
+			wantAck(t, "an ended session", w, client, nil)
+		})
+	}
+
+	t.Run("a failed read", func(t *testing.T) {
+		n := failStatement(t, f.app, func(tx *gorm.DB) bool { return selects(tx, "count(*) as n") })
+		w := member.do("GET", scheduled, nil, false)
+		if n.Load() == 0 || w.Code != http.StatusInternalServerError {
+			t.Fatalf("a failed count (failed %d): %d %s", n.Load(), w.Code, w.Body.String())
+		}
+		wantNoAck(t, "a failed count", w)
+	})
 }

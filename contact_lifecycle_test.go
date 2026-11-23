@@ -7,6 +7,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"go/ast"
+	"go/parser"
 	"io"
 	"log"
 	"net/http"
@@ -19,6 +21,8 @@ import (
 	"time"
 
 	"fold/internal/audit"
+	"fold/internal/dbopen"
+	"fold/internal/guardkit"
 	"fold/internal/notify"
 	"fold/internal/policy"
 	"fold/internal/testdb"
@@ -37,14 +41,14 @@ import (
 // pg_stat_activity proves each contender reached the gate before release.
 func holdContactGate(t *testing.T, a *App) *gorm.DB {
 	t.Helper()
-	tx := a.DB.Begin()
+	tx := a.DB.Begin(contactGateTx)
 	if tx.Error != nil {
 		t.Fatal(tx.Error)
 	}
+	t.Cleanup(func() { tx.Rollback() })
 	if err := lockContacts(tx); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { tx.Rollback() })
 	return tx
 }
 func waitContactWaiters(t *testing.T, a *App, n int) {
@@ -1030,7 +1034,7 @@ func TestContactMutationCtxServerCapBelowBudget(t *testing.T) {
 	begin, cfg, gate := -1, -1, -1
 	for i, e := range st {
 		switch {
-		case begin < 0 && strings.EqualFold(strings.TrimSpace(e.SQL), "begin"):
+		case begin < 0 && strings.HasPrefix(strings.ToLower(strings.TrimSpace(e.SQL)), "begin"):
 			begin = i
 		case cfg < 0 && strings.Contains(e.SQL, "set_config('statement_timeout'"):
 			cfg = i
@@ -1787,6 +1791,29 @@ func (c *contactCleanupConn) BeginTx(context.Context, driver.TxOptions) (driver.
 func (*contactCleanupConn) ExecContext(context.Context, string, []driver.NamedValue) (driver.Result, error) {
 	return driver.RowsAffected(0), nil
 }
+
+// QueryContext answers the contact gate's one query (lockContacts) as
+// PostgreSQL would at Read Committed; any other query is unexpected.
+func (*contactCleanupConn) QueryContext(_ context.Context, query string, _ []driver.NamedValue) (driver.Rows, error) {
+	if !strings.HasPrefix(query, "SELECT pg_advisory_xact_lock(") {
+		return nil, errors.New("unexpected query")
+	}
+	return &contactGateRows{}, nil
+}
+
+type contactGateRows struct{ done bool }
+
+func (*contactGateRows) Columns() []string { return []string{"lock", "level"} }
+func (*contactGateRows) Close() error      { return nil }
+func (r *contactGateRows) Next(dest []driver.Value) error {
+	if r.done {
+		return io.EOF
+	}
+	r.done = true
+	dest[0], dest[1] = "", "read committed"
+	return nil
+}
+
 func (*contactCleanupConn) Commit() error { return errors.New("unexpected commit") }
 func (c *contactCleanupConn) Rollback() error {
 	close(c.rollbackStarted)
@@ -2665,5 +2692,374 @@ func assertSealedAndRolledBack(t testing.TB, events []testdb.Event, want int) {
 	}
 	if sealed != want {
 		t.Errorf("%d sealed transactions in the proxy log, want %d", sealed, want)
+	}
+}
+
+// repeatableReadPool opens a second pool on app's database whose sessions
+// default to Repeatable Read, and proves the default took effect.
+func repeatableReadPool(t *testing.T, app *App) *gorm.DB {
+	t.Helper()
+	var name string
+	gormMust(t, app.DB.Raw("SELECT current_database()").Scan(&name))
+	dsn, err := testdb.URL(name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	u, err := url.Parse(dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// pgx reads %20, not Encode's "+", as a blank.
+	u.RawQuery += "&default_transaction_isolation=repeatable%20read"
+	rr, err := dbopen.Open(u.String(), logger.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sqlDB, err := rr.DB()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { sqlDB.Close() })
+	var control string
+	if err := rr.Transaction(func(tx *gorm.DB) error {
+		return tx.Raw("SHOW transaction_isolation").Scan(&control).Error
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if control != "repeatable read" {
+		t.Fatalf("the pool's default is %q; the test needs repeatable read", control)
+	}
+	return rr
+}
+
+// TestGatedMutationsHonorWhatCommittedWhileTheyWaited (C5): a contact-gated
+// writer outside contactMutation, on a pool whose default is Repeatable Read,
+// waits for the gate while its holder removes the writer's group leadership
+// (the membership row alone) and commits. The writer's transaction begins at
+// Read Committed (contactGateTx), so it sees the removal and refuses the
+// manager add; at Repeatable Read the gate's own statement would have fixed a
+// snapshot from before the removal. The control, with no removal, adds.
+func TestGatedMutationsHonorWhatCommittedWhileTheyWaited(t *testing.T) {
+	for _, demoted := range []bool{true, false} {
+		t.Run(fmt.Sprintf("demoted=%v", demoted), func(t *testing.T) {
+			app, admin, adminClient := peopleTestApp(t)
+			actor := newTestUser(t, app, "waiting manager", "pw", models.RoleMember)
+			g := newTestGroup(t, app, actor, "Waiting scope", models.GroupActive)
+			addMember(t, app, admin, g, models.MembershipLeader)
+			ev, date := seedCappedEvent(t, app, adminClient, itoa(g.ID), intPtr(1), false)
+			target := newTestUser(t, app, "waiting target", "pw", models.RoleMember)
+			client := loginAPI(t, app, "waiting manager", "pw")
+			rr := repeatableReadPool(t, app)
+			gate := holdContactGate(t, app)
+			orig := app.DB
+			app.DB = rr
+			t.Cleanup(func() { app.DB = orig })
+			response := queueContact(func() *httptest.ResponseRecorder {
+				return client.do("POST", "/api/v1/events/"+itoa(ev)+"/registrations/add", map[string]any{"date": date, "userId": target.ID}, true)
+			})
+			waitContactWaiters(t, app, 1)
+			if demoted {
+				if err := gate.Model(&models.Membership{}).Where("group_id = ? AND user_id = ?", g.ID, actor.ID).Update("status", models.MembershipRemoved).Error; err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := gate.Commit().Error; err != nil {
+				t.Fatal(err)
+			}
+			w := awaitContactResponse(t, response)
+			added := contactCount(t, app, &models.Registration{}, "user_id = ?", target.ID)
+			if demoted && (w.Code != http.StatusForbidden || added != 0) {
+				t.Fatalf("a removed leader's add went through: %d %s, %d rows", w.Code, w.Body.String(), added)
+			}
+			if !demoted && (w.Code != http.StatusOK || added != 1) {
+				t.Fatalf("the control add: %d %s, %d rows", w.Code, w.Body.String(), added)
+			}
+		})
+	}
+}
+
+// TestContactMutationsRunAtReadCommitted: a contact mutation runs at Read
+// Committed even where the session's default is Repeatable Read (C5), with and
+// without a deadline. The control transaction on the same pool proves the
+// default took effect.
+func TestContactMutationsRunAtReadCommitted(t *testing.T) {
+	app := testApp(t)
+	rr := repeatableReadPool(t, app)
+	level := func(tx *gorm.DB) string {
+		var got string
+		gormMust(t, tx.Raw("SHOW transaction_isolation").Scan(&got))
+		return got
+	}
+	orig := app.DB
+	app.DB = rr
+	t.Cleanup(func() { app.DB = orig })
+	var plain, bounded string
+	if err := app.contactMutation(contactChange{}, func(tx *gorm.DB) error { plain = level(tx); return nil }); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := app.contactMutationCtx(ctx, contactChange{}, func(tx *gorm.DB) error { bounded = level(tx); return nil }); err != nil {
+		t.Fatal(err)
+	}
+	if plain != "read committed" || bounded != "read committed" {
+		t.Fatalf("contact mutation isolation: plain %q, bounded %q; want read committed", plain, bounded)
+	}
+}
+
+// TestContactMutationsPinReadCommitted is the structural backstop to
+// TestContactMutationsRunAtReadCommitted (G3): contactMutationOn's one Begin
+// passes sql.LevelReadCommitted.
+func TestContactMutationsPinReadCommitted(t *testing.T) {
+	parsed := guardkit.Production(t).Parse(parser.SkipObjectResolution)
+	f := parsed.File("contact_lifecycle.go")
+	if f == nil {
+		t.Fatal("contact_lifecycle.go not found")
+	}
+	fn := guardkit.FindFunc(f.AST, "contactMutationOn")
+	if fn == nil {
+		t.Fatal("contactMutationOn not found")
+	}
+	var begins []string
+	ast.Inspect(fn.Body, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		if sel, ok := call.Fun.(*ast.SelectorExpr); ok && sel.Sel.Name == "Begin" {
+			args := []string{}
+			for _, a := range call.Args {
+				args = append(args, guardkit.Squash(f.Src[parsed.Fset.Position(a.Pos()).Offset:parsed.Fset.Position(a.End()).Offset]))
+			}
+			begins = append(begins, strings.Join(args, ","))
+		}
+		return true
+	})
+	if len(begins) != 1 || begins[0] != "&sql.TxOptions{Isolation: sql.LevelReadCommitted}" {
+		t.Fatalf("contactMutationOn begins %q; want one Begin(&sql.TxOptions{Isolation: sql.LevelReadCommitted})", begins)
+	}
+}
+
+// TestRepeatableReadLockOfAMovedRowFails pins the PostgreSQL behaviour the
+// kept-date design relies on (C4): a Repeatable Read transaction whose snapshot
+// predates another session's committed update of a row gets 40001 when it
+// then locks that row, rather than locking the new version.
+func TestRepeatableReadLockOfAMovedRowFails(t *testing.T) {
+	app := testApp(t)
+	user := newTestUser(t, app, "rr lock subject", "password1234", models.RoleMember)
+	tx := app.DB.Begin(&sql.TxOptions{Isolation: sql.LevelRepeatableRead})
+	gormMust(t, tx)
+	defer tx.Rollback()
+	var before models.User
+	gormMust(t, tx.First(&before, user.ID))
+	gormMust(t, app.DB.Model(&models.User{}).Where("id = ?", user.ID).Update("name", "moved after the snapshot"))
+	err := tx.Exec("SELECT id FROM users WHERE id = ? FOR UPDATE", user.ID).Error
+	if pgCode(err) != "40001" {
+		t.Fatalf("locking a row updated after the snapshot: %v, want SQLSTATE 40001", err)
+	}
+}
+
+// TestGatedTransactionsBeginReadCommitted is the structural backstop for the
+// gate's owners outside contactMutation (C5): a production .Transaction call
+// whose function (a literal, or a local variable holding one) reaches
+// takeContactGate (every form of the gate: exclusive, shared and the sweep's
+// try-lock) through the root package's own functions passes contactGateTx.
+// It follows calls by name and leaves out contactMutationOn, which begins its
+// own transaction (TestContactMutationsPinReadCommitted). It cannot follow a
+// gate reached through a function value passed in, so the owners that take
+// one (runContactOperation's lock, prepareAndSend's prep) are named and must
+// pin every transaction they begin. No other production code may name
+// contactLockID, so a hand-written gate statement can't bypass the rule. At
+// run time takeContactGate refuses any other level, and
+// TestGatedMutationsHonorWhatCommittedWhileTheyWaited proves the behavior.
+func TestGatedTransactionsBeginReadCommitted(t *testing.T) {
+	parsed := guardkit.Production(t).Parse(parser.SkipObjectResolution)
+	files := parsed.Package("main")
+	decls := map[string][]*ast.FuncDecl{}
+	for _, f := range files {
+		for _, d := range f.AST.Decls {
+			if fd, ok := d.(*ast.FuncDecl); ok && fd.Body != nil {
+				decls[fd.Name.Name] = append(decls[fd.Name.Name], fd)
+			}
+		}
+	}
+	// A call is followed when it is a plain function or a method on the App
+	// (a.x); a function literal inside a declaration is not, since it may run
+	// later (a job handler, a route) rather than in the caller's transaction.
+	callee := func(c *ast.CallExpr) string {
+		switch fn := guardkit.Unparen(c.Fun).(type) {
+		case *ast.Ident:
+			return fn.Name
+		case *ast.SelectorExpr:
+			if recv, ok := fn.X.(*ast.Ident); ok && recv.Name == "a" {
+				return fn.Sel.Name
+			}
+		}
+		return ""
+	}
+	reaches := func(n ast.Node, names map[string]bool, intoLiterals bool) bool {
+		found := false
+		ast.Inspect(n, func(x ast.Node) bool {
+			if _, ok := x.(*ast.FuncLit); ok && !intoLiterals {
+				return false
+			}
+			if c, ok := x.(*ast.CallExpr); ok && names[callee(c)] {
+				found = true
+			}
+			return !found
+		})
+		return found
+	}
+	for _, f := range files {
+		ast.Inspect(f.AST, func(n ast.Node) bool {
+			fd, ok := n.(*ast.FuncDecl)
+			if ok && fd.Name.Name == "takeContactGate" {
+				return false
+			}
+			if id, ok := n.(*ast.Ident); ok && id.Name == "contactLockID" && !strings.HasSuffix(f.Path, "advisory_locks.go") {
+				t.Errorf("%s:%d names contactLockID outside takeContactGate", f.Path, parsed.Fset.Position(id.Pos()).Line)
+			}
+			return true
+		})
+	}
+	gated := map[string]bool{"takeContactGate": true}
+	for changed := true; changed; {
+		changed = false
+		for name, fds := range decls {
+			if gated[name] || name == "contactMutationOn" {
+				continue
+			}
+			for _, fd := range fds {
+				if reaches(fd.Body, gated, false) {
+					gated[name], changed = true, true
+					break
+				}
+			}
+		}
+	}
+	owners, bad := 0, []string{}
+	sweepPinned := false
+	byValue := map[string]int{"runContactOperation": 0, "prepareAndSend": 0}
+	for _, f := range files {
+		guardkit.InspectStack(f.AST, func(n ast.Node, stack []ast.Node) bool {
+			call, ok := n.(*ast.CallExpr)
+			if !ok || guardkit.Callee(call) != "Transaction" || len(call.Args) == 0 {
+				return true
+			}
+			sel, ok := guardkit.Unparen(call.Fun).(*ast.SelectorExpr)
+			if !ok {
+				return true
+			}
+			if recv, ok := sel.X.(*ast.Ident); ok && (recv.Name == "tx" || recv.Name == "sp") {
+				return true // a savepoint: its owner is the transaction around it
+			}
+			pinned := len(call.Args) == 2 && guardkit.Squash(f.Src[parsed.Fset.Position(call.Args[1].Pos()).Offset:parsed.Fset.Position(call.Args[1].End()).Offset]) == "contactGateTx"
+			for i := len(stack) - 1; i >= 0; i-- {
+				if fd, ok := stack[i].(*ast.FuncDecl); ok {
+					if _, named := byValue[fd.Name.Name]; named {
+						byValue[fd.Name.Name]++
+						if !pinned {
+							bad = append(bad, fmt.Sprintf("%s:%d (%s takes its gate as a value)", f.Path, parsed.Fset.Position(call.Pos()).Line, fd.Name.Name))
+						}
+						return true
+					}
+					break
+				}
+			}
+			var body ast.Node
+			switch fn := call.Args[0].(type) {
+			case *ast.FuncLit:
+				body = fn.Body
+			case *ast.Ident:
+				for i := len(stack) - 1; i >= 0 && body == nil; i-- {
+					fd, ok := stack[i].(*ast.FuncDecl)
+					if !ok {
+						continue
+					}
+					ast.Inspect(fd.Body, func(x ast.Node) bool {
+						as, ok := x.(*ast.AssignStmt)
+						if !ok || len(as.Lhs) != 1 || len(as.Rhs) != 1 {
+							return true
+						}
+						if id, ok := as.Lhs[0].(*ast.Ident); ok && id.Name == fn.Name {
+							if lit, ok := as.Rhs[0].(*ast.FuncLit); ok {
+								body = lit.Body
+							}
+						}
+						return body == nil
+					})
+				}
+			}
+			if body == nil || !reaches(body, gated, true) {
+				return true
+			}
+			owners++
+			if !pinned {
+				bad = append(bad, fmt.Sprintf("%s:%d", f.Path, parsed.Fset.Position(call.Pos()).Line))
+			}
+			for i := len(stack) - 1; i >= 0; i-- {
+				if fd, ok := stack[i].(*ast.FuncDecl); ok {
+					sweepPinned = sweepPinned || (fd.Name.Name == "sweepContacts" && pinned)
+					break
+				}
+			}
+			return true
+		})
+	}
+	if owners < 20 {
+		t.Fatalf("found only %d gated transactions: the guard lost its way", owners)
+	}
+	if !sweepPinned {
+		t.Error("the guard did not find sweepContacts' try-lock transaction as a pinned owner: it lost its way")
+	}
+	for name, n := range byValue {
+		if n == 0 {
+			t.Errorf("%s begins no transaction any more: update the guard's list of owners that take their gate as a value", name)
+		}
+	}
+	if len(bad) > 0 {
+		t.Fatalf("these transactions take the contact gate without contactGateTx:\n%s", strings.Join(bad, "\n"))
+	}
+}
+
+// TestContactSweepRunsAtReadCommittedOnAnyDefault: the daily sweep takes the
+// gate with its try-lock in a transaction pinned to Read Committed, so on a
+// pool whose default is Repeatable Read it still runs and ends a contact whose
+// basis (the subject's membership) is gone. Every form of the gate (the
+// exclusive lock, the shared one runContactOperation's readers take, and the
+// sweep's try-lock) refuses a transaction at another level and is taken at
+// Read Committed.
+func TestContactSweepRunsAtReadCommittedOnAnyDefault(t *testing.T) {
+	f := newContactAPIFixture(t, true)
+	contact := f.create(t, "email", "Sweep basis reason")
+	gormMust(t, f.app.DB.Where("group_id = ? AND user_id = ?", f.group.ID, f.subject.ID).Delete(&models.Membership{}))
+	orig := f.app.DB
+	rr := repeatableReadPool(t, f.app)
+	f.app.DB = rr
+	t.Cleanup(func() { f.app.DB = orig })
+	if err := f.app.sweepContacts(t.Context(), time.Now().UTC()); err != nil {
+		t.Fatalf("the sweep on a Repeatable Read default: %v", err)
+	}
+	if got := savedAsk(t, f, contact.ID).Status; got != "ended" {
+		t.Fatalf("the sweep left the contact %q", got)
+	}
+	forms := map[string]func(*gorm.DB) error{
+		"exclusive": lockContacts,
+		"shared":    lockContactsShared,
+		"try-lock": func(tx *gorm.DB) error {
+			locked, err := tryLockContacts(tx)
+			if err == nil && !locked {
+				return errors.New("the free gate was not taken")
+			}
+			return err
+		},
+	}
+	for name, take := range forms {
+		if err := rr.Transaction(take); err == nil || !strings.Contains(err.Error(), "contact gate taken at repeatable read") {
+			t.Errorf("%s gate at the pool's Repeatable Read default: %v", name, err)
+		}
+		if err := rr.Transaction(take, contactGateTx); err != nil {
+			t.Errorf("%s gate at Read Committed: %v", name, err)
+		}
 	}
 }

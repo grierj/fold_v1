@@ -48,6 +48,8 @@ type dateProjection struct {
 	Manager       bool
 	Attendees     bool
 	SeriesVisible bool
+	// Revision is the date's edit token (dateToken), only for a Manager.
+	Revision string
 
 	eff *occurrenceJSON
 }
@@ -75,6 +77,9 @@ func (a *App) projectDate(viewer *models.User, vs visibleSet, occ *models.EventO
 	p := &dateProjection{Event: ev, Occ: occ, Ordinary: true, Invited: invited, Rel: f.rel, Facts: f}
 	p.Group = a.groupShownTo(viewer, f.group, f.rel)
 	p.Manager = f.canManage(viewer)
+	if p.Manager {
+		p.Revision = a.dateToken(ev, occ, p.Group)
+	}
 	p.Attendees = policy.CanSeeAttendeeNames(asPerson(viewer), f.view, asGroup(f.group), f.rel)
 	p.SeriesVisible = vs.canSeeSeries(viewer, ev)
 	return p, true
@@ -172,6 +177,7 @@ func labelGroup(shown *models.Group, wantHostedBy bool, sn *siteNameOnce) groupL
 // the surface adds counts, seats, the viewer's own answer and attendees.
 func (p *dateProjection) occurrenceJSON(sn *siteNameOnce) occurrenceJSON {
 	inst := *p.Eff()
+	inst.Revision = p.Revision
 	inst.Visibility = policy.EffectiveVisibility(p.Event.Visibility, p.Occ.VisibilityOverride)
 	inst.LeaderOpened = p.Event.LeaderOpened
 	inst.ChurchWide = p.Event.GroupID == nil
@@ -193,15 +199,17 @@ func (p *dateProjection) listVideo(inst *occurrenceJSON, going bool) {
 }
 
 // calendarRow is the slim row the calendar shows. myStatus is the viewer's own
-// answer ("" for none); it never carries a household answer.
-func (p *dateProjection) calendarRow(sn *siteNameOnce, myStatus string, ownScope bool) calendarOccurrenceJSON {
+// answer ("" for none); it never carries a household answer. now is the
+// calendar's clock: a manager's row for a date the event page does not list
+// links to the date page, where its manager tools are.
+func (p *dateProjection) calendarRow(sn *siteNameOnce, myStatus string, ownScope bool, now time.Time) calendarOccurrenceJSON {
 	e := p.Eff()
 	row := calendarOccurrenceJSON{
 		EventID: p.Event.ID, Date: p.DateString(), StartsAt: e.StartsAt, EndsAt: e.EndsAt,
 		Title: e.Title, Location: e.Location, ChurchWide: p.Event.GroupID == nil,
 		RemoteAvailable: p.RemoteOffered(), ChildcareAvailable: p.Event.ChildcareAvailable, OwnScope: ownScope,
 	}
-	if !p.ShowsSeries() {
+	if !p.ShowsSeries() || (p.Manager && !eventPageLists(p.Occ, now)) {
 		row.DateURL = p.DateURL()
 	}
 	if p.Ordinary {
@@ -217,24 +225,24 @@ func (p *dateProjection) calendarRow(sn *siteNameOnce, myStatus string, ownScope
 // pageVideoRight is whether the viewer may see the link on this date's page: by
 // ordinary access, or through an exact-date invitation (reg is their own row).
 func (p *dateProjection) pageVideoRight(reg models.Registration, now time.Time) bool {
-	var actor policy.ContactAccount
+	var actor policy.OccurrenceActor
 	var access policy.OccurrenceAccess
 	var facts policy.OccurrenceFacts
 	if p.Invited != nil {
-		actor, access, facts = p.Invited.Account, p.Invited.Access, p.Invited.Facts
+		actor, access, facts = p.Invited.Actor, p.Invited.Access, p.Invited.Facts
 	}
 	return policy.CanSeeOccurrenceVideo(actor, p.Ordinary, p.Manager, access, facts, now, videoRevealOf(p.Event), reg.Status)
 }
 
 // dateJSON is the date page. It never carries host people, series, attendee,
-// contact or management data (the handler adds the room, reminders and whether
+// contact or management data beyond canManage (the handler adds the room, reminders and whether
 // the viewer can register). reg is the viewer's own registration, if any.
 func (p *dateProjection) dateJSON(sn *siteNameOnce, reg models.Registration, now time.Time) dateOccurrenceJSON {
 	e := p.Eff()
-	var actor policy.ContactAccount
+	var actor policy.OccurrenceActor
 	var access policy.OccurrenceAccess
 	if p.Invited != nil {
-		actor, access = p.Invited.Account, p.Invited.Access
+		actor, access = p.Invited.Actor, p.Invited.Access
 	}
 	canVideo := p.pageVideoRight(reg, now)
 	out := dateOccurrenceJSON{ID: p.Occ.ID, EventID: p.Event.ID, Date: p.DateString(), DateURL: p.DateURL(),
@@ -243,8 +251,9 @@ func (p *dateProjection) dateJSON(sn *siteNameOnce, reg models.Registration, now
 		RemoteAvailable: p.RemoteOffered(), GuestsAllowed: e.GuestsAllowed,
 		VideoProvider: videoProviderOf(p.Event), CanSeeVideo: canVideo,
 		CanSeeAttendees: policy.CanSeeOccurrenceAttendees(p.Ordinary, p.Attendees),
-		CanDecline:      p.Invited != nil && policy.CanEndOccurrenceAccess(actor, false, access),
-		CanBlock:        p.Invited != nil && policy.CanBlockManagerAdds(actor, access)}
+		CanDecline:      p.Invited != nil && policy.CanEndOwnOccurrenceAccess(actor, access),
+		CanBlock:        p.Invited != nil && policy.CanBlockManagerAdds(actor, access),
+		CanManage:       p.Ordinary && p.Manager}
 	if reg.ID > 0 {
 		out.MyRegistration = &reg.Status
 	}

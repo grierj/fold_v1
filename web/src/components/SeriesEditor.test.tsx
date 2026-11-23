@@ -1,9 +1,15 @@
 import { testEvent } from "../test/fixtures";
 import { stubService } from "../test/service";
-import { render, screen, waitFor } from "@testing-library/react";
+import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { RouterProvider, createMemoryRouter } from "react-router-dom";
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import { DateWritesProvider } from "../lib/dateWrites";
+import { ERROR_COPY } from "../lib/errors";
+import { formatDayFull } from "../lib/when";
+import { occurrence } from "../test/occurrence";
+import { careKid, deferred, KEPT, KEPT_COUNT, kept409, keptForbiddenNow, keptPerson, observeKept, READ_OUTCOMES, readFailures, type ReadOutcome } from "../test/keptPanel";
+import type { Attendee, EventOccurrence, OccurrenceResponse } from "../types";
 import { SeriesEditor } from "./SeriesEditor";
 import { UnsavedChangesBlocker } from "../lib/unsavedChanges";
 import { DateRooms, SeriesRooms } from "../api/rooms";
@@ -15,7 +21,7 @@ stubService(DateRooms, () => ({ list: vi.fn() }));
 
 stubService(SeriesRooms, () => ({ list: vi.fn() }));
 
-stubService(Events, () => ({ update: vi.fn(), generateJitsi: vi.fn().mockResolvedValue({ url: "https://meet.jit.si/fold-abc123def4" }) }));
+stubService(Events, () => ({ update: vi.fn(), generateJitsi: vi.fn().mockResolvedValue({ url: "https://meet.jit.si/fold-abc123def4" }), managedDate: vi.fn(), removeRegistration: vi.fn() }));
 
 stubService(Site, () => ({ get: vi.fn().mockResolvedValue({ timezone: "UTC" }) }));
 
@@ -301,5 +307,161 @@ describe("SeriesEditor form layout (DEC-95)", () => {
       expect(screen.queryByRole("combobox", { name: /^Room/ })).not.toBeInTheDocument();
       expect(DateRooms.list).not.toHaveBeenCalled();
     });
+  });
+});
+
+// W5: a series save refused for dates someone who left kept (DEC-156).
+describe("SeriesEditor and kept dates", () => {
+  const A = "2026-12-01";
+  const B = "2026-12-08";
+  const series = { eventId: 7, startsLocal: "2026-12-01T19:00", durationMinutes: 60, tzid: "UTC", title: "Supper", description: "", location: "Hall", recurrenceRule: "FREQ=WEEKLY;BYDAY=TU", capacity: null, waitlistEnabled: false, guestsAllowed: 0 };
+  const read = (date: string, over: Partial<EventOccurrence> = {}): OccurrenceResponse => ({ occurrence: occurrence({ date, attendeesVisible: true, keptCount: 1, attendees: [keptPerson("Old Name"), careKid()], ...over }) });
+  const both = [{ date: A, keptCount: 1 }, { date: B, keptCount: 1 }];
+  const home = () => screen.getByRole("region", { name: KEPT.home });
+
+  function mount(onAuthorityLost = vi.fn()) {
+    const router = createMemoryRouter([{ path: "/", element: <DateWritesProvider><SeriesEditor series={series} idPrefix="kept" onSaved={() => {}} onAuthorityLost={onAuthorityLost} /></DateWritesProvider> }]);
+    render(<RouterProvider router={router} />);
+
+    return { onAuthorityLost };
+  }
+
+  async function typeTitleAndSave() {
+    const title = screen.getByRole("textbox", { name: "Title" });
+    await userEvent.clear(title);
+    await userEvent.type(title, "Typed title");
+    await userEvent.click(screen.getByRole("button", { name: "Save series" }));
+  }
+
+  const draftKept = () => expect(screen.getByRole("textbox", { name: "Title" })).toHaveValue("Typed title");
+
+  beforeEach(() => {
+    vi.mocked(Events.update).mockReset();
+    vi.mocked(Events.managedDate).mockReset();
+    vi.mocked(Events.removeRegistration).mockReset();
+    vi.mocked(Events.managedDate).mockImplementation((_id, date) => Promise.resolve(read(date)));
+    vi.mocked(Events.removeRegistration).mockResolvedValue({});
+  });
+
+  it("shows one date-only section per date, no count and the save line", async () => {
+    vi.mocked(Events.update).mockRejectedValueOnce(kept409(both));
+    mount();
+    await typeTitleAndSave();
+    await screen.findByText("Old Name");
+    expect(within(home()).getByRole("heading", { name: formatDayFull(A) })).toBeInTheDocument();
+    expect(within(home()).getByRole("heading", { name: formatDayFull(B) })).toBeInTheDocument();
+    expect(within(home()).getByRole("alert")).toHaveTextContent(KEPT.saveLine);
+    expect(document.body.textContent).not.toMatch(KEPT_COUNT);
+    expect(document.body.textContent).not.toContain(ERROR_COPY.date_kept_after_leaving);
+    expect(document.querySelector("form")?.contains(home())).toBe(false);
+    draftKept();
+  });
+
+  it.each([["missing", undefined], ["empty", []], ["unreadable", [{ when: A }]]])("with a %s list shows the ERROR_COPY line alone and no panel", async (_name, list) => {
+    vi.mocked(Events.update).mockRejectedValueOnce(kept409(list));
+    mount();
+    await typeTitleAndSave();
+    expect(await screen.findByRole("alert")).toHaveTextContent(ERROR_COPY.date_kept_after_leaving);
+    expect(screen.queryByRole("region", { name: KEPT.home })).not.toBeInTheDocument();
+    expect(document.body.textContent).not.toContain(formatDayFull(A));
+    expect(Events.managedDate).not.toHaveBeenCalled();
+    draftKept();
+  });
+
+  it("a refused panel read clears the kept state and focuses Save when focus was in the panel", async () => {
+    vi.mocked(Events.update).mockRejectedValueOnce(kept409(both));
+    const { onAuthorityLost } = mount();
+    await typeTitleAndSave();
+    await screen.findByText("Old Name");
+    screen.getByRole("button", { name: "Manage sign-ups" }).focus();
+    vi.mocked(Events.managedDate).mockRejectedValueOnce(readFailures[403]());
+    await userEvent.keyboard("{Enter}");
+    await waitFor(() => expect(onAuthorityLost).toHaveBeenCalledTimes(1));
+    expect(screen.queryByRole("region", { name: KEPT.home })).not.toBeInTheDocument();
+    expect(screen.getByRole("alert")).toHaveTextContent(KEPT.refused);
+    expect(document.activeElement).toBe(screen.getByRole("button", { name: "Save series" }));
+    draftKept();
+  });
+
+  // W4b's events (iii-b) and (v) on the series host.
+  for (const event of ["iii-b", "v"] as const) {
+    for (const outcome of READ_OUTCOMES) {
+      it(`event (${event}) settled ${outcome} keeps the draft and shows nothing kept-specific while pending`, async () => {
+        if (event === "iii-b") vi.mocked(Events.managedDate).mockResolvedValueOnce(read(A, { attendeesVisible: false, attendees: undefined }));
+        vi.mocked(Events.update).mockRejectedValueOnce(kept409(both));
+        const { onAuthorityLost } = mount();
+        await typeTitleAndSave();
+        await screen.findByText(event === "iii-b" ? KEPT.nobodyHere : "Old Name");
+        const held = deferred<OccurrenceResponse>();
+        vi.mocked(Events.managedDate).mockReturnValueOnce(held.promise);
+        const seen = observeKept([A, B]);
+
+        if (event === "iii-b") act(() => { window.dispatchEvent(new Event("focus")); });
+        else await userEvent.click(screen.getByRole("button", { name: "Manage sign-ups" }));
+        expect(keptForbiddenNow([A, B])).toEqual([]);
+        expect(home()).toHaveTextContent(KEPT.checking);
+        seen.stop();
+        seen.expectClean();
+        const date = event === "v" ? B : A;
+        await settleRead(held, outcome, date);
+
+        if (outcome === "success") expect(await screen.findByText("New Name")).toBeInTheDocument();
+        else if (outcome === 403 || outcome === 404) {
+          await waitFor(() => expect(onAuthorityLost).toHaveBeenCalledTimes(1));
+          expect(screen.getByRole("alert")).toHaveTextContent(KEPT.refused);
+        } else expect(home()).toHaveTextContent(KEPT.unknown);
+        draftKept();
+      });
+    }
+  }
+
+  async function settleRead(held: ReturnType<typeof deferred<OccurrenceResponse>>, outcome: ReadOutcome, date: string) {
+    await act(async () => {
+      if (outcome === "success") held.resolve(read(date, { attendees: [keptPerson("New Name")] }));
+      else held.reject(readFailures[outcome]());
+      await held.promise.catch(() => {});
+    });
+  }
+
+  it("the race across dates: no line ever calls the dates clear together, and a new refusal starts fresh", async () => {
+    // The server's state, which the mock reads: who keeps each date.
+    const server = new Map<string, Attendee[]>([[A, [keptPerson("Old Name")]], [B, []]]);
+    vi.mocked(Events.managedDate).mockImplementation((_id, date) => Promise.resolve(read(date, { attendees: server.get(date) ?? [], keptCount: (server.get(date) ?? []).filter((a) => a.keptAfterLeaving).length })));
+    vi.mocked(Events.removeRegistration).mockImplementation(() => { server.set(A, []);
+
+ return Promise.resolve({}); });
+    vi.mocked(Events.update).mockRejectedValueOnce(kept409(both));
+    mount();
+    const seen = observeKept([A, B]);
+    await typeTitleAndSave();
+    await screen.findByText("Old Name");
+    await userEvent.click(screen.getByRole("button", { name: "More for Old Name" }));
+    await userEvent.click(screen.getByRole("menuitem", { name: "Remove Old Name" }));
+    await userEvent.click(screen.getByRole("button", { name: "Remove" }));
+    expect(await screen.findByText(KEPT.nobodyHere)).toBeInTheDocument();
+    // Another member leaves and keeps A.
+    server.set(A, [keptPerson("Third Name", { registrationId: 33, userId: 12 })]);
+    await userEvent.click(screen.getByRole("button", { name: "Manage sign-ups" }));
+    expect(await screen.findByText(KEPT.nobodyHere)).toBeInTheDocument();
+    const sectionA = within(home()).getByRole("heading", { name: formatDayFull(A) }).parentElement;
+    expect(sectionA?.textContent).toBe(`${formatDayFull(A)}Manage sign-ups`);
+    seen.stop();
+
+    for (const s of seen.states) expect(s.text).not.toMatch(/these dates now|Save again to apply your change/);
+    const held = deferred<OccurrenceResponse>();
+    vi.mocked(Events.managedDate).mockReturnValueOnce(held.promise);
+    const save = deferred<Awaited<ReturnType<typeof Events.update>>>();
+    vi.mocked(Events.update).mockReturnValueOnce(save.promise);
+    await userEvent.click(screen.getByRole("button", { name: "Save series" }));
+    const again = observeKept([A, B]);
+    await act(async () => { save.reject(kept409([{ date: A, keptCount: 1 }])); await save.promise.catch(() => {}); });
+    await waitFor(() => expect(Events.managedDate).toHaveBeenLastCalledWith(7, A));
+    expect(document.body.textContent).toContain(KEPT.checking);
+    again.stop();
+    again.expectClean();
+    await act(async () => { held.resolve(read(A, { attendees: server.get(A) ?? [], keptCount: 1 })); await held.promise; });
+    expect(screen.getByText("Third Name")).toBeInTheDocument();
+    expect(within(home()).getByRole("alert")).toHaveTextContent(ERROR_COPY.date_kept_after_leaving);
+    draftKept();
   });
 });

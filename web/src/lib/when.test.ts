@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { badgeParts, formatCalendarDay, formatDayFull, formatPeriod, formatTime, formatWhen, heldIn, historyDayBounds, zoneNote, formatNextMeeting, minuteOfDay, formatHour, wallClock, wallToInstant, formatWhenIn, shortZoneName } from "./when";
+import { badgeParts, formatCalendarDay, formatDayFull, formatWallClock, formatPeriod, formatTime, formatWhen, heldIn, historyDayBounds, zoneNote, formatNextMeeting, minuteOfDay, formatHour, wallClock, wallToInstant, formatWhenIn, shortZoneName } from "./when";
 
 // Saturday Oct 17 2026, 7:00 PM in Los Angeles (PDT, UTC-7) = 02:00 UTC Sunday.
 const laSat7pm = "2026-10-18T02:00:00Z";
@@ -41,6 +41,19 @@ describe("formatWhen", () => {
     expect(formatTime("2026-10-28T23:00:00Z", "Europe/London")).toBe("11:00 PM");
     expect(formatTime("2026-11-05T00:00:00Z", "Europe/London")).toBe("12:00 AM");
     expect(formatTime("2026-11-05T00:00:00Z", "America/New_York")).toBe("7:00 PM");
+  });
+});
+
+describe("formatWallClock", () => {
+  it("reads an event's own clock as written, whatever the viewer's zone", () => {
+    expect(formatWallClock("2026-12-01T19:00")).toBe("Tuesday, December 1, 2026 at 7:00 PM");
+    expect(formatWallClock("2026-12-01T00:05")).toBe("Tuesday, December 1, 2026 at 12:05 AM");
+    // 2:30 AM on the day US clocks skip it still reads as it was typed.
+    expect(formatWallClock("2027-03-14T02:30")).toBe("Sunday, March 14, 2027 at 2:30 AM");
+  });
+
+  it("returns anything that is not a wall-clock minute unchanged", () => {
+    for (const odd of ["2026-02-30T19:00", "2026-12-01T19:00:00", "2026-12-01", "soon"]) expect(formatWallClock(odd)).toBe(odd);
   });
 });
 

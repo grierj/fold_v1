@@ -212,13 +212,18 @@ test("a group page chunk that fails while it starts on hover is fetched again fo
 
 // The group and event routes have their own loading boundaries, so leaving a
 // loaded group for its event shows the event skeleton, not the old group.
+// The group is this test's own: in a shared seed group, other specs' events
+// make the list compact (over 6 events) and can page the second date out.
 test("See all dates from a loaded group shows the event skeleton while the event page chunk loads", async ({ page, request }) => {
   const admin = await apiAs(request, "grier");
-  const { groups } = schema.parse(schema.looseObject({ groups: schema.array(schema.looseObject({ id: schema.number(), name: schema.string() })) }), (await admin("GET", "/groups")));
-  const room = groups.find((g) => g.name === "Room 201 class")!;
-  const lee = await apiAs(request, "lee");
+  const groupName = `Slow page group ${Date.now().toString(36)}`;
+
+  const { group: room } = schema.parse(schema.looseObject({ group: schema.looseObject({ id: schema.number() }) }), await admin("POST", "/groups", {
+    name: groupName, description: "", tags: [], location: "", visibility: "public", memberLimit: null,
+  }));
+
   const d = new Date(Date.now() + 11 * 864e5).toISOString().slice(0, 10);
-  await lee("POST", `/groups/${room.id}/events`, {
+  await admin("POST", `/groups/${room.id}/events`, {
     title: "Slow page night", startsLocal: `${d}T06:30`, durationMinutes: 30, tzid: "America/Boise",
     recurrenceRule: "FREQ=WEEKLY;COUNT=2",
   });
@@ -239,14 +244,14 @@ test("See all dates from a loaded group shows the event skeleton while the event
     await route.continue();
   });
   await page.goto(`/groups/${room.id}`);
-  await expect(page.getByRole("heading", { level: 1, name: "Room 201 class" })).toBeVisible();
+  await expect(page.getByRole("heading", { level: 1, name: groupName })).toBeVisible();
   expect(requested, "the event page chunk loaded with the group").toBe(false);
 
   const card = page.getByRole("article", { name: "Slow page night", exact: true });
-  await card.getByRole("link", { name: /^See (all \d+|more) dates$/ }).click();
+  await card.getByRole("link", { name: "See all 2 dates", exact: true }).click();
   await expect(page).toHaveURL(/\/events\/\d+$/);
   await expect(page.getByRole("status").filter({ hasText: "Loading this event…" })).toBeVisible();
-  await expect(page.getByRole("heading", { level: 1, name: "Room 201 class" })).toHaveCount(0);
+  await expect(page.getByRole("heading", { level: 1, name: groupName })).toHaveCount(0);
   expect(requested).toBe(true);
   release();
   await expect(page.getByRole("heading", { level: 1, name: "Slow page night" })).toBeVisible();

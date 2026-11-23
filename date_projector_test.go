@@ -199,12 +199,16 @@ var projectorViewers = []string{"signed out", "Ada Admin", "Lee Leader", "Mia Me
 var (
 	projectorDateRe  = regexp.MustCompile(`\d{4}-\d{2}-\d{2}|\d{8}`)
 	projectorStampRe = regexp.MustCompile(`(?m)^(LAST-MODIFIED|CREATED)[^\r\n]*\r?\n`)
+	// A manager's edit token carries the per-process generation; it is
+	// replaced before the date pattern could rewrite digit runs inside it.
+	projectorRevisionRe = regexp.MustCompile(`"revision": ?"[^"]*"`)
 )
 
 // normalize replaces the fixture's moving dates with offsets from today, so
 // the goldens do not rot.
 func (f *projectorFixture) normalize(s string) string {
 	s = projectorStampRe.ReplaceAllString(s, "")
+	s = projectorRevisionRe.ReplaceAllString(s, `"revision": "R"`)
 	return projectorDateRe.ReplaceAllStringFunc(s, func(m string) string {
 		layout := "2006-01-02"
 		if len(m) == 8 {

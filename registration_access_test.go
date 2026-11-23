@@ -394,7 +394,7 @@ func TestHardDeletePathsEndLiveGrantsFirst(t *testing.T) {
 	t.Run("restoration drop", func(t *testing.T) {
 		f := newOccurrenceReadFixture(t)
 		err := f.app.DB.Transaction(func(tx *gorm.DB) error {
-			err := f.app.restoreRegistrations(tx, f.recipient.ID, models.UserActive, &f.issuer.ID, "", time.Now().UTC())
+			err := f.app.restoreRegistrations(tx, f.recipient.ID, map[string]any{"status": models.UserActive}, &f.issuer.ID, "", time.Now().UTC())
 			return err
 		})
 		if err != nil {
@@ -762,5 +762,73 @@ func TestRegistrationAccessRepeatRulesSurviveSeriesUndoDeletion(t *testing.T) {
 	if len(notices) != 1 || notices[0].SubjectID == nil || *notices[0].SubjectID != r2.ID || notices[0].DedupeKey == nil ||
 		!strings.HasPrefix(*notices[0].DedupeKey, "occurrence-added:"+itoa(r2.ID)+":") {
 		t.Fatalf("added notices: %+v", notices)
+	}
+}
+
+// TestKeptDateSQLMatchesPolicy: keptDateSQL is a live grant whose origin ends
+// with its date, the same answer models.Registration.AccessLive and
+// policy.AccessEndsWithDate give together, for every origin, an unknown one
+// and none included, live, ended and never granted. (That unexpired agrees
+// just past the end is TestAccessEndsWithDate.) 00014's trigger refuses a
+// later end for exactly those rows, for every state the schema can store;
+// TestKeptDateEndMigration covers an origin it cannot store yet.
+func TestKeptDateSQLMatchesPolicy(t *testing.T) {
+	f := newDepartureTestFixture(t)
+	app := f.app
+	at := time.Now().UTC().Truncate(time.Microsecond)
+	triggerCases := 0
+	origins := []string{"", policy.OccurrenceOriginManagerAdd, policy.OccurrenceOriginDepartureSelf, policy.OccurrenceOriginDepartureRemoval, "a_future_origin"}
+	stamps := []struct {
+		name           string
+		granted, ended *time.Time
+	}{{"live", &at, nil}, {"ended", &at, &at}, {"never granted", nil, nil}}
+	for _, origin := range origins {
+		for _, s := range stamps {
+			r := models.Registration{AccessOrigin: origin, AccessGrantedAt: s.granted, AccessEndedAt: s.ended}
+			want := r.AccessLive() && policy.AccessEndsWithDate(origin)
+			var got bool
+			if err := app.DB.Raw("SELECT ("+keptDateSQL+") FROM (VALUES (?::text, ?::timestamptz, ?::timestamptz)) AS registrations(access_origin, access_granted_at, access_ended_at)",
+				origin, s.granted, s.ended).Row().Scan(&got); err != nil {
+				t.Fatal(err)
+			}
+			if got != want {
+				t.Errorf("origin %q, %s: keptDateSQL %v, policy %v", origin, s.name, got, want)
+			}
+			if stored := (origin == "") == (s.granted == nil); !stored || origin == "a_future_origin" {
+				continue
+			}
+			triggerCases++
+			start := at.Add(48 * time.Hour)
+			occ, reg := addDepartureRegistration(t, f, f.subject, "Trigger parity "+origin+" "+s.name, models.VisibilityPublic, nil, start, start.Add(time.Hour), models.OccurrenceScheduled, models.RegGoing)
+			if origin != "" {
+				g := accessGrant{Origin: origin, IssuerID: &f.leader.ID}
+				actor := f.leader.ID
+				if origin != policy.OccurrenceOriginManagerAdd {
+					var m models.Membership
+					gormMust(t, app.DB.Where("user_id = ? AND group_id = ?", f.subject.ID, f.group.ID).First(&m))
+					if origin == policy.OccurrenceOriginDepartureSelf {
+						actor = f.subject.ID
+					}
+					g = accessGrant{Origin: origin, DepartureMembershipID: &m.ID, DepartureActorID: &actor}
+				}
+				if _, err := seedAccessGrantIn(app.DB, reg.ID, g, &actor, at); err != nil {
+					t.Fatalf("origin %q: seed the grant: %v", origin, err)
+				}
+				if s.ended != nil {
+					gormMust(t, app.DB.Exec(`UPDATE registrations SET access_ended_at = access_granted_at, access_end_reason = 'occurrence_ended' WHERE id = ?`, reg.ID))
+				}
+			}
+			tx := app.DB.Begin()
+			gormMust(t, tx)
+			err := tx.Exec(`UPDATE event_occurrences SET ends_at = ends_at + interval '1 hour' WHERE id = ?`, occ.ID).Error
+			tx.Rollback()
+			if refused := pgConstraint(err, "23514", "event_occurrences_kept_date_end"); refused != want || (!refused && err != nil) {
+				t.Errorf("origin %q, %s: a later end gives %v, want refused %v", origin, s.name, err, want)
+			}
+		}
+	}
+	// No grant, plus live and ended for each of the three stored origins.
+	if triggerCases != 7 {
+		t.Fatalf("the trigger column checked %d stored states, want 7", triggerCases)
 	}
 }

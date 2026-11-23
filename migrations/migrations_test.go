@@ -12,6 +12,7 @@ package migrations_test
 // docs/plan/briefs/audit-2026-11/R9-baseline-squash.md (section 9, S2).
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -242,6 +243,14 @@ type accessDB struct {
 func newAccessDB(t *testing.T) accessDB {
 	t.Helper()
 	a := accessDB{t: t, db: openSQL(t, testdb.Fresh(t, true))}
+	a.seed()
+	return a
+}
+
+// seed writes the shared rows; any version from the baseline on holds their
+// tables.
+func (a accessDB) seed() {
+	a.t.Helper()
 	for _, q := range []string{
 		`INSERT INTO users(id,email,status,role,account_type) VALUES
 		 (1,'departure-leader@example.com','active','member','adult'),
@@ -275,7 +284,6 @@ func newAccessDB(t *testing.T) accessDB {
 	} {
 		a.exec(q)
 	}
-	return a
 }
 
 func (a accessDB) exec(q string, args ...any) {
@@ -1952,7 +1960,8 @@ func TestBaselineDownRefusesWhileAUserExists(t *testing.T) {
 
 func TestBaselineDownAndUpOnAnEmptyDatabase(t *testing.T) {
 	t.Parallel()
-	gdb, err := testdb.Open(testdb.Fresh(t, true))
+	name := testdb.Fresh(t, true)
+	gdb, err := testdb.Open(name)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1964,6 +1973,9 @@ func TestBaselineDownAndUpOnAnEmptyDatabase(t *testing.T) {
 	ctx := context.Background()
 	p := newProvider(t, db)
 	tables := publicTableCount(t, db)
+	// 00015 keeps its fences and the hold through every Down (DEC-158), so
+	// the pristine schema this test checks needs them released first.
+	releaseRecoveryFloor(t, name, db)
 	if _, err := p.DownTo(ctx, 0); err != nil {
 		t.Fatalf("down on an empty database: %v", err)
 	}
@@ -4521,7 +4533,7 @@ func TestOccurrenceSeriesStartsMigration(t *testing.T) {
 	if seriesClockDirty(t, db, eventID) {
 		t.Fatal("Up again starts the event dirty")
 	}
-	if v, err := p.GetDBVersion(ctx); err != nil || v != latestVersion(t) {
+	if v, err := p.GetDBVersion(ctx); err != nil || v != seriesStartsVersion {
 		t.Fatalf("version = %d, %v", v, err)
 	}
 }
@@ -4614,4 +4626,1002 @@ func TestOccurrenceSeriesStartsMigrationRollsBackOnALockTimeout(t *testing.T) {
 		t.Fatalf("version after the failure = %d, %v", v, err)
 	}
 	upTo(t, p, seriesStartsVersion)
+}
+
+const dateEditVersion = 10
+
+func editRevisions(t *testing.T, db *sql.DB, eventID, occID int64) (event, occ int64, receipt []byte) {
+	t.Helper()
+	if err := db.QueryRow(`SELECT e.edit_revision, o.edit_revision, o.edit_receipt FROM events e JOIN event_occurrences o ON o.event_id = e.id
+		WHERE e.id = $1 AND o.id = $2`, eventID, occID).Scan(&event, &occ, &receipt); err != nil {
+		t.Fatal(err)
+	}
+	return event, occ, receipt
+}
+
+// TestDateEditRevisionsMigration: 00010 adds the revision counters and the
+// receipt without touching a row, and its triggers count every tracked change
+// a writer makes (raw SQL here stands for a previous binary that does not know
+// the columns) while ignoring the bookkeeping columns.
+func TestDateEditRevisionsMigration(t *testing.T) {
+	t.Parallel()
+	_, db, p := freshAt(t, dateEditVersion-1)
+	ctx := context.Background()
+	eventID, occID := seriesStartsFixture(t, db)
+	before := snapshotRows[int64](t, db, `SELECT id, (to_jsonb(o) - 'edit_revision' - 'edit_receipt')::text FROM event_occurrences o`)
+	upTo(t, p, dateEditVersion)
+	if got := snapshotRows[int64](t, db, `SELECT id, (to_jsonb(o) - 'edit_revision' - 'edit_receipt')::text FROM event_occurrences o`); !reflect.DeepEqual(got, before) {
+		t.Fatalf("Up changed a date:\n%v\n%v", before, got)
+	}
+	if ev, occ, receipt := editRevisions(t, db, eventID, occID); ev != 1 || occ != 1 || receipt != nil {
+		t.Fatalf("existing rows start at %d/%d/%x, want 1/1/null", ev, occ, receipt)
+	}
+	exec := func(q string, args ...any) {
+		t.Helper()
+		if _, err := db.Exec(q, args...); err != nil {
+			t.Fatalf("%s: %v", q, err)
+		}
+	}
+	receipt := bytes.Repeat([]byte{7}, 32)
+	exec(`UPDATE event_occurrences SET edit_receipt = $1 WHERE id = $2`, receipt, occID)
+	if _, occ, got := editRevisions(t, db, eventID, occID); occ != 1 || !bytes.Equal(got, receipt) {
+		t.Fatalf("a receipt-only write = %d/%x, want no bump and the receipt kept", occ, got)
+	}
+	for _, q := range []string{
+		`UPDATE event_occurrences SET updated_at = now() WHERE id = $1`,
+		`UPDATE event_occurrences SET title_override = title_override, status = status WHERE id = $1`,
+		`UPDATE event_occurrences SET edit_revision = 99 WHERE id = $1`,
+	} {
+		exec(q, occID)
+		if _, occ, got := editRevisions(t, db, eventID, occID); occ != 1 || !bytes.Equal(got, receipt) {
+			t.Fatalf("%s = %d/%x, want no bump and the receipt kept", q, occ, got)
+		}
+	}
+	exec(`UPDATE event_occurrences SET title_override = 'Moved' WHERE id = $1`, occID)
+	if _, occ, got := editRevisions(t, db, eventID, occID); occ != 2 || got != nil {
+		t.Fatalf("a tracked date write = %d/%x, want 2 and the receipt cleared", occ, got)
+	}
+	exec(`UPDATE event_occurrences SET edit_receipt = $1, starts_at = starts_at + interval '1 hour' WHERE id = $2`, receipt, occID)
+	if _, occ, got := editRevisions(t, db, eventID, occID); occ != 3 || got != nil {
+		t.Fatalf("a receipt written with a tracked change = %d/%x, want 3 and no receipt", occ, got)
+	}
+	for _, q := range []string{
+		`UPDATE events SET updated_at = now() WHERE id = $1`,
+		`UPDATE events SET series_clock_dirty = false WHERE id = $1`,
+		`UPDATE events SET edit_revision = 50 WHERE id = $1`,
+		`UPDATE events SET title = title WHERE id = $1`,
+	} {
+		exec(q, eventID)
+		if ev, _, _ := editRevisions(t, db, eventID, occID); ev != 1 {
+			t.Fatalf("%s = event revision %d, want 1", q, ev)
+		}
+	}
+	exec(`UPDATE events SET rrule = rrule WHERE id = $1`, eventID)
+	if ev, _, _ := editRevisions(t, db, eventID, occID); ev != 1 || !seriesClockDirty(t, db, eventID) {
+		t.Fatalf("an equal rule save = %d (dirty %v), want no bump and 00009's flag still raised", ev, seriesClockDirty(t, db, eventID))
+	}
+	exec(`UPDATE events SET title = 'Renamed', edit_revision = 1 WHERE id = $1`, eventID)
+	exec(`UPDATE events SET deleted_at = now() WHERE id = $1`, eventID)
+	if ev, _, _ := editRevisions(t, db, eventID, occID); ev != 3 {
+		t.Fatalf("two tracked event writes = %d, want 3", ev)
+	}
+	var fresh int64
+	if err := db.QueryRow(`INSERT INTO event_occurrences (event_id, original_date, starts_at, ends_at, status, edit_revision)
+		VALUES ($1, '2026-03-11', '2026-03-11T09:00:00Z', '2026-03-11T10:00:00Z', 'scheduled', DEFAULT) RETURNING edit_revision`, eventID).Scan(&fresh); err != nil || fresh != 1 {
+		t.Fatalf("an inserted date reads %d, %v, want 1", fresh, err)
+	}
+	if _, err := db.Exec(`UPDATE event_occurrences SET edit_receipt = $1 WHERE id = $2`, []byte("short"), occID); pgErrorCode(err) != "23514" {
+		t.Fatalf("a receipt that is not 32 bytes: %v, want check_violation", err)
+	}
+
+	downTo(t, p, dateEditVersion-1)
+	var leftovers int
+	if err := db.QueryRow(`SELECT (SELECT count(*) FROM pg_proc WHERE proname IN ('events_edit_revision', 'event_occurrences_edit_revision'))
+		+ (SELECT count(*) FROM pg_trigger WHERE tgname IN ('events_edit_revision', 'event_occurrences_edit_revision'))
+		+ (SELECT count(*) FROM information_schema.columns WHERE table_name IN ('events', 'event_occurrences') AND column_name IN ('edit_revision', 'edit_receipt'))`).Scan(&leftovers); err != nil || leftovers != 0 {
+		t.Fatalf("after Down %d objects remain, %v", leftovers, err)
+	}
+	exec(`UPDATE event_occurrences SET title_override = 'Previous schema' WHERE id = $1`, occID)
+	upTo(t, p, dateEditVersion)
+	if ev, occ, got := editRevisions(t, db, eventID, occID); ev != 1 || occ != 1 || got != nil {
+		t.Fatalf("Up again starts at %d/%d/%x, want 1/1/null", ev, occ, got)
+	}
+	if v, err := p.GetDBVersion(ctx); err != nil || v != dateEditVersion {
+		t.Fatalf("version = %d, %v", v, err)
+	}
+}
+
+const pushBindingVersion = 11
+
+// TestPushBindingGenerationMigration: 00011 adds the device binding counter
+// without touching a device, and its trigger counts every change of owner or
+// key a writer makes (raw SQL here stands for a previous binary that does not
+// know the column), including a round trip back to an earlier owner or key
+// pair and a write that sets the counter or created_at by hand, while a save
+// that changes neither keeps it.
+func TestPushBindingGenerationMigration(t *testing.T) {
+	t.Parallel()
+	_, db, p := freshAt(t, pushBindingVersion-1)
+	ctx := context.Background()
+	exec := func(q string, args ...any) {
+		t.Helper()
+		if _, err := db.Exec(q, args...); err != nil {
+			t.Fatalf("%s: %v", q, err)
+		}
+	}
+	exec(`INSERT INTO users (id, email) VALUES (301, 'owner@example.com'), (302, 'next@example.com')`)
+	var dev int64
+	if err := db.QueryRow(`INSERT INTO push_subscriptions (user_id, endpoint, p256dh, auth) VALUES (301, 'https://push.example/1', 'k1', 'a1') RETURNING id`).Scan(&dev); err != nil {
+		t.Fatal(err)
+	}
+	before := snapshotRows[int64](t, db, `SELECT id, (to_jsonb(d) - 'binding_generation')::text FROM push_subscriptions d`)
+	upTo(t, p, pushBindingVersion)
+	if got := snapshotRows[int64](t, db, `SELECT id, (to_jsonb(d) - 'binding_generation')::text FROM push_subscriptions d`); !reflect.DeepEqual(got, before) {
+		t.Fatalf("Up changed a device:\n%v\n%v", before, got)
+	}
+	generation := func() int64 {
+		t.Helper()
+		var g int64
+		if err := db.QueryRow(`SELECT binding_generation FROM push_subscriptions WHERE id = $1`, dev).Scan(&g); err != nil {
+			t.Fatal(err)
+		}
+		return g
+	}
+	if g := generation(); g != 1 {
+		t.Fatalf("an existing device starts at %d, want 1", g)
+	}
+	for _, q := range []string{
+		`UPDATE push_subscriptions SET last_used_at = now(), failed_at = now(), label = 'Phone' WHERE id = $1`,
+		`UPDATE push_subscriptions SET user_id = user_id, p256dh = p256dh, auth = auth WHERE id = $1`,
+		`UPDATE push_subscriptions SET binding_generation = 99 WHERE id = $1`,
+		`UPDATE push_subscriptions SET created_at = created_at - interval '1 day' WHERE id = $1`,
+	} {
+		exec(q, dev)
+		if g := generation(); g != 1 {
+			t.Fatalf("%s = %d, want 1", q, g)
+		}
+	}
+	want := int64(1)
+	for _, q := range []string{
+		`UPDATE push_subscriptions SET user_id = 302 WHERE id = $1`,
+		`UPDATE push_subscriptions SET user_id = 301 WHERE id = $1`,
+		`UPDATE push_subscriptions SET p256dh = 'k2', auth = 'a2' WHERE id = $1`,
+		`UPDATE push_subscriptions SET p256dh = 'k1', auth = 'a1' WHERE id = $1`,
+		`UPDATE push_subscriptions SET auth = 'a3', binding_generation = 1 WHERE id = $1`,
+	} {
+		exec(q, dev)
+		want++
+		if g := generation(); g != want {
+			t.Fatalf("%s = %d, want %d", q, g, want)
+		}
+	}
+	var fresh int64
+	if err := db.QueryRow(`INSERT INTO push_subscriptions (user_id, endpoint, p256dh, auth, binding_generation)
+		VALUES (302, 'https://push.example/2', 'k9', 'a9', DEFAULT) RETURNING binding_generation`).Scan(&fresh); err != nil || fresh != 1 {
+		t.Fatalf("an inserted device reads %d, %v, want 1", fresh, err)
+	}
+
+	downTo(t, p, pushBindingVersion-1)
+	var leftovers int
+	if err := db.QueryRow(`SELECT (SELECT count(*) FROM pg_proc WHERE proname = 'push_subscriptions_binding_generation')
+		+ (SELECT count(*) FROM pg_trigger WHERE tgname = 'push_subscriptions_binding_generation')
+		+ (SELECT count(*) FROM information_schema.columns WHERE table_name = 'push_subscriptions' AND column_name = 'binding_generation')`).Scan(&leftovers); err != nil || leftovers != 0 {
+		t.Fatalf("after Down %d objects remain, %v", leftovers, err)
+	}
+	exec(`UPDATE push_subscriptions SET user_id = 302 WHERE id = $1`, dev)
+	upTo(t, p, pushBindingVersion)
+	if g := generation(); g != 1 {
+		t.Fatalf("Up again starts at %d, want 1", g)
+	}
+	if v, err := p.GetDBVersion(ctx); err != nil || v != pushBindingVersion {
+		t.Fatalf("version = %d, %v", v, err)
+	}
+}
+
+const jobClaimVersion = 12
+
+// TestJobClaimSeqMigration: 00012 adds the claim number without touching a
+// job, every nextval hands out a new number, a previous binary's writes (raw
+// SQL here) leave it alone, and Down removes the column and the sequence
+// while the jobs stay as they were.
+func TestJobClaimSeqMigration(t *testing.T) {
+	t.Parallel()
+	_, db, p := freshAt(t, jobClaimVersion-1)
+	exec := func(q string, args ...any) {
+		t.Helper()
+		if _, err := db.Exec(q, args...); err != nil {
+			t.Fatalf("%s: %v", q, err)
+		}
+	}
+	exec(`INSERT INTO jobs (kind, status, attempts, locked_at, locked_by) VALUES ('work', 'running', 1, now(), 'old'), ('work', 'queued', 0, NULL, '')`)
+	jobsNow := `SELECT id, (to_jsonb(j) - 'claim_seq')::text FROM jobs j`
+	before := snapshotRows[int64](t, db, jobsNow)
+	upTo(t, p, jobClaimVersion)
+	if got := snapshotRows[int64](t, db, jobsNow); !reflect.DeepEqual(got, before) {
+		t.Fatalf("Up changed a job:\n%v\n%v", before, got)
+	}
+	var unset int
+	if err := db.QueryRow(`SELECT count(*) FROM jobs WHERE claim_seq IS NULL`).Scan(&unset); err != nil || unset != 2 {
+		t.Fatalf("existing jobs with no claim number: %d, %v", unset, err)
+	}
+	seen := map[int64]bool{}
+	for range 3 {
+		var n int64
+		if err := db.QueryRow(`UPDATE jobs SET claim_seq = nextval('jobs_claim_seq') WHERE locked_by = 'old' RETURNING claim_seq`).Scan(&n); err != nil || seen[n] {
+			t.Fatalf("claim number %d repeated or failed: %v", n, err)
+		}
+		seen[n] = true
+	}
+	var kept int64
+	if err := db.QueryRow(`SELECT claim_seq FROM jobs WHERE locked_by = 'old'`).Scan(&kept); err != nil {
+		t.Fatal(err)
+	}
+	exec(`UPDATE jobs SET status = 'queued', attempts = attempts - 1, locked_at = NULL WHERE locked_by = 'old'`)
+	var after int64
+	if err := db.QueryRow(`SELECT claim_seq FROM jobs WHERE locked_by = 'old'`).Scan(&after); err != nil || after != kept {
+		t.Fatalf("a write that names no claim number moved it: %d, want %d, %v", after, kept, err)
+	}
+
+	before = snapshotRows[int64](t, db, jobsNow)
+	downTo(t, p, jobClaimVersion-1)
+	if got := snapshotRows[int64](t, db, `SELECT id, to_jsonb(j)::text FROM jobs j`); !reflect.DeepEqual(got, before) {
+		t.Fatalf("Down changed a job:\n%v\n%v", before, got)
+	}
+	var leftovers int
+	if err := db.QueryRow(`SELECT (SELECT count(*) FROM pg_class WHERE relname = 'jobs_claim_seq')
+		+ (SELECT count(*) FROM information_schema.columns WHERE table_name = 'jobs' AND column_name = 'claim_seq')`).Scan(&leftovers); err != nil || leftovers != 0 {
+		t.Fatalf("after Down %d objects remain, %v", leftovers, err)
+	}
+	upTo(t, p, jobClaimVersion)
+	if v, err := p.GetDBVersion(context.Background()); err != nil || v != jobClaimVersion {
+		t.Fatalf("version = %d, %v", v, err)
+	}
+}
+
+const audienceAdmittedVersion = 13
+
+// TestMessageAudienceAdmittedMigration: 00013 adds the date-check mark
+// without touching a recipient row or claiming evidence for one: every
+// existing row, sent and skipped alike, reads NULL. A previous binary's
+// insert, which names no such column, reads NULL too; a later outcome the
+// previous binary writes leaves a mark alone. Down drops only the column and
+// changes no row.
+func TestMessageAudienceAdmittedMigration(t *testing.T) {
+	t.Parallel()
+	_, db, p := freshAt(t, audienceAdmittedVersion-1)
+	exec := func(q string, args ...any) {
+		t.Helper()
+		if _, err := db.Exec(q, args...); err != nil {
+			t.Fatalf("%s: %v", q, err)
+		}
+	}
+	exec(`INSERT INTO users(id,email,status,role) VALUES(1,'author@example.com','active','member'),(2,'reader@example.com','active','member')`)
+	exec(`INSERT INTO messages(id,author_id,status,category,subject,audience) VALUES(1,1,'sent','announcement','News','{"type":"occurrence","occurrenceId":5}')`)
+	exec(`INSERT INTO message_recipients(message_id,user_id,channel,address,status,reason) VALUES
+		(1,2,'email','reader@example.com','sent',''),(1,2,'push','','suppressed','push is off')`)
+	rowsNow := `SELECT id, (to_jsonb(r) - 'audience_admitted_at')::text FROM message_recipients r`
+	before := snapshotRows[int64](t, db, rowsNow)
+	upTo(t, p, audienceAdmittedVersion)
+	if got := snapshotRows[int64](t, db, rowsNow); !reflect.DeepEqual(got, before) {
+		t.Fatalf("Up changed a row:\n%v\n%v", before, got)
+	}
+	var marked int
+	if err := db.QueryRow(`SELECT count(*) FROM message_recipients WHERE audience_admitted_at IS NOT NULL`).Scan(&marked); err != nil || marked != 0 {
+		t.Fatalf("Up marked %d existing rows, %v", marked, err)
+	}
+	// A previous binary's insert and outcome write, which name no mark.
+	exec(`INSERT INTO message_recipients(message_id,user_id,channel,address,status,copy_of_user_id) VALUES(1,1,'email','author@example.com','queued',NULL)`)
+	exec(`UPDATE message_recipients SET audience_admitted_at = now() WHERE channel = 'push'`)
+	exec(`UPDATE message_recipients SET status = 'failed', error = 'x', updated_at = now()`)
+	var unmarked, kept int
+	if err := db.QueryRow(`SELECT count(*) FILTER (WHERE audience_admitted_at IS NULL), count(*) FILTER (WHERE channel = 'push' AND audience_admitted_at IS NOT NULL) FROM message_recipients`).Scan(&unmarked, &kept); err != nil || unmarked != 2 || kept != 1 {
+		t.Fatalf("after a previous binary's writes: %d unmarked, %d kept, %v", unmarked, kept, err)
+	}
+	before = snapshotRows[int64](t, db, rowsNow)
+	downTo(t, p, audienceAdmittedVersion-1)
+	if got := snapshotRows[int64](t, db, `SELECT id, to_jsonb(r)::text FROM message_recipients r`); !reflect.DeepEqual(got, before) {
+		t.Fatalf("Down changed a row:\n%v\n%v", before, got)
+	}
+	upTo(t, p, audienceAdmittedVersion)
+	if v, err := p.GetDBVersion(context.Background()); err != nil || v != audienceAdmittedVersion {
+		t.Fatalf("version = %d, %v", v, err)
+	}
+}
+
+const keptDateEndVersion = 14
+
+// pgConstraintName is the constraint a PostgreSQL error names, "" for any
+// other error.
+func pgConstraintName(err error) string {
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) {
+		return pgErr.ConstraintName
+	}
+	return ""
+}
+
+// keptDateRefused reports whether err is 00014's refusal, as the driver
+// carries it to a writer: SQLSTATE 23514 naming event_occurrences_kept_date_end.
+func keptDateRefused(err error) bool {
+	return pgErrorCode(err) == "23514" && pgConstraintName(err) == "event_occurrences_kept_date_end"
+}
+
+// TestKeptDateEndMigration (DEC-156): 00014's trigger refuses an UPDATE that
+// makes a date end later while an unstamped grant of any origin but
+// manager_add is on it, and any such UPDATE at an isolation level other than
+// Read Committed. It reads no clock and only stored state, so a writer that
+// stamps the grant first in its own transaction passes: that is the trigger's
+// stated limit, the path an earlier build takes after a date's stored end
+// (M4). Raw SQL stands in for every writer; no earlier binary runs here and
+// nothing is claimed about one. Up and Down change no row.
+func TestKeptDateEndMigration(t *testing.T) {
+	t.Parallel()
+	name, db, p := freshAt(t, keptDateEndVersion-1)
+	a := accessDB{t: t, db: db}
+	a.seed()
+	// Live grants: 40 on date 30 (departure_self), 41 on 31
+	// (departure_removal), 42 on 32 (manager_add), 46 on 36 (departure_self,
+	// stamped by M4). 43 on 33 has none. 45 on 35 is a departure grant that
+	// ended at its date's end.
+	a.exec(`DELETE FROM manager_add_blocks WHERE subject_user_id=3`)
+	a.exec(`UPDATE registrations SET access_origin='departure_self',access_departure_membership_id=50,access_departure_actor_id=2,access_granted_at='2026-10-26 12:00Z' WHERE id=40`)
+	a.exec(`UPDATE registrations SET access_origin='departure_removal',access_departure_membership_id=50,access_departure_actor_id=1,access_granted_at='2026-10-26 12:00Z' WHERE id=41`)
+	a.exec(`UPDATE registrations SET access_origin='manager_add',access_issuer_id=1,access_granted_at='2026-10-26 12:00Z' WHERE id=42`)
+	a.exec(`UPDATE registrations SET access_origin='departure_removal',access_departure_membership_id=54,access_departure_actor_id=7,access_granted_at='2026-10-26 12:00Z' WHERE id=45`)
+	a.exec(`UPDATE registrations SET access_ended_at='2026-12-06 19:00Z',access_end_reason='occurrence_ended' WHERE id=45`)
+	a.exec(`UPDATE registrations SET access_origin='departure_self',access_departure_membership_id=52,access_departure_actor_id=3,access_granted_at='2026-10-26 12:00Z' WHERE id=46`)
+	// M8's dates: their times are seeded before their grants, because a raise
+	// onto a live grant is exactly what 00014 refuses.
+	a.exec(`INSERT INTO event_occurrences(id,event_id,original_date,starts_at,ends_at,status) VALUES
+		(38,20,'2025-11-20','2025-11-20 18:00Z','2025-11-20 19:00Z','scheduled'),
+		(39,20,'2027-11-20','2027-11-20 18:00Z','2027-11-20 19:00Z','scheduled')`)
+	a.exec(`INSERT INTO registrations(id,occurrence_id,user_id,status,source) VALUES(48,38,2,'going','web'),(49,39,2,'going','web')`)
+	a.exec(`UPDATE registrations SET access_origin='departure_self',access_departure_membership_id=50,access_departure_actor_id=2,access_granted_at='2026-10-26 12:00Z' WHERE id IN (48,49)`)
+
+	tables := `SELECT 'o' || id, to_jsonb(o)::text FROM event_occurrences o UNION ALL SELECT 'r' || id, to_jsonb(r)::text FROM registrations r`
+	before := snapshotRows[string](t, db, tables)
+	upTo(t, p, keptDateEndVersion)
+	sameRows(t, "rows after Up", snapshotRows[string](t, db, tables), before)
+
+	raise := `UPDATE event_occurrences SET ends_at = ends_at + interval '1 hour' WHERE id = $1`
+	dateRow := func(t *testing.T, id int) string {
+		t.Helper()
+		return queryLines(t, db, fmt.Sprintf(`SELECT to_jsonb(o)::text FROM event_occurrences o WHERE id = %d`, id))
+	}
+	refused := func(t *testing.T, label string, err error) {
+		t.Helper()
+		if !keptDateRefused(err) {
+			t.Errorf("%s: %v (code %q, constraint %q), want 23514 event_occurrences_kept_date_end", label, err, pgErrorCode(err), pgConstraintName(err))
+		}
+	}
+	live := func(t *testing.T, reg int) {
+		t.Helper()
+		if n := (accessDB{t: t, db: db}).count(`SELECT count(*) FROM registrations WHERE id=$1 AND access_granted_at IS NOT NULL AND access_ended_at IS NULL`, reg); n != 1 {
+			t.Errorf("registration %d's grant is no longer live", reg)
+		}
+	}
+
+	t.Run("M1 a live departure grant refuses a later end", func(t *testing.T) {
+		for _, c := range []struct {
+			origin   string
+			date, rg int
+		}{{"departure_self", 30, 40}, {"departure_removal", 31, 41}} {
+			stored := dateRow(t, c.date)
+			_, err := db.Exec(raise, c.date)
+			refused(t, c.origin, err)
+			if got := dateRow(t, c.date); got != stored {
+				t.Errorf("%s: the refused raise changed the date (and its edit_revision):\n%s\nwant\n%s", c.origin, got, stored)
+			}
+			live(t, c.rg)
+		}
+	})
+	t.Run("M2 a leader's add, no grant and an ended grant let it end later", func(t *testing.T) {
+		for label, date := range map[string]int{"manager_add": 32, "no grant": 33, "ended departure grant": 35} {
+			if _, err := db.Exec(raise, date); err != nil {
+				t.Errorf("%s: %v", label, err)
+			}
+		}
+	})
+	t.Run("M3 an earlier or unchanged end commits with the grant live", func(t *testing.T) {
+		for _, q := range []string{
+			`UPDATE event_occurrences SET ends_at = ends_at - interval '10 minutes' WHERE id = 30`,
+			`UPDATE event_occurrences SET starts_at = starts_at + interval '10 minutes' WHERE id = 30`,
+			`UPDATE event_occurrences SET title_override = 'Same end', ends_at = ends_at WHERE id = 30`,
+		} {
+			if _, err := db.Exec(q); err != nil {
+				t.Errorf("%s: %v", q, err)
+			}
+		}
+		live(t, 40)
+	})
+	t.Run("M5 raise then stamp is refused at the raise", func(t *testing.T) {
+		tx, err := db.Begin()
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer tx.Rollback()
+		_, err = tx.Exec(raise, 31)
+		refused(t, "the raise before the stamp", err)
+		if _, err := tx.Exec(`UPDATE registrations SET access_ended_at='2026-12-02 19:00Z',access_end_reason='occurrence_ended' WHERE id=41`); pgErrorCode(err) != "25P02" {
+			t.Errorf("the stamp after a refused raise: %v, want the aborted transaction (25P02)", err)
+		}
+		tx.Rollback()
+		live(t, 41)
+	})
+	t.Run("M6 a committed shortening cannot be extended while the grant is live", func(t *testing.T) {
+		if _, err := db.Exec(`UPDATE event_occurrences SET ends_at = ends_at - interval '30 minutes' WHERE id = 31`); err != nil {
+			t.Fatal(err)
+		}
+		_, err := db.Exec(`UPDATE event_occurrences SET ends_at = ends_at + interval '15 minutes' WHERE id = 31`)
+		refused(t, "extending the shortened date", err)
+	})
+	t.Run("M7 earlier builds' write shapes are refused while the grant is live", func(t *testing.T) {
+		// Stand-ins at Read Committed for the shapes the earlier builds' writers
+		// send (the series move, a full-row GORM Save, a restore that retimes);
+		// no earlier binary runs, and what one would answer is not claimed.
+		_, err := db.Exec(`UPDATE event_occurrences SET starts_at = starts_at + interval '1 day', ends_at = ends_at + interval '1 day' WHERE id = 30`)
+		refused(t, "the series move", err)
+
+		gdb, err := testdb.Open(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if sqlDB, err := gdb.DB(); err == nil {
+			t.Cleanup(func() { sqlDB.Close() })
+		}
+		var o models.EventOccurrence
+		if err := gdb.First(&o, 30).Error; err != nil {
+			t.Fatal(err)
+		}
+		o.EndsAt = o.EndsAt.Add(time.Hour)
+		refused(t, "a full-row Save", gdb.Save(&o).Error)
+
+		if _, err := db.Exec(`UPDATE event_occurrences SET status = 'cancelled', cancel_source = 'series' WHERE id = 31`); err != nil {
+			t.Fatal(err)
+		}
+		_, err = db.Exec(`UPDATE event_occurrences SET status = 'scheduled', cancel_source = '', starts_at = starts_at + interval '1 day', ends_at = ends_at + interval '1 day' WHERE id = 31`)
+		refused(t, "a restore that retimes", err)
+		if _, err := db.Exec(`UPDATE event_occurrences SET status = 'scheduled', cancel_source = '' WHERE id = 31`); err != nil {
+			t.Fatalf("a restore that keeps the times: %v", err)
+		}
+		live(t, 40)
+		live(t, 41)
+	})
+	t.Run("M8 the refusal reads no clock", func(t *testing.T) {
+		for label, date := range map[string]int{"ended a year ago": 38, "a year ahead": 39} {
+			_, err := db.Exec(raise, date)
+			refused(t, label, err)
+		}
+		def := strings.ToLower(queryLines(t, db, `SELECT pg_get_functiondef('event_occurrences_kept_date_end()'::regprocedure)`))
+		for _, clock := range []string{"now(", "clock_timestamp", "current_timestamp", "statement_timestamp", "transaction_timestamp", "localtimestamp", "current_date"} {
+			if strings.Contains(def, clock) {
+				t.Errorf("the trigger function reads a clock (%s):\n%s", clock, def)
+			}
+		}
+	})
+	t.Run("M10 any isolation level but Read Committed refuses every later end", func(t *testing.T) {
+		ctx := context.Background()
+		for _, c := range []struct {
+			level  sql.IsolationLevel
+			refuse bool
+		}{{sql.LevelRepeatableRead, true}, {sql.LevelSerializable, true}, {sql.LevelReadCommitted, false}} {
+			tx, err := db.BeginTx(ctx, &sql.TxOptions{Isolation: c.level})
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, err = tx.Exec(raise, 33)
+			if c.refuse {
+				refused(t, c.level.String()+" with no grant", err)
+			} else if err != nil {
+				t.Errorf("%s with no grant: %v", c.level, err)
+			}
+			tx.Rollback()
+		}
+	})
+	t.Run("an origin the schema does not know yet blocks too", func(t *testing.T) {
+		// The trigger means "not manager_add", so a future origin blocks until
+		// someone reviews it. The schema refuses unknown origins today, so the
+		// row is written with the provenance check and trigger set aside, in a
+		// transaction that is rolled back.
+		tx, err := db.Begin()
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer tx.Rollback()
+		for _, q := range []string{
+			`ALTER TABLE registrations DROP CONSTRAINT registrations_access_provenance`,
+			`ALTER TABLE registrations DISABLE TRIGGER USER`,
+			`UPDATE registrations SET access_origin='a_future_origin',access_granted_at='2026-10-26 12:00Z' WHERE id=43`,
+		} {
+			if _, err := tx.Exec(q); err != nil {
+				t.Fatalf("%s: %v", q, err)
+			}
+		}
+		_, err = tx.Exec(raise, 33)
+		refused(t, "a future origin", err)
+	})
+	// M4 runs last: stamping is final, so it spends grant 46.
+	t.Run("M4 stamp then raise in one transaction commits (the stated limit)", func(t *testing.T) {
+		// The trigger reads stored state only. A writer that stamps the grant
+		// and then raises the end in one transaction passes: this is the path
+		// an earlier build takes once a date's stored end has passed (its
+		// before pass stamps the lapsed grant, then it moves the date), and the
+		// limit the docs state.
+		tx, err := db.Begin()
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer tx.Rollback()
+		if _, err := tx.Exec(`UPDATE registrations SET access_ended_at='2026-12-07 19:00Z',access_end_reason='occurrence_ended' WHERE id=46`); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := tx.Exec(raise, 36); err != nil {
+			t.Fatalf("the raise after the stamp: %v", err)
+		}
+		if err := tx.Commit(); err != nil {
+			t.Fatal(err)
+		}
+	})
+	t.Run("M9 Down drops only the guard and Up restores it", func(t *testing.T) {
+		guard := func() int {
+			t.Helper()
+			return (accessDB{t: t, db: db}).count(`SELECT (SELECT count(*) FROM pg_proc WHERE proname = 'event_occurrences_kept_date_end')
+				+ (SELECT count(*) FROM pg_trigger WHERE tgname = 'event_occurrences_kept_date_end' AND tgrelid = 'event_occurrences'::regclass)`)
+		}
+		if n := guard(); n != 2 {
+			t.Fatalf("before Down: %d of the function and trigger, want 2", n)
+		}
+		stored := snapshotRows[string](t, db, tables)
+		downTo(t, p, keptDateEndVersion-1)
+		if n := guard(); n != 0 {
+			t.Fatalf("after Down: %d of the function and trigger remain", n)
+		}
+		sameRows(t, "rows after Down", snapshotRows[string](t, db, tables), stored)
+		// Without the trigger a later end commits with the grant live: the
+		// state `fold migrate down-one` leaves for whatever binary starts next.
+		if _, err := db.Exec(raise, 30); err != nil {
+			t.Fatalf("a raise with no trigger: %v", err)
+		}
+		live(t, 40)
+		stored = snapshotRows[string](t, db, tables)
+		upTo(t, p, keptDateEndVersion)
+		if n := guard(); n != 2 {
+			t.Fatalf("after Up again: %d of the function and trigger, want 2", n)
+		}
+		sameRows(t, "rows after Up again", snapshotRows[string](t, db, tables), stored)
+		_, err := db.Exec(raise, 30)
+		refused(t, "a raise after Up again", err)
+		if v, err := p.GetDBVersion(context.Background()); err != nil || v != keptDateEndVersion {
+			t.Fatalf("version = %d, %v", v, err)
+		}
+	})
+}
+
+// TestKeptDateEndMigrationWaitsAtMostFiveSeconds: 00014's CREATE TRIGGER
+// needs a SHARE ROW EXCLUSIVE lock on event_occurrences. An open writer holds
+// ROW EXCLUSIVE, so the migration gives up after its 5s lock_timeout and
+// leaves nothing behind, and the version stays.
+func TestKeptDateEndMigrationWaitsAtMostFiveSeconds(t *testing.T) {
+	t.Parallel()
+	name, db, p := freshAt(t, keptDateEndVersion-1)
+	holder := holdLock(t, name, `LOCK event_occurrences IN ROW EXCLUSIVE MODE`)
+	elapsed, err := timedUpTo(p, keptDateEndVersion, time.Minute)
+	if code := pgErrorCode(err); code != "55P03" {
+		t.Fatalf("UpTo(%d) with event_occurrences held: %v (code %q), want lock_not_available 55P03", keptDateEndVersion, err, code)
+	}
+	if elapsed < 5*time.Second || elapsed > 30*time.Second {
+		t.Fatalf("00014 gave up after %s, want at least its 5s lock_timeout and well under 30s", elapsed)
+	}
+	if err := holder.Rollback(); err != nil {
+		t.Fatal(err)
+	}
+	var leftovers int
+	if err := db.QueryRow(`SELECT (SELECT count(*) FROM pg_proc WHERE proname = 'event_occurrences_kept_date_end')
+		+ (SELECT count(*) FROM pg_trigger WHERE tgname = 'event_occurrences_kept_date_end')`).Scan(&leftovers); err != nil || leftovers != 0 {
+		t.Fatalf("a failed 00014 left %d objects, %v", leftovers, err)
+	}
+	if v, err := p.GetDBVersion(context.Background()); err != nil || v != keptDateEndVersion-1 {
+		t.Fatalf("version after the failure = %d, %v", v, err)
+	}
+	upTo(t, p, keptDateEndVersion)
+}
+
+// 00015 (DEC-158): the start fence, the audit fence, the hold and the epoch.
+
+const (
+	// v0.1.0's boot statements (restoreFenceCreateSQL, restoreFenceAdvanceSQL), byte for byte but for the
+	// placeholder style, with the advisory lock its boot takes first.
+	v010FenceCreate   = "INSERT INTO settings (key, value) VALUES ($1, '0') ON CONFLICT (key) DO NOTHING"
+	v010FenceAdvance  = "UPDATE settings SET value = (value::bigint + 1)::text WHERE key = $1 RETURNING value::bigint"
+	startFenceRefusal = "this database needs Fold at recovery level 3 or later (exact visibility consent, DEC-158), and this Fold release is older; start the current release, and restore data only with its restore.sh --dump"
+	auditFenceRefusal = "a visibility change can be saved only by a Fold release that checks visibility consent (DEC-158), and can cancel registrations only after the exact change was reviewed"
+)
+
+// inTx runs fn in one transaction on db and commits only when fn returns nil.
+func inTx(db *sql.DB, fn func(tx *sql.Tx) error) error {
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if err := fn(tx); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// declare sets a transaction-local setting, as the release's helpers do.
+func declare(tx *sql.Tx, name, value string) error {
+	_, err := tx.Exec("SELECT set_config($1, $2, true)", name, value)
+	return err
+}
+
+// v010Boot is an earlier release's boot transaction, optionally declaring a
+// recovery level first.
+func v010Boot(db *sql.DB, level *string) error {
+	return inTx(db, func(tx *sql.Tx) error {
+		if _, err := tx.Exec("SELECT pg_advisory_xact_lock($1)", migrations.LockID); err != nil {
+			return err
+		}
+		if level != nil {
+			if err := declare(tx, "fold.recovery_level", *level); err != nil {
+				return err
+			}
+		}
+		if _, err := tx.Exec(v010FenceCreate, "restore_fence"); err != nil {
+			return err
+		}
+		var v int64
+		return tx.QueryRow(v010FenceAdvance, "restore_fence").Scan(&v)
+	})
+}
+
+func fenceCounter(t *testing.T, db *sql.DB) string {
+	t.Helper()
+	var v sql.NullString
+	if err := db.QueryRow("SELECT value FROM settings WHERE key = 'restore_fence'").Scan(&v); err != nil && !errors.Is(err, sql.ErrNoRows) {
+		t.Fatal(err)
+	}
+	return v.String
+}
+
+// floorObjects is every object 00015 keeps, with its definition.
+func floorObjects(t *testing.T, db *sql.DB) string {
+	t.Helper()
+	return queryLines(t, db, `
+SELECT 'trigger ' || tgname || ' ' || pg_get_triggerdef(oid) FROM pg_trigger WHERE tgname IN ('settings_recovery_floor', 'audit_logs_visibility_consent')
+UNION ALL SELECT 'function ' || proname || ' ' || md5(pg_get_functiondef(oid)) FROM pg_proc WHERE proname IN ('settings_recovery_floor', 'audit_logs_visibility_consent')
+UNION ALL SELECT 'view ' || pg_get_viewdef('recovery_floor_hold'::regclass) || ' ' || coalesce(obj_description('recovery_floor_hold'::regclass, 'pg_class'), '')
+UNION ALL SELECT 'epoch ' || value FROM settings WHERE key = 'visibility_consent_epoch'
+ORDER BY 1`)
+}
+
+func visibilityFixtureRows(t *testing.T, db *sql.DB) (eventID int64) {
+	t.Helper()
+	for _, stmt := range []string{
+		`INSERT INTO users (id, email) VALUES (901, 'fence@example.com') ON CONFLICT DO NOTHING`,
+		`INSERT INTO groups (id, name, leader_id) VALUES (901, 'Fence group', 901) ON CONFLICT DO NOTHING`,
+		`INSERT INTO events (id, group_id, created_by, title, description, location, starts_local, tzid, rrule, duration_minutes, visibility)
+		 VALUES (901, 901, 901, 'Fence event', '', '', '2026-12-01T18:00', 'UTC', '', 60, 'private') ON CONFLICT DO NOTHING`,
+	} {
+		if _, err := db.Exec(stmt); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return 901
+}
+
+func TestVisibilityConsentFenceMigration(t *testing.T) {
+	t.Parallel()
+	_, db, p := freshAt(t, latestVersion(t))
+	ptr := func(s string) *string { return &s }
+
+	t.Run("start fence", func(t *testing.T) {
+		before := fenceCounter(t, db)
+		wantPgError(t, "an undeclared boot", v010Boot(db, nil), "55000", startFenceRefusal)
+		for _, bad := range []string{"2", "", "abc", "99999", "-3", " 3"} {
+			wantPgError(t, "a boot declaring "+strconv.Quote(bad), v010Boot(db, ptr(bad)), "55000", startFenceRefusal)
+		}
+		if got := fenceCounter(t, db); got != before {
+			t.Fatalf("a refused boot moved the counter: %q -> %q", before, got)
+		}
+		for _, good := range []string{"3", "4", "0003"} {
+			if err := v010Boot(db, ptr(good)); err != nil {
+				t.Fatalf("a boot declaring %q: %v", good, err)
+			}
+		}
+		if err := inTx(db, func(tx *sql.Tx) error {
+			_, err := tx.Exec(`INSERT INTO settings (key, value) VALUES ('site_name', 'Fence church') ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`)
+			return err
+		}); err != nil {
+			t.Fatalf("another key, undeclared: %v", err)
+		}
+		wantPgError(t, "renaming the row", inTx(db, func(tx *sql.Tx) error {
+			_, err := tx.Exec(`UPDATE settings SET key = 'restore_fence_old' WHERE key = 'restore_fence'`)
+			return err
+		}), "55000", startFenceRefusal)
+		// A declaration made before a savepoint holds after the savepoint is rolled back.
+		if err := inTx(db, func(tx *sql.Tx) error {
+			if err := declare(tx, "fold.recovery_level", "3"); err != nil {
+				return err
+			}
+			for _, s := range []string{"SAVEPOINT s", "SELECT 1", "ROLLBACK TO SAVEPOINT s"} {
+				if _, err := tx.Exec(s); err != nil {
+					return err
+				}
+			}
+			var v int64
+			return tx.QueryRow(v010FenceAdvance, "restore_fence").Scan(&v)
+		}); err != nil {
+			t.Fatalf("a declaration across a rolled-back savepoint: %v", err)
+		}
+		if err := inTx(db, func(tx *sql.Tx) error {
+			_, err := tx.Exec(`DELETE FROM settings WHERE key = 'restore_fence'`)
+			return err
+		}); err != nil {
+			t.Fatalf("DELETE is not fenced: %v", err)
+		}
+	})
+
+	ev := visibilityFixtureRows(t, db)
+	audit := func(action, targetType, meta string) func(tx *sql.Tx) error {
+		return func(tx *sql.Tx) error {
+			_, err := tx.Exec(`INSERT INTO audit_logs (action, target_type, target_id, meta_json) VALUES ($1, $2, $3, $4::jsonb)`, action, targetType, ev, meta)
+			return err
+		}
+	}
+	// replay runs an earlier build's writes: the visibility change first, then its audit row.
+	replay := func(declared string, write func(tx *sql.Tx) error) error {
+		return inTx(db, func(tx *sql.Tx) error {
+			if declared != "" {
+				if err := declare(tx, "fold.visibility_consent", declared); err != nil {
+					return err
+				}
+			}
+			if _, err := tx.Exec(`UPDATE events SET visibility = 'public', leader_opened = true WHERE id = $1`, ev); err != nil {
+				return err
+			}
+			return write(tx)
+		})
+	}
+	eventVisibility := func(t *testing.T) string {
+		t.Helper()
+		var v string
+		var opened bool
+		if err := db.QueryRow(`SELECT visibility, leader_opened FROM events WHERE id = $1`, ev).Scan(&v, &opened); err != nil {
+			t.Fatal(err)
+		}
+		return fmt.Sprintf("%s/%v", v, opened)
+	}
+	reset := func(t *testing.T) {
+		t.Helper()
+		if _, err := db.Exec(`UPDATE events SET visibility = 'private', leader_opened = false WHERE id = $1`, ev); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	t.Run("audit fence: cancellations", func(t *testing.T) {
+		row := audit("registration.cancelled", "event", `{"reason": "event_more_private", "registrationId": 1}`)
+		for _, d := range []string{"", "v1:no-review", "v2", "V1"} {
+			reset(t)
+			wantPgError(t, "a cancellation declared "+strconv.Quote(d), replay(d, row), "23514", auditFenceRefusal)
+			if got := eventVisibility(t); got != "private/false" {
+				t.Fatalf("a refused cancellation kept its transaction's event write: %s", got)
+			}
+		}
+		reset(t)
+		if err := replay("v1", row); err != nil {
+			t.Fatalf("a checked cancellation: %v", err)
+		}
+	})
+
+	t.Run("audit fence: every event visibility row", func(t *testing.T) {
+		shapes := map[string]func(tx *sql.Tx) error{
+			"W2 series row of the stale empty reset": audit("event.visibility_changed", "event", `{"oldVisibility": "private", "newVisibility": "public", "oldLeaderOpened": false, "leaderOpened": false}`),
+			"W2 override with a typed reason":        audit("event.visibility_override", "event", `{"oldVisibility": "private", "newVisibility": "public", "reason": "series_reset"}`),
+			"W1 atCreation":                          audit("event.visibility_override", "event", `{"oldVisibility": "private", "newVisibility": "public", "atCreation": true}`),
+			"W4 group_more_private":                  audit("event.visibility_changed", "event", `{"reason": "group_more_private"}`),
+			"W4 leader chose tighten":                audit("event.visibility_changed", "event", `{"reason": "group_more_private_leader_chose_tighten"}`),
+			"W5 kept open":                           audit("event.visibility_override", "event", `{"reason": "Kept open when the group became invite-only."}`),
+			"W3 a date reset":                        audit("event.visibility_changed", "event", `{"original_date": "2026-12-01", "oldVisibility": "invite_only", "newVisibility": null, "reason": "series_reset"}`),
+			"W3 another typed reason":                audit("event.visibility_override", "event", `{"original_date": "2026-12-01", "reason": "Friends welcome"}`),
+			"another target type":                    audit("event.visibility_changed", "group", `{}`),
+			"empty meta":                             audit("event.visibility_override", "event", `{}`),
+		}
+		for name, write := range shapes {
+			for _, d := range []string{"", "v2", "v1:review"} {
+				reset(t)
+				wantPgError(t, name+" declared "+strconv.Quote(d), replay(d, write), "23514", auditFenceRefusal)
+				if got := eventVisibility(t); got != "private/false" {
+					t.Fatalf("%s: a refused row kept the event write: %s", name, got)
+				}
+			}
+			for _, d := range []string{"v1", "v1:no-review"} {
+				reset(t)
+				if err := replay(d, write); err != nil {
+					t.Fatalf("%s declared %q: %v", name, d, err)
+				}
+			}
+		}
+		// W1 at v0.1.0: the event row, then its creation row, in one transaction.
+		wantPgError(t, "an earlier build's group-event creation", inTx(db, func(tx *sql.Tx) error {
+			if _, err := tx.Exec(`INSERT INTO events (id, group_id, created_by, title, description, location, starts_local, tzid, rrule, duration_minutes, visibility, leader_opened)
+				VALUES (902, 901, 901, 'Opened at creation', '', '', '2026-12-01T18:00', 'UTC', '', 60, 'public', true)`); err != nil {
+				return err
+			}
+			_, err := tx.Exec(`INSERT INTO audit_logs (action, target_type, target_id, meta_json) VALUES ('event.visibility_override', 'event', 902, '{"atCreation": true}')`)
+			return err
+		}), "23514", auditFenceRefusal)
+		var n int
+		if err := db.QueryRow(`SELECT count(*) FROM events WHERE id = 902`).Scan(&n); err != nil || n != 0 {
+			t.Fatalf("a refused creation left %d events (%v)", n, err)
+		}
+	})
+
+	t.Run("unrelated rows need no declaration", func(t *testing.T) {
+		for _, row := range []func(tx *sql.Tx) error{
+			audit("event.changed", "event", `{}`),
+			audit("event.created", "event", `{"visibility": "public"}`),
+			audit("group.updated", "group", `{"visibility": "public"}`),
+			audit("event.host_added", "event", `{}`),
+			audit("registration.cancelled", "event", `{"reason": "removed"}`),
+			audit("registration.cancelled", "event", `{}`),
+		} {
+			if err := inTx(db, row); err != nil {
+				t.Fatalf("an unrelated row was fenced: %v", err)
+			}
+		}
+	})
+
+	t.Run("the Down keeps everything, with a user and without", func(t *testing.T) {
+		kept := floorObjects(t, db)
+		if strings.Count(kept, "trigger ") != 2 || strings.Count(kept, "function ") != 2 || !strings.Contains(kept, "view ") || !strings.Contains(kept, "DEC-158") || !strings.Contains(kept, "epoch ") {
+			t.Fatalf("00015 installed: %s", kept)
+		}
+		for _, withUser := range []bool{true, false} {
+			if !withUser {
+				if _, err := db.Exec(`DELETE FROM events; DELETE FROM groups; DELETE FROM users`); err != nil {
+					t.Fatal(err)
+				}
+			}
+			downTo(t, p, 14)
+			if got := floorObjects(t, db); got != kept {
+				t.Fatalf("the Down (user %v) changed what 00015 keeps:\n%s\nwant\n%s", withUser, got, kept)
+			}
+			wantPgError(t, "an earlier boot at 14", v010Boot(db, nil), "55000", startFenceRefusal)
+			wantPgError(t, "an undeclared reset row at 14", inTx(db, audit("event.visibility_changed", "event", `{}`)), "23514", auditFenceRefusal)
+			upTo(t, p, latestVersion(t))
+			if got := floorObjects(t, db); got != kept {
+				t.Fatalf("the Up over the kept fences changed them:\n%s\nwant\n%s", got, kept)
+			}
+		}
+	})
+}
+
+// TestRecoveryFloorSurvivesTheWholeChainDown: on a database with no user, the
+// walk down keeps both fences at every version, and the baseline's Down fails
+// at the hold (2BP01 naming audit_logs) and rolls back whole.
+func TestRecoveryFloorSurvivesTheWholeChainDown(t *testing.T) {
+	t.Parallel()
+	name := testdb.Fresh(t, true)
+	db := openSQL(t, name)
+	p := newProvider(t, db)
+	ctx := context.Background()
+	kept := floorObjects(t, db)
+	for _, v := range []int64{14, 7, 1} {
+		downTo(t, p, v)
+		if got := floorObjects(t, db); got != kept {
+			t.Fatalf("at %d the fences changed:\n%s", v, got)
+		}
+		wantPgError(t, fmt.Sprintf("an earlier boot at %d", v), v010Boot(db, nil), "55000", startFenceRefusal)
+		wantPgError(t, fmt.Sprintf("an undeclared reset row at %d", v), inTx(db, func(tx *sql.Tx) error {
+			_, err := tx.Exec(`INSERT INTO audit_logs (action, target_type, target_id, meta_json) VALUES ('event.visibility_changed', 'event', 1, '{"reason": "series_reset", "original_date": "2026-12-01"}')`)
+			return err
+		}), "23514", auditFenceRefusal)
+	}
+	tables := publicTableCount(t, db)
+	_, err := p.Down(ctx)
+	if err == nil || !strings.Contains(err.Error(), "cannot drop table audit_logs because other objects depend on it") || !strings.Contains(err.Error(), "2BP01") {
+		t.Fatalf("the baseline Down on a userless database: %v, want 2BP01 at the hold", err)
+	}
+	if v, err := p.GetDBVersion(ctx); err != nil || v != 1 {
+		t.Fatalf("version after the refused baseline Down = %d, %v, want 1", v, err)
+	}
+	if got := publicTableCount(t, db); got != tables {
+		t.Fatalf("tables after the refused baseline Down = %d, want %d", got, tables)
+	}
+	if got := floorObjects(t, db); got != kept {
+		t.Fatalf("the refused baseline Down changed the fences:\n%s", got)
+	}
+	// With a user, the baseline's own refusal still comes first.
+	if _, err := db.Exec(`INSERT INTO users (id, email) VALUES (1, 'floor@example.com')`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := p.Down(ctx); err == nil || !strings.Contains(err.Error(), baselineDownRefusal) {
+		t.Fatalf("the baseline Down with a user: %v, want %q", err, baselineDownRefusal)
+	}
+	upTo(t, p, latestVersion(t))
+	if got := floorObjects(t, db); got != kept {
+		t.Fatalf("Up after the walk changed the fences:\n%s", got)
+	}
+}
+
+// TestRecoveryFloorCleanupRefusesForeignDatabases: the test-only cleanup acts
+// only on a live testdb.Fresh database it is connected to.
+func TestRecoveryFloorCleanupRefusesForeignDatabases(t *testing.T) {
+	t.Parallel()
+	name := testdb.Fresh(t, true)
+	db := openSQL(t, name)
+	if err := recoveryFloorCleanupTarget(name, db); err != nil {
+		t.Fatalf("a live Fresh database with its own handle: %v", err)
+	}
+	other := testdb.Fresh(t, true)
+	for label, target := range map[string]string{
+		"a Shared-style name":                 "fold_test_shared",
+		"a template name":                     "fold_tmpl_" + strings.Repeat("0", 12),
+		"a Fresh name held by another handle": other,
+	} {
+		if err := recoveryFloorCleanupTarget(target, db); err == nil {
+			t.Errorf("%s: the cleanup accepted it", label)
+		}
+	}
+	kept := floorObjects(t, db)
+	if strings.Count(kept, "trigger ") != 2 {
+		t.Fatalf("the refusals touched the fences: %s", kept)
+	}
+	// A Fresh database whose test has ended (its name dropped from the set) is refused too.
+	var dropped string
+	t.Run("a dropped Fresh name", func(t *testing.T) {
+		dropped = testdb.Fresh(t, true)
+	})
+	if err := recoveryFloorCleanupTarget(dropped, db); err == nil {
+		t.Error("a dropped Fresh name: the cleanup accepted it")
+	}
+}
+
+// TestVisibilityConsentFenceInFlight: a transaction in flight when 00015 is
+// first applied is never half fenced. One that already inserted an audit row
+// holds ROW EXCLUSIVE, so CREATE TRIGGER's SHARE ROW EXCLUSIVE waits, 00015
+// gives up with 55P03 at version 14, and that transaction commits unfenced. One
+// that began before 00015 committed and inserts after it is refused.
+func TestVisibilityConsentFenceInFlight(t *testing.T) {
+	t.Parallel()
+	visibilityRow := `INSERT INTO audit_logs (action, target_type, target_id, meta_json) VALUES ('event.visibility_changed', 'event', 1, '{}')`
+	t.Run("an insert already made holds the migration off", func(t *testing.T) {
+		name, db, p := freshAt(t, 14)
+		held, err := openSQL(t, name).Begin()
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer held.Rollback()
+		if _, err := held.Exec(visibilityRow); err != nil {
+			t.Fatal(err)
+		}
+		_, err = timedUpTo(p, 15, 0)
+		if err == nil || !strings.Contains(err.Error(), "55P03") {
+			t.Fatalf("00015 behind an open insert: %v, want 55P03", err)
+		}
+		if v, err := p.GetDBVersion(context.Background()); err != nil || v != 14 {
+			t.Fatalf("version after the refused Up = %d, %v, want 14", v, err)
+		}
+		if err := held.Commit(); err != nil {
+			t.Fatalf("the transaction that was first commits unfenced: %v", err)
+		}
+		upTo(t, p, 15)
+		wantPgError(t, "an undeclared row after the Up", inTx(db, func(tx *sql.Tx) error { _, err := tx.Exec(visibilityRow); return err }), "23514", auditFenceRefusal)
+	})
+	t.Run("a transaction begun before the commit and inserting after it is refused", func(t *testing.T) {
+		name, _, p := freshAt(t, 14)
+		early, err := openSQL(t, name).Begin()
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer early.Rollback()
+		if _, err := early.Exec(`SELECT count(*) FROM users`); err != nil {
+			t.Fatal(err)
+		}
+		upTo(t, p, 15)
+		_, err = early.Exec(visibilityRow)
+		wantPgError(t, "an insert after 00015 committed", err, "23514", auditFenceRefusal)
+	})
 }

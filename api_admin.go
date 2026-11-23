@@ -123,7 +123,7 @@ func (a *App) apiAdminCreateUser(c *gin.Context) {
 		}
 		return audit.Write(tx, audit.Entry{Actor: &actor.ID, Action: audit.UserCreated,
 			TargetType: "user", TargetID: u.ID, Meta: map[string]any{"role": u.Role}, IP: c.ClientIP()})
-	})
+	}, contactGateTx)
 	if answerStaleSession(c, err) {
 		return
 	}

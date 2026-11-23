@@ -27,6 +27,12 @@ type CalendarFacts struct {
 	// SignedOut: a visitor with no account has no own scope, so no date reads
 	// as theirs (no "Not answered" on church-wide dates, DEC-99).
 	SignedOut bool
+	// ManagerKept: the viewer manages this event, someone who left kept this
+	// date (a live departure grant, DEC-156) and it has not ended. In
+	// Everything only, it keeps the date outside DEC-77's window so the manager
+	// can reach it and Remove them first (DEC-157). Just mine and the feeds
+	// never read it, and it is never own scope.
+	ManagerKept bool
 }
 
 type CalendarDecision struct {
@@ -57,6 +63,13 @@ func DecideCalendar(scope CalendarScope, facts CalendarFacts, now time.Time) Cal
 	// Membership/hosting and household/exact-date ties are standing scope and
 	// are likewise not discovery rows.
 	if answered || facts.GroupMember || facts.Host || facts.HouseholdDate || facts.ExactDate {
+		decision.Include = true
+		return decision
+	}
+
+	// The scope is tested explicitly: own includes ChurchWide, so the Just mine
+	// return above does not shield an unhosted church-wide date (DEC-157).
+	if scope == CalendarScopeAll && facts.ManagerKept {
 		decision.Include = true
 		return decision
 	}

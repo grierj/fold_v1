@@ -16,6 +16,16 @@ type sessionJSON struct {
 	CanCompose bool     `json:"canCompose"`
 }
 
+// sessionBootstrapJSON is GET /auth/bootstrap (M8.1): the viewer this
+// browser's cookie authenticates (null when none), its CSRF token and that
+// token's credential marker.
+type sessionBootstrapJSON struct {
+	User             *userJSON `json:"user"`
+	CanCompose       bool      `json:"canCompose"`
+	CSRFToken        string    `json:"csrfToken"`
+	CredentialMarker string    `json:"credentialMarker"`
+}
+
 // siteJSON is GET /site.
 type siteJSON struct {
 	Name         string `json:"name"`
@@ -299,6 +309,41 @@ type openEventsResponseJSON struct {
 
 type occurrenceResponseJSON struct {
 	Occurrence occurrenceJSON `json:"occurrence"`
+}
+
+// impactResetDateJSON is one date an event reset would change, as its review
+// shows it: the date's own visibility before the reset (DEC-158).
+type impactResetDateJSON struct {
+	OccurrenceID uint   `json:"occurrenceId"`
+	Date         string `json:"date"`
+	Title        string `json:"title"`
+	Visibility   string `json:"visibility"`
+}
+
+// dateNeedsConsentJSON is what a 409 date_needs_consent carries beside error
+// and code: the people saving the date would cancel (dateNeedsConsent), with
+// the impact's consent token.
+type dateNeedsConsentJSON struct {
+	Impact visibilityImpactJSON `json:"impact"`
+}
+
+// dateChangedJSON is what a 409 date_changed from the guarded edit may carry
+// beside error and code: baseSuperseded only when the submitted base is
+// proved older than the date (errDateBaseSuperseded), absent otherwise.
+type dateChangedJSON struct {
+	BaseSuperseded bool `json:"baseSuperseded,omitempty"`
+}
+
+// keptDatesConflictJSON is what a 409 date_kept_after_leaving carries beside
+// error and code: each refused date (its original date, sorted) and how many
+// people kept it. Counts only, never names, ids or links (DEC-156).
+type keptDatesConflictJSON struct {
+	KeptDates []keptDateCountJSON `json:"keptDates"`
+}
+
+type keptDateCountJSON struct {
+	Date      string `json:"date"`
+	KeptCount int    `json:"keptCount"`
 }
 
 type eventDateResponseJSON struct {

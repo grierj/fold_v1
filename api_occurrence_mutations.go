@@ -145,12 +145,24 @@ func (a *App) reconcileOccurrenceAsk(tx *gorm.DB, r *models.ContactRequest, now 
 // end, so a mutation that names an event persists the expiry that already
 // elapsed under the shared gate before fn changes the event or its dates, and
 // a move cannot resurrect authority. The "after" run then ends whatever fn's
-// own changes invalidated. Other scopes only need the "after" run.
+// own changes invalidated. Other scopes only need the "after" run. A
+// single-date edit (contactChange.SingleDate) runs both itself, scoped to its
+// date.
 func (a *App) reconcileAccessesBefore(tx *gorm.DB, now time.Time, change contactChange) error {
-	if change.EventID == 0 {
+	if change.EventID == 0 || change.SingleDate != nil {
 		return nil
 	}
 	return a.reconcileOccurrenceAccesses(tx, now, change)
+}
+
+// reconcileDateAccesses ends the invalid exact-date grants of one date whose
+// row the caller holds. It locks the date's live grant rows and only then
+// reads the clock, so a grant whose date ended while any lock was awaited is
+// judged past its stored end. It returns the clock it judged on.
+func (a *App) reconcileDateAccesses(tx *gorm.DB, occurrenceID uint) (time.Time, error) {
+	q := tx.Where("registrations.user_id IS NOT NULL AND "+registrationAccessLiveSQL).
+		Where("registrations.occurrence_id = ?", occurrenceID)
+	return endInvalidAccesses(tx, q, func() time.Time { return a.now().UTC() })
 }
 
 // Accepted attendance deliberately does not reload issuer authority or blocks.
@@ -165,16 +177,25 @@ func (a *App) reconcileOccurrenceAccesses(tx *gorm.DB, now time.Time, change con
 	case change.GroupID != 0:
 		q = q.Where("registrations.occurrence_id IN (SELECT o.id FROM event_occurrences o JOIN events e ON e.id = o.event_id WHERE e.group_id = ?)", change.GroupID)
 	}
+	_, err := endInvalidAccesses(tx, q, func() time.Time { return now })
+	return err
+}
+
+// endInvalidAccesses locks the live grant rows q selects, in id order, then
+// reads clock and ends every row that clock judges invalid. It returns that
+// clock, read even when no row is live.
+func endInvalidAccesses(tx *gorm.DB, q *gorm.DB, clock func() time.Time) (time.Time, error) {
 	var rows []models.Registration
 	if err := q.Clauses(clause.Locking{Strength: "UPDATE"}).Order("registrations.id").Find(&rows).Error; err != nil {
-		return err
+		return time.Time{}, err
 	}
+	now := clock()
 	if len(rows) == 0 {
-		return nil
+		return now, nil
 	}
 	facts, err := loadOccurrenceInvitationFacts(tx, rows, now)
 	if err != nil {
-		return err
+		return now, err
 	}
 	occurrenceIDs := make([]uint, 0, len(rows))
 	for _, row := range rows {
@@ -182,7 +203,7 @@ func (a *App) reconcileOccurrenceAccesses(tx *gorm.DB, now time.Time, change con
 	}
 	scopes, err := accessScopesIn(tx, occurrenceIDs)
 	if err != nil {
-		return err
+		return now, err
 	}
 	for i := range rows {
 		row := &rows[i]
@@ -191,10 +212,10 @@ func (a *App) reconcileOccurrenceAccesses(tx *gorm.DB, now time.Time, change con
 			continue
 		}
 		if err := endRegistrationAccess(tx, row, scopes[row.OccurrenceID], reason, nil, now, ""); err != nil {
-			return err
+			return now, err
 		}
 	}
-	return nil
+	return now, nil
 }
 
 // liveOccurrenceInvitationIn is transaction authority only while the contact
@@ -216,7 +237,7 @@ func liveOccurrenceInvitationIn(tx *gorm.DB, row models.Registration, now time.T
 	if err != nil {
 		return false, err
 	}
-	if !policy.OccurrenceAccessCurrent(account, occurrenceAccessPolicy(row, scope), facts, now) {
+	if !policy.OccurrenceAccessCurrent(account.OccurrenceActor(), occurrenceAccessPolicy(row, scope), facts, now) {
 		return false, nil
 	}
 	var n int64
@@ -316,7 +337,7 @@ func (a *App) mutateOwnOccurrence(c *gin.Context, operation string) {
 			want, reason = models.RegDeclined, policy.OccurrenceDeclined
 		}
 		if operation == operationBlock {
-			if !policy.CanBlockManagerAdds(account, occurrenceAccessPolicy(reg, scope)) {
+			if !policy.CanBlockManagerAdds(account.OccurrenceActor(), occurrenceAccessPolicy(reg, scope)) {
 				return refuse()
 			}
 			block := models.ManagerAddBlock{SubjectUserID: actor.ID, OrganizerType: scope.Organizer.Type, OrganizerID: scope.Organizer.ID}
@@ -379,7 +400,7 @@ func (a *App) mutateOwnOccurrence(c *gin.Context, operation string) {
 			result.WaitlistPosition = &pos
 		}
 		return nil
-	})
+	}, contactGateTx)
 	if err != nil {
 		// A refusal the person is told about is audited; a database failure is
 		// only logged by fail.
@@ -635,5 +656,5 @@ func (a *App) auditOccurrenceRefusal(actorID uint, ip, operation string) error {
 			return err
 		}
 		return writeOccurrenceRefusal(tx, actorID, ip, operation)
-	})
+	}, contactGateTx)
 }

@@ -603,21 +603,10 @@ func placeLine(room *occurrenceRoomJSON, location string) string {
 	return line
 }
 
-// occurrenceRooms maps dates to their confirmed booking's room, for showing
-// the room as the place (9.2). Empty while rooms are off. One read: the
-// rooms switch is checked inside the same query, so a list of dates pays
-// exactly one read for rooms whether they are on or off. A page shows its
-// dates without rooms if the read fails; feeds use roomsFor and fail.
-func (a *App) occurrenceRooms(db *gorm.DB, occurrenceIDs []uint) map[uint]*occurrenceRoomJSON {
-	if len(occurrenceIDs) == 0 {
-		return map[uint]*occurrenceRoomJSON{}
-	}
-	out, _ := roomsFor(db, occurrenceIDs)
-	return out
-}
-
-// roomsFor is occurrenceRooms, reporting a failed read. A feed's dates come
-// in chunks of lookupChunk ids, so a list of dates under that pays one read.
+// roomsFor maps dates to their confirmed booking's room, for showing the room
+// as the place (9.2), and reports a failed read. Empty while rooms are off:
+// the rooms switch is checked inside the same query. A feed's dates come in
+// chunks of lookupChunk ids, so a list of dates under that pays one read.
 func roomsFor(db *gorm.DB, occurrenceIDs []uint) (map[uint]*occurrenceRoomJSON, error) {
 	out := map[uint]*occurrenceRoomJSON{}
 	err := eachChunk(occurrenceIDs, lookupChunk, func(chunk []uint) error {

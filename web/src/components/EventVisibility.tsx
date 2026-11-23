@@ -1,11 +1,14 @@
 import { Form } from "./ui/Form";
-import { useEffect, useState } from "react";
-import { ApiError } from "../api/core";
+import { useEffect, useId, useLayoutEffect, useRef, useState } from "react";
 import { Events } from "../api/events";
 import type { Visibility, VisibilityImpact } from "../types";
 import { GroupVisibilityReview } from "./GroupVisibilityReview";
 import { openedEventWarning } from "./EventIntro";
 import { errorText } from "../lib/errors";
+import { decisionImpact, reviewOutdated } from "../lib/visibilityConsent";
+import { ROSTER_STALE, ROSTER_WAITING, visibilityRank } from "../lib/visibilityChange";
+import { useRosterActivityOf } from "../lib/dateWrites";
+import { useFocusHome, useKeepFocusHome } from "../lib/focusHome";
 import { Checkbox, Choices, Field, FormError, Input, Radio } from "./ui/Field";
 import { Button } from "./ui/Button";
 
@@ -15,18 +18,14 @@ const CHOICES: { value: Visibility; label: string; description: string }[] = [
   { value: "invite_only", label: "Invite only", description: "Only the group's members can see it." },
 ];
 
-export function visibilityRank(v: string): number {
-  if (v === "public") return 2;
-
-  if (v === "private") return 1;
-
-  return 0;
-}
-
 // EventVisibilityControl sets who can see one event. Every event keeps its
 // own value, copied from the group when it was created (DEC-48). A group
 // event set wider than its group is marked as opened by a leader. A
-// church-wide event is public or private.
+// church-wide event is public or private. A change that cancels anyone, and
+// every reset of its dates, is saved only with the consent of the impact the
+// server showed (DEC-158). A review opens, and is confirmed, only when no
+// sign-up update on the event began, ended or is in flight since the request
+// it comes from was sent; while one is in flight Save waits.
 export function EventVisibilityControl({
   eventId,
   groupName,
@@ -50,62 +49,150 @@ export function EventVisibilityControl({
   const [error, setError] = useState<string | null>(null);
   const [resetOverrides, setResetOverrides] = useState(false);
   const [futureOverrides, setFutureOverrides] = useState(0);
+  const saveButton = useRef<HTMLButtonElement>(null);
+  // Keeps keyboard focus when a stale answer or a sign-up update closes the review, or disables Save under it.
+  const home = useFocusHome<HTMLFormElement>();
+  useKeepFocusHome(home);
+  const activity = useRosterActivityOf();
+  const waiting = activity.pendingFor([eventId]) > 0;
+  const committing = useRef(false);
+  const waitingId = useId();
+  // Save disabled under the keyboard (a sign-up update began) hands focus to the form, never the page.
+  useLayoutEffect(() => {
+    if (waiting && document.activeElement === saveButton.current) home.moveHere();
+  }, [waiting, home]);
   useEffect(() => {
     let live = true;
     Promise.resolve(Events.visibilityImpact(eventId, visibility)).then((impact) => { if (live) setFutureOverrides(impact?.futureOverrides ?? 0); }).catch(() => {});
 
     return () => { live = false; };
   }, [eventId, visibility]);
-  const [review, setReview] = useState<VisibilityImpact | null>(null);
+  // `mark` is the session roster sequence the request behind the review was sent at.
+  const [review, setReview] = useState<{ impact: VisibilityImpact; mark: number } | null>(null);
 
-  // More private: preview first and confirm, the same as a group (DEC-48).
+  function show(impact: VisibilityImpact, mark: number) {
+    setFutureOverrides(impact.futureOverrides ?? 0);
+    setReview({ impact, mark });
+  }
+
+  // A sign-up update on this event began, ended or is in flight since `mark`: the answer may count people who
+  // are no longer signed up, or miss some who are.
+  const moved = (mark: number) => activity.changedSince(mark, [eventId]) || activity.pendingFor([eventId]) > 0;
+
+  // Focus that was on this form (Save, the review's buttons) goes to its home; focus elsewhere (a roster the
+  // person is using) stays where it is.
+  function stale() {
+    const active = document.activeElement;
+
+    if (!active || active === document.body || home.ref.current?.contains(active)) home.moveHere();
+    setReview(null);
+    setError(ROSTER_STALE.event);
+  }
+
+  // A review is judged from its request's mark until a listener is armed: a write that began (and maybe ended)
+  // after the request's last check, before this commit, is never shown and withdraws it. After that, a begin
+  // withdraws it. A commit on its way decides from its own answer.
+  const reviewMoved = review !== null && !busy && !committing.current && moved(review.mark);
+  useLayoutEffect(() => {
+    if (!review) return;
+
+    if (!committing.current && moved(review.mark)) {
+      stale();
+
+      return;
+    }
+
+    return activity.subscribe((event) => {
+      if (event.end === undefined && event.eventId === eventId && !committing.current) {
+        setReview(null);
+        setError(ROSTER_STALE.event);
+      }
+    });
+  }, [activity, eventId, review]);
+
+  // The server's preview decides, never the page's props: a reset always
+  // shows what it changes unless nothing changes at all, and a more private
+  // choice shows who it cancels (DEC-48).
   async function save(e: React.FormEvent) {
     e.preventDefault();
+
+    if (busy || activity.pendingFor([eventId]) > 0) return;
     setError(null);
 
     if (resetOverrides || visibilityRank(value) < visibilityRank(visibility)) {
+      let impact: VisibilityImpact;
+      const mark = activity.mark();
+
       try {
-        const impact = await Events.visibilityImpact(eventId, value, resetOverrides);
-
-        if (impact.tightened.length > 0) {
-          setReview(impact);
-
-          return;
-        }
+        impact = await Events.visibilityImpact(eventId, value, resetOverrides);
       } catch (err) {
         setError(errorText(err, "We couldn't check this event."));
 
         return;
       }
-    }
 
-    await commit(false);
-  }
-
-  async function commit(confirm: boolean) {
-    setBusy(true);
-    setError(null);
-
-    try {
-      await Events.setVisibility(eventId, { visibility: value, reason: reason.trim() || undefined, confirm, resetOverrides });
-      setReview(null);
-      onSaved();
-    } catch (err) {
-      if (err instanceof ApiError && err.status === 409) {
-        setReview(await Events.visibilityImpact(eventId, value, resetOverrides));
-        setError("Registrations changed. Please review again.");
+      if (moved(mark)) {
+        stale();
 
         return;
       }
 
-      setError(errorText(err, "We couldn't change who can see this."));
+      setFutureOverrides(impact.futureOverrides ?? 0);
+      const changes = impact.tightened.length > 0 || (resetOverrides && ((impact.resetDates ?? []).length > 0 || impact.currentVisibility !== impact.visibility));
+
+      if (changes) {
+        show(impact, mark);
+
+        return;
+      }
+
+      await commit(impact.consent ?? "");
+
+      return;
+    }
+
+    await commit("");
+  }
+
+  async function commit(consent: string) {
+    if (committing.current || activity.pendingFor([eventId]) > 0) return;
+    committing.current = true;
+    const mark = activity.mark();
+    setBusy(true);
+    setError(null);
+
+    try {
+      await Events.setVisibility(eventId, { visibility: value, reason: reason.trim() || undefined, consent, resetOverrides });
+      setReview(null);
+      onSaved();
+    } catch (err) {
+      const fresh = decisionImpact(err);
+
+      if (fresh && moved(mark)) {
+        stale();
+
+        return;
+      }
+
+      // Any other answer after a sign-up update withdraws the review too: the next Save previews again.
+      if (moved(mark)) setReview(null);
+
+      if (fresh) {
+        show(fresh, mark);
+        setError("We checked again before saving. Please review the changes below.");
+
+        return;
+      }
+
+      setError(reviewOutdated(err) ?? errorText(err, "We couldn't change who can see this."));
     } finally {
+      committing.current = false;
       setBusy(false);
     }
   }
 
   return (
-    <Form noValidate onSubmit={save} className="mt-3 space-y-3 border-t border-border pt-3">
+    <Form ref={home.ref} tabIndex={-1} noValidate onSubmit={save} className="mt-3 space-y-3 border-t border-border pt-3">
       {error && <FormError>{error}</FormError>}
       <VisibilityField
         id={`event-visibility-${eventId}`}
@@ -119,19 +206,25 @@ export function EventVisibilityControl({
         onReason={setReason}
       />
       {futureOverrides > 0 && <div className="space-y-2"><p className="text-sm text-text-muted">{futureOverrides} {futureOverrides === 1 ? "date has its" : "dates have their"} own visibility and won't change.</p><Checkbox label="Also reset those dates to the series setting" checked={resetOverrides} onChange={(e) => setResetOverrides(e.target.checked)} /></div>}
-      {review && (
+      {review && !reviewMoved && (
         <GroupVisibilityReview
-          key={JSON.stringify(review)}
-          impact={review}
+          key={JSON.stringify(review.impact)}
+          impact={review.impact}
           subject="event"
+          reset={resetOverrides}
           busy={busy}
-          onConfirm={() => void commit(true)}
+          waiting={waiting}
+          onConfirm={() => void commit(review.impact.consent ?? "")}
           onCancel={() => setReview(null)}
+          returnFocus={saveButton}
         />
       )}
-      <Button variant="secondary" type="submit" disabled={busy}>
-        {busy ? "Saving…" : "Save visibility"}
-      </Button>
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+        <Button ref={saveButton} variant="secondary" type="submit" disabled={busy || waiting} aria-describedby={waiting && !busy ? waitingId : undefined}>
+          {busy ? "Saving…" : "Save visibility"}
+        </Button>
+        <p id={waitingId} aria-live="polite" className="text-sm text-text-muted">{waiting && !busy && ROSTER_WAITING}</p>
+      </div>
     </Form>
   );
 }

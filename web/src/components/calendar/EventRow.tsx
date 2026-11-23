@@ -1,6 +1,7 @@
 import { Link } from "react-router-dom";
 import type { CalendarOccurrence } from "../../types";
-import { formatTime } from "../../lib/when";
+import { useId } from "react";
+import { formatDayHeading, formatTime } from "../../lib/when";
 import { calendarState, calendarStateLabel, ghosted, occurrenceLink } from "../../lib/calendarState";
 import { CheckIcon } from "../icons";
 import { StatusBadge } from "./StatusBadge";
@@ -115,10 +116,14 @@ export function EventChip({ occ, stacked }: { occ: CalendarOccurrence; stacked?:
   );
 }
 
-export function DaySection({ heading, occs, sticky }: { heading: string; occs: CalendarOccurrence[]; sticky?: boolean }) {
+// level is the day heading's rank: h2 under the page's h1 (Agenda, the selected day), h4 inside a section
+// that already sits under the period's h2 and its own h3 (StartedEarlier).
+export function DaySection({ heading, occs, sticky, level = 2 }: { heading: string; occs: CalendarOccurrence[]; sticky?: boolean; level?: 2 | 4 }) {
+  const Heading = level === 4 ? "h4" : "h2";
+
   return (
     <section>
-      <h2 className={`mb-2 py-2 font-semibold text-text ${sticky ? "sticky top-[var(--fold-header-height,4rem)] z-0 bg-page sm:static" : ""}`}>{heading}</h2>
+      <Heading className={`mb-2 py-2 font-semibold text-text ${sticky ? "sticky top-[var(--fold-header-height,4rem)] z-0 bg-page sm:static" : ""}`}>{heading}</Heading>
       {occs.length === 0 ? (
         <p className="text-sm text-text-muted">Nothing on this day.</p>
       ) : (
@@ -126,6 +131,23 @@ export function DaySection({ heading, occs, sticky }: { heading: string; occs: C
           {occs.map((o) => <li key={`${o.eventId}-${o.date}`}><EventRow occ={o} /></li>)}
         </ul>
       )}
+    </section>
+  );
+}
+
+// Week and Month show only their grid's days, so a row the calendar returns that starts before the first one
+// (DEC-157: an underway date someone kept after leaving, carried in for its managers) is listed here, above the
+// grid, under its own start day. Nothing renders when there is none.
+export function StartedEarlier({ days, unit, zone }: { days: Array<[string, CalendarOccurrence[]]>; unit: "week" | "month"; zone: string }) {
+  const id = useId();
+
+  if (days.length === 0) return null;
+
+  return (
+    <section aria-labelledby={id} className="mb-6 space-y-2">
+      <h3 id={id} className="font-semibold text-text">Already underway</h3>
+      <p className="text-sm text-text-muted">Started before this {unit} and still going.</p>
+      {days.map(([d, list]) => <DaySection key={d} heading={formatDayHeading(d, zone)} occs={list} level={4} />)}
     </section>
   );
 }

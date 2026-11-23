@@ -396,6 +396,7 @@
     "canBlock": false,
     "visibility": "public",
     "canRegister": true,
+    "canManage": true,
     "groupId": 1,
     "groupName": "Open Group",
     "reminders": {
@@ -500,6 +501,7 @@
     "canBlock": false,
     "visibility": "invite_only",
     "canRegister": true,
+    "canManage": true,
     "groupId": 1,
     "groupName": "Open Group",
     "reminders": {
@@ -596,6 +598,7 @@
     "canBlock": false,
     "visibility": "public",
     "canRegister": true,
+    "canManage": true,
     "groupId": 1,
     "groupName": "Open Group",
     "reminders": {
@@ -686,6 +689,7 @@
     "canBlock": false,
     "visibility": "public",
     "canRegister": true,
+    "canManage": true,
     "groupId": 2,
     "groupName": "Hidden Group",
     "reminders": {
@@ -753,6 +757,7 @@
     "canBlock": false,
     "visibility": "public",
     "canRegister": true,
+    "canManage": true,
     "groupId": 2,
     "groupName": "Hidden Group",
     "reminders": {
@@ -820,6 +825,7 @@
     "canBlock": false,
     "visibility": "private",
     "canRegister": true,
+    "canManage": true,
     "groupId": 1,
     "groupName": "Open Group",
     "reminders": {
@@ -892,6 +898,7 @@
     "canBlock": false,
     "visibility": "public",
     "canRegister": true,
+    "canManage": true,
     "groupId": 1,
     "groupName": "Open Group",
     "reminders": {
@@ -971,6 +978,7 @@
     "canBlock": false,
     "visibility": "public",
     "canRegister": true,
+    "canManage": true,
     "hostedBy": "Fold",
     "reminders": {
       "minutes": 1440,
@@ -1047,6 +1055,7 @@
     "canBlock": false,
     "visibility": "private",
     "canRegister": true,
+    "canManage": true,
     "hostedBy": "Fold",
     "reminders": {
       "minutes": 1440,
@@ -1107,6 +1116,7 @@
     "canBlock": false,
     "visibility": "public",
     "canRegister": true,
+    "canManage": true,
     "groupId": 1,
     "groupName": "Open Group",
     "reminders": {
@@ -1211,6 +1221,7 @@
     "canBlock": false,
     "visibility": "invite_only",
     "canRegister": true,
+    "canManage": true,
     "groupId": 1,
     "groupName": "Open Group",
     "reminders": {
@@ -1307,6 +1318,7 @@
     "canBlock": false,
     "visibility": "public",
     "canRegister": true,
+    "canManage": true,
     "groupId": 1,
     "groupName": "Open Group",
     "reminders": {
@@ -1397,6 +1409,7 @@
     "canBlock": false,
     "visibility": "public",
     "canRegister": true,
+    "canManage": true,
     "groupId": 2,
     "groupName": "Hidden Group",
     "reminders": {
@@ -1464,6 +1477,7 @@
     "canBlock": false,
     "visibility": "public",
     "canRegister": true,
+    "canManage": true,
     "groupId": 2,
     "groupName": "Hidden Group",
     "reminders": {
@@ -1531,6 +1545,7 @@
     "canBlock": false,
     "visibility": "private",
     "canRegister": true,
+    "canManage": true,
     "groupId": 1,
     "groupName": "Open Group",
     "reminders": {
@@ -1603,6 +1618,7 @@
     "canBlock": false,
     "visibility": "public",
     "canRegister": true,
+    "canManage": true,
     "groupId": 1,
     "groupName": "Open Group",
     "reminders": {
@@ -3889,6 +3905,7 @@
     "canBlock": false,
     "visibility": "public",
     "canRegister": true,
+    "canManage": true,
     "hostedBy": "Fold",
     "reminders": {
       "minutes": 1440,
@@ -3965,6 +3982,7 @@
     "canBlock": false,
     "visibility": "private",
     "canRegister": true,
+    "canManage": true,
     "hostedBy": "Fold",
     "reminders": {
       "minutes": 1440,

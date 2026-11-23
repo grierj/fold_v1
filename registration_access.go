@@ -44,6 +44,60 @@ const accessTargetType = "registration"
 // the registrations table: provenance set, grant stamp present, not ended.
 const registrationAccessLiveSQL = "registrations.access_origin <> '' AND registrations.access_granted_at IS NOT NULL AND registrations.access_ended_at IS NULL"
 
+// keptDateSQL is a live grant that ends with its date (policy.AccessEndsWithDate):
+// a date kept after leaving, which may not end later (DEC-156). It names the
+// one origin that does not, so a new origin blocks until someone decides.
+const keptDateSQL = registrationAccessLiveSQL + " AND registrations.access_origin <> 'manager_add'"
+
+// keptDatesIn counts the live kept-date grants on each of occurrenceIDs, from
+// stored state only: no lock and no clock. A writer calls it after its before
+// pass (reconcileDateAccesses, reconcileAccessesBefore) has stamped every
+// grant that lapsed on its clock, so a grant counted here was live on that
+// clock and the edit must not make its date end later.
+func keptDatesIn(tx *gorm.DB, occurrenceIDs []uint) (map[uint]int, error) {
+	out := map[uint]int{}
+	if len(occurrenceIDs) == 0 {
+		return out, nil
+	}
+	var rows []struct {
+		OccurrenceID uint
+		N            int
+	}
+	if err := tx.Model(&models.Registration{}).Select("registrations.occurrence_id, count(*) AS n").
+		Where("registrations.occurrence_id IN ? AND registrations.user_id IS NOT NULL AND "+keptDateSQL, occurrenceIDs).
+		Group("registrations.occurrence_id").Scan(&rows).Error; err != nil {
+		return nil, err
+	}
+	for _, r := range rows {
+		out[r.OccurrenceID] = r.N
+	}
+	return out, nil
+}
+
+// keptDatesPreviewIn is keptDatesIn for the read-only preview, which has no
+// before pass: it counts only the grants liveOccurrenceInvitationIn judges
+// current on now, so a lapsed grant the save would stamp first is not counted.
+// Writers never use it: re-judging on a clock later than their pass would miss
+// a grant that pass left live.
+func keptDatesPreviewIn(db *gorm.DB, occ *models.EventOccurrence, now time.Time) (int, error) {
+	var rows []models.Registration
+	if err := db.Where("registrations.occurrence_id = ? AND registrations.user_id IS NOT NULL AND "+keptDateSQL, occ.ID).
+		Order("registrations.id").Find(&rows).Error; err != nil {
+		return 0, err
+	}
+	n := 0
+	for _, row := range rows {
+		live, err := liveOccurrenceInvitationIn(db, row, now)
+		if err != nil {
+			return 0, err
+		}
+		if live {
+			n++
+		}
+	}
+	return n, nil
+}
+
 // registrationAccessColumns are written only by this file. Ordinary answer
 // writes omit them, so a stale struct can never revert a grant or an end.
 var registrationAccessColumns = []string{

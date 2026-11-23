@@ -22,26 +22,26 @@ import (
 // Mutation owners must reload these facts under the shared contact gate and their
 // domain locks; this read loader does not authorize or serialize any mutation.
 type occurrenceRead struct {
-	Event        models.Event
-	Occurrence   models.EventOccurrence
-	Access       policy.OccurrenceAccess
-	Facts        policy.OccurrenceFacts
-	Account      policy.ContactAccount
+	Event      models.Event
+	Occurrence models.EventOccurrence
+	Access     policy.OccurrenceAccess
+	Facts      policy.OccurrenceFacts
+	// Actor is the recipient as exact-date authority reads them: no age, so
+	// no right that needs an adult can come from a read.
+	Actor        policy.OccurrenceActor
 	Registration models.Registration
 }
 
-// scopedOccurrenceReads loads exact candidates independently of series-filtered eventCandidates.
+// scopedOccurrenceReadsIn loads exact candidates independently of
+// series-filtered eventCandidates, every read on db: db and q must come from
+// the same transaction or handle, and no read here touches another connection.
 // q selects occurrence IDs (window/date and event filters). Parent IDs NEVER
 // enter the ordinary visible set. All related facts are batched, including live
-// registration provenance; no attendee/contact directory is loaded here.
-func (a *App) scopedOccurrenceReads(viewer *models.User, q *gorm.DB, now time.Time) (map[uint]*occurrenceRead, error) {
-	return scopedOccurrenceReadsIn(a.DB, viewer, q, now)
-}
-
-// scopedOccurrenceReadsIn is scopedOccurrenceReads on db, for a caller that
-// holds a transaction or a context-bound handle: db and q must come from the
-// same one, and no read here touches another connection.
-func scopedOccurrenceReadsIn(db *gorm.DB, viewer *models.User, q *gorm.DB, now time.Time) (map[uint]*occurrenceRead, error) {
+// registration provenance; no attendee/contact directory is loaded here. The
+// grants and the dates that judge them are separate statements, so a caller
+// that shows what a grant authorizes reads both in one snapshot: the edit that
+// stamps an expired grant ended can move its date in the same commit.
+func (a *App) scopedOccurrenceReadsIn(db *gorm.DB, viewer *models.User, q *gorm.DB, now time.Time) (map[uint]*occurrenceRead, error) {
 	out := map[uint]*occurrenceRead{}
 	if viewer == nil {
 		return out, nil
@@ -51,6 +51,9 @@ func scopedOccurrenceReadsIn(db *gorm.DB, viewer *models.User, q *gorm.DB, now t
 		q.Session(&gorm.Session{}).Model(&models.EventOccurrence{}).Select("id")).Find(&grants).Error
 	if err != nil || len(grants) == 0 {
 		return out, err
+	}
+	if a.hooks.invitationReadStep != nil {
+		a.hooks.invitationReadStep("grants")
 	}
 	reads, err := occurrenceInvitationReadsIn(db, grants, now)
 	if err != nil {
@@ -72,7 +75,7 @@ const scopedInviteProbeBatch = 50
 // hasScopedUntitledRead reports whether any scheduled occurrence of eventID
 // with no title of its own is visible to viewer through an exact-date
 // invitation. It pages only the viewer's live-grant candidates by date id and validates
-// each page with scopedOccurrenceReads, the same loader and policy the date
+// each page with scopedOccurrenceReadsIn, the same loader and policy the date
 // page uses, stopping at the first page with a hit. A load error is returned,
 // never read as "not visible". Paging the dates (never capping the grants)
 // keeps every statement bounded however many dates the event keeps, and every
@@ -83,7 +86,7 @@ const scopedInviteProbeBatch = 50
 // rechecks.
 // Every read goes through db (a transaction or a context-bound handle, with
 // no second connection), as in scopedOccurrenceReadsIn.
-func hasScopedUntitledRead(db *gorm.DB, viewer *models.User, eventID uint, now time.Time) (bool, error) {
+func (a *App) hasScopedUntitledRead(db *gorm.DB, viewer *models.User, eventID uint, now time.Time) (bool, error) {
 	if viewer == nil {
 		return false, nil
 	}
@@ -100,7 +103,7 @@ func hasScopedUntitledRead(db *gorm.DB, viewer *models.User, eventID uint, now t
 		if len(ids) == 0 {
 			return false, nil
 		}
-		scoped, err := scopedOccurrenceReadsIn(db, viewer, db.Where("id IN ?", ids), now)
+		scoped, err := a.scopedOccurrenceReadsIn(db, viewer, db.Where("id IN ?", ids), now)
 		if err != nil {
 			return false, err
 		}
@@ -128,24 +131,32 @@ func occurrenceInvitationReadsIn(tx *gorm.DB, grants []models.Registration, now 
 	if err != nil {
 		return nil, err
 	}
+	return facts.reads(grants, now), nil
+}
+
+// reads judges grants by facts already loaded (loadOccurrenceInvitationFacts,
+// or one statement's rows for a claimed email, dateFacts): the one evaluation
+// of exact-date authority, keyed by registration id.
+func (f *occurrenceInvitationFacts) reads(grants []models.Registration, now time.Time) map[uint]*occurrenceRead {
+	out := map[uint]*occurrenceRead{}
 	for _, row := range grants {
 		if row.UserID == nil || !currentDepartureRegistration(row.Status) {
 			continue
 		}
-		occ := facts.occurrences[row.OccurrenceID]
-		ev := facts.events[occ.EventID]
-		actor := facts.accounts[*row.UserID]
+		occ := f.occurrences[row.OccurrenceID]
+		ev := f.events[occ.EventID]
+		actor := f.actors[*row.UserID]
 		if occ.ID == 0 || ev.ID == 0 || occ.EventID != ev.ID {
 			continue
 		}
 		scope := accessScopeOf(&ev)
-		f := occurrenceFactsOf(&occ, &ev, facts.group(&ev))
+		lifecycle := occurrenceFactsOf(&occ, &ev, f.group(&ev))
 		access := occurrenceAccessPolicy(row, scope)
-		if policy.CanSeeOccurrence(actor, false, access, f, now) {
-			out[row.ID] = &occurrenceRead{Event: ev, Occurrence: occ, Registration: row, Account: actor, Access: access, Facts: f}
+		if policy.CanSeeOccurrence(actor, false, access, lifecycle, now) {
+			out[row.ID] = &occurrenceRead{Event: ev, Occurrence: occ, Registration: row, Actor: actor, Access: access, Facts: lifecycle}
 		}
 	}
-	return out, nil
+	return out
 }
 
 // occurrenceFactsOf is the one builder of the lifecycle facts policy judges an
@@ -162,7 +173,7 @@ func occurrenceFactsOf(occ *models.EventOccurrence, ev *models.Event, group *mod
 
 type occurrenceInvitationFacts struct {
 	users       map[uint]*models.User
-	accounts    map[uint]policy.ContactAccount
+	actors      map[uint]policy.OccurrenceActor
 	occurrences map[uint]models.EventOccurrence
 	events      map[uint]models.Event
 	groups      map[uint]*models.Group
@@ -179,6 +190,10 @@ func loadOccurrenceInvitationFacts(tx *gorm.DB, grants []models.Registration, no
 	users, accounts, err := occurrenceAccountsIn(tx, subjectIDs, now)
 	if err != nil {
 		return nil, err
+	}
+	actors := make(map[uint]policy.OccurrenceActor, len(accounts))
+	for id, a := range accounts {
+		actors[id] = a.OccurrenceActor()
 	}
 	var occs []models.EventOccurrence
 	if err := tx.Where("id IN ?", ids).Find(&occs).Error; err != nil {
@@ -206,7 +221,7 @@ func loadOccurrenceInvitationFacts(tx *gorm.DB, grants []models.Registration, no
 	if err != nil {
 		return nil, err
 	}
-	return &occurrenceInvitationFacts{users, accounts, occByID, evByID, groupByID}, nil
+	return &occurrenceInvitationFacts{users, actors, occByID, evByID, groupByID}, nil
 }
 
 func (f *occurrenceInvitationFacts) group(ev *models.Event) *models.Group {
@@ -229,7 +244,7 @@ func (f *occurrenceInvitationFacts) endReason(row models.Registration, now time.
 	if u == nil || !u.CanSignIn() {
 		return policy.ContactAccountDisabled
 	}
-	if u.AccountType == models.AccountTeen && !f.accounts[u.ID].Active {
+	if u.AccountType == models.AccountTeen && !f.actors[u.ID].Active {
 		return policy.OccurrenceConsentLost
 	}
 	occ := f.occurrences[row.OccurrenceID]
@@ -251,7 +266,7 @@ func (f *occurrenceInvitationFacts) endReason(row models.Registration, now time.
 	if !lifecycle.Scheduled {
 		return policy.OccurrenceCancelled
 	}
-	if row.AccessOrigin != policy.OccurrenceOriginManagerAdd && !occ.EndsAt.IsZero() && !now.Before(occ.EndsAt) {
+	if policy.AccessEndsWithDate(row.AccessOrigin) && !occ.EndsAt.IsZero() && !now.Before(occ.EndsAt) {
 		return policy.OccurrenceEnded
 	}
 	if !currentDepartureRegistration(row.Status) {
@@ -282,8 +297,9 @@ func occurrenceDatePath(eventID uint, date string) string {
 	return "/events/" + strconv.FormatUint(uint64(eventID), 10) + "/dates/" + date
 }
 
-// dateOccurrenceJSON never carries host people, contact or management data.
-// Only ordinary reads may attach a group label/link, after an independent
+// dateOccurrenceJSON never carries host people, contact or management data,
+// except canManage, a capability flag (the date page's manager tools read
+// their data from the managed read). Only ordinary reads may attach a group label/link, after an independent
 // groupShownTo check, and only the ordinary JSON read carries the date page's
 // own facts (datePage); invitation-only reads omit all of that.
 type dateOccurrenceJSON struct {
@@ -313,9 +329,11 @@ type dateOccurrenceJSON struct {
 	CanBlock         bool      `json:"canBlock"`
 	Visibility       string    `json:"visibility,omitempty"`
 	CanRegister      bool      `json:"canRegister,omitempty"`
-	HostedBy         string    `json:"hostedBy,omitempty"`
-	GroupID          *uint     `json:"groupId,omitempty"`
-	GroupName        string    `json:"groupName,omitempty"`
+	// CanManage is true only for an ordinary reader who manages the event.
+	CanManage bool   `json:"canManage,omitempty"`
+	HostedBy  string `json:"hostedBy,omitempty"`
+	GroupID   *uint  `json:"groupId,omitempty"`
+	GroupName string `json:"groupName,omitempty"`
 	// Room is the date's confirmed room, shown as its place (9.2, M2.1b).
 	Room *occurrenceRoomJSON `json:"room,omitempty"`
 	// Reminders is this date's email reminders (M3.6b), only for its
@@ -341,27 +359,49 @@ func (a *App) apiGetOccurrenceDate(c *gin.Context) {
 		return
 	}
 	me := apiUser(c)
-	read, err := a.scheduledDatePage(me, id, date)
+	read, judged, err := a.scheduledDatePage(me, id, date)
 	if err != nil {
 		fail(c, err)
 		return
 	}
 	if read != nil {
+		if !a.answerDatePage(c, judged) {
+			return
+		}
 		c.JSON(http.StatusOK, eventDateResponseJSON{Occurrence: read.out})
 		return
 	}
 	if me != nil {
-		tomb, err := a.cancelledDate(me, id, date)
+		var tomb *cancelledDateJSON
+		tomb, judged, err = a.cancelledDate(me, id, date)
 		if err != nil {
 			fail(c, err)
 			return
 		}
 		if tomb != nil {
+			if !a.answerDatePage(c, judged) {
+				return
+			}
 			c.JSON(http.StatusOK, eventDateCancelledResponseJSON{Occurrence: *tomb})
 			return
 		}
 	}
+	if !a.answerDatePage(c, judged) {
+		return
+	}
 	jsonError(c, http.StatusNotFound, "event not found")
+}
+
+// answerDatePage acknowledges a participating date page read for the viewer
+// judged by the snapshot that decided the answer: the scheduled date, the
+// tombstone, or, for the 404, the last read that ran. false means it answered
+// the 500 itself.
+func (a *App) answerDatePage(c *gin.Context, judged sessionJudgment) bool {
+	if err := a.acknowledgeDecision(c, judged, true); err != nil {
+		fail(c, err)
+		return false
+	}
+	return true
 }
 
 // apiOccurrenceCalendar downloads one date as an .ics file (DEC-93). It goes
@@ -401,16 +441,29 @@ func occurrenceDateParams(c *gin.Context) (uint, string, bool) {
 	return uint(id), date, true
 }
 
-// loadOccurrenceDate is scheduledDateIn for the calendar download, on a.DB
-// with no snapshot, and its room as the event pages show it (occurrenceRooms:
-// a failed room read leaves the room out). It answers the error itself when
-// ok is false.
+// loadOccurrenceDate is scheduledDateIn for the calendar download and its
+// room as the event pages show it (a failed room read leaves the room out),
+// in one read-only Repeatable Read snapshot like the date page's, so the grant
+// that admits the date and the date it shows come from one committed state.
+// It answers the error itself when ok is false.
 func (a *App) loadOccurrenceDate(c *gin.Context) (dateOccurrenceJSON, bool) {
 	id, date, ok := occurrenceDateParams(c)
 	if !ok {
 		return dateOccurrenceJSON{}, false
 	}
-	read, err := a.scheduledDateIn(a.DB, apiUser(c), id, date, a.now().UTC())
+	var read *scheduledRead
+	now := a.now().UTC()
+	err := a.DB.Transaction(func(tx *gorm.DB) error {
+		viewer, err := snapshotViewerIn(tx, apiUser(c))
+		if err != nil {
+			return err
+		}
+		if read, err = a.scheduledDateIn(tx, viewer, id, date, now); err != nil || read == nil {
+			return err
+		}
+		read.out.Room, _ = dateRoomIn(tx, read.date.Occ.ID)
+		return nil
+	}, readSnapshot)
 	if err != nil {
 		fail(c, err)
 		return dateOccurrenceJSON{}, false
@@ -419,10 +472,13 @@ func (a *App) loadOccurrenceDate(c *gin.Context) (dateOccurrenceJSON, bool) {
 		jsonError(c, http.StatusNotFound, "event not found")
 		return dateOccurrenceJSON{}, false
 	}
-	occID := read.date.Occ.ID
-	read.out.Room = a.occurrenceRooms(a.DB, []uint{occID})[occID]
 	return read.out, true
 }
+
+// readSnapshot is the read-only Repeatable Read transaction a page reads in
+// when what it shows must come from one committed state: every statement sees
+// the same snapshot, and it takes no lock and never waits on a writer.
+var readSnapshot = &sql.TxOptions{Isolation: sql.LevelRepeatableRead, ReadOnly: true}
 
 // scheduledRead is one scheduled date as scheduledDateIn authorized and
 // presented it, with what datePageIn builds on and what it decided and loaded
@@ -450,8 +506,9 @@ type scheduledRead struct {
 // decided and loaded after it ends: that projection reads nothing and never
 // walks the recurrence rule; the series clock is the writer's stored evidence
 // (usualClockIn).
-func (a *App) scheduledDatePage(me *models.User, id uint, date string) (*scheduledRead, error) {
+func (a *App) scheduledDatePage(me *models.User, id uint, date string) (*scheduledRead, sessionJudgment, error) {
 	var read *scheduledRead
+	var judged sessionJudgment
 	now := a.now().UTC()
 	err := a.DB.Transaction(func(tx *gorm.DB) error {
 		a.scheduledDateStep("begin")
@@ -459,6 +516,7 @@ func (a *App) scheduledDatePage(me *models.User, id uint, date string) (*schedul
 		if err != nil {
 			return err
 		}
+		judged.judge(viewer)
 		if read, err = a.scheduledDateIn(tx, viewer, id, date, now); err != nil || read == nil {
 			return err
 		}
@@ -466,12 +524,15 @@ func (a *App) scheduledDatePage(me *models.User, id uint, date string) (*schedul
 		var roomErr error
 		read.out.Room, roomErr = dateRoomIn(tx, read.date.Occ.ID)
 		return a.datePageIn(tx, viewer, read, roomErr)
-	}, &sql.TxOptions{Isolation: sql.LevelRepeatableRead, ReadOnly: true})
-	if err != nil || read == nil {
-		return nil, err
+	}, readSnapshot)
+	if err != nil {
+		return nil, sessionJudgment{}, err
+	}
+	if read == nil {
+		return nil, judged, nil
 	}
 	read.date.datePage(&read.out, read.show, read.page, read.reg)
-	return read, nil
+	return read, judged, nil
 }
 
 // scheduledDateStep runs the test hook at a named point of the scheduled
@@ -544,7 +605,7 @@ func (a *App) scheduledDateIn(db *gorm.DB, me *models.User, id uint, dateStr str
 		return nil, err
 	}
 	q := db.Where("event_id = ? AND original_date = ? AND status = ?", id, dateStr, models.OccurrenceScheduled)
-	scoped, err := scopedOccurrenceReadsIn(db, me, q, now)
+	scoped, err := a.scopedOccurrenceReadsIn(db, me, q, now)
 	if err != nil {
 		return nil, err
 	}
@@ -773,19 +834,28 @@ func seriesCoverageIn(tx *gorm.DB, me *models.User, vs visibleSet, ev *models.Ev
 // from one read-only Repeatable Read snapshot that takes no contact gate, so a
 // disable or a title edit committed during the read never pairs with facts it
 // did not commit with, and page reads never queue behind lifecycle writers. A
-// failed read is an error, never "not qualified".
-func (a *App) cancelledDate(me *models.User, eventID uint, date string) (*cancelledDateJSON, error) {
+// failed read is an error, never "not qualified". The viewer is judged last,
+// on the same snapshot, so its first statement stays the date's.
+func (a *App) cancelledDate(me *models.User, eventID uint, date string) (*cancelledDateJSON, sessionJudgment, error) {
 	var out *cancelledDateJSON
+	var judged sessionJudgment
 	now := a.now().UTC()
 	err := a.DB.Transaction(func(tx *gorm.DB) error {
 		var err error
-		out, err = a.cancelledDateIn(tx, me, eventID, date, now)
-		return err
-	}, &sql.TxOptions{Isolation: sql.LevelRepeatableRead, ReadOnly: true})
+		if out, err = a.cancelledDateIn(tx, me, eventID, date, now); err != nil {
+			return err
+		}
+		viewer, err := snapshotViewerIn(tx, me)
+		if err != nil {
+			return err
+		}
+		judged.judge(viewer)
+		return nil
+	}, readSnapshot)
 	if err != nil {
-		return nil, err
+		return nil, sessionJudgment{}, err
 	}
-	return out, nil
+	return out, judged, nil
 }
 
 // cancelledDateStep runs the test hook at a named point of the tombstone read.
@@ -826,25 +896,36 @@ func (a *App) cancelledDateIn(tx *gorm.DB, me *models.User, eventID uint, date s
 	if err != nil {
 		return nil, err
 	}
-	f := policy.CancelledDateFacts{
-		Viewer:     facts.accounts[me.ID],
-		Own:        row.UserID != nil && *row.UserID == me.ID && row.HouseholdPersonID == nil,
-		Standing:   currentDepartureRegistration(row.Status),
-		Ordinary:   vs.canSeeDate(viewer, vs.ByID[ev.ID], &occ),
-		Access:     occurrenceAccessPolicy(row, accessScopeOf(&ev)),
-		Occurrence: occurrenceFactsOf(&occ, &ev, facts.group(&ev)),
-		Now:        now,
-	}
-	if row.AccessEndedAt != nil && row.AccessEndReason == policy.OccurrenceCancelled {
-		if f.Evidence, err = a.cancelEvidenceIn(tx, row, ev.ID); err != nil {
-			return nil, err
-		}
-	}
-	if !policy.CanSeeCancelledOccurrence(f) {
-		return nil, nil
+	ok, err := a.cancelledDateEntitledIn(tx, me.ID, row, facts, &ev, &occ, vs.canSeeDate(viewer, vs.ByID[ev.ID], &occ), now)
+	if err != nil || !ok {
+		return nil, err
 	}
 	out := cancelledDateOf(&ev, &occ)
 	return &out, nil
+}
+
+// cancelledDateEntitledIn is policy.CanSeeCancelledOccurrence for viewerID on
+// the cancelled date occ, judged by row (the viewer's own registration on it),
+// facts (loadOccurrenceInvitationFacts over row) and ordinary, the viewer's
+// ordinary access to the date, which the caller decides. The evidence of a
+// grant ended as occurrence_cancelled is read here, on tx.
+func (a *App) cancelledDateEntitledIn(tx *gorm.DB, viewerID uint, row models.Registration, facts *occurrenceInvitationFacts, ev *models.Event, occ *models.EventOccurrence, ordinary bool, now time.Time) (bool, error) {
+	f := policy.CancelledDateFacts{
+		Viewer:     facts.actors[viewerID],
+		Own:        row.UserID != nil && *row.UserID == viewerID && row.HouseholdPersonID == nil && row.OccurrenceID == occ.ID,
+		Standing:   currentDepartureRegistration(row.Status),
+		Ordinary:   ordinary,
+		Access:     occurrenceAccessPolicy(row, accessScopeOf(ev)),
+		Occurrence: occurrenceFactsOf(occ, ev, facts.group(ev)),
+		Now:        now,
+	}
+	if row.AccessEndedAt != nil && row.AccessEndReason == policy.OccurrenceCancelled {
+		var err error
+		if f.Evidence, err = a.cancelEvidenceIn(tx, row, ev.ID); err != nil {
+			return false, err
+		}
+	}
+	return policy.CanSeeCancelledOccurrence(f), nil
 }
 
 // cancelEvidenceIn reads the two narrow records that tie a grant ended as
@@ -959,27 +1040,35 @@ func occurrenceAccountsInZone(tx *gorm.DB, ids []uint, now time.Time, zone *time
 	}
 	teens := []uint{}
 	for i := range rows {
-		u := &rows[i]
-		users[u.ID] = u
-		accounts[u.ID] = contactAccount(u, now, zone)
-		if u.AccountType == models.AccountTeen {
-			teens = append(teens, u.ID)
+		if rows[i].AccountType == models.AccountTeen {
+			teens = append(teens, rows[i].ID)
 		}
 	}
+	granted := map[uint]bool{}
 	if len(teens) > 0 {
 		var consents []models.TeenConsent
 		if err := tx.Select("DISTINCT ON (teen_user_id) *").Where("teen_user_id IN ? AND scope = ?", teens, models.TeenConsentAccount).Order("teen_user_id, at DESC, id DESC").Find(&consents).Error; err != nil {
 			return nil, nil, err
 		}
-		granted := map[uint]bool{}
 		for _, c := range consents {
 			granted[c.TeenUserID] = c.Status == models.ConsentGranted
 		}
-		for _, id := range teens {
-			a := accounts[id]
-			a.Active = a.Active && granted[id]
-			accounts[id] = a
-		}
+	}
+	for i := range rows {
+		u := &rows[i]
+		users[u.ID] = u
+		a := contactAccount(u, now, zone)
+		a.Active = occurrenceActorOf(u, granted[u.ID]).Active
+		accounts[u.ID] = a
 	}
 	return users, accounts, nil
+}
+
+// occurrenceActorOf is the one rule for whether u is an active exact-date
+// recipient: a live account that can sign in and, for a teen, whose latest
+// account consent is granted (consented). It reads no age or contact
+// preference, so it can be built from rows that carry neither.
+func occurrenceActorOf(u *models.User, consented bool) policy.OccurrenceActor {
+	return policy.OccurrenceActor{Person: asPerson(u),
+		Active: !u.DeletedAt.Valid && u.CanSignIn() && (u.AccountType != models.AccountTeen || consented)}
 }

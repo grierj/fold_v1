@@ -392,7 +392,7 @@ func TestPersonalFeedOpenedHiddenSeriesDateStaysStandaloneAndPrivate(t *testing.
 	}).Error; err != nil {
 		t.Fatal(err)
 	}
-	apiDo(t, admin, "PUT", fmt.Sprintf("/api/v1/events/%d/occurrences/%s", ev.ID, models.FormatCalendarDate(dates[0].OriginalDate)), map[string]any{"visibility": "public"}, http.StatusOK)
+	saveDate(t, admin, ev.ID, models.FormatCalendarDate(dates[0].OriginalDate), map[string]any{"visibility": "public"}, http.StatusOK, "")
 
 	path := createFeedLink(t, client, models.CalendarFeedAll)
 	// The fixture runs at 18:00 UTC, so the start time names the date without the formatter under test.
@@ -698,8 +698,7 @@ func TestFeedRecurringAcceptance(t *testing.T) {
 	apiDo(t, admin, "POST", fmt.Sprintf("/api/v1/events/%d/cancel", series.ID),
 		map[string]any{"date": cancelled}, http.StatusOK)
 	moved := feedDate(start.AddDate(0, 0, 14))
-	apiDo(t, admin, "PUT", fmt.Sprintf("/api/v1/events/%d/occurrences/%s", series.ID, moved),
-		map[string]any{"title": "Special Rehearsal", "startsLocal": moved + "T21:00"}, http.StatusOK)
+	saveDate(t, admin, series.ID, moved, map[string]any{"title": "Special Rehearsal", "startsLocal": moved + "T21:00"}, http.StatusOK, "")
 
 	anon := newAPIClient(t, app)
 	for _, path := range []string{"/cal/public.ics", fmt.Sprintf("/cal/groups/%d.ics", open)} {
@@ -1008,9 +1007,9 @@ func TestPublicAndGroupFeedsOpenedDateHidesSeriesDetails(t *testing.T) {
 			}).Error; err != nil {
 				t.Fatal(err)
 			}
-			apiDo(t, admin, "PUT", fmt.Sprintf("/api/v1/events/%d/occurrences/%s", ev.ID, models.FormatCalendarDate(dates[0].OriginalDate)), map[string]any{
+			saveDate(t, admin, ev.ID, models.FormatCalendarDate(dates[0].OriginalDate), map[string]any{
 				"visibility": "public", "title": "Opened community date", "location": "Opened date place",
-			}, http.StatusOK)
+			}, http.StatusOK, "")
 			for _, path := range []string{"/cal/public.ics", fmt.Sprintf("/cal/groups/%d.ics", *ev.GroupID)} {
 				raw := unfoldFeed(feedBody(t, anon, path))
 				for _, want := range []string{"BEGIN:VEVENT", "SUMMARY:Opened community date", "LOCATION:Opened date place", "Remote attendance available", occurrenceDatePath(ev.ID, models.FormatCalendarDate(dates[0].OriginalDate)), dates[0].StartsAt.UTC().Format("20060102T150405")} {
@@ -1052,7 +1051,7 @@ func TestOpenedDateFeedsUseEffectiveRemoteAvailability(t *testing.T) {
 	if err := app.DB.Model(&models.Event{}).Where("id = ?", ev.ID).Update("visibility", models.VisibilityInviteOnly).Error; err != nil {
 		t.Fatal(err)
 	}
-	apiDo(t, admin, "PUT", fmt.Sprintf("/api/v1/events/%d/occurrences/%s", ev.ID, models.FormatCalendarDate(dates[0].OriginalDate)), map[string]any{"visibility": "public"}, http.StatusOK)
+	saveDate(t, admin, ev.ID, models.FormatCalendarDate(dates[0].OriginalDate), map[string]any{"visibility": "public"}, http.StatusOK, "")
 	for _, tc := range []struct {
 		name     string
 		enabled  bool
@@ -1073,7 +1072,7 @@ func TestOpenedDateFeedsUseEffectiveRemoteAvailability(t *testing.T) {
 			if err := app.DB.Model(&models.Event{}).Where("id = ?", ev.ID).Updates(map[string]any{"remote_available": tc.enabled, "remote_capacity": tc.capacity}).Error; err != nil {
 				t.Fatal(err)
 			}
-			apiDo(t, admin, "PUT", fmt.Sprintf("/api/v1/events/%d/occurrences/%s", ev.ID, models.FormatCalendarDate(dates[0].OriginalDate)), map[string]any{"remoteCapacityOverride": tc.override}, http.StatusOK)
+			saveDate(t, admin, ev.ID, models.FormatCalendarDate(dates[0].OriginalDate), map[string]any{"remoteCapacityOverride": tc.override}, http.StatusOK, "")
 			var body struct {
 				Occurrence dateOccurrenceJSON `json:"occurrence"`
 			}
@@ -1116,9 +1115,9 @@ func TestRecurringFeedsUseDateRemoteCapacityAndRefresh(t *testing.T) {
 	if err := app.DB.Where("event_id = ?", ev.ID).Order("original_date").Find(&dates).Error; err != nil || len(dates) != 3 {
 		t.Fatalf("dates: %v count=%d", err, len(dates))
 	}
-	datePath := fmt.Sprintf("/api/v1/events/%d/occurrences/%s", ev.ID, models.FormatCalendarDate(dates[0].OriginalDate))
-	apiDo(t, admin, "PUT", datePath, map[string]any{"remoteCapacityOverride": 0, "location": ""}, http.StatusOK)
-	apiDo(t, admin, "PUT", fmt.Sprintf("/api/v1/events/%d/occurrences/%s", ev.ID, models.FormatCalendarDate(dates[1].OriginalDate)), map[string]any{"remoteCapacityOverride": 2}, http.StatusOK)
+	day0 := models.FormatCalendarDate(dates[0].OriginalDate)
+	saveDate(t, admin, ev.ID, day0, map[string]any{"remoteCapacityOverride": 0, "location": ""}, http.StatusOK, "")
+	saveDate(t, admin, ev.ID, models.FormatCalendarDate(dates[1].OriginalDate), map[string]any{"remoteCapacityOverride": 2}, http.StatusOK, "")
 	// Fill the inherited positive pool: offered means configured, not free seats.
 	if code, body := registerModeAs(member, ev.ID, models.FormatCalendarDate(dates[2].OriginalDate), models.RegGoing, models.AttendanceRemote); code != http.StatusOK {
 		t.Fatalf("remote RSVP: %d %s", code, body)
@@ -1158,7 +1157,7 @@ func TestRecurringFeedsUseDateRemoteCapacityAndRefresh(t *testing.T) {
 	if w := fetchFeedIf(t, anon, paths[0], before.Header().Get("ETag")); w.Code != http.StatusNotModified {
 		t.Fatalf("unchanged feed: %d", w.Code)
 	}
-	apiDo(t, admin, "PUT", datePath, map[string]any{"remoteCapacityOverride": nil}, http.StatusOK)
+	saveDate(t, admin, ev.ID, day0, map[string]any{"remoteCapacityOverride": nil}, http.StatusOK, "")
 	if w := fetchFeedIf(t, anon, paths[0], before.Header().Get("ETag")); w.Code != http.StatusOK || w.Header().Get("ETag") == before.Header().Get("ETag") {
 		t.Fatalf("capacity reset did not refresh feed: %d", w.Code)
 	}

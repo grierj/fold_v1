@@ -2,12 +2,14 @@ package main
 
 import (
 	"errors"
+	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
 	"time"
 
 	"fold/internal/audit"
+	"fold/internal/consent"
 	"fold/internal/mail"
 	"fold/internal/policy"
 	"fold/models"
@@ -28,14 +30,20 @@ func (a *App) groupShownTo(me *models.User, g *models.Group, rel policy.Rel) *mo
 }
 
 func (a *App) presentEvent(ev *models.Event, me *models.User, f eventFacts) (eventJSON, error) {
+	return a.presentEventIn(a.DB, ev, me, f, &siteNameOnce{a: a})
+}
+
+// presentEventIn is presentEvent with the church-wide hosts read on db and the
+// site name from site, so the event page reads them in its snapshot.
+func (a *App) presentEventIn(db *gorm.DB, ev *models.Event, me *models.User, f eventFacts, site *siteNameOnce) (eventJSON, error) {
 	j := toEventJSON(ev)
 	if f.canManage(me) {
 		applyEventVideoReveal(&j, ev, false, true)
 	}
-	l := labelGroup(a.groupShownTo(me, f.group, f.rel), true, &siteNameOnce{a: a})
+	l := labelGroup(a.groupShownTo(me, f.group, f.rel), true, site)
 	j.GroupID, j.GroupName, j.GroupVisibility, j.HostedBy = l.ID, l.Name, l.Visibility, l.HostedBy
 	if policy.IsAdmin(asPerson(me)) && ev.GroupID == nil {
-		hosts, err := a.eventHosts(ev.ID)
+		hosts, err := eventHostsIn(db, ev.ID)
 		if err != nil {
 			return j, err
 		}
@@ -54,8 +62,12 @@ func (a *App) respondEvent(c *gin.Context, status int, ev *models.Event, me *mod
 }
 
 func (a *App) eventHosts(eventID uint) ([]hostJSON, error) {
+	return eventHostsIn(a.DB, eventID)
+}
+
+func eventHostsIn(db *gorm.DB, eventID uint) ([]hostJSON, error) {
 	var rows []models.EventHost
-	if err := a.DB.Preload("User").Where("event_id = ?", eventID).Order("id").Find(&rows).Error; err != nil {
+	if err := db.Preload("User").Where("event_id = ?", eventID).Order("id").Find(&rows).Error; err != nil {
 		return nil, err
 	}
 	out := make([]hostJSON, 0, len(rows))
@@ -93,6 +105,17 @@ func (a *App) eventPermissions(me *models.User, f eventFacts) (manage, setVis bo
 // range endpoints it serves have no such filter and must not list past dates.
 func upcomingWindow(now time.Time) (from, to string) {
 	return now.Add(-24 * time.Hour).Format("2006-01-02"), now.AddDate(0, 0, 90).Format("2006-01-02")
+}
+
+// eventPageLists is whether the event and group pages list this date: the Go
+// form of occurrencesForEventsErr's filter as those pages call it (scheduled,
+// original date inside upcomingWindow(now), not yet started). A manager's
+// calendar row links any other date to its date page (DEC-157).
+// TestManagerCalendarLinkMatchesTheEventPageList keeps the two equal.
+func eventPageLists(o *models.EventOccurrence, now time.Time) bool {
+	from, to := upcomingWindow(now)
+	day := models.FormatCalendarDate(o.OriginalDate)
+	return o.Status == models.OccurrenceScheduled && day >= from && day <= to && !o.StartsAt.Before(now)
 }
 
 // loadEventFor loads the event named by :id with the caller's facts. The error
@@ -175,30 +198,74 @@ func (a *App) apiListOpenEvents(c *gin.Context) {
 	c.JSON(http.StatusOK, openEventsResponseJSON{Events: listed})
 }
 
+// apiGetEvent is the event page: the event, its upcoming dates and the
+// viewer's permissions, with the group label, the site name and an admin's
+// church-wide hosts, all read in one read-only Repeatable Read snapshot on one
+// clock with the viewer re-read in it (snapshotViewerIn), so a demotion, a
+// removed host or an erasure committed during the read never pairs old
+// authority with newer rows. A participating request is acknowledged for that
+// viewer once the snapshot has ended (decidingSnapshot), on the page and on
+// its 404 once that rollback was confirmed.
 func (a *App) apiGetEvent(c *gin.Context) {
-	ev, f, ok := a.loadVisibleEvent(c)
-	if !ok {
-		return
+	id, _ := strconv.Atoi(c.Param("id"))
+	var out gin.H
+	var judged sessionJudgment
+	err := decidingSnapshot(a.DB.WithContext(c.Request.Context()), func(tx *gorm.DB) error {
+		if a.hooks.readerBegin != nil {
+			a.hooks.readerBegin("event detail")
+		}
+		now := a.now().UTC()
+		me, err := snapshotViewerIn(tx, apiUser(c))
+		if err != nil {
+			return err
+		}
+		judged.judge(me)
+		var ev models.Event
+		if err := tx.First(&ev, id).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return errEventNotFound
+			}
+			return err
+		}
+		f, err := eventFactsIn(tx, me, &ev)
+		if err != nil {
+			return err
+		}
+		if !f.canSee(me) {
+			return errEventNotFound
+		}
+		if a.hooks.readerAuthorized != nil {
+			a.hooks.readerAuthorized("event detail")
+		}
+		manage, setVis := a.eventPermissions(me, f)
+		from, to := upcomingWindow(now)
+		listed, _, err := a.listDatesIn(dateListRead{db: tx, now: now, strict: true}, []uint{ev.ID}, from, to, &now, me, 0, nil)
+		if err != nil {
+			return err
+		}
+		event, err := a.presentEventIn(tx, &ev, me, f, &siteNameOnce{a: a, db: tx})
+		if err != nil {
+			return err
+		}
+		out = gin.H{
+			"event":            event,
+			"occurrences":      listed,
+			"canManage":        manage,
+			"canSetVisibility": setVis,
+		}
+		if a.hooks.readerEnd != nil {
+			a.hooks.readerEnd("event detail", tx)
+		}
+		return nil
+	})
+	if ackErr := a.acknowledgeDecision(c, judged, err == nil || decidedRefusal(err)); ackErr != nil {
+		err = ackErr
 	}
-	now := time.Now().UTC()
-	from, to := upcomingWindow(now)
-	manage, setVis := a.eventPermissions(apiUser(c), f)
-	listed, err := a.occurrencesForEventsErr([]uint{ev.ID}, from, to, &now, apiUser(c))
-	if err != nil {
-		jsonError(c, http.StatusInternalServerError, "could not load events")
-		return
-	}
-	event, err := a.presentEvent(ev, apiUser(c), f)
 	if err != nil {
 		fail(c, err)
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{
-		"event":            event,
-		"occurrences":      listed,
-		"canManage":        manage,
-		"canSetVisibility": setVis,
-	})
+	c.JSON(http.StatusOK, out)
 }
 
 func (a *App) hostCandidate(actor *models.User, email string) (*models.User, error) {
@@ -323,9 +390,11 @@ func (a *App) apiSetEventVisibility(c *gin.Context) {
 	var body struct {
 		Visibility string `json:"visibility"`
 		Reason     string `json:"reason"`
-		// Confirm acknowledges that registrants will be cancelled (the preview).
-		Confirm        bool `json:"confirm"`
-		ResetOverrides bool `json:"resetOverrides"`
+		// Consent is the token of the impact the person reviewed (the preview
+		// or a 409's). A change that cancels anyone, and every reset, needs
+		// the token of the impact as the write finds it (DEC-158).
+		Consent        *string `json:"consent"`
+		ResetOverrides bool    `json:"resetOverrides"`
 	}
 	if err := c.ShouldBindJSON(&body); err != nil {
 		jsonError(c, http.StatusBadRequest, "invalid body")
@@ -361,39 +430,60 @@ func (a *App) apiSetEventVisibility(c *gin.Context) {
 			*ev = *locked
 			return nil
 		}
-		action := audit.VisibilityChanged
-		if opened {
-			action = audit.VisibilityOverride
-		}
 		oldVis, oldOpened := locked.Visibility, locked.LeaderOpened
-		impact, err = eventImpactOfReset(tx, locked, vis, body.ResetOverrides)
+		// Every selection first, on one clock, under the locks; then the
+		// consent check over exactly them; only then any write.
+		now := a.now().UTC()
+		b, h, dates, err := eventImpactIn(tx, lockingSelector(tx, now), now, me.ID, locked, vis, body.ResetOverrides, body.ResetOverrides)
 		if err != nil {
 			return err
 		}
-		if !body.Confirm && impactHasLosers(impact) {
+		impact = b.impact
+		plan, token, err := a.checkConsentIn(tx, body.Consent, h, b.entries)
+		if errors.Is(err, errConsentMismatch) {
+			impact.Consent = token
 			return errNeedDecision
+		}
+		if err != nil {
+			return err
+		}
+		action := audit.VisibilityChanged
+		if opened {
+			action = audit.VisibilityOverride
 		}
 		if err := tx.Model(locked).Updates(map[string]any{"visibility": vis, "leader_opened": opened}).Error; err != nil {
 			return err
 		}
 		locked.Visibility, locked.LeaderOpened = vis, opened
 		// More private: the same cancel-and-notify as a group tightening (DEC-48).
-		if policy.MoreOpen(oldVis, vis) {
-			err := a.cancelDateLosers(tx, me, c.ClientIP(), locked, vis, time.Now().UTC(), seriesDates)
+		if series := eventRowKey(consent.ListTightened, locked); plan.Has(series) {
+			cs, err := plan.Take(series)
 			if err != nil {
 				return err
 			}
-		}
-		if body.ResetOverrides {
-			var dates []models.EventOccurrence
-			if err := futureOverrides(tx, locked.ID).Clauses(clause.Locking{Strength: "UPDATE"}).Order("id").Find(&dates).Error; err != nil {
+			if err := a.cancelSelectedLosers(tx, cs, me, c.ClientIP(), locked, vis, seriesDates); err != nil {
 				return err
 			}
-			for i := range dates {
-				err := a.changeDateVisibility(tx, me, c.ClientIP(), locked, &dates[i], f.group, nil, "series_reset", false)
-				if err != nil {
+		}
+		// Exactly the dates the reviewed impact listed (empty unless the
+		// check passed).
+		byID := map[uint64]*models.EventOccurrence{}
+		for i := range dates {
+			byID[uint64(dates[i].ID)] = &dates[i]
+		}
+		for _, id := range plan.ResetDates() {
+			d := byID[id]
+			if d == nil {
+				return fmt.Errorf("reset date %d is not among the locked dates", id)
+			}
+			var cd consent.Checked[dateLosers]
+			if k := dateRowKey(consent.ListTightened, locked, d); plan.Has(k) {
+				if cd, err = plan.Take(k); err != nil {
 					return err
 				}
+			}
+			if err := a.changeDateVisibilitySelected(tx, me, c.ClientIP(), locked, d, f.group, nil, "series_reset", false, cd); err != nil {
+				return err
 			}
 		}
 		*ev = *locked
@@ -416,14 +506,15 @@ func (a *App) apiSetEventVisibility(c *gin.Context) {
 			return err
 		}
 		if action == audit.VisibilityOverride && f.group != nil {
-			err := notifyVisibilityOverride(tx, me.ID, ev, f.group, vis, reason)
-			return err
+			if err := notifyVisibilityOverride(tx, me.ID, ev, f.group, vis, reason); err != nil {
+				return err
+			}
 		}
-		return nil
+		return plan.Done()
 	})
 	if errors.Is(err, errNeedDecision) {
 		c.JSON(http.StatusConflict, gin.H{
-			"error":         "Confirm cancelling the registrations of people who can no longer see this event",
+			"error":         "Review this change before saving",
 			"needsDecision": true,
 			"impact":        impact,
 		})
@@ -597,11 +688,11 @@ func dateCandidatesIn(db *gorm.DB, viewer *models.User, q *gorm.DB) (visibleSet,
 	return loadCandidates(db, viewer, q, false)
 }
 
-// deletedEventCandidates is eventCandidates for the admin-only "show deleted
+// deletedEventCandidatesIn is dateCandidatesIn for the admin-only "show deleted
 // events" calendar switch (DEC-68): an admin also gets the events of
 // soft-deleted groups. Anyone else gets the ordinary candidates.
-func (a *App) deletedEventCandidates(viewer *models.User, q *gorm.DB) (visibleSet, error) {
-	return loadCandidates(a.DB, viewer, q, policy.IsAdmin(asPerson(viewer)))
+func deletedEventCandidatesIn(db *gorm.DB, viewer *models.User, q *gorm.DB) (visibleSet, error) {
+	return loadCandidates(db, viewer, q, policy.IsAdmin(asPerson(viewer)))
 }
 
 // When reading in a transaction, db and q must both come from that transaction.

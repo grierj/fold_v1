@@ -172,6 +172,8 @@ var erasureColumns = []erasureColumn{
 	{"event_occurrences", "remote_capacity_override", "T09", "NA", []string{"T09"}},
 	{"event_occurrences", "visibility_override", "T09", "NA", []string{"T09"}},
 	{"event_occurrences", "cancel_source", "T09", "NA", []string{"T09"}},
+	{"event_occurrences", "edit_revision", "T09", "NA", []string{"T09"}},
+	{"event_occurrences", "edit_receipt", "T09", "NA", []string{"T09"}},
 
 	// T10 events
 	{"events", "id", "T10", "RET", []string{"T10"}},
@@ -207,6 +209,7 @@ var erasureColumns = []erasureColumn{
 	{"events", "reminder_email_minutes", "T10", "RET", []string{"T10"}},
 	{"events", "reminder_push", "T10", "RET", []string{"T10"}},
 	{"events", "series_clock_dirty", "T10", "RET", []string{"T10", "T40"}},
+	{"events", "edit_revision", "T10", "RET", []string{"T10"}},
 
 	// T11 groups
 	{"groups", "id", "T11", "RET", []string{"T11"}},
@@ -314,6 +317,7 @@ var erasureColumns = []erasureColumn{
 	{"jobs", "unique_key", "T18", "RET", []string{"T18", "7.4", "9.4"}},
 	{"jobs", "created_at", "T18", "RET", []string{"T18"}},
 	{"jobs", "updated_at", "T18", "RET", []string{"T18"}},
+	{"jobs", "claim_seq", "T18", "RET", []string{"T18"}},
 
 	// T19 login_throttles
 	{"login_throttles", "key", "T19", "DEL", []string{"T19"}},
@@ -360,6 +364,7 @@ var erasureColumns = []erasureColumn{
 	{"message_recipients", "provider_message_id", "T23", "RET", []string{"T23"}},
 	{"message_recipients", "error", "T23", "COND", []string{"T23", "M22", "M23"}},
 	{"message_recipients", "sent_at", "T23", "RET", []string{"T23"}},
+	{"message_recipients", "audience_admitted_at", "T23", "RET", []string{"T23"}},
 	{"message_recipients", "created_at", "T23", "RET", []string{"T23"}},
 	{"message_recipients", "updated_at", "T23", "RET", []string{"T23"}},
 
@@ -440,6 +445,7 @@ var erasureColumns = []erasureColumn{
 	{"push_subscriptions", "label", "T27", "DEL", []string{"T27"}},
 	{"push_subscriptions", "created_at", "T27", "DEL", []string{"T27"}},
 	{"push_subscriptions", "last_used_at", "T27", "DEL", []string{"T27"}},
+	{"push_subscriptions", "binding_generation", "T27", "DEL", []string{"T27"}},
 	{"push_subscriptions", "failed_at", "T27", "DEL", []string{"T27"}},
 
 	// T28 registrations

@@ -1491,7 +1491,7 @@ func TestAvatarWorkTakesOnlyTheUserRow(t *testing.T) {
 				return err
 			}
 			return lockContacts(tx)
-		}); err != nil {
+		}, contactGateTx); err != nil {
 			t.Fatalf("the contact gate was held: %v", err)
 		}
 		var held int

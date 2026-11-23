@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"fold/internal/audit"
+	"fold/internal/consent"
 	"fold/internal/eventdates"
 	"fold/internal/events"
 	"fold/internal/notify"
@@ -64,36 +65,86 @@ func (a *App) occurrencesForEventsErr(eventIDs []uint, from, to string, startAft
 
 // occurrencesForEventsAfterErr is occurrencesForEventsErr with a response cap
 // (applied after date visibility, before attendee enrichment; zero keeps the
-// full list) and a group-page cursor.
+// full list) and a group-page cursor, read on a.DB at the wall clock.
 func (a *App) occurrencesForEventsAfterErr(eventIDs []uint, from, to string, startAfter *time.Time, me *models.User, limit int, cursor *groupUpcomingCursor) ([]occurrenceJSON, bool, error) {
-	out := []occurrenceJSON{}
-	if len(eventIDs) == 0 {
-		return out, false, nil
-	}
-	// The one place event dates are listed: drop every event this viewer
-	// can't see, so no caller has to remember to.
-	vs, err := a.dateCandidates(me, a.DB.Where("id IN ?", eventIDs))
+	return a.listDatesIn(dateListRead{db: a.DB, now: time.Now().UTC()}, eventIDs, from, to, startAfter, me, limit, cursor)
+}
+
+// dateListRead is where a date list reads and on which clock. The event pages
+// read on a.DB, decide household ages on the church zone read when first
+// needed (UTC when it can't be read) and leave out a recoverable row whose
+// eligibility can't be read. A group read is strict: every read is on its
+// snapshot, household facts count from churchClockIn on it, and a failed
+// required read is the answer. Either way a failed seat, childcare or room
+// read shows its default, in a savepoint on a transaction.
+type dateListRead struct {
+	db     *gorm.DB
+	now    time.Time
+	strict bool
+}
+
+// listDatesIn is occurrencesForEventsAfterErr on rr.
+func (a *App) listDatesIn(rr dateListRead, eventIDs []uint, from, to string, startAfter *time.Time, me *models.User, limit int, cursor *groupUpcomingCursor) ([]occurrenceJSON, bool, error) {
+	sel, err := selectDatesIn(rr, eventIDs, dateSelection{from: from, to: to, startAfter: startAfter, limit: limit, cursor: cursor}, me)
 	if err != nil {
-		return out, false, err
+		return []occurrenceJSON{}, false, err
+	}
+	out, err := a.presentDatesIn(rr, sel, me)
+	if err != nil {
+		return []occurrenceJSON{}, false, err
+	}
+	return out, sel.truncated, nil
+}
+
+// dateSelection is which scheduled dates a list asks for: original days in
+// [from, to], starting at or after startAfter (nil for any), after cursor,
+// at most limit of them (0 for all).
+type dateSelection struct {
+	from, to   string
+	startAfter *time.Time
+	limit      int
+	cursor     *groupUpcomingCursor
+}
+
+// selectedDates is what selectDatesIn chose: the viewer's candidate events
+// and, in list order, the dates of them the viewer may see (vs.canSeeDate),
+// each with its Event filled in. truncated says a further visible date was
+// left out by the limit.
+type selectedDates struct {
+	vs        visibleSet
+	kept      []models.EventOccurrence
+	truncated bool
+}
+
+// selectDatesIn chooses the dates a list shows me, reading on rr.db: the one
+// place event dates are selected, dropping every event and date this viewer
+// can't see, so no caller has to remember to. It reads events, the viewer's
+// facts about them and the dates, nothing about anyone registered.
+func selectDatesIn(rr dateListRead, eventIDs []uint, want dateSelection, me *models.User) (selectedDates, error) {
+	if len(eventIDs) == 0 {
+		return selectedDates{}, nil
+	}
+	vs, err := dateCandidatesIn(rr.db, me, rr.db.Where("id IN ?", eventIDs))
+	if err != nil {
+		return selectedDates{}, err
 	}
 	if len(vs.IDs) == 0 {
-		return out, false, nil
+		return selectedDates{vs: vs}, nil
 	}
-	evs, byID := vs.Events, vs.ByID
-	eventIDs = vs.IDs
+	byID := vs.ByID
 
-	q := a.DB.Where("event_id IN ? AND status = ? AND original_date >= ? AND original_date <= ?",
-		eventIDs, models.OccurrenceScheduled, from, to)
-	if startAfter != nil {
-		q = q.Where("starts_at >= ?", *startAfter)
+	q := rr.db.Where("event_id IN ? AND status = ? AND original_date >= ? AND original_date <= ?",
+		vs.IDs, models.OccurrenceScheduled, want.from, want.to)
+	if want.startAfter != nil {
+		q = q.Where("starts_at >= ?", *want.startAfter)
 	}
 	var occs []models.EventOccurrence
 	if err := q.Order("starts_at, id").Find(&occs).Error; err != nil {
-		return out, false, err
+		return selectedDates{}, err
 	}
 
-	truncated := false
-	kept := make([]models.EventOccurrence, 0, len(occs))
+	cursor := want.cursor
+	sel := selectedDates{vs: vs, kept: make([]models.EventOccurrence, 0, len(occs))}
 	for _, o := range occs {
 		if !vs.canSeeDate(me, byID[o.EventID], &o) {
 			continue
@@ -101,24 +152,35 @@ func (a *App) occurrencesForEventsAfterErr(eventIDs []uint, from, to string, sta
 		if cursor != nil && (o.StartsAt.Before(cursor.StartsAt) || (o.StartsAt.Equal(cursor.StartsAt) && o.ID <= cursor.ID)) {
 			continue
 		}
-		if limit > 0 && len(kept) >= limit {
-			truncated = true
+		if want.limit > 0 && len(sel.kept) >= want.limit {
+			sel.truncated = true
 			break
 		}
-		kept = append(kept, o)
+		sel.kept = append(sel.kept, o)
 	}
+	for i := range sel.kept {
+		sel.kept[i].Event = *byID[sel.kept[i].EventID]
+	}
+	return sel, nil
+}
+
+// presentDatesIn renders the selected dates as the event pages and group
+// lists show them, reading on rr.db.
+func (a *App) presentDatesIn(rr dateListRead, sel selectedDates, me *models.User) ([]occurrenceJSON, error) {
+	out := []occurrenceJSON{}
+	kept, vs := sel.kept, sel.vs
 	if len(kept) == 0 {
-		return out, false, nil
+		return out, nil
 	}
+	evs, byID := vs.Events, vs.ByID
 
 	ids := make([]uint, len(kept))
 	for i := range kept {
 		ids[i] = kept[i].ID
-		kept[i].Event = *byID[kept[i].EventID]
 	}
-	countOf, err := registrationCountsByDate(a.DB, ids)
+	countOf, err := registrationCountsByDate(rr.db, ids)
 	if err != nil {
-		return out, false, err
+		return out, err
 	}
 	// The viewer's own registration: myRegistration may read waitlisted
 	// or removed, so only cancelled rows are left out. The row id feeds
@@ -126,8 +188,8 @@ func (a *App) occurrencesForEventsAfterErr(eventIDs []uint, from, to string, sta
 	mine := map[uint]models.Registration{}
 	if me != nil {
 		var rows []models.Registration
-		if err := a.DB.Where("user_id = ? AND occurrence_id IN ? AND status <> ?", me.ID, ids, models.RegCancelled).Find(&rows).Error; err != nil {
-			return out, false, err
+		if err := rr.db.Where("user_id = ? AND occurrence_id IN ? AND status <> ?", me.ID, ids, models.RegCancelled).Find(&rows).Error; err != nil {
+			return out, err
 		}
 		for _, r := range rows {
 			mine[r.OccurrenceID] = r
@@ -137,16 +199,12 @@ func (a *App) occurrencesForEventsAfterErr(eventIDs []uint, from, to string, sta
 	// slice 2). The counts above count rows; these count seats.
 	// A failed seat or childcare total degrades to zero rather than hiding
 	// the dates (TestOccurrenceCountErrorsKeepDates); it is logged.
-	usedMap, err := seatsUsedMapForMode(a.DB, ids, models.AttendanceInPerson)
-	if err != nil {
-		log.Printf("list event dates: seats: %v", err)
-		usedMap = map[uint]int{}
-	}
-	remoteUsedMap, err := seatsUsedMapForMode(a.DB, ids, models.AttendanceRemote)
-	if err != nil {
-		log.Printf("list event dates: remote seats: %v", err)
-		remoteUsedMap = map[uint]int{}
-	}
+	usedMap := lenientCounts(rr.db, "seats", func(db *gorm.DB) (map[uint]int, error) {
+		return seatsUsedMapForMode(db, ids, models.AttendanceInPerson)
+	})
+	remoteUsedMap := lenientCounts(rr.db, "remote seats", func(db *gorm.DB) (map[uint]int, error) {
+		return seatsUsedMapForMode(db, ids, models.AttendanceRemote)
+	})
 
 	showChildcare := map[uint]bool{}
 	showNames := map[uint]bool{}
@@ -171,43 +229,57 @@ func (a *App) occurrencesForEventsAfterErr(eventIDs []uint, from, to string, sta
 			childcareIDs = append(childcareIDs, o.ID)
 		}
 	}
-	childcareUsed, err := childcareUsedMap(a.DB, childcareIDs)
-	if err != nil {
-		log.Printf("list event dates: childcare: %v", err)
-		childcareUsed = map[uint]int{}
-	}
+	childcareUsed := lenientCounts(rr.db, "childcare", func(db *gorm.DB) (map[uint]int, error) {
+		return childcareUsedMap(db, childcareIDs)
+	})
 	// One set of household facts and one church-local clock per request.
-	facts := a.requestFacts()
-	names, removed, err := a.attendeeNames(kept, showNames, showChildcare, showDeclined, me, facts)
-	if err != nil {
-		return out, false, err
+	var facts *subjectFacts
+	if rr.strict {
+		if facts, err = requestFactsAt(rr.db, rr.now); err != nil {
+			return out, err
+		}
+	} else {
+		facts = a.requestFacts()
 	}
-	guardians := a.confirmedContactGuardians(me, facts.users)
+	names, removed, err := a.attendeeNames(rosterRead{db: rr.db, now: rr.now, snapshot: rr.strict}, kept, showNames, showChildcare, showDeclined, me, facts)
+	if err != nil {
+		return out, err
+	}
+	guardians := confirmedContactGuardians(rr.db, me, facts.users)
 	for _, o := range kept {
 		presentAttendeeContacts(names[o.ID], me, facts.users, guardians, showDeclined[o.EventID])
 		presentAttendeeContacts(removed[o.ID], me, facts.users, guardians, showDeclined[o.EventID])
 	}
-	ownHousehold, err := a.myHouseholdAnswers(ids, me, facts)
+	ownHousehold, err := myHouseholdAnswers(rr.db, ids, me, facts)
 	if err != nil {
-		return out, false, err
+		return out, err
 	}
-	// Only a household account can have registered someone by name.
 	householdVideo := map[uint]bool{}
 	if me != nil {
 		if _, inHousehold := facts.accounts[me.ID]; inHousehold {
-			householdVideo, err = householdGoingMap(a.DB, ids, me, true)
+			householdVideo, err = householdGoingMap(rr.db, ids, me, true)
 			if err != nil {
-				return out, false, err
+				return out, err
 			}
 		}
 	}
 
 	siteName := &siteNameOnce{a: a}
+	if rr.strict {
+		siteName.db = rr.db
+	}
 	keptIDs := make([]uint, len(kept))
 	for i := range kept {
 		keptIDs[i] = kept[i].ID
 	}
-	rooms := a.occurrenceRooms(a.DB, keptIDs)
+	rooms := map[uint]*occurrenceRoomJSON{}
+	lenientReadIn(rr.db, func(db *gorm.DB) {
+		// The event pages show whatever rooms were read; a strict read shows
+		// rooms only from a complete read.
+		if got, err := roomsFor(db, keptIDs); err == nil || !rr.strict {
+			rooms = got
+		}
+	})
 	for i := range kept {
 		o := &kept[i]
 		date, ok := a.projectDate(me, vs, o, nil)
@@ -238,8 +310,8 @@ func (a *App) occurrencesForEventsAfterErr(eventIDs []uint, from, to string, sta
 		inst.RemoteSeatsUsed = remoteUsed
 		inst.RemoteSpotsLeft = spotsLeftFor(inst.RemoteCapacity, remoteUsed)
 		if r, ok := mine[o.ID]; ok {
-			if err := inst.setMine(a.DB, &r); err != nil {
-				return out, false, err
+			if err := inst.setMine(rr.db, &r); err != nil {
+				return out, err
 			}
 		}
 		// The video link is per date: going on this date (or running the
@@ -261,7 +333,23 @@ func (a *App) occurrencesForEventsAfterErr(eventIDs []uint, from, to string, sta
 		out = append(out, inst)
 	}
 	sort.SliceStable(out, func(i, j int) bool { return out[i].StartsAt.Before(out[j].StartsAt) })
-	return out, truncated, nil
+	return out, nil
+}
+
+// lenientCounts runs a per-date count whose failure shows zero rather than
+// hiding the dates (TestOccurrenceCountErrorsKeepDates): logged, in a
+// savepoint on a transaction, and used only when the read completed.
+func lenientCounts(db *gorm.DB, what string, read func(*gorm.DB) (map[uint]int, error)) map[uint]int {
+	out := map[uint]int{}
+	lenientReadIn(db, func(sp *gorm.DB) {
+		got, err := read(sp)
+		if err != nil {
+			log.Printf("list event dates: %s: %v", what, err)
+			return
+		}
+		out = got
+	})
+	return out
 }
 
 // changeVariant names what changed on a date for its event.changed notice:
@@ -445,6 +533,13 @@ func (a *App) groupSummary(viewer *models.User, g *models.Group) (groupSummaryJS
 // date's override), never by a SQL copy of the policy: a hidden date must not
 // reveal its time through the group card or the directory order.
 func (a *App) groupSummaries(viewer *models.User, groups []models.Group) ([]groupSummaryJSON, error) {
+	return a.groupSummariesIn(a.DB, viewer, groups, nil)
+}
+
+// groupSummariesIn is groupSummaries on db. now is a snapshot's clock when db
+// is that snapshot: the next date is read in it. A nil now reads the next date
+// in a snapshot of its own (nextVisibleDates), for a caller that holds none.
+func (a *App) groupSummariesIn(db *gorm.DB, viewer *models.User, groups []models.Group, now *time.Time) ([]groupSummaryJSON, error) {
 	out := make([]groupSummaryJSON, 0, len(groups))
 	if len(groups) == 0 {
 		return out, nil
@@ -457,7 +552,7 @@ func (a *App) groupSummaries(viewer *models.User, groups []models.Group) ([]grou
 		GroupID uint
 		Count   int64
 	}
-	if err := a.DB.Model(&models.Membership{}).Select("memberships.group_id, count(*) AS count").Joins(listedUsers("memberships")).
+	if err := db.Model(&models.Membership{}).Select("memberships.group_id, count(*) AS count").Joins(listedUsers("memberships")).
 		Where("memberships.group_id IN ? AND memberships.status = ?", ids, models.MembershipActive).Group("memberships.group_id").Scan(&counts).Error; err != nil {
 		return nil, err
 	}
@@ -465,11 +560,16 @@ func (a *App) groupSummaries(viewer *models.User, groups []models.Group) ([]grou
 	for _, row := range counts {
 		members[row.GroupID] = row.Count
 	}
-	names, err := leaderNames(a.DB, leaderIDs)
+	names, err := leaderNames(db, leaderIDs)
 	if err != nil {
 		return nil, err
 	}
-	next, err := nextVisibleDates(a.DB, viewer, ids)
+	var next map[uint]*time.Time
+	if now == nil {
+		next, err = nextVisibleDates(db, viewer, ids)
+	} else {
+		next, err = nextVisibleDatesIn(db, viewer, ids, *now)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -511,7 +611,7 @@ func nextVisibleDates(db *gorm.DB, viewer *models.User, groupIDs []uint) (map[ui
 	var next map[uint]*time.Time
 	err := db.Transaction(func(tx *gorm.DB) error {
 		var err error
-		next, err = nextVisibleDatesIn(tx, viewer, groupIDs)
+		next, err = nextVisibleDatesIn(tx, viewer, groupIDs, time.Now().UTC())
 		return err
 	}, &sql.TxOptions{Isolation: sql.LevelRepeatableRead, ReadOnly: true})
 	if err != nil {
@@ -522,8 +622,8 @@ func nextVisibleDates(db *gorm.DB, viewer *models.User, groupIDs []uint) (map[ui
 
 // Candidates, policy facts and all minimum chunks must share a snapshot: a
 // tightening committed between them must not pair old authority with new dates.
-func nextVisibleDatesIn(tx *gorm.DB, viewer *models.User, groupIDs []uint) (map[uint]*time.Time, error) {
-	now := time.Now().UTC()
+// now is the snapshot's clock: the first date starting at or after it.
+func nextVisibleDatesIn(tx *gorm.DB, viewer *models.User, groupIDs []uint, now time.Time) (map[uint]*time.Time, error) {
 	vs, err := loadCandidates(tx, viewer, tx.Where(
 		"group_id IN ? AND id IN (SELECT event_id FROM event_occurrences WHERE status = ? AND starts_at >= ?)",
 		groupIDs, models.OccurrenceScheduled, now), false)
@@ -761,8 +861,29 @@ func applySpec(ev *models.Event, spec events.Spec, body eventBody, ed capacityEd
 	ev.VideoReveal = vid.reveal
 }
 
+// errDateWindow is a malformed from/to range, answered 400 with its text.
+type errDateWindow string
+
+func (e errDateWindow) Error() string { return string(e) }
+
+const (
+	errDateWindowFormat errDateWindow = "from and to must be YYYY-MM-DD"
+	errDateWindowOrder  errDateWindow = "to must be on or after from"
+	errDateWindowLength errDateWindow = "date range must be 366 days or less"
+)
+
 func parseDateWindow(c *gin.Context) (from, to string, ok bool) {
-	now := time.Now().UTC()
+	from, to, err := dateWindowAt(c, time.Now().UTC())
+	if err != nil {
+		jsonError(c, http.StatusBadRequest, err.Error())
+		return "", "", false
+	}
+	return from, to, true
+}
+
+// dateWindowAt reads a list's from and to (original dates, inclusive), by
+// default today through 90 days out on now's UTC date.
+func dateWindowAt(c *gin.Context, now time.Time) (from, to string, err error) {
 	from = c.Query("from")
 	to = c.Query("to")
 	if from == "" {
@@ -774,18 +895,15 @@ func parseDateWindow(c *gin.Context) (from, to string, ok bool) {
 	fd, err1 := models.ParseCalendarDate(from)
 	td, err2 := models.ParseCalendarDate(to)
 	if err1 != nil || err2 != nil {
-		jsonError(c, http.StatusBadRequest, "from and to must be YYYY-MM-DD")
-		return "", "", false
+		return "", "", errDateWindowFormat
 	}
 	if td.Before(fd) {
-		jsonError(c, http.StatusBadRequest, "to must be on or after from")
-		return "", "", false
+		return "", "", errDateWindowOrder
 	}
 	if td.Sub(fd) > maxEventWindow {
-		jsonError(c, http.StatusBadRequest, "date range must be 366 days or less")
-		return "", "", false
+		return "", "", errDateWindowLength
 	}
-	return from, to, true
+	return from, to, nil
 }
 
 type groupEventsJSON struct {
@@ -795,34 +913,36 @@ type groupEventsJSON struct {
 	NextCursor string           `json:"nextCursor"`
 }
 
+// apiListEvents is one page of a group's dates in a from/to window, read in
+// one snapshot with the group's visibility (readGroup).
 func (a *App) apiListEvents(c *gin.Context) {
 	id, _ := strconv.Atoi(c.Param("id"))
-	g, _, ok := a.loadGroupFor(c, uint(id))
-	if !ok {
-		return
-	}
-	from, to, ok := parseDateWindow(c)
-	if !ok {
-		return
-	}
-	limit, cursor, ok := parseGroupUpcomingPage(c, g.ID)
-	if !ok {
-		return
-	}
-	var eventIDs []uint
-	if err := a.DB.Model(&models.Event{}).Where("group_id = ?", g.ID).Pluck("id", &eventIDs).Error; err != nil {
-		jsonError(c, http.StatusInternalServerError, "could not load events")
-		return
-	}
-	listed, hasMore, err := a.occurrencesForEventsAfterErr(eventIDs, from, to, nil, apiUser(c), limit, cursor)
-	if err != nil {
-		jsonError(c, http.StatusInternalServerError, "could not load events")
-		return
-	}
-	c.JSON(http.StatusOK, groupEventsJSON{
-		Events: listed, Truncated: hasMore, HasMore: hasMore,
-		NextCursor: nextGroupUpcomingCursor(g.ID, listed, hasMore),
+	var out groupEventsJSON
+	err := a.readGroup(c, uint(id), false, func(r groupRead) error {
+		from, to, err := dateWindowAt(c, r.now)
+		if err != nil {
+			return err
+		}
+		limit, cursor, err := groupUpcomingPage(c, r.group.ID)
+		if err != nil {
+			return err
+		}
+		a.groupReadAuthorized("group events")
+		listed, hasMore, err := a.groupDatesIn(r, from, to, nil, limit, cursor)
+		if err != nil {
+			return err
+		}
+		out = groupEventsJSON{
+			Events: listed, Truncated: hasMore, HasMore: hasMore,
+			NextCursor: nextGroupUpcomingCursor(r.group.ID, listed, hasMore),
+		}
+		return nil
 	})
+	if err != nil {
+		answerGroupRead(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, out)
 }
 
 // draftEvent validates an event body and applies it to ev (the caller's
@@ -940,8 +1060,17 @@ func (a *App) apiCreateEvent(c *gin.Context) {
 			ev.Visibility = vis
 			ev.LeaderOpened = policy.MoreOpen(vis, locked.Visibility)
 		}
+		// The consent rule runs on every group-event creation, at this
+		// transaction's top level: a new event cancels nobody, so it passes
+		// unchecked, and its declaration is what lets the visibility audit row
+		// below through 00015's audit fence (DEC-158). Never inside the
+		// callback: the room booking's savepoint would undo it.
+		plan, _, err := a.checkConsentIn(tx, nil, consent.Header{Kind: consent.KindEvent, Actor: uint64(actor.ID), Target: ev.Visibility, Current: locked.Visibility}, nil)
+		if err != nil {
+			return err
+		}
 		meta := map[string]any{"groupId": gid, "churchWide": false, "visibility": ev.Visibility}
-		return a.createEventIn(tx, &ev, actor, c.ClientIP(), body.RoomID, meta, func() error {
+		if err := a.createEventIn(tx, &ev, actor, c.ClientIP(), body.RoomID, meta, func() error {
 			if ev.Visibility == locked.Visibility {
 				return nil
 			}
@@ -962,7 +1091,10 @@ func (a *App) apiCreateEvent(c *gin.Context) {
 				return notifyVisibilityOverride(tx, actor.ID, &ev, &locked, ev.Visibility, reason)
 			}
 			return nil
-		})
+		}); err != nil {
+			return err
+		}
+		return plan.Done()
 	})
 	if errors.Is(err, errCreateGroupHidden) {
 		jsonError(c, http.StatusNotFound, "group not found")
@@ -1053,6 +1185,25 @@ func (a *App) apiUpdateEvent(c *gin.Context) {
 			}
 		}
 		actions := events.ApplySeries(existing, whens, now)
+		// DEC-156: a move or a retimed restore that makes a date end later is
+		// refused while someone who left still holds it; the before pass
+		// (reconcileAccessesBefore) has stamped every lapsed grant. One answer
+		// lists every refused date and nothing is written.
+		stored := make(map[uint]events.Existing, len(existing))
+		for _, e := range existing {
+			stored[e.ID] = e
+		}
+		raised := map[uint]string{}
+		for _, act := range actions {
+			if act.Kind == events.ActionMove || (act.Kind == events.ActionRestore && act.Retime) {
+				if old := stored[act.ID]; act.When.EndsAt.After(old.EndsAt) {
+					raised[act.ID] = old.OriginalDate
+				}
+			}
+		}
+		if err := refuseKeptDates(tx, raised); err != nil {
+			return err
+		}
 		oldCap, oldPlace := locked.Capacity, locked.Location
 		oldRemoteCap := locked.RemoteCapacity
 		oldChildcareCap, oldChildcareAvailable := locked.ChildcareCapacity, locked.ChildcareAvailable
@@ -1477,250 +1628,64 @@ func (a *App) apiCancelOccurrence(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{})
 }
 
-func (a *App) apiUpdateOccurrence(c *gin.Context) {
-	ev, ok := a.loadManagedEvent(c)
-	if !ok {
-		return
-	}
-	date := c.Param("date")
-	if _, err := models.ParseCalendarDate(date); err != nil {
-		fail(c, errSeriesDateInvalid)
-		return
-	}
-	var body struct {
-		StartsLocal      *string          `json:"startsLocal"`
-		DurationMinutes  *int             `json:"durationMinutes"`
-		Location         *string          `json:"location"`
-		Title            *string          `json:"title"`
-		CapacityOverride *json.RawMessage `json:"capacityOverride"`
-		// RemoteCapacityOverride mirrors CapacityOverride for the
-		// remote pool (M1.8 slice 2); null uses the event's cap.
-		RemoteCapacityOverride json.RawMessage `json:"remoteCapacityOverride"`
-		Visibility             json.RawMessage `json:"visibility"`
-		Reason                 string          `json:"reason"`
-		Confirm                bool            `json:"confirm"`
-	}
-	if err := c.ShouldBindJSON(&body); err != nil {
-		jsonError(c, http.StatusBadRequest, "invalid body")
-		return
-	}
-	visibility, visibilitySet, visErr := parseDateVisibility(body.Visibility)
-	if visErr != nil || len(body.Reason) > 500 {
-		fail(c, errVisibilityNotAllowed)
-		return
-	}
-	newOverride, overrideSet, capErr := parseCapacity(body.CapacityOverride)
-	if capErr != nil {
-		fail(c, capErr)
-		return
-	}
-	newRemoteOverride, remoteOverrideSet, capErr := parseRemoteCapacity(body.RemoteCapacityOverride, true)
-	if capErr != nil {
-		fail(c, capErr)
-		return
-	}
-	// Validate everything that doesn't need the row before the lock.
-	if body.DurationMinutes != nil && !events.ValidDuration(*body.DurationMinutes) {
-		fail(c, errInvalidDuration)
-		return
-	}
-	if err := validateEventText(strings.TrimSpace(strOrEmpty(body.Title)), "", strings.TrimSpace(strOrEmpty(body.Location))); err != nil {
-		fail(c, err)
-		return
-	}
-	me := apiUser(c)
-	var inst occurrenceJSON
-	var impact visibilityImpactJSON
-	err := a.contactMutation(contactChange{EventID: ev.ID}, func(tx *gorm.DB) error {
-		actor, err := lockActorIn(tx, me, actorRead)
+// previewDateTimes is the start and end the date preview counts on for o:
+// startsLocal on ev's wall clock and duration in minutes, each nil to keep
+// the stored value (dateClock), as the guarded edit saves them.
+func previewDateTimes(ev *models.Event, o *models.EventOccurrence, startsLocal *string, duration *int) (time.Time, time.Time, error) {
+	var start *time.Time
+	if startsLocal != nil {
+		t, _, err := events.ParseWall(strings.TrimSpace(*startsLocal), ev.TZID)
 		if err != nil {
-			return err
+			return time.Time{}, time.Time{}, specAnswer(err)
 		}
-		me = actor
-		var current models.Event
-		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&current, ev.ID).Error; err != nil {
-			return err
-		}
-		ev = &current
-		f, err := eventFactsIn(tx, me, ev)
-		if err != nil {
-			return err
-		}
-		if !f.canManage(me) {
-			return errOccurrenceNotFound
-		}
-		// A series edit may have changed the zone while the body arrived.
-		var wallStart *time.Time
-		if body.StartsLocal != nil {
-			t, _, err := events.ParseWall(strings.TrimSpace(*body.StartsLocal), ev.TZID)
-			if err != nil {
-				return specAnswer(err)
-			}
-			u := t.UTC()
-			wallStart = &u
-		}
-		var o models.EventOccurrence
-		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
-			Where("event_id = ? AND original_date = ?", ev.ID, date).First(&o).Error; err != nil {
-			return errOccurrenceNotFound
-		}
-		if visibilitySet {
-			next := policy.EffectiveVisibility(ev.Visibility, visibility)
-			if !policy.CanSetEventVisibility(asPerson(me), f.view, f.rel, next) {
-				return errDateVisibility
-			}
-			var err error
-			impact, err = dateImpactOf(tx, ev, &o, next)
-			if err != nil {
-				return err
-			}
-			if !body.Confirm && impactHasLosers(impact) {
-				return errNeedDecision
-			}
+		u := t.UTC()
+		start = &u
+	}
+	s, e := dateClock(ev, o, start, duration)
+	return s, e, nil
+}
 
-		}
-		oldStart, oldEnd := o.StartsAt, o.EndsAt
-		oldPlace := ev.Location
-		if o.LocationOverride != nil {
-			oldPlace = *o.LocationOverride
-		}
-		oldOverride := o.CapacityOverride
-		oldRemoteOverride := o.RemoteCapacityOverride
-		dur := effectiveOccurrenceDuration(ev, &o)
-		if body.DurationMinutes != nil {
-			dur = *body.DurationMinutes
-			o.DurationOverride = body.DurationMinutes
-		}
-		start := o.StartsAt
-		if wallStart != nil {
-			start = *wallStart
-			o.StartsAtOverride = wallStart
-		}
-		newPlace := oldPlace
-		if body.Location != nil {
-			loc := strings.TrimSpace(*body.Location)
-			o.LocationOverride = &loc
-			newPlace = loc
-		}
-		if body.Title != nil {
-			title := strings.TrimSpace(*body.Title)
-			o.TitleOverride = &title
-		}
-		if overrideSet {
-			o.CapacityOverride = newOverride
-		}
-		if remoteOverrideSet {
-			o.RemoteCapacityOverride = newRemoteOverride
-		}
-		o.StartsAt = start
-		o.EndsAt = start.Add(time.Duration(dur) * time.Minute)
-		if err := tx.Save(&o).Error; err != nil {
-			return err
-		}
-		// Cancellation and promotion use the final title, time and seat pools
-		// even when this request edits visibility and capacity together.
-		if visibilitySet {
-			err := a.changeDateVisibility(tx, me, c.ClientIP(), ev, &o, f.group, visibility, body.Reason, false)
-			if err != nil {
-				return err
-			}
-		}
-		// event.changed fans out when the date's time or place actually
-		// changed: one item per going or waitlisted person, with the
-		// combined variant when both changed.
-		timeChanged := !o.StartsAt.Equal(oldStart) || !o.EndsAt.Equal(oldEnd)
-		placeChanged := newPlace != oldPlace
-		if timeChanged {
-			// The date's room moves with it, or is lost to a conflict (9.2).
-			err := settleDateRooms(tx, ev, []uint{o.ID}, nil, &me.ID)
-			if err != nil {
-				return err
-			}
-		}
-		if timeChanged || placeChanged {
-			err := notifyEventChanged(tx, ev, &o, changeVariant(timeChanged, placeChanged), &me.ID)
-			if err != nil {
-				return err
-			}
-		}
-		// A raised per-date cap promotes into the new seats; a lowered
-		// one promotes nobody and removes nobody (Decision 3). Either
-		// pool's override counts.
-		capMoved := overrideSet && !intPtrEqual(oldOverride, newOverride) &&
-			!intPtrEqual(events.EffectiveCapacity(ev.Capacity, oldOverride),
-				events.EffectiveCapacity(ev.Capacity, newOverride))
-		remoteCapMoved := remoteOverrideSet && !intPtrEqual(oldRemoteOverride, newRemoteOverride) &&
-			!intPtrEqual(events.EffectiveCapacity(ev.RemoteCapacity, oldRemoteOverride),
-				events.EffectiveCapacity(ev.RemoteCapacity, newRemoteOverride))
-		if capMoved || remoteCapMoved {
-			err := a.promoteLocked(tx, ev, &o, a.now().UTC(), &me.ID)
-			if err != nil {
-				return err
-			}
-		}
-		groupLoc := ""
-		if f.group != nil {
-			groupLoc = f.group.Location // group-ok: managers only, re-checked under the lock
-		}
-		inst = occurrenceToJSON(ev, &o, groupLoc)
-		inst.Room = a.occurrenceRooms(a.DB, []uint{o.ID})[o.ID]
-		applyVideoReveal(&inst, ev, false, true) // managers see the link
-		inst.Visibility = policy.EffectiveVisibility(ev.Visibility, o.VisibilityOverride)
-		inst.LeaderOpened = ev.LeaderOpened
-		inst.ChurchWide = ev.GroupID == nil
-		used, err := seatsUsedForMode(tx, o.ID, models.AttendanceInPerson, 0)
-		if err != nil {
-			return err
-		}
-		inst.SeatsUsed = used
-		inst.SpotsLeft = spotsLeftFor(inst.Capacity, used)
-		remoteUsed, err := seatsUsedForMode(tx, o.ID, models.AttendanceRemote, 0)
-		if err != nil {
-			return err
-		}
-		inst.RemoteSeatsUsed = remoteUsed
-		inst.RemoteSpotsLeft = spotsLeftFor(inst.RemoteCapacity, remoteUsed)
-		if ev.ChildcareAvailable {
-			n, err := childcareUsedFor(tx, o.ID, 0)
-			if err != nil {
-				return err
-			}
-			inst.ChildcareUsed = &n
-			inst.ChildcareSpotsLeft = spotsLeftFor(ev.ChildcareCapacity, n)
-		}
-		var mineReg models.Registration
-		if err := tx.Where("user_id = ? AND occurrence_id = ? AND status <> ?",
-			me.ID, o.ID, models.RegCancelled).Limit(1).Find(&mineReg).Error; err != nil {
-			return err
-		}
-		if mineReg.ID != 0 {
-			if err := inst.setMine(tx, &mineReg); err != nil {
-				return err
-			}
-		}
-		return nil
-	})
-	switch {
-	case errors.Is(err, errNeedDecision):
-		c.JSON(http.StatusConflict, gin.H{"needsDecision": true, "impact": impact})
-		return
-	case errors.Is(err, errDateVisibility):
-		fail(c, errVisibilityNotAllowed)
-		return
-	case errors.Is(err, errOccurrenceNotFound):
-		jsonError(c, http.StatusNotFound, "that date is not on this event")
-		return
-	case errors.Is(err, gorm.ErrRecordNotFound):
-		jsonError(c, http.StatusNotFound, "event not found")
-		return
-	case isAPIError(err):
-		fail(c, err)
-		return
-	case err != nil:
-		jsonError(c, http.StatusInternalServerError, "could not update this date")
-		return
+// dateClock is the start and end a single-date save gives o. A save that names
+// neither a start nor a duration keeps the stored start and end: a date a
+// series edit left alone (a per-date override, or a date already past,
+// events.ApplySeries) can last other than its event's duration now, and such a
+// save must not move its end (DEC-156). A new duration runs from the start; a
+// new start with no duration takes the date's own duration, else the event's
+// (effectiveOccurrenceDuration), as the date is shown.
+func dateClock(ev *models.Event, o *models.EventOccurrence, start *time.Time, duration *int) (time.Time, time.Time) {
+	if start == nil && duration == nil {
+		return o.StartsAt, o.EndsAt
 	}
-	c.JSON(http.StatusOK, occurrenceResponseJSON{Occurrence: inst})
+	s := o.StartsAt
+	if start != nil {
+		s = *start
+	}
+	dur := effectiveOccurrenceDuration(ev, o)
+	if duration != nil {
+		dur = *duration
+	}
+	return s, s.Add(time.Duration(dur) * time.Minute)
+}
+
+// apiRetiredDatePut is the retired PUT /events/:id/occurrences/:date. A tab
+// opened before the guarded edit (POST .../edits) shipped still sends it; it
+// is refused with date_page_outdated so that tab reloads, after the same 401,
+// 404, 403, 400 and 404 the manager's exact-date read decides
+// (managedDateTargetIn), in one read-only snapshot. It never reads the body
+// and writes nothing.
+func (a *App) apiRetiredDatePut(c *gin.Context) {
+	id, _ := strconv.Atoi(c.Param("id"))
+	var judged sessionJudgment
+	err := decidingSnapshot(a.DB.WithContext(c.Request.Context()), func(tx *gorm.DB) error {
+		if _, err := a.managedDateTargetIn(tx, apiUser(c), id, c.Param("date"), &judged); err != nil {
+			return err
+		}
+		return errDatePageOutdated
+	})
+	if ackErr := a.acknowledgeDecision(c, judged, decidedRefusal(err)); ackErr != nil {
+		err = ackErr
+	}
+	fail(c, err)
 }
 
 // restoreSeriesDates records dates a series edit just brought back and tells
@@ -1747,8 +1712,14 @@ func restoreSeriesDates(tx *gorm.DB, actor uint, ip string, ev *models.Event, oc
 // startsLocal/endsLocal are the wall clock in tzid (C2). date is the series
 // date and stays put when a per-date override moves the clock.
 type occurrenceJSON struct {
-	hideSeries            bool             `json:"-"`
-	ID                    uint             `json:"id"`
+	hideSeries bool `json:"-"`
+	ID         uint `json:"id"`
+	// Revision is the date's edit token (dateToken), only for its managers;
+	// the guarded date edit names it. Cancelled is set only on the manager's
+	// edit base (GET /events/:id/occurrences/:date), which also answers a
+	// cancelled date.
+	Revision              string           `json:"revision,omitempty"`
+	Cancelled             bool             `json:"cancelled,omitempty"`
 	EventID               uint             `json:"eventId"`
 	Date                  string           `json:"date"`
 	DateURL               string           `json:"dateUrl,omitempty"`
@@ -1787,6 +1758,10 @@ type occurrenceJSON struct {
 	Attendees                []attendeeJSON                `json:"attendees,omitempty"`
 	MyHouseholdRegistrations []myHouseholdRegistrationJSON `json:"myHouseholdRegistrations"`
 	RemovedRegistrations     []attendeeJSON                `json:"removedRegistrations,omitempty"`
+	// KeptCount is how many live grants that end with the date it holds
+	// (keptDatesIn, the 409 date_kept_after_leaving count). Only the manager's
+	// edit base carries it, and only beside its roster (DEC-156, DEC-64).
+	KeptCount *int `json:"keptCount,omitempty"`
 	// Capacity, waitlist, and guests (M1.5). Capacity is the effective
 	// cap for this date (per-date override wins); null means unlimited.
 	// SpotsLeft is null when unlimited and never below 0. SeatsUsed

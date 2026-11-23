@@ -196,6 +196,8 @@ export interface GuestRegistration {
 /** @public Go JSON contract, checked by TestWebTypesMatchGoJSON. */
 export interface Attendee {
   addedByLeader?: boolean;
+  // A live grant that ends with the date: the person kept it after leaving (DEC-156). Managers only.
+  keptAfterLeaving?: boolean;
   email?: string;
   phone?: string;
   accountType?: "adult" | "teen";
@@ -216,6 +218,10 @@ export interface Attendee {
 // endsLocal are the wall clock in tzid.
 export interface EventOccurrence {
  dateUrl?: string;
+ // The date's edit token, only for its managers (the guarded date edit names it).
+ revision?: string;
+ // Set only on a manager's edit base, which also answers a cancelled date.
+ cancelled?: boolean;
  groupVisibility?: Visibility;
  visibilityOverride?: Visibility;
  seriesVisibility?: Visibility;
@@ -254,6 +260,9 @@ export interface EventOccurrence {
   attendees?: Attendee[];
   myHouseholdRegistrations: MyHouseholdRegistration[];
   removedRegistrations?: Attendee[];
+  // Live grants that end with the date (the 409 date_kept_after_leaving count).
+  // Only the manager's edit base carries it, beside its roster; never rendered.
+  keptCount?: number;
   // Capacity, waitlist, and guests (M1.5). capacity is the effective cap
   // for this date; null means unlimited. spotsLeft is null when
   // unlimited and never below 0. seatsUsed counts seats while
@@ -472,8 +481,22 @@ export interface VisibilityImpactEvent {
 export interface VisibilityImpact {
  futureOverrides?: number;
   visibility: Visibility;
+  // The scope's own visibility before the change (DEC-158).
+  currentVisibility: Visibility;
   tightened: VisibilityImpactEvent[];
   leaderOpened: VisibilityImpactEvent[];
+  // An event reset only: each date the reset changes.
+  resetDates?: ImpactResetDate[];
+  // The token that confirms exactly this impact; sent back as consent.
+  consent?: string;
+}
+
+/** @public Go JSON contract, checked by TestWebTypesMatchGoJSON; one date an event reset would change, with its own visibility before the reset. */
+export interface ImpactResetDate {
+  occurrenceId: number;
+  date: string;
+  title: string;
+  visibility: Visibility;
 }
 
 export type OpenedDecision = "keep" | "tighten";
@@ -821,6 +844,8 @@ export interface AddRequest {
 /** @public Exact-date read contract; does not authorize a mutation. */
 export interface EventDate {
  canRegister?: boolean;
+ // True only for someone who manages the event: the date page then offers its manager tools.
+ canManage?: boolean;
  visibility?: Visibility;
  hostedBy?: string;
  groupId?: number;
@@ -1593,6 +1618,15 @@ export interface SessionResponse {
   canCompose?: boolean;
 }
 
+// GET /auth/bootstrap (M8.1): who this browser's cookie signs in (null when no
+// one), its CSRF token and the credential marker the token's cookie carries.
+export interface SessionBootstrapResponse {
+  user: User | null;
+  canCompose: boolean;
+  csrfToken: string;
+  credentialMarker: string;
+}
+
 // GET /site. pushEnabled is the church's switch for notifications on devices (DEC-124).
 export interface SiteInfo {
   name: string;
@@ -1908,6 +1942,30 @@ export interface MessageTestResponse {
 
 export interface OccurrenceResponse {
   occurrence: EventOccurrence;
+}
+
+// What a 409 date_needs_consent carries beside error and code.
+/** @public Go JSON contract, checked by TestWebTypesMatchGoJSON; the guarded date editor reads it once the cutover slice lands. */
+export interface DateNeedsConsentResponse {
+  impact: VisibilityImpact;
+}
+
+// What a 409 date_changed from the guarded date edit may carry: baseSuperseded only when the base sent is
+// proved older than the date, so an earlier send of it can never apply.
+/** @public Go JSON contract, checked by TestWebTypesMatchGoJSON; lib/dateWrites reads the key from the error's data. */
+export interface DateChangedResponse {
+  baseSuperseded?: boolean;
+}
+
+/** @public Go JSON contract, checked by TestWebTypesMatchGoJSON; the body of 409 date_kept_after_leaving (DEC-156). */
+export interface KeptDatesConflictResponse {
+  keptDates: KeptDateCount[];
+}
+
+/** @public Go JSON contract, checked by TestWebTypesMatchGoJSON. */
+export interface KeptDateCount {
+  date: string;
+  keptCount: number;
 }
 
 /** @public Go JSON contract, checked by TestWebTypesMatchGoJSON; read through EventDateRead. */

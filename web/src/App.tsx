@@ -11,6 +11,7 @@ import { NotFound } from "./components/Missing";
 import { RequireUser } from "./components/RequireUser";
 import { useAuth } from "./auth";
 import { UnsavedChangesBlocker } from "./lib/unsavedChanges";
+import { DateWritesProvider } from "./lib/dateWrites";
 
 const GroupDetail = lazy(groupDetailChunk.route);
 const EventDetail = lazy(eventDetailChunk.route);
@@ -45,7 +46,7 @@ const MessageComposerPage = lazy(() => import("./pages/MessageComposer").then((m
 const MessageReadPage = lazy(() => import("./pages/MessageRead").then((m) => ({ default: m.MessageReadPage })));
 
 export default function App() {
-  const { user, loading } = useAuth();
+  const { user, loading, credential } = useAuth();
   const location = useLocation();
 
   if (loading) return null;
@@ -60,6 +61,7 @@ export default function App() {
     // survives. Routes wait for the session check so pages fetch once.
     <Layout key={user ? `${user.id}:${user.status}` : "anon"}>
       <UnsavedChangesBlocker />
+      <DateWritesProvider credential={credential}>
       <RouteErrorBoundary resetKey={location.key}>
       <Suspense fallback={<Skeleton kind="page" label="Loading page…" />}>
       <Routes>
@@ -106,6 +108,7 @@ export default function App() {
       </Routes>
       </Suspense>
       </RouteErrorBoundary>
+      </DateWritesProvider>
     </Layout>
   );
 }
