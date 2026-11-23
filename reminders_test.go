@@ -729,11 +729,22 @@ func TestReapSettlesReminderWhoseJobDied(t *testing.T) {
 	if err := f.app.DB.Where("occurrence_id = ? AND category = ?", f.groupOcc.ID, models.MessageCategoryReminder).First(&m).Error; err != nil || m.Status != models.MessageScheduled {
 		t.Fatalf("the reminder should be written and still scheduled: %v %+v", err, m)
 	}
+	listed := func() string {
+		var out messageListJSON
+		decodeJSON(t, f.admin.do("GET", "/api/v1/messages?category=reminder", nil, false), &out)
+		if len(out.Messages) != 1 || out.Messages[0].ID != m.ID {
+			t.Fatalf("admin's reminder list: %+v", out.Messages)
+		}
+		return out.Messages[0].Status
+	}
+	if got := listed(); got != models.MessageScheduled {
+		t.Fatalf("listed before the reap as %q", got)
+	}
 	if err := f.app.reapMessages(context.Background(), time.Now().Add(2*time.Hour)); err != nil {
 		t.Fatal(err)
 	}
 	f.app.DB.First(&m, m.ID)
-	if m.Status != models.MessageFailed || m.Error != whyNotPrepared {
+	if m.Status != models.MessageFailed || m.Error != whyNotPrepared || listed() != models.MessageFailed {
 		t.Fatalf("a reminder whose job died should fail with a reason: %+v", m)
 	}
 	if n := contactCount(t, f.app, &models.AuditLog{}, "action = ? AND target_id = ?", audit.MessageRefused, m.ID); n != 1 {
