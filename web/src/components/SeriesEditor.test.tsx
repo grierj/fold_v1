@@ -641,6 +641,22 @@ describe("SeriesEditor once a save has finished it", () => {
     focus.mockRestore();
   });
 
+  it("waits on the form, then goes to Close, when a read lands while another save in the panel keeps Close off", async () => {
+    const props = { series: single, idPrefix: "wait", onSaved: () => {}, onClose: () => {} };
+    const view = render(<SeriesEditor {...props} held />);
+    await userEvent.click(screen.getByRole("button", { name: "Save series" }));
+    const refresh = await screen.findByRole("button", { name: "Refresh" });
+    view.rerender(<SeriesEditor {...props} held locked />);
+    refresh.focus();
+    view.rerender(<SeriesEditor {...props} locked />);
+    expect(screen.queryByRole("button", { name: "Refresh" })).not.toBeInTheDocument();
+    const close = screen.getByRole("button", { name: "Close" });
+    expect(close).toBeDisabled();
+    expect(document.activeElement).toBe(close.closest("form"));
+    view.rerender(<SeriesEditor {...props} />);
+    expect(close).toHaveFocus();
+  });
+
   it("neither moves focus nor scrolls when focus left the form during the save", async () => {
     const scroll = vi.fn();
     Element.prototype.scrollIntoView = scroll;

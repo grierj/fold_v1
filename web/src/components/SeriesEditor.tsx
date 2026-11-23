@@ -1,6 +1,6 @@
 import { Form } from "./ui/Form";
 import { childcareBody, childcareFrom } from "./ChildcareField";
-import { useLayoutEffect, useRef, useState } from "react";
+import { useCallback, useLayoutEffect, useRef, useState } from "react";
 import { Events } from "../api/events";
 import { bydays, isSimpleWeekly, isWeekly, weekdayCode, weeklyRule } from "../lib/rrule";
 import { useDirty } from "../lib/useDirty";
@@ -167,11 +167,19 @@ export function SeriesEditor({
   const focusInvalid = useRef(false);
   const submit = useRef<HTMLButtonElement>(null);
   const close = useRef<HTMLButtonElement>(null);
-  const refreshButton = useRef<HTMLButtonElement>(null);
+  const refreshButton = useRef<HTMLButtonElement | null>(null);
   // Holds Close and the saved lines, brought into view when focus moves there.
   const outcome = useRef<HTMLDivElement>(null);
-  // A read that lands removes the Refresh button: focus that was on it goes to Close.
+  // A read that lands removes the Refresh button, whoever asked for it (this editor's Refresh or the page's own
+  // Try again): focus that was on it as it left the page goes to Close.
   const refocus = useRef(false);
+
+  const refreshRef = useCallback((el: HTMLButtonElement | null) => {
+    if (el === null && refreshButton.current !== null && document.activeElement === refreshButton.current) refocus.current = true;
+
+    refreshButton.current = el;
+  }, []);
+
   const againId = `s-again-${idPrefix}`;
   const kept = useKeptRefusal({ initial: null, submit, onRefused: setError, onAuthorityLost });
 
@@ -179,26 +187,29 @@ export function SeriesEditor({
   const { guard, markSaved } = useUnsavedChanges(dirty);
 
   // Close (Refresh, if the page's read failed) is what is left to press once a save has finished the editor: focus
-  // still in the form goes there, and the saved lines come into view with it.
+  // still in the form goes there, and the saved lines come into view with it. While another save in the panel keeps
+  // Close off, focus waits on the form, where a save keeps it, and goes to Close once it can be pressed.
   const showOutcome = (target: HTMLButtonElement | null) => {
-    target?.focus({ preventScroll: true });
+    const able = target !== null && !target.disabled ? target : root.current;
+    able?.focus({ preventScroll: true });
     outcome.current?.scrollIntoView?.({ block: "nearest" });
   };
+
+  const closeOff = action.running || locked || stale;
 
   useLayoutEffect(() => {
     if (finished && root.current?.contains(document.activeElement)) showOutcome(stale ? refreshButton.current : close.current);
     // Only when the save finishes; a later change of `stale` is the next effect's.
   }, [finished, root]);
 
-  // The page's own Try again lands a read too, with no call from here. Read in the render that drops the button,
-  // while it is still in the page.
-  if (!stale && refreshButton.current !== null && document.activeElement === refreshButton.current) refocus.current = true;
-
   useLayoutEffect(() => {
     if (stale || !refocus.current) return;
     refocus.current = false;
     showOutcome(close.current);
   }, [stale]);
+  useLayoutEffect(() => {
+    if (finished && !closeOff && document.activeElement === root.current) showOutcome(close.current);
+  }, [finished, closeOff, root]);
 
   useLayoutEffect(() => {
     if (frozen || !focusInvalid.current) return;
@@ -310,10 +321,7 @@ export function SeriesEditor({
   }
 
   function reread() {
-    void refresh.run(async () => {
-      await onSaved();
-      refocus.current = document.activeElement === refreshButton.current;
-    });
+    void refresh.run(async () => { await onSaved(); });
   }
 
   return (<>
@@ -370,7 +378,7 @@ export function SeriesEditor({
             </Button>
           )}
           {onClose && (
-            <Button ref={close} variant="secondary" layout="w-full sm:w-auto" disabled={action.running || locked || stale}
+            <Button ref={close} variant="secondary" layout="w-full sm:w-auto" disabled={closeOff}
               aria-describedby={finished && !stale ? againId : undefined} onClick={onClose}>
               Close
             </Button>
@@ -381,7 +389,7 @@ export function SeriesEditor({
           <FormError>{refresh.state.status === "failed"
             ? "Your changes are saved, but we still couldn't refresh this page. Refresh to try again."
             : "Your changes are saved, but we couldn't refresh this page. Refresh to keep editing."}</FormError>
-          <Button ref={refreshButton} variant="secondary" layout="w-full sm:w-auto" onClick={reread}>{refresh.running ? "Refreshing…" : "Refresh"}</Button>
+          <Button ref={refreshRef} variant="secondary" layout="w-full sm:w-auto" onClick={reread}>{refresh.running ? "Refreshing…" : "Refresh"}</Button>
         </>}
         {finished && !stale && onClose && (
           <p id={againId} className="-mt-3 text-sm text-text-muted">To change more, close this and open it again.</p>
