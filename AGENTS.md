@@ -39,6 +39,7 @@ SaaS operator) must be able to run it with `docker compose up`. The shipped arti
 | Web push, devices, the service worker | `docs/agents/push.md` |
 | Who can see an event or date, tightening and resets (consent), kept dates, the date page, rosters | `docs/agents/visibility.md` |
 | A read authorized by a grant, a link, a switch, a filter or a role; acknowledging a decision | `docs/agents/snapshots.md` |
+| A status value or column, a new writer of one, a row whose state is a timestamp or a counter, a multi-step flow in the web client | `docs/agents/lifecycles.md` |
 | The job runner (`internal/jobs`), Retry/Dismiss, a handler that waits (`LaterIn`), a new writer of `jobs` | `.cursor/skills/verify-job-queue` (run its `check`) |
 | A file in `migrations/` | `docs/agents/migrations.md` |
 | Dockerfile, compose, `deploy/`, releases, restore | `docs/agents/deploy.md` |
