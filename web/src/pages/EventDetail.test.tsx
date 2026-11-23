@@ -714,6 +714,16 @@ describe("EventDetail header actions and ?manage (DEC-99)", () => {
     expect(document.activeElement).toBe(edit);
   });
 
+  it("gives focus back to Edit event when the editor is closed", async () => {
+    vi.mocked(Events.get).mockResolvedValue(page);
+    render(<main id="main" tabIndex={-1}><MemoryRouter initialEntries={["/events/7"]}><DateWritesProvider credential={credential}><Routes><Route path="/events/:id" element={<EventDetail />} /></Routes></DateWritesProvider></MemoryRouter></main>);
+    await userEvent.click(await screen.findByRole("button", { name: "Edit event" }));
+    await userEvent.click(screen.getByRole("button", { name: "Close" }));
+    const edit = screen.getByRole("button", { name: "Edit event" });
+    expect(edit).toHaveAttribute("aria-expanded", "false");
+    expect(document.activeElement).toBe(edit);
+  });
+
   it("leaves focus where the person moved it while a series save was on its way", async () => {
     vi.mocked(Events.get).mockResolvedValue(page);
     const put = deferred<{ event: typeof page.event }>();

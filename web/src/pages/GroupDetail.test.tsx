@@ -812,6 +812,23 @@ it("finishes the series editor after a save: locked as sent, Saved, Close focuse
   confirm.mockRestore();
 });
 
+it("tracks focus for an event row only while its series panel is open", async () => {
+  const rows = [1, 2, 3, 4].map((n) => occurrence({ id: n, eventId: 6 + n, date: `2026-12-0${n}`, title: `Night ${n}` }));
+  vi.mocked(Groups.get).mockResolvedValue({ ...page, canManage: true, upcomingEvents: rows });
+  const added = vi.spyOn(document, "addEventListener");
+  const focusins = () => added.mock.calls.filter(([type]) => type === "focusin").length;
+  open();
+  await screen.findByRole("button", { name: "More for Night 4 on 2026-12-04" });
+  const withRows = focusins();
+  cleanup();
+  added.mockClear();
+  vi.mocked(Groups.get).mockResolvedValue({ ...page, canManage: true, upcomingEvents: rows.slice(0, 1) });
+  open();
+  await screen.findByRole("button", { name: "More for Night 1 on 2026-12-01" });
+  expect(withRows).toBe(focusins());
+  added.mockRestore();
+});
+
 it("opens the series editor again from the saved values, and its save sends the next change", async () => {
   vi.mocked(Groups.get).mockResolvedValue({ ...page, canManage: true });
   vi.mocked(Events.update).mockResolvedValue({ event: testEvent(7) });
@@ -824,6 +841,7 @@ it("opens the series editor again from the saved values, and its save sends the 
   expect(Events.update).toHaveBeenLastCalledWith(7, expect.objectContaining({ capacity: 12 }));
   await waitFor(() => expect(Groups.get).toHaveBeenCalledTimes(2));
   await userEvent.click(await screen.findByRole("button", { name: "Close" }));
+  expect(document.activeElement).toBe(screen.getByRole("button", { name: "More for Supper on 2026-12-01" }));
   await userEvent.click(screen.getByRole("button", { name: "More for Supper on 2026-12-01" }));
   await userEvent.click(screen.getByRole("menuitem", { name: "Edit event" }));
   const seats = await screen.findByLabelText(/^Seat limit/);

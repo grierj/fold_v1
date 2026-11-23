@@ -285,6 +285,7 @@ describe("SeriesEditor form layout (DEC-95)", () => {
     const close = screen.getByRole("button", { name: "Close" });
     expect(close).toBeEnabled();
     expect(close).toHaveFocus();
+    expect(close).toHaveAccessibleDescription("To change more, close and open Edit series again.");
     fireEvent.submit(title.closest("form")!);
     expect(Events.update).toHaveBeenCalledOnce();
   });

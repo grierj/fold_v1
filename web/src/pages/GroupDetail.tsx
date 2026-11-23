@@ -124,6 +124,15 @@ function EventRow({
   const visibilityAction = useAction();
   const panelBusy = seriesAction.running || visibilityAction.running;
   const panel = useRef<HTMLDivElement | null>(null);
+  const opener = useRef<HTMLDivElement>(null);
+  // Close took the focused control with the panel: focus goes back to this row's menu, never the page body.
+  const closedPanel = useRef(false);
+  useLayoutEffect(() => {
+    if (editor !== null || !closedPanel.current) return;
+    closedPanel.current = false;
+
+    if (!document.activeElement || document.activeElement === document.body) opener.current?.querySelector("button")?.focus();
+  }, [editor]);
   const replaced = useRef({ eventId: instance.eventId, onEditorReplaced });
   replaced.current = { eventId: instance.eventId, onEditorReplaced };
   // Runs while the removed row is still in the document, before the page's own layout effect looks for the new one.
@@ -157,7 +166,7 @@ function EventRow({
     <OccurrenceCard at={instance.startsAt} title={name}
       notice={canManage && instance.visibilityOverride && <p className="text-xs text-text-muted">Visibility changed for this date</p>}
       meta={<div className="text-sm text-text-muted">{time}{loc ? ` · ${loc}` : ""}</div>}
-      menu={canManage && <div data-series-opener={instance.eventId}><Menu
+      menu={canManage && <div ref={opener} data-series-opener={instance.eventId}><Menu
         tone="quiet"
         label={`More for ${name} on ${instance.date}`}
         items={[
@@ -236,7 +245,10 @@ function EventRow({
               roomDate={instance.recurrenceRule ? undefined : instance.date}
               onRoomChanged={onChanged}
               onSaved={onChanged}
-              onClose={() => setEditor(null)}
+              onClose={() => {
+                closedPanel.current = true;
+                setEditor(null);
+              }}
               action={seriesAction}
               locked={visibilityAction.running}
             />

@@ -151,6 +151,7 @@ export function SeriesEditor({
   const focusInvalid = useRef(false);
   const submit = useRef<HTMLButtonElement>(null);
   const close = useRef<HTMLButtonElement>(null);
+  const againId = `s-again-${idPrefix}`;
   const kept = useKeptRefusal({ initial: null, submit, onRefused: setError, onAuthorityLost });
 
   const dirty = useDirty({ date, time, duration, recurring, days, tzid, title, description, location, rule, until, options });
@@ -326,12 +327,18 @@ export function SeriesEditor({
           </Button>
         )}
         {onClose && (
-          <Button ref={close} variant="secondary" layout="w-full sm:w-auto" disabled={action.running || locked} onClick={onClose}>
+          <Button ref={close} variant="secondary" layout="w-full sm:w-auto" disabled={action.running || locked}
+            aria-describedby={finished ? againId : undefined} onClick={onClose}>
             Close
           </Button>
         )}
       </FormActions>
       <SavedStatus ok={finished} error={null} />
+      {finished && onClose && (
+        <p id={againId} className="-mt-3 text-sm text-text-muted">
+          To change more, close and open {instance.recurrenceRule ? "Edit series" : "Edit event"} again.
+        </p>
+      )}
     </Form>
     {/* After the form, never inside it: the panel's roster has forms of its own. */}
     {kept.refusal && <KeptDates key={kept.refusal.seq} eventId={instance.eventId} keptDates={kept.refusal.dates} onRefused={kept.refused} onClose={kept.close} />}

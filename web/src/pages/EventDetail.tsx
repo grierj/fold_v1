@@ -73,6 +73,8 @@ function EventDetailContent() {
   // A save in the panel reads the page again from nothing: focus still in the panel waits on the main region, and
   // focus the reload dropped goes back to Edit series, the panel's opener, once the page is shown.
   const returnToEdit = useRef(false);
+  // Close took the focused control with the panel: focus goes back to Edit series, never the page body.
+  const closedPanel = useRef(false);
   const [seriesFeedback, setSeriesFeedback] = useState<SeriesFeedbackSignal | null>(null);
   const seriesFeedbackRevision = useRef(0);
   const rsvpMutationGate = useRsvpMutationGate();
@@ -118,6 +120,12 @@ function EventDetailContent() {
 
     if (!active || active === document.body || active.id === "main") editButton.current?.focus();
   }, [loading, page]);
+  useLayoutEffect(() => {
+    if (editing || !closedPanel.current) return;
+    closedPanel.current = false;
+
+    if (!document.activeElement || document.activeElement === document.body) editButton.current?.focus();
+  }, [editing]);
   const notFound = load.error instanceof ApiError && load.error.status === 404;
   const error = load.error && !notFound ? errorText(load.error, "We couldn't load this event.") : null;
   const setPage = load.setData;
@@ -264,7 +272,10 @@ function EventDetailContent() {
               setRoomsRevision((n) => n + 1);
               void load.retry();
             }}
-            onClose={() => setEditing(false)}
+            onClose={() => {
+              closedPanel.current = true;
+              setEditing(false);
+            }}
             action={seriesAction}
             locked={visibilityAction.running}
           />
