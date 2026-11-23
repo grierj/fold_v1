@@ -320,6 +320,7 @@ export function DateEditor({
   const locked = busy || status !== "idle";
   const changesNow = JSON.stringify(changesOf(draft, stored, base));
   // What this editor's last stored save took, which the form still shows as changes until the date is read again.
+  // Try again stores the same changes: the form is locked from the save in doubt until its answer.
   const taken = useRef<string | null>(null);
   // A save on its way or in doubt is the session's attempts' to finish, here or on another page.
   const unsent = !locked && changesNow !== "{}" && changesNow !== taken.current;
@@ -389,7 +390,7 @@ export function DateEditor({
 
     switch (v.kind) {
       case "stored":
-        if (!replaying) taken.current = changesNow;
+        taken.current = changesNow;
         kept.close();
         setBusy(false);
         setError(null);
