@@ -70,8 +70,8 @@ function EventDetailContent() {
   const visibilityAction = useAction();
   const panelBusy = seriesAction.running || visibilityAction.running;
   const editButton = useRef<HTMLButtonElement>(null);
-  // A save in the panel reads the page again from nothing: focus still in the panel waits on the main region and
-  // goes back to Edit series, the panel's opener, once the page is shown.
+  // A save in the panel reads the page again from nothing: focus still in the panel waits on the main region, and
+  // focus the reload dropped goes back to Edit series, the panel's opener, once the page is shown.
   const returnToEdit = useRef(false);
   const [seriesFeedback, setSeriesFeedback] = useState<SeriesFeedbackSignal | null>(null);
   const seriesFeedbackRevision = useRef(0);
@@ -138,9 +138,9 @@ function EventDetailContent() {
   function handleRsvp() { void load.reload(); }
 
   function parkFocus() {
-    if (!editorRef.current?.contains(document.activeElement)) return;
     returnToEdit.current = true;
-    document.getElementById("main")?.focus({ preventScroll: true });
+
+    if (editorRef.current?.contains(document.activeElement)) document.getElementById("main")?.focus({ preventScroll: true });
   }
 
   function reportSeriesFeedback(eventId: number, date: string, actorResults: ActorRsvpResult[]) {

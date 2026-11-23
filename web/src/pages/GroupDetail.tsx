@@ -392,9 +392,9 @@ function GroupDetailContent() {
   const detail = load.data ?? null;
   useEffect(() => { if (detail) loadedDates.current = detail.upcomingEvents.length; }, [detail]);
 
-  // Focus this page took from a form that is gone, and where it goes once the page shows what replaced it: Save
-  // group's menu once the page is shown again; for a row a read replaced with focus in its editor, the event's
-  // new row, else the section heading, never the page body.
+  // Where focus that a read dropped goes once the page shows that read: after Save group, the group's menu; after
+  // a read replaced a row with focus in its editor, the event's new row, else the section heading. Never the page
+  // body, and never away from a control the person moved to.
   const returnTo = useRef<{ eventId: number } | "group" | null>(null);
   const groupMenu = useRef<HTMLDivElement>(null);
   const eventsHeading = useRef<HTMLHeadingElement>(null);
@@ -412,7 +412,7 @@ function GroupDetailContent() {
       : document.querySelector<HTMLElement>(`[data-series-opener="${target.eventId}"] button`);
 
     (opener ?? eventsHeading.current)?.focus();
-  });
+  }, [detail, load.loading]);
   // A guarded edit settled (from here or the event page): the page is asked for again. Any date may be one this
   // group lists, as a read on its way may hold it, so this is decided from the address, never from what is loaded.
   useEditRefresh(() => true, () => void load.reload());
@@ -733,12 +733,9 @@ function GroupDetailContent() {
     // The form goes, and the page with it until the read below answers: focus that is still in the form or the
     // review waits on the main region.
     const active = document.activeElement;
+    returnTo.current = "group";
 
-    if (reviewHome.ref.current?.contains(active) || groupSave.current?.form?.contains(active)) {
-      returnTo.current = "group";
-      document.getElementById("main")?.focus({ preventScroll: true });
-    }
-
+    if (reviewHome.ref.current?.contains(active) || groupSave.current?.form?.contains(active)) document.getElementById("main")?.focus({ preventScroll: true });
     setEditing(false);
     setReviewError(null);
     await load.retry();

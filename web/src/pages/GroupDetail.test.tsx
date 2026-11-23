@@ -995,6 +995,36 @@ it("leaves focus where the person moved it while Save group was on its way", asy
   expect(document.activeElement).toBe(elsewhere);
 });
 
+it("keeps focus off the page body while Save group reads the page again, then gives it to the group's menu", async () => {
+  vi.mocked(Groups.get).mockResolvedValue({ ...page, canManage: true });
+  vi.mocked(Groups.update).mockResolvedValue({ group: page.group });
+  render(<main id="main" tabIndex={-1}><MemoryRouter initialEntries={["/groups/1"]}><Routes><Route path="/groups/:id" element={<GroupDetail />} /></Routes></MemoryRouter></main>);
+  await userEvent.click(await screen.findByRole("button", { name: "More group actions" }));
+  await userEvent.click(screen.getByRole("menuitem", { name: "Edit group" }));
+  const reload = deferred<GroupDetailResponse>();
+  vi.mocked(Groups.get).mockReturnValueOnce(reload.promise);
+  await userEvent.click(await screen.findByRole("button", { name: "Save group" }));
+  await waitFor(() => expect(Groups.get).toHaveBeenCalledTimes(2));
+  expect(document.activeElement).toBe(document.getElementById("main"));
+  await act(async () => { reload.resolve({ ...page, canManage: true }); await reload.promise; });
+  expect(document.activeElement).toBe(await screen.findByRole("button", { name: "More group actions" }));
+});
+
+it("gives focus to the group's menu when Save group's reload removes the control the person moved to", async () => {
+  vi.mocked(Groups.get).mockResolvedValue({ ...page, canManage: true });
+  const saving = deferred<{ group: typeof page.group }>();
+  vi.mocked(Groups.update).mockReturnValueOnce(saving.promise);
+  render(<main id="main" tabIndex={-1}><MemoryRouter initialEntries={["/groups/1"]}><Routes><Route path="/groups/:id" element={<GroupDetail />} /></Routes></MemoryRouter></main>);
+  await userEvent.click(await screen.findByRole("button", { name: "More group actions" }));
+  await userEvent.click(screen.getByRole("menuitem", { name: "Edit group" }));
+  await userEvent.click(await screen.findByRole("button", { name: "Save group" }));
+  screen.getByRole("button", { name: "More group actions" }).focus();
+  await act(async () => { saving.resolve({ group: page.group }); await saving.promise; });
+  await waitFor(() => expect(Groups.get).toHaveBeenCalledTimes(2));
+  const menu = await screen.findByRole("button", { name: "More group actions" });
+  await waitFor(() => expect(document.activeElement).toBe(menu));
+});
+
 it("keeps Manage sign-ups away from people who can't manage the group", async () => {
   open();
   await screen.findByRole("tablist");

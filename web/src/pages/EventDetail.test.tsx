@@ -728,6 +728,20 @@ describe("EventDetail header actions and ?manage (DEC-99)", () => {
     expect(document.activeElement).toBe(elsewhere);
   });
 
+  it("gives focus to Edit event when the save's reload removes the control the person moved to", async () => {
+    vi.mocked(Events.get).mockResolvedValue(page);
+    const put = deferred<{ event: typeof page.event }>();
+    vi.mocked(Events.update).mockReturnValueOnce(put.promise);
+    render(<main id="main" tabIndex={-1}><MemoryRouter initialEntries={["/events/7"]}><DateWritesProvider credential={credential}><Routes><Route path="/events/:id" element={<EventDetail />} /></Routes></DateWritesProvider></MemoryRouter></main>);
+    await userEvent.click(await screen.findByRole("button", { name: "Edit event" }));
+    await userEvent.type(screen.getByLabelText("Title"), "{Enter}");
+    screen.getByRole("button", { name: "More event actions" }).focus();
+    await act(async () => { put.resolve({ event: page.event }); await put.promise; });
+    const edit = await screen.findByRole("button", { name: "Edit event" });
+    await waitFor(() => expect(edit).toHaveAttribute("aria-expanded", "false"));
+    await waitFor(() => expect(document.activeElement).toBe(screen.getByRole("button", { name: "Edit event" })));
+  });
+
   it("puts Edit and More together in one row", async () => {
     vi.mocked(Events.get).mockResolvedValue(page);
     renderPage();

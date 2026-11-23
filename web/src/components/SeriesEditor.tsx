@@ -150,6 +150,8 @@ export function SeriesEditor({
   // A save is marked saved for a page that leaves on it; an editor that stays open is guarded again once what it
   // saved is its baseline, an edit made after the save included.
   useEffect(() => { if (savedAt > 0) resume(); }, [savedAt]);
+  // "Saved" goes at the first edit after it, and an edit undone by hand does not bring it back.
+  useEffect(() => { if (dirty && action.state.status === "done") action.reset(); }, [dirty]);
 
   useLayoutEffect(() => {
     if (frozen || !focusInvalid.current) return;
@@ -314,7 +316,7 @@ export function SeriesEditor({
           </Button>
         )}
       </FormActions>
-      <SavedStatus ok={action.state.status === "done" && !dirty} error={null} />
+      <SavedStatus ok={action.state.status === "done"} error={null} />
     </Form>
     {/* After the form, never inside it: the panel's roster has forms of its own. */}
     {kept.refusal && <KeptDates key={kept.refusal.seq} eventId={instance.eventId} keptDates={kept.refusal.dates} onRefused={kept.refused} onClose={kept.close} />}

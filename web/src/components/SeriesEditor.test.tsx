@@ -291,8 +291,9 @@ describe("SeriesEditor form layout (DEC-95)", () => {
     render(<RouterProvider router={router} />);
     await userEvent.click(screen.getByRole("button", { name: "Save series" }));
     expect(await screen.findByText("Saved")).toBeInTheDocument();
-    await userEvent.type(screen.getByRole("textbox", { name: "Title" }), "!");
+    await userEvent.type(screen.getByRole("textbox", { name: "Title" }), "!{Backspace}");
     expect(screen.queryByText("Saved")).not.toBeInTheDocument();
+    await userEvent.type(screen.getByRole("textbox", { name: "Title" }), "!");
     void router.navigate("/elsewhere");
     await waitFor(() => expect(confirm).toHaveBeenCalledWith("Leave without saving? Your changes will be lost."));
     expect(screen.queryByText("Elsewhere page")).not.toBeInTheDocument();
