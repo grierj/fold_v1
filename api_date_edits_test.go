@@ -409,7 +409,8 @@ func TestDateEditReplayIsReadOnly(t *testing.T) {
 	clock := newMutableClock(f.app, time.Now().UTC())
 	cases := map[string]func(t *testing.T) (map[string]any, []any){
 		"time and title": func(t *testing.T) (map[string]any, []any) {
-			return map[string]any{"title": "Moved supper", "startsLocal": edited.StartsAt.Add(90 * time.Minute).Format("2006-01-02T15:04")}, nil
+			// A kept date can move earlier while its grant is live (DEC-156).
+			return map[string]any{"title": "Moved supper", "startsLocal": wallAt(edited.StartsAt.Add(-90 * time.Minute))}, nil
 		},
 		"tightening with consent": func(t *testing.T) (map[string]any, []any) {
 			gormMust(t, f.app.DB.Model(&models.EventOccurrence{}).Where("id = ?", edited.ID).Update("visibility_override", models.VisibilityPublic))
