@@ -1037,8 +1037,8 @@ limit; on a series edit null clears the limit and leaving it out keeps it);
 one registration.
 
 **The series revision (DEC-162).** A series edit names the read it was made
-from: its body's `revision` is the `revision` of the event as the editor last
-read it, `1.<generation>.<event id>.<event revision>`, opaque to the client. A
+from: its body's `revision` is the `revision` of the read the editor opened
+with, `1.<generation>.<event id>.<event revision>`, opaque to the client. A
 body the server cannot read is answered first, whatever its revision: 400 for a
 `revision` of any JSON type but a string (a JSON `null` is read as missing, so it
 answers 409 `event_changed` below), and for a seat, guest or reminder number that
@@ -1051,10 +1051,12 @@ restarted, or one read before any later change to the event) with 409
 job. The event's revision rises with every change to a stored series field, its
 visibility and its series room, by anyone; a save that changes nothing leaves
 it, and the daily extender does not move it. The answer's `event.revision` is
-the new token. Refused, the web editor reads the event once: when nothing it
-can save differs from the read it opened with, it sends the same save again
-with the new revision (three sends in all); otherwise it saves nothing, closes,
-and the page shows the event as stored.
+the new token. Refused, the web editor reads the event again: when nothing it
+can save differs from the read it opened with, it sends the same save with the
+new revision, up to three sends in all, and after a third refusal it shows its
+ordinary save error and stays open; when something differs, it closes and the
+page shows the event as stored, saying nothing was saved. A read that fails
+leaves the editor open with its ordinary save error.
 
 Childcare (M1.8 slice 3): event create and series update accept
 `childcareAvailable` (default false), `childcareNotes` (up to 500
@@ -1333,8 +1335,8 @@ What each deployed client shows:
 
 - *"Edit series" / "Edit event" from the earlier release* sends no `revision`
   (DEC-162), so its save answers 409 `event_changed`, which that page shows as
-  "We couldn't update the series. Please try again in a minute." Nothing is saved. Reloading the page loads
-  the current SPA, which saves normally.
+  "We couldn't update the series. Please try again in a minute." Nothing is
+  saved. Reloading the page loads the current SPA, which saves normally.
 
 The upgrade restarts the server, so any revision a tab already holds is
 refused once: a date's with `date_changed` (After any restart, above), and a

@@ -163,7 +163,7 @@ export const ERROR_COPY = {
   too_many_guests: "That's more guests than this event allows. Try fewer.",
   date_closed: "This date isn't open for registration anymore.",
   date_changed: "This date may have changed since you opened it. Check it and save again.",
-  event_changed: "Someone changed this event while you were editing, so your changes weren't saved. Check the event and try again.",
+  event_changed: "This event may have changed since you opened it, so your changes weren't saved. Check it and try again.",
   date_needs_consent: "Saving this date would cancel some sign-ups. Check the question and save again.",
   date_kept_after_leaving: "Someone who left the group kept this date, so it can't end later yet. Remove anyone marked “Kept after leaving” below, then save again.",
   date_edit_invalid: "We couldn't save this date. Refresh the page and try again.",
