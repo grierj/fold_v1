@@ -8,7 +8,7 @@ import { Badge } from "../components/ui/Badge";
 import { useHousehold } from "../lib/useHousehold";
 import { canDemoteLeader, canMakeLeader, canAskForContact, canRegisterAsGuest, canRemoveMember, groupCanSchedule, isActiveAdult } from "../lib/can";
 import { SeriesEditor } from "../components/SeriesEditor";
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, type ReactNode, type RefObject } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { ApiError } from "../api/core";
 import { Events } from "../api/events";
@@ -123,16 +123,13 @@ function EventRow({
   const seriesAction = useAction();
   const visibilityAction = useAction();
   const panelBusy = seriesAction.running || visibilityAction.running;
-  // A saved visibility re-keys its control when this date's answer comes back: focus that the old control's
-  // removal dropped goes to the panel, if it was still there.
-  const panel = useFocusHome<HTMLDivElement>();
-  useKeepFocusHome(panel);
+  const panel = useRef<HTMLDivElement | null>(null);
   const replaced = useRef({ eventId: instance.eventId, onEditorReplaced });
   replaced.current = { eventId: instance.eventId, onEditorReplaced };
   // Runs while the removed row is still in the document, before the page's own layout effect looks for the new one.
   useLayoutEffect(() => () => {
-    if (panel.ref.current?.contains(document.activeElement)) replaced.current.onEditorReplaced(replaced.current.eventId);
-  }, [panel]);
+    if (panel.current?.contains(document.activeElement)) replaced.current.onEditorReplaced(replaced.current.eventId);
+  }, []);
   // This date's guarded edit: anything but idle closes Edit; a save whose answer never arrived is reached
   // through its own opener, outside the menu.
   const attempts = useDateAttempts();
@@ -209,7 +206,7 @@ function EventRow({
             onTerminalRefresh();
           }} /></ConfirmProvider>}
         {editor === "series" && (
-          <div ref={panel.ref} tabIndex={-1} className="outline-none">
+          <SeriesPanel outer={panel}>
             <SeriesEditor
               series={{
                 eventId: instance.eventId,
@@ -254,7 +251,7 @@ function EventRow({
               action={visibilityAction}
               locked={seriesAction.running}
             />
-          </div>
+          </SeriesPanel>
         )}
     </OccurrenceCard>
   );
@@ -263,6 +260,21 @@ function EventRow({
 // The description above the tabs, clamped to three lines. "Read more" shows
 // only when the text really overflows, and is re-checked when the width
 // changes (rotating a phone, resizing the window).
+// The open series panel. A saved visibility re-keys its control when this date's answer comes back: focus that the
+// old control's removal dropped goes to the panel, if it was still there. Only an open panel tracks focus, so a page
+// of rows adds no listeners.
+function SeriesPanel({ outer, children }: { outer: RefObject<HTMLDivElement | null>; children: ReactNode }) {
+  const home = useFocusHome<HTMLDivElement>();
+  useKeepFocusHome(home);
+
+  const ref = useCallback((el: HTMLDivElement | null) => {
+    home.ref.current = el;
+    outer.current = el;
+  }, [home, outer]);
+
+  return <div ref={ref} tabIndex={-1} className="outline-none">{children}</div>;
+}
+
 function ClampedDescription({ text, onReadMore }: { text: string; onReadMore: () => void }) {
   const ref = useRef<HTMLParagraphElement>(null);
   const [overflows, setOverflows] = useState(false);

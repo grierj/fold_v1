@@ -769,7 +769,7 @@ it("adds Manage sign-ups to each date's More menu for leaders, opening that date
   expect(await screen.findByText("At /events/7?manage=2026-12-01")).toBeInTheDocument();
 });
 
-it("keeps the series editor open after a save, says Saved, keeps the visibility choice, and guards and saves later edits (DEC-98)", async () => {
+it("finishes the series editor after a save: locked as sent, Saved, Close focused, the visibility choice kept, leaving asks nothing", async () => {
   vi.mocked(Groups.get).mockResolvedValue({ ...page, canManage: true });
   vi.mocked(Events.update).mockResolvedValue({ event: testEvent(7) });
   const confirm = vi.spyOn(window, "confirm").mockReturnValue(false);
@@ -785,44 +785,54 @@ it("keeps the series editor open after a save, says Saved, keeps the visibility 
   const title = await screen.findByRole("textbox", { name: "Title" });
   await userEvent.click(screen.getByRole("radio", { name: /^Invite only/ }));
   await userEvent.type(title, " night");
-  const save = screen.getByRole("button", { name: "Save series" });
-  save.focus();
+  screen.getByRole("button", { name: "Save series" }).focus();
   await userEvent.keyboard("{Enter}");
   await waitFor(() => expect(screen.getByText("Saved")).toBeInTheDocument());
   expect(screen.getByText("Saved")).toHaveAttribute("role", "status");
   expect(Events.update).toHaveBeenLastCalledWith(7, expect.objectContaining({ title: "Supper night" }));
   await waitFor(() => expect(Groups.get).toHaveBeenCalledTimes(2));
-  expect(title).toBeEnabled();
+  expect(title).toBeDisabled();
   expect(title).toHaveValue("Supper night");
-  expect(document.activeElement).toBe(save);
+  expect(screen.getByLabelText(/^Seat limit/)).toBeDisabled();
+  expect(screen.queryByRole("button", { name: "Save series" })).not.toBeInTheDocument();
+  const close = screen.getByRole("button", { name: "Close" });
+  expect(close).toBeEnabled();
+  expect(document.activeElement).toBe(close);
   expect(screen.getByRole("radio", { name: /^Invite only/ })).toBeChecked();
+  expect(screen.getByRole("radio", { name: /^Invite only/ })).toBeEnabled();
+  fireEvent.submit(title.closest("form")!);
+  expect(Events.update).toHaveBeenCalledOnce();
 
-  const unload = () => {
-    const leaving = new Event("beforeunload", { cancelable: true });
-    window.dispatchEvent(leaving);
-
-    return leaving.defaultPrevented;
-  };
-
-  expect(unload()).toBe(false);
-
-  await userEvent.type(title, " and songs");
-  expect(screen.queryByText("Saved")).not.toBeInTheDocument();
-  expect(unload()).toBe(true);
-  await userEvent.click(screen.getByRole("link", { name: "Elsewhere" }));
-  expect(confirm).toHaveBeenCalledWith("Leave without saving? Your changes will be lost.");
-  expect(screen.queryByText("Elsewhere page")).not.toBeInTheDocument();
-
-  await userEvent.click(screen.getByRole("button", { name: "Save series" }));
-  await waitFor(() => expect(Events.update).toHaveBeenCalledTimes(2));
-  expect(Events.update).toHaveBeenLastCalledWith(7, expect.objectContaining({ title: "Supper night and songs" }));
-  expect(await screen.findByText("Saved")).toBeInTheDocument();
-  expect(screen.getByRole("radio", { name: /^Invite only/ })).toBeChecked();
-  confirm.mockClear();
+  const leaving = new Event("beforeunload", { cancelable: true });
+  window.dispatchEvent(leaving);
+  expect(leaving.defaultPrevented).toBe(false);
   await userEvent.click(screen.getByRole("link", { name: "Elsewhere" }));
   expect(await screen.findByText("Elsewhere page")).toBeInTheDocument();
   expect(confirm).not.toHaveBeenCalled();
   confirm.mockRestore();
+});
+
+it("opens the series editor again from the saved values, and its save sends the next change", async () => {
+  vi.mocked(Groups.get).mockResolvedValue({ ...page, canManage: true });
+  vi.mocked(Events.update).mockResolvedValue({ event: testEvent(7) });
+  open();
+  await userEvent.click(await screen.findByRole("button", { name: "More for Supper on 2026-12-01" }));
+  await userEvent.click(screen.getByRole("menuitem", { name: "Edit event" }));
+  await userEvent.type(screen.getByLabelText(/^Seat limit/), "12");
+  vi.mocked(Groups.get).mockResolvedValue({ ...page, canManage: true, upcomingEvents: [occurrence({ capacity: 12 })] });
+  await userEvent.click(screen.getByRole("button", { name: "Save series" }));
+  expect(Events.update).toHaveBeenLastCalledWith(7, expect.objectContaining({ capacity: 12 }));
+  await waitFor(() => expect(Groups.get).toHaveBeenCalledTimes(2));
+  await userEvent.click(await screen.findByRole("button", { name: "Close" }));
+  await userEvent.click(screen.getByRole("button", { name: "More for Supper on 2026-12-01" }));
+  await userEvent.click(screen.getByRole("menuitem", { name: "Edit event" }));
+  const seats = await screen.findByLabelText(/^Seat limit/);
+  expect(seats).toHaveValue(12);
+  expect(screen.queryByText("Saved")).not.toBeInTheDocument();
+  await userEvent.clear(seats);
+  await userEvent.click(screen.getByRole("button", { name: "Save series" }));
+  await waitFor(() => expect(Events.update).toHaveBeenCalledTimes(2));
+  expect(Events.update).toHaveBeenLastCalledWith(7, expect.objectContaining({ capacity: null }));
 });
 
 describe("the series panel while a save is on its way", () => {
@@ -837,7 +847,7 @@ describe("the series panel while a save is on its way", () => {
     return screen.findByRole("textbox", { name: "Title" });
   }
 
-  it("locks the editor and the visibility control, keeps focus in the editor, and gives it back to Save series after", async () => {
+  it("locks the editor and the visibility control, keeps focus in the editor, and gives it to Close after", async () => {
     const put = deferred<{ event: ReturnType<typeof testEvent> }>();
     vi.mocked(Events.update).mockReturnValueOnce(put.promise);
     const title = await openSeries();
@@ -853,10 +863,12 @@ describe("the series panel while a save is on its way", () => {
     await userEvent.type(title, " and songs");
     expect(title).toHaveValue("Supper night");
     await act(async () => { put.resolve({ event: testEvent(7) }); await put.promise; });
-    expect(document.activeElement).toBe(save);
+    const close = screen.getByRole("button", { name: "Close" });
+    expect(document.activeElement).toBe(close);
     await waitFor(() => expect(Groups.get).toHaveBeenCalledTimes(2));
     expect(Events.update).toHaveBeenCalledOnce();
-    expect(document.activeElement).toBe(save);
+    expect(document.activeElement).toBe(close);
+    expect(screen.getByRole("button", { name: "Save visibility" })).toBeEnabled();
   });
 
   it("leaves focus where the person moved it while the save was on its way", async () => {

@@ -1,6 +1,6 @@
 import { Form } from "./ui/Form";
 import { childcareBody, childcareFrom } from "./ChildcareField";
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useLayoutEffect, useRef, useState } from "react";
 import { Events } from "../api/events";
 import { bydays, isSimpleWeekly, isWeekly, weekdayCode, weeklyRule } from "../lib/rrule";
 import { useDirty } from "../lib/useDirty";
@@ -58,7 +58,7 @@ export interface SeriesFields {
 // SeriesEditor is the one "Edit series" / "Edit event" form, used on the
 // group page and the event page (consistency rule, AGENTS.md).
 export function SeriesEditor({
-  series: instance,
+  series,
   idPrefix,
   locationHint,
   roomDate,
@@ -86,6 +86,9 @@ export function SeriesEditor({
   // Another run in the same panel is on its way.
   locked?: boolean;
 }) {
+  // The save sends the difference from what the editor opened with, so that stays its baseline through any reload:
+  // one save per mount (a second one would diff against values it did not show), and a locked editor never changes.
+  const [instance] = useState(series);
   const simple = isSimpleWeekly(instance.recurrenceRule);
 
   const when = useWhenState({
@@ -130,11 +133,15 @@ export function SeriesEditor({
   const [moreOpen, setMoreOpen] = useState(true);
   const own = useAction();
   const action = shared ?? own;
-  // Nothing in the form changes while a save is on its way: the save sends what was there when it began, and a
-  // success closes the editor or makes what is shown the saved values, so a later edit would be lost without a word.
-  const frozen = action.running || locked;
-  // Bumped by a save that worked: an editor that stays open (the group page's) counts edits from what it saved.
-  const [savedAt, setSavedAt] = useState(0);
+  // A save that worked finishes this editor: one that stays open (the group page's) shows what it sent until closed.
+  const [finished, setFinished] = useState(false);
+  // Nothing in the form changes while a save is on its way or after one worked: the save sends what was there when
+  // it began, so a later edit would be lost without a word.
+  const frozen = action.running || locked || finished;
+  // Read when an answer lands (a Jitsi link): one landing on a locked or finished form is dropped. Set in save()
+  // too, before the first render that disables the fields.
+  const frozenNow = useRef(frozen);
+  frozenNow.current = frozen;
   const [error, setError] = useState<string | null>(null);
   const [optionErrors, setOptionErrors] = useState<OptionErrors>({});
   const home = useFocusHome<HTMLFormElement>();
@@ -143,15 +150,20 @@ export function SeriesEditor({
   // A refused option is focused once the save ends and the fields can take focus again, if focus is still in the form.
   const focusInvalid = useRef(false);
   const submit = useRef<HTMLButtonElement>(null);
+  const close = useRef<HTMLButtonElement>(null);
   const kept = useKeptRefusal({ initial: null, submit, onRefused: setError, onAuthorityLost });
 
-  const dirty = useDirty({ date, time, duration, recurring, days, tzid, title, description, location, rule, until, options }, true, savedAt);
-  const { guard, markSaved, resume } = useUnsavedChanges(dirty);
-  // A save is marked saved for a page that leaves on it; an editor that stays open is guarded again once what it
-  // saved is its baseline, an edit made after the save included.
-  useEffect(() => { if (savedAt > 0) resume(); }, [savedAt]);
-  // "Saved" goes at the first edit after it, and an edit undone by hand does not bring it back.
-  useEffect(() => { if (dirty && action.state.status === "done") action.reset(); }, [dirty]);
+  const dirty = useDirty({ date, time, duration, recurring, days, tzid, title, description, location, rule, until, options });
+  const { guard, markSaved } = useUnsavedChanges(dirty);
+
+  // Close is what is left to press once a save has finished the editor: focus still in the form (or lost) goes there.
+  const settled = finished && !action.running;
+  useLayoutEffect(() => {
+    if (!settled) return;
+    const active = document.activeElement;
+
+    if (!active || active === document.body || root.current?.contains(active)) close.current?.focus({ preventScroll: true });
+  }, [settled, root]);
 
   useLayoutEffect(() => {
     if (frozen || !focusInvalid.current) return;
@@ -163,7 +175,7 @@ export function SeriesEditor({
   async function save(e: React.FormEvent) {
     e.preventDefault();
 
-    if (frozen) return;
+    if (frozenNow.current) return;
 
     if (simple && recurring && days.length === 0) {
       setError("Pick at least one day to repeat weekly.");
@@ -230,11 +242,12 @@ export function SeriesEditor({
       Object.assign(body, videoBody(video));
     }
 
+    frozenNow.current = true;
     await action.run(async () => {
       try {
         await Events.update(instance.eventId, body);
         markSaved();
-        setSavedAt((n) => n + 1);
+        setFinished(true);
         kept.close();
         onSaved();
       } catch (err) {
@@ -302,21 +315,23 @@ export function SeriesEditor({
           open={moreOpen}
           onOpenChange={setMoreOpen}
           values={options}
-          onChange={setOptions}
+          onChange={(next) => { if (!frozenNow.current) setOptions(next); }}
           errors={optionErrors}
         />
       </fieldset>
       <FormActions>
-        <Button ref={submit} variant="primary" layout="w-full sm:w-auto" type="submit" disabled={frozen}>
-          {action.running ? "Saving…" : "Save series"}
-        </Button>
+        {!finished && (
+          <Button ref={submit} variant="primary" layout="w-full sm:w-auto" type="submit" disabled={frozen}>
+            {action.running ? "Saving…" : "Save series"}
+          </Button>
+        )}
         {onClose && (
-          <Button variant="secondary" layout="w-full sm:w-auto" disabled={frozen} onClick={onClose}>
+          <Button ref={close} variant="secondary" layout="w-full sm:w-auto" disabled={action.running || locked} onClick={onClose}>
             Close
           </Button>
         )}
       </FormActions>
-      <SavedStatus ok={action.state.status === "done"} error={null} />
+      <SavedStatus ok={finished} error={null} />
     </Form>
     {/* After the form, never inside it: the panel's roster has forms of its own. */}
     {kept.refusal && <KeptDates key={kept.refusal.seq} eventId={instance.eventId} keptDates={kept.refusal.dates} onRefused={kept.refused} onClose={kept.close} />}

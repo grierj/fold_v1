@@ -1,6 +1,6 @@
 import { testEvent } from "../test/fixtures";
 import { stubService } from "../test/service";
-import { act, render, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { RouterProvider, createMemoryRouter } from "react-router-dom";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -270,35 +270,76 @@ describe("SeriesEditor form layout (DEC-95)", () => {
     expect(Events.update).toHaveBeenLastCalledWith(7, expect.objectContaining({ reminderPush: false }));
   });
 
-  it("is ready for the next change after a save that leaves it open (#427)", async () => {
+  it("finishes after a save that leaves it open: no Saving… left, nothing to change and nothing more to send (#427)", async () => {
     vi.mocked(Events.update).mockReset().mockResolvedValue({ event: testEvent(7) });
     const onSaved = vi.fn();
-    render(<SeriesEditor series={baseSeries} idPrefix="again" onSaved={onSaved} />);
+    render(<SeriesEditor series={baseSeries} idPrefix="again" onSaved={onSaved} onClose={() => {}} />);
+    const title = screen.getByRole("textbox", { name: "Title" });
+    await userEvent.type(title, " night");
     await userEvent.click(screen.getByRole("button", { name: "Save series" }));
     await waitFor(() => expect(onSaved).toHaveBeenCalledOnce());
-    expect(screen.getByRole("button", { name: "Save series" })).toBeEnabled();
-    await userEvent.click(screen.getByRole("button", { name: "Save series" }));
-    expect(Events.update).toHaveBeenCalledTimes(2);
+    expect(screen.getByRole("status")).toHaveTextContent("Saved");
+    expect(screen.queryByRole("button", { name: /^Sav(e series|ing…)$/ })).not.toBeInTheDocument();
+    expect(title).toBeDisabled();
+    expect(title).toHaveValue("Supper night");
+    const close = screen.getByRole("button", { name: "Close" });
+    expect(close).toBeEnabled();
+    expect(close).toHaveFocus();
+    fireEvent.submit(title.closest("form")!);
+    expect(Events.update).toHaveBeenCalledOnce();
   });
 
-  it("asks before leaving an edit made after a save that left it open, even a save with no edits", async () => {
+  it("keeps showing what it sent when the page's reload brings new values", async () => {
+    vi.mocked(Events.update).mockReset().mockResolvedValue({ event: testEvent(7) });
+    const series = { ...baseSeries, recurrenceRule: "FREQ=WEEKLY;COUNT=4" };
+    const view = render(<SeriesEditor series={series} idPrefix="flip" onSaved={() => {}} onClose={() => {}} />);
+    const rule = screen.getByRole("textbox", { name: "Recurrence rule" });
+    await userEvent.clear(rule);
+    await userEvent.type(rule, "FREQ=WEEKLY;BYDAY=WE,TH");
+    await userEvent.click(screen.getByRole("button", { name: "Save series" }));
+    expect(await screen.findByText("Saved")).toBeInTheDocument();
+    view.rerender(<SeriesEditor series={{ ...series, recurrenceRule: "FREQ=WEEKLY;BYDAY=WE,TH", title: "Renamed" }} idPrefix="flip" onSaved={() => {}} onClose={() => {}} />);
+    expect(screen.getByRole("textbox", { name: "Recurrence rule" })).toHaveValue("FREQ=WEEKLY;BYDAY=WE,TH");
+    expect(screen.getByRole("textbox", { name: "Title" })).toHaveValue("Supper");
+    expect(screen.getByText("Saved")).toBeInTheDocument();
+  });
+
+  it("leaves the Jitsi link as sent when a new one lands after the save began", async () => {
+    const jitsi = deferred<{ url: string }>();
+    vi.mocked(Events.generateJitsi).mockReturnValueOnce(jitsi.promise);
+    const put = deferred<{ event: ReturnType<typeof testEvent> }>();
+    vi.mocked(Events.update).mockReset().mockReturnValueOnce(put.promise);
+    const sent = "https://meet.jit.si/fold-old000link";
+    render(<SeriesEditor series={{ ...baseSeries, videoProvider: "jitsi", videoUrl: sent }} idPrefix="jitsi" onSaved={() => {}} onClose={() => {}} />);
+    await userEvent.click(screen.getByRole("button", { name: "Generate a new Jitsi link" }));
+    await userEvent.click(screen.getByRole("button", { name: "Save series" }));
+    await act(async () => { jitsi.resolve({ url: "https://meet.jit.si/fold-new111link" }); await jitsi.promise; });
+    const link = screen.getByRole("textbox", { name: /^Video link/ });
+    expect(link).toHaveValue(sent);
+    await act(async () => { put.resolve({ event: testEvent(7) }); await put.promise; });
+    expect(screen.getByText("Saved")).toBeInTheDocument();
+    expect(link).toHaveValue(sent);
+  });
+
+  it("asks nothing when leaving after a save of an edit", async () => {
     vi.mocked(Events.update).mockReset().mockResolvedValue({ event: testEvent(7) });
     const confirm = vi.spyOn(window, "confirm").mockReturnValue(false);
 
     const router = createMemoryRouter([
-      { path: "/", element: <><UnsavedChangesBlocker /><SeriesEditor series={baseSeries} idPrefix="stay" onSaved={() => {}} /></> },
+      { path: "/", element: <><UnsavedChangesBlocker /><SeriesEditor series={baseSeries} idPrefix="stay" onSaved={() => {}} onClose={() => {}} /></> },
       { path: "/elsewhere", element: <p>Elsewhere page</p> },
     ]);
 
     render(<RouterProvider router={router} />);
+    await userEvent.type(screen.getByRole("textbox", { name: "Title" }), " night");
     await userEvent.click(screen.getByRole("button", { name: "Save series" }));
     expect(await screen.findByText("Saved")).toBeInTheDocument();
-    await userEvent.type(screen.getByRole("textbox", { name: "Title" }), "!{Backspace}");
-    expect(screen.queryByText("Saved")).not.toBeInTheDocument();
-    await userEvent.type(screen.getByRole("textbox", { name: "Title" }), "!");
+    const leaving = new Event("beforeunload", { cancelable: true });
+    window.dispatchEvent(leaving);
+    expect(leaving.defaultPrevented).toBe(false);
     void router.navigate("/elsewhere");
-    await waitFor(() => expect(confirm).toHaveBeenCalledWith("Leave without saving? Your changes will be lost."));
-    expect(screen.queryByText("Elsewhere page")).not.toBeInTheDocument();
+    expect(await screen.findByText("Elsewhere page")).toBeInTheDocument();
+    expect(confirm).not.toHaveBeenCalled();
     confirm.mockRestore();
   });
 
