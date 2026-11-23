@@ -1366,8 +1366,8 @@ func TestLeadersHearGroupDecisions(t *testing.T) {
 	}
 	notice("group.approved", edited)
 
-	// A group an earlier release sent back to pending, approved again: a
-	// second decision is a second notice. No release does that move now.
+	// A group an earlier release sent back to pending (the API refuses
+	// that move) approved again: a second decision is a second notice.
 	if err := app.DB.Model(&models.Group{}).Where("id = ?", approved).Update("status", models.GroupPending).Error; err != nil {
 		t.Fatal(err)
 	}

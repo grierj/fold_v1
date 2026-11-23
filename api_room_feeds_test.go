@@ -317,8 +317,8 @@ func TestRoomFeedHidesEventsOfInactiveGroups(t *testing.T) {
 	if w := f.leader.do("PUT", "/api/v1/groups/"+itoa(archived.ID), map[string]any{"status": models.GroupArchived}, true); w.Code != http.StatusOK {
 		t.Fatalf("archive: %d %s", w.Code, w.Body.String())
 	}
-	// No release moves a group back to pending any more; an earlier one
-	// could, and such a group keeps the dates it had.
+	// The API refuses a move back to pending, but a group an earlier
+	// release sent there keeps the dates it had.
 	if err := f.app.DB.Model(&models.Group{}).Where("id = ?", pending.ID).Update("status", models.GroupPending).Error; err != nil {
 		t.Fatal(err)
 	}

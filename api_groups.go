@@ -783,7 +783,7 @@ var errRoleRefused = apiErr(http.StatusForbidden, "", "forbidden")
 
 // errGroupBackToPending: nothing would ask an admin to decide a group again,
 // so no group goes back to pending once it has left it.
-var errGroupBackToPending = apiErr(http.StatusConflict, "group_back_to_pending", "a group that was approved or archived can't go back to waiting for approval")
+var errGroupBackToPending = apiErr(http.StatusConflict, "group_back_to_pending", "an active or archived group can't go back to waiting for approval")
 
 // errGroupNotApprovedForAdds: only admins add people to a pending or
 // archived group (policy.CanAddToGroup).

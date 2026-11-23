@@ -144,7 +144,7 @@ export const ERROR_COPY = {
   cannot_join: "You can't join this group. Ask a leader if you think that's a mistake.",
   members_only: "Only members can see who's in this group.",
   group_inactive: "This group isn't active anymore.",
-  group_back_to_pending: "This group has already been reviewed, so it can't go back to waiting for approval. You can make it active or archive it instead.",
+  group_back_to_pending: "You can archive this group or make it active, but it can't go back to waiting for approval.",
   group_not_approved: "This group isn't approved yet. You can invite people once an admin approves it.",
   group_add_not_approved: "This group isn't approved yet. You can add people once an admin approves it.",
   group_events_not_approved: "This group isn't approved yet. You can schedule events once an admin approves it.",
