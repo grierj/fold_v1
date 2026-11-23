@@ -4,6 +4,8 @@ import { Guardians, type GuardianConsentScope } from "../api/guardians";
 import type { GuardianTeen } from "../types";
 import { errorText } from "../lib/errors";
 import { useAction } from "../lib/useAction";
+import { useNewestRead } from "../lib/newestRead";
+import { useFocusHome, useLockedFocus } from "../lib/focusHome";
 import { Button } from "./ui/Button";
 import { Field, FormError, Input, Select } from "./ui/Field";
 import { ErrorNotice } from "./ErrorNotice";
@@ -24,12 +26,21 @@ function TeenConsentControls({ teen, onChanged }: { teen: GuardianTeen; onChange
   // A landed refresh removes its button: focus that was on it goes to the consent action it brings back.
   const refocus = useRef(false);
   const granted = scope === "account" ? teen.accountConsent : scope === "sms" ? teen.smsConsent : teen.photosConsent;
+  // A change disables the button pressed and then replaces it (Revoke becomes Grant) or, when its refresh fails,
+  // removes every action: focus waits on the teen's section and goes to what replaced it, never the page.
+  const home = useFocusHome<HTMLDivElement>();
+  useLockedFocus(home, action.running);
 
   useLayoutEffect(() => {
     if (stale || !refocus.current) return;
     refocus.current = false;
     consentButton.current?.focus({ preventScroll: true });
   }, [stale]);
+
+  useLayoutEffect(() => {
+    if (action.running || document.activeElement !== home.ref.current) return;
+    (stale ? refreshButton : consentButton).current?.focus({ preventScroll: true });
+  }, [action.running, stale, home]);
 
   async function change(status: "granted" | "revoked") {
     if (status === "revoked" && !confirm(scope === "account" ? `Revoke account consent for ${teen.teenName}? They will be signed out and unable to use Fold until consent is granted again.` : `Revoke ${scope} consent for ${teen.teenName}?`)) return;
@@ -63,7 +74,7 @@ function TeenConsentControls({ teen, onChanged }: { teen: GuardianTeen; onChange
     void action.run(async () => (await Guardians.email(teen.linkId)).message);
   }
 
-  return <div className="border-t border-border pt-4 mt-4">
+  return <div ref={home.ref} tabIndex={-1} className="border-t border-border pt-4 mt-4 outline-none">
     <h3 className="font-semibold">{teen.teenName}</h3>
     <Button variant="link" aria-expanded={showGrants} onClick={() => setShowGrants(!showGrants)}>{showGrants ? "Close contact access" : "View active contact access"}</Button>
     {showGrants && <Suspense fallback={<p role="status">Loading contact access…</p>}><GuardianContactGrants teenUserId={teen.teenUserId} /></Suspense>}
@@ -105,9 +116,12 @@ export function GuardianConsentCard() {
   const claimAction = useAction();
   const claimed = claimAction.state;
 
-  async function load() { setTeens((await Guardians.teens()).teens); setLoaded(true); }
+  const load = useNewestRead(Guardians.teens, (answer) => {
+    setTeens(answer.teens);
+    setLoaded(true);
+  });
 
-  useEffect(() => { load().catch((cause: unknown) => setLoadError(errorText(cause))); }, []);
+  useEffect(() => { load().catch((cause: unknown) => setLoadError(errorText(cause))); }, [load]);
 
   function retry() { setLoadError(""); void load().catch((cause: unknown) => setLoadError(errorText(cause))); }
 

@@ -1,10 +1,12 @@
 import { publicName } from "../lib/can";
-import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { AdminTeenConsents } from "../api/adminUsers";
 import type { TeenConsent, User } from "../types";
 import { errorText } from "../lib/errors";
 import { formatWhen } from "../lib/when";
 import { useAction } from "../lib/useAction";
+import { useNewestRead } from "../lib/newestRead";
+import { useFocusHome, useLockedFocus } from "../lib/focusHome";
 import { Button } from "./ui/Button";
 import { Choices, Field, FormError, Radio, showFieldErrors, Textarea } from "./ui/Field";
 
@@ -24,7 +26,10 @@ export default function TeenConsentPanel({ user, onUpdated, onClose }: { user: U
   const [error, setError] = useState<string | null>(null);
   const action = useAction();
   const busy = action.running;
-  const ref = useRef<HTMLDivElement>(null);
+  // A change disables what was pressed and, when its refresh fails, removes every action: focus waits on the
+  // panel and goes to Refresh consent (or back to what was pressed), never the page.
+  const home = useFocusHome<HTMLDivElement>();
+  const ref = home.ref;
   // A change that saved but whose refresh failed: what is shown may be out of date, so no consent action is
   // offered until a refresh lands, and only that clears it.
   const [stale, setStale] = useState(false);
@@ -35,20 +40,26 @@ export default function TeenConsentPanel({ user, onUpdated, onClose }: { user: U
   // A landed refresh removes its button: focus that was on it goes to Grant consent (Close consent for an adult).
   const refocus = useRef(false);
 
-  const load = useCallback(async () => {
-    const result = await AdminTeenConsents.list(user.id);
+  const load = useNewestRead(() => AdminTeenConsents.list(user.id), (result) => {
     setHistory(result.consents);
     setSuspended(result.administrativelyDisabled);
     setLoaded(true);
-  }, [user.id]);
+  });
 
-  useEffect(() => { load().catch((e) => setError(errorText(e, "We couldn't load consent history."))); }, [load]);
+  useEffect(() => { load().catch((e) => setError(errorText(e, "We couldn't load consent history."))); }, [load, user.id]);
+
+  useLockedFocus(home, busy);
 
   useLayoutEffect(() => {
     if (stale || !refocus.current) return;
     refocus.current = false;
     (grantButton.current ?? closeButton.current)?.focus({ preventScroll: true });
   }, [stale]);
+
+  useLayoutEffect(() => {
+    if (busy || !stale || document.activeElement !== home.ref.current) return;
+    refreshButton.current?.focus({ preventScroll: true });
+  }, [busy, stale, home]);
 
   function reload() {
     void refresh.run(async () => {
@@ -92,10 +103,10 @@ export default function TeenConsentPanel({ user, onUpdated, onClose }: { user: U
   const { state } = action;
 
   return (
-    <div ref={ref} className="mt-4 border-t border-border pt-4 space-y-4 whitespace-normal" aria-label={`Consent for ${publicName(user)}`}>
+    <div ref={ref} tabIndex={-1} className="mt-4 border-t border-border pt-4 space-y-4 whitespace-normal outline-none" aria-label={`Consent for ${publicName(user)}`}>
       <div className="flex flex-wrap items-center justify-between gap-2">
         <h3 className="font-semibold">Teen consent</h3>
-        <Button ref={closeButton} variant="ghost" onClick={onClose}>Close consent</Button>
+        <Button ref={closeButton} variant="ghost" disabled={busy} onClick={onClose}>Close consent</Button>
       </div>
       {!loaded && !error && <p role="status">Loading consent…</p>}
       {loaded && !stale && <>
@@ -107,12 +118,15 @@ export default function TeenConsentPanel({ user, onUpdated, onClose }: { user: U
         {user.accountType === "teen" ? <>
           {suspended && <p className="text-text-muted">An admin has disabled this account. Granting consent keeps it disabled until an admin enables it.</p>}
           {!user.hasPassword && <p className="text-text-muted">They still need to set a password before they can sign in.</p>}
-          <Choices legend="Consent scope">
-            {scopes.map((item) => <Radio key={item.value} name={`consent-scope-${user.id}`} label={item.label} checked={scope === item.value} onChange={() => setScope(item.value)} />)}
-          </Choices>
-          <Field label="Consent evidence" hint="Required to grant. For example: paper form signed by a parent on October 22. Maximum 1,000 characters. You can add a reason when revoking." error={evidenceError ?? undefined}>
-            <Textarea value={evidence} onChange={(event) => { setEvidence(event.target.value); setEvidenceError(null); }} maxLength={1000} rows={3} />
-          </Field>
+          {/* Locked while a change is on its way: a saved grant clears the evidence, so a later edit would be lost. */}
+          <fieldset disabled={busy} className="min-w-0 space-y-4">
+            <Choices legend="Consent scope">
+              {scopes.map((item) => <Radio key={item.value} name={`consent-scope-${user.id}`} label={item.label} checked={scope === item.value} onChange={() => setScope(item.value)} />)}
+            </Choices>
+            <Field label="Consent evidence" hint="Required to grant. For example: paper form signed by a parent on October 22. Maximum 1,000 characters. You can add a reason when revoking." error={evidenceError ?? undefined}>
+              <Textarea value={evidence} onChange={(event) => { setEvidence(event.target.value); setEvidenceError(null); }} maxLength={1000} rows={3} />
+            </Field>
+          </fieldset>
           <p className="text-sm text-text-muted">SMS consent also needs their own SMS opt-in before any texts can be sent. Photo consent applies to galleries.</p>
           <div className="flex flex-wrap gap-2">
             <Button ref={grantButton} variant="primary" onClick={() => void change("granted")} disabled={busy}>{busy ? "Saving…" : "Grant consent"}</Button>
