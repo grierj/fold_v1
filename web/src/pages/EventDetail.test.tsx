@@ -693,6 +693,65 @@ describe("EventDetail header actions and ?manage (DEC-99)", () => {
     expect(screen.getByLabelText("Title")).toHaveFocus();
   });
 
+  it("keeps focus off the page body while a saved series reads the page again, then gives it to Edit event", async () => {
+    vi.mocked(Events.get).mockResolvedValue(page);
+    const put = deferred<{ event: typeof page.event }>();
+    vi.mocked(Events.update).mockReturnValueOnce(put.promise);
+    render(<main id="main" tabIndex={-1}><MemoryRouter initialEntries={["/events/7"]}><DateWritesProvider credential={credential}><Routes><Route path="/events/:id" element={<EventDetail />} /></Routes></DateWritesProvider></MemoryRouter></main>);
+    await userEvent.click(await screen.findByRole("button", { name: "Edit event" }));
+    const title = screen.getByLabelText("Title");
+    await userEvent.type(title, "{Enter}");
+    expect(title).toBeDisabled();
+    expect(document.activeElement).toBe(title.closest("form"));
+    expect(screen.getByRole("button", { name: "Edit event" })).toBeDisabled();
+    const again = deferred<typeof page>();
+    vi.mocked(Events.get).mockReturnValueOnce(again.promise);
+    await act(async () => { put.resolve({ event: page.event }); await put.promise; });
+    expect(document.activeElement).toBe(document.getElementById("main"));
+    await act(async () => { again.resolve(page); await again.promise; });
+    const edit = await screen.findByRole("button", { name: "Edit event" });
+    expect(edit).toHaveAttribute("aria-expanded", "false");
+    expect(document.activeElement).toBe(edit);
+  });
+
+  it("gives focus back to Edit event when the editor is closed", async () => {
+    vi.mocked(Events.get).mockResolvedValue(page);
+    render(<main id="main" tabIndex={-1}><MemoryRouter initialEntries={["/events/7"]}><DateWritesProvider credential={credential}><Routes><Route path="/events/:id" element={<EventDetail />} /></Routes></DateWritesProvider></MemoryRouter></main>);
+    await userEvent.click(await screen.findByRole("button", { name: "Edit event" }));
+    await userEvent.click(screen.getByRole("button", { name: "Close" }));
+    const edit = screen.getByRole("button", { name: "Edit event" });
+    expect(edit).toHaveAttribute("aria-expanded", "false");
+    expect(document.activeElement).toBe(edit);
+  });
+
+  it("leaves focus where the person moved it while a series save was on its way", async () => {
+    vi.mocked(Events.get).mockResolvedValue(page);
+    const put = deferred<{ event: typeof page.event }>();
+    vi.mocked(Events.update).mockReturnValueOnce(put.promise);
+    render(<main id="main" tabIndex={-1}><button>Elsewhere</button><MemoryRouter initialEntries={["/events/7"]}><DateWritesProvider credential={credential}><Routes><Route path="/events/:id" element={<EventDetail />} /></Routes></DateWritesProvider></MemoryRouter></main>);
+    await userEvent.click(await screen.findByRole("button", { name: "Edit event" }));
+    await userEvent.type(screen.getByLabelText("Title"), "{Enter}");
+    const elsewhere = screen.getByRole("button", { name: "Elsewhere" });
+    elsewhere.focus();
+    await act(async () => { put.resolve({ event: page.event }); await put.promise; });
+    await waitFor(() => expect(screen.getByRole("button", { name: "Edit event" })).toHaveAttribute("aria-expanded", "false"));
+    expect(document.activeElement).toBe(elsewhere);
+  });
+
+  it("gives focus to Edit event when the save's reload removes the control the person moved to", async () => {
+    vi.mocked(Events.get).mockResolvedValue(page);
+    const put = deferred<{ event: typeof page.event }>();
+    vi.mocked(Events.update).mockReturnValueOnce(put.promise);
+    render(<main id="main" tabIndex={-1}><MemoryRouter initialEntries={["/events/7"]}><DateWritesProvider credential={credential}><Routes><Route path="/events/:id" element={<EventDetail />} /></Routes></DateWritesProvider></MemoryRouter></main>);
+    await userEvent.click(await screen.findByRole("button", { name: "Edit event" }));
+    await userEvent.type(screen.getByLabelText("Title"), "{Enter}");
+    screen.getByRole("button", { name: "More event actions" }).focus();
+    await act(async () => { put.resolve({ event: page.event }); await put.promise; });
+    const edit = await screen.findByRole("button", { name: "Edit event" });
+    await waitFor(() => expect(edit).toHaveAttribute("aria-expanded", "false"));
+    await waitFor(() => expect(document.activeElement).toBe(screen.getByRole("button", { name: "Edit event" })));
+  });
+
   it("puts Edit and More together in one row", async () => {
     vi.mocked(Events.get).mockResolvedValue(page);
     renderPage();

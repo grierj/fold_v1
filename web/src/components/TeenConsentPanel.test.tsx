@@ -1,5 +1,6 @@
 import { stubService } from "../test/service";
-import { render, screen, waitFor } from "@testing-library/react";
+import { StrictMode } from "react";
+import { act, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, expect, it, vi } from "vitest";
 import { AdminTeenConsents } from "../api/adminUsers";
@@ -73,4 +74,98 @@ it("explains independent suspension and keeps adult history read-only", async ()
   expect(screen.getByText(/Their teen consent history stays on file/)).toBeVisible();
   await userEvent.click(screen.getByText("Consent history (1)"));
   expect(screen.getByText("Signed parent form")).toBeVisible();
+});
+
+it("says a grant was saved when only the refresh after it fails, and offers no consent action until a refresh lands (#430)", async () => {
+  const updated = vi.fn();
+  render(<TeenConsentPanel user={teen} onUpdated={updated} onClose={vi.fn()} />);
+  await userEvent.type(await screen.findByLabelText("Consent evidence"), "Signed parent form");
+  vi.mocked(AdminTeenConsents.list).mockRejectedValueOnce(new Error("offline")).mockRejectedValueOnce(new Error("offline"));
+  await userEvent.click(screen.getByRole("button", { name: "Grant consent" }));
+  expect(AdminTeenConsents.change).toHaveBeenCalledOnce();
+  expect(await screen.findByRole("status")).toHaveTextContent("Account access consent granted.");
+  expect(screen.getByRole("alert")).toHaveTextContent("Your change is saved, but we couldn't load Casey's latest consent. Refresh to see it before you change anything else.");
+  expect(screen.queryByText(/couldn't save/)).not.toBeInTheDocument();
+
+  const stale = () => {
+    expect(screen.queryByRole("button", { name: /^(Grant|Revoke) consent$/ })).not.toBeInTheDocument();
+    expect(screen.queryAllByText(/Not granted|Granted/)).toHaveLength(0);
+    expect(screen.queryByLabelText("Consent evidence")).not.toBeInTheDocument();
+  };
+
+  stale();
+  expect(updated).toHaveBeenCalledOnce();
+  const refresh = screen.getByRole("button", { name: "Refresh consent" });
+  await userEvent.click(refresh);
+  await waitFor(() => expect(screen.getByRole("alert")).toHaveTextContent("couldn't reach"));
+  stale();
+  expect(refresh).toHaveFocus();
+  vi.mocked(AdminTeenConsents.list).mockResolvedValueOnce({ consents: [consent], administrativelyDisabled: false });
+  await userEvent.click(refresh);
+  expect(await screen.findByText("Granted")).toBeInTheDocument();
+  expect(screen.getByLabelText("Consent evidence")).toHaveValue("");
+  expect(screen.getByRole("button", { name: "Grant consent" })).toHaveFocus();
+  expect(AdminTeenConsents.change).toHaveBeenCalledOnce();
+});
+
+function held<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (cause: unknown) => void;
+  const promise = new Promise<T>((yes, no) => { resolve = yes; reject = no; });
+
+  return { promise, resolve, reject };
+}
+
+it("an older read that lands after a newer one never replaces its answer", async () => {
+  const first = held<{ consents: TeenConsent[]; administrativelyDisabled: boolean }>();
+  const second = held<{ consents: TeenConsent[]; administrativelyDisabled: boolean }>();
+  vi.mocked(AdminTeenConsents.list).mockReturnValueOnce(first.promise).mockReturnValueOnce(second.promise);
+  // StrictMode mounts twice, so two reads go out; the first one asked answers last.
+  render(<StrictMode><TeenConsentPanel user={teen} onUpdated={vi.fn()} onClose={vi.fn()} /></StrictMode>);
+  await waitFor(() => expect(AdminTeenConsents.list).toHaveBeenCalledTimes(2));
+  await act(async () => { second.resolve({ consents: [consent], administrativelyDisabled: false }); await second.promise; });
+  expect(await screen.findByText("Granted")).toBeInTheDocument();
+  await act(async () => { first.resolve({ consents: [], administrativelyDisabled: false }); await first.promise; });
+  expect(screen.getByText("Granted")).toBeInTheDocument();
+  expect(screen.queryByText("Consent history (0)")).not.toBeInTheDocument();
+});
+
+it("moves focus from the pressed button to Refresh consent when the refresh after a change fails", async () => {
+  render(<TeenConsentPanel user={teen} onUpdated={vi.fn()} onClose={vi.fn()} />);
+  await userEvent.type(await screen.findByLabelText("Consent evidence"), "Signed parent form");
+  vi.mocked(AdminTeenConsents.list).mockRejectedValueOnce(new Error("offline"));
+  screen.getByRole("button", { name: "Grant consent" }).focus();
+  await userEvent.keyboard("{Enter}");
+  const refresh = await screen.findByRole("button", { name: "Refresh consent" });
+  await waitFor(() => expect(refresh).toHaveFocus());
+});
+
+it("leaves focus where the person moved it while the change was on its way", async () => {
+  const change = held<Record<string, never>>();
+  vi.mocked(AdminTeenConsents.change).mockReturnValueOnce(change.promise);
+  render(<><button>Elsewhere</button><TeenConsentPanel user={teen} onUpdated={vi.fn()} onClose={vi.fn()} /></>);
+  await userEvent.type(await screen.findByLabelText("Consent evidence"), "Signed parent form");
+  vi.mocked(AdminTeenConsents.list).mockRejectedValueOnce(new Error("offline"));
+  await userEvent.click(screen.getByRole("button", { name: "Grant consent" }));
+  const elsewhere = screen.getByRole("button", { name: "Elsewhere" });
+  elsewhere.focus();
+  await act(async () => { change.resolve({}); await change.promise; });
+  expect(await screen.findByRole("button", { name: "Refresh consent" })).toBeInTheDocument();
+  expect(document.activeElement).toBe(elsewhere);
+});
+
+it("locks the scope and evidence while a change is on its way, so nothing typed then is cleared by its success", async () => {
+  const change = held<Record<string, never>>();
+  vi.mocked(AdminTeenConsents.change).mockReturnValueOnce(change.promise);
+  render(<TeenConsentPanel user={teen} onUpdated={vi.fn()} onClose={vi.fn()} />);
+  const evidence = await screen.findByLabelText("Consent evidence");
+  await userEvent.type(evidence, "Signed parent form");
+  await userEvent.click(screen.getByRole("button", { name: "Grant consent" }));
+  expect(evidence).toBeDisabled();
+  expect(screen.getByRole("radio", { name: "SMS" })).toBeDisabled();
+  await userEvent.type(evidence, " and a call");
+  expect(evidence).toHaveValue("Signed parent form");
+  await act(async () => { change.reject(new Error("offline")); await change.promise.catch(() => {}); });
+  expect(evidence).toBeEnabled();
+  expect(evidence).toHaveValue("Signed parent form");
 });

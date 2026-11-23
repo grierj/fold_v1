@@ -100,3 +100,49 @@ export function useKeepFocusHome(home: FocusHome | null): void {
     home?.rescue();
   });
 }
+
+// While `locked` (a run on its way), the home's controls are disabled, and a disabled control drops focus to the
+// page body (a text field inside a disabled fieldset at once, before any effect runs; a button a moment later). The
+// control that had it hands focus to the home in the same commit and gets it back when the lock ends, if focus is
+// still on the home and the control can take it. `forget` drops that return when something else says where focus
+// goes (a review that takes it, a refusal that explains why the home has it, a field error).
+export function useLockedFocus(home: FocusHome, locked: boolean): { forget: () => void } {
+  const held = useRef<HTMLElement | null>(null);
+  // The control inside the home that last had focus, while focus has gone nowhere else since.
+  const last = useRef<HTMLElement | null>(null);
+
+  useEffect(() => {
+    const onFocusIn = (e: FocusEvent) => {
+      const target = e.target;
+      last.current = target instanceof HTMLElement && target !== home.ref.current && home.ref.current?.contains(target) ? target : null;
+    };
+
+    document.addEventListener("focusin", onFocusIn);
+
+    return () => document.removeEventListener("focusin", onFocusIn);
+  }, [home]);
+
+  useLayoutEffect(() => {
+    const el = home.ref.current;
+
+    if (locked) {
+      const active = document.activeElement;
+      const lost = !active || active === document.body;
+      const from = lost ? last.current : active;
+
+      if (el && from instanceof HTMLElement && from !== el && el.contains(from) && from.matches(":disabled")) {
+        held.current = from;
+        home.moveHere();
+      }
+
+      return;
+    }
+
+    const back = held.current;
+    held.current = null;
+
+    if (back?.isConnected && !back.matches(":disabled") && document.activeElement === el) back.focus({ preventScroll: true });
+  }, [locked, home]);
+
+  return useMemo(() => ({ forget: () => { held.current = null; } }), []);
+}
