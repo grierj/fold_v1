@@ -1,0 +1,52 @@
+func 4c2de46cae22761d ./internal/jobs Runner.Start
+func e4f1c87e31c47549 ./internal/jobs Runner.RunOnce
+func 8020144521d8002d ./internal/jobs safeRun
+func 68910b504300c1b5 ./internal/jobs Runner.finish
+func 822bf27d479ca346 ./internal/jobs Runner.callOnDead
+func 060442c3594bc23f ./internal/jobs heldBy
+func ce314a6be558aa6a ./internal/jobs LaterIn
+func d19b2e74e9f16416 ./internal/jobs laterUpdates
+func 222dc2d406cf8c74 ./internal/jobs Later
+func 977c3d897d33e502 ./internal/jobs Requeued
+func cefe7a539ebad752 ./internal/jobs Retry
+func eb4ddcdc0b06ad61 ./internal/jobs Dismiss
+func b7cdadddc2a5a935 ./internal/jobs decideDead
+func 58ad337f8f533045 ./internal/jobs PruneDone
+func b898345a523110fb . App.decideDeadJob
+func f1749755f14e4bca . App.deliverMessagePush
+func 4606e8acdba246fe . pushWaitIn
+decl internal/jobs/dead.go:func Dismiss(tx *gorm.DB, id uint) (bool, error)
+decl internal/jobs/dead.go:func LockDead(tx *gorm.DB, id uint) (bool, error)
+decl internal/jobs/dead.go:func Retry(tx *gorm.DB, id uint) (bool, error)
+decl internal/jobs/dead.go:func decideDead(tx *gorm.DB, id uint, updates map[string]any) (bool, error)
+decl internal/jobs/jobs.go:func (e laterError) Error() string { return "not due until " + e.at.UTC().Format(time.RFC3339) }
+decl internal/jobs/jobs.go:func (r *Runner) RunOnce(ctx context.Context, worker string) (bool, error)
+decl internal/jobs/jobs.go:func (r *Runner) Start(ctx context.Context, n int) func()
+decl internal/jobs/jobs.go:func (r *Runner) callOnDead(job claimed, msg string)
+decl internal/jobs/jobs.go:func (r *Runner) finish(job claimed, runErr error, final bool) error
+decl internal/jobs/jobs.go:func (t Type) Attempts() int
+decl internal/jobs/jobs.go:func (t Type) Enqueue(db *gorm.DB, payload any, runAt time.Time, uniqueKey string) (bool, error)
+decl internal/jobs/jobs.go:func (t Type) Spec(payload any, runAt time.Time, uniqueKey string) Spec
+decl internal/jobs/jobs.go:func Backoff(attempt int, rnd func() float64) time.Duration
+decl internal/jobs/jobs.go:func CleanError(err error) string
+decl internal/jobs/jobs.go:func EnqueueMany(db *gorm.DB, specs []Spec) (int64, error)
+decl internal/jobs/jobs.go:func LastAttempt(ctx context.Context) bool
+decl internal/jobs/jobs.go:func Later(at time.Time) error { return laterError{at: at} }
+decl internal/jobs/jobs.go:func LaterIn(ctx context.Context, tx *gorm.DB, at time.Time) error
+decl internal/jobs/jobs.go:func NewRunner(db *gorm.DB, kinds ...Kind) *Runner
+decl internal/jobs/jobs.go:func PruneDone(db *gorm.DB, cutoff time.Time) (int64, error)
+decl internal/jobs/jobs.go:func Requeued() error { return errRequeued }
+decl internal/jobs/jobs.go:func WillRunAgain(q *gorm.DB) *gorm.DB
+decl internal/jobs/jobs.go:func WithClaim(ctx context.Context, c Claim) context.Context
+decl internal/jobs/jobs.go:func heldBy(db *gorm.DB, c Claim) *gorm.DB
+decl internal/jobs/jobs.go:func laterUpdates(at time.Time) map[string]any
+decl internal/jobs/jobs.go:func safeRun(ctx context.Context, k Kind, payload json.RawMessage) (err error)
+writer internal/jobs/dead.go:1
+writer internal/jobs/jobs.go:5
+writer migrations/00001_baseline.sql:1
+writer migrations/00008_suppression_address_contract.sql:1
+writer push_deliver.go:1
+migration migrations/00001_baseline.sql
+migration migrations/00008_suppression_address_contract.sql
+migration migrations/00012_job_claim_seq.sql
+waiter messages_push.go
