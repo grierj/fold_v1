@@ -1,5 +1,6 @@
 import { useContext, useEffect, useRef } from "react";
 import { UNSAFE_DataRouterContext, useBlocker } from "react-router-dom";
+import type { ConfirmRequest } from "../components/ui/ConfirmDialog";
 
 // Leaving a page with unsaved edits asks first (DEC-98). Closing or reloading
 // the tab gets the browser's own prompt; moving to another page in the app
@@ -8,9 +9,21 @@ import { UNSAFE_DataRouterContext, useBlocker } from "react-router-dom";
 // their own). Call `markSaved()` right before navigating away after a
 // successful save, so the edits the save just stored don't block it; a page
 // that stays open after that navigation calls `resume()` right after it, so
-// later edits are guarded again.
+// later edits are guarded again. A page that asks in the app's own dialog
+// registers it with `useLeaveQuestion` (lib/leaveQuestion.ts, kept out of the
+// eager bundle with the dialog); elsewhere the browser's confirm asks.
 const openForms = new Set<() => boolean>();
 let leavingOnPurpose = false;
+let askToLeave: (() => Promise<boolean>) | null = null;
+
+export const LEAVE = {
+  title: "Leave without saving?",
+  body: "Your changes will be lost.",
+  confirmLabel: "Leave without saving",
+  cancelLabel: "Keep editing",
+  tone: "normal",
+  native: "Leave without saving? Your changes will be lost.",
+} satisfies ConfirmRequest;
 
 const anyUnsaved = () => !leavingOnPurpose && [...openForms].some((unsaved) => unsaved());
 
@@ -49,6 +62,15 @@ export function useUnsavedChanges(dirty: boolean) {
   return { guard: null, markSaved: () => { saved.current = true; }, resume: () => { saved.current = false; } };
 }
 
+// The page dialog that asks before leaving, while its page is mounted; returns the unregister.
+export function askToLeaveWith(asker: () => Promise<boolean>): () => void {
+  askToLeave = asker;
+
+  return () => {
+    if (askToLeave === asker) askToLeave = null;
+  };
+}
+
 // Rendered once inside the data router (App). useBlocker needs a data router;
 // tests that render in a MemoryRouter get the tab-close prompt only.
 export function UnsavedChangesBlocker() {
@@ -61,11 +83,36 @@ function NavigationGuard() {
   const blocker = useBlocker(({ currentLocation, nextLocation }) =>
     anyUnsaved() && (currentLocation.pathname !== nextLocation.pathname || currentLocation.search !== nextLocation.search));
 
+  const latest = useRef(blocker);
+  // One question at a time. A navigation blocked while it is open (Back
+  // pressed again) asks nothing more: the answer applies to whichever
+  // navigation is waiting when it comes, so Leave goes to the latest one.
+  const asking = useRef(false);
+  latest.current = blocker;
+
   useEffect(() => {
     if (blocker.state !== "blocked") return;
+    const ask = askToLeave;
 
-    if (window.confirm("Leave without saving? Your changes will be lost.")) blocker.proceed();
-    else blocker.reset();
+    if (!ask) {
+      if (window.confirm(LEAVE.native)) blocker.proceed();
+      else blocker.reset();
+
+      return;
+    }
+
+    if (asking.current) return;
+    asking.current = true;
+    void ask().then((leave) => {
+      asking.current = false;
+      // The newest blocker's own proceed and reset: an earlier one's no longer moves history.
+      const now = latest.current;
+
+      if (now.state !== "blocked") return;
+
+      if (leave) now.proceed();
+      else now.reset();
+    });
   }, [blocker]);
 
   return null;

@@ -551,7 +551,9 @@ func init() {
 	})
 	register(Kind{
 		// A date a series edit had cancelled is on again because the rule
-		// includes it. Same recipients and privacy rules as OccurrenceCancelled.
+		// includes it (DEC-91). Same recipients and privacy rules as
+		// OccurrenceCancelled: someone who can't see the date gets the
+		// nameless text.
 		Key: OccurrenceRestored, Category: CatEvents, AllowEmail: true,
 		Render: func(v Vars) (string, string) {
 			return "Back on: " + or(v.Event, "Church event"),
@@ -681,16 +683,22 @@ func init() {
 		},
 	})
 	register(Kind{
-		// A re-enabled account was left out of a full occurrence
-		// (DEC-38, DEC-47, M1.5): the registration was dropped and the
-		// person is told to ask a leader or host.
+		// A re-enabled account was left out of an occurrence (DEC-38,
+		// DEC-47, M1.5): the registration was dropped and the person is
+		// told to ask a leader or host. Change is "" when the date was full
+		// and "unavailable" when they may not sign up for it now, which is
+		// also the case for a date they can no longer see (the caller then
+		// names no event).
 		Key: RegistrationNotRestored, Category: CatEvents, AllowEmail: true,
 		Render: func(v Vars) (string, string) {
 			if v.Person != "" {
 				return v.Person + " could not be added back to " + or(v.Event, "an event"), "Ask a leader or host to add them after checking their household details and available seats."
 			}
-			return "You're not back in " + or(v.Event, "one of your events") + " yet",
-				"The event was full when your account was turned back on. Ask a leader or host to add you."
+			why := "The event was full when your account was turned back on."
+			if v.Change == "unavailable" {
+				why = "Your sign-up couldn't come back when your account was turned back on."
+			}
+			return "You're not back in " + or(v.Event, "one of your events") + " yet", why + " Ask a leader or host to add you."
 		},
 	})
 	register(Kind{

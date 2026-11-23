@@ -1297,7 +1297,9 @@ const reconcileProtectReads = 2
 // beginOwnedTx begins a transaction the test owns and reports its backend pid.
 func beginOwnedTx(t *testing.T, db *gorm.DB) (*gorm.DB, int) {
 	t.Helper()
-	tx := db.Begin()
+	// Read Committed whatever the database default, since some callers take
+	// the contact gate on it (lockContacts refuses any other level).
+	tx := db.Begin(contactGateTx)
 	if tx.Error != nil {
 		t.Fatal(tx.Error)
 	}

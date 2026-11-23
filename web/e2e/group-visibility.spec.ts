@@ -1,6 +1,6 @@
 import * as schema from "valibot";
 import { expect, test } from "@playwright/test";
-import { apiAs, signIn, fromMore } from "./helpers";
+import { apiAs, signIn, fromMore, groupDetailPath } from "./helpers";
 
 function futureDate(days: number): string {
   return new Date(Date.now() + days * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
@@ -12,9 +12,15 @@ function futureDate(days: number): string {
 test("making a group invite-only reviews its events before saving", async ({ page, request }) => {
   test.setTimeout(30_000);
   const admin = await apiAs(request, "grier");
+  // Names only this test uses: the hidden-name checks below match substrings,
+  // and other specs' public groups ("Viewport supper club") and the seed's
+  // Fellowship Hall room can be on Quinn's screen.
+  const suffix = Date.now().toString(36);
+  const groupName = `Supper club ${suffix}`;
+  const place = `Fellowship hall ${suffix}`;
 
   const { group } = schema.parse(schema.looseObject({ group: schema.looseObject({ id: schema.number() }) }), (await admin("POST", "/groups", {
-    name: "Supper club", description: "", tags: [], imageUrl: "", location: "Fellowship hall",
+    name: groupName, description: "", tags: [], imageUrl: "", location: place,
     visibility: "private", memberLimit: null,
   })));
 
@@ -45,7 +51,7 @@ test("making a group invite-only reviews its events before saving", async ({ pag
   const confirm = review.getByRole("button", { name: "Make the group invite-only" });
   await expect(confirm).toBeDisabled();
   // Nothing is saved while the leader decides.
-  expect((schema.parse(schema.looseObject({ group: schema.looseObject({ visibility: schema.string() }) }), (await grier("GET", `/groups/${group.id}`)))).group.visibility).toBe("private");
+  expect((schema.parse(schema.looseObject({ group: schema.looseObject({ visibility: schema.string() }) }), (await grier("GET", groupDetailPath(group.id))))).group.visibility).toBe("private");
 
   await review.getByTestId(`opened-${bake}`).getByRole("radio", { name: /Keep it public/ }).check();
   await confirm.click();
@@ -59,6 +65,6 @@ test("making a group invite-only reviews its events before saving", async ({ pag
   await signIn(page, "quinn");
   await page.getByRole("button", { name: "Alerts" }).click();
   await expect(page.getByText("Registration cancelled: Soup night")).toBeVisible();
-  await expect(page.getByText("Supper club")).toHaveCount(0);
-  await expect(page.getByText("Fellowship hall")).toHaveCount(0);
+  await expect(page.getByText(groupName)).toHaveCount(0);
+  await expect(page.getByText(place)).toHaveCount(0);
 });

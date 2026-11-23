@@ -38,10 +38,10 @@ while (( $# )); do
       echo '         [--lane-base SHA] [--landing SHA] [--prior SHA] [--archive-base SHA]'
       echo 'The four revisions drive the real-binary crossing cases (R4-6c-V, T07B-2-V): LANE_BASE (the recorded'
       echo 'level-0 preflight base, default 8c07c85), the level-1 commit that precedes restore.sh (default d400b77),'
-      echo 'the level-2 release before the candidate, the only legal rollback target (default 6927e89), and the'
+      echo 'the level-2 release before the candidate, the lineage origin whose way back is refused (default 52e60ff), and the'
       echo 'archive base (default 8989979): the first parent of the reason-review schema landing, whose migrations'
       echo 'lack the reason-review file. LANE_BASE is also dumped as the older table-set archive. The candidate'
-      echo 'binary is built from git archive of the committed HEAD, which must be recovery level 2; an uncommitted'
+      echo 'binary is built from git archive of the committed HEAD, which must be recovery level 3; an uncommitted'
       echo 'tree is refused. --image serves only the fixture stack.'
       exit 0 ;;
     *) echo "unknown option $1" >&2; exit 1 ;;
@@ -93,7 +93,8 @@ drill_progress_init bootstrap base-proof recovery-interruptions reopen-interrupt
   legacy_archive_case review_reconciliation_cases review_backup_archive_cases review_cleanup_retry_cases \
   review_orphaned_restore_case review_moving_tag_case \
   uploads_erasure_cases uploads_interruption_cases backup_exclusion_cases \
-  real_binary_refusals real_level_lineage real_same_level_rollback real_current_release_restore real_older_archive_restore final-verification
+  real_binary_refusals real_level_lineage real_lower_level_rollback_refused real_l1_pre_upgrade_dump real_level0_started_by_hand
+  real_prior_refused_at_start real_prior_running_across_upgrade real_current_release_restore real_older_archive_restore final-verification
 else
 drill_progress_init "${CROSSINGS_ONLY_PLAN[@]}"
 fi
@@ -432,7 +433,7 @@ kill_point() {
   if [[ -n "$(pg postgres -c "SELECT oid FROM pg_database WHERE oid=$(jq -er .origOid "$DIR/recovery.lock")")" ]]; then assert_original_heap
   else [[ "$(jq -er .cleanup "$DIR/recovery.lock")" != none ]]; fi
 }
-# crossings-only: the fixture stack, the dump and reset_case exist now. Run the five real-binary crossing cases and stop: the recovery matrices below are the full run's.
+# crossings-only: the fixture stack, the dump and reset_case exist now. Run the nine real-binary crossing cases and stop: the recovery matrices below are the full run's.
 # A bare call, so errexit stays on inside it; it exits with DRILL_PARTIAL_PASS_EXIT when the diagnostic passes and never returns.
 if [[ "$MODE" != full ]]; then
 crossings_only_run
@@ -599,7 +600,8 @@ for drill_family in count_races archive_failures pin_and_abort_cases cleanup_and
   legacy_archive_case review_reconciliation_cases review_backup_archive_cases review_cleanup_retry_cases \
   review_orphaned_restore_case review_moving_tag_case \
   uploads_erasure_cases uploads_interruption_cases backup_exclusion_cases \
-  real_binary_refusals real_level_lineage real_same_level_rollback real_current_release_restore real_older_archive_restore; do
+  real_binary_refusals real_level_lineage real_lower_level_rollback_refused real_l1_pre_upgrade_dump real_level0_started_by_hand \
+  real_prior_refused_at_start real_prior_running_across_upgrade real_current_release_restore real_older_archive_restore; do
   drill_case_begin "$drill_family"
   # A bare call preserves errexit inside the acceptance function. Never put
   # this call in an if/! or || list: Bash would disable its failed assertions.

@@ -34,19 +34,89 @@ suppressions. The guards named here are parse-only; each test file states its ow
 - Version 2 links bind the destination address for turn-on; legacy and moved-address links still
   allow turn-off, and erased-account links stay invalid. A session older than an address change
   cannot turn email on.
+- An event audience's announcement (a date, a series or several events) reaches a registrant only
+  through a date they may still see (`audienceSeers`): resolution (preview, `message.send`, Try
+  again) leaves the others out, and every batch row decides again on its claim, a guardian copy by
+  its teen ("can't see this date anymore"). The composer's preview and send count (with the
+  names they show), the read page and a push each decide in one read-only snapshot. Preparation
+  decides the audience and builds every row it will write (email facts, the guardian copies switch
+  and links, push choices) in one read-only snapshot (`preparedAudienceIn`, `preparedRowsIn`), then
+  claims in a separate write transaction (users FOR KEY SHARE, then the message).
+- **A claimed batch row** (a reminder or an event audience's announcement) decides and fills from
+  one statement (`loadDateFacts`, `decideDatedRow`) on its claim transaction, which is pinned to
+  Read Committed (`readCommitted`): the claim, the early status check, the choice
+  (`readEmailOff`), then that statement, read and closed before rendering. It reads the
+  message's current status and cutoff (Try again moves `scheduled_at`), the recipient and the
+  subject (a copy's teen), the subject's memberships, host rows, registrations and grants, and
+  the dates, events and groups they name; the same decisions as the read page and a push judge
+  it (`audienceSeersFrom`, `reminderReadersFrom`, `readerEventValuesFrom`, over `memDates`). An
+  edit committed before the statement counts for both the gate and the fields, one after for
+  neither; that one email may still go with the old whole payload, and the next row or retry
+  decides again. A copy's teen who cannot sign in lends no signed-in authority: the copy says
+  only what a signed-out visitor could see. No user or date lock is taken after the claim.
+- **The facts statement** (`dateFactsSQL`) reads only the columns in `factColumns`, each named
+  with the decision or merge field that reads it (`factColumnReaders`): never a password or
+  manage-link hash (a password only as `has_password`), an email or phone, a note, a
+  description or a video link, and never a place (an event's, a date's or a group's location, a
+  room), a group's name, a household person or event settings no decision reads, since those
+  belong to events and groups the reader may not see (`TestFactColumnsCoverTheModels`,
+  `TestDateFactsStatementSelectsNoSecrets`, `TestDateFactsStatementReturnsNoSecrets`). It reads
+  no birth date or contact preference either: an exact-date grant judges its recipient as a
+  `policy.OccurrenceActor` (`occurrenceActorOf`: whose account, and whether it is active), which
+  has no age, so a loaded row can never pass for an adult by a missing birth date; code that
+  reads the statement's rows never builds a `ContactAccount`
+  (`TestFactsStatementRowsNeverBecomeAContactAccount`). The parity tests
+  (`TestDateFactsMatchTheQueries*`, `TestRetryFactsMatchTheAudienceQueries`) first give people,
+  events, groups and dates non-default ages, contact preferences, places, names and settings in
+  the left-out columns (`fillUnreadFactColumns`), and judge each source by its own row of the
+  reader, so a decision that read one would disagree; the room columns are kept out by
+  `factNeverRead`. Each id
+  list is one `bigint[]` parameter, so the bind count is the same for any audience
+  (`TestDateFactsBindsTheSameParametersForAnyCount`); its rows are indexed once by person, so
+  each decision reads only that person's rows.
+- **Try again** is pinned to Read Committed too. After the presser's users row, the message row
+  and the daily count, one statement (`decideRetryIn`) decides who pressed it
+  (`policy.CanSeeMessageHistory`, a reminder's manager facts included), the author's right to the
+  audience or the reminder's date, start and switch, and which failed people `message.send`
+  would still reach, a row skipped for a hidden date in the batch's words (`audienceSkip`). A
+  guardian copy, of a reminder as of an announcement, goes again only under the copy rule
+  preparation builds it by (`copyRule`: copies on, link confirmed, guardian not in the audience,
+  teen an active teen who would get it). The teen's email filters (`recipientFacts`) are read
+  just after the statement, by their own helpers: they can only skip a copy, so an opt-out
+  committed before they are read is honored (`TestTryAgainKeepsAReminderCopyOnlyUnderTheCopyRule`).
+  The batch then checks the guardian's own choice at the claim, not the teen's. At 22,000 failed
+  rows it stays one statement (`TestTryAgainAtChurchScale` logs the lock time and plan).
+- **Historical read access** (`isMessageRecipientIn`, DEC-135): for an event audience a direct
+  row lets its person read for good only when it was delivered (sent, delivered, bounced,
+  complained) or carries `audience_admitted_at` (migration `00013`), which the writers that just
+  made the date check set: preparation for the email skips it finishes, a claimed email row for
+  whatever it records after the check (an eligible opt-out included), and an announcement push
+  before its provider call. It is set once, never cleared, and never backfilled, and it outlasts
+  every later outcome, "can't see this date anymore" included. Any other row (queued, skipped
+  before the check, failed by the last-attempt cleanup or the reaper, or written before `00013`)
+  needs a date the person may still see, read live; one skipped as "can't see this date anymore"
+  never counts.
 - Every optional or broadcast email checks the effective choice at its send boundary:
   - Batch rows recheck `message_recipients.address` inside each row's claim transaction, after
     its claim and before rendering and dispatch; optional notifications check inside their claim
     too.
-  - At READ COMMITTED, a choice committed before the choice statement starts is honored. A later
-    change may not stop that one in-flight send; every later row and retry rechecks.
+  - The claim runs at Read Committed whatever the database's default, so a choice committed
+    before the choice statement starts is honored. A later change may not stop that one in-flight
+    send; every later row and retry rechecks.
 - Required mail bypasses choices; provider suppressions remain separate.
 - Enforced by `TestEmailChoiceSQLStaysInOneHelper`, `TestEmailChoiceGuardCatchesBypasses`,
   `TestReadEmailOffCombinesAccountAndDestination`, `TestEmailSettingsHideChoiceSource`,
   `TestReusedAddressKeepsErasedChoicesUntilHolderTurnsOn`,
   `TestOptionalMailChecksTheEffectiveChoice`, `TestOptionalMailGuardCatchesBypasses`,
-  `TestBatchRechecksTheChoiceAtEachRow`, `TestTestSendHonorsTheEffectiveChoice`,
-  `TestTestSendInFlightWindow`.
+  `TestBatchRechecksTheChoiceAtEachRow`, `TestBatchHonorsAChoiceCommittedRightAfterTheClaim`,
+  `TestTestSendHonorsTheEffectiveChoice`, `TestTestSendInFlightWindow`. The batch and Try again
+  boundaries: `TestBatchEmailNeverPairsALapsedGrantWithAMovedDate`,
+  `TestBatchEmailInFlightSendsOnlyTheOldWholePayload`,
+  `TestGuardianCopyOfADisabledTeenSaysOnlyWhatASignedOutVisitorSees`,
+  `TestBatchEmailCountsFromTheCutoffAsItStandsNow`, `TestTryAgainRechecksAReminderAfterTheLocks`,
+  `TestTryAgainRefusesAnAuthorDemotedAfterTheLocks`, `TestTryAgainNeverPairsALapsedGrantWithAMovedDate`,
+  `TestDateFactsMatchTheQueries*`, `TestRetryFactsMatchTheAudienceQueries`; read access:
+  `TestReadEntitlementNeedsProofTheCheckLetThemIn`, `TestReadEntitlementEvidenceSurvivesLaterOutcomes`.
 
 ## Direct account mail (M7.5, R6-4)
 
@@ -82,7 +152,7 @@ an optional notice email sent to their teen. Plan section 7.4 has the rules; the
   not `RELEASE SAVEPOINT`: a failure there rolls back the teen's sent status and mails the teen again.
   Copy jobs therefore commit with the teen's sent status and only with it.
 - **Ids only** (`guardianCopyJob`), `unique_key` per notice and guardian. The job reads every fact
-  again in a lock-free transaction (notice, kind, teen's sent delivery, switch, teen, guardian link,
+  again in one read-only Repeatable Read snapshot (no lock) (notice, kind, teen's sent delivery, switch, teen, guardian link,
   direct-recipient dedupe, the teen's live access to the subject, the guardian's own choice and
   suppression), then sends outside it. A failed read is an error and retries; a "no" is a quiet
   finish. A change committed between the reads and the provider may not stop that one copy. Delivery
@@ -95,7 +165,23 @@ an optional notice email sent to their teen. Plan section 7.4 has the rules; the
   `registration.cancelled` alone (DEC-149). That copy is **not** `CopyText` of the stored notice: the
   teen's title can carry the date (the single-date path), and a title can hold any separator, so the
   copy is `Kind.LostAccessCopyText` of the plain title the writer stored in the notice's `data`
-  (`notify.DataEventTitle`). A notice without it gets no copy. Never parse the stored title.
+  (`notify.DataEventTitle`). A notice without it gets no copy. Never parse the stored title. The
+  cancellation writer (`cancelSelectedLosers`) stores no title, and names no event, for a holder
+  who could not see the date just before the tightening (a retained registrant of an archived
+  group): the title may have been set while it was hidden from them, so neither they nor their
+  guardians learn it. A tightened cancelled date showed its title only to someone entitled to its
+  tombstone (`policy.CanSeeCancelledOccurrence`), so a holder whose only row on it is a household
+  person's is told no title either. Its siblings `event.cancelled` and `event.restored`
+  (`notifyOccurrences`; DEC-91 keeps "back on" for everyone still signed up), and
+  `registration.removed`, `registration.not_restored` (`registrationNoticeIn`) and
+  `registration.promoted` (`registrationNotice`, which adds the manage and video links only when
+  shown), do the same for a registrant who cannot see the date now. Eligibility counts an invited or
+  pending-consent account as signed in; notices judge it as signed out, so a promotion into a
+  private date tells it nothing about the date. Such a row goes through `withheldDate`: the kind's
+  nameless text (no title, time, place or link) and no subject, expiry or data, so the feed's
+  `subjectId`, its archiving and push urgency follow nothing about the date. With no subject the
+  teen's live access can't be shown, so no copy goes. The direct-recipient dedupe matches the kind
+  and dedupe key alone, since a withheld row has no subject columns to match.
 - A new optional email kind fails `TestNoticeGuardianCopyKindsAreClassified` until someone decides
   whether its guardians are copied.
 - Guards: `notify_guardian_copy.go` is a delivery file in `mailerSendFiles`;

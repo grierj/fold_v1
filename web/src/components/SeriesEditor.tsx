@@ -17,7 +17,9 @@ import { SeriesRoomField } from "./SeriesRoomField";
 import { seatsFrom } from "./SeatsField";
 import { videoBody } from "./VideoField";
 import { remoteBody, remoteFrom } from "./RemoteField";
-import { errorText } from "../lib/errors";
+import { errorText, keptDatesOf } from "../lib/errors";
+import { KeptDates } from "./KeptDates";
+import { useKeptRefusal } from "./keptRefusal";
 import { optionFieldOfError, validateEventOptions, type EventOptionValues, type OptionErrors } from "./eventOptionValues";
 import type { EventInput, VideoProvider, VideoReveal } from "../types";
 
@@ -60,6 +62,7 @@ export function SeriesEditor({
   onSaved,
   onClose,
   onRoomChanged,
+  onAuthorityLost,
 }: {
   series: SeriesFields;
   idPrefix: string;
@@ -71,6 +74,8 @@ export function SeriesEditor({
   onClose?: () => void;
   // The room was booked or released (its own action, not part of Save).
   onRoomChanged?: () => void;
+  // The kept-dates panel's read was refused: this person may no longer manage the event.
+  onAuthorityLost?: () => void;
 }) {
   const simple = isSimpleWeekly(instance.recurrenceRule);
 
@@ -118,6 +123,8 @@ export function SeriesEditor({
   const [error, setError] = useState<string | null>(null);
   const [optionErrors, setOptionErrors] = useState<OptionErrors>({});
   const root = useRef<HTMLFormElement>(null);
+  const submit = useRef<HTMLButtonElement>(null);
+  const kept = useKeptRefusal({ initial: null, submit, onRefused: setError, onAuthorityLost });
 
   const dirty = useDirty({ date, time, duration, recurring, days, tzid, title, description, location, rule, until, options });
   const { guard, markSaved } = useUnsavedChanges(dirty);
@@ -194,12 +201,17 @@ export function SeriesEditor({
     try {
       await Events.update(instance.eventId, body);
       markSaved();
+      kept.close();
       onSaved();
     } catch (err) {
       const msg = errorText(err, "We couldn't update the series.");
       const field = optionFieldOfError(err);
+      const keptDates = keptDatesOf(err);
 
-      if (field) {
+      // A refusal for kept dates is told by the panel (DEC-156); with no date to read, the error line says it alone.
+      if (keptDates && keptDates.length > 0) {
+        kept.open(keptDates);
+      } else if (field) {
         showFieldErrors(root.current, () => {
           setError(msg);
           setOptionErrors({ [field]: msg });
@@ -213,7 +225,7 @@ export function SeriesEditor({
     }
   }
 
-  return (
+  return (<>
     <Form ref={root} noValidate onSubmit={save} className="mt-3 space-y-4 border-t border-border pt-3">
       <p className="text-sm text-text-muted">
         This changes every future date that has not been edited on its own. Customized dates stay as they are. Dates
@@ -258,7 +270,7 @@ export function SeriesEditor({
         errors={optionErrors}
       />
       <FormActions>
-        <Button variant="primary" layout="w-full sm:w-auto" type="submit" disabled={busy}>
+        <Button ref={submit} variant="primary" layout="w-full sm:w-auto" type="submit" disabled={busy}>
           {busy ? "Saving…" : "Save series"}
         </Button>
         {onClose && (
@@ -268,5 +280,7 @@ export function SeriesEditor({
         )}
       </FormActions>
     </Form>
-  );
+    {/* After the form, never inside it: the panel's roster has forms of its own. */}
+    {kept.refusal && <KeptDates key={kept.refusal.seq} eventId={instance.eventId} keptDates={kept.refusal.dates} onRefused={kept.refused} onClose={kept.close} />}
+  </>);
 }

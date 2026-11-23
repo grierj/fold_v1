@@ -175,8 +175,8 @@ type Runner struct {
 	// OnDead, when set, is called once after a job's move to dead lands (it
 	// ran out of attempts, its worker stopped while running it, or its kind
 	// went unknown past the grace). errText is the CleanError text the row
-	// keeps. It is not called for a retry, Later or success, nor when this
-	// worker no longer held the job. It runs after the dead UPDATE has
+	// keeps. It is not called for a retry, Later, Requeued or success, nor
+	// when this claim no longer held the job. It runs after the dead UPDATE has
 	// committed, outside that transaction, so a process that dies in between
 	// loses the call: the job is still dead on the System list, so the hook
 	// is a notice, not the record. A panic in it is recovered and logged and
@@ -227,6 +227,7 @@ func (r *Runner) Start(ctx context.Context, n int) func() {
 
 type claimed struct {
 	ID          uint
+	ClaimSeq    int64
 	Kind        string
 	Payload     string
 	Attempts    int
@@ -249,11 +250,13 @@ func (r *Runner) RunOnce(ctx context.Context, worker string) (bool, error) {
 	var job claimed
 	// One statement: pick the earliest due job nobody holds, or one whose
 	// lease ran out, and take it. SKIP LOCKED lets other workers move on.
-	err := r.DB.WithContext(ctx).Raw(`UPDATE jobs SET status = ?, locked_at = now(), locked_by = ?, attempts = attempts + 1, updated_at = now()
+	// Every claim draws a new claim_seq (Claim).
+	err := r.DB.WithContext(ctx).Raw(`UPDATE jobs SET status = ?, locked_at = now(), locked_by = ?, attempts = attempts + 1,
+			claim_seq = nextval('jobs_claim_seq'), updated_at = now()
 		WHERE id = (SELECT id FROM jobs
 			WHERE (status IN (?, ?) AND run_at <= now()) OR (status = ? AND locked_at < now() - make_interval(secs => ?))
 			ORDER BY run_at, id FOR UPDATE SKIP LOCKED LIMIT 1)
-		RETURNING id, kind, payload, attempts, max_attempts, created_at`,
+		RETURNING id, claim_seq, kind, payload, attempts, max_attempts, created_at`,
 		models.JobRunning, worker, models.JobQueued, models.JobFailed, models.JobRunning, r.Lease.Seconds()).Scan(&job).Error
 	if err != nil || job.ID == 0 {
 		return false, err
@@ -262,15 +265,43 @@ func (r *Runner) RunOnce(ctx context.Context, worker string) (bool, error) {
 	switch {
 	case job.Attempts > job.MaxAttempts:
 		// Its last attempt never finished: the process stopped mid-job.
-		return true, r.finish(job, worker, errors.New("the worker stopped while running it"), true)
+		return true, r.finish(job, errors.New("the worker stopped while running it"), true)
 	case !known && time.Since(job.CreatedAt) > unknownKindGrace:
-		return true, r.finish(job, worker, fmt.Errorf("no handler for job kind %q", job.Kind), true)
+		return true, r.finish(job, fmt.Errorf("no handler for job kind %q", job.Kind), true)
 	case !known:
-		return true, r.DB.Model(&models.Job{}).Where("id = ? AND status = ? AND locked_by = ?", job.ID, models.JobRunning, worker).
+		return true, heldBy(r.DB, Claim{ID: job.ID, Seq: job.ClaimSeq}).
 			Updates(map[string]any{"status": models.JobQueued, "attempts": gorm.Expr("attempts - 1"), "locked_at": nil,
 				"last_error": "this version of Fold doesn't run this kind of task", "run_at": time.Now().Add(unknownKindWait), "updated_at": time.Now()}).Error
 	}
-	return true, r.finish(job, worker, safeRun(context.WithValue(ctx, attemptKey{}, job.Attempts >= job.MaxAttempts), kind, json.RawMessage(job.Payload)), false)
+	ctx = WithClaim(context.WithValue(ctx, attemptKey{}, job.Attempts >= job.MaxAttempts), Claim{ID: job.ID, Seq: job.ClaimSeq})
+	return true, r.finish(job, safeRun(ctx, kind, json.RawMessage(job.Payload)), false)
+}
+
+// Claim is one claim of a running job: its row and the claim_seq the claim
+// drew from jobs_claim_seq. Only the holder of the current claim changes the
+// row (finish, LaterIn). Neither the worker label nor the attempt count can
+// stand in for the number: two workers or processes may share a label (it is
+// caller-supplied; generated ones are host, PID and index), a wait gives its
+// attempt back and an admin's Retry starts the count again, so a later claim
+// can repeat both. A sequence never hands out a number twice; it rewinds only
+// with the database (restore.sh stops the app first; 00012's Down is offline
+// maintenance), so no claim from before is still running.
+type Claim struct {
+	ID  uint
+	Seq int64
+}
+
+// heldBy narrows db to job c.ID while c is its current claim.
+func heldBy(db *gorm.DB, c Claim) *gorm.DB {
+	return db.Model(&models.Job{}).Where("id = ? AND status = ? AND claim_seq = ?", c.ID, models.JobRunning, c.Seq)
+}
+
+type claimKey struct{}
+
+// WithClaim is the context a handler runs under for claim c (RunOnce gives
+// every handler one).
+func WithClaim(ctx context.Context, c Claim) context.Context {
+	return context.WithValue(ctx, claimKey{}, c)
 }
 
 type attemptKey struct{}
@@ -304,17 +335,78 @@ type laterError struct{ at time.Time }
 
 func (e laterError) Error() string { return "not due until " + e.at.UTC().Format(time.RFC3339) }
 
-// finish records the outcome, but only while this worker still holds the
-// job: if its lease ran out and another worker took it, that one decides.
-func (r *Runner) finish(job claimed, worker string, runErr error, final bool) error {
+// ErrClaimLost: LaterIn found the job no longer held by this claim (its
+// lease ran out and another claim took it, or it already ended), so the
+// caller's transaction must roll back. The runner records nothing for it:
+// whoever holds the job decides.
+var ErrClaimLost = errors.New("jobs: this attempt no longer holds the job")
+
+var errNoClaim = errors.New("jobs: LaterIn outside a job the runner claimed")
+
+// LaterIn, on tx, queues the running job this ctx's handler holds again to
+// run at at, without using an attempt or recording an error, as the runner
+// does for Later. The handler writes what the job waits for in the same
+// transaction and, once it has committed, returns Requeued(): the wait and
+// the requeue commit together, so a sibling deciding in a later transaction
+// sees a queued job (WillRunAgain), and a worker that stops after the commit
+// leaves a job that waits for at, not a running one for lease recovery to
+// spend an attempt on. It changes the job only while this ctx's claim is
+// current; otherwise it returns ErrClaimLost and the caller's transaction
+// rolls back.
+func LaterIn(ctx context.Context, tx *gorm.DB, at time.Time) error {
+	c, ok := ctx.Value(claimKey{}).(Claim)
+	if !ok {
+		return errNoClaim
+	}
+	res := heldBy(tx, c).Updates(laterUpdates(at))
+	if res.Error != nil {
+		return res.Error
+	}
+	if res.RowsAffected == 0 {
+		return ErrClaimLost
+	}
+	return nil
+}
+
+// Requeued is what a handler returns once the transaction in which it called
+// LaterIn has committed. The job is already queued, and may already be
+// claimed again (even by a worker with this one's label), so the runner
+// writes and logs nothing for this claim. A handler that returns it without
+// that commit leaves its job running until lease recovery takes it back,
+// spending the attempt.
+func Requeued() error { return errRequeued }
+
+var errRequeued = errors.New("jobs: the handler queued its job again (LaterIn)")
+
+// laterUpdates puts a running job back to wait until at, giving back the
+// attempt its claim took.
+func laterUpdates(at time.Time) map[string]any {
+	return map[string]any{"status": models.JobQueued, "attempts": gorm.Expr("attempts - 1"), "locked_at": nil,
+		"last_error": "", "run_at": at.UTC(), "updated_at": time.Now()}
+}
+
+// WillRunAgain narrows q (over jobs) to the jobs that will still run: queued
+// or waiting to retry. A running job decides for itself; one going back to
+// wait is queued in the same commit as what it waits for (LaterIn).
+func WillRunAgain(q *gorm.DB) *gorm.DB {
+	return q.Where("status IN ?", []string{models.JobQueued, models.JobFailed})
+}
+
+// finish records the outcome, but only while job's claim is current: if its
+// lease ran out and another claim took it, that one decides.
+func (r *Runner) finish(job claimed, runErr error, final bool) error {
 	var updates map[string]any
 	msg := ""
 	var later laterError
 	dead := false
 	switch {
+	case errors.Is(runErr, errRequeued) && !final:
+		return nil
+	case errors.Is(runErr, ErrClaimLost) && !final:
+		log.Printf("jobs: %s #%d ran past its lease; another worker took it over", job.Kind, job.ID)
+		return nil
 	case errors.As(runErr, &later) && !final:
-		updates = map[string]any{"status": models.JobQueued, "attempts": gorm.Expr("attempts - 1"), "locked_at": nil,
-			"last_error": "", "run_at": later.at.UTC(), "updated_at": time.Now()}
+		updates = laterUpdates(later.at)
 	case runErr == nil:
 		updates = map[string]any{"status": models.JobDone, "locked_at": nil, "last_error": "", "updated_at": time.Now()}
 	case final || job.Attempts >= job.MaxAttempts:
@@ -329,10 +421,10 @@ func (r *Runner) finish(job claimed, worker string, runErr error, final bool) er
 		updates = map[string]any{"status": models.JobFailed, "locked_at": nil, "last_error": msg,
 			"run_at": time.Now().Add(wait), "updated_at": time.Now()}
 	}
-	res := r.DB.Model(&models.Job{}).Where("id = ? AND status = ? AND locked_by = ?", job.ID, models.JobRunning, worker).Updates(updates)
+	res := heldBy(r.DB, Claim{ID: job.ID, Seq: job.ClaimSeq}).Updates(updates)
 	if res.Error == nil && res.RowsAffected == 0 {
-		// Its lease ran out while it ran and another worker took it; that
-		// worker's outcome stands.
+		// Its lease ran out while it ran and another claim took it; that
+		// claim's outcome stands.
 		log.Printf("jobs: %s #%d ran past its lease; another worker took it over", job.Kind, job.ID)
 	}
 	if dead && res.Error == nil && res.RowsAffected == 1 && r.OnDead != nil {

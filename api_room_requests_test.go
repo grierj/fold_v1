@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"net/http"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -610,5 +611,67 @@ func TestConfirmRoomRequestNeedsActiveGroup(t *testing.T) {
 
 	if w := f.admin.do("POST", "/api/v1/admin/room-requests/"+itoa(reqs[0].ID)+"/reject", map[string]any{}, true); w.Code != http.StatusOK {
 		t.Fatalf("reject still works: %d %s", w.Code, w.Body.String())
+	}
+}
+
+// The date page's usual room follows the series writer's approval rule
+// (bookSeriesRoom): with a series request still open and approval turned off,
+// a date the extender adds confirms in the series room although the event
+// still flags it pending, and its page reads that room as the usual one, not
+// a change. A date still waiting on the open request has no room yet, which
+// is a change.
+func TestDatePageUsualRoomAfterApprovalTurnsOff(t *testing.T) {
+	f := newBookingFixture(t)
+	approvalOn(t, f)
+	start := f.startOn.AddDate(0, 0, 1)
+	series := createFeedEvent(t, f.leader, f.group, "Weekly", start, "FREQ=WEEKLY;COUNT=3")
+	if code, out := f.seriesRoom(t, f.leader, series, map[string]any{"roomId": f.hall.ID}); code != http.StatusOK || out.Pending != 3 {
+		t.Fatalf("series: %d %+v", code, out)
+	}
+	if w := f.admin.do("PUT", "/api/v1/admin/settings/room-approval", map[string]any{"enabled": false}, true); w.Code != http.StatusOK {
+		t.Fatalf("approval off: %d %s", w.Code, w.Body.String())
+	}
+	first, last := feedDate(start), feedDate(start.AddDate(0, 0, 14))
+	if err := f.app.DB.Where("event_id = ? AND original_date = ?", series.ID, last).Delete(&models.EventOccurrence{}).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := eventdates.Extend(f.app.DB, time.Now().UTC(), f.app.afterExtend()); err != nil {
+		t.Fatal(err)
+	}
+	var ev models.Event
+	if err := f.app.DB.First(&ev, series.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if !ev.DefaultRoomPending || len(listRequests(t, f.admin)) != 1 {
+		t.Fatal("fixture: the series room should still await the open request")
+	}
+	if n := contactCount(t, f.app, &models.RoomBooking{},
+		"status = ? AND occurrence_id IN (SELECT id FROM event_occurrences WHERE event_id = ? AND original_date = ?)",
+		models.BookingConfirmed, series.ID, last); n != 1 {
+		t.Fatalf("fixture: %d confirmed bookings on the added date, want 1", n)
+	}
+	page := func(date string) dateOccurrenceJSON {
+		t.Helper()
+		w := f.leader.do("GET", "/api/v1/events/"+itoa(series.ID)+"/dates/"+date, nil, false)
+		if w.Code != http.StatusOK {
+			t.Fatalf("date page %s: %d %s", date, w.Code, w.Body.String())
+		}
+		var out struct {
+			Occurrence dateOccurrenceJSON `json:"occurrence"`
+		}
+		decodeJSON(t, w, &out)
+		if out.Occurrence.Series == nil || out.Occurrence.Series.Usual == nil {
+			t.Fatalf("date page %s: no series comparison: %s", date, w.Body.String())
+		}
+		return out.Occurrence
+	}
+	added := page(last)
+	if added.Room == nil || added.Room.ID != f.hall.ID || added.Series.Usual.Room == nil || added.Series.Usual.Room.ID != f.hall.ID ||
+		len(added.Series.Changes) != 0 {
+		t.Fatalf("the added date in the series room: room %+v, usual %+v, changes %v", added.Room, added.Series.Usual.Room, added.Series.Changes)
+	}
+	waiting := page(first)
+	if waiting.Room != nil || !reflect.DeepEqual(waiting.Series.Changes, []string{changeRoom}) {
+		t.Fatalf("a date still waiting on the request: room %+v, changes %v", waiting.Room, waiting.Series.Changes)
 	}
 }

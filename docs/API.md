@@ -12,16 +12,93 @@ registered provider hooks outside this API may be exempt.
 
 ```
 GET /api/v1/auth/csrf            → {csrfToken}   (also sets the session cookie)
+GET /api/v1/auth/bootstrap       → {user | null, canCompose, csrfToken, credentialMarker}
 ```
 
-SPA boot flow: `GET /auth/csrf` → store token → send as header on all
-writes. 401 responses are JSON `{"error":"unauthorized"}` — the SPA
-redirects to login itself (no server redirects except `/setup`).
+**Browser credential (M8.1).** The CSRF token is the browser credential T.
+Every credential replacement mints a fresh T in the signed `fold-session`
+cookie: sign-in (the same account again too), a password change, a verified
+email change in this browser, a password reset, an account setup, an accepted
+invitation, and a pending teen's sign-in that clears the login. The same
+response sets a host-only cookie script can read, `__Host-fold-credential`
+over HTTPS (`fold-credential` over plain HTTP), holding the marker
+M = base64url(HMAC-SHA256(key, T)). It has the session cookie's path,
+SameSite, Secure flag and lifetime, and it conveys no identity or authority;
+it only tells every tab sharing the cookie that the credential changed. Logout
+expires both cookies. A request that still carries the marker under the other
+name (left by a switch between HTTP and HTTPS on one host) has it expired by
+any response that writes the marker. A first visit's lazily minted token gets its marker
+too; a verified email in another account's or a signed-out browser changes
+neither cookie.
+
+`GET /auth/bootstrap` (optional sign-in, no-store) is the SPA's one cold token
+request: it answers the viewer the cookie authenticates (`user` is null when
+signed out or the session ended), T and M, and sets the marker alone when the
+cookie's is missing, wrong, doubled or sent beside the other name (the session
+cookie is left as it is). That is no repair of a doubled marker: a copy of
+the same name at another path or domain (left by something else on the host)
+is a separate cookie that neither the server nor script can tell apart or
+name, so it stays until it expires or is cleared. Script on a page that sees
+more than one marker trusts none, so that page fails closed: participating
+requests are refused before they are sent, plain requests go on, and pages
+where only the server's marker shows work as usual. A copy under a page path
+never reaches the server; over HTTPS a copy can only have the plain name,
+since `__Host-` forbids any path but `/` and any domain.
+Its response carries `Fold-Session-Checked: v2 <M> <user id | anon>`.
+
+A participating request sends `Fold-Session-Check: v2` and its pinned T as
+`X-CSRF-Token`, on reads as well as writes. The server compares T with the
+cookie the request carried before it mints anything: a missing cookie, a
+cookie with no T, a different T, or a doubled header answers the usual
+`403 session_expired` with no `Set-Cookie`. A route that takes part
+acknowledges a usable answer with `Fold-Session-Checked: v2 <M> <viewer>`,
+naming the viewer its deciding read judged, on a success and on an actionable
+refusal alike. `/auth/bootstrap` names the viewer the sign-in middleware's
+fresh read judged. The reader routes that take part are the group page with each later page (`GET /groups/:id`,
+`GET /groups/:id/events`), the group's date summaries (`GET /groups/:id/date-cards?section=summary`), the
+roster (`GET /groups/:id/members` and a role change's roster reply), the event
+page (`GET /events/:id`), the date page (`GET /events/:id/dates/:date`), the
+manager's exact date (`GET /events/:id/occurrences/:date`) with the retired
+date PUT beside it (refusals only), the guarded edit
+(`POST /events/:id/occurrences/:date/edits`) and `GET /me/household`. Each of
+these reads in one read-only snapshot (the edit: its locked transaction) and judges
+the viewer there, so the acknowledgment names that viewer, never the identity
+the request arrived with: a session that ended before the snapshot is answered
+and acknowledged as `anon` on an optional-sign-in read (a former owner never
+receives its anonymous answer as theirs) and is a 401 elsewhere. The header is
+set only once the transaction has ended: on an answer that committed and on a
+refusal the snapshot decided (a missing group, event or date is acknowledged
+exactly like a hidden one) once its rollback was confirmed. A 401, a 5xx, a
+failed COMMIT and an unconfirmed rollback carry none; a reader's refusal whose
+rollback was not confirmed is the generic 500. The date page names the viewer of the read
+whose answer it is (the scheduled date, the tombstone, or for the 404 the last
+read that ran). The guarded edit acknowledges only its writer's outcomes, for
+the actor that writer locked: the refusals made before it (the preflight's
+404/403, a malformed body, a detected restore) carry none, so a participating
+client treats them as unknown. An acknowledgment says nothing about any other
+snapshot, earlier pages of the group list included. The SPA's pages send these
+reads plainly for now. The SPA uses a
+participating answer only once its body is read: it must carry the
+acknowledgment for the pinned credential, be a JSON object, and arrive while
+that credential is still the tab's. Otherwise a read is closed and a write's
+outcome is unknown (a 5xx keeps its status). Requests without the header
+behave as before.
+
+SPA boot flow: `GET /auth/bootstrap` → adopt the token once the body's marker,
+the marker cookie and the acknowledgment agree → send it as header on all
+writes. A request that replaces the credential (sign-in, logout, a token that
+signs someone in, a password change, a verified email) drops the token first
+and bootstraps again when it settles, whatever the outcome; the tab's earlier
+work never becomes current again, even when it settles on the same token. 401
+responses are JSON `{"error":"unauthorized"}` — the SPA redirects to login
+itself (no server redirects except `/setup`), but only when the 401 came from
+the credential the tab still holds, so a late 401 never signs out a credential
+another tab installed meanwhile.
 
 Every API response carries `Cache-Control: no-store` (so does the SPA
 shell), so neither the HTTP cache nor back/forward replays a session
-after logout. `POST /auth/logout` expires the session cookie; the SPA then
-clears local/session storage and reloads `/`.
+after logout. `POST /auth/logout` expires the session cookie and its marker;
+the SPA then clears local/session storage and reloads `/`.
 
 ## Endpoints
 
@@ -31,6 +108,7 @@ clears local/session storage and reloads `/`.
 POST /api/v1/auth/login    {email, password} → 200 {user, canCompose} | 401 | 429
 POST /api/v1/auth/logout                         → 200 {}
 GET  /api/v1/auth/me                             → 200 {user, canCompose} | 401
+GET  /api/v1/auth/bootstrap                      → 200 {user | null, canCompose, csrfToken, credentialMarker}
 POST /api/v1/auth/password-reset         {email} → 200 {message}  (public)
 POST /api/v1/auth/password-reset/confirm {token, password} → 200 {user} | 400  (public)
 ```
@@ -423,7 +501,7 @@ Resource bounds for avatar and cover uploads (one path, `readImageUpload`):
 GET  /api/v1/groups?search=&tag=          → {groups: [groupSummary]}
 GET  /api/v1/me/groups                    → {groups: [groupSummary]}  (auth; groups I belong to, any status)
 POST /api/v1/groups                       → 201 {group}   (auth, not teens; pending, or active when an admin creates it)
-GET  /api/v1/groups/:id?cursor=&limit=    → {group, members, upcomingEvents, truncated, hasMore, nextCursor, canManage, isMember}
+GET  /api/v1/groups/:id?datePaging=2&cursor=&limit= → {group, members, upcomingEvents, truncated, hasMore, nextCursor, canManage, isMember}
 PUT  /api/v1/groups/:id                   → 200 {group}   (group leader or admin)
 POST   /api/v1/groups/:id/cover           → 200 {imageUrl} | 503 upload_busy (group leader or admin; multipart, field "cover")
 DELETE /api/v1/groups/:id/cover           → 200 {}         (group leader or admin)
@@ -476,9 +554,27 @@ another page. Attendee enrichment runs only for the returned page.
 this window. When true, `nextCursor` is an opaque last-seen occurrence key;
 pass it unchanged as `cursor` to request the next page. Otherwise it is `""`.
 A cursor belongs to one group, grants no access, and each page checks current
-visibility again. Invalid cursors or out-of-range limits return 400
-(`group_upcoming_page`). The time window is evaluated anew on each request;
-this is not a frozen snapshot when dates or permissions change.
+visibility again. Every request, the first page included, carries
+`datePaging=2`, the marker of this paging contract (M8.1). A missing marker or
+any other value, an invalid cursor or an out-of-range limit returns 400
+(`group_upcoming_page`) with no group data, only once the group is visible: on
+a group the caller may not see they return its 404, marker or no marker. A
+tab still running the page from before this contract sends no marker; the
+400 makes it reload (Cutover, under Guarded date edit). `/groups/:id/events`
+and `/groups/:id/members` take no marker and are unchanged. The time window is evaluated anew on each
+request; this is not a frozen snapshot across requests when dates or
+permissions change.
+
+Each response of `GET /groups/:id`, `/groups/:id/events` and
+`/groups/:id/members` is read in one read-only snapshot, on one clock: the
+signed-in caller (read again there, so a session ended since the request
+began reads as signed out on the optional routes and as 401 on `/members`),
+the group and the caller's standing in it, the roster, the dates and
+everything shown with them, and the summary's `nextEventAt`. A demotion,
+an erasure or an edit committed while the response is read shows in the next
+response, never in part of this one. Household visibility and ages count from
+the church's date read in that snapshot; a stored church zone that is not a
+zone fails a page that has dates to show (500), and no zone at all is UTC.
 
 The SPA merges continuation pages by occurrence ID and resets loaded dates
 and cursors when the group or viewer changes. Per-series “more dates loaded”
@@ -530,13 +626,23 @@ its events. Making it more private, in the same transaction:
   `event.visibility_override` (with the usual notice); `tighten` works like
   the inherited case. If any decision is missing or invalid, nothing is
   saved and the answer is `409 {error, needsDecision: true, impact}`.
+- the body carries `consent` beside `openedEvents` (see Visibility consent
+  below): a tightening that cancels anyone needs the token of the impact as
+  the write finds it.
 
 ```
 GET /api/v1/groups/:id/visibility-impact?visibility=invite_only → 200 impact  (leader or admin)
 ```
 
-`impact`: `{visibility, tightened: [impactEvent], leaderOpened:
-[impactEvent]}`, with `impactEvent` `{id, title, visibility, registrants}`.
+`impact`: `{visibility, currentVisibility, tightened: [impactEvent], leaderOpened:
+[impactEvent], futureOverrides?, resetDates?, consent}`, with `impactEvent`
+`{id, title, visibility, registrants, date?, occurrenceId?, decisionKey?}`.
+`currentVisibility` is the scope's own visibility before the change (the
+group's, the event's series value, or the date's effective value).
+`resetDates` (the event preview and its 409 with `resetOverrides` only) lists
+`{occurrenceId, date, title, visibility}` for each future date the reset
+changes, the date's own value before the reset, by occurrence id. `consent` is
+the token that confirms exactly this impact.
 `registrants` counts people registered for upcoming dates who would lose
 access if that event is tightened. Both lists are empty unless the change
 is more private. The SPA calls this before saving and shows the list.
@@ -545,12 +651,47 @@ One event works the same way (DEC-48):
 
 ```
 GET /api/v1/events/:id/visibility-impact?visibility=invite_only → 200 impact  (leader, host, or admin)
-PUT /api/v1/events/:id/visibility  body {visibility, reason?, confirm?}
+PUT /api/v1/events/:id/visibility  body {visibility, reason?, consent?, resetOverrides?}
 ```
 
 The impact lists only that event, under `tightened`, when the change is more
-private. If it would cancel registrations, the PUT answers 409
-`{needsDecision: true, impact}` unless `confirm` is true.
+private. A change that would cancel registrations, and every request with
+`resetOverrides`, needs the impact's `consent` (see Visibility consent below);
+otherwise the PUT answers 409 `{error, needsDecision: true, impact}` with a
+fresh impact and token, and writes nothing.
+
+### Visibility consent (DEC-158)
+
+The previews (`GET …/visibility-impact` on a group, an event and a date) read
+the viewer, their authority and the impact in one snapshot, on one clock, and
+return `consent`: an HMAC over the scope, the actor, the consent epoch, the
+current visibility, every displayed row and reset date, and the identities of
+the registrations each row would cancel. The released writes take
+`consent?: string`:
+
+| `consent` | The change is review-required | Answer |
+|---|---|---|
+| absent or `null` | yes | 409 `visibility_review_outdated`, no impact (a page from before this rule) |
+| present and not matching (`""` and a wrong shape included) | yes | 409 decision with a fresh impact and token; nothing written |
+| present and matching | yes | saved: exactly the reviewed registrations are cancelled, and a reset resets exactly the reviewed dates |
+| anything | no | saved; the token is ignored |
+
+A change is review-required when it cancels at least one registration, or is
+an event request with `resetOverrides` (even one that cancels nobody or finds
+no future date with its own visibility). A reset binds the count, the dates it
+resets and the current series value. The one boundary: a change that is not a
+reset and has become an opening (another manager made the scope more private
+first) needs no consent and saves its target (DEC-48). A start of Fold
+invalidates the consent tokens minted before it; a confirmation that is
+already being checked when another instance starts still saves, because the
+start waits for it. Different `SESSION_SECRET`s refuse each other's tokens.
+
+On the upgraded database an earlier release's process that is still running
+answers 500 to every event or date visibility change (a series change, a reset,
+a date's own value, a group tightening that touches an event, a group event
+created with its own visibility) and cancels nobody; it no longer starts once
+stopped. Its other requests are not promised to work either: one that read the
+schema before this release's column changes can fail them. Event creation's request and answer shapes are unchanged.
 After the body arrives, the PUT checks the session, role, and group leadership
 or event hosting again, including for a request that changes nothing. A session
 that ended answers 401, lost management rights answer 403, and a visibility
@@ -578,7 +719,9 @@ POST /api/v1/groups/:id/members → 200 {membership}  (auth; leader or admin)
 DELETE /api/v1/groups/:id/members/:userId → 200 {departure}  (auth; leader or admin; DEC-35; confirmed legacy alias)
      body: {snapshot, keepOccurrenceIds: [id, ...], note?}; note stays only in audit/removal records and is never shown to the removed person
 PUT  /api/v1/groups/:id/members/:userId/role → 200 {members: [...]}  (auth; leader or admin)
-     body: {role: "leader"|"member"} — userId must already be an active member
+     body: {role: "leader"|"member"} — userId must already be an active member;
+     once the change commits, the reply is GET /members as the caller may see it then (its own
+     snapshot): a caller who lost access since gets that read's 401, 403 or 404, and the change stays made
 POST /api/v1/groups/:id/deletion-request → 200 {group}  (auth; a leader)
 DELETE /api/v1/groups/:id/deletion-request → 200 {}    (auth; leader or admin)
 GET  /api/v1/groups/:id/members → {members: [...]}  (auth; members and admins; 404 if you cannot see the group, 403 if you are not in it)
@@ -794,7 +937,7 @@ POST /api/v1/groups/:id/events              → 201 {event} | 409 group_events_n
      a session that ended answers 401.
 PUT  /api/v1/events/:id                     → 200 {event}   (leader, host, or admin; series edit)
 PUT  /api/v1/events/:id/visibility          → 200 {event}   (leader, host, or admin)
-     body: {visibility, reason?}
+     body: {visibility, reason?, consent?, resetOverrides?}
 DELETE /api/v1/events/:id                   → 200 {}        (leader, host, or admin)
 POST /api/v1/events/:id/hosts               → 200 {hosts}   (admin; church-wide only)
      body: {email}
@@ -802,16 +945,20 @@ POST /api/v1/events/:id/hosts               → 200 {hosts}   (admin; church-wid
 DELETE /api/v1/events/:id/hosts/:userId     → 200 {hosts}   (admin; refuses the last live host)
 POST /api/v1/events/:id/cancel              → 200 {}        (leader, host, or admin)
      body: {date: "YYYY-MM-DD"} — cancels that stored date
-PUT  /api/v1/events/:id/occurrences/:date   → 200 {occurrence}  (leader, host, or admin)
-     body: any of {startsLocal, durationMinutes, location, title, capacityOverride, visibility, reason, confirm} — this date only; see Per-date visibility below
+PUT  /api/v1/events/:id/occurrences/:date   → 409 date_page_outdated  (leader, host, or admin; retired)
+     edit payload: ignored after standard CSRF processing; writes nothing (see Cutover under Guarded date edit)
+GET  /api/v1/events/:id/occurrences/:date   → 200 {occurrence}  (leader, host, or admin; the date's edit base, scheduled or cancelled)
+POST /api/v1/events/:id/occurrences/:date/edits → 200 {occurrence}  (leader, host, or admin; the guarded date edit)
+     body: {attempt, revision, changes: {startsLocal?, durationMinutes?, title?, location?, capacityOverride?, remoteCapacityOverride?, visibility?}, reason?, consent?}
 GET  /api/v1/calendar?from=&to=&tz=&mine=1&group=&deleted=1&remote=1&childcare=1
   → {occurrences: [calendarOccurrence], truncated}   (slim rows, no attendance;
      each row has only the viewer's myStatus and an ownScope presentation flag;
      mine=1 omits Can't go and unanswered outsider-public dates; unanswered
      church-wide dates are limited to 30 days; Everything keeps Can't go and
      limits unanswered public/church-wide discovery dates to 30 days, including
-     for signed-out viewers; signed-out mine=1 is ignored but does not bypass
-     that window; remote=1 keeps only events with remoteAvailable;
+     for signed-out viewers, except a date someone kept after leaving, for the
+     people who manage its event (DEC-157); signed-out mine=1 is ignored but does
+     not bypass that window; remote=1 keeps only events with remoteAvailable;
      childcare=1 keeps only events with childcareAvailable)
 POST /api/v1/events/video/jitsi             → 200 {url}   (leader, host, or admin)
 ```
@@ -971,12 +1118,15 @@ receive a stored cancellation notification. A date whose time moves sends `event
 promotes waitlisted parties in line order on each future date whose
 effective capacity grew; lowering it removes nobody. Per-date overrides,
 including a location-only override, are left alone. Dates the new rule adds
-are inserted. The per-date update (`PUT /events/:id/occurrences/:date`)
-takes `startsLocal?`, `durationMinutes?`, `location?`, `title?`, and
-`capacityOverride?` (number or null, like `capacity`); time or place changes
-fan out `event.changed`, and a raised override promotes. It also accepts the
-per-date visibility contract documented below; a visibility-only override does
-not pin the date's time/place. Series visibility preserves customized dates by
+are inserted. A series edit that would make a date someone kept after
+leaving end later (a move or a retimed restore) is refused as a whole with
+409 `date_kept_after_leaving` listing every such date, and writes nothing
+(DEC-156; the 409 is described under the guarded date edit). One date is
+edited only through the guarded edit (`POST /events/:id/occurrences/:date/edits`,
+below): time or place changes fan out `event.changed`, and a raised override
+promotes. It takes the per-date visibility contract documented below; a
+visibility-only override does not pin the date's time/place. The old per-date
+PUT is retired (Cutover, below). Series visibility preserves customized dates by
 default, with explicit `resetOverrides` and impact confirmation to clear future
 visibility overrides.
 
@@ -984,6 +1134,171 @@ Occurrences are returned in chronological order. `from`/`to` are inclusive
 `YYYY-MM-DD` and at most 366 days apart. Cancelled dates are left out of
 the list. The group detail's `upcomingEvents` instead use the bounded
 90-day continuation described under Groups (25 dates per page by default).
+
+### Guarded date edit
+
+A manager edits one date from a revision token, and the edit is refused when
+the date, its series or the group place it shows changed since (M8.1).
+
+```
+GET  /api/v1/events/:id/occurrences/:date        → 200 {occurrence}
+POST /api/v1/events/:id/occurrences/:date/edits  → 200 {occurrence}
+     {attempt: "<32 lowercase hex>", revision: "<token>",
+      changes: {startsLocal?, durationMinutes?, title?, location?,
+                capacityOverride?: number|null, remoteCapacityOverride?: number|null,
+                visibility?: "public"|"private"|"invite_only"|"series"|null},
+      reason?: string, consent?: string}
+```
+
+- **The token.** Every occurrence a manager reads carries `revision`: the
+  event page, the group page and `GET /groups/:id/events`, the edit base and
+  the edit's own answer. Nobody else gets one. Clients compare it only for
+  equality and send it back unchanged. It names this server process, the
+  date, the event's and the date's change counters, and, when the date shows
+  the group's place (no place of its own or of the event's), a tag of that
+  place.
+- **The edit base.** `GET /events/:id/occurrences/:date` is one date as its
+  manager edits it, read in one snapshot, scheduled or `cancelled: true`.
+  It is the base for a date no list shows (a cancelled one, or one that has
+  started). It answers 404 for a missing or hidden event or date and 403 to a
+  viewer who sees the event but does not manage it. The cancelled-date page
+  (`GET /events/:id/dates/:date`) is unchanged and carries no token.
+  - *A scheduled date* carries the group label the event list gives the
+    editor (`groupId`, `groupName`, `groupVisibility`, or `hostedBy` for a
+    church-wide event), so does the guarded edit's answer.
+  - *A scheduled date that has not ended* (on the server's clock at the read;
+    underway, or beyond the event page's 90 days, included) also carries the
+    roster the event list gives a manager: `attendees` with `addedByLeader`
+    and `keptAfterLeaving`, `removedRegistrations` with the recoverable rows,
+    `registrations` with `declined`, `attendeesVisible: true`, and
+    `keptCount`. `keptCount` is the number the save's 409
+    `date_kept_after_leaving` would count for the date (live grants that end
+    with it, DEC-156): a count, never names. Household visibility, ages and
+    care notes are decided on the read's one clock and the church's zone read
+    in its snapshot; a church zone that cannot be read, or is no zone, answers
+    500 and no roster.
+  - *A cancelled date* answers the edit base unchanged: no group label, no
+    roster, `attendeesVisible: false`, and `registrations` with zero counts.
+    *An ended scheduled date* adds only the group label. Neither carries a
+    roster or `keptCount`; a client tells "no roster" from "an empty roster"
+    by `attendeesVisible`.
+- **Changes.** At least one key; unknown keys are refused. Strings are
+  trimmed. `capacityOverride` and `remoteCapacityOverride` null clear the
+  date's cap to the event's (remote accepts 0, which closes the date's remote
+  seats). `visibility` follows Per-date visibility below; an omitted
+  `visibility` never changes the date's override. `reason` is allowed only with
+  `visibility` (at most 500 characters). `consent` (32 lowercase hex) is the
+  token of the impact the person reviewed (Visibility consent above); absent
+  is treated like a mismatch, since no page from before the rule sends this.
+- **The date's clock.** Changes with neither `startsLocal` nor
+  `durationMinutes` keep the stored start and end, even when the date lasts
+  other than its event's duration now (a series edit leaves a date with its
+  own title, place or visibility, and a past date, where it was). A new
+  duration is the date's duration from its start; a new start with no
+  duration ends that many minutes later: the date's own duration, else the
+  event's, as the date is shown. The date's `visibility-impact` preview does
+  the same.
+- **`attempt`** is 16 random bytes per Save press. Try again resends the same
+  body byte for byte.
+
+Answers:
+
+| Status | Body | When |
+|---|---|---|
+| 200 | `{occurrence}` with `revision` | Applied. Also a retry of an attempt that already applied, and a change equal to what is stored; neither writes anything, and the answer's `revision` is the date's current token. |
+| 400 | `date_edit_invalid` | A malformed attempt, token or body: empty `changes`, an unknown key, a field of the wrong type, `reason` without `visibility`, `consent` not a token (the old `confirmCount` is an unknown key). |
+| 400 | field codes | `invalid_duration`, `invalid_capacity`, `invalid_remote_capacity_override`, `visibility_not_allowed`, `too_long` (the reason), the event text limits, an invalid `startsLocal` in the event's zone. |
+| 403 | | The caller sees the event but does not manage it. |
+| 404 | | A missing or hidden event, a date not on it, management lost while the body arrived, or the event deleted meanwhile. |
+| 409 | `date_changed` | The token is from another server process, or the date, its series or its shown group place changed since. Also, rarely, a save made just as the date ends, when its old and its new end both pass during the save. Read the date again and save again. |
+| 409 | `date_changed` + `baseSuperseded: true` | The same refusal, when the locked check also proves the token older than the date: the same process and occurrence, neither counter ahead of the date's, one behind. Those counters only rise, so no earlier send of this token can still apply in this process (a database restored under it is the stated limit below). The key is absent, never `false`, for a token another process issued, a change to the shown group place alone (it can change back and match again), the end crossing above, and every refusal before the writer. |
+| 409 | `date_kept_after_leaving` + `keptDates` | The change makes the date end later (a later start, a longer duration, or both) while someone who left the group still holds it: a live exact-date grant of any origin but a leader's add (DEC-156). `keptDates` is `[{date: "YYYY-MM-DD", keptCount}]`, counts only. Nothing is written and no consent is asked first; a manager removes those people (`POST /events/:id/registrations/remove`), then the same save applies. |
+| 409 | `date_needs_consent` + `impact` | Tightening would cancel sign-ups and `consent` is not the token of the impact as the write finds it. `impact` is the visibility-impact shape with one `tightened` row and a fresh `consent`; send the same attempt again with it. |
+| 503 | `restore_detected` | The database was restored under this process, which is about to restart. Checked again under the contact gate on each attempt, so a rerun after a detection writes nothing. |
+| 500 | | The outcome is unknown. Try again with the same body: it never applies twice. |
+
+How it decides, under the contact gate, the event lock and the date lock:
+
+- The date's exact-date grants are locked, then checked on a clock read after
+  every lock the check waits for, so a retained grant whose date ended while
+  the request waited is ended against the old end before the date can move.
+  Only this date's grants are locked, never another date's.
+- After that check, a grant still live that ends with its date (any origin
+  but a leader's add) refuses any change that makes the date end later:
+  `date_kept_after_leaving`, before anything is written or asked (DEC-156).
+  A move can therefore never keep a kept date's access alive past its old
+  end. A database trigger (migration `00014`) also refuses, for any writer,
+  an UPDATE that makes the date end later while such a grant is unstamped;
+  the app's check runs first, so this 409 is the answer a client sees.
+- The grants are checked again against the date as saved, before anyone is told of
+  the change or promoted, so nothing is sent through a grant whose new end has
+  already passed.
+- If the date's stored end, old or new, passes later in the save, the save is
+  run again once, so every grant, notice and promotion is judged on a clock
+  that still holds. A second such crossing in the rerun answers
+  `date_changed` and writes nothing.
+- A token from another process is refused before anything else. Then a retry
+  of an attempt that applied is recognised by the date's receipt: a keyed
+  digest of the actor, the event, the date, the attempt, its normalized
+  changes, reason and `consent`, and the token the edit produced. Any
+  later change to the date, its series or its shown place stops it matching,
+  and the retry gets `date_changed` (with `baseSuperseded` when the date or
+  its series changed).
+- Consent is counted on the date as saved (its new start), from one locked
+  selection under one clock, and exactly those rows are cancelled.
+- Promotion runs once, on the date as saved (its visibility, time and caps),
+  after the cancellations and the new caps. A seat a tightening frees and one
+  a raised cap opens are offered in one pass, the promoted person's notice is
+  judged on the saved date, and inside the two-hour cutoff the leaders or
+  hosts are told once. The cutoff is judged on a clock read when promotion
+  runs, after every earlier lock wait.
+- Each person going or waiting is told the place changed only when the place
+  their own view shows changed between the date as stored before the edit and
+  as saved, so a visibility change in the same save counts.
+- A replay, a no-op and every refusal roll the whole transaction back,
+  including the routine reconciliation of contact and exact-date grants.
+- **After any restart** (a deploy, a crash, a restore or a rollback), an open
+  editor's next save gets one `date_changed`. That is what keeps a restored
+  database from being matched against an older token. A database restored
+  under a still-running process is the one exception, the same limit the
+  restore barrier states (docs/agents/erasure.md); no Fold tool restores that
+  way.
+
+**Cutover (M8.1).** The SPA edits a date only through the guarded edit. The
+old `PUT /events/:id/occurrences/:date` stays registered to refuse saves from tabs
+opened before the upgrade. Standard form or header CSRF checks still apply (403).
+The handler ignores the edit payload and uses one read-only snapshot for the
+same checks as the edit base. A signed-out caller gets 401. Missing and hidden
+events return identical 404 responses. A viewer who can see the event but
+cannot manage it gets 403. An authorized manager gets 400 `series_date_invalid`
+for a malformed date, 404 for a missing date, or 409 `date_page_outdated`
+with only `error` and `code` for an existing date. The handler takes no writer
+lock and writes nothing. It acknowledges refusals as the edit base does.
+
+The group page takes part the same way: `GET /groups/:id` without
+`datePaging=2` answers 400 `group_upcoming_page` once the group is visible.
+
+What each deployed client shows:
+
+- *The current SPA* never sends the PUT and always sends the marker. It words
+  `date_page_outdated` as "Fold was updated while this page was open. Reload
+  this page, then edit the date again."
+- *A date editor from the earlier release* does not know the code and does not
+  show the server's text, so it shows its own fallback: "We couldn't update
+  this date. Please try again in a minute." Trying again gets the same answer.
+  Reload the page (which loads the current SPA), open the date again and redo
+  the edit; nothing from the earlier attempt was saved.
+- *A group page from the earlier release* knows `group_upcoming_page`. On its
+  first load, a refresh or Load more dates it shows "Those dates couldn't be
+  loaded. Reload the group and try again." Its Try again gets the same answer;
+  reloading the page loads the current SPA, which reads the group normally.
+- *Schedule an event from the earlier release* (`/groups/:id/events/new`)
+  reads the group the same way but treats every failure as "not a manager",
+  so it says only the group leader or an admin can schedule events there,
+  even to a leader. Reloading the page fixes it.
+
+The upgrade restarts the server, so any revision a tab already holds is
+refused once with `date_changed` (After any restart, above).
 
 ### Registration
 
@@ -1450,7 +1765,7 @@ opt-in before any texts can be sent.
 
 Rosters (`members` in group detail, `GET /groups/:id/members`, admin rosters) include `admin: true` for church admins, so the SPA can label them and hide Remove (DEC-38).
 
-Disabling (DEC-38): the account's memberships and registrations are kept, hidden from rosters, and left out of member counts, registration counts, and leader counts; any leadership becomes plain membership (with `membership.role_changed`, reason `account_disabled`). Disabling frees every seat the account held on future dates, promoting waitlisted parties into them. Enabling it again restores them as plain member, writing `membership.restored` per membership and `user.enabled`. Going registrations are restored when they fit; one that would overfill is deleted instead (DEC-47): `registration.not_restored` is written and the person gets an ask-a-leader notice. Waitlisted rows keep their place. In a group at its member limit the membership is dropped instead (DEC-47): `membership.not_restored` (meta `userId`, `count`, `limit`) is written and the person gets a notification ("You're not back in … yet", "Ask a leader to add you.", stored notification with a numeric ID and standard notification retention). A leader or admin can add them with `overLimit: true`. Deleting still ends memberships.
+Disabling (DEC-38): the account's memberships and registrations are kept, hidden from rosters, and left out of member counts, registration counts, and leader counts; any leadership becomes plain membership (with `membership.role_changed`, reason `account_disabled`). Disabling frees every seat the account held on future dates, promoting waitlisted parties into them. Enabling it again restores them as plain member, writing `membership.restored` per membership and `user.enabled`. Going registrations are restored when they fit; one that would overfill, or that the person may no longer sign up for (judged as the account comes back: its restored status, and the role when the same edit changes it), is deleted instead (DEC-47): `registration.not_restored` is written and the person gets an ask-a-leader notice saying which ("The event was full…" or "Your sign-up couldn't come back…"), naming no event when they can no longer see the date. Waitlisted rows keep their place. In a group at its member limit the membership is dropped instead (DEC-47): `membership.not_restored` (meta `userId`, `count`, `limit`) is written and the person gets a notification ("You're not back in … yet", "Ask a leader to add you.", stored notification with a numeric ID and standard notification retention). A leader or admin can add them with `overLimit: true`. Deleting still ends memberships.
 
 Removing a member (DEC-35): leaders remove people from groups they lead,
 co-leaders included, but never an admin (they can't demote an admin
@@ -1681,7 +1996,7 @@ GET  /api/v1/messages/compose[?event=<id>] → 200 {canCompose, canMessageEveryo
 POST /api/v1/messages/audience-preview   → 200 {summary} | 400 | 403 | 404   body: {audience}
 GET  /api/v1/messages[?category=announcement|reminder] → 200 {messages: [message]} | 400   (yours; an admin's has everyone's; M3.6b)
 POST /api/v1/messages                    → 201 {message} | 400 | 403 | 404   body: {channel?, subject, bodyHtml, audience, pushAlert?}
-GET  /api/v1/messages/:id                → 200 {message} | 404               (its author or an admin; a reminder also its event's managers, M3.6b)
+GET  /api/v1/messages/:id                → 200 {message} | 401 | 404         (its author or an admin; a reminder also its event's managers, M3.6b)
 PUT  /api/v1/messages/:id                → 200 {message} | 400 | 403 | 404 | 409
 POST /api/v1/messages/:id/schedule       → 200 {message, summary} | 400 | 409   body: {scheduledAt?} (absent: now)
 POST /api/v1/messages/:id/cancel         → 200 {message} | 409               (audited message.cancelled)
@@ -1701,14 +2016,14 @@ Leaders, hosts and admins write announcements (`policy.CanComposeMessages`): adm
 #### Merge fields, preview and test sends (M3.4b)
 
 ```
-GET  /api/v1/messages/:id/preview        → 200 {preview: {subject, text}} | 404
-GET  /api/v1/messages/:id/preview.html   → 200 text/html | 404              (for an iframe)
-POST /api/v1/messages/:id/test           → 200 {ok} | 400 | 401 | 404 | 502
+GET  /api/v1/messages/:id/preview        → 200 {preview: {subject, text}} | 401 | 404 | 409
+GET  /api/v1/messages/:id/preview.html   → 200 text/html | 401 | 404 | 409  (for an iframe)
+POST /api/v1/messages/:id/test           → 200 {ok} | 400 | 401 | 404 | 409 | 502
 ```
 
 Merge fields (PLAN 7.3) are `{{first_name}}` and, in a message to one event's people (an `occurrence` or `event_series` audience), `{{event_title}}`, `{{event_time}}`, `{{event_link}}` and `{{manage_link}}`; a link's address can be `{{event_link}}` or `{{manage_link}}` and survives sanitizing. Saving refuses any other field (`message_merge_unknown`) and event fields for any other audience (`message_merge_event`). Values are HTML-escaped in the HTML part.
 
-A preview or test first checks again that the viewer may write to the audience (roles and events change after a draft is saved), then renders the saved message as the viewer would get it: merge fields with the viewer's own values (their first name; the event's title, the audience's date, else its next upcoming one, else its latest, in the event's time zone, and its page for both links; M3.5 gives a guest their own manage link), the email layout (`internal/content/email.html`: one 600px column of tables with inline styles, the church name above the body and, below, "You're getting messages from leaders at …", "To stop them or change which emails you get, visit your email settings" (linking the viewer's own settings page, as the plain-text footer does), and the church's mailing address), and the plain-text part with the same footer as optional notices. `preview.html` is served with its own Content-Security-Policy (`default-src 'none'`, inline styles and https images only, `sandbox` with no scripts) and `no-store`; the dev outbox shows each stored email's HTML the same way at `/dev/outbox/<id>/html`.
+A message's page, its recipients, its preview, its test and its read page (`/read`) judge the session, the message and the right to it in one read-only snapshot, in that order: a session no longer current answers 401 whatever the id, before the message is looked up; then a message that isn't there, or one the viewer may not see, is 404; then a preview or test of an automatic reminder is 409 `message_reminder`. A preview or test first checks again that the viewer may write to the audience (roles and events change after a draft is saved), then renders the saved message as the viewer would get it: merge fields with the viewer's own values (their first name; the event's title, the audience's date, else its next upcoming one, else its latest, in the event's time zone, and its page for both links; M3.5 gives a guest their own manage link), the email layout (`internal/content/email.html`: one 600px column of tables with inline styles, the church name above the body and, below, "You're getting messages from leaders at …", "To stop them or change which emails you get, visit your email settings" (linking the viewer's own settings page, as the plain-text footer does), and the church's mailing address), and the plain-text part with the same footer as optional notices. `preview.html` is served with its own Content-Security-Policy (`default-src 'none'`, inline styles and https images only, `sandbox` with no scripts) and `no-store`; the dev outbox shows each stored email's HTML the same way at `/dev/outbox/<id>/html`.
 
 `test` sends the message to the viewer's own address on the broadcast stream with its one-click unsubscribe header, subject `[Test] …`. It needs a subject and body. It is audited `message.test_sent` before sending, under a lock on the viewer's row, and those rows limit it to 10 tries an hour (a try that fails still counts) (`message_test_limit`, a 400: it is the author's own inbox, so not a DEC-52 429). An address that is suppressed answers `message_test_email`; a provider failure is 502 `message_test_failed`.
 
@@ -1733,6 +2048,8 @@ Each batch sends its queued rows one at a time. Each email is rendered for its r
 
 Right before sending, each reader's suppressions, account status and messages-from-leaders switch are read again, so someone who bounced, was disabled or opted out since the snapshot is skipped, with the same reason words the snapshot uses.
 
+An event audience (a date, a series or several events) reaches a registrant only through a date they may still see: a registration of theirs, or one they made for a household person, in the audience's statuses, on the audience's date or an upcoming date of its events, that they may see as a date, ordinarily or through a live exact-date invitation. Someone whose every such date is hidden from them (a member who left and kept a date that has since ended and moved, a guest of a date made private) is not in the audience: the composer's count leaves them out, `message.send` makes no row for them, and Try again skips their failed row as "no longer on the list". Each send decides again: an email row, a guardian copy (by its teen) and a push whose person no longer holds a registration the audience names are skipped as "no longer on the list", and one whose every such date is hidden from them as "can't see this date anymore". The series' dates are counted from the message's scheduled time, so a date that starts while it is sending still counts.
+
 Each row is sent under a row lock (`FOR UPDATE SKIP LOCKED`) and recorded as `sent`, with the provider's id, in the same transaction, so two workers never send the same row. Delivery is at least once: a crash between the provider accepting an email and that commit can send it again on the retry. A batch stops after 10 minutes, inside the jobs lease, and its retry carries on.
 
 How a send error is handled depends on whether a retry can help (`mail.IsPermanent`):
@@ -1755,7 +2072,7 @@ A leader or host may schedule at most 5 messages a day to one group's people (a 
 #### History and Try again (M3.5b)
 
 ```
-GET  /api/v1/messages/:id/recipients     → 200 {counts, skippedBy, recipients, more, canRetry} | 404   (its author or an admin; a reminder also its event's managers)
+GET  /api/v1/messages/:id/recipients     → 200 {counts, skippedBy, recipients, more, canRetry} | 401 | 404   (its author or an admin; a reminder also its event's managers)
 POST /api/v1/messages/:id/retry          → 200 {message} | 403 message_retry_refused | 403 reminder_retry_refused | 404 | 409 message_retry_sending | 409 message_nothing_to_retry
 GET  /api/v1/admin/settings/guardian-copies → 200 {on}                              (admin)
 PUT  /api/v1/admin/settings/guardian-copies → 200 {on} | 400                         (admin; audited setting.guardian_copies_changed)
@@ -1773,7 +2090,7 @@ A message's `error` follows DEC-52. Fold's own plain texts reach everyone as the
 
 `canRetry` shows "Try again" (DEC-131): the message is `sent` or `failed` with failed rows (guardian copies included), or failed before anyone was chosen because it couldn't be got ready, and its author is active and may still write to its audience. `retry` checks the same, then in one transaction sets only the `failed` rows back to `queued` (clearing their error), the message to `sending` (clearing its error), queues `message.deliver_batch` jobs for those rows under fresh keys, and audits `message.retried` with the count. Rows that were sent, delivered, bounced or skipped are never queued again, so nobody it reached gets it twice. A message that never got ready goes back to `scheduled` for now and `message.send` prepares it from the start. Whoever presses it, an admin included, it goes out in the author's name, so the author's rights are what is checked: an author who can no longer write to these people is 403 `message_retry_refused` and nothing changes. A message that is already going out again (someone else pressed it first) is 409 `message_retry_sending`, "It's already sending again."; one with nothing to retry is 409 `message_nothing_to_retry`. An announcement retry counts toward the leader's daily group-message limit on the church day it goes out; the message itself is excluded from the count, so retrying it on the same day does not use a second slot. Admins remain exempt.
 
-Before an announcement's failed rows go back, each is checked against today's audience, in the author's name, inside the same transaction (the "Try again" rule for reminders below does the same for a date's registrants). The author's rights are read again, and the audience is worked out as `message.send` would build it today. A person no longer in it (a removed or departed member, a cancelled registrant) is skipped with "no longer on the list", not sent to. A guardian copy follows its teen: it is skipped with "no longer on the list" when the teen is out of the audience, and with "guardian copy no longer sent" when the guardian is now in the direct audience, its link is no longer confirmed, the teen is no longer a teen account, the teen wouldn't get the message today under the usual recipient filters (for example, they turned off messages from leaders), or the church turned guardian copies off. A retry does not create a new direct row for a guardian who joined the audience after the original send. A leader sees the first reason as a count in `skippedBy` and the person as `missed`; the copy reason, like every copy, is in an admin's list only (DEC-132). If every failed row is dropped, the retry still answers 200, queues no batch, and the message settles as it stands with nothing left to retry. These reads happen in the retry's transaction at READ COMMITTED, after the author's and the message's locks: a change committed before a read starts is honored. One committed after may not stop that retry's batches, since batch delivery doesn't recheck membership, registrations, links or teen eligibility (the first send's snapshot works the same way). The next Try again checks again.
+Before an announcement's failed rows go back, each is checked against today's audience, in the author's name, inside the same transaction (the "Try again" rule for reminders below does the same for a date's registrants). The author's rights are read again, and the audience is worked out as `message.send` would build it today. A person no longer in it (a removed or departed member, a cancelled registrant) is skipped with "no longer on the list", not sent to. A guardian copy follows its teen: it is skipped with "no longer on the list" when the teen is out of the audience, and with "guardian copy no longer sent" when the guardian is now in the direct audience, its link is no longer confirmed, the teen is no longer a teen account, the teen wouldn't get the message today under the usual recipient filters (for example, they turned off messages from leaders), or the church turned guardian copies off. A retry does not create a new direct row for a guardian who joined the audience after the original send. A leader sees the first reason as a count in `skippedBy` and the person as `missed`; the copy reason, like every copy, is in an admin's list only (DEC-132). If every failed row is dropped, the retry still answers 200, queues no batch, and the message settles as it stands with nothing left to retry. The retry's transaction runs at Read Committed whatever the database's default. After the presser's and the message's locks and the daily count, one statement reads everything that decides: whether the person pressing it may still see the message (else 404, as for a message that isn't theirs), the author's rights and the audience, and each failed person's registrations, dates, memberships and links, so no decision pairs a fact with another committed after it. Only a guardian copy's teen's email filters are read just before, and they can only skip a copy. A change committed after that statement may not stop that retry's batches: batch delivery rechecks an event audience's registration and date visibility (above), but not group membership, links or teen eligibility (the first send's snapshot works the same way). The next Try again checks again.
 
 The message's page shows the counts as a line ("Sent to 132 people · 3 bounced · 9 skipped (6 turned off messages from leaders, 3 have no email address)"), the guardian copies as a count ("1 guardian copy didn't go out"), a failed send's problem under the title as an alert ("This message didn't go out", or for a partly sent one "1 person didn't get this", people and guardian copies counted apart as in the list), Try again outside the alert as the view's one primary action, with a confirm in the same words ("Send again to the 1 person and 1 guardian copy it didn't reach?"), and "See who got it". While a message is sending, or due to send (including a scheduled time that arrives while the page is open), the page reads the message and its counts every 5 seconds ("Sending… 40 of 132 so far", "Sending again…" after Try again). It waits while the tab is hidden, stops when the message settles or the page closes, and after 30 minutes with no change stops and offers "Refresh to check again". A hidden status says once that it settled, not on every check.
 
@@ -1782,20 +2099,20 @@ The message's page shows the counts as a line ("Sent to 132 people · 3 bounced 
 #### Push notification too (M3.13d2)
 
 ```
-GET  /api/v1/messages/:id/read           → 200 {message: {id, subject, from, sentAt, bodyHtml}} | 404
+GET  /api/v1/messages/:id/read           → 200 {message: {id, subject, from, sentAt, bodyHtml}} | 401 | 404
 ```
 
-Who may read is unchanged (DEC-135). On this page `{{event_title}}`, `{{event_time}}`, `{{event_link}}` and `{{manage_link}}` carry today's values, filled only while, and only as far as, the reader may still see the event or date under the rules the event and date pages use. The series gives every field. One date seen on its own (an exact-date invitation, or an override that opens a date of a hidden series) gives that date's title, its time when the reader's registration is in the audience's statuses, and its page, never the series link. A series announcement to someone who can't see the series gives the series title alone, through a scheduled date they can see that has no title of its own. A cancelled date gives people who can see the series the series title and link only, and everyone else nothing. Otherwise the fields read empty and a link reads as its text, as for a deleted event; `{{first_name}}` is always filled. Nobody is exempt: an admin, the author and a reminder's manager see event fields only as far as they can see the event. The page does not replay the values the email carried, so someone who lost access sees blanks even where their email had the old title, and a failed read answers 500 rather than blanks. The message list's reminder titles (admins and the event's managers) are a management view and keep their current behavior.
+Who may read is DEC-135's rule, with one narrowing for an event audience: a direct row suppressed because its person could not see the date never lets them read, and otherwise they may read for good only when a row shows they were let in: it was delivered (sent, delivered, bounced or complained), or the writer that recorded it had just let them through the date check (`audience_admitted_at`: preparation's email skips, a claimed email row whatever it then recorded, a skip for an email reason included, and an announcement push). Any other row (still queued, skipped before that check, failed by the last attempt's cleanup or the daily reaper, or written before the check was recorded) lets them read only while a date they may still see puts them in it. Rows written before migration `00013` carry no record, so a skip or failure among them is judged live, while a delivery stays readable. On this page `{{event_title}}`, `{{event_time}}`, `{{event_link}}` and `{{manage_link}}` carry today's values, filled only while, and only as far as, the reader may still see the event or date under the rules the event and date pages use. The series gives every field. One date seen on its own (an exact-date invitation, or an override that opens a date of a hidden series) gives that date's title, its time when the reader's registration is in the audience's statuses, and its page, never the series link. A series announcement to someone who can't see the series gives the series title alone, through a scheduled date they can see that has no title of its own. A cancelled date gives people who can see the series the series title and link only, and everyone else nothing. Otherwise the fields read empty and a link reads as its text, as for a deleted event; `{{first_name}}` is always filled. Nobody is exempt: an admin, the author and a reminder's manager see event fields only as far as they can see the event. The page does not replay the values the email carried, so someone who lost access sees blanks even where their email had the old title, and a failed read answers 500 rather than blanks. The message list's reminder titles (admins and the event's managers) are a management view and keep their current behavior.
 
 An announcement always goes by email; `pushAlert` (on `POST` and `PUT /messages`, and on `message`) adds a short push for the people who have push on (DEC-123). A new message that leaves it out has it on; an update that leaves it out keeps the stored value. `channel: "push"` (any case) is 400 `message_push_only` ("an announcement always goes by email"); push is never a channel of its own. `compose` answers `pushEnabled`, the church's switch (DEC-124): off, the composer hides "Push notification too", the stored value stays, and nothing pushes.
 
 Push follows push consent, not the email row (DEC-122). `summary` gains `push`, how many active people the audience names have push on for messages from leaders (their latest `(push, all)` consent is opted in and their `(push, category:messages)` consent isn't opted out) and a device, whether or not the email reaches them (0 with the church's switch off), and each such recipient `push: true`. Having no device isn't a skip. The composer marks them "Push too", or "Push only" for someone the email won't reach (DEC-135 B).
 
-`message.send` snapshots one `message_recipients` row with `channel: "push"` for each active direct recipient with push on, whatever their email row says: someone skipped for an email reason (turned off email from leaders, a bounce, no address) still gets the push, and someone not active (disabled, waiting for consent) gets neither. Never a guardian copy, a guest or a household person; only with the switch and `push_alert` on; announcements only. In the same transaction it queues one `push.deliver` per device (`unique_key` `push:mr:<row>:d:<device>`, ids only, in batched INSERTs, `jobs.EnqueueMany`); a row with no device left by then is "device gone" at once. Each job checks again, in order: the church's switch ("push turned off by the church"), the account ("recipient not active"), push consent ("push not turned on", "push turned off for messages from leaders"; email consent plays no part), the device (with none left, "device gone"), that the message is still sending or sent ("no longer current"), quiet hours (the row stays queued with "outside quiet hours · sending at 8:00 AM" on the recipient's clock), and the hourly limit of 20, which counts announcement and notification pushes together ("hourly limit"). The row is `sent` once any device takes it. The lock screen shows the subject as the reader's email says it, and the first 120 characters of the plain text then "Open to read."; no link address, URL, link field, email address or phone number (DEC-124). A tap opens `/messages/:id/read`. Push rows never change a message's status, counts or `failedCount`, and Try again never sends a push again. The daily reaper stops a push row with no job left after an hour ("didn't go out").
+`message.send` snapshots one `message_recipients` row with `channel: "push"` for each active direct recipient with push on, whatever their email row says: someone skipped for an email reason (turned off email from leaders, a bounce, no address) still gets the push, and someone not active (disabled, waiting for consent) gets neither. Never a guardian copy, a guest or a household person; only with the switch and `push_alert` on; announcements only. In the same transaction it queues one `push.deliver` per device (`unique_key` `push:mr:<row>:d:<device>`, ids only, in batched INSERTs, `jobs.EnqueueMany`); a row with no device left by then is "device gone" at once. Each job checks again, in order: the church's switch ("push turned off by the church"), the account ("recipient not active"), push consent ("push not turned on", "push turned off for messages from leaders"; email consent plays no part), the device (with none left, "device gone"), that the message is still sending or sent ("no longer current"), quiet hours (the row stays queued with "outside quiet hours · sending at 8:00 AM" on the recipient's clock), and the hourly limit of 20, which counts announcement and notification pushes together ("hourly limit"). Then, in one read-only snapshot, it reads the message again (still sending or sent, and the scheduled time a later Try again may have moved, from which a series' dates count), decides whether an event audience still reaches the person ("can't see this date anymore" otherwise, as for the email) and fills the lock screen's event fields; the push service is called after that snapshot ends. What the push service answers changes the device only while it is still the one sent to (same owner, keys and binding generation, a counter that goes up on every change of owner or key and never repeats; a browser handed to another account and back again, or renewed and given its old keys again, is a new binding): a browser rebound, bound back or renewed meanwhile is not removed on "gone" and not marked failed. A "gone" about it retries while attempts remain. An attempt that ends without delivering for a reason about its device alone ("device gone", "the push service couldn't be reached", "the push service refused it") leaves the row only to another of the person's devices' jobs for it that will still run: queued (a job that went back to wait for quiet hours is queued in the same commit as its wait) or waiting to retry. A device with no job, or whose job ended, is no reason to wait, and a running job decides for itself, so two last attempts never wait for each other. Otherwise it is failed ("the push service couldn't be reached", "the push service refused it") when the device is still theirs, and "device gone" when it moved to someone else or is gone. A job that goes back to wait for quiet hours puts a row another device settled that way back to queued with its "sending at" time, while the person is still active (read after any deletion or status change of the account in progress has committed); the row's lock orders the two, so the history never says a push missed while another device's job waits for the morning. The row is `sent` once any device takes it, and a sent row never changes. The lock screen shows the subject as the reader's email says it, and the first 120 characters of the plain text then "Open to read."; no link address, URL, link field, email address or phone number (DEC-124). A tap opens `/messages/:id/read`. Push rows never change a message's status, counts or `failedCount`, and Try again never sends a push again. The daily reaper stops a push row with no job left after an hour ("didn't go out").
 
 History `counts` gains `push: {sent, waiting: [{until, n}], missed: {reason: n}}` ("Push notifications: 38 pushed · 2 waiting until 8:00 AM · 1 device gone"). The list stays one row a person: a person's row gains `push: {status, until?, reason?}` ("Push sent", "Push waiting until 8:00 AM", "Push didn't go out"), so "And N more" counts people. Leaders and hosts see each person's push status and when it waits until, as the counts say it (DEC-135 B); its reason is an admin's only.
 
-`read` is the page a push opens (`policy.CanReadMessage`, DEC-135 A): whoever may see the message's history, and anyone an announcement was sent to, meaning a direct row (any channel, a skipped email included, never a guardian copy) on a message that is sending or sent. It answers only the subject and body with the reader's merge values, sanitized again, `from` ("Lee Leader via First Church") and when it went out; never the audience, counts or other recipients. A link to `{{event_link}}` or `{{manage_link}}` with no value for the reader keeps only its text. A recipient still gets 404 from `GET /messages/:id` and `/recipients`. Anyone else gets 404.
+`read` is the page a push opens (`policy.CanReadMessage`, DEC-135 A): whoever may see the message's history, and anyone an announcement was sent to, meaning a direct row (any channel, never a guardian copy) on a message that is sending or sent; for an event audience, as narrowed above (a delivery or a recorded date check, else a date they may still see). It answers only the subject and body with the reader's merge values, sanitized again, `from` ("Lee Leader via First Church") and when it went out; never the audience, counts or other recipients. A link to `{{event_link}}` or `{{manage_link}}` with no value for the reader keeps only its text. A recipient still gets 404 from `GET /messages/:id` and `/recipients`. Anyone else gets 404.
 
 #### Event reminders (M3.6a)
 
@@ -1818,9 +2135,9 @@ A reminder is a message the pipeline sends (`category` `reminder`, no author, `o
 
 - **The forms.** Every event form (create a group event, create a church-wide event, Edit series on the group and event pages) has a "Reminder email" select under More options: Off, 2 hours, 1 day (the default), 2 days or 1 week before; the closed More options says "Reminder 1 day before" or "No reminder". It sends `reminderEmailMinutes`; Edit series sends it only when changed. It is a series setting: editing one date doesn't change it. Group date rows (`occurrenceJSON`) carry the series' `reminderEmailMinutes` for that form.
 - **The date page.** `GET /api/v1/events/:id/dates/:date` answers `reminders` only to the event's managers (`policy.CanManageEvent`: an admin, a leader of its group, a host of a church-wide event); for anyone else, and for an exact-date invitation read, the field is absent. It is `{minutes, dueAt, covered, messages: [{messageId, kind, status, sentAt, reached, failed, skipped}]}`: the event's reminder time (`0` off), when this date's reminder goes (`null` when off), whether a reminder already written covers that one so it won't go (the same reminder, or another sent one less than the reminder time before it: `reminderAlreadyCovers`' rule), and every reminder written for the date, oldest first, read in one query. `kind` is `going` (the reminder) or `waitlist` (the waitlist note). The people are counted as the M3.5b history counts them, without guardian copies (DEC-132): `reached` got it (sent or delivered), `failed` didn't (bounced, marked as spam, or failed), `skipped` weren't sent it. The page says "Reminder emailed to 12 people · yesterday at 7:00 PM · 1 didn't get it · 2 skipped" and "Waitlist note emailed to 3 people · …", each linking to the reminder's page; then "Reminder goes out Tue, Nov 3 at 7:00 PM" before it goes (not when `covered`), or "Reminders are off for this event". Times read on the church's clock, as message times do.
-- **Who may read a reminder.** `GET /messages/:id` and `/messages/:id/recipients` let in the author, an admin, and for a reminder anyone who manages its event (`policy.CanSeeMessageHistory`, by the facts the event page uses). Anyone else gets 404. A leader or host reads the history under the leader rules: no reasons, guardian copies as a count (DEC-132), a provider's error in plain words (DEC-52).
+- **Who may read a reminder.** `GET /messages/:id` and `/messages/:id/recipients` let in the author, an admin, and for a reminder anyone who manages its event (`policy.CanSeeMessageHistory`, by the facts the event page uses). Anyone else gets 404. These two, the composer's picker and its preview (with the rendering "Send a test to me" sends), `GET /messages` and the `message` a write answers with (create, edit, schedule, cancel, Try again) each read the session's user, their right and what they show in one read-only snapshot, so a leader or manager who loses the group or event, or an admin who is demoted, never sees a message, title or name written after; a session no longer current there answers 401, and a write's answer answers 404 when its viewer may no longer see the message. A leader or host reads the history under the leader rules: no reasons, guardian copies as a count (DEC-132), a provider's error in plain words (DEC-52).
 - **Read only.** A reminder is never `editable`. Edit, schedule, cancel, preview and test answer 409 `message_reminder` for everyone, admins included (`policy.CanEditMessage`).
-- **Try again.** `retry` works for a failed reminder for an admin or a manager of its event. A reminder has no author, so what is checked is the date and the event: the date still scheduled and not started, and the event's reminders still on, else 403 `reminder_retry_refused` (and `canRetry` is false). Each failed row is checked again, as the first send would (a guardian copy follows its teen): someone no longer going (for the waitlist note, no longer on the waitlist) is skipped with "no longer going" ("no longer on the waitlist"), and someone who can no longer see the date with "can't see this date anymore", instead of sent. It is audited `message.retried` with the presser.
+- **Try again.** `retry` works for a failed reminder for an admin or a manager of its event, judged again after the retry's locks with everything else it decides (a manager who lost the event gets 404). A reminder has no author, so what is checked is the date and the event: the date still scheduled and not started, and the event's reminders still on, else 403 `reminder_retry_refused` (and `canRetry` is false). Each failed row is checked again, as the first send would (a guardian copy follows its teen): someone no longer going (for the waitlist note, no longer on the waitlist) is skipped with "no longer going" ("no longer on the waitlist"), and someone who can no longer see the date with "can't see this date anymore", instead of sent. It is audited `message.retried` with the presser.
 - **Messages.** `message` gains `category` (`announcement` or `reminder`) and, for a reminder whose date still exists, `reminder: {kind, occurrenceId, eventId, eventTitle, date, startsAt, tzid}` (the date's own title when it has one, and the event's zone; one more query for the whole list). `GET /messages?category=announcement` or `?category=reminder` lists one kind, each with its own 200 (any other value is 400); without it both share the 200. An admin's Messages page has two chips, "Announcements" (the default) and "Automatic reminders", so reminders can't crowd announcements out; a reminder reads "Automatic reminder · Book night, Tue, Nov 3" (or "Automatic waitlist note"), its date in the event's zone, with its status in words. A leader's page has no chips and keeps only what they wrote. A reminder also has `displaySubject`, its subject with `{{event_title}}` and `{{event_time}}` filled in as its emails said them (the date's title, its time on the event's clock: "Reminder: Book night on Tue, Nov 3 · 7:00 PM MST"); it is "" for an announcement. A reminder's page uses it as the heading, says "Automatic reminder for Book night, Tue, Nov 3 at 7:00 PM", linking to the date, in place of the author line, and shows its body with merge fields as written.
 
 #### The 2-hour push reminder (M3.13d3)
@@ -1830,7 +2147,7 @@ Every event also has `reminderPush` (on by default, PLAN 7.7, DEC-123), set on c
 - **Its own message.** Each date's push reminder is a reminder message with `channel` `push`, `reminder.kind` `push` and key `push:<occurrence>:<start>:120`, holding only push rows (`message_recipients.channel` `push`), one per person. It is never an announcement's push-only case (DEC-123 refuses that): reminders are a channel of their own. It is `sent` from the start; its `sentAt` is its first push, and until then Messages says "Waiting to go out" while some of its rows are still to go (`pushWaiting` on `message`), else "Nobody got it", and "Pushed …" once one went. It is never sent again (`canRetry` false), and it writes no bell row (DEC-44). A date cancelled and restored at the same start keeps its key, so a row its cancelled job already skipped stays skipped.
 - **Who.** The date's `going` registrants (a household person's reaches the account holder) who are active, have push on (`(push, all)` opted in), haven't turned push off for event updates (`category:events`) and have a device. Nobody else gets a row. No waitlist push and no guests (they can't subscribe).
 - **When.** The hourly `reminders.sweep` plans each person on their own clock: due 2 hours before the start; outside their quiet hours (8 AM–8 PM, DEC-126) it moves to the last allowed minute before, at most 18 hours earlier (7:59 PM the night before a 9:00 AM date), else the row is `suppressed` "outside quiet hours" (7.7, the SMS rule). A time already past goes at once if the person's window is open and it passed within the sweep's 6-hour lookback; with the window shut it is skipped. One `push.deliver` per device (`push:mr:<row>:d:<device>`, with the planned time) is queued at that time. The sweep reads, in one query, only the going people with a device who have no row yet on their date's current push reminder, so a date already planned costs nothing on later sweeps; push consent is read once for all of them.
-- **At send.** The job checks again that the date is still scheduled at the start in the key and hasn't started ("date cancelled or moved" otherwise; a moved date's new start gets a new reminder), that the event's `reminderPush` is still on ("push reminder turned off"), that the person is still going ("no longer going") and may still see the date ("can't see this date anymore"), and that the person's window is open, allowing 15 minutes past the planned time so a 7:59 PM push that runs a minute late still goes ("outside quiet hours" otherwise). The hourly limit never stops it, though a sent one counts toward the 20 (DEC-126).
+- **At send.** The job checks again that the date is still scheduled at the start in the key and hasn't started ("date cancelled or moved" otherwise; a moved date's new start gets a new reminder), that the event's `reminderPush` is still on ("push reminder turned off"), that the person is still going ("no longer going") and may still see the date ("can't see this date anymore"), and that the person's window is open, allowing 15 minutes past the planned time so a 7:59 PM push that runs a minute late still goes ("outside quiet hours" otherwise). These checks and the lock screen come from one read-only snapshot, so the title and time shown are the date's as its checks judged it. The hourly limit never stops it, though a sent one counts toward the 20 (DEC-126).
 - **The lock screen.** "Reminder: Book night", then "Starts at 7:00 PM" on the reader's clock ("Starts tomorrow at 9:00 AM" the night before), and never the place: a lock screen is public and small groups often meet in homes (DEC-124, DEC-136). Links and phone numbers in the title are taken out. A tap opens the date page, which shows the place. The push service keeps it until the date starts, at most a day.
 - **The date page.** `reminders` gains `push` (the event's switch; `null` when the church turned push off) and `pushDueAt` (when this date's push reminder goes on the church's clock, `null` when off, already written, or skipped there by quiet hours), and each message `waiting` (push rows still to go). An email reminder counts only its email rows, a push reminder only its push rows. The page says "Reminder pushed to 5 people · today at 5:00 PM · 1 skipped" (or "Push reminder waiting to go to 5 people"), linking to its history, "Push reminder goes out Tue, Nov 3 at 5:00 PM" before it is written, or "Push reminders are off for this event"; with only the email off it says "Reminder emails are off for this event". A push reminder's page lists each person by their push.
 
@@ -1886,7 +2203,15 @@ actions use domain endpoints, checked against notification ownership, kind and
 subject. Only group approval and eligible clean-adult account requests are
 inline; sensitive requests use navigation and explicit destination decisions.
 Resolved races return structured already-handled details. No contact data or
-hidden-group metadata may enter feed text; sensitive email is names-free.
+hidden-group metadata may enter feed text; sensitive email is names-free. A
+notice about a date its recipient may not see (`event.cancelled`,
+`event.restored`, `registration.cancelled`, `registration.removed`,
+`registration.not_restored`, `registration.promoted`) is the kind's nameless
+text: no title, time, place or link, no `subjectId`, no expiry tied to the
+date, and its push is never urgent. An invited or pending-consent account is
+judged as signed out here, so a waitlisted one promoted into a date only
+signed-in people may see is told "You're in: an event", with no manage or
+video link; the stored row says no more once the account is active.
 
 ### ICS feeds (outside `/api/v1`)
 
@@ -1901,7 +2226,12 @@ Feeds cover 30 days back to 12 months ahead, carry `ETag` and
 `Cache-Control: private, max-age=900` (304 on `If-None-Match`), and
 never carry attendee data. Contents follow the viewer's permissions at
 fetch time; a disabled or deleted owner's token answers the same plain
-404 as an unknown one. All feeds are finite snapshots of authorized scheduled
+404 as an unknown one. Each feed reads its link, the rooms switch where it
+applies, and everything it shows in one read-only snapshot on one clock. A
+request already using a snapshot can return what that snapshot allowed. A new
+request to Fold sees link revocations and switch changes committed before its
+snapshot. A manager's extra kept dates (DEC-157) reach the calendar only.
+All feeds are finite snapshots of authorized scheduled
 occurrences selected by their actual start in the half-open export window.
 They contain no VEVENT `RRULE`, `EXDATE`, `RDATE`, or `RECURRENCE-ID`: clients
 never reconstruct dates beyond the loaded authorization facts. Cancellation
@@ -1971,7 +2301,7 @@ All but logout need a signed-in, active account and the CSRF token as usual (`cs
 - **Privacy.** No response, log line, audit row, consent row or job carries an endpoint, `p256dh` or `auth` (`TestPushLogsKeepSecretsOut`, `TestPushSubscribeSavesBindsAndConsents`).
 - **The browser side (M3.13c1).** Two public routes outside `/api/v1`. `GET /sw.js` is the service worker (`web/src/sw.ts`, built to `web/dist/sw.js`), served `Cache-Control: no-cache` with a JavaScript type, and a 404 when the bundle has none (never the SPA shell). It handles `install` (`skipWaiting`) and `activate` (`clients.claim`), so a new worker takes over at once and controls open tabs, plus `push`, `notificationclick` (same-origin links only) and `pushsubscriptionchange` (CSRF token, `/push/config`, subscribe, `PUT /push/subscriptions`); it has no `fetch` handler and caches nothing, so it can never serve a stale page. Only the card's "Turn on notifications" registers it. `GET /manifest.webmanifest` is made by the server (`application/manifest+json`, `no-cache`): `name` is `site_name`, `short_name` the same when it is 12 characters or fewer, else "Fold"; `id` `/`, `start_url` `/?source=homescreen` (the SPA sends a signed-out Home Screen app to Log in), `scope` `/`, `display` `standalone`, and the 192, 512 and 512 maskable icons under `/assets/brand/`. The CSP names `worker-src 'self'; manifest-src 'self'`.
 
-**Delivery.** A kind with `AllowPush` gets its own short push text (`PushRender`), rendered with the bell's `Vars` when the row is written and stored as `notifications.push_title`/`push_body`. `notify.Send` queues a `notify.deliver` job in the same transaction. That job queues one `push.deliver` per device of each recipient (unique key `push:n:<id>:d:<device>`), with no delay; the push job checks the church switch, the account, consent and the per-category switch, as M3.13a built it. A lock screen is public (DEC-124): push text never carries a contact detail, teen badge, person's name, note, place, signed or video link, or `Data`, and a hidden group's name reaches it only as the bell's (the caller's `canSeeGroupIn` decision). What pushes:
+**Delivery.** A kind with `AllowPush` gets its own short push text (`PushRender`), rendered with the bell's `Vars` when the row is written and stored as `notifications.push_title`/`push_body`. `notify.Send` queues a `notify.deliver` job in the same transaction. That job queues one `push.deliver` per device of each recipient (unique key `push:n:<id>:d:<device>`), with no delay; the push job checks the church switch, the account, consent and the per-category switch, as M3.13a built it, and then the device. A device turned off, gone or rebound to another account before its job runs gets nothing, and the notice's push delivery is settled as "device gone" unless another of the person's devices' jobs for it will still run, as for an announcement; a device's refusal or a last attempt that never reached it is settled the same way. A lock screen is public (DEC-124): push text never carries a contact detail, teen badge, person's name, note, place, signed or video link, or `Data`, and a hidden group's name reaches it only as the bell's (the caller's `canSeeGroupIn` decision). What pushes:
 
 | Kind | Push title | Push body |
 |---|---|---|
@@ -2461,19 +2791,60 @@ account with a live exact-date invitation.
 `:date` is the occurrence's original `YYYY-MM-DD` key, not its rescheduled
 start day. It returns `{occurrence: EventDate}` for ordinary event visibility
 or a current explicit invitation to **that stable occurrence only**. Missing,
-invalid, cancelled, deleted, or unauthorized dates return 404; signed-out
+invalid, deleted, or unauthorized dates return 404; signed-out
 requests for nonpublic dates return 404. GET has no side effects and does not approve an ask.
 Pending asks and ordinary registration rows alone confer no extra visibility.
 
+A cancelled date (M8.1 brief 2.2) returns `{occurrence: CancelledEventDate}`,
+exactly `{title, date, cancelled: true}` (the date's effective title, its
+original `YYYY-MM-DD` and the flag), to a signed-in viewer whose own
+registration on that stable occurrence (not a household person's row they
+hold) still stands (Going, Maybe or waitlisted) and who either:
+
+- has, now and apart from any invitation, the ordinary access the scheduled
+  read requires; or
+- holds an exact-date invitation on that row that passes every current check
+  (account and teen consent, event and group still there, active context)
+  and was valid at this cancellation: still live (a departure grant only
+  before the date's stored end), or ended as `occurrence_cancelled` by this
+  cancellation. That is one matching `occurrence_access.ended` snapshot on
+  the registration and no `event.dates_restored` row for the date with a
+  larger audit id. A grant ended under an earlier cancellation that a
+  restore undid does not count. Unreadable evidence denies: a snapshot on
+  the registration that fails the snapshot check, more than one match, or a
+  restore row for the event whose `occurrenceIds` is not a nonempty array of
+  positive ids (a `null`, zero, negative, fractional or string element
+  included).
+
+Everyone else, a role or ordinary access alone included, gets the same 404 as
+a missing date. Every fact comes from one read-only Repeatable Read snapshot
+that takes no contact gate, and the session is checked against the account
+row in that snapshot: a session ended (signed out, password changed, account
+disabled) before the snapshot gets the 404 too. A failed read is a 500, never
+a 404. The
+tombstone is this JSON read only: `calendar.ics`, feeds, discovery and every
+write keep their scheduled-date behavior.
+
 `GET /api/v1/events/:id/dates/:date/calendar.ics` (DEC-93) downloads that date
 as a one-event iCalendar file (`text/calendar`, `Content-Disposition:
-attachment; filename="event-YYYY-MM-DD.ics"`). It uses the same load as the
-JSON read above, so the same requests get 404 (JSON) and the file carries only
+attachment; filename="event-YYYY-MM-DD.ics"`). It uses the same scheduled-date
+load as the JSON read above, so the same requests get 404 (JSON), and a
+cancelled date is 404 for everyone, a viewer who gets its tombstone included.
+The file carries only
 the date's own title, place, times, remote line, exact-date URL and, when the
 JSON would show it, the video link. `STATUS` is `CONFIRMED` for your Going,
 `TENTATIVE` for Maybe or Waitlisted, and absent otherwise. The `UID` matches
 the feeds', so a calendar that also subscribes keeps one copy. No calendar
 name, description, hosts or attendees.
+
+The `.ics` download, `GET /calendar` (its `group=` filter included), every
+`/cal/` feed (a secret link's scope and owner included), `GET /calendar/rooms`
+and `GET /messages/:id/read` (who may read included) each read everything they
+show, and whatever authorizes it, in one read-only Repeatable Read snapshot,
+as the date page does. A grant, a group filter, a link's scope or a role is
+therefore never paired with dates, titles or places committed after it was
+read: an edit that ends an expired grant and moves its date in one commit is
+seen whole or not at all. These reads take no lock and never wait on a writer.
 
 `EventDate` has exactly these fields (optional keys marked `?`):
 
@@ -2484,7 +2855,9 @@ remoteAvailable, guestsAllowed,
 myRegistration, myAttendanceMode?, myGuestCount?,
 videoProvider, videoUrl?, videoHidden,
 canSeeVideo, canSeeAttendees, canDecline, canBlock,
-visibility?, hostedBy?, groupId?, groupName?, canRegister?
+visibility?, hostedBy?, groupId?, groupName?, canRegister?, canManage?,
+room?, reminders?,
+groupHeader?, attendance?, seats?, remoteRsvp?, myWaitlistPosition?, series?
 ```
 
 Times/title/place are effective for that date. Only ordinary-visibility reads
@@ -2493,15 +2866,128 @@ viewer may independently see the group, otherwise `hostedBy` with the church
 name (including the privacy-safe fallback for an opened hidden-group date).
 This does not authorize the parent series. Invitation-only responses omit all
 of these organizer/ordinary-visibility keys and never fall back to a hidden
-group's place. Neither response includes host identities, attendee/contact
-details, counts, capacities, series title, series start, RRULE/until, sibling
-dates, or management controls. `myRegistration`
-is the viewer's own status or null. Video is gated by that date's own RSVP and
+group's place. Neither response includes host identities, contact details,
+care notes, sibling dates or management controls. `canManage` is `true` only on
+an ordinary read by someone who manages the event (absent otherwise, and never
+on a tombstone or an invitation-only read): the date page then offers "Manage
+this date", whose data comes from the manager's exact-date read
+(`GET /events/:id/occurrences/:date`). `myRegistration`
+is the viewer's own status or null. An ordinary reader's own cancelled answer
+is `"cancelled"` with no `myAttendanceMode` or `myGuestCount`, and every
+capability is what an unanswered viewer of the date gets: it is history, not
+an RSVP. A cancelled answer on a scheduled date is not a cancelled date. Video is gated by that date's own RSVP and
 current policy; an invitation does not inherit manager video authority.
-`canSeeAttendees` is always false for invitation-only access, and this endpoint
-never includes attendees even for ordinary viewers. `canDecline`/`canBlock`
+`canSeeAttendees` is always false for invitation-only access. `canDecline`/`canBlock`
 describe current recipient invitation policy for the mutations below. Ordinary
 voluntary RSVP continues to use its existing authority.
+
+**The date page's own facts (M8.1 brief sections 4 and 6).** Only the ordinary
+JSON read carries these optional keys as `policy.DatePage` allows. An
+invitation-only read has none of them (its `remoteAvailable` and video fields
+are as above). Every fact of the scheduled JSON read, and the authority
+that admits it, comes from one consistent database snapshot. The session is
+rechecked against the account row in that snapshot. A session already ended
+there (signed out, password changed, account disabled) reads as signed out.
+A session that ends after the
+snapshot starts is not seen by this read; the next request is signed out. A failed room read leaves `room`
+out, as on the event pages and in `calendar.ics`, except where the series
+comparison below needs the room, which is then a 500. A failed read of the
+church name, the push switch, the reminder's church zone or `canRegister` shows
+its default (the default name, push on, UTC, `canRegister` false) and the rest
+of the date still loads. Household attendee authorization requires a valid
+church zone and returns an error if it cannot be read. Each key is absent when
+not allowed:
+
+- `description`: the series description, when it has text and the viewer may
+  see the series at its own visibility. The one-date `calendar.ics` download
+  omits the description. Calendar feeds use their existing series visibility
+  rule for descriptions.
+- `groupHeader` `{imageUrl, coverFocalX, coverFocalY, leaderName}`: only with
+  `groupId`, for a group the viewer may see. `imageUrl` is `""` for a group
+  with no photo (the page uses its generated cover); the leader is the group's
+  display leader's public name. A church-wide date, or one whose group is
+  hidden from the viewer, has no `groupHeader` and keeps the `hostedBy`
+  church label, never a host's name.
+- `attendance` `{registrations, attendees?}`: `registrations` counts rows by
+  answer over listed accounts, `going`, `maybe` and `waitlisted` always,
+  `declined` only for the event's managers (DEC-64), as on the event pages.
+  `attendees` is present only when `canSeeAttendees` and there is at least one
+  name to show: the Going and Maybe names the existing subject rules allow this viewer (pending teens and
+  household people as on the event pages), each `{name, status, guestCount}`
+  with no contact, care or management field. A name the rules hide is left
+  out, so fewer names than `registrations.going` plus `maybe` means some are
+  private.
+- `seats` `{inPerson, remote?, waitlistEnabled, childcare?}`: each pool is
+  `{capacity, used, left}` for this date (its overrides applied); `capacity`
+  and `left` are `null` when unlimited, `left` is never below 0, and `used`
+  counts places (one per Going party plus its guests), not rows. `remote` is
+  present when the event takes remote answers, `childcare` when it offers
+  childcare: `{full, totals?}`, where `full` says a limited pool has no
+  places left and `totals` (a pool) is only for the event's managers on a
+  date whose series they may see (`policy.CanSeeChildcare`). A failed count
+  read is a 500, never an empty or available pool.
+- `remoteRsvp`: `offered`; `closed` (remote is on for the event but this
+  date's effective remote cap is 0); or `none` (in person only). A full
+  remote pool is still `offered`. Link access is separate and unchanged:
+  `videoUrl` is shown when the viewer may see the link; `videoHidden` true
+  means a link exists but waits until the viewer is Going (`registered_only`;
+  Maybe is not enough; an ordinary manager sees it without an answer); neither
+  means no link is configured. Closing remote answers does not withdraw a link
+  the viewer may already see.
+- `myWaitlistPosition`: the viewer's own 1-based place in line when their own
+  answer is waitlisted, as on the event pages.
+- `series`, only when the viewer may see the series itself (not for a date
+  opened on its own): `{recurrenceRule, upcomingDates?, coveredDates?,
+  canAnswerSeries, usual?, changes}`. For a signed-in viewer of a repeating
+  event, `upcomingDates` counts the series' scheduled dates starting after now that
+  the viewer could answer with `POST /events/:id/series-registrations` (the
+  same time and date-visibility boundaries), and `coveredDates` counts the
+  viewer's own Going or Maybe answers among exactly those dates, so a date
+  hidden from the viewer changes neither number. Nothing stores how an answer
+  was made; "in for the series" is inferred from these counts.
+  `canAnswerSeries` is true when that writer would accept a series answer
+  from the viewer and at least one such date exists. For a repeating event,
+  `usual` is the series' values on this date's original day:
+  `{startsLocal, endsLocal, durationMinutes, location, room, capacity,
+  remoteCapacity, visibility}` (the clock is the time the series writer
+  generated for that day when it wrote the date: creation, the daily
+  extension or a series edit store every distinct time the rule makes on the
+  date's original day, so the page never walks the rule (DEC-155). It is the
+  rule's own hour, as a `BYHOUR` part sets it, with daylight saving included,
+  down to a time that daylight saving moves from the next day's skipped clock
+  onto this one. When the rule makes several times on one day it is the one
+  this date starts at, else the earliest in the same minute (the date editor
+  saves whole minutes), else the first the writer generated. Its wall clock
+  is shown in the zone it was written in, which is the event's zone for every
+  upcoming date; a past date keeps the comparison it had. `startsLocal` and
+  `endsLocal` are empty when the clock is unknown: a date written before the
+  server stored these times and not yet repaired by the daily job (upcoming
+  dates are repaired; past ones stay unknown), a series repeating from
+  `0001-01-01T00:00` UTC whose date predates the store (the recurrence
+  library starts such a series from the moment it is walked), a date at the
+  edge of what the writer walked, or a series a previous server version
+  edited until the next series edit or daily run settles it. An empty clock
+  claims no `time` change, so an empty `changes` then does not mean the time
+  is unchanged; a `day` change is still listed when the shown date is not
+  the date's original day. For a date kept through a series edit that the rule no longer generates, it is
+  the series' start time of day on the date's original day, kept as written
+  even when daylight saving skips that clock there; its place, using the
+  group's place only when the group is shown; its series room while room
+  booking is on and, for a series room still awaiting approval, only while
+  approval is off, when new dates confirm in it directly; both caps, `null`
+  unlimited). `changes` lists what about this date differs from `usual`, in
+  this order: `day`, `time` (the start's local date and time of day; `day`
+  compares local dates even when the instants match: where daylight saving
+  skips the usual clock and that instant falls on the evening before, a date
+  there is a `day` change; a date starting at the usual start's instant
+  changed no time; the same local time at the other pass through a repeated
+  fall-back hour is a `time` change),
+  `duration`, `place`, `room`, `capacity`, `remoteCapacity` (only while the
+  event takes remote answers) and `visibility`. Values are compared, not
+  whether an override is stored: an override equal to the series value is no
+  change, and an unchanged date has `[]`. A one-time event has no `usual`,
+  `upcomingDates` or `coveredDates`, `canAnswerSeries` is false and `changes`
+  is `[]`: the series writer answers only for a repeating event.
 
 Calendar rows for invitation-only dates retain the slim `CalendarOccurrence`
 shape, with `dateUrl` set to `/events/:id/dates/:date`, the recipient's own Going
@@ -2513,6 +2999,20 @@ with an absolute exact-date URL: never RRULE, sibling EXDATEs, series metadata,
 or a bare series URL. Public and group feeds remain ordinary-visibility only.
 The UI owner must follow `dateUrl` for scoped rows rather than synthesizing a
 parent-event link. The exact-date SPA page uses this sanitized contract.
+`dateUrl` is also set on the row of someone who manages the event when the
+event and group pages do not list that date (it has started, or it is outside
+their original-date window): the date page carries that manager's tools for it.
+
+**Kept dates on the managers' calendar (DEC-157).** In Everything (not
+`mine=1`), a scheduled date someone kept after leaving (a live departure grant,
+any access origin but `manager_add`) stays on the calendar of everyone who
+manages its event until Remove or its end, outside the 30-day window: at any
+distance within the range, and while it is underway. While it is underway
+(started at or before the server's clock, not ended), it is listed even when
+it began before `from`, under its own start day; a kept date that has not
+started is listed only on its own day. The row is the ordinary slim row.
+Just mine and every feed, in both scopes, are unchanged. The calendar reads the
+kept-date fact and the carried dates on its one snapshot.
 
 `CanSeeEvent`, `loadVisibleEvent`, ordinary `/events` discovery, and rich
 occurrence lists retain their existing series-only semantics. Explicit
@@ -2682,7 +3182,11 @@ names-free, navigation-only, unbatched `occurrence.added` notice to the exact da
 Invitation changes/promotions/cancellations also use names-free exact-date links,
 not hidden group or series links. Managers alone receive optional
 `Attendee.addedByLeader`, computed from current explicit access, never inferred
-from Registration source; other viewers have no such key.
+from Registration source; other viewers have no such key. Managers alone also
+receive `Attendee.keptAfterLeaving`: the row holds a live grant that ends with
+its date (someone kept the date after leaving, DEC-156), on the event list, the
+group list and the date's edit base; `false` on every other row and once the
+grant ends. Nobody else, the person included, and no feed carries the key.
 
 Manual promotion services existing voluntary waitlist responses, teen included;
 it is not a new invitation and mints no access. Fresh manager/session/destination
@@ -2859,10 +3363,11 @@ column is set. `visibility` on occurrence lists is the effective value;
 is visible, `groupVisibility` for the shared visibility editor.
 
 ```
-PUT /api/v1/events/:id/occurrences/:date
-    {visibility?: "public"|"private"|"invite_only"|"series"|null,
-     reason?: string, confirm?: boolean, ...existing date edits}
+POST /api/v1/events/:id/occurrences/:date/edits
+    {attempt, revision, changes: {visibility?: "public"|"private"|"invite_only"|"series"|null,
+     ...other date changes}, reason?: string, consent?: string}
 GET /api/v1/events/:id/occurrences/:date/visibility-impact?visibility=series
+    [&startsLocal=YYYY-MM-DDTHH:MM][&durationMinutes=n]
 GET /api/v1/events/:id/dates/:date
 ```
 
@@ -2871,8 +3376,32 @@ only the visibility override. Explicit equal-to-series values remain explicit.
 The usual event visibility policy applies: group leaders/admins may set any
 value; church-wide hosts/admins may use public/private only. Reasons are
 optional, at most 500 characters. Tightening, including clearing an open date,
-previews newly inaccessible registrations on that date. PUT returns 409 with
-`needsDecision` and `impact` until `confirm:true` acknowledges cancellation.
+previews newly inaccessible registrations on that date. A save that would
+cancel anyone needs the `consent` of the impact as the write finds it: absent
+or another token answers 409 `date_needs_consent` with a fresh `impact`
+(Guarded date edit above), and the same attempt sent again with that
+`impact.consent` applies.
+
+Consent is counted on the date as the save would store it. The guarded edit
+counts on the date as saved, on its new start, and asks by rolling the whole
+save back, so a 409 `date_needs_consent` wrote nothing (a 500 means the
+outcome is unknown). A date moved from the past into the future can lose
+people; one moved into the past loses nobody. The preview takes the same
+optional `startsLocal` and `durationMinutes` the save sends, validated as the
+save validates them (`invalid_duration`, `invalid_start`), and counts on that
+start; without them it counts on the stored start and end, as the save keeps
+them (The date's clock, under the guarded edit). Only a single date takes
+them: the group and event previews have none, since only one date can be
+retimed and re-scoped in one save. When those times make the date end later
+and someone who left the group still holds it on the preview's clock, the
+preview answers the save's 409 `date_kept_after_leaving` with `keptDates`
+instead of an impact (DEC-156); a grant whose date has already ended is not
+counted, since the save would end it first. The preview reads the viewer,
+their authority, the kept grants and the count in one snapshot; it is
+advisory, and the guarded edit, under its locks, decides: a departure or a
+clock crossing between the two can make the edit answer a different count or
+the refusal, with nothing written. People cancelled for a tightening are told
+the date's title as it was before the save, never a title the same save sets.
 Active explicit exact-date invitations preserve their own registrations and
 never grant series or group authority.
 
@@ -2888,8 +3417,9 @@ Series visibility PUT accepts `resetOverrides?:boolean` (default false).
 Its visibility-impact GET accepts `resetOverrides=1` and returns
 `futureOverrides`, counted across all future stored dates, not the list limit.
 Without reset, explicit dates keep their visibility and are excluded from the
-series cancellations. With reset, each future override is cleared and audited
-atomically, including when the series value itself stays the same. Past dates
+series cancellations. With reset, the impact also lists `resetDates`, and exactly those future
+overrides are cleared and audited atomically, including when the series value
+itself stays the same; the request needs that impact's `consent`. Past dates
 and unrelated date customizations are unchanged.
 
 Group visibility review includes explicit dates wider than the new group value

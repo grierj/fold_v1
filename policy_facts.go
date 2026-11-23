@@ -125,20 +125,39 @@ func groupRel(db *gorm.DB, userID, groupID uint) (policy.Rel, error) {
 // hostedEvents is the church-wide events (of eventIDs) the user hosts. A host
 // row on a group event grants nothing (DEC-7), so such events never appear.
 func hostedEvents(db *gorm.DB, userID uint, eventIDs []uint) (map[uint]bool, error) {
-	out := map[uint]bool{}
-	if userID == 0 || len(eventIDs) == 0 {
-		return out, nil
+	if userID == 0 {
+		return map[uint]bool{}, nil
 	}
-	var ids []uint
-	err := db.Model(&models.EventHost{}).
-		Joins("JOIN events ON events.id = event_hosts.event_id AND events.group_id IS NULL").
-		Where("event_hosts.user_id = ? AND event_hosts.event_id IN ?", userID, eventIDs).
-		Pluck("event_hosts.event_id", &ids).Error
+	byUser, err := hostedEventsByUser(db, []uint{userID}, eventIDs)
 	if err != nil {
 		return nil, err
 	}
-	for _, id := range ids {
-		out[id] = true
+	if out := byUser[userID]; out != nil {
+		return out, nil
+	}
+	return map[uint]bool{}, nil
+}
+
+// hostedEventsByUser is hostedEvents for several users in one query: for each
+// user who hosts any, the church-wide events of eventIDs they host.
+func hostedEventsByUser(db *gorm.DB, userIDs, eventIDs []uint) (map[uint]map[uint]bool, error) {
+	out := map[uint]map[uint]bool{}
+	if len(userIDs) == 0 || len(eventIDs) == 0 {
+		return out, nil
+	}
+	var rows []struct{ UserID, EventID uint }
+	err := db.Model(&models.EventHost{}).Select("event_hosts.user_id, event_hosts.event_id").
+		Joins("JOIN events ON events.id = event_hosts.event_id AND events.group_id IS NULL").
+		Where("event_hosts.user_id IN ? AND event_hosts.event_id IN ?", userIDs, eventIDs).
+		Find(&rows).Error
+	if err != nil {
+		return nil, err
+	}
+	for _, r := range rows {
+		if out[r.UserID] == nil {
+			out[r.UserID] = map[uint]bool{}
+		}
+		out[r.UserID][r.EventID] = true
 	}
 	return out, nil
 }
@@ -178,6 +197,62 @@ func loadFactSet(db *gorm.DB, viewer *models.User, evs []models.Event, withDelet
 	}
 	s.Hosted, err = hostedEvents(db, viewerID, churchWide)
 	return s, err
+}
+
+// loadFactSets is loadFactSet for several viewers over one batch of events:
+// the groups once, each group's memberships of the viewers in one query a
+// chunk, and the hosts of the church-wide events in one more. Viewer id 0 (a
+// guest or signed-out reader, eventViewer) has no membership or host facts.
+// Soft-deleted groups are left out, as for loadFactSet without withDeleted.
+func loadFactSets(db *gorm.DB, viewerIDs []uint, evs []models.Event) (map[uint]factSet, error) {
+	gset := map[uint]struct{}{}
+	var churchWide []uint
+	for i := range evs {
+		if evs[i].GroupID != nil {
+			gset[*evs[i].GroupID] = struct{}{}
+		} else {
+			churchWide = append(churchWide, evs[i].ID)
+		}
+	}
+	groupIDs := idList(gset)
+	groups, err := groupsByID(db, groupIDs, false)
+	if err != nil {
+		return nil, err
+	}
+	out := map[uint]factSet{}
+	people := []uint{}
+	for _, id := range viewerIDs {
+		if _, ok := out[id]; ok {
+			continue
+		}
+		out[id] = factSet{Groups: groups, Rels: map[uint]policy.Rel{}, Hosted: map[uint]bool{}}
+		if id != 0 {
+			people = append(people, id)
+		}
+	}
+	for _, gid := range groupIDs {
+		if err := eachIDChunk(people, func(chunk []uint) error {
+			rels, err := userRels(db, gid, chunk)
+			for uid, rel := range rels {
+				out[uid].Rels[gid] = rel
+			}
+			return err
+		}); err != nil {
+			return nil, err
+		}
+	}
+	if err := eachIDChunk(people, func(chunk []uint) error {
+		hosted, err := hostedEventsByUser(db, chunk, churchWide)
+		for uid, evIDs := range hosted {
+			for id := range evIDs {
+				out[uid].Hosted[id] = true
+			}
+		}
+		return err
+	}); err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
 func (s factSet) of(ev *models.Event) eventFacts {

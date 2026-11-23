@@ -2,7 +2,7 @@ import { isString } from "../lib/wireValues";
 import type {
   AttendanceMode,
   DateRegistrationResponse,
-  EventDateResponse,
+  EventDateRead,
   EventDetailResponse,
   EventHostsResponse,
   EventInput,
@@ -20,16 +20,17 @@ import type {
   Visibility,
   VisibilityImpact,
 } from "../types";
-import { api, path, query, type Id } from "./core";
+import { api, path, query, type Credential, type Id } from "./core";
 
 export const Events = {
   listOpen: () => api<OpenEventsResponse>("/events"),
-  get: (id: Id) => api<EventDetailResponse>(path`/events/${id}`),
+  // pinned (M8.1): a participating read, answered only for this credential (api/core.ts).
+  get: (id: Id, pinned?: Credential) => api<EventDetailResponse>(path`/events/${id}`, { pinned }),
   createChurch: (data: NewEventInput & { title: string }) => api<EventSeriesResponse>("/events", { method: "POST", body: data }),
   setVisibility: (
     id: Id,
-    // confirm: the leader saw the preview of registrations this cancels.
-    data: { visibility: Visibility; reason?: string; confirm?: boolean; resetOverrides?: boolean }
+    // consent: the token of the impact the leader reviewed ("" when none ran).
+    data: { visibility: Visibility; reason?: string; consent: string; resetOverrides?: boolean }
   ) => api<EventSeriesResponse>(path`/events/${id}/visibility`, { method: "PUT", body: data }),
   visibilityImpact: (id: Id, visibility: Visibility, resetOverrides = false) =>
     api<VisibilityImpact>(`${path`/events/${id}/visibility-impact`}${query({ visibility, resetOverrides: resetOverrides ? "1" : "0" })}`),
@@ -58,20 +59,73 @@ export const Events = {
   restoreRegistration: (id: Id, date: string, target: { userId: number } | { personId: number; registeredBy: number }, attendanceMode: AttendanceMode, overCapacity: boolean) =>
     api<unknown>(path`/events/${id}/registrations/add`, { method: "POST", body: { date, ...target, attendanceMode, overCapacity } }),
   cancelOccurrence: (id: Id, date: string) => api<unknown>(path`/events/${id}/cancel`, { method: "POST", body: { date } }),
-  dateVisibilityImpact: (id: Id, date: string, visibility: Visibility | "series") =>
-    api<VisibilityImpact>(`${path`/events/${id}/occurrences/${date}/visibility-impact`}${query({ visibility })}`),
-  updateOccurrence: (
-    id: Id,
-    date: string,
-    data: { startsLocal?: string; durationMinutes?: number; location?: string; title?: string; capacityOverride?: number | null; remoteCapacityOverride?: number | null; visibility?: Visibility | "series" | null; reason?: string; confirm?: boolean }
-  ) => api<OccurrenceResponse>(path`/events/${id}/occurrences/${date}`, { method: "PUT", body: data }),
+  // `time` is the start and duration the same save sends, so the count is for the date as it would be saved.
+  dateVisibilityImpact: (id: Id, date: string, visibility: Visibility | "series", time?: { startsLocal?: string; durationMinutes?: number }) =>
+    api<VisibilityImpact>(`${path`/events/${id}/occurrences/${date}/visibility-impact`}${query({ visibility, startsLocal: time?.startsLocal, durationMinutes: time?.durationMinutes })}`),
+  // The manager's edit base for one date. A scheduled date that has not ended carries its roster (attendeesVisible).
+  managedDate: (id: Id, date: string, pinned?: Credential) => api<OccurrenceResponse>(path`/events/${id}/occurrences/${date}`, { pinned }),
   delete: (id: Id) => api<unknown>(path`/events/${id}`, { method: "DELETE" }),
+};
+
+/** @public what a guarded date edit may change (POST .../occurrences/:date/edits); the guarded editor sends it once a host adopts it. */
+export interface DateEditChanges {
+  startsLocal?: string;
+  durationMinutes?: number;
+  title?: string;
+  location?: string;
+  capacityOverride?: number | null;
+  remoteCapacityOverride?: number | null;
+  visibility?: Visibility | "series" | null;
+}
+
+const changeKeys = ["startsLocal", "durationMinutes", "title", "location", "capacityOverride", "remoteCapacityOverride", "visibility"] as const;
+
+/** @public one guarded date edit attempt as it may have been sent: its exact address and body, and the fields the person submitted. */
+export interface DateEditEnvelope {
+  readonly url: string;
+  readonly body: string;
+  readonly attempt: string;
+  readonly revision: string;
+  readonly occurrenceId: number;
+  readonly changes: Readonly<DateEditChanges>;
+  readonly reason?: string;
+}
+
+function attemptId(): string {
+  return Array.from(crypto.getRandomValues(new Uint8Array(16)), (b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+// A guarded date edit's request, frozen once (DateWritesProvider keeps it in memory only): a replay sends these
+// bytes again, and an answered consent question adds only its token.
+export const DateEdits = {
+  // null when nothing would change or the base is not a manager read's (no occurrence id or revision). The
+  // reason is trimmed and sent only with a visibility change.
+  freeze: (eventId: Id, date: string, occurrenceId: number, revision: string, changes: DateEditChanges, reason?: string): DateEditEnvelope | null => {
+    const kept: DateEditChanges = {};
+
+    for (const key of changeKeys) if (changes[key] !== undefined) Object.assign(kept, { [key]: changes[key] });
+    const why = "visibility" in kept ? reason?.trim() || undefined : undefined;
+
+    if (!Object.keys(kept).length || !revision || !Number.isSafeInteger(occurrenceId) || occurrenceId <= 0) return null;
+    const attempt = attemptId();
+
+    return Object.freeze({
+      url: path`/events/${eventId}/occurrences/${date}/edits`,
+      body: JSON.stringify({ attempt, revision, changes: kept, reason: why }),
+      attempt, revision, occurrenceId, changes: Object.freeze(kept), reason: why,
+    });
+  },
+  withConsent: (sent: DateEditEnvelope, consent: string): DateEditEnvelope =>
+    Object.freeze({ ...sent, body: JSON.stringify({ attempt: sent.attempt, revision: sent.revision, changes: sent.changes, reason: sent.reason, consent }) }),
+  // Pinned to the credential the attempt belongs to; permit, onDispatch and signal as in core's RequestOptions.
+  send: (sent: DateEditEnvelope, pinned: Credential, gate: { permit: () => boolean; onDispatch: () => void; signal: AbortSignal }) =>
+    api<OccurrenceResponse>(sent.url, { method: "POST", json: sent.body, pinned, ...gate }),
 };
 
 // One date of an event: /events/:id/dates/:date, where :date is the
 // occurrence's original YYYY-MM-DD.
 export const Dates = {
-  get: (id: Id, date: string) => api<EventDateResponse>(path`/events/${id}/dates/${date}`),
+  get: (id: Id, date: string, pinned?: Credential) => api<EventDateRead>(path`/events/${id}/dates/${date}`, { pinned }),
   // Care options are deliberately absent: the date DTO cannot describe them.
   register: (id: Id, date: string, answer: { status: "going" | "maybe"; attendanceMode?: AttendanceMode; guestCount?: number }) =>
     api<DateRegistrationResponse>(path`/events/${id}/dates/${date}/registration`, { method: "PUT", body: answer }),

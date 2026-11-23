@@ -44,7 +44,7 @@ func TestLockedAccountTokenClaimRejectsRotatedHash(t *testing.T) {
 		return db.Transaction(func(tx *gorm.DB) error {
 			_, _, err := lockAndConsumeAccountToken(tx, models.TokenPasswordReset, raw)
 			return err
-		})
+		}, contactGateTx)
 	})
 	awaitDBSignal(t, reached)
 	// Model a token writer that rotated the row after this lookup. The guarded
@@ -278,7 +278,7 @@ func TestCurrentCredentialProofRejectsStaleEpochOrHash(t *testing.T) {
 			err := app.DB.Transaction(func(tx *gorm.DB) error {
 				_, err := lockCurrentCredentials(tx, expected)
 				return err
-			})
+			}, contactGateTx)
 			if !errors.Is(err, errSecuritySession) {
 				t.Fatalf("stale %s proof accepted: %v", changed, err)
 			}

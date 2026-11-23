@@ -253,7 +253,7 @@ func (a *App) toHouseholdPersonJSON(person *models.HouseholdPerson, links []mode
 		}
 	}
 	facts := householdFacts(person, links, batch.today)
-	if policy.CanSeeCareNotes(asPerson(viewer), facts, rel, nil, time.Now().UTC()) {
+	if policy.CanSeeCareNotes(asPerson(viewer), facts, rel, nil, batch.now) {
 		notes = &person.CareNotes
 	}
 	eligibility := policy.HouseholdRegistrationProblem(facts)
@@ -285,25 +285,31 @@ func (a *App) toHouseholdPersonJSON(person *models.HouseholdPerson, links []mode
 }
 
 func (a *App) toHouseholdJSON(household *models.Household, viewer *models.User) (householdJSON, error) {
+	return a.toHouseholdJSONIn(a.DB, household, viewer, time.Now().UTC())
+}
+
+// toHouseholdJSONIn is toHouseholdJSON read on db, with ages, care-note
+// windows and conversions decided at now.
+func (a *App) toHouseholdJSONIn(db *gorm.DB, household *models.Household, viewer *models.User, now time.Time) (householdJSON, error) {
 	out := householdJSON{
 		ID: household.ID, Name: household.Name, Address: household.Address,
 		CreatedBy: household.CreatedBy,
 		People:    []householdPersonJSON{}, Accounts: []householdAccountJSON{},
 	}
 	var people []models.HouseholdPerson
-	if err := a.DB.Where("household_id = ? AND converted_user_id IS NULL", household.ID).Order("id").Find(&people).Error; err != nil {
+	if err := db.Where("household_id = ? AND converted_user_id IS NULL", household.ID).Order("id").Find(&people).Error; err != nil {
 		return out, err
 	}
 	ids := make([]uint, 0, len(people))
 	for i := range people {
 		ids = append(ids, people[i].ID)
 	}
-	links, err := loadGuardianLinks(a.DB, ids)
+	links, err := loadGuardianLinks(db, ids)
 	if err != nil {
 		return out, err
 	}
 	var accounts []models.HouseholdAccount
-	if err := a.DB.Where("household_id = ?", household.ID).Order("id").Find(&accounts).Error; err != nil {
+	if err := db.Where("household_id = ?", household.ID).Order("id").Find(&accounts).Error; err != nil {
 		return out, err
 	}
 	var rel policy.HouseholdRel
@@ -312,13 +318,13 @@ func (a *App) toHouseholdJSON(household *models.Household, viewer *models.User) 
 			rel = householdRelOf(acct, true)
 		}
 	}
-	batch, err := a.loadConversionBatchFor(a.DB, viewer, rel, ids, links)
+	batch, err := a.loadConversionBatchAt(db, viewer, rel, ids, links, now)
 	if err != nil {
 		return out, err
 	}
 	var invitations []models.Invitation
 	if len(ids) > 0 {
-		if err := a.DB.Where("household_person_id IN ? AND accepted_at IS NULL AND revoked_at IS NULL", ids).Find(&invitations).Error; err != nil {
+		if err := db.Where("household_person_id IN ? AND accepted_at IS NULL AND revoked_at IS NULL", ids).Find(&invitations).Error; err != nil {
 			return out, err
 		}
 	}
@@ -328,7 +334,7 @@ func (a *App) toHouseholdJSON(household *models.Household, viewer *models.User) 
 	}
 	if len(ids) > 0 {
 		var requests []models.AccountRequest
-		if err := openConversionRequests(a.DB).Where("household_person_id IN ?", ids).Find(&requests).Error; err != nil {
+		if err := openConversionRequests(db).Where("household_person_id IN ?", ids).Find(&requests).Error; err != nil {
 			return out, err
 		}
 		for _, req := range requests {
@@ -356,7 +362,7 @@ func (a *App) toHouseholdJSON(household *models.Household, viewer *models.User) 
 	users := map[uint]models.User{}
 	if len(userIDs) > 0 {
 		var found []models.User
-		if err := a.DB.Where("id IN ?", userIDs).Find(&found).Error; err != nil {
+		if err := db.Where("id IN ?", userIDs).Find(&found).Error; err != nil {
 			return out, err
 		}
 		for _, u := range found {
@@ -422,29 +428,68 @@ func revokeGuardianLinks(tx *gorm.DB, c *gin.Context, actor uint, person *models
 // apiGetMyHousehold returns the user's household, or {household: null}
 // when they have none yet. It is read-only (Warden, PR 106): the household
 // is created by PUT /me/household or POST /me/household/people through
-// ensureHousehold.
+// ensureHousehold. The viewer, their seat, the policy check, the household
+// and everyone in it are read in one read-only Repeatable Read snapshot on
+// one clock, so a relation removed or a person erased during the read never
+// pairs with what it did not commit with; a seat that cannot be read is a
+// failure, never "no household". A participating request is acknowledged for
+// the viewer judged there, on a refusal once its rollback was confirmed
+// (decidingSnapshot).
 func (a *App) apiGetMyHousehold(c *gin.Context) {
-	u := apiUser(c)
-	acct, found := householdAccountIn(a.DB, u.ID)
-	if !found {
-		c.JSON(http.StatusOK, myHouseholdResponseJSON{})
-		return
+	var out myHouseholdResponseJSON
+	var judged sessionJudgment
+	err := decidingSnapshot(a.DB.WithContext(c.Request.Context()), func(tx *gorm.DB) error {
+		if a.hooks.readerBegin != nil {
+			a.hooks.readerBegin("my household")
+		}
+		now := a.now().UTC()
+		me, err := snapshotViewerIn(tx, apiUser(c))
+		if err != nil {
+			return err
+		}
+		if me == nil {
+			return errSecuritySession
+		}
+		judged.judge(me)
+		var acct models.HouseholdAccount
+		res := tx.Where("user_id = ?", me.ID).Limit(1).Find(&acct)
+		if res.Error != nil {
+			return res.Error
+		}
+		if a.hooks.readerAuthorized != nil {
+			a.hooks.readerAuthorized("my household")
+		}
+		if res.RowsAffected == 0 {
+			return nil
+		}
+		if !policy.CanManageHousehold(asPerson(me), householdRelOf(acct, true)) {
+			return errHouseholdForbidden
+		}
+		var household models.Household
+		if err := tx.First(&household, acct.HouseholdID).Error; err != nil {
+			return err
+		}
+		h, err := a.toHouseholdJSONIn(tx, &household, me, now)
+		if err != nil {
+			return err
+		}
+		out.Household = &h
+		if a.hooks.readerEnd != nil {
+			a.hooks.readerEnd("my household", tx)
+		}
+		return nil
+	})
+	if ackErr := a.acknowledgeDecision(c, judged, err == nil || decidedRefusal(err)); ackErr != nil {
+		err = ackErr
 	}
-	if !policy.CanManageHousehold(asPerson(u), householdRelOf(acct, true)) {
-		jsonError(c, http.StatusForbidden, "forbidden")
-		return
-	}
-	var household models.Household
-	if err := a.DB.First(&household, acct.HouseholdID).Error; err != nil {
-		jsonError(c, http.StatusInternalServerError, "could not load household")
-		return
-	}
-	out, err := a.toHouseholdJSON(&household, u)
-	if err != nil {
+	switch {
+	case err == nil:
+		c.JSON(http.StatusOK, out)
+	case isAPIError(err):
+		fail(c, err)
+	default:
 		jsonError(c, http.StatusInternalServerError, "could not load your household")
-		return
 	}
-	c.JSON(http.StatusOK, myHouseholdResponseJSON{Household: &out})
 }
 
 func (a *App) apiUpdateMyHousehold(c *gin.Context) {

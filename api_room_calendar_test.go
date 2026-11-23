@@ -3,12 +3,16 @@ package main
 import (
 	"encoding/json"
 	"net/http"
+	"net/http/httptest"
 	"sort"
 	"strings"
 	"testing"
 	"time"
 
 	"fold/models"
+
+	"github.com/gin-gonic/gin"
+	"gorm.io/gorm"
 )
 
 type roomCalendarFixture struct {
@@ -395,4 +399,56 @@ func TestRoomCalendarWindowInChurchTime(t *testing.T) {
 			t.Fatalf("%v should be refused", bad)
 		}
 	}
+}
+
+// TestRoomCalendarReadsTheSwitchInItsSnapshot: roomsOn turns the route away
+// while rooms are off, and the handler reads the switch again as the first
+// statement of the snapshot its bookings come from. So rooms turned off after
+// the route let a request through show nothing (the same 404), and a commit
+// right after that read ("room calendar") that turns rooms off and retitles a
+// booking's event is invisible to the request: it shows the earlier title.
+// A switch read before the snapshot began, or a Read Committed transaction,
+// would pair "on" with the later title.
+func TestRoomCalendarReadsTheSwitchInItsSnapshot(t *testing.T) {
+	const secret = "Retitled while rooms went off"
+	call := func(f roomCalendarFixture) *httptest.ResponseRecorder {
+		w := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(w)
+		c.Request = httptest.NewRequest(http.MethodGet, "/api/v1/calendar/rooms?view=week&date="+feedDate(f.startOn), nil)
+		c.Set("apiUser", f.memberUser)
+		f.app.apiRoomCalendar(c)
+		return w
+	}
+	t.Run("off past the route", func(t *testing.T) {
+		f := newRoomCalendarFixture(t)
+		if err := setSettingIn(f.app.DB, settingRoomsEnabled, "false"); err != nil {
+			t.Fatal(err)
+		}
+		if w := call(f); w.Code != http.StatusNotFound || strings.Contains(w.Body.String(), "Event A") {
+			t.Fatalf("rooms off, past the route: %d %s", w.Code, w.Body.String())
+		}
+	})
+	t.Run("off right after the switch is read", func(t *testing.T) {
+		f := newRoomCalendarFixture(t)
+		fired := atReaderSeam(f.app, "authorized", "room calendar", func() {
+			if err := f.app.DB.Transaction(func(tx *gorm.DB) error {
+				if err := setSettingIn(tx, settingRoomsEnabled, "false"); err != nil {
+					return err
+				}
+				return tx.Model(&models.Event{}).Where("title = ?", "Event A").Update("title", secret).Error
+			}); err != nil {
+				t.Error(err)
+			}
+		})
+		w := call(f)
+		if !fired.Load() {
+			t.Fatal("the room calendar never reached its seam")
+		}
+		if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), "Event A") || strings.Contains(w.Body.String(), secret) {
+			t.Fatalf("the switch's snapshot: %d %s", w.Code, w.Body.String())
+		}
+		if w := call(f); w.Code != http.StatusNotFound {
+			t.Fatalf("after rooms went off: %d %s", w.Code, w.Body.String())
+		}
+	})
 }

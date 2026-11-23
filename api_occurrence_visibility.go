@@ -6,6 +6,8 @@ import (
 	"net/http"
 
 	"fold/internal/audit"
+	"fold/internal/consent"
+	"fold/internal/events"
 	"fold/internal/policy"
 	"fold/models"
 	"github.com/gin-gonic/gin"
@@ -34,12 +36,24 @@ func dateEvent(ev *models.Event, occ *models.EventOccurrence) *models.Event {
 	return &copy
 }
 
+// canRegisterDateIn is canRegisterDateErrIn where a failed read can only say no.
 func (a *App) canRegisterDateIn(tx *gorm.DB, u *models.User, ev *models.Event, occurrenceID uint) bool {
+	ok, _ := a.canRegisterDateErrIn(tx, u, ev, occurrenceID)
+	return ok
+}
+
+// canRegisterDateErrIn is whether u may register for the scheduled date
+// occurrenceID of ev; a date that is not scheduled says no, and a failed read
+// is its error.
+func (a *App) canRegisterDateErrIn(tx *gorm.DB, u *models.User, ev *models.Event, occurrenceID uint) (bool, error) {
 	var occ models.EventOccurrence
-	if tx.Where("id = ? AND event_id = ? AND status = ?", occurrenceID, ev.ID, models.OccurrenceScheduled).First(&occ).Error != nil {
-		return false
+	if err := tx.Where("id = ? AND event_id = ? AND status = ?", occurrenceID, ev.ID, models.OccurrenceScheduled).First(&occ).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return false, nil
+		}
+		return false, err
 	}
-	return a.canRegisterDate(tx, u, ev, &occ)
+	return a.canRegisterErrIn(tx, u, dateEvent(ev, &occ))
 }
 
 func (a *App) canRegisterDate(tx *gorm.DB, u *models.User, ev *models.Event, occ *models.EventOccurrence) bool {
@@ -71,35 +85,18 @@ func parseDateVisibility(raw json.RawMessage) (*string, bool, error) {
 	return &value, true, nil
 }
 
-func impactHasLosers(impact visibilityImpactJSON) bool {
-	for _, row := range impact.Tightened {
-		if row.Registrants > 0 {
-			return true
-		}
-	}
-	return false
-}
-
-func dateImpactOf(tx *gorm.DB, ev *models.Event, occ *models.EventOccurrence, next string) (visibilityImpactJSON, error) {
-	impact := visibilityImpactJSON{Visibility: next, Tightened: []impactEventJSON{}, LeaderOpened: []impactEventJSON{}}
-	if policy.MoreOpen(policy.EffectiveVisibility(ev.Visibility, occ.VisibilityOverride), next) {
-		var count int64
-		if err := losersForDate(tx, ev, next, time.Now().UTC(), occ.ID).Count(&count).Error; err != nil {
-			return impact, err
-		}
-		impact.Tightened = append(impact.Tightened, impactEventJSON{ID: ev.ID, Title: ev.Title + " · " + models.FormatCalendarDate(occ.OriginalDate), Visibility: policy.EffectiveVisibility(ev.Visibility, occ.VisibilityOverride), Registrants: count})
-	}
-	return impact, nil
-}
-
-// Caller holds the contact gate, event and occurrence locks. Cancellation,
-// audit and stored notices share the same transaction as the date edit.
+// Caller holds the contact gate, event and occurrence locks, and ran
+// checkConsentIn earlier in the same transaction. Cancellation, audit and
+// stored notices share the same transaction as the date edit.
 //
 // group is the event's group as it will be once the surrounding change is
 // saved (a group edit passes its in-memory copy), or nil to read it. keep
 // records the date as deliberately kept open: it audits and notifies as an
-// override even though nothing changes.
-func (a *App) changeDateVisibility(tx *gorm.DB, actor *models.User, ip string, ev *models.Event, occ *models.EventOccurrence, group *models.Group, value *string, reason string, keep bool) error {
+// override even though nothing changes. c is the checked selection of the
+// date's losers (consent.Plan.Take): exactly those are cancelled when the date
+// becomes more private. The zero Checked cancels nobody (a kept date, or a
+// change with nobody to cancel).
+func (a *App) changeDateVisibilitySelected(tx *gorm.DB, actor *models.User, ip string, ev *models.Event, occ *models.EventOccurrence, group *models.Group, value *string, reason string, keep bool, c consent.Checked[dateLosers]) error {
 	old := occ.VisibilityOverride
 	if !keep && ((old == nil && value == nil) || (old != nil && value != nil && *old == *value)) {
 		return nil
@@ -129,7 +126,7 @@ func (a *App) changeDateVisibility(tx *gorm.DB, actor *models.User, ip string, e
 		return err
 	}
 	if policy.MoreOpen(before, after) && !keep {
-		if err := a.cancelDateLosers(tx, actor, ip, ev, after, time.Now().UTC(), occ.ID); err != nil {
+		if err := a.cancelSelectedLosers(tx, c, actor, ip, ev, after, occ.ID); err != nil {
 			return err
 		}
 	}
@@ -143,6 +140,12 @@ func (a *App) changeDateVisibility(tx *gorm.DB, actor *models.User, ip string, e
 	return nil
 }
 
+// apiDateVisibilityImpact previews a date's visibility change: GET
+// /events/:id/occurrences/:date/visibility-impact?visibility=...
+// [&startsLocal=...][&durationMinutes=...]. The optional times are the ones
+// the same save would set, so the count is the one the PUT asks consent for:
+// the date as it would be saved. The viewer, their authority and the count
+// are read in one snapshot.
 func (a *App) apiDateVisibilityImpact(c *gin.Context) {
 	ev, ok := a.loadManagedEvent(c)
 	if !ok {
@@ -153,43 +156,105 @@ func (a *App) apiDateVisibilityImpact(c *gin.Context) {
 		fail(c, errVisibilityNotAllowed)
 		return
 	}
-	var occ models.EventOccurrence
-	if !isCalendarDate(c.Param("date")) || a.DB.Where("event_id = ? AND original_date = ?", ev.ID, c.Param("date")).First(&occ).Error != nil {
+	var startsLocal *string
+	if raw, ok := c.GetQuery("startsLocal"); ok {
+		startsLocal = &raw
+	}
+	var duration *int
+	if raw, ok := c.GetQuery("durationMinutes"); ok {
+		n, err := strconv.Atoi(raw)
+		if err != nil || !events.ValidDuration(n) {
+			fail(c, errInvalidDuration)
+			return
+		}
+		duration = &n
+	}
+	date := c.Param("date")
+	if !isCalendarDate(date) {
 		jsonError(c, http.StatusNotFound, "event not found")
 		return
 	}
-	impact, err := dateImpactOf(a.DB, ev, &occ, policy.EffectiveVisibility(ev.Visibility, value))
-	if err != nil {
-		jsonError(c, http.StatusInternalServerError, "could not preview visibility")
-		return
-	}
-	c.JSON(http.StatusOK, impact)
-}
-
-func eventImpactOfReset(tx *gorm.DB, ev *models.Event, next string, reset bool) (visibilityImpactJSON, error) {
-	impact, err := eventImpactOf(tx, ev, next)
-	if err != nil {
-		return impact, err
-	}
-	var dates []models.EventOccurrence
-	if err := futureOverrides(tx, ev.ID).Find(&dates).Error; err != nil {
-		return impact, err
-	}
-	impact.FutureOverrides = int64(len(dates))
-	if reset {
-		for i := range dates {
-			date, err := dateImpactOf(tx, ev, &dates[i], next)
-			if err != nil {
-				return impact, err
-			}
-			impact.Tightened = append(impact.Tightened, date.Tightened...)
+	var impact visibilityImpactJSON
+	err = a.DB.Transaction(func(tx *gorm.DB) error {
+		me, err := snapshotViewerIn(tx, apiUser(c))
+		if err != nil {
+			return err
 		}
+		if me == nil {
+			return errSecuritySession
+		}
+		var current models.Event
+		if err := tx.First(&current, ev.ID).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return errEventNotFound
+			}
+			return err
+		}
+		f, err := eventFactsIn(tx, me, &current)
+		if err != nil {
+			return err
+		}
+		if !f.canSee(me) {
+			return errEventNotFound
+		}
+		if !f.canManage(me) {
+			return errCannotChangeEvent
+		}
+		if a.hooks.readerAuthorized != nil {
+			a.hooks.readerAuthorized("date visibility preview")
+		}
+		var occ models.EventOccurrence
+		if err := tx.Where("event_id = ? AND original_date = ?", current.ID, date).First(&occ).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return errEventNotFound
+			}
+			return err
+		}
+		start, end, err := previewDateTimes(&current, &occ, startsLocal, duration)
+		if err != nil {
+			return err
+		}
+		now := a.now().UTC()
+		// DEC-156: the save would refuse a later end on a kept date, so the
+		// preview answers that refusal instead of a question it can't save.
+		if end.After(occ.EndsAt) {
+			n, err := keptDatesPreviewIn(tx, &occ, now)
+			if err != nil {
+				return err
+			}
+			if n > 0 {
+				return keptDatesConflict{keptDatesConflictJSON{KeptDates: []keptDateCountJSON{{Date: models.FormatCalendarDate(occ.OriginalDate), KeptCount: n}}}}
+			}
+		}
+		before := policy.EffectiveVisibility(current.Visibility, occ.VisibilityOverride)
+		next := policy.EffectiveVisibility(current.Visibility, value)
+		var sel *dateLosers
+		if policy.MoreOpen(before, next) {
+			s, err := previewDateLosersAt(tx, &current, before, next, now, occ.ID, start)
+			if err != nil {
+				return err
+			}
+			sel = &s
+		}
+		b, h := dateImpactIn(me.ID, &current, &occ, before, next, sel)
+		impact = b.impact
+		impact.Consent, err = a.consentTokenIn(tx, h, b.entries)
+		return err
+	}, readSnapshot)
+	switch {
+	case isAPIError(err):
+		fail(c, err)
+	case err != nil:
+		jsonError(c, http.StatusInternalServerError, "could not preview visibility")
+	default:
+		c.JSON(http.StatusOK, impact)
 	}
-	return impact, nil
 }
 
-// Explicit dates are reviewed independently of their parent's opened marker.
-func openedDates(tx *gorm.DB, groupID uint, oldVis, next string) ([]models.EventOccurrence, map[uint]*models.Event, error) {
+// openedDatesAt is a group's future dates with their own visibility wider
+// than next, with their events: each is reviewed on its own, whatever its
+// event's opened marker.
+func openedDatesAt(tx *gorm.DB, now time.Time, groupID uint, oldVis, next string) ([]models.EventOccurrence, map[uint]*models.Event, error) {
 	evs := map[uint]*models.Event{}
 	if !policy.MoreOpen(oldVis, next) {
 		return nil, evs, nil
@@ -207,7 +272,7 @@ func openedDates(tx *gorm.DB, groupID uint, oldVis, next string) ([]models.Event
 		return nil, evs, nil
 	}
 	var dates []models.EventOccurrence
-	if err := futureOverrides(tx, ids...).Order("id").Find(&dates).Error; err != nil {
+	if err := futureOverridesAt(tx, now, ids...).Order("id").Find(&dates).Error; err != nil {
 		return nil, nil, err
 	}
 	out := []models.EventOccurrence{}
@@ -217,11 +282,6 @@ func openedDates(tx *gorm.DB, groupID uint, oldVis, next string) ([]models.Event
 		}
 	}
 	return out, evs, nil
-}
-
-func futureOverrides(tx *gorm.DB, eventIDs ...uint) *gorm.DB {
-	return tx.Model(&models.EventOccurrence{}).
-		Where("event_id IN ? AND starts_at > ? AND visibility_override IS NOT NULL", eventIDs, time.Now().UTC())
 }
 
 func dateDecisionKey(id uint) string { return "date:" + idString(id) }

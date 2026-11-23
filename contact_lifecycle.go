@@ -27,26 +27,76 @@ import (
 // through audit, task resolution and commit (including reveal). This preserves
 // both group-first membership and user-first deletion/consent lock prefixes.
 
+// A transaction that takes the gate begins at Read Committed (contactGateTx,
+// or contactMutationOn's own Begin), whatever the role's or database's
+// default: every statement after the gate must see what committed while it
+// waited. Under Repeatable Read the snapshot would be fixed by the gate's own
+// statement, before the wait, and a demotion the previous holder committed
+// would be invisible. The gate reads the level in its own statement and
+// refuses any other, so an owner that forgot the pin fails closed rather than
+// acting on stale authority.
 func lockContacts(tx *gorm.DB) error {
-	return tx.Exec("SELECT pg_advisory_xact_lock(?)", contactLockID).Error
+	_, err := takeContactGate(tx, "pg_advisory_xact_lock")
+	return err
 }
+
+// contactGateTx begins a transaction that takes the contact gate
+// (lockContacts). BEGIN carries the level, so a pooler that drops startup
+// parameters cannot change it.
+var contactGateTx = &sql.TxOptions{Isolation: sql.LevelReadCommitted}
 
 // lockContactsShared is the gate for pure reads: readers run together and wait
 // only for writers, who take the exclusive lock above on the same id. Use it
 // only where nothing but append-only rows (such as a refusal audit) is written.
 func lockContactsShared(tx *gorm.DB) error {
-	return tx.Exec("SELECT pg_advisory_xact_lock_shared(?)", contactLockID).Error
+	_, err := takeContactGate(tx, "pg_advisory_xact_lock_shared")
+	return err
+}
+
+// tryLockContacts takes the exclusive gate only if it is free (the daily
+// sweep, which skips a turn rather than queue behind a writer).
+func tryLockContacts(tx *gorm.DB) (bool, error) {
+	return takeContactGate(tx, "pg_try_advisory_xact_lock")
+}
+
+// takeContactGate is every form of the gate. The statement starts with the
+// lock function's name (tests find a waiter on the gate by that text in
+// pg_stat_activity) and reads the transaction's level in the same statement,
+// refusing any but Read Committed.
+func takeContactGate(tx *gorm.DB, fn string) (bool, error) {
+	var gate struct{ Lock, Level string }
+	if err := tx.Raw("SELECT "+fn+"(?)::text AS lock, current_setting('transaction_isolation') AS level", contactLockID).
+		Scan(&gate).Error; err != nil {
+		return false, err
+	}
+	if gate.Level != "read committed" {
+		return false, fmt.Errorf("contact gate taken at %s; its transaction must begin with contactGateTx", gate.Level)
+	}
+	return gate.Lock != "false", nil
 }
 
 type contactChange struct {
 	UserID  uint
 	EventID uint
 	GroupID uint
+	// SingleDate marks a single-date edit; only singleDateMutation sets it.
+	// fn holds the event and that one date, runs the date's own "before"
+	// access pass under them on a clock read after its grant rows are locked,
+	// and fills SingleDate in once it saved the date. The wrapper then runs no
+	// event-wide access pass, before or after: those lock every live grant
+	// row of the event, and a household or RSVP writer holding a sibling date
+	// while it promotes one of them closes a cycle. The tail of
+	// reconcileContacts runs the date's "after" pass and the clock fence
+	// (closeSingleDate). Only for a writer of one date that changes no event
+	// row and cancels no date: the cancellation proof in the M8.1 brief relies
+	// on cancellers running the event-wide after pass. A pointer, so
+	// contactChange stays comparable.
+	SingleDate *singleDate
 	// Seal, when set, runs after reconcileContacts and immediately before the
 	// commit-reserve check (T07B-1b, R5-C01). It is a pointer so contactChange
-	// stays comparable; reconcileContacts reads only the three ids above. Only
-	// fencedContactMutation sets it (from its callback's result); a nil Seal
-	// sends no extra statement.
+	// stays comparable; reconcileContacts reads only the three ids and
+	// SingleDate. Only fencedContactMutation sets it (from its callback's
+	// result); a nil Seal sends no extra statement.
 	Seal *contactSeal
 }
 
@@ -261,7 +311,12 @@ func (a *App) contactMutationOn(ctx context.Context, db *gorm.DB, change contact
 		// contactMutationCtx passes a WithContext clone, so this binds only it.
 		db.Statement.ConnPool = conn
 	}
-	tx := db.Begin()
+	// Read Committed whatever the role's or database's default: after the
+	// contact gate every statement must see what committed while this one
+	// waited for it (a Repeatable Read default would fix the snapshot before
+	// the wait). BEGIN carries the level, so a pooler that drops startup
+	// parameters cannot change it.
+	tx := db.Begin(&sql.TxOptions{Isolation: sql.LevelReadCommitted})
 	if tx.Error != nil {
 		return tx.Error
 	}
@@ -554,21 +609,24 @@ func (a *App) reconcileContacts(tx *gorm.DB, now time.Time, change contactChange
 			}
 		}
 	}
+	if change.SingleDate != nil {
+		return a.closeSingleDate(tx, change.SingleDate)
+	}
 	// The "after" run of the pair reconcileAccessesBefore describes.
 	return a.reconcileOccurrenceAccesses(tx, now, change)
 }
 
 func (a *App) sweepContacts(ctx context.Context, now time.Time) error {
 	return a.DB.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		var locked bool
-		if err := tx.Raw("SELECT pg_try_advisory_xact_lock(?)", contactLockID).Scan(&locked).Error; err != nil {
+		locked, err := tryLockContacts(tx)
+		if err != nil {
 			return err
 		}
 		if !locked {
 			return nil
 		}
 		return a.reconcileContacts(tx, now, contactChange{})
-	})
+	}, contactGateTx)
 }
 
 // addRequestPolicy is deliberately separate from contactScope: an ask never

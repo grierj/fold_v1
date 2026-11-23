@@ -291,7 +291,7 @@ func (a *App) decideGuardianLink(c *gin.Context, confirm bool) {
 		}
 		return audit.Write(tx, audit.Entry{Actor: &me.ID, Action: auditAction,
 			TargetType: "guardian_link", TargetID: link.ID, Meta: meta, IP: c.ClientIP()})
-	})
+	}, contactGateTx)
 	if a.answerAlreadyHandled(c, err, notify.HouseholdLinkPending, link.ID) {
 		return
 	}
