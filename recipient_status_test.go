@@ -9,6 +9,7 @@ import (
 	"gorm.io/gorm"
 
 	"fold/internal/policy"
+	"fold/internal/testdb"
 	"fold/models"
 )
 
@@ -253,5 +254,64 @@ func TestMoveRecipientRefusesWhatTheRuleDoesNotHold(t *testing.T) {
 	}
 	if n != int64(len(rows)) {
 		t.Fatalf("%d of %d rows are still queued", n, len(rows))
+	}
+}
+
+// A send's own outcome is written on the plain handle, where a gorm write is
+// its own transaction: the push recorder keeps that, so a COMMIT the server
+// never confirms is the recorder's error. After a device miss the recorder is
+// handed that step's transaction and writes inside it, with no COMMIT of its
+// own.
+func TestPushRecorderKeepsItsTransactionBoundary(t *testing.T) {
+	app := testApp(t)
+	people := recipientTestPeople(t, app, 2)
+	m := models.Message{Status: models.MessageSending, Category: models.MessageCategoryAnnouncement, Subject: "push"}
+	if err := app.DB.Create(&m).Error; err != nil {
+		t.Fatal(err)
+	}
+	rows := make([]models.MessageRecipient, len(people))
+	for i, id := range people {
+		rows[i] = models.MessageRecipient{MessageID: m.ID, UserID: id, Channel: models.DeliveryPush, Status: models.RecipientQueued}
+		if err := app.DB.Create(&rows[i]).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+	var name string
+	if err := app.DB.Raw("SELECT current_database()").Scan(&name).Error; err != nil {
+		t.Fatal(err)
+	}
+	proxy := testdb.NewProxy(t)
+	db, err := proxy.Open(name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	commits := func() int { return len(proxy.Find(testdb.KindCommit, "")) }
+
+	before := commits()
+	if err := messagePushRecorder(rows[0].ID)(db, models.RecipientSent, "", time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if got := commits() - before; got != 1 {
+		t.Errorf("a send's own outcome committed %d times, want its own transaction", got)
+	}
+	if r := recipientRowOf(t, app, rows[0].ID); r.Status != models.RecipientSent {
+		t.Fatalf("the row is %s", r.Status)
+	}
+
+	before = commits()
+	err = db.Transaction(func(tx *gorm.DB) error {
+		if err := messagePushRecorder(rows[1].ID)(tx, models.RecipientSuppressed, pushWhyGone, time.Now()); err != nil {
+			return err
+		}
+		if got := commits() - before; got != 0 {
+			t.Errorf("inside a transaction the recorder committed %d times", got)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r := recipientRowOf(t, app, rows[1].ID); r.Status != models.RecipientSuppressed {
+		t.Fatalf("the row is %s", r.Status)
 	}
 }

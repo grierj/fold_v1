@@ -19,11 +19,12 @@ const (
 var recipientStatuses = []string{RecipientQueued, RecipientSuppressed, RecipientDeferred, RecipientSent,
 	RecipientDelivered, RecipientBounced, RecipientComplained, RecipientFailed}
 
-// The channels whose rows move. The column's CHECK also allows sms, which
-// nothing writes (SMS is not built).
+// The channels of the column's CHECK. Nothing writes an sms row (SMS is not
+// built); only the erasure, which names no channel, would move one.
 const (
 	RecipientChannelEmail = "email"
 	RecipientChannelPush  = "push"
+	RecipientChannelSMS   = "sms"
 )
 
 // RecipientMove is one way a message recipient row's status changes, named by
@@ -66,6 +67,7 @@ var (
 	emailOnly = []string{RecipientChannelEmail}
 	pushOnly  = []string{RecipientChannelPush}
 	bothKinds = []string{RecipientChannelEmail, RecipientChannelPush}
+	everyKind = []string{RecipientChannelEmail, RecipientChannelPush, RecipientChannelSMS}
 )
 
 // Recorded as built, odd moves included: a provider's bounce or complaint
@@ -73,8 +75,8 @@ var (
 // outcome (another device's miss, or a status no push row holds); a push row
 // that missed on one device goes back to queued when another device's job
 // waits for quiet hours, which the caller allows only for a device miss of a
-// person still active; and erasing a person suppresses their queued rows of
-// both channels.
+// person still active; and erasing a person suppresses their queued rows on
+// every channel, since its statement names none.
 var recipientRules = map[RecipientMove]recipientRule{
 	RecipientSnapshotQueued:   {channels: bothKinds, to: RecipientQueued},
 	RecipientSnapshotSkipped:  {channels: bothKinds, to: RecipientSuppressed},
@@ -94,7 +96,7 @@ var recipientRules = map[RecipientMove]recipientRule{
 	RecipientPushFailed:       {channels: pushOnly, from: []string{RecipientQueued}, to: RecipientFailed},
 	RecipientPushWaits:        {channels: pushOnly, from: []string{RecipientQueued, RecipientSuppressed, RecipientFailed}, to: RecipientQueued},
 	RecipientPushReaped:       {channels: pushOnly, from: []string{RecipientQueued}, to: RecipientSuppressed},
-	RecipientEraseRecipient:   {channels: bothKinds, from: []string{RecipientQueued}, to: RecipientSuppressed},
+	RecipientEraseRecipient:   {channels: everyKind, from: []string{RecipientQueued}, to: RecipientSuppressed},
 }
 
 func allRecipientStatusesBut(s string) []string {

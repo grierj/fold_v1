@@ -165,8 +165,13 @@ func messagePushRecorder(id uint) pushRecorder {
 		if move.To() == models.RecipientSent {
 			fields["sent_at"] = now.UTC()
 		}
-		_, err := moveRecipient(db, id, move, fields, "")
-		return err
+		// db is a transaction after a device miss and the plain handle for a
+		// send's own outcome; the write is its own transaction there, as a
+		// gorm write is, so a failed COMMIT is this call's error.
+		return inDefaultTransaction(db, func(tx *gorm.DB) error {
+			_, err := moveRecipient(tx, id, move, fields, "")
+			return err
+		})
 	}
 }
 

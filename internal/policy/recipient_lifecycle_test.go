@@ -6,7 +6,7 @@ import (
 	"testing"
 )
 
-var recipientChannels = []string{RecipientChannelEmail, RecipientChannelPush, "sms"}
+var recipientChannels = []string{RecipientChannelEmail, RecipientChannelPush, RecipientChannelSMS}
 
 // TestRecipientMoves pins every (move, channel, from) triple: the status each
 // move ends in from each status on each channel, or "" where it may not
@@ -41,7 +41,7 @@ func TestRecipientMoves(t *testing.T) {
 		RecipientPushFailed:       push(map[string]string{q: fa}),
 		RecipientPushWaits:        push(map[string]string{q: q, su: q, fa: q}),
 		RecipientPushReaped:       push(map[string]string{q: su}),
-		RecipientEraseRecipient:   {RecipientChannelEmail: {q: su}, RecipientChannelPush: {q: su}},
+		RecipientEraseRecipient:   {RecipientChannelEmail: {q: su}, RecipientChannelPush: {q: su}, RecipientChannelSMS: {q: su}},
 	}
 	moves := RecipientMoves()
 	if len(moves) != len(want) {
@@ -72,9 +72,13 @@ func TestRecipientMoveChannels(t *testing.T) {
 	for _, m := range RecipientMoves() {
 		got := m.Channels()
 		switch m {
-		case RecipientSnapshotQueued, RecipientSnapshotSkipped, RecipientEraseRecipient:
+		case RecipientSnapshotQueued, RecipientSnapshotSkipped:
 			if !reflect.DeepEqual(got, both) {
 				t.Errorf("%q moves %v, want both channels", m, got)
+			}
+		case RecipientEraseRecipient:
+			if !reflect.DeepEqual(got, recipientChannels) {
+				t.Errorf("%q moves %v, want every channel", m, got)
 			}
 		default:
 			if len(got) != 1 {

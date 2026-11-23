@@ -98,3 +98,15 @@ func recipientMoveFrom(move policy.RecipientMove, fields map[string]any) (from, 
 	channels, err = list(move.Channels())
 	return from, channels, err
 }
+
+// inDefaultTransaction runs fn as a gorm write on db runs: inside the
+// transaction db is already in, or in one of its own when db is in none
+// (gorm's default transaction). moveRecipientsWhere is a raw statement, which
+// gorm does not wrap.
+func inDefaultTransaction(db *gorm.DB, fn func(tx *gorm.DB) error) error {
+	switch db.Statement.ConnPool.(type) {
+	case gorm.TxBeginner, gorm.ConnPoolBeginner:
+		return db.Transaction(fn)
+	}
+	return fn(db)
+}
