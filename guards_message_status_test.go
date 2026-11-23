@@ -26,8 +26,9 @@ import (
 // Model(<message value>) or Table("messages"), or a name assigned one. On a
 // messages chain the guard reports Update or UpdateColumn of "status" or of a
 // column it cannot read, and every Updates or UpdateColumns except of a map
-// it can read whole: a map literal, or a local map the function makes, whose
-// keys are all string literals other than status. So a message struct, any
+// it can read whole: a map literal, or a local map the function makes and
+// hands to no other call, whose keys are all plain column names in string
+// literals, none of them status. So a message struct, any
 // other struct, a parameter's map, a map with a computed key and a map built
 // elsewhere are all reported, whatever Select precedes them. "Status", the
 // field's name, counts as the column, as gorm resolves it. Anywhere it reports a
@@ -37,9 +38,7 @@ import (
 // list runs to the end of its literal (the rest is built at run time).
 //
 // It does not see a message reached through a struct field, an interface or
-// a result of a function the scanned tree does not declare; a map key that
-// is a string literal holding a quoted identifier (moveMessage refuses every
-// column but the ones it names, so the writer cannot be used for it); a package that
+// a result of a function the scanned tree does not declare; a package that
 // imports models under another name; an upsert's DoUpdates; gorm calls in a
 // function literal at package level (there it reads only raw SQL); or SQL
 // assembled without the "UPDATE messages SET" or "INSERT INTO messages"
@@ -57,9 +56,10 @@ var messageStatusWriterCensus = []string{
 }
 
 var (
-	messageUpdateRe     = regexp.MustCompile(`(?is)\bUPDATE\s+(?:ONLY\s+)?(?:public\.)?"?messages"?(?:\s+(?:AS\s+)?\w+)?\s+SET\b(.*?)(\bWHERE\b|\bFROM\b|\bRETURNING\b|;|$)`)
-	messageInsertRe     = regexp.MustCompile(`(?is)\bINSERT\s+INTO\s+(?:public\.)?"?messages"?(?:\s|\(|$)`)
-	messageSetsStatusRe = regexp.MustCompile(`(?i)(?:^|[\s,."])status"?\s*=`)
+	messageUpdateRe      = regexp.MustCompile(`(?is)\bUPDATE\s+(?:ONLY\s+)?(?:public\.)?"?messages"?(?:\s+(?:AS\s+)?\w+)?\s+SET\b(.*?)(\bWHERE\b|\bFROM\b|\bRETURNING\b|;|$)`)
+	messageInsertRe      = regexp.MustCompile(`(?is)\bINSERT\s+INTO\s+(?:public\.)?"?messages"?(?:\s|\(|$)`)
+	messagePlainColumnRe = regexp.MustCompile(`^[a-z_][a-z0-9_]*$`)
+	messageSetsStatusRe  = regexp.MustCompile(`(?i)(?:^|[\s,."])status"?\s*=`)
 )
 
 type messageStatusWrite struct{ at, fn, shape string }
@@ -235,6 +235,9 @@ func messageMapLit(e ast.Expr) (status, computed bool) {
 			computed = true
 		} else if messageStatusKey(s) {
 			status = true
+		} else if !messagePlainColumnRe.MatchString(s) {
+			// A quoted identifier or an expression: gorm writes it as given.
+			computed = true
 		}
 	}
 	return status, computed
@@ -278,6 +281,20 @@ func messageLocalMaps(fd *ast.FuncDecl) (status, computed, made, params map[stri
 		switch v := n.(type) {
 		case *ast.FuncLit:
 			addParams(v.Type.Params)
+		case *ast.CallExpr:
+			// A map handed to another call (maps.Copy, a helper) may come back
+			// with keys the guard did not see.
+			if sel, ok := guardkit.Unparen(v.Fun).(*ast.SelectorExpr); ok && (sel.Sel.Name == "Updates" || sel.Sel.Name == "UpdateColumns") {
+				return true
+			}
+			for _, arg := range v.Args {
+				if u, ok := guardkit.Unparen(arg).(*ast.UnaryExpr); ok && u.Op == token.AND {
+					arg = u.X
+				}
+				if id, ok := guardkit.Unparen(arg).(*ast.Ident); ok {
+					computed[id.Name] = true
+				}
+			}
 		case *ast.ValueSpec:
 			for i, name := range v.Names {
 				if i < len(v.Values) {
@@ -311,6 +328,8 @@ func messageLocalMaps(fd *ast.FuncDecl) (status, computed, made, params map[stri
 						computed[x.Name] = true
 					} else if messageStatusKey(s) {
 						status[x.Name] = true
+					} else if !messagePlainColumnRe.MatchString(s) {
+						computed[x.Name] = true
 					}
 				}
 			}
@@ -563,6 +582,16 @@ func (a *App) send(tx *gorm.DB) error {
 func (a *App) send(tx *gorm.DB, m *models.Message) error {
 	return tx.Model(m).Select("Status").Updates(struct{ Status string }{"sent"}).Error
 }`, "send: Updates of a value it cannot read"},
+		{"a local map filled by another call", `package main
+func (a *App) send(tx *gorm.DB, m *models.Message, cols map[string]any) error {
+	fields := map[string]any{"error": ""}
+	maps.Copy(fields, cols)
+	return tx.Model(m).Updates(fields).Error
+}`, "send: Updates of a map with computed keys"},
+		{"a quoted identifier as the key", `package main
+func (a *App) send(tx *gorm.DB, m *models.Message) error {
+	return tx.Model(m).Updates(map[string]any{"\"status\"": "sent"}).Error
+}`, "send: Updates of a map with computed keys"},
 		{"a map built elsewhere", `package main
 func (a *App) send(tx *gorm.DB, m *models.Message) error {
 	cols := sentColumns()
