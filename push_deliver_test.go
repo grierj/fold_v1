@@ -19,12 +19,14 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"fold/internal/jobs"
 	"fold/internal/notify"
 	"fold/internal/push"
+	"fold/internal/testdb"
 	"fold/models"
 
 	"gorm.io/gorm"
@@ -41,12 +43,18 @@ type fakePush struct {
 	headers []http.Header
 	// bodies is each path's last encrypted body (pushPayload decrypts it).
 	bodies map[string][]byte
+	// onSend, set before any send, runs while the push service holds a
+	// request: a test commits a change there, between dispatch and outcome.
+	onSend func(path string)
 }
 
 func (f *fakePush) RoundTrip(r *http.Request) (*http.Response, error) {
 	var body []byte
 	if r.Body != nil {
 		body, _ = io.ReadAll(r.Body)
+	}
+	if f.onSend != nil {
+		f.onSend(r.URL.Path)
 	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -365,6 +373,59 @@ func TestPushDeliverGoneDeletesTheDevice(t *testing.T) {
 	runPushJobs(t, app, n, old, phone)
 	if status, _ := pushDelivery(t, app, n); status != models.DeliverySent || deviceExists(app, old.ID) || !deviceExists(app, phone.ID) {
 		t.Fatalf("delivery %q", status)
+	}
+}
+
+// TestPushNoticeGoneWaitsOnlyForARealJob: a notice's push to a device that is
+// gone leaves its delivery to another device only while that device's job is
+// still to run, and that job still delivers it, with no job added; a device
+// saved after the notice's jobs were queued has none, so the delivery is
+// "device gone" at once.
+func TestPushNoticeGoneWaitsOnlyForARealJob(t *testing.T) {
+	for _, sibling := range []string{"job queued", "no job"} {
+		t.Run(sibling, func(t *testing.T) {
+			app, f := pushTestApp(t)
+			u := pushMember(t, app, "pat")
+			old := newPushDevice(t, app, u, "old")
+			var phone testDevice
+			if sibling == "job queued" {
+				phone = newPushDevice(t, app, u, "phone")
+			}
+			id := sendNotice(t, app, notify.GroupApproved, u)
+			var n models.Notification
+			gormMust(t, app.DB.First(&n, id))
+			gormMust(t, app.DB.Model(&models.Job{}).Where("kind = ?", kindPushDeliver).Delete(&models.Job{}))
+			if err := app.DB.Transaction(func(tx *gorm.DB) error { return queuePushFor(tx, &n) }); err != nil {
+				t.Fatal(err)
+			}
+			if sibling == "no job" {
+				phone = newPushDevice(t, app, u, "phone")
+			}
+			jobsBefore := pushJobCount(t, app)
+			f.set(old.path, http.StatusGone)
+			if err := app.deliverPush(context.Background(), pushJob{NotificationID: id, DeviceID: old.ID}); err != nil {
+				t.Fatal(err)
+			}
+			if deviceExists(app, old.ID) {
+				t.Fatal("the gone device is still there")
+			}
+			status, reason := pushDelivery(t, app, id)
+			if sibling == "no job" {
+				if status != models.DeliverySuppressed || reason != pushWhyGone || f.count(phone.path) != 0 {
+					t.Fatalf("with a device that has no job: delivery %q %q, sends %v", status, reason, f.sent)
+				}
+				return
+			}
+			if status != "" {
+				t.Fatalf("with the phone's job still to run: delivery %q %q; want none yet", status, reason)
+			}
+			if err := app.deliverPush(context.Background(), pushJob{NotificationID: id, DeviceID: phone.ID}); err != nil {
+				t.Fatal(err)
+			}
+			if status, _ := pushDelivery(t, app, id); status != models.DeliverySent || f.count(phone.path) != 1 || pushJobCount(t, app) != jobsBefore {
+				t.Fatalf("the phone's job: delivery %q, sends %v, jobs %d then %d", status, f.sent, jobsBefore, pushJobCount(t, app))
+			}
+		})
 	}
 }
 
@@ -1071,13 +1132,12 @@ func TestWaitingPushRechecksInTheMorning(t *testing.T) {
 	if f.total() != 0 {
 		t.Fatalf("sends %v", f.sent)
 	}
-	for id, want := range map[uint]string{nOff: pushWhyNotOn, nRead: pushWhyRead, nArchived: pushWhyStale, nExpired: pushWhyStale} {
+	// A device gone overnight, with no other device to take it, settles its
+	// notice's push as "device gone".
+	for id, want := range map[uint]string{nOff: pushWhyNotOn, nGone: pushWhyGone, nRead: pushWhyRead, nArchived: pushWhyStale, nExpired: pushWhyStale} {
 		if status, reason := pushDelivery(t, app, id); status != models.DeliverySuppressed || reason != want {
 			t.Errorf("notification %d: %q %q, want suppressed %q", id, status, reason, want)
 		}
-	}
-	if status, _ := pushDelivery(t, app, nGone); status != "" {
-		t.Errorf("a device gone overnight: %q", status)
 	}
 	var notDone int64
 	app.DB.Model(&models.Job{}).Where("kind = ? AND status <> ?", kindPushDeliver, models.JobDone).Count(&notDone)
@@ -1366,4 +1426,981 @@ func TestNoticeDevicesOffRunsInOneTransaction(t *testing.T) {
 			t.Fatalf("the erasure left %d notices", n)
 		}
 	})
+}
+
+// TestPushOutcomeLeavesAChangedDeviceAlone: an announcement push's outcome is
+// written only to the device as it was dispatched (row, owner and keys). While
+// the push service holds the request, the shared browser is rebound to another
+// account, or its owner renews the subscription with new keys, and commits.
+// "Gone" must not delete the changed device, a refusal must not mark it
+// failed, and a delivery must not clear its failure; the old attempt's row
+// still gets its own outcome. A Gone answer about a changed device retries,
+// so a renewed subscription gets the push and a rebound one is decided as a
+// moved device; about a device already deleted meanwhile, it is "device gone"
+// at once. "rebind back" hands the browser to the next holder and back to its
+// owner through the real subscribe route before the answer comes: row, owner
+// and keys match the dispatch again, but it is a new binding, so the stale
+// answer still changes nothing and the retry goes to the owner's binding now.
+// "renew back" is the same for one owner: the route saves new keys and then
+// the old pair again. "same clock" is "rebind back" with created_at set back
+// to its value at dispatch, so only the binding generation tells them apart.
+func TestPushOutcomeLeavesAChangedDeviceAlone(t *testing.T) {
+	type outcome struct {
+		code   int
+		change string
+	}
+	for _, tc := range []outcome{
+		{http.StatusGone, "rebind"}, {http.StatusGone, "renew"}, {http.StatusGone, "remove"}, {http.StatusGone, "rebind back"},
+		{http.StatusGone, "renew back"}, {http.StatusGone, "same clock"}, {http.StatusGone, "saved again"},
+		{http.StatusBadRequest, "rebind"}, {http.StatusBadRequest, "rebind back"}, {http.StatusBadRequest, "renew back"},
+		{http.StatusBadRequest, "same clock"}, {http.StatusCreated, "rebind"},
+	} {
+		t.Run(fmt.Sprintf("%d after %s", tc.code, tc.change), func(t *testing.T) {
+			app, fp := pushTestApp(t)
+			u := pushMember(t, app, "owner")
+			other := pushMember(t, app, "nextholder")
+			dev := newPushDevice(t, app, u, "shared")
+			ownerC, otherC := loginAPI(t, app, u.Name, "password123456"), loginAPI(t, app, other.Name, "password123456")
+			var stored models.PushSubscription
+			gormMust(t, app.DB.First(&stored, dev.ID))
+			failedAt := time.Now().UTC().Add(-time.Hour).Truncate(time.Second)
+			if tc.code == http.StatusCreated {
+				gormMust(t, app.DB.Model(&models.PushSubscription{}).Where("id = ?", dev.ID).UpdateColumn("failed_at", failedAt))
+			}
+			now := time.Now().UTC()
+			m := models.Message{Status: models.MessageSending, Category: models.MessageCategoryAnnouncement, Subject: "News",
+				BodyHTML: "<p>Hello</p>", BodyText: "Hello", Audience: `{"type":"group","groupId":1}`, ScheduledAt: &now}
+			gormMust(t, app.DB.Create(&m))
+			row := models.MessageRecipient{MessageID: m.ID, UserID: u.ID, Channel: models.DeliveryPush, Status: models.RecipientQueued}
+			gormMust(t, app.DB.Create(&row))
+			newKey, err := ecdh.P256().GenerateKey(rand.Reader)
+			if err != nil {
+				t.Fatal(err)
+			}
+			newAuth := make([]byte, 16)
+			_, _ = rand.Read(newAuth)
+			renewedKey, renewedAuth := base64.RawURLEncoding.EncodeToString(newKey.PublicKey().Bytes()), base64.RawURLEncoding.EncodeToString(newAuth)
+			var changed atomic.Bool
+			fp.onSend = func(string) {
+				if !changed.CompareAndSwap(false, true) {
+					return
+				}
+				if tc.change == "remove" {
+					if err := app.DB.Delete(&models.PushSubscription{}, dev.ID).Error; err != nil {
+						t.Error(err)
+					}
+					return
+				}
+				if tc.change == "rebind back" || tc.change == "same clock" {
+					sub := browserSub{Endpoint: dev.Endpoint, Keys: map[string]string{"p256dh": dev.P256dh, "auth": dev.Auth}}
+					for _, c := range []*apiClient{otherC, ownerC} {
+						if w := c.do("PUT", "/api/v1/push/subscriptions", sub, true); w.Code != http.StatusOK {
+							t.Errorf("rebinding the browser: %d %s", w.Code, w.Body.String())
+						}
+					}
+					if tc.change == "same clock" {
+						if err := app.DB.Model(&models.PushSubscription{}).Where("id = ?", dev.ID).UpdateColumn("created_at", stored.CreatedAt).Error; err != nil {
+							t.Error(err)
+						}
+					}
+					return
+				}
+				if tc.change == "saved again" {
+					// The owner's own browser saves the same subscription: the
+					// same binding, so the answer about it still counts.
+					sub := browserSub{Endpoint: dev.Endpoint, Keys: map[string]string{"p256dh": dev.P256dh, "auth": dev.Auth}}
+					if w := ownerC.do("PUT", "/api/v1/push/subscriptions", sub, true); w.Code != http.StatusOK {
+						t.Errorf("saving the subscription again: %d %s", w.Code, w.Body.String())
+					}
+					return
+				}
+				if tc.change == "renew back" {
+					for _, keys := range []map[string]string{{"p256dh": renewedKey, "auth": renewedAuth}, {"p256dh": dev.P256dh, "auth": dev.Auth}} {
+						if w := ownerC.do("PUT", "/api/v1/push/subscriptions", browserSub{Endpoint: dev.Endpoint, Keys: keys}, true); w.Code != http.StatusOK {
+							t.Errorf("renewing the subscription: %d %s", w.Code, w.Body.String())
+						}
+					}
+					return
+				}
+				set := map[string]any{"user_id": other.ID}
+				if tc.change == "renew" {
+					set = map[string]any{"p256dh": renewedKey, "auth": renewedAuth}
+				}
+				if err := app.DB.Model(&models.PushSubscription{}).Where("id = ?", dev.ID).UpdateColumns(set).Error; err != nil {
+					t.Error(err)
+				}
+			}
+			fp.set(dev.path, tc.code)
+			err = app.deliverMessagePush(context.Background(), row.ID, dev.ID, 0)
+			if tc.change == "saved again" {
+				gormMust(t, app.DB.First(&row, row.ID))
+				if err != nil || deviceExists(app, dev.ID) || row.Status != models.RecipientSuppressed || row.Reason != pushWhyGone {
+					t.Fatalf("Gone about a device only saved again: err %v, device kept %v, row %+v; want it deleted and device gone", err, deviceExists(app, dev.ID), row)
+				}
+				return
+			}
+			if tc.change == "remove" {
+				gormMust(t, app.DB.First(&row, row.ID))
+				if err != nil || row.Status != models.RecipientSuppressed || row.Reason != pushWhyGone {
+					t.Fatalf("Gone about a device deleted meanwhile: err %v, row %+v; want device gone at once", err, row)
+				}
+				return
+			}
+			var after models.PushSubscription
+			if res := app.DB.Where("id = ?", dev.ID).Limit(1).Find(&after); res.Error != nil || res.RowsAffected != 1 {
+				t.Fatalf("the changed device is gone after the old attempt's %d (%v)", tc.code, res.Error)
+			}
+			gormMust(t, app.DB.First(&row, row.ID))
+			switch tc.code {
+			case http.StatusGone:
+				if err == nil || row.Status != models.RecipientQueued {
+					t.Fatalf("Gone about a changed device: err %v, row %+v; want a retry with the row queued", err, row)
+				}
+				fp.set(dev.path, http.StatusCreated)
+				if err := app.deliverMessagePush(context.Background(), row.ID, dev.ID, 0); err != nil {
+					t.Fatal(err)
+				}
+				gormMust(t, app.DB.First(&row, row.ID))
+				if tc.change != "rebind" && (row.Status != models.RecipientSent || fp.count(dev.path) != 2) {
+					t.Fatalf("the %s subscription's retry: row %+v, sends %d", tc.change, row, fp.count(dev.path))
+				}
+				if tc.change == "rebind" && (row.Status != models.RecipientSuppressed || row.Reason != pushWhyGone || fp.count(dev.path) != 1) {
+					t.Fatalf("the rebound device's retry: row %+v, sends %d", row, fp.count(dev.path))
+				}
+			case http.StatusBadRequest:
+				if after.FailedAt != nil || row.Status != models.RecipientFailed {
+					t.Fatalf("a refusal of the old attempt: device failed_at %v, row %+v", after.FailedAt, row)
+				}
+			case http.StatusCreated:
+				if err != nil || after.FailedAt == nil || !after.FailedAt.Equal(failedAt) || row.Status != models.RecipientSent {
+					t.Fatalf("a delivery of the old attempt: err %v, device failed_at %v, row %+v", err, after.FailedAt, row)
+				}
+			}
+			if tc.change == "rebind" && after.UserID != other.ID {
+				t.Fatalf("the device's owner is %d, want the next holder", after.UserID)
+			}
+			switch tc.change {
+			case "rebind back", "renew back", "same clock":
+				// Every field the dispatch read is back, but the binding is new.
+				if after.UserID != u.ID || after.P256dh != dev.P256dh || after.Auth != dev.Auth || after.BindingGeneration <= stored.BindingGeneration {
+					t.Fatalf("the device after its round trip: owner %d, generation %d (dispatched %d)", after.UserID, after.BindingGeneration, stored.BindingGeneration)
+				}
+				if tc.change == "same clock" && !after.CreatedAt.Equal(stored.CreatedAt) {
+					t.Fatalf("created_at %v, want the dispatched %v", after.CreatedAt, stored.CreatedAt)
+				}
+			}
+		})
+	}
+}
+
+// pushLastAttemptFixture is an announcement push row for owner, with a job
+// for dev queued on its last attempt.
+func pushLastAttemptFixture(t *testing.T, app *App, u *models.User, devs ...testDevice) models.MessageRecipient {
+	t.Helper()
+	now := time.Now().UTC()
+	m := models.Message{Status: models.MessageSending, Category: models.MessageCategoryAnnouncement, Subject: "News",
+		BodyHTML: "<p>Hello</p>", BodyText: "Hello", Audience: `{"type":"group","groupId":1}`, ScheduledAt: &now}
+	gormMust(t, app.DB.Create(&m))
+	row := models.MessageRecipient{MessageID: m.ID, UserID: u.ID, Channel: models.DeliveryPush, Status: models.RecipientQueued}
+	gormMust(t, app.DB.Create(&row))
+	for _, dev := range devs {
+		key := pushRecipientKey(row.ID, dev.ID)
+		if ok, err := pushDeliverType.Enqueue(app.DB, pushJob{MessageRecipientID: row.ID, DeviceID: dev.ID}, now.Add(-time.Second), key); err != nil || !ok {
+			t.Fatalf("queued %v: %v", ok, err)
+		}
+		gormMust(t, app.DB.Model(&models.Job{}).Where("unique_key = ?", key).Update("attempts", pushDeliverType.Attempts()-1))
+	}
+	return row
+}
+
+func renewedKeys(t *testing.T) (string, string) {
+	t.Helper()
+	key, err := ecdh.P256().GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	auth := make([]byte, 16)
+	_, _ = rand.Read(auth)
+	return base64.RawURLEncoding.EncodeToString(key.PublicKey().Bytes()), base64.RawURLEncoding.EncodeToString(auth)
+}
+
+func pushJobCount(t *testing.T, app *App) int64 {
+	t.Helper()
+	var n int64
+	gormMust(t, app.DB.Model(&models.Job{}).Where("kind = ?", kindPushDeliver).Count(&n))
+	return n
+}
+
+// TestPushGoneAboutAChangedDeviceOnItsLastAttempt: a Gone answer about a
+// device that changed while the push service answered retries while attempts
+// remain; on the job's last attempt (run through the jobs runner) it must
+// still leave the row honest. The person's renewed subscription was never
+// reached as it is now: the row fails. A browser rebound to someone else is
+// the moved-device rule: device gone. The row waits only for another device's
+// job that will still run (queued or waiting to retry), and that job can
+// still deliver it, with no job added; a device saved after the jobs were
+// queued has no job, and a job that already ended takes nothing, so neither
+// keeps the row queued.
+func TestPushGoneAboutAChangedDeviceOnItsLastAttempt(t *testing.T) {
+	for _, tc := range []struct {
+		change, sibling string
+	}{
+		{"renew", ""}, {"renew", "no job"}, {"renew", "job ended"}, {"renew", "job queued"}, {"renew", "job retrying"},
+		{"rebind", ""}, {"rebind", "no job"}, {"rebind", "job queued"},
+	} {
+		t.Run(strings.TrimSpace(tc.change+" "+tc.sibling), func(t *testing.T) {
+			app, fp := pushTestApp(t)
+			u := pushMember(t, app, "owner")
+			other := pushMember(t, app, "nextholder")
+			dev := newPushDevice(t, app, u, "shared")
+			row := pushLastAttemptFixture(t, app, u, dev)
+			var laptop testDevice
+			if tc.sibling != "" {
+				// Saved after the push's jobs were queued: no job of its own.
+				laptop = newPushDevice(t, app, u, "laptop")
+			}
+			laptopKey := pushRecipientKey(row.ID, laptop.ID)
+			switch tc.sibling {
+			case "job ended":
+				gormMust(t, app.DB.Create(&models.Job{Kind: kindPushDeliver, Payload: fmt.Sprintf(`{"messageRecipientId":%d,"deviceId":%d}`, row.ID, laptop.ID),
+					RunAt: time.Now(), Status: models.JobDead, MaxAttempts: pushDeliverType.Attempts(), UniqueKey: &laptopKey}))
+			case "job queued", "job retrying":
+				status := models.JobQueued
+				if tc.sibling == "job retrying" {
+					status = models.JobFailed
+				}
+				// Due later than the shared device's, so the runner takes that first.
+				gormMust(t, app.DB.Create(&models.Job{Kind: kindPushDeliver, Payload: fmt.Sprintf(`{"messageRecipientId":%d,"deviceId":%d}`, row.ID, laptop.ID),
+					RunAt: time.Now(), Status: status, MaxAttempts: pushDeliverType.Attempts(), UniqueKey: &laptopKey}))
+			}
+			p256dh, auth := renewedKeys(t)
+			var changed atomic.Bool
+			fp.onSend = func(path string) {
+				if path != dev.path || !changed.CompareAndSwap(false, true) {
+					return
+				}
+				set := map[string]any{"user_id": other.ID}
+				if tc.change == "renew" {
+					set = map[string]any{"p256dh": p256dh, "auth": auth}
+				}
+				if err := app.DB.Model(&models.PushSubscription{}).Where("id = ?", dev.ID).UpdateColumns(set).Error; err != nil {
+					t.Error(err)
+				}
+			}
+			fp.set(dev.path, http.StatusGone)
+			jobsBefore := pushJobCount(t, app)
+			if ran, err := jobs.NewRunner(app.DB, app.pushKinds()...).RunOnce(context.Background(), "test"); err != nil || !ran {
+				t.Fatalf("ran %v: %v", ran, err)
+			}
+			if !changed.Load() || fp.count(dev.path) != 1 || fp.count(laptop.path) != 0 {
+				t.Fatalf("the runner took another job first: %v", fp.sent)
+			}
+			gormMust(t, app.DB.First(&row, row.ID))
+			var j models.Job
+			gormMust(t, app.DB.Where("unique_key = ?", pushRecipientKey(row.ID, dev.ID)).First(&j))
+			if j.Status == models.JobQueued || j.Status == models.JobFailed || j.Status == models.JobRunning {
+				t.Fatalf("the last attempt left its job %s", j.Status)
+			}
+			if !deviceExists(app, dev.ID) {
+				t.Fatal("the stale Gone deleted the changed device")
+			}
+			switch {
+			case tc.sibling == "job queued" || tc.sibling == "job retrying":
+				if row.Status != models.RecipientQueued {
+					t.Fatalf("with the laptop's job still to run: row %+v; want queued", row)
+				}
+				// That job still delivers it, and nothing queued another.
+				if err := app.deliverMessagePush(context.Background(), row.ID, laptop.ID, 0); err != nil {
+					t.Fatal(err)
+				}
+				gormMust(t, app.DB.First(&row, row.ID))
+				if row.Status != models.RecipientSent || fp.count(laptop.path) != 1 || pushJobCount(t, app) != jobsBefore {
+					t.Fatalf("the laptop's job: row %+v, sends %v, jobs %d then %d", row, fp.sent, jobsBefore, pushJobCount(t, app))
+				}
+			case tc.change == "renew":
+				if row.Status != models.RecipientFailed || row.Reason != pushWhyNotReached {
+					t.Fatalf("the renewed device's last attempt: row %+v; want failed, not reached", row)
+				}
+			default:
+				if row.Status != models.RecipientSuppressed || row.Reason != pushWhyGone {
+					t.Fatalf("the rebound device's last attempt: row %+v; want device gone", row)
+				}
+			}
+			if tc.sibling != "job queued" && tc.sibling != "job retrying" && pushJobCount(t, app) != jobsBefore {
+				t.Fatalf("settling the row queued a job: %d then %d", jobsBefore, pushJobCount(t, app))
+			}
+		})
+	}
+}
+
+// TestPushTwoLastAttemptsNeverWaitForEachOther: two of the person's devices
+// are both renewed while the push service answers each one's last attempt,
+// and the two jobs run together. Each sees the other's job running, which
+// decides for itself, so neither leaves the row queued for the other.
+func TestPushTwoLastAttemptsNeverWaitForEachOther(t *testing.T) {
+	app, fp := pushTestApp(t)
+	u := pushMember(t, app, "owner")
+	phone, laptop := newPushDevice(t, app, u, "phone"), newPushDevice(t, app, u, "laptop")
+	row := pushLastAttemptFixture(t, app, u, phone, laptop)
+	devs := map[string]testDevice{phone.path: phone, laptop.path: laptop}
+	renewed := map[string][2]string{}
+	for path := range devs {
+		p256dh, auth := renewedKeys(t)
+		renewed[path] = [2]string{p256dh, auth}
+	}
+	var arrived sync.WaitGroup
+	arrived.Add(2)
+	both := make(chan struct{})
+	go func() { arrived.Wait(); close(both) }()
+	fp.onSend = func(path string) {
+		keys := renewed[path]
+		if err := app.DB.Model(&models.PushSubscription{}).Where("id = ?", devs[path].ID).UpdateColumns(map[string]any{"p256dh": keys[0], "auth": keys[1]}).Error; err != nil {
+			t.Error(err)
+		}
+		arrived.Done()
+		select {
+		case <-both:
+		case <-time.After(10 * time.Second):
+			t.Error("the two last attempts never ran together")
+		}
+	}
+	fp.set(phone.path, http.StatusGone)
+	fp.set(laptop.path, http.StatusGone)
+	runner := jobs.NewRunner(app.DB, app.pushKinds()...)
+	var wg sync.WaitGroup
+	for _, w := range []string{"one", "two"} {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if ran, err := runner.RunOnce(context.Background(), w); err != nil || !ran {
+				t.Errorf("worker %s ran %v: %v", w, ran, err)
+			}
+		}()
+	}
+	wg.Wait()
+	gormMust(t, app.DB.First(&row, row.ID))
+	if row.Status != models.RecipientFailed || row.Reason != pushWhyNotReached {
+		t.Fatalf("after both last attempts: row %+v; want failed, not reached", row)
+	}
+}
+
+// TestPushMovedDeviceWaitsOnlyForARealJob: a push whose device moved to
+// another account before it ran leaves the row to the person's other device
+// only while that device's job is still to run; a device with no job (saved
+// after the push was queued) is no reason to wait.
+func TestPushMovedDeviceWaitsOnlyForARealJob(t *testing.T) {
+	for _, sibling := range []string{"no job", "job queued"} {
+		t.Run(sibling, func(t *testing.T) {
+			app, fp := pushTestApp(t)
+			u := pushMember(t, app, "owner")
+			other := pushMember(t, app, "nextholder")
+			dev := newPushDevice(t, app, u, "shared")
+			row := pushLastAttemptFixture(t, app, u, dev)
+			laptop := newPushDevice(t, app, u, "laptop")
+			if sibling == "job queued" {
+				if _, err := pushDeliverType.Enqueue(app.DB, pushJob{MessageRecipientID: row.ID, DeviceID: laptop.ID}, time.Now().Add(time.Hour), pushRecipientKey(row.ID, laptop.ID)); err != nil {
+					t.Fatal(err)
+				}
+			}
+			gormMust(t, app.DB.Model(&models.PushSubscription{}).Where("id = ?", dev.ID).Update("user_id", other.ID))
+			if err := app.deliverMessagePush(context.Background(), row.ID, dev.ID, 0); err != nil {
+				t.Fatal(err)
+			}
+			gormMust(t, app.DB.First(&row, row.ID))
+			want := models.RecipientSuppressed
+			if sibling == "job queued" {
+				want = models.RecipientQueued
+			}
+			if fp.total() != 0 || row.Status != want {
+				t.Fatalf("pushes %v, row %+v; want %s", fp.sent, row, want)
+			}
+		})
+	}
+}
+
+// TestPushNoticeSiblingThatMovesStillSettles: a notice's push to a gone device
+// leaves its delivery to the person's other device while that device's job is
+// still queued. That device is then turned off, or rebound to another account,
+// before its job runs. Its job settles the delivery as "device gone": both jobs
+// finish, nothing is sent to the device or its new holder, and no job is
+// added.
+func TestPushNoticeSiblingThatMovesStillSettles(t *testing.T) {
+	for _, change := range []string{"removed", "rebound"} {
+		t.Run(change, func(t *testing.T) {
+			app, f := pushTestApp(t)
+			u := pushMember(t, app, "pat")
+			holder := pushMember(t, app, "next holder")
+			old, phone := newPushDevice(t, app, u, "old"), newPushDevice(t, app, u, "phone")
+			id := sendNotice(t, app, notify.GroupApproved, u)
+			gormMust(t, app.DB.Where("kind = ?", kindPushDeliver).Delete(&models.Job{}))
+			// The old device's job is due first, so the runner takes it first.
+			if err := enqueuePushDelivery(app.DB, id, old.ID, time.Now().Add(-time.Minute)); err != nil {
+				t.Fatal(err)
+			}
+			if err := enqueuePushDelivery(app.DB, id, phone.ID, time.Now().Add(-time.Second)); err != nil {
+				t.Fatal(err)
+			}
+			jobsBefore := pushJobCount(t, app)
+			f.set(old.path, http.StatusGone)
+			runner := jobs.NewRunner(app.DB, app.pushKinds()...)
+			if ran, err := runner.RunOnce(context.Background(), "test"); err != nil || !ran {
+				t.Fatalf("ran %v: %v", ran, err)
+			}
+			if status, reason := pushDelivery(t, app, id); status != "" || f.count(old.path) != 1 || f.count(phone.path) != 0 {
+				t.Fatalf("the gone device's job: delivery %q %q, sends %v; want it left to the phone's job", status, reason, f.sent)
+			}
+			if change == "removed" {
+				gormMust(t, app.DB.Delete(&models.PushSubscription{}, phone.ID))
+			} else {
+				gormMust(t, app.DB.Model(&models.PushSubscription{}).Where("id = ?", phone.ID).Update("user_id", holder.ID))
+			}
+			drainJobs(t, app)
+			if status, reason := pushDelivery(t, app, id); status != models.DeliverySuppressed || reason != pushWhyGone {
+				t.Fatalf("after the phone %s: delivery %q %q; want suppressed %q", change, status, reason, pushWhyGone)
+			}
+			if f.total() != 1 || f.count(phone.path) != 0 {
+				t.Fatalf("sends %v; want only the gone device's one", f.sent)
+			}
+			var rows, holderRows, notDone int64
+			gormMust(t, app.DB.Model(&models.NotificationDelivery{}).Where("notification_id = ? AND channel = ?", id, models.DeliveryPush).Count(&rows))
+			gormMust(t, app.DB.Model(&models.NotificationDelivery{}).Where("user_id = ?", holder.ID).Count(&holderRows))
+			gormMust(t, app.DB.Model(&models.Job{}).Where("kind = ? AND status <> ?", kindPushDeliver, models.JobDone).Count(&notDone))
+			if rows != 1 || holderRows != 0 || notDone != 0 || pushJobCount(t, app) != jobsBefore {
+				t.Fatalf("delivery rows %d, the holder's %d, jobs not done %d, jobs %d then %d", rows, holderRows, notDone, jobsBefore, pushJobCount(t, app))
+			}
+		})
+	}
+}
+
+// claimPushJobByHand puts the job with key in the state the runner's claim
+// leaves it: running, held by worker, one more attempt, a new claim number.
+// It returns the context the runner would run the handler under for that
+// claim.
+func claimPushJobByHand(t *testing.T, app *App, key, worker string) context.Context {
+	t.Helper()
+	var c jobs.Claim
+	res := app.DB.Raw(`UPDATE jobs SET status = ?, locked_at = now(), locked_by = ?, attempts = attempts + 1,
+			claim_seq = nextval('jobs_claim_seq'), updated_at = now()
+		WHERE unique_key = ? AND status IN (?, ?) AND run_at <= now() RETURNING id, claim_seq AS seq`,
+		models.JobRunning, worker, key, models.JobQueued, models.JobFailed).Scan(&c)
+	if res.Error != nil || c.ID == 0 {
+		t.Fatalf("claiming %s: %+v, %v", key, c, res.Error)
+	}
+	return jobs.WithClaim(context.Background(), c)
+}
+
+// pushJobWaitsUntil checks that the job with key went back to wait in its
+// handler's wait commit (jobs.LaterIn): queued for opens, unheld, with the
+// attempt its claim took given back, so the runner writes nothing when the
+// handler returns jobs.Requeued.
+func pushJobWaitsUntil(t *testing.T, app *App, key string, opens time.Time, attempts int) {
+	t.Helper()
+	var j models.Job
+	gormMust(t, app.DB.Where("unique_key = ?", key).First(&j))
+	if j.Status != models.JobQueued || !j.RunAt.Equal(opens.UTC()) || j.LockedAt != nil || j.Attempts != attempts {
+		t.Fatalf("after its wait committed, job %s is %s due %v, locked %v, %d attempts; want queued for %v, unheld, %d attempts",
+			key, j.Status, j.RunAt, j.LockedAt, j.Attempts, opens.UTC(), attempts)
+	}
+}
+
+// TestPushGoneRacingASiblingThatWaits: the person's phone takes an
+// announcement's push just before quiet hours and answers "gone" after they
+// start, while the job for their laptop is running and goes back to wait for
+// the morning. Whichever of the two settles the row first, the history says
+// the push waits until the morning, never "device gone", through the night;
+// in the morning the laptop's job delivers it, with no job added. When the
+// laptop waited first, the phone's job sees it will run again and leaves the
+// row; when the phone settled first, the laptop's wait puts the row back to
+// waiting. When the laptop's wait commits while the phone's settlement waits on
+// the row's lock, the settlement sees it. In the last arm both jobs waited in
+// the night and wake in the morning: the laptop's job is running, about to
+// send, when the phone answers "gone". A job that woke is not waiting, so the
+// row is "device gone" at once, as for two last attempts.
+func TestPushGoneRacingASiblingThatWaits(t *testing.T) {
+	for _, order := range []string{"laptop waits first", "phone settles first", "laptop waits during the settlement", "both wake gone"} {
+		t.Run(order, func(t *testing.T) {
+			app, fp := pushTestApp(t)
+			clock := quietHours(app)
+			clock.set(19, 59, 15)
+			u := denverMember(t, app, "owner")
+			phone, laptop := newPushDevice(t, app, u, "phone"), newPushDevice(t, app, u, "laptop")
+			row := pushLastAttemptFixture(t, app, u, phone, laptop)
+			phoneKey, laptopKey := pushRecipientKey(row.ID, phone.ID), pushRecipientKey(row.ID, laptop.ID)
+			jobsBefore := pushJobCount(t, app)
+			fp.set(phone.path, http.StatusGone)
+			if order == "both wake gone" {
+				fp.set(laptop.path, http.StatusGone)
+			}
+			reload := func() {
+				t.Helper()
+				gormMust(t, app.DB.First(&row, row.ID))
+			}
+			waitingOvernight := func(when string) {
+				t.Helper()
+				reload()
+				if row.Status != models.RecipientQueued || !strings.HasPrefix(row.Reason, pushWaitPrefix) {
+					t.Fatalf("%s: row %s %q; want it waiting for the morning", when, row.Status, row.Reason)
+				}
+			}
+			var opens time.Time
+			var laptopCtx context.Context
+			laptopWaits := func() {
+				t.Helper()
+				// The runner has claimed the laptop's job; its handler finds
+				// quiet hours have begun and goes back to wait.
+				err := app.deliverMessagePush(laptopCtx, row.ID, laptop.ID, 0)
+				if !errors.Is(err, jobs.Requeued()) {
+					t.Fatalf("the laptop's job in quiet hours: %v; want it to wait (jobs.Requeued)", err)
+				}
+				opens, _ = app.pushOpensAt(app.pushNow(), denverZone)
+			}
+			switch order {
+			case "laptop waits during the settlement":
+				laptopCtx = claimPushJobByHand(t, app, laptopKey, "laptop worker")
+				// The laptop's wait holds the row, as pushWaitIn's UPDATE does,
+				// while the phone's job sends, hears "gone" and settles.
+				opens = time.Date(2030, 1, 16, 8, 0, 0, 0, denverZone)
+				hold := app.DB.Begin(pushSettleTx)
+				gormMust(t, hold)
+				gormMust(t, hold.Exec("SELECT id FROM message_recipients WHERE id = ? FOR UPDATE", row.ID))
+				done := make(chan error, 1)
+				go func() {
+					_, err := jobs.NewRunner(app.DB, app.pushKinds()...).RunOnce(context.Background(), "phone worker")
+					done <- err
+				}()
+				testdb.WaitUntil(t, "the phone's settlement to wait on the push row", 10*time.Second, func() bool {
+					var n int64
+					if err := app.DB.Raw(`SELECT count(*) FROM pg_stat_activity WHERE datname = current_database() AND wait_event_type = 'Lock'
+						AND state = 'active' AND query LIKE '%message_recipients%'`).Scan(&n).Error; err != nil {
+						t.Fatal(err)
+					}
+					return n > 0
+				})
+				if err := pushWaitIn(laptopCtx, hold, row.ID, opens, denverZone); err != nil {
+					hold.Rollback()
+					t.Fatal(err)
+				}
+				gormMust(t, hold.Commit())
+				if err := <-done; err != nil {
+					t.Fatal(err)
+				}
+				if fp.count(phone.path) != 1 || deviceExists(app, phone.ID) {
+					t.Fatalf("the phone's job: sends %v", fp.sent)
+				}
+				waitingOvernight("after the phone settled behind the laptop's wait")
+				pushJobWaitsUntil(t, app, laptopKey, opens, pushDeliverType.Attempts()-1)
+				waitingOvernight("overnight")
+			case "laptop waits first", "phone settles first":
+				laptopCtx = claimPushJobByHand(t, app, laptopKey, "laptop worker")
+				var raced atomic.Bool
+				fp.onSend = func(path string) {
+					if path != phone.path || !raced.CompareAndSwap(false, true) {
+						return
+					}
+					clock.set(20, 1, 15)
+					if order == "laptop waits first" {
+						laptopWaits()
+					}
+				}
+				if ran, err := jobs.NewRunner(app.DB, app.pushKinds()...).RunOnce(context.Background(), "phone worker"); err != nil || !ran {
+					t.Fatalf("ran %v: %v", ran, err)
+				}
+				if !raced.Load() || fp.count(phone.path) != 1 || fp.count(laptop.path) != 0 {
+					t.Fatalf("the phone's job: sends %v", fp.sent)
+				}
+				if deviceExists(app, phone.ID) {
+					t.Fatal("the gone phone is still there")
+				}
+				if order == "phone settles first" {
+					reload()
+					if row.Status != models.RecipientSuppressed || row.Reason != pushWhyGone {
+						t.Fatalf("the phone settled with the laptop's job running and not yet waiting: row %s %q; want device gone", row.Status, row.Reason)
+					}
+					laptopWaits()
+				}
+				waitingOvernight("after the laptop's job went back to wait")
+				pushJobWaitsUntil(t, app, laptopKey, opens, pushDeliverType.Attempts()-1)
+				waitingOvernight("overnight")
+			case "both wake gone":
+				// Both jobs waited in the night: the row waits, and both are
+				// queued for the morning.
+				clock.set(20, 1, 15)
+				drainJobs(t, app)
+				waitingOvernight("overnight")
+				if fp.total() != 0 {
+					t.Fatalf("sent in the night: %v", fp.sent)
+				}
+			}
+
+			clock.set(8, 0, 16)
+			makeDue(app)
+			if order != "both wake gone" {
+				drainJobs(t, app)
+				reload()
+				if row.Status != models.RecipientSent || fp.count(laptop.path) != 1 || fp.count(phone.path) != 1 || pushJobCount(t, app) != jobsBefore {
+					t.Fatalf("in the morning: row %s %q, sends %v, jobs %d then %d; want sent by the laptop with no job added", row.Status, row.Reason, fp.sent, jobsBefore, pushJobCount(t, app))
+				}
+				return
+			}
+			// The laptop's job woke too and is running, about to send.
+			claimPushJobByHand(t, app, laptopKey, "laptop worker")
+			if ran, err := jobs.NewRunner(app.DB, app.pushKinds()...).RunOnce(context.Background(), "phone worker"); err != nil || !ran {
+				t.Fatalf("ran %v: %v", ran, err)
+			}
+			reload()
+			if row.Status != models.RecipientSuppressed || row.Reason != pushWhyGone || fp.count(phone.path) != 1 {
+				t.Fatalf("the phone answered gone while the woken laptop job ran: row %s %q, sends %v; want device gone", row.Status, row.Reason, fp.sent)
+			}
+			var j models.Job
+			gormMust(t, app.DB.Where("unique_key = ?", phoneKey).First(&j))
+			if j.Status != models.JobDone {
+				t.Fatalf("the phone's job is %s", j.Status)
+			}
+			if err := app.deliverMessagePush(context.Background(), row.ID, laptop.ID, 0); err != nil {
+				t.Fatal(err)
+			}
+			reload()
+			if row.Status != models.RecipientSuppressed || row.Reason != pushWhyGone || fp.count(laptop.path) != 1 {
+				t.Fatalf("the laptop answered gone too: row %s %q, sends %v; want device gone", row.Status, row.Reason, fp.sent)
+			}
+		})
+	}
+}
+
+// pushStepGates stops an announcement push at step: the i-th time any push
+// reaches it, gates[i].reached closes and that push waits until
+// gates[i].release closes (the cleanup closes any left). Later arrivals pass.
+type pushStepGate struct{ reached, release chan struct{} }
+
+func pushStepGates(t *testing.T, app *App, step string, n int) []pushStepGate {
+	t.Helper()
+	gates := make([]pushStepGate, n)
+	for i := range gates {
+		gates[i] = pushStepGate{reached: make(chan struct{}), release: make(chan struct{})}
+	}
+	var arrived atomic.Int64
+	app.hooks.pushStep = func(s string) {
+		if s != step {
+			return
+		}
+		i := int(arrived.Add(1)) - 1
+		if i >= n {
+			return
+		}
+		close(gates[i].reached)
+		<-gates[i].release
+	}
+	var once sync.Once
+	t.Cleanup(func() {
+		once.Do(func() {
+			for i := range gates {
+				select {
+				case <-gates[i].release:
+				default:
+					close(gates[i].release)
+				}
+			}
+		})
+	})
+	return gates
+}
+
+func waitClosed(t *testing.T, what string, ch <-chan struct{}) {
+	t.Helper()
+	select {
+	case <-ch:
+	case <-time.After(10 * time.Second):
+		t.Fatalf("timed out waiting for %s", what)
+	}
+}
+
+func pushJobByKey(t *testing.T, app *App, key string) models.Job {
+	t.Helper()
+	var j models.Job
+	gormMust(t, app.DB.Where("unique_key = ?", key).First(&j))
+	return j
+}
+
+// TestPushWaitNeverTouchesAReplacementsClaim: a worker's announcement push
+// passes its checks in quiet hours and stalls before its wait commits; its
+// lease runs out and a second worker takes the job back and is running it
+// when the first one reaches its wait. The stale attempt changes neither the
+// job nor the row (jobs.LaterIn finds its claim gone and the whole wait
+// rolls back), and its finish records nothing; the replacement's own wait
+// stands, with its attempt given back, and in the morning it sends once.
+func TestPushWaitNeverTouchesAReplacementsClaim(t *testing.T) {
+	app, fp := pushTestApp(t)
+	clock := quietHours(app)
+	u := denverMember(t, app, "owner")
+	laptop := newPushDevice(t, app, u, "laptop")
+	row := pushLastAttemptFixture(t, app, u, laptop)
+	key := pushRecipientKey(row.ID, laptop.ID)
+	gormMust(t, app.DB.Model(&models.Job{}).Where("unique_key = ?", key).Update("attempts", 0))
+	gates := pushStepGates(t, app, "wait", 2)
+
+	first := jobs.NewRunner(app.DB, app.pushKinds()...)
+	firstDone := make(chan error, 1)
+	go func() {
+		_, err := first.RunOnce(context.Background(), "worker one")
+		firstDone <- err
+	}()
+	waitClosed(t, "the first worker to reach its wait", gates[0].reached)
+
+	// The first worker's lease has run out: a second worker takes the job.
+	second := jobs.NewRunner(app.DB, app.pushKinds()...)
+	second.Lease = time.Nanosecond
+	secondDone := make(chan error, 1)
+	go func() {
+		ran, err := second.RunOnce(context.Background(), "worker two")
+		if err == nil && !ran {
+			err = errors.New("the second worker found nothing to take back")
+		}
+		secondDone <- err
+	}()
+	waitClosed(t, "the replacement to reach its wait", gates[1].reached)
+	replaced := pushJobByKey(t, app, key)
+	if replaced.Status != models.JobRunning || replaced.LockedBy != "worker two" || replaced.Attempts != 2 {
+		t.Fatalf("the replacement's claim: %+v", replaced)
+	}
+
+	close(gates[0].release)
+	if err := <-firstDone; err != nil {
+		t.Fatalf("the stale worker: %v", err)
+	}
+	after := pushJobByKey(t, app, key)
+	if after.Status != models.JobRunning || after.LockedBy != "worker two" || after.Attempts != 2 ||
+		!after.RunAt.Equal(replaced.RunAt) || after.LockedAt == nil || !after.LockedAt.Equal(*replaced.LockedAt) || after.LastError != "" {
+		t.Fatalf("the stale worker's wait changed the replacement's job: before %+v, after %+v", replaced, after)
+	}
+	gormMust(t, app.DB.First(&row, row.ID))
+	if row.Status != models.RecipientQueued || row.Reason != "" {
+		t.Fatalf("the stale worker's wait wrote the row: %s %q", row.Status, row.Reason)
+	}
+
+	close(gates[1].release)
+	if err := <-secondDone; err != nil {
+		t.Fatal(err)
+	}
+	opens, _ := app.pushOpensAt(app.pushNow(), denverZone)
+	pushJobWaitsUntil(t, app, key, opens, 1)
+	gormMust(t, app.DB.First(&row, row.ID))
+	if row.Status != models.RecipientQueued || !strings.HasPrefix(row.Reason, pushWaitPrefix) || fp.total() != 0 {
+		t.Fatalf("overnight: row %s %q, sends %v", row.Status, row.Reason, fp.sent)
+	}
+
+	clock.set(8, 0, 16)
+	makeDue(app)
+	drainJobs(t, app)
+	gormMust(t, app.DB.First(&row, row.ID))
+	if j := pushJobByKey(t, app, key); row.Status != models.RecipientSent || fp.count(laptop.path) != 1 || j.Status != models.JobDone || j.Attempts != 2 {
+		t.Fatalf("in the morning: row %s %q, sends %v, job %s after %d attempts", row.Status, row.Reason, fp.sent, j.Status, j.Attempts)
+	}
+}
+
+// TestPushWaitsFinishNeverTouchesTheNextClaim: an announcement push goes back
+// to wait for quiet hours and its worker is slow to return after the wait
+// commits. Morning comes and a worker with the same label (a restarted
+// process can reuse one) claims the job again, on the same attempt count the
+// wait gave back, and is about to send when the first handler returns. The
+// first worker's finish changes nothing (its wait is jobs.Requeued, and its
+// claim is not the current one): the morning claim keeps the job, no third
+// claim takes it, and the push is sent once.
+func TestPushWaitsFinishNeverTouchesTheNextClaim(t *testing.T) {
+	app, fp := pushTestApp(t)
+	clock := quietHours(app)
+	u := denverMember(t, app, "owner")
+	laptop := newPushDevice(t, app, u, "laptop")
+	row := pushLastAttemptFixture(t, app, u, laptop)
+	key := pushRecipientKey(row.ID, laptop.ID)
+	gormMust(t, app.DB.Model(&models.Job{}).Where("unique_key = ?", key).Update("attempts", 0))
+	waited, morning := pushStepGate{make(chan struct{}), make(chan struct{})}, pushStepGate{make(chan struct{}), make(chan struct{})}
+	var waits, snapshots atomic.Int64
+	app.hooks.pushStep = func(s string) {
+		switch {
+		case s == "waited" && waits.Add(1) == 1:
+			close(waited.reached)
+			<-waited.release
+		case s == "snapshot" && snapshots.Add(1) == 1:
+			close(morning.reached)
+			<-morning.release
+		}
+	}
+	t.Cleanup(func() {
+		for _, g := range []pushStepGate{waited, morning} {
+			select {
+			case <-g.release:
+			default:
+				close(g.release)
+			}
+		}
+	})
+	run := func() <-chan error {
+		done := make(chan error, 1)
+		go func() {
+			ran, err := jobs.NewRunner(app.DB, app.pushKinds()...).RunOnce(context.Background(), "worker")
+			if err == nil && !ran {
+				err = errors.New("found no job to claim")
+			}
+			done <- err
+		}()
+		return done
+	}
+
+	firstDone := run()
+	waitClosed(t, "the push's wait to commit", waited.reached)
+	opens, _ := app.pushOpensAt(app.pushNow(), denverZone)
+	pushJobWaitsUntil(t, app, key, opens, 0)
+
+	clock.set(8, 0, 16)
+	makeDue(app)
+	secondDone := run()
+	waitClosed(t, "the same worker label to claim the job in the morning", morning.reached)
+	claim := pushJobByKey(t, app, key)
+	if claim.Status != models.JobRunning || claim.LockedBy != "worker" || claim.Attempts != 1 || claim.ClaimSeq == nil {
+		t.Fatalf("the morning claim: %+v", claim)
+	}
+
+	close(waited.release)
+	if err := <-firstDone; err != nil {
+		t.Fatalf("the slow worker: %v", err)
+	}
+	after := pushJobByKey(t, app, key)
+	if after.Status != models.JobRunning || after.ClaimSeq == nil || *after.ClaimSeq != *claim.ClaimSeq || after.Attempts != 1 ||
+		after.LockedAt == nil || !after.LockedAt.Equal(*claim.LockedAt) || !after.RunAt.Equal(claim.RunAt) || after.LastError != "" {
+		t.Fatalf("the slow worker's finish changed the morning claim: before %+v, after %+v", claim, after)
+	}
+	if ran, err := jobs.NewRunner(app.DB, app.pushKinds()...).RunOnce(context.Background(), "worker"); ran || err != nil {
+		t.Fatalf("a third claim while the morning one runs: ran %v, %v", ran, err)
+	}
+
+	close(morning.release)
+	if err := <-secondDone; err != nil {
+		t.Fatal(err)
+	}
+	gormMust(t, app.DB.First(&row, row.ID))
+	if j := pushJobByKey(t, app, key); row.Status != models.RecipientSent || fp.count(laptop.path) != 1 || fp.total() != 1 || j.Status != models.JobDone || j.Attempts != 1 {
+		t.Fatalf("in the morning: row %s %q, sends %v, job %s after %d attempts", row.Status, row.Reason, fp.sent, j.Status, j.Attempts)
+	}
+}
+
+// TestPushWaitOutlivesAWorkerThatStopsAfterIt: on its last attempt, an
+// announcement push goes back to wait for quiet hours and its worker stops
+// right after the wait commits, before the runner hears jobs.Requeued. The job
+// is already queued for the morning with its attempt given back, so lease
+// recovery finds nothing to take back overnight and never marks it dead; in
+// the morning it sends once, and the stopped worker's late finish changes
+// nothing.
+func TestPushWaitOutlivesAWorkerThatStopsAfterIt(t *testing.T) {
+	app, fp := pushTestApp(t)
+	clock := quietHours(app)
+	u := denverMember(t, app, "owner")
+	laptop := newPushDevice(t, app, u, "laptop")
+	row := pushLastAttemptFixture(t, app, u, laptop)
+	key := pushRecipientKey(row.ID, laptop.ID)
+	last := pushDeliverType.Attempts()
+	stopped := pushStepGates(t, app, "waited", 1)[0]
+
+	stoppedDone := make(chan error, 1)
+	go func() {
+		_, err := jobs.NewRunner(app.DB, app.pushKinds()...).RunOnce(context.Background(), "stopping worker")
+		stoppedDone <- err
+	}()
+	waitClosed(t, "the worker's wait to commit", stopped.reached)
+
+	recovery := jobs.NewRunner(app.DB, app.pushKinds()...)
+	recovery.Lease = time.Nanosecond
+	if ran, err := recovery.RunOnce(context.Background(), "recovery"); err != nil || ran {
+		t.Fatalf("lease recovery overnight: ran %v, %v, job %+v; want nothing to take back", ran, err, pushJobByKey(t, app, key))
+	}
+	opens, _ := app.pushOpensAt(app.pushNow(), denverZone)
+	pushJobWaitsUntil(t, app, key, opens, last-1)
+	gormMust(t, app.DB.First(&row, row.ID))
+	if row.Status != models.RecipientQueued || !strings.HasPrefix(row.Reason, pushWaitPrefix) || fp.total() != 0 {
+		t.Fatalf("overnight: row %s %q, sends %v", row.Status, row.Reason, fp.sent)
+	}
+
+	clock.set(8, 0, 16)
+	makeDue(app)
+	drainJobs(t, app)
+	gormMust(t, app.DB.First(&row, row.ID))
+	j := pushJobByKey(t, app, key)
+	if row.Status != models.RecipientSent || fp.count(laptop.path) != 1 || j.Status != models.JobDone || j.Attempts != last {
+		t.Fatalf("in the morning: row %s %q, sends %v, job %s after %d attempts", row.Status, row.Reason, fp.sent, j.Status, j.Attempts)
+	}
+
+	close(stopped.release)
+	if err := <-stoppedDone; err != nil {
+		t.Fatal(err)
+	}
+	if late := pushJobByKey(t, app, key); late.Status != models.JobDone || late.Attempts != last || !late.RunAt.Equal(j.RunAt) || fp.total() != 1 {
+		t.Fatalf("the stopped worker's late finish: job %+v, sends %v", late, fp.sent)
+	}
+}
+
+// TestPushWaitSerializesWithErasure: an announcement push to the person's
+// laptop passes its checks in quiet hours, after their phone's job recorded
+// "device gone" on the row, and reaches its wait while an admin's erasure of
+// the person holds their account and has already scrubbed their message rows
+// (a settled row has nothing to scrub, so the scrub passes it). The wait
+// takes the account first, so it waits for the erasure to commit and then
+// sees the person is no longer active: the row is never put back in the
+// queue for an erased account, and nothing is sent in the morning.
+func TestPushWaitSerializesWithErasure(t *testing.T) {
+	app, fp := pushTestApp(t)
+	clock := quietHours(app)
+	newTestUser(t, app, "root", "password1234", models.RoleAdmin)
+	admin := loginAPI(t, app, "root", "password1234")
+	u := denverMember(t, app, "owner")
+	laptop := newPushDevice(t, app, u, "laptop")
+	row := pushLastAttemptFixture(t, app, u, laptop)
+	key := pushRecipientKey(row.ID, laptop.ID)
+	gormMust(t, app.DB.Model(&models.MessageRecipient{}).Where("id = ?", row.ID).
+		UpdateColumns(map[string]any{"status": models.RecipientSuppressed, "reason": pushWhyGone, "address": "", "error": ""}))
+	gate := pushStepGates(t, app, "wait", 1)[0]
+
+	pushDone := make(chan error, 1)
+	go func() {
+		_, err := jobs.NewRunner(app.DB, app.pushKinds()...).RunOnce(context.Background(), "laptop worker")
+		pushDone <- err
+	}()
+	waitClosed(t, "the laptop's push to pass its checks and reach its wait", gate.reached)
+
+	scrubbed, releaseErasure := erasureTestPause(t, app.DB, erasureTestPoint{Processor: "raw", After: true, Step: "gorm:raw",
+		SQLContains: "UPDATE message_recipients SET address = ''"})
+	erased := make(chan int, 1)
+	go func() { erased <- admin.do("DELETE", "/api/v1/admin/users/"+itoa(u.ID), nil, true).Code }()
+	waitClosed(t, "the erasure to pass its message row scrub", scrubbed)
+
+	close(gate.release)
+	testdb.WaitUntil(t, "the push's wait to block on the account or finish", 10*time.Second, func() bool {
+		if len(pushDone) > 0 {
+			return true
+		}
+		var n int64
+		if err := app.DB.Raw(`SELECT count(*) FROM pg_stat_activity WHERE datname = current_database() AND wait_event_type = 'Lock'
+			AND state = 'active' AND query LIKE '%FOR SHARE OF u%'`).Scan(&n).Error; err != nil {
+			t.Fatal(err)
+		}
+		return n > 0
+	})
+	releaseErasure()
+	if code := <-erased; code != http.StatusOK {
+		t.Fatalf("the erasure: %d", code)
+	}
+	if err := <-pushDone; err != nil {
+		t.Fatal(err)
+	}
+	gormMust(t, app.DB.First(&row, row.ID))
+	if row.Status != models.RecipientSuppressed || row.Reason != pushWhyGone || row.Address != "" || row.Error != "" {
+		t.Fatalf("after the erasure and the wait: row %s %q (address %q, error %q); want the erased person's device miss left settled",
+			row.Status, row.Reason, row.Address, row.Error)
+	}
+
+	clock.set(8, 0, 16)
+	makeDue(app)
+	drainJobs(t, app)
+	gormMust(t, app.DB.First(&row, row.ID))
+	if j := pushJobByKey(t, app, key); row.Status != models.RecipientSuppressed || fp.total() != 0 || j.Status != models.JobDone {
+		t.Fatalf("in the morning: row %s %q, sends %v, job %s", row.Status, row.Reason, fp.sent, j.Status)
+	}
 }

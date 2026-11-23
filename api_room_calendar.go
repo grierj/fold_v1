@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"net/http"
 	"strings"
 	"time"
@@ -9,6 +10,7 @@ import (
 	"fold/models"
 
 	"github.com/gin-gonic/gin"
+	"gorm.io/gorm"
 )
 
 // The by-room view (M2.2a, 8.1): per active room, its confirmed bookings
@@ -77,27 +79,67 @@ func roomCalendarWindow(view, date string, zone *time.Location, now time.Time) (
 	return time.Time{}, time.Time{}, false
 }
 
+// Answers the room calendar's snapshot can end with besides a database error.
+var (
+	errRoomCalendarHidden = errors.New("room calendar not shown")
+	errRoomCalendarWindow = errors.New("room calendar window")
+)
+
+// apiRoomCalendar reads in one read-only Repeatable Read snapshot: the rooms
+// switch, the viewer and what they may see, the rooms, the bookings, the candidates, the
+// exact-date grants and the dates, so a booking's title is shown only by
+// authority from the same committed state.
 func (a *App) apiRoomCalendar(c *gin.Context) {
-	me := apiUser(c)
-	p := asPerson(me)
-	// Teens get the same 404 as rooms being off: nothing to find here.
-	if !policy.CanSeeRoomCalendar(p) {
+	var out roomCalendarJSON
+	err := a.DB.Transaction(func(tx *gorm.DB) error {
+		var err error
+		out, err = a.roomCalendarIn(tx, c)
+		return err
+	}, readSnapshot)
+	switch {
+	case errors.Is(err, errRoomCalendarHidden):
+		// Teens, and rooms turned off, get roomsOn's 404: nothing to find here.
 		jsonError(c, http.StatusNotFound, "not found")
-		return
+	case errors.Is(err, errRoomCalendarWindow):
+		jsonError(c, http.StatusBadRequest, "view must be day or week, and date YYYY-MM-DD")
+	case err != nil:
+		jsonError(c, http.StatusInternalServerError, "could not load the room calendar")
+	default:
+		c.JSON(http.StatusOK, out)
 	}
-	zone := churchZoneOrUTC(a.DB)
+}
+
+func (a *App) roomCalendarIn(tx *gorm.DB, c *gin.Context) (roomCalendarJSON, error) {
+	// roomsOn already turned the route away while rooms were off; the switch
+	// is read again here so the bookings come from a state it was on in.
+	if on, err := boolSettingErrIn(tx, settingRoomsEnabled, false); err != nil {
+		return roomCalendarJSON{}, err
+	} else if !on {
+		return roomCalendarJSON{}, errRoomCalendarHidden
+	}
+	if a.hooks.readerAuthorized != nil {
+		a.hooks.readerAuthorized("room calendar")
+	}
+	me, err := snapshotViewerIn(tx, apiUser(c))
+	if err != nil {
+		return roomCalendarJSON{}, err
+	}
+	p := asPerson(me)
+	if !policy.CanSeeRoomCalendar(p) {
+		return roomCalendarJSON{}, errRoomCalendarHidden
+	}
+	zone := time.UTC
+	lenientReadIn(tx, func(sp *gorm.DB) { zone = churchZoneOrUTC(sp) })
 	now := a.calendarTime()
 	first, last, ok := roomCalendarWindow(strings.TrimSpace(c.Query("view")), strings.TrimSpace(c.Query("date")), zone, now)
 	if !ok {
-		jsonError(c, http.StatusBadRequest, "view must be day or week, and date YYYY-MM-DD")
-		return
+		return roomCalendarJSON{}, errRoomCalendarWindow
 	}
 	windowStart, windowEnd := first.UTC(), last.AddDate(0, 0, 1).UTC()
 
 	var rooms []models.Room
-	if err := a.DB.Where("active").Order("lower(building), lower(name), id").Find(&rooms).Error; err != nil {
-		jsonError(c, http.StatusInternalServerError, "could not load the room calendar")
-		return
+	if err := tx.Where("active").Order("lower(building), lower(name), id").Find(&rooms).Error; err != nil {
+		return roomCalendarJSON{}, err
 	}
 	out := roomCalendarJSON{Timezone: zone.String(), From: first.Format("2006-01-02"), To: last.Format("2006-01-02"), Rooms: []roomCalendarRoomJSON{}}
 	index := map[uint]int{}
@@ -112,8 +154,7 @@ func (a *App) apiRoomCalendar(c *gin.Context) {
 			Capacity: r.Capacity, Restricted: r.Restricted, Bookings: []roomSlotJSON{}})
 	}
 	if len(roomIDs) == 0 {
-		c.JSON(http.StatusOK, out)
-		return
+		return out, nil
 	}
 
 	// Confirmed bookings hold the room; an admin also sees the requested
@@ -125,7 +166,7 @@ func (a *App) apiRoomCalendar(c *gin.Context) {
 		Waiting bool
 	}
 	var rows []bookingRow
-	q := a.DB.Table("room_bookings b").
+	q := tx.Table("room_bookings b").
 		Select(`b.*, o.event_id, (b.status = ?) AS waiting`, models.BookingRequested).
 		Joins("JOIN event_occurrences o ON o.id = b.occurrence_id").
 		Where("b.room_id IN ? AND b.starts_at < ? AND b.ends_at > ? AND o.status = ?",
@@ -138,15 +179,13 @@ func (a *App) apiRoomCalendar(c *gin.Context) {
 		q = q.Where("b.status = ?", models.BookingConfirmed)
 	}
 	if err := q.Order("b.starts_at, b.id").Limit(maxRoomCalendarSlots + 1).Scan(&rows).Error; err != nil {
-		jsonError(c, http.StatusInternalServerError, "could not load the room calendar")
-		return
+		return roomCalendarJSON{}, err
 	}
 	if len(rows) > maxRoomCalendarSlots {
 		rows, out.Truncated = rows[:maxRoomCalendarSlots], true
 	}
 	if len(rows) == 0 {
-		c.JSON(http.StatusOK, out)
-		return
+		return out, nil
 	}
 
 	// Each date goes through the ordinary date filter, then the viewer's
@@ -160,27 +199,24 @@ func (a *App) apiRoomCalendar(c *gin.Context) {
 			eventIDs = append(eventIDs, r.EventID)
 		}
 	}
-	vs, err := a.dateCandidates(me, a.DB.Where("id IN ?", eventIDs))
+	vs, err := dateCandidatesIn(tx, me, tx.Where("id IN ?", eventIDs))
 	if err != nil {
-		jsonError(c, http.StatusInternalServerError, "could not load the room calendar")
-		return
+		return roomCalendarJSON{}, err
 	}
-	scoped, err := a.scopedOccurrenceReads(me, a.DB.Where("id IN ?", occIDs), now)
+	scoped, err := a.scopedOccurrenceReadsIn(tx, me, tx.Where("id IN ?", occIDs), now)
 	if err != nil {
-		jsonError(c, http.StatusInternalServerError, "could not load the room calendar")
-		return
+		return roomCalendarJSON{}, err
 	}
 	var occs []models.EventOccurrence
-	if err := a.DB.Where("id IN ?", occIDs).Find(&occs).Error; err != nil {
-		jsonError(c, http.StatusInternalServerError, "could not load the room calendar")
-		return
+	if err := tx.Where("id IN ?", occIDs).Find(&occs).Error; err != nil {
+		return roomCalendarJSON{}, err
 	}
 	occByID := make(map[uint]*models.EventOccurrence, len(occs))
 	for i := range occs {
 		occByID[occs[i].ID] = &occs[i]
 	}
 
-	siteName := &siteNameOnce{a: a}
+	siteName := &siteNameOnce{a: a, db: tx}
 	for _, r := range rows {
 		slot := roomSlotJSON{StartsAt: r.StartsAt, EndsAt: r.EndsAt, Reserved: true}
 		occ := occByID[r.OccurrenceID]
@@ -217,5 +253,5 @@ func (a *App) apiRoomCalendar(c *gin.Context) {
 		room := &out.Rooms[index[r.RoomID]]
 		room.Bookings = append(room.Bookings, slot)
 	}
-	c.JSON(http.StatusOK, out)
+	return out, nil
 }

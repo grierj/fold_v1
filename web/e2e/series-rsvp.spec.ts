@@ -6,6 +6,7 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { apiAs, signInTo } from "./helpers";
 import { formatCalendarDay } from "../src/lib/when";
 import { measure } from "./ui-measure.mjs";
+import { expectModalDialog } from "./dialogs";
 
 const day = (n: number) => new Date(Date.now() + n * 864e5).toISOString().slice(0, 10);
 const proof = process.env.SCREENS_DIR;
@@ -187,6 +188,8 @@ test("all three series scopes submit, keyboard focus is contained, bulk Can't go
   const phoneDialog = await dialog.boundingBox();
   expect(phoneDialog && Math.abs(phoneDialog.y + phoneDialog.height - 900)).toBeLessThanOrEqual(1);
   await capture(page, "series-scope-dialog", false);
+  // capture checks the page under main; the scope picker is a portal, checked on its own at 390 and 1280.
+  await expectModalDialog(page, dialog, "series-scope-dialog-portal");
   await page.keyboard.press("Shift+Tab");
   await expect(dialog.getByRole("button", { name: "Cancel" })).toBeFocused();
   await page.keyboard.press("Tab");
@@ -231,14 +234,29 @@ test("all three series scopes submit, keyboard focus is contained, bulk Can't go
   await expect(page.getByRole("status").filter({ hasText: "Maybe for 4 dates" })).toHaveCount(1);
   await capture(page, "series-scope-all-future-result");
 
-  let confirmMessage = "";
-  page.once("dialog", async (confirm) => {
-    confirmMessage = confirm.message();
-    await confirm.accept();
-  });
+  // Bulk Can't go asks in the page's labelled dialog; a browser prompt here is a regression.
+  const nativeDialogs: string[] = [];
+  page.on("dialog", (native) => { nativeDialogs.push(native.message()); void native.dismiss(); });
+  const declineAll = answerGroups(page).first().getByRole("button", { name: "Can't go", exact: true });
   await answerAllFuture(page, answerGroups(page).first(), "Can't go");
-  expect(confirmMessage).toContain("removed from your calendar and personal feed");
+  let consent = page.getByRole("dialog", { name: "Can't go to these dates?" });
+  await expect(consent).toContainText("removed from your calendar and personal feed");
+  // Declining dates is an ordinary choice, not a destructive one (DEC-63): primary, and focus starts on it.
+  await expect(consent.getByRole("button", { name: "Can't go to these dates" })).toBeFocused();
+  await expectModalDialog(page, consent, "series-bulk-cant-go-consent");
+  await capture(page, "series-bulk-cant-go-consent", false);
+  // Escape answers no: nothing changes and focus is back on the answer.
+  await page.keyboard.press("Escape");
+  await expect(consent).toBeHidden();
+  await expect(declineAll).toBeFocused();
+  await expect(page.getByRole("status").filter({ hasText: "Maybe for 4 dates" })).toHaveCount(1);
+  await answerAllFuture(page, answerGroups(page).first(), "Can't go");
+  consent = page.getByRole("dialog", { name: "Can't go to these dates?" });
+  const confirmMessage = (await consent.textContent()) ?? "";
+  await consent.getByRole("button", { name: "Can't go to these dates" }).click();
+  await expect(consent).toBeHidden();
   await expect(page.getByRole("status").filter({ hasText: /Can't go to 4 dates/ })).toBeVisible();
+  expect(nativeDialogs).toEqual([]);
   await expect(page.getByRole("status").filter({ hasText: "Maybe for 4 dates" })).toHaveCount(0);
 
   for (let index = 0; index < 4; index++) {
@@ -254,6 +272,73 @@ test("all three series scopes submit, keyboard focus is contained, bulk Can't go
   await expect(page.getByRole("dialog")).toHaveCount(0);
   await expect(answerGroups(page).getByRole("button", { name: "Maybe" })).toHaveAttribute("aria-pressed", "true");
   await capture(page, "single-date-bypass-result");
+});
+
+// Two dialogs at once: a manager's own answer opens the scope picker while an
+// Add back is on its way, and the seats-filled retry then opens over it. Only
+// the newest is live; Escape after a click on its heading closes it and hands
+// the keyboard back to the scope picker, whose own Escape returns to the answer.
+test("a delayed over-capacity retry opens over the scope picker, and each dialog keeps the keyboard in turn", async ({ page, request }) => {
+  const event = await createEvent(request, "Overlap browser proof", 6, "FREQ=WEEKLY;COUNT=2");
+  const [first] = await eventDates(request, event.id);
+  await answerDate(request, "sam", event.id, first.date, "going");
+  const [sam] = (await eventDates(request, event.id))[0].attendees;
+  const admin = await apiAs(request, "grier");
+  await admin("POST", `/events/${event.id}/registrations/remove`, { date: first.date, registrationId: sam.registrationId });
+
+  const nativeDialogs: string[] = [];
+  page.on("dialog", (native) => { nativeDialogs.push(native.message()); void native.dismiss(); });
+  await page.setViewportSize({ width: 390, height: 900 });
+  await signInTo(page, "grier", `/events/${event.id}`);
+  await page.getByRole("button", { name: `More for ${first.date}` }).click();
+  await page.getByRole("menuitem", { name: "Manage sign-ups" }).click();
+  const roster = page.getByRole("region", { name: "Manage sign-ups" });
+
+  let releaseRestore!: () => void;
+  const restoreHeld = new Promise<void>((resolve) => { releaseRestore = resolve; });
+  const restores: boolean[] = [];
+  const restorePath = `**/api/v1/events/${event.id}/registrations/add`;
+
+  await page.route(restorePath, async (route) => {
+    const body = schema.parse(schema.looseObject({ overCapacity: schema.boolean() }), route.request().postDataJSON());
+    restores.push(body.overCapacity);
+    await restoreHeld;
+    await route.fulfill({ status: 409, contentType: "application/json", body: JSON.stringify({ error: "This event is full.", code: "event_full" }) });
+  });
+
+  const addBack = roster.getByRole("button", { name: /^Add back / });
+  await addBack.click();
+  await expect.poll(() => restores.length).toBe(1);
+
+  const secondGoing = answerGroups(page).nth(1).getByRole("button", { name: "Going", exact: true });
+  await expect(answerGroups(page)).toHaveCount(2);
+  await secondGoing.click();
+  const scope = page.getByRole("dialog", { name: /How far should “Going” apply/ });
+  await expect(scope.getByRole("button", { name: "Just this date" })).toBeFocused();
+
+  releaseRestore();
+  const retry = page.getByRole("dialog", { name: /^Add .+ over capacity\?$/ });
+  await expect(retry).toBeVisible();
+  await expect(page.getByRole("dialog")).toHaveCount(2);
+  expect(await scope.evaluate((panel) => panel.closest("[inert]") !== null), "the scope picker under the retry is inert").toBe(true);
+  await expectModalDialog(page, retry, "overlap-retry-over-scope");
+
+  await retry.getByRole("heading").click();
+  await page.keyboard.press("Escape");
+  await expect(retry).toBeHidden();
+  await expect(scope).toBeVisible();
+  expect(await scope.evaluate((panel) => panel.closest("[inert]") === null), "the scope picker is live again").toBe(true);
+  expect(await scope.evaluate((panel) => panel.contains(document.activeElement)), "the keyboard is back in the scope picker").toBe(true);
+  await expectModalDialog(page, scope, "overlap-scope-after-retry");
+
+  await scope.getByRole("heading").click();
+  await page.keyboard.press("Escape");
+  await expect(page.getByRole("dialog")).toHaveCount(0);
+  await expect(secondGoing).toBeFocused();
+  await expect(roster.getByRole("alert").filter({ hasText: "This event is full." })).toBeVisible();
+  expect(restores).toEqual([false]);
+  expect(nativeDialogs).toEqual([]);
+  await page.unroute(restorePath);
 });
 
 test("non-household sibling fields refresh after a series answer and Undo without stale save payloads", async ({ page, request }) => {
@@ -641,6 +726,7 @@ test("a household user keeps one-date drafts while their own answer uses every s
   await first.getByRole("button", { name: "Choose dates for my answer" }).click();
   await expect(page.getByRole("dialog", { name: /How far should “Maybe” apply/ })).toBeVisible();
   await capture(page, "household-series-scope-dialog", false);
+  await expectModalDialog(page, page.getByRole("dialog", { name: /How far should “Maybe” apply/ }), "household-series-scope-dialog-portal");
   await page.getByRole("button", { name: "Just this date" }).click();
   await expect(first.getByRole("status").filter({ hasText: "You: maybe" })).toBeVisible();
   await expect(first.getByRole("checkbox", { name: "Mary" })).toBeChecked();

@@ -48,14 +48,16 @@ type calendarScopeBatch struct {
 	household map[uint]bool
 }
 
-func (a *App) loadCalendarScopeBatch(viewer *models.User, occurrenceIDs []uint) (calendarScopeBatch, error) {
+// loadCalendarScopeBatchIn reads the viewer's own and household answers on
+// db, the caller's snapshot.
+func loadCalendarScopeBatchIn(db *gorm.DB, viewer *models.User, occurrenceIDs []uint) (calendarScopeBatch, error) {
 	out := calendarScopeBatch{ownStatus: map[uint]string{}, household: map[uint]bool{}}
 	if viewer == nil || len(occurrenceIDs) == 0 {
 		return out, nil
 	}
 	err := eachIDChunk(occurrenceIDs, func(chunk []uint) error {
 		var own []models.Registration
-		if err := a.DB.Select("occurrence_id", "status").Where(
+		if err := db.Select("occurrence_id", "status").Where(
 			"user_id = ? AND occurrence_id IN ? AND status IN ?", viewer.ID, chunk,
 			[]string{models.RegGoing, models.RegMaybe, models.RegWaitlisted, models.RegDeclined},
 		).Find(&own).Error; err != nil {
@@ -65,7 +67,7 @@ func (a *App) loadCalendarScopeBatch(viewer *models.User, occurrenceIDs []uint) 
 			out.ownStatus[row.OccurrenceID] = row.Status
 		}
 		var householdIDs []uint
-		if err := a.DB.Model(&models.Registration{}).Joins(listedRegistrations()).
+		if err := db.Model(&models.Registration{}).Joins(listedRegistrations()).
 			Where("registrations.registered_by = ? AND registrations.household_person_id IS NOT NULL AND registrations.occurrence_id IN ? AND registrations.status IN ?", viewer.ID, chunk,
 				models.CurrentRegStatuses).
 			Distinct().Pluck("registrations.occurrence_id", &householdIDs).Error; err != nil {
@@ -79,7 +81,7 @@ func (a *App) loadCalendarScopeBatch(viewer *models.User, occurrenceIDs []uint) 
 	return out, err
 }
 
-func calendarScopeDecision(scope policy.CalendarScope, signedIn bool, ev *models.Event, occ *models.EventOccurrence, rel policy.Rel, hosted, household, exact bool, ownStatus string, now time.Time) policy.CalendarDecision {
+func calendarScopeDecision(scope policy.CalendarScope, signedIn bool, ev *models.Event, occ *models.EventOccurrence, rel policy.Rel, hosted, household, exact, managerKept bool, ownStatus string, now time.Time) policy.CalendarDecision {
 	publicDate := false
 	churchWide := false
 	if ev != nil {
@@ -90,6 +92,6 @@ func calendarScopeDecision(scope policy.CalendarScope, signedIn bool, ev *models
 		Authorized: true, GroupMember: rel.Member, ChurchWide: churchWide,
 		Host: hosted, OwnStatus: ownStatus, HouseholdDate: household,
 		ExactDate: exact, PublicDate: publicDate, StartsAt: occ.StartsAt,
-		SignedOut: !signedIn,
+		SignedOut: !signedIn, ManagerKept: managerKept,
 	}, now)
 }

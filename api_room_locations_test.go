@@ -96,9 +96,7 @@ func TestRoomLocationMatchingEdges(t *testing.T) {
 	fallback := createFeedEvent(t, f.leader, f.group, "Fallback", start, "FREQ=WEEKLY;COUNT=2")
 	// One date of it moves to a typed "Annex": that date doesn't match.
 	moved := feedDate(start.AddDate(0, 0, 7))
-	if w := f.leader.do("PUT", "/api/v1/events/"+itoa(fallback.ID)+"/occurrences/"+moved, map[string]any{"location": "Annex"}, true); w.Code != http.StatusOK {
-		t.Fatalf("date override: %d %s", w.Code, w.Body.String())
-	}
+	saveDate(t, f.leader, fallback.ID, moved, map[string]any{"location": "Annex"}, http.StatusOK, "")
 	// eventA (the fixture's group event, also on the group's place) already
 	// has the nursery: it is left as it is.
 	if code, _ := f.book(t, f.admin, f.eventA, map[string]any{"roomId": f.nursery.ID}); code != http.StatusOK {

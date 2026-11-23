@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -140,90 +141,34 @@ func (a *App) prepareMessageOnce(ctx context.Context, id uint) error {
 	var au audienceJSON
 	_ = json.Unmarshal([]byte(m.Audience), &au)
 	category := messageCategory(&m)
-	var ids []uint
-	var hidden map[uint]bool
-	if m.Category == models.MessageCategoryReminder {
-		// A reminder has no author: its date's registrants, each checked
-		// again for whether they may still see the date (M3.6, M1.13).
-		if err := au.normalize(); err != nil || m.OccurrenceID == nil {
-			return a.refuseMessage(db, &m, read, whyAudienceGone)
-		}
-		var err error
-		if ids, err = a.audienceUserIDs(db, au, now); err != nil {
+	var rows []models.MessageRecipient
+	var refused string
+	// Who it reaches, and every row it will write, come from one read-only
+	// snapshot: the author's rights, the audience's targets, the dates and
+	// grants that put each registrant in it, each person's email facts, the
+	// guardian copies switch and links, and push choices. No row pairs an
+	// audience decision with a link or a choice committed after it. The claim
+	// below is a separate write transaction (users FOR KEY SHARE, then the
+	// message), and every row decides again when it goes.
+	if err := db.Transaction(func(tx *gorm.DB) error {
+		ids, hidden, why, err := a.preparedAudienceIn(tx, &m, &au, now)
+		if err != nil || why != "" {
+			refused = why
 			return err
 		}
-		can, err := a.reminderReaders(db, *m.OccurrenceID, ids, now)
-		if errors.Is(err, errAudienceGone) {
-			return a.refuseMessage(db, &m, read, whyAudienceGone)
+		if a.hooks.readerAuthorized != nil {
+			a.hooks.readerAuthorized("preparation")
 		}
-		if err != nil {
-			return err
-		}
-		hidden = map[uint]bool{}
-		for _, id := range ids {
-			hidden[id] = !can[id]
-		}
-	} else {
-		// 1. The author's rights are checked again: roles change after scheduling.
-		var author models.User
-		if m.AuthorID == nil || db.First(&author, *m.AuthorID).Error != nil || author.Status != models.UserActive {
-			return a.refuseMessage(db, &m, read, whyAuthorGone)
-		}
-		var err error
-		ids, err = a.resolveAudience(&author, &au, now)
-		switch {
-		case errors.Is(err, errAudienceRefused):
-			return a.refuseMessage(db, &m, read, whyAuthorRefused)
-		case errors.Is(err, errAudienceGone), errors.Is(err, errAudienceInvalid):
-			return a.refuseMessage(db, &m, read, whyAudienceGone)
-		case err != nil:
-			return err
-		}
-	}
-	// 2–4. Who it reaches, each once, and who is skipped and why.
-	facts, err := recipientFacts(db, ids, category)
-	if err != nil {
+		rows, err = a.preparedRowsIn(tx, &m, &au, ids, hidden, category)
+		return err
+	}, readSnapshot); err != nil {
 		return err
 	}
-	for i := range facts {
-		if facts[i].Skip == "" && hidden[facts[i].User.ID] {
-			facts[i].Skip = skipCantSeeDate
-		}
+	if refused != "" {
+		return a.refuseMessage(db, &m, read, refused)
 	}
-	rows := make([]models.MessageRecipient, 0, len(facts))
-	direct := map[uint]bool{}
-	var teens []uint
-	for _, f := range facts {
-		row := models.MessageRecipient{MessageID: m.ID, UserID: f.User.ID, Channel: models.DeliveryEmail, Status: models.RecipientQueued}
-		direct[f.User.ID] = true
-		if f.Skip != "" {
-			row.Status, row.Reason = models.RecipientSuppressed, f.Skip
-		} else {
-			row.Address = strings.TrimSpace(f.User.Email)
-			if f.User.AccountType == models.AccountTeen {
-				teens = append(teens, f.User.ID)
-			}
-		}
-		rows = append(rows, row)
-	}
-	// 5. Guardian copies (DEC-19): by email only (DEC-29), each guardian
-	// filtered like anyone else.
-	if len(teens) > 0 && boolSettingIn(a.DB, settingGuardianCopies, false) {
-		copies, err := guardianCopyRows(db, m.ID, teens, direct, category)
-		if err != nil {
-			return err
-		}
-		rows = append(rows, copies...)
-	}
-	// 7, push (DEC-123, DEC-122): a row for each active direct recipient
-	// with push on, whatever their email row says; never a guardian copy.
-	pushRows, err := a.messagePushRows(db, &m, facts)
-	if err != nil {
-		return err
-	}
-	rows = append(rows, pushRows...)
 	claimed := false
-	err = db.Transaction(func(tx *gorm.DB) error {
+	err := db.Transaction(func(tx *gorm.DB) error {
 		// Everyone the snapshot names is locked FOR KEY SHARE, in ascending
 		// id, before the claim: the rows below take that lock on their
 		// users through their foreign keys anyway, and an account erasure
@@ -279,6 +224,68 @@ func (a *App) prepareMessageOnce(ctx context.Context, id uint) error {
 	return err
 }
 
+// preparedRowsIn builds, on tx (preparation's snapshot), m's rows for ids
+// (PLAN 7.1 steps 2-5 and 7): each person once, skipped with the reason when
+// an email filter or hidden (a reminder's registrant who may no longer see the
+// date) says so; the guardian copies (DEC-19, by email only, DEC-29), each
+// guardian filtered like anyone else; and a push row for each active direct
+// recipient with push on (DEC-123, DEC-122), whatever their email row says,
+// never a guardian copy.
+func (a *App) preparedRowsIn(tx *gorm.DB, m *models.Message, au *audienceJSON, ids []uint, hidden map[uint]bool, category string) ([]models.MessageRecipient, error) {
+	facts, err := recipientFacts(tx, ids, category)
+	if err != nil {
+		return nil, err
+	}
+	for i := range facts {
+		if facts[i].Skip == "" && hidden[facts[i].User.ID] {
+			facts[i].Skip = skipCantSeeDate
+		}
+	}
+	// An event audience's announcement reaches ids only through a date each
+	// may still see, judged in this snapshot (resolveAudienceIn): a direct row
+	// this preparation finishes (an email skip) records that its person was
+	// let in. A queued row records it when it is sent.
+	var admitted *time.Time
+	if m.Category == models.MessageCategoryAnnouncement && eventAudience(au.Type) {
+		at := time.Now().UTC()
+		admitted = &at
+	}
+	rows := make([]models.MessageRecipient, 0, len(facts))
+	direct := map[uint]bool{}
+	var teens []uint
+	for _, f := range facts {
+		row := models.MessageRecipient{MessageID: m.ID, UserID: f.User.ID, Channel: models.DeliveryEmail, Status: models.RecipientQueued}
+		direct[f.User.ID] = true
+		if f.Skip != "" {
+			row.Status, row.Reason, row.AudienceAdmittedAt = models.RecipientSuppressed, f.Skip, admitted
+		} else {
+			row.Address = strings.TrimSpace(f.User.Email)
+			if f.User.AccountType == models.AccountTeen {
+				teens = append(teens, f.User.ID)
+			}
+		}
+		rows = append(rows, row)
+	}
+	if len(teens) > 0 {
+		on, err := boolSettingErrIn(tx, settingGuardianCopies, false)
+		if err != nil {
+			return nil, err
+		}
+		if on {
+			copies, err := guardianCopyRows(tx, m.ID, teens, direct, category)
+			if err != nil {
+				return nil, err
+			}
+			rows = append(rows, copies...)
+		}
+	}
+	pushRows, err := a.messagePushRows(tx, m, facts)
+	if err != nil {
+		return nil, err
+	}
+	return append(rows, pushRows...), nil
+}
+
 // lockSnapshotUsers locks every user a snapshot names (each row's recipient
 // and, for a guardian copy, the teen it is about) as notify.Send locks its
 // recipients (userlock.KeyShareLive) and returns the ones that still exist
@@ -311,7 +318,7 @@ func revalidateSnapshotRows(rows []models.MessageRecipient, live map[uint]bool) 
 			continue
 		}
 		if !live[r.UserID] {
-			r.Status, r.Reason, r.Address = models.RecipientSuppressed, skipNotActive, ""
+			r.Status, r.Reason, r.Address, r.AudienceAdmittedAt = models.RecipientSuppressed, skipNotActive, "", nil
 		}
 		out = append(out, r)
 	}
@@ -499,7 +506,13 @@ func (a *App) deliverMessageBatchOnce(ctx context.Context, p messageBatchJob) er
 		return db.Transaction(func(tx *gorm.DB) error { return a.settleMessage(tx, m.ID) })
 	}
 	var au audienceJSON
-	_ = json.Unmarshal([]byte(m.Audience), &au)
+	if err := json.Unmarshal([]byte(m.Audience), &au); err != nil {
+		return fmt.Errorf("message %d: its stored audience doesn't read: %w", m.ID, err)
+	}
+	// A reminder carries its date's place in its own text, and an event
+	// audience's announcement its author's words about the dates: both go only
+	// as far as a date the person may still see allows, decided at each row.
+	dated := m.Category == models.MessageCategoryReminder || eventAudience(au.Type)
 	blocked, err := batchSuppressions(db, rows)
 	if err != nil {
 		return err
@@ -519,54 +532,66 @@ func (a *App) deliverMessageBatchOnce(ctx context.Context, p messageBatchJob) er
 	sender := mail.Unwrap(a.mailSender())
 	optOut := categoryScope(messageCategory(&m))
 	last := jobs.LastAttempt(ctx)
-	for _, row := range rows {
+	for _, queued := range rows {
+		// Read Committed whatever the database's default, so each statement
+		// below reads what committed before it began: the choice after the
+		// claim, then every protected fact in one later statement.
 		err := db.Transaction(func(tx *gorm.DB) error {
-			var held uint
-			if err := tx.Raw("SELECT id FROM message_recipients WHERE id = ? AND status = ? FOR UPDATE SKIP LOCKED", row.ID, models.RecipientQueued).Scan(&held).Error; err != nil {
+			var row models.MessageRecipient
+			if err := tx.Raw("SELECT * FROM message_recipients WHERE id = ? AND message_id = ? AND channel = ? AND status = ? FOR UPDATE SKIP LOCKED",
+				queued.ID, m.ID, models.DeliveryEmail, models.RecipientQueued).Scan(&row).Error; err != nil {
 				return err
 			}
-			if held == 0 {
+			if row.ID == 0 {
 				return nil // another worker has it, or it is done
 			}
+			if a.hooks.batchRowClaimed != nil {
+				a.hooks.batchRowClaimed(tx, row.ID)
+			}
 			// Who the reader is now, read after the claim for this row alone:
-			// someone disabled or opted out since the snapshot doesn't get
-			// it, and the event fields follow their role and groups as they
-			// stand at this send (message_event_visibility.go).
+			// someone disabled since the snapshot doesn't get it.
 			reader, readers, err := rowReaders(tx, row)
 			if err != nil {
 				return err
 			}
 			if reader == nil || !(reader.Status == models.UserActive || reader.Status == models.UserGuest && guestMayGet(messageCategory(&m))) {
-				return markRecipient(tx, row.ID, models.RecipientSuppressed, skipNotActive, "", "")
+				return markRecipient(tx, row.ID, models.RecipientSuppressed, skipNotActive, "", "", false)
 			}
 			// D11: check the actual destination after claiming each row, including
-			// guardian copies and rows re-queued by apiRetryMessage or recheckReminderRows.
+			// guardian copies and rows re-queued by apiRetryMessage (Try again).
 			// A choice committed before this statement starts is honored; a later change
 			// may not stop this one in-flight send. Every later row and retry rechecks.
 			off, err := readEmailOff(tx, []emailDest{{UserID: row.UserID, Address: row.Address}})
 			if err != nil {
 				return err
 			}
-			if off.Off(row.UserID, row.Address, optOut) {
-				return markRecipient(tx, row.ID, models.RecipientSuppressed, skipOptedOutOf(messageCategory(&m)), "", "")
+			if a.hooks.batchChoiceRead != nil {
+				a.hooks.batchChoiceRead(row.ID)
 			}
-			// A reminder's own text carries the date's place, written when it
-			// was prepared, so someone who can no longer see the date gets no
-			// reminder at all, not one with the fields blanked.
-			if m.Category == models.MessageCategoryReminder {
-				may, err := a.reminderRowMaySee(tx, &m, row, time.Now())
-				if err != nil {
+			d := rowDecision{reader: reader, readers: readers}
+			if dated {
+				// The date decision and every field it lets through come from
+				// one statement read after the choice (datedRowDecision); the
+				// earlier reads above only refuse early.
+				if d, err = a.decideDatedRow(tx, &m, au, row); err != nil || d.stop {
 					return err
 				}
-				if !may {
-					return markRecipient(tx, row.ID, models.RecipientSuppressed, skipCantSeeDate, "", "")
+			}
+			if d.skip == skipNotActive {
+				return markRecipient(tx, row.ID, models.RecipientSuppressed, skipNotActive, "", "", false)
+			}
+			if off.Off(row.UserID, row.Address, optOut) {
+				return markRecipient(tx, row.ID, models.RecipientSuppressed, skipOptedOutOf(messageCategory(&m)), "", "", d.admitted)
+			}
+			if d.skip != "" {
+				return markRecipient(tx, row.ID, models.RecipientSuppressed, d.skip, "", "", false)
+			}
+			if !dated {
+				if d.values, err = a.rowValues(tx, row, readers, au, time.Now()); err != nil {
+					return err
 				}
 			}
-			values, err := a.rowValues(tx, row, readers, au, time.Now())
-			if err != nil {
-				return err
-			}
-			msg, err := a.messageEmail(&m, row, reader, readers, values, footer)
+			msg, err := a.messageEmail(&m, row, d.reader, d.readers, d.values, footer)
 			if err != nil {
 				return err
 			}
@@ -574,22 +599,22 @@ func (a *App) deliverMessageBatchOnce(ctx context.Context, p messageBatchJob) er
 			res := sendTracked(ctx, sender, msg, blocked[mail.NormalizeAddress(row.Address)])
 			switch {
 			case res.outcome == sendSent:
-				return markRecipient(tx, row.ID, models.RecipientSent, "", res.providerID, "")
+				return markRecipient(tx, row.ID, models.RecipientSent, "", res.providerID, "", d.admitted)
 			case res.outcome == sendSuppressed:
 				// The same words the snapshot uses for these people.
 				why := skipNotWorking
 				if s := (*mail.ErrSuppressed)(nil); errors.As(res.err, &s) && s.Reason == models.SuppressComplaint {
 					why = skipComplained
 				}
-				return markRecipient(tx, row.ID, models.RecipientSuppressed, why, "", "")
+				return markRecipient(tx, row.ID, models.RecipientSuppressed, why, "", "", d.admitted)
 			case res.outcome == sendNotConfigured:
-				return markRecipient(tx, row.ID, models.RecipientFailed, "", "", whyNoSender)
+				return markRecipient(tx, row.ID, models.RecipientFailed, "", "", whyNoSender, d.admitted)
 			case res.outcome == sendPermanent, last:
-				return markRecipient(tx, row.ID, models.RecipientFailed, "", "", jobs.CleanError(res.err))
+				return markRecipient(tx, row.ID, models.RecipientFailed, "", "", jobs.CleanError(res.err), d.admitted)
 			default:
 				return errors.Join(errStopBatch, res.err)
 			}
-		})
+		}, readCommitted)
 		if err != nil {
 			return err
 		}
@@ -597,10 +622,108 @@ func (a *App) deliverMessageBatchOnce(ctx context.Context, p messageBatchJob) er
 	return db.Transaction(func(tx *gorm.DB) error { return a.settleMessage(tx, m.ID) })
 }
 
-func markRecipient(tx *gorm.DB, id uint, status, reason, providerID, errText string) error {
+// readCommitted pins a transaction to Read Committed whatever the database's
+// default: each statement reads what committed before it began.
+var readCommitted = &sql.TxOptions{Isolation: sql.LevelReadCommitted}
+
+// rowDecision is what one claimed email row sends, or why it doesn't.
+type rowDecision struct {
+	// stop: the message is no longer going out; the row stays queued.
+	stop bool
+	// skip is the suppression reason; "" sends.
+	skip string
+	// admitted: an event audience's date check let this direct recipient in
+	// (message_recipients.audience_admitted_at).
+	admitted bool
+	reader   *models.User
+	readers  map[uint]*models.User
+	values   map[uint]map[string]string
+}
+
+// decideDatedRow decides a claimed row of a reminder or an event audience's
+// announcement from one statement on its claim transaction (loadDateFacts):
+// the message's current cutoff, the recipient and the subject (a copy's teen),
+// the subject's memberships, host rows, registrations and grants, and the
+// dates, events and groups they name. Nothing it decides or fills is read
+// again: an edit committed before the statement began counts for both the
+// gate and the fields, and one committed after counts for neither.
+func (a *App) decideDatedRow(tx *gorm.DB, m *models.Message, au audienceJSON, row models.MessageRecipient) (rowDecision, error) {
+	now := a.now().UTC()
+	facts, err := a.loadDateFacts(tx, rowFactsQuery(m, au, row))
+	if err != nil {
+		return rowDecision{}, err
+	}
+	return a.datedRowDecision(facts, m, au, row, now)
+}
+
+// datedRowDecision is decideDatedRow's judgment, from facts alone.
+func (a *App) datedRowDecision(facts *dateFacts, m *models.Message, au audienceJSON, row models.MessageRecipient, now time.Time) (rowDecision, error) {
+	cur := facts.message
+	if cur == nil || cur.Status != models.MessageSending {
+		return rowDecision{stop: true}, nil
+	}
+	reader := facts.liveUser(row.UserID)
+	if reader == nil || !(reader.Status == models.UserActive || reader.Status == models.UserGuest && guestMayGet(messageCategory(m))) {
+		return rowDecision{skip: skipNotActive}, nil
+	}
+	subjectID := rowSubject(row)
+	subject := facts.liveUser(subjectID)
+	src := facts.source(a)
+	if row.CopyOfUserID != nil && subject != nil && !subject.CanSignIn() {
+		// A teen who can't sign in lends the copy no authority of their own:
+		// what they could see signed out is all it may say.
+		src.signedOut = map[uint]bool{subjectID: true}
+	}
+	d := rowDecision{reader: reader, readers: map[uint]*models.User{reader.ID: reader}}
+	if subject != nil {
+		d.readers[subjectID] = subject
+	}
+	if m.Category == models.MessageCategoryReminder {
+		may := false
+		if m.OccurrenceID != nil {
+			can, err := reminderReadersFrom(src, *m.OccurrenceID, []uint{subjectID}, now)
+			if err != nil && !errors.Is(err, errAudienceGone) {
+				return rowDecision{}, err
+			}
+			may = can[subjectID]
+		}
+		if !may {
+			return rowDecision{skip: skipCantSeeDate}, nil
+		}
+	} else {
+		// The series cutoff is the message's scheduled time as it stands now:
+		// Try again moves it on the same rows.
+		cutoff := models.Message{ScheduledAt: cur.ScheduledAt}
+		seers, err := audienceSeersFrom(src, au, []uint{subjectID}, messageSince(&cutoff, now), now)
+		if err != nil {
+			return rowDecision{}, err
+		}
+		if why := audienceSkip(seers, subjectID); why != "" {
+			return rowDecision{skip: why}, nil
+		}
+		d.admitted = row.CopyOfUserID == nil
+	}
+	if subject == nil {
+		return rowDecision{skip: skipCantSeeDate}, nil
+	}
+	vals, err := a.readerEventValuesFrom(src, subject, au, now)
+	if err != nil {
+		return rowDecision{}, err
+	}
+	d.values = map[uint]map[string]string{subjectID: vals}
+	return d, nil
+}
+
+// markRecipient records a claimed email row's outcome. admitted also records,
+// once, that the row's direct recipient passed the event audience's date
+// check at this send (isMessageRecipientIn).
+func markRecipient(tx *gorm.DB, id uint, status, reason, providerID, errText string, admitted bool) error {
 	updates := map[string]any{"status": status, "reason": reason, "provider_message_id": providerID, "error": errText, "updated_at": time.Now()}
 	if status == models.RecipientSent {
 		updates["sent_at"] = time.Now()
+	}
+	if admitted {
+		updates["audience_admitted_at"] = gorm.Expr("COALESCE(audience_admitted_at, now())")
 	}
 	return tx.Model(&models.MessageRecipient{}).Where("id = ? AND status = ?", id, models.RecipientQueued).Updates(updates).Error
 }
@@ -698,7 +821,9 @@ func audienceRegisteredDates(db *gorm.DB, eventID uint, au audienceJSON, readerI
 	} else {
 		q = q.Where("o.status = ? AND o.starts_at >= ?", models.OccurrenceScheduled, now)
 	}
-	if err := q.Order("COALESCE(r.user_id, r.registered_by), o.starts_at").Scan(&dates).Error; err != nil {
+	// Two dates can start at the same instant; the date id breaks the tie, as
+	// memDates does, so every loader picks the same one.
+	if err := q.Order("COALESCE(r.user_id, r.registered_by), o.starts_at, o.id").Scan(&dates).Error; err != nil {
 		return nil, err
 	}
 	out := make(map[uint]registeredDate, len(dates))
@@ -858,4 +983,49 @@ func stillDue(tx *gorm.DB, id uint) error {
 		return errChangedWhilePreparing
 	}
 	return nil
+}
+
+// preparedAudienceIn decides, on tx (preparation's snapshot), who m reaches:
+// for a reminder, its date's registrants and which of them may no longer see
+// the date (M3.6, M1.13); for an announcement, the audience as its author may
+// still message it (step 1: roles change after scheduling). refused is why
+// the message can't go at all.
+func (a *App) preparedAudienceIn(tx *gorm.DB, m *models.Message, au *audienceJSON, now time.Time) (ids []uint, hidden map[uint]bool, refused string, err error) {
+	if m.Category == models.MessageCategoryReminder {
+		if err := au.normalize(); err != nil || m.OccurrenceID == nil {
+			return nil, nil, whyAudienceGone, nil
+		}
+		if ids, err = a.audienceUserIDs(tx, *au, now); err != nil {
+			return nil, nil, "", err
+		}
+		can, err := a.reminderReaders(tx, *m.OccurrenceID, ids, now)
+		if errors.Is(err, errAudienceGone) {
+			return nil, nil, whyAudienceGone, nil
+		}
+		if err != nil {
+			return nil, nil, "", err
+		}
+		hidden = map[uint]bool{}
+		for _, id := range ids {
+			hidden[id] = !can[id]
+		}
+		return ids, hidden, "", nil
+	}
+	var author models.User
+	if m.AuthorID != nil {
+		if err := tx.Where("id = ?", *m.AuthorID).Limit(1).Find(&author).Error; err != nil {
+			return nil, nil, "", err
+		}
+	}
+	if author.ID == 0 || author.Status != models.UserActive {
+		return nil, nil, whyAuthorGone, nil
+	}
+	ids, err = a.resolveAudienceIn(tx, &author, au, now)
+	switch {
+	case errors.Is(err, errAudienceRefused):
+		return nil, nil, whyAuthorRefused, nil
+	case errors.Is(err, errAudienceGone), errors.Is(err, errAudienceInvalid):
+		return nil, nil, whyAudienceGone, nil
+	}
+	return ids, nil, "", err
 }

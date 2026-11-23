@@ -723,7 +723,7 @@ func TestOccurrenceRegistrationCoreRejectsUnverifiedTeenAndWrongPurpose(t *testi
 			}
 			_, err = f.app.addAccountRegistrationLocked(tx, &ev, locked, subject.ID, &f.leader.ID, managerRegistrationOptions{approved: proof, mode: models.AttendanceInPerson}, time.Now().UTC(), "")
 			return err
-		})
+		}, contactGateTx)
 		if !errors.Is(err, errPeopleAddForbidden) {
 			t.Fatal("core accepted unverified teen", err)
 		}
@@ -1187,7 +1187,7 @@ func TestOccurrenceOrdinaryRSVPRetryRevalidatesEndedInvitation(t *testing.T) {
 			if scenario == "tighten_then_end" {
 				manager, recipient := cloneContactClient(f.admin), cloneContactClient(f.client)
 				tighten = queueContact(func() *httptest.ResponseRecorder {
-					return manager.do("PUT", "/api/v1/events/"+itoa(f.event.ID)+"/visibility", map[string]any{"visibility": models.VisibilityInviteOnly, "confirm": true}, true)
+					return manager.do("PUT", "/api/v1/events/"+itoa(f.event.ID)+"/visibility", confirmVisibility(t, manager, "/api/v1/events/"+itoa(f.event.ID)+"/visibility", map[string]any{"visibility": models.VisibilityInviteOnly}), true)
 				})
 				waitContactWaiters(t, f.app, 1)
 				end = queueContact(func() *httptest.ResponseRecorder {
@@ -1225,7 +1225,14 @@ func TestOccurrenceOrdinaryRSVPRetryRevalidatesEndedInvitation(t *testing.T) {
 					}
 				}
 			}
-			if w := awaitContactResponse(t, rsvp); w.Code != 404 {
+			// The disable bumped the session epoch while the RSVP waited: the
+			// locked holder's session is stale, which is the signed-out 401
+			// before any date authority is judged.
+			want := http.StatusNotFound
+			if scenario == "disable_reenable" {
+				want = http.StatusUnauthorized
+			}
+			if w := awaitContactResponse(t, rsvp); w.Code != want {
 				t.Fatal("queued RSVP reused stale authority", w.Code, w.Body.String())
 			}
 			if savedOccurrenceAccess(t, f).Status != policy.OccurrenceAccessEnded {
@@ -1448,7 +1455,7 @@ func TestOccurrenceAskBirthdayRechecksClockAfterDomainLock(t *testing.T) {
 			}
 			op := contactOperation{actor: f.issuer, now: beforeBirthday, zone: time.UTC}
 			return f.app.completeAddAsk(tx, &op, &r, "")
-		})
+		}, contactGateTx)
 	}()
 	waitOccurrenceDomainWaiter(t, f.app)
 	if err := blocker.Commit().Error; err != nil {

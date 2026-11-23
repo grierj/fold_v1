@@ -19,6 +19,56 @@ push reminders or the service worker. Background: M3.13, DEC-121 to DEC-129,
 - Pushes share `pushTarget`, `pushHeld` (church switch, active account, consent), `pushOpensAt`
   (quiet hours, at least a second out) and `sendPush` (`push_deliver.go`). A notice's, an
   announcement's and a reminder's push differ only in what they check before and what they say.
+- An announcement push (after quiet hours and the hourly limit) and a push reminder read their
+  destination (`pushDestinationIn`: the account, the church's switch, consent and the device's
+  owner), decide their date authority and build their payload in one read-only Repeatable Read
+  snapshot (`announcementPushIn`, `planReminderPushIn`), then record or call the push service
+  after it ends: no network call under a transaction, and no lock beyond the claim. The device
+  sent to is the one that snapshot read, so a shared browser rebound to another account, or a
+  device or consent turned off, before it began never gets the payload; a change committed after
+  it began can't stop that one send. The earlier checks only spare quiet hours and the hourly
+  limit a push that can't go. An event audience's push goes only while a date the person may
+  still see puts them in it (`audienceSeers`), counting a series from the message's stored
+  scheduled time, as email and the read page do. An announcement push reads the message again
+  in its snapshot (`messagePushColumns`): Try again moves `scheduled_at` without touching push
+  rows, so a push still waiting counts from the cutoff Try again set. A reminder keeps its stored
+  date reference; its push reads the current date and effective title in the snapshot.
+- What the push service answers changes a device only as it was dispatched (`dispatchedDevice`:
+  row, owner, keys and `binding_generation`). The generation goes up by one on every change of
+  owner or key, kept by a trigger (migration `00011`) so every writer advances it; it never
+  repeats for a row. A browser handed to another account and back, or renewed and given its old
+  keys again, counts as changed; no timestamp stands in for it, because a clock reading can
+  repeat. A browser rebound, bound back or renewed with new keys while the answer was on its way
+  is not deleted on "gone", marked failed or stamped used. A "gone" about a changed device
+  retries while attempts remain.
+- An attempt that ends without delivering for a reason about its device alone (gone, moved or
+  turned off before the job ran, refused, a last attempt that never reached it) goes through
+  `settlePushMiss`, for notices, announcements and reminders alike: it leaves the row only to
+  another of the person's devices' `push.deliver` jobs for that row that will still run
+  (`pushSiblingWaiting`, `jobs.WillRunAgain`: queued, including one gone back to wait for quiet
+  hours, or waiting to retry). A device saved after the jobs were queued has no job, and a job that
+  ended takes nothing, so neither keeps the row waiting. Any other running sibling decides for
+  itself; a delivery upgrades any earlier outcome to sent, so two last attempts never each wait
+  for the other. Otherwise the row is failed when the device is still theirs, and "device gone"
+  when it moved to someone else or is gone. A notice's push to a device that is gone or another
+  account's is never sent there and is settled the same way.
+- An announcement job that goes back to wait for quiet hours (`pushWaitIn`) locks the person's
+  account first (`FOR SHARE`, the account-first order erasure and status changes take), then
+  writes the row's "sending at" reason and queues its own job again for the opening
+  (`jobs.LaterIn`: queued, attempt given back) in one Read Committed commit. It puts a device miss
+  (`pushDeviceMisses`) another job recorded back to queued only while the person is still active,
+  read after any erasure or status change holding the account has committed; a sent row never
+  changes. `jobs.LaterIn` changes the job only while the handler's own claim holds (`jobs.Claim`:
+  the row and its `claim_seq`, which never repeats, even when a worker label is reused, a wait
+  gives its attempt back or an admin retries); after a lost lease it returns
+  `jobs.ErrClaimLost`, nothing commits and the runner records nothing. Once the wait commits the
+  handler returns `jobs.Requeued`, and the runner writes nothing: the job may already be claimed
+  again for the opening. A worker that stops after the commit leaves a queued job, not a
+  running one for lease recovery to spend an attempt on. Settlement locks the row first
+  (`settlePushMissIn`), so whichever commits first, the other sees it. A notice has no queued
+  state: a notice job waiting for quiet hours returns `jobs.Later` alone, so a sibling's miss can
+  show until the morning delivery upgrades it to sent. The daily `reapMessagePushes` remains the
+  backstop for an announcement row whose last job stopped before deciding.
 - `push.deliver` is one job per device.
 
 ## What a push may say

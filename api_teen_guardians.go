@@ -112,7 +112,7 @@ func (a *App) apiClaimTeenGuardian(c *gin.Context) {
 			}
 			err = requestTeenGuardian(tx, me.ID, teen.ID, &me.ID, "claim", c.ClientIP())
 			return err
-		})
+		}, contactGateTx)
 	} else {
 		err = res.Error
 	}

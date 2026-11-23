@@ -8,10 +8,12 @@ import { PageCount, Pagination } from "./ui/Pagination";
 import { SearchBox } from "./ui/SearchBox";
 import { EmptyState } from "./ui/EmptyState";
 import { registrationStatusLabel } from "../lib/status";
+import { ConfirmShown } from "./ui/ConfirmDialog";
 
 // Small schedules keep direct answers. Longer schedules share one compact,
 // searchable date list. Opened forms stay mounted while hidden, so browsing
-// another date/page doesn't discard a guest form or RSVP draft.
+// another date/page doesn't discard a guest form or RSVP draft; hiding a date
+// does end any question or retry its forms had pending (ConfirmShown).
 export function CompactDates({ dates, requested, requestVersion = 0, loadedOnly = false, noun = "dates", children }: {
   dates: EventOccurrence[]; requested?: string; requestVersion?: number; loadedOnly?: boolean; noun?: string;
   children: (date: EventOccurrence) => ReactNode;
@@ -80,7 +82,9 @@ export function CompactDates({ dates, requested, requestVersion = 0, loadedOnly 
           }}>{opened ? "Hide details" : "Details and RSVP"}</Button>
         </div>}
         <div id={`date-details-${d.id}`} hidden={dense && !opened}>
-          {(!dense || opened || visited.has(d.id) || d.id === dates[0]?.id) && children(d)}
+          <ConfirmShown shown={!dense || (opened && visible.has(d.id))}>
+            {(!dense || opened || visited.has(d.id) || d.id === dates[0]?.id) && children(d)}
+          </ConfirmShown>
         </div>
       </div>;
     })}

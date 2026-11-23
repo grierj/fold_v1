@@ -4,6 +4,7 @@ import { expect, test, type Page } from "@playwright/test";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { apiAs, email, fromMore, PASSWORD, signIn, signInTo, soon } from "./helpers";
 import { measure } from "./ui-measure.mjs";
+import { expectModalDialog } from "./dialogs";
 import type { EventOccurrence } from "../src/types";
 
 const adminName = process.env.VERIFY_URL ? "verify-admin" : "grier";
@@ -127,10 +128,10 @@ for (const scenario of ["adult-decline", "adult-block", "teen-removal"] as const
     await page.goto("/notifications");
     await (await soon(page.getByRole("link", { name: /You have a date invitation/ }))).click();
     await expect(page).toHaveURL(new RegExp(path + "$"));
-    await expect(await soon(page.getByText("You're going. See you there!", { exact: true }))).toBeVisible();
+    await expect(await soon(page.getByText("You're going to this date.", { exact: true }))).toBeVisible();
     const exact = await (await page.request.get(`/api/v1${path}`)).json();
 
-    for (const key of ["groupId", "groupName", "hostedBy", "hosts", "attendees", "removedRegistrations", "recurrenceRule", "seriesTitle", "description", "canManage", "myHouseholdRegistrations", "myChildcareCount", "myChildcareAgesNote"]) expect(exact.occurrence).not.toHaveProperty(key);
+    for (const key of ["groupId", "groupName", "hostedBy", "hosts", "attendees", "removedRegistrations", "recurrenceRule", "seriesTitle", "description", "canManage", "myHouseholdRegistrations", "myChildcareCount", "myChildcareAgesNote", "visibility", "groupHeader", "attendance", "seats", "remoteRsvp", "series", "myWaitlistPosition"]) expect(exact.occurrence).not.toHaveProperty(key);
     expect(exact.occurrence.canSeeVideo).toBe(true); expect(exact.occurrence.videoUrl).toBe("https://example.com/exact-private-call");
     save(`${scenario}-safe-date`, exact);
     await expect(page.locator(`a[href="/events/${event.id}"]`)).toHaveCount(0);
@@ -149,7 +150,7 @@ for (const scenario of ["adult-decline", "adult-block", "teen-removal"] as const
     // rather than clear the accepted request's options with invented defaults.
     await page.goto(otherPath);
     await (await soon(page.getByRole("button", { name: "Going", exact: true }))).click();
-    await expect(page.getByText("You're going. See you there!", { exact: true })).toBeVisible();
+    await expect(page.getByText("You're going to this date.", { exact: true })).toBeVisible();
     const retained = await admin("GET", `/events/${event.id}`);
     const retainedCare = retained.occurrences[1].attendees.find((a: { userId: number }) => a.userId === user.id);
     expect(retainedCare.childcareCount).toBe(1); expect(retainedCare.childcareAgesNote).toBe("Age 5, keep this care request");
@@ -162,7 +163,7 @@ for (const scenario of ["adult-decline", "adult-block", "teen-removal"] as const
 
     for (const hidden of [`/events/${event.id}`, `/groups/${group.id}`, `/events/${event.id}/dates/${sibling.date}`]) expect((await page.request.get(`/api/v1${hidden}`)).status()).toBe(404);
     await selectedLink.focus(); await page.keyboard.press("Enter");
-    await expect(await soon(page.getByText("You're going. See you there!", { exact: true }))).toBeVisible();
+    await expect(await soon(page.getByText("You're going to this date.", { exact: true }))).toBeVisible();
 
     // Own scoped RSVP, not household/proxy or ordinary RSVP. The real server
     // returns the current answer after each save; mode/guests are explicit.
@@ -220,8 +221,23 @@ for (const scenario of ["adult-decline", "adult-block", "teen-removal"] as const
       await page.evaluate(() => window.dispatchEvent(new Event("focus")));
     } else {
       const block = scenario === "adult-block";
-      page.once("dialog", async (dialog) => { expect(dialog.message()).toContain("Other accepted dates stay yours"); await dialog.accept(); });
-      await page.getByRole("button", { name: block ? "Don't add me again" : "Can't go", exact: true }).click();
+      const label = block ? "Don't add me again" : "Can't go";
+      // The date page asks in its own labelled dialog; a browser prompt here is a regression.
+      const nativeDialogs: string[] = [];
+      page.on("dialog", (dialog) => { nativeDialogs.push(dialog.message()); void dialog.dismiss(); });
+      await page.getByRole("button", { name: label, exact: true }).click();
+      const question = page.getByRole("dialog", { name: block ? "Don't add me again?" : "Can't go to this date?" });
+      await expect(question).toContainText("Other accepted dates stay yours");
+      await expect(question.getByRole("button", { name: "Cancel" })).toBeFocused();
+      await expectModalDialog(page, question, `${scenario}-question`);
+      // Escape answers no: the invitation stands and focus is back on the button that asked.
+      await page.keyboard.press("Escape");
+      await expect(question).toBeHidden();
+      await expect(page.getByRole("button", { name: label, exact: true })).toBeFocused();
+      await page.getByRole("button", { name: label, exact: true }).click();
+      await question.getByRole("button", { name: label, exact: true }).click();
+      await expect(question).toBeHidden();
+      expect(nativeDialogs).toEqual([]);
     }
 
     await expect(page.getByText("This date is not available", { exact: true })).toBeVisible();

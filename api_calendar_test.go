@@ -7,7 +7,10 @@ import (
 	"testing"
 	"time"
 
+	"fold/internal/policy"
 	"fold/models"
+
+	"gorm.io/gorm"
 )
 
 type calendarPage struct {
@@ -444,7 +447,7 @@ func TestCalendarRemoteFilter(t *testing.T) {
 	decodeJSON(t, w, &hybrid)
 	closed := scheduleGroupEvent(t, admin, open, "Remote Closed This Date")
 	apiDo(t, admin, "PUT", fmt.Sprintf("/api/v1/events/%d", closed.ID), map[string]any{"remoteAvailable": true}, http.StatusOK)
-	apiDo(t, admin, "PUT", fmt.Sprintf("/api/v1/events/%d/occurrences/%s", closed.ID, closed.StartsLocal[:10]), map[string]any{"remoteCapacityOverride": 0}, http.StatusOK)
+	saveDate(t, admin, closed.ID, closed.StartsLocal[:10], map[string]any{"remoteCapacityOverride": 0}, http.StatusOK, "")
 	secret := createGroupAs(t, admin, "Secret Remote", models.VisibilityInviteOnly)
 	w = admin.do("POST", "/api/v1/groups/"+itoa(secret)+"/events", map[string]any{
 		"title": "Secret Hybrid", "startsLocal": "2026-12-01T19:00", "durationMinutes": 60,
@@ -743,4 +746,523 @@ func TestCalendarHiddenGroupSiteNameReadBudget(t *testing.T) {
 		}
 		t.Logf("%d dates: %d reads, site_name=%d", i, reads, *settings)
 	}
+}
+
+// TestCalendarGroupFilterIsJudgedInTheListsSnapshot: the group filter says
+// which events are a group's, so it is judged in the snapshot that lists them.
+// The group is made invite-only and one of its dates retitled in one commit,
+// right after the filter is judged and again at the "grants" seam: the list
+// must come from the state the filter was judged in, never pair the old
+// authorization with the new title.
+func TestCalendarGroupFilterIsJudgedInTheListsSnapshot(t *testing.T) {
+	for _, seam := range readerSeams {
+		t.Run(seam, func(t *testing.T) {
+			f := newDepartureReadFixture(t, models.VisibilityPublic, models.RegGoing, policy.OccurrenceOriginDepartureSelf)
+			const renamed = "Renamed under a hidden group"
+			fired := atReaderSeam(f.app, seam, "calendar group", func() {
+				if err := f.app.DB.Transaction(func(tx *gorm.DB) error {
+					if err := tx.Model(&models.Group{}).Where("id = ?", f.group).Update("visibility", models.VisibilityInviteOnly).Error; err != nil {
+						return err
+					}
+					return tx.Model(&models.EventOccurrence{}).Where("id = ?", f.dates[0].ID).Update("title_override", renamed).Error
+				}); err != nil {
+					t.Error(err)
+				}
+			})
+			from, to := feedDate(f.dates[0].StartsAt.AddDate(0, 0, -1)), feedDate(f.dates[2].StartsAt.AddDate(0, 0, 1))
+			w := f.client.do("GET", "/api/v1/calendar?tz=UTC&group="+itoa(f.group)+"&from="+from+"&to="+to, nil, false)
+			if !fired.Load() {
+				t.Fatalf("the calendar never reached the %s seam", seam)
+			}
+			if w.Code != http.StatusOK || strings.Contains(w.Body.String(), renamed) {
+				t.Fatalf("the group filter paired its old authorization with a newer date: %d %s", w.Code, w.Body.String())
+			}
+			if w := f.client.do("GET", "/api/v1/calendar?tz=UTC&group="+itoa(f.group)+"&from="+from+"&to="+to, nil, false); w.Code != http.StatusNotFound {
+				t.Fatalf("after the commit the hidden group's filter: %d %s", w.Code, w.Body.String())
+			}
+		})
+	}
+}
+
+// keptCalendar is a public group with a leader who is no admin, an admin who is
+// neither a member nor a host, a member who leaves keeping dates, an ordinary
+// member who stays, and a second member who can leave later.
+type keptCalendar struct {
+	app                                   *App
+	group                                 uint
+	issuer, leader, admin, member, other  *apiClient
+	second                                *apiClient
+	adminU, memberU, secondU, issuerU, lU *models.User
+}
+
+func newKeptCalendar(t *testing.T) keptCalendar {
+	t.Helper()
+	app := testApp(t)
+	f := keptCalendar{app: app}
+	f.issuerU = newTestUser(t, app, "kept issuer", "password1234", models.RoleAdmin)
+	f.issuer = loginAPI(t, app, "kept issuer", "password1234")
+	f.group = createFeedGroup(t, f.issuer, "Kept calendar group", models.VisibilityPublic, "Kept hall")
+	var g models.Group
+	gormMust(t, app.DB.First(&g, f.group))
+	f.lU = newTestUser(t, app, "kept leader", "password1234", models.RoleMember)
+	addMember(t, app, f.lU, &g, models.MembershipLeader)
+	f.leader = loginAPI(t, app, "kept leader", "password1234")
+	f.adminU = newTestUser(t, app, "kept admin", "password1234", models.RoleAdmin)
+	f.admin = loginAPI(t, app, "kept admin", "password1234")
+	f.memberU = newTestUser(t, app, "kept member", "password1234", models.RoleMember)
+	addMember(t, app, f.memberU, &g, models.MembershipMember)
+	f.member = loginAPI(t, app, "kept member", "password1234")
+	otherU := newTestUser(t, app, "kept other", "password1234", models.RoleMember)
+	addMember(t, app, otherU, &g, models.MembershipMember)
+	f.other = loginAPI(t, app, "kept other", "password1234")
+	f.secondU = newTestUser(t, app, "kept second", "password1234", models.RoleMember)
+	addMember(t, app, f.secondU, &g, models.MembershipMember)
+	f.second = loginAPI(t, app, "kept second", "password1234")
+	return f
+}
+
+// event creates a weekly public event of n dates far from every fixture date,
+// signs who up Going on all of them, and returns its dates in order. A test
+// then places each date with place and has who leave keeping some.
+func (f keptCalendar) event(t *testing.T, title string, n int, who ...*apiClient) (eventJSON, []models.EventOccurrence) {
+	t.Helper()
+	ev := createFeedEvent(t, f.issuer, f.group, title, feedStart(300), fmt.Sprintf("FREQ=WEEKLY;COUNT=%d", n))
+	var dates []models.EventOccurrence
+	gormMust(t, f.app.DB.Where("event_id = ?", ev.ID).Order("starts_at").Find(&dates))
+	if len(dates) != n {
+		t.Fatalf("%s has %d dates, want %d", title, len(dates), n)
+	}
+	for _, c := range who {
+		for _, d := range dates {
+			if code, body := registerAs(c, ev.ID, models.FormatCalendarDate(d.OriginalDate), models.RegGoing, nil); code != http.StatusOK {
+				t.Fatalf("going on %s: %d %s", models.FormatCalendarDate(d.OriginalDate), code, body)
+			}
+		}
+	}
+	return ev, dates
+}
+
+// place moves a date (no grant is live yet, so 00014 allows it): its original
+// day, its start, its length and a title of its own.
+func (f keptCalendar) place(t *testing.T, d *models.EventOccurrence, title, day string, start time.Time, minutes int) {
+	t.Helper()
+	gormMust(t, f.app.DB.Exec("UPDATE event_occurrences SET original_date = ?, starts_at = ?, ends_at = ?, duration_override = ?, title_override = ? WHERE id = ?",
+		day, start.UTC(), start.Add(time.Duration(minutes)*time.Minute).UTC(), minutes, title, d.ID))
+	gormMust(t, f.app.DB.First(d, d.ID))
+}
+
+// leave has c leave the group through the real departure, keeping exactly keep.
+func (f keptCalendar) leave(t *testing.T, c *apiClient, keep ...models.EventOccurrence) {
+	t.Helper()
+	base := "/api/v1/groups/" + itoa(f.group)
+	preview := getDeparturePreview(t, c, base+"/departure-preview", http.StatusOK)
+	ids := []uint{}
+	for _, d := range keep {
+		ids = append(ids, d.ID)
+	}
+	if w := confirmDeparturePreview(t, c, "POST", base+"/leave", preview, ids, ""); w.Code != http.StatusOK {
+		t.Fatalf("leave keeping %v: %d %s", ids, w.Code, w.Body.String())
+	}
+	for _, d := range keep {
+		if n, err := keptDatesIn(f.app.DB, []uint{d.ID}); err != nil || n[d.ID] == 0 {
+			t.Fatalf("date %d is not kept after leaving: %v %v", d.ID, n, err)
+		}
+	}
+}
+
+// remove is a manager's roster Remove of u's row on d.
+func (f keptCalendar) remove(t *testing.T, eventID uint, d models.EventOccurrence, u *models.User) {
+	t.Helper()
+	var reg models.Registration
+	gormMust(t, f.app.DB.Where("occurrence_id = ? AND user_id = ?", d.ID, u.ID).First(&reg))
+	if w := f.issuer.do("POST", "/api/v1/events/"+itoa(eventID)+"/registrations/remove",
+		map[string]any{"date": models.FormatCalendarDate(d.OriginalDate), "registrationId": reg.ID}, true); w.Code != http.StatusOK {
+		t.Fatalf("remove: %d %s", w.Code, w.Body.String())
+	}
+}
+
+func calendarRowFor(page calendarPage, title string) (calendarOccurrenceJSON, bool) {
+	for _, o := range page.Occurrences {
+		if o.Title == title {
+			return o, true
+		}
+	}
+	return calendarOccurrenceJSON{}, false
+}
+
+func calendarQuery(from, to time.Time, extra string) string {
+	return "tz=UTC&from=" + feedDate(from) + "&to=" + feedDate(to) + extra
+}
+
+// TestManagerCalendarLinkMatchesTheEventPageList (DEC-157): for the group's
+// leader and for an admin who is neither member nor host, a calendar row links
+// to the date page exactly when the event page does not list that date, at
+// every boundary of the event page's filter; eventPageLists agrees with that
+// filter. The admin keeps every kept date (ManagerKept) and no unkept public
+// date outside DEC-77's window. A member's and a visitor's rows carry no link.
+func TestManagerCalendarLinkMatchesTheEventPageList(t *testing.T) {
+	f := newKeptCalendar(t)
+	now := time.Now().UTC().Truncate(time.Minute)
+	ev, d := f.event(t, "Boundary series", 7, f.member)
+	day := func(t time.Time) string { return t.Format("2006-01-02") }
+	noon := func(days int) time.Time {
+		return time.Date(now.Year(), now.Month(), now.Day(), 12, 0, 0, 0, time.UTC).AddDate(0, 0, days)
+	}
+	started, soon, last, past, custom, late, cancelled := &d[0], &d[1], &d[2], &d[3], &d[4], &d[5], &d[6]
+	f.place(t, started, "Started ten minutes ago", day(now), now.Add(-10*time.Minute), 60)
+	// One date per original day: this one's clock was moved to an hour from now.
+	f.place(t, soon, "Starts in an hour", day(now.AddDate(0, 0, 1)), now.Add(time.Hour), 60)
+	f.place(t, last, "Last listed day", day(noon(90)), noon(90), 60)
+	f.place(t, past, "First unlisted day", day(noon(91)), noon(91), 60)
+	f.place(t, custom, "Customized far date", day(noon(121)), noon(121), 60)
+	f.place(t, late, "Yesterday's date later today", day(now.Add(-24*time.Hour)), now.Add(2*time.Hour), 60)
+	f.place(t, cancelled, "Cancelled boundary date", day(noon(30)), noon(30), 60)
+	f.leave(t, f.member, *started, *past, *custom)
+	gormMust(t, f.app.DB.Exec("UPDATE event_occurrences SET status = ? WHERE id = ?", models.OccurrenceCancelled, cancelled.ID))
+	if n, _ := keptDatesIn(f.app.DB, []uint{cancelled.ID}); n[cancelled.ID] != 0 {
+		t.Fatal("the cancelled date holds a grant")
+	}
+
+	all := []*models.EventOccurrence{started, soon, last, past, custom, late, cancelled}
+	q := calendarQuery(now.Add(-24*time.Hour), noon(125), "")
+	from, to := upcomingWindow(now)
+	useCalendarTestClock(f.app, now)
+	for _, who := range []struct {
+		name string
+		c    *apiClient
+		u    *models.User
+	}{{"leader", f.leader, f.lU}, {"admin", f.admin, f.adminU}} {
+		t.Run(who.name, func(t *testing.T) {
+			listed, err := f.app.occurrencesForEventsErr([]uint{ev.ID}, from, to, &now, who.u)
+			if err != nil {
+				t.Fatal(err)
+			}
+			onList := map[string]bool{}
+			for _, o := range listed {
+				onList[o.Date] = true
+			}
+			for _, o := range all {
+				gormMust(t, f.app.DB.First(o, o.ID))
+				if got, want := eventPageLists(o, now), onList[models.FormatCalendarDate(o.OriginalDate)]; got != want {
+					t.Errorf("eventPageLists(%s) = %v, the event page lists it: %v", derefTitle(o), got, want)
+				}
+			}
+			page, _ := getCalendar(t, who.c, q, http.StatusOK)
+			for _, row := range page.Occurrences {
+				wantURL := ""
+				if !onList[row.Date] {
+					wantURL = occurrenceDatePath(ev.ID, row.Date)
+				}
+				if row.DateURL != wantURL {
+					t.Errorf("%s: dateUrl %q, want %q", row.Title, row.DateURL, wantURL)
+				}
+			}
+			for _, title := range []string{"Started ten minutes ago", "First unlisted day", "Customized far date"} {
+				if row, ok := calendarRowFor(page, title); !ok || row.DateURL == "" {
+					t.Errorf("%s: no linked row for a kept unlisted date: %+v", title, page.Occurrences)
+				}
+			}
+			if hasTitle(page, "Cancelled boundary date") {
+				t.Error("the cancelled date is on the calendar")
+			}
+			if who.name == "admin" {
+				// DEC-77 still bounds the admin's unkept public dates.
+				if hasTitle(page, "Last listed day") {
+					t.Error("the admin sees an unkept public date 90 days ahead")
+				}
+				for _, title := range []string{"Starts in an hour", "Yesterday's date later today"} {
+					if !hasTitle(page, title) {
+						t.Errorf("the admin lost %s inside the window", title)
+					}
+				}
+			} else if !hasTitle(page, "Last listed day") {
+				t.Error("the leader lost a standing-scope date")
+			}
+		})
+	}
+	t.Run("member and visitor rows carry no link", func(t *testing.T) {
+		for name, c := range map[string]*apiClient{"member": f.other, "visitor": newAPIClient(t, f.app)} {
+			page, raw := getCalendar(t, c, q, http.StatusOK)
+			if len(page.Occurrences) == 0 || strings.Contains(raw, `"dateUrl"`) {
+				t.Errorf("%s rows: %s", name, raw)
+			}
+		}
+	})
+
+	// The HTTP control on the real clock, with margins no request can cross:
+	// the calendar against GET /events/:id.
+	f.app.clock = nil
+	wall := time.Now().UTC().Truncate(time.Minute)
+	ev2, d2 := f.event(t, "Wide margin series", 5, f.second)
+	wideNoon := func(days int) time.Time {
+		return time.Date(wall.Year(), wall.Month(), wall.Day(), 12, 0, 0, 0, time.UTC).AddDate(0, 0, days)
+	}
+	f.place(t, &d2[0], "Wide started", day(wall.Add(-time.Hour)), wall.Add(-time.Hour), 180)
+	f.place(t, &d2[1], "Wide soon", day(wall.AddDate(0, 0, 1)), wall.Add(2*time.Hour), 60)
+	f.place(t, &d2[2], "Wide 80", day(wideNoon(80)), wideNoon(80), 60)
+	f.place(t, &d2[3], "Wide 100", day(wideNoon(100)), wideNoon(100), 60)
+	f.place(t, &d2[4], "Wide 121", day(wideNoon(121)), wideNoon(121), 60)
+	f.leave(t, f.second, d2[0], d2[3], d2[4])
+	for _, c := range []*apiClient{f.leader, f.admin} {
+		w := c.do("GET", "/api/v1/events/"+itoa(ev2.ID), nil, false)
+		if w.Code != http.StatusOK {
+			t.Fatal(w.Code, w.Body.String())
+		}
+		var body struct {
+			Occurrences []occurrenceJSON `json:"occurrences"`
+		}
+		decodeJSON(t, w, &body)
+		onList := map[string]bool{}
+		for _, o := range body.Occurrences {
+			onList[o.Date] = true
+		}
+		page, _ := getCalendar(t, c, calendarQuery(wall.Add(-24*time.Hour), wideNoon(125), ""), http.StatusOK)
+		seen := 0
+		for _, row := range page.Occurrences {
+			if row.EventID != ev2.ID {
+				continue
+			}
+			seen++
+			if (row.DateURL != "") == onList[row.Date] {
+				t.Errorf("%s: dateUrl %q, the event page lists it: %v", row.Title, row.DateURL, onList[row.Date])
+			}
+		}
+		if seen < 4 {
+			t.Errorf("wide-margin rows: %d, %+v", seen, page.Occurrences)
+		}
+	}
+}
+
+func derefTitle(o *models.EventOccurrence) string {
+	if o.TitleOverride == nil {
+		return models.FormatCalendarDate(o.OriginalDate)
+	}
+	return *o.TitleOverride
+}
+
+// TestManagersReachKeptDatesOnTheirCalendar (DEC-157) through the real
+// calendar handler: in Everything, a date someone kept after leaving stays on
+// the calendar of everyone who manages its event, outside DEC-77's window and
+// while underway, carried in when it began before the range; never in Just
+// mine, Home's request or the feeds, never for a member, and only while the
+// grant is live and the date has not ended on the calendar's clock.
+func TestManagersReachKeptDatesOnTheirCalendar(t *testing.T) {
+	day := func(t time.Time) string { return t.Format("2006-01-02") }
+	midnight := func(t time.Time) time.Time { return time.Date(t.Year(), t.Month(), t.Day(), 0, 0, 0, 0, time.UTC) }
+
+	t.Run("everything, just mine, home and feeds", func(t *testing.T) {
+		f := newKeptCalendar(t)
+		now := time.Now().UTC().Truncate(time.Minute)
+		today := midnight(now)
+		ev, d := f.event(t, "Kept reach series", 4, f.member)
+		f.place(t, &d[0], "Underway kept", day(now), now.Add(-30*time.Minute), 120)
+		f.place(t, &d[1], "Far kept", day(today.AddDate(0, 0, 121)), today.AddDate(0, 0, 121).Add(12*time.Hour), 60)
+		f.place(t, &d[2], "Far sibling", day(today.AddDate(0, 0, 114)), today.AddDate(0, 0, 114).Add(12*time.Hour), 60)
+		yesterdayNoon := today.AddDate(0, 0, -1).Add(12 * time.Hour)
+		f.place(t, &d[3], "Began yesterday kept", day(yesterdayNoon), yesterdayNoon, 2*24*60)
+		_, d2 := f.event(t, "Unkept twin series", 1, f.member)
+		f.place(t, &d2[0], "Began yesterday unkept", day(yesterdayNoon), yesterdayNoon, 2*24*60)
+		f.leave(t, f.member, d[0], d[1], d[3])
+		// Pinned after the departure, so the grants it made are live on this clock.
+		useCalendarTestClock(f.app, time.Now())
+
+		everything := calendarQuery(today, today.AddDate(0, 0, 29), "")
+		farRange := calendarQuery(today.AddDate(0, 0, 110), today.AddDate(0, 0, 125), "")
+		home := calendarQuery(today, today.AddDate(0, 0, 60), "&mine=1")
+		farMine := calendarQuery(today.AddDate(0, 0, 110), today.AddDate(0, 0, 125), "&mine=1")
+		wantLinked := func(t *testing.T, page calendarPage, title string, eventID uint) {
+			t.Helper()
+			row, ok := calendarRowFor(page, title)
+			if !ok || row.DateURL != occurrenceDatePath(eventID, row.Date) {
+				t.Fatalf("%s: no row linking its date page: %+v", title, page.Occurrences)
+			}
+		}
+		absent := func(t *testing.T, page calendarPage, titles ...string) {
+			t.Helper()
+			for _, title := range titles {
+				if hasTitle(page, title) {
+					t.Fatalf("%s is on the calendar: %v", title, calendarTitles(page))
+				}
+			}
+		}
+
+		// (a) An underway public kept date, for an admin who is no member.
+		page, _ := getCalendar(t, f.admin, everything, http.StatusOK)
+		wantLinked(t, page, "Underway kept", ev.ID)
+		// (b) 121 days ahead; DEC-77 still drops its unkept sibling.
+		page, _ = getCalendar(t, f.admin, farRange, http.StatusOK)
+		wantLinked(t, page, "Far kept", ev.ID)
+		absent(t, page, "Far sibling")
+		// (e) Began yesterday and still going: carried into the leader's today.
+		page, _ = getCalendar(t, f.leader, everything, http.StatusOK)
+		wantLinked(t, page, "Began yesterday kept", ev.ID)
+		if row, _ := calendarRowFor(page, "Began yesterday kept"); row.Date != day(yesterdayNoon) {
+			t.Fatalf("the carried row is not under its own start day: %+v", row)
+		}
+		// (f) The same shape without a kept grant is not carried.
+		absent(t, page, "Began yesterday unkept")
+		// (g) A member who is no leader gets no carried row.
+		page, _ = getCalendar(t, f.other, everything, http.StatusOK)
+		absent(t, page, "Began yesterday kept", "Began yesterday unkept")
+
+		// (d) and (h): Just mine and Home's request shape have none of them.
+		mineBefore := map[string]string{}
+		for name, r := range map[string]struct {
+			c *apiClient
+			q string
+		}{"admin home": {f.admin, home}, "admin far mine": {f.admin, farMine}, "leader home": {f.leader, home}} {
+			page, raw := getCalendar(t, r.c, r.q, http.StatusOK)
+			if r.c == f.leader {
+				// The leader's own dates stay; only the carry-in is never mine.
+				absent(t, page, "Began yesterday kept")
+			} else {
+				absent(t, page, "Underway kept", "Far kept", "Began yesterday kept")
+			}
+			mineBefore[name] = raw
+		}
+		// (k) The personal feeds, both scopes.
+		anon := newAPIClient(t, f.app)
+		feedClients := map[string]*apiClient{"admin": f.admin, "leader": f.leader}
+		paths := map[string]string{}
+		// Both scopes of one link: a person has one feed link at a time.
+		feedsOf := func(t *testing.T) map[string]string {
+			t.Helper()
+			out := map[string]string{}
+			for who, c := range feedClients {
+				for _, scope := range []string{models.CalendarFeedMine, models.CalendarFeedAll} {
+					if paths[who] == "" {
+						paths[who] = personalFeedPath(t, c, scope)
+					} else if w := c.do("PUT", "/api/v1/me/calendar-feed", map[string]any{"scope": scope}, true); w.Code != http.StatusOK {
+						t.Fatalf("feed scope %s: %d %s", scope, w.Code, w.Body.String())
+					}
+					out[who+" "+scope] = feedBody(t, anon, paths[who])
+				}
+			}
+			return out
+		}
+		feeds := feedsOf(t)
+		for name, body := range feeds {
+			if strings.HasPrefix(name, "admin") && (strings.Contains(body, "Far kept") || strings.Contains(body, "Underway kept")) {
+				t.Fatalf("the %s feed keeps a kept date outside DEC-77's window:\n%s", name, body)
+			}
+		}
+
+		// (i) After Remove the grant has ended: back to DEC-77 and no carry.
+		f.remove(t, ev.ID, d[0], f.memberU)
+		f.remove(t, ev.ID, d[1], f.memberU)
+		f.remove(t, ev.ID, d[3], f.memberU)
+		page, _ = getCalendar(t, f.admin, everything, http.StatusOK)
+		absent(t, page, "Underway kept", "Began yesterday kept")
+		page, _ = getCalendar(t, f.admin, farRange, http.StatusOK)
+		absent(t, page, "Far kept", "Far sibling")
+		page, _ = getCalendar(t, f.leader, everything, http.StatusOK)
+		absent(t, page, "Began yesterday kept")
+		for name, r := range map[string]struct {
+			c *apiClient
+			q string
+		}{"admin home": {f.admin, home}, "admin far mine": {f.admin, farMine}, "leader home": {f.leader, home}} {
+			if _, raw := getCalendar(t, r.c, r.q, http.StatusOK); raw != mineBefore[name] {
+				t.Fatalf("%s changed with the grants:\nbefore %s\nafter  %s", name, mineBefore[name], raw)
+			}
+		}
+		for name, got := range feedsOf(t) {
+			if got != feeds[name] {
+				t.Fatalf("the %s feed changed with the grants:\nbefore %s\nafter  %s", name, feeds[name], got)
+			}
+		}
+	})
+
+	t.Run("an ended date leaves on the calendar's clock", func(t *testing.T) {
+		f := newKeptCalendar(t)
+		wall := time.Now().UTC().Truncate(time.Minute)
+		ev, d := f.event(t, "Ending series", 1, f.member)
+		f.place(t, &d[0], "Ends in two hours", day(wall), wall.Add(time.Hour), 60)
+		f.leave(t, f.member, d[0])
+		q := calendarQuery(midnight(wall).AddDate(0, 0, -1), midnight(wall).AddDate(0, 0, 2), "")
+		clock := newMutableClock(f.app, d[0].EndsAt.Add(time.Minute))
+		page, _ := getCalendar(t, f.admin, q, http.StatusOK)
+		if hasTitle(page, "Ends in two hours") {
+			t.Fatalf("an ended kept date stayed on the calendar: %v", calendarTitles(page))
+		}
+		clock.set(d[0].EndsAt.Add(-time.Minute))
+		page, _ = getCalendar(t, f.admin, q, http.StatusOK)
+		if row, ok := calendarRowFor(page, "Ends in two hours"); !ok || row.DateURL != occurrenceDatePath(ev.ID, row.Date) {
+			t.Fatalf("an underway kept date is missing before its end: %v", calendarTitles(page))
+		}
+	})
+
+	t.Run("isolation", func(t *testing.T) {
+		f := newKeptCalendar(t)
+		now := time.Now().UTC().Truncate(time.Minute)
+		today := midnight(now)
+		_, d := f.event(t, "Isolated series", 2, f.member, f.second)
+		f.place(t, &d[0], "Isolated kept", day(today.AddDate(0, 0, 60)), today.AddDate(0, 0, 60).Add(12*time.Hour), 60)
+		f.place(t, &d[1], "Isolated newly kept", day(today.AddDate(0, 0, 67)), today.AddDate(0, 0, 67).Add(12*time.Hour), 60)
+		f.leave(t, f.member, d[0])
+		q := calendarQuery(today.AddDate(0, 0, 55), today.AddDate(0, 0, 70), "")
+		fired := atReaderSeam(f.app, "authorized", "calendar kept dates", func() {
+			gormMust(t, f.app.DB.Model(&models.User{}).Where("id = ?", f.adminU.ID).Update("role", models.RoleMember))
+			f.leave(t, f.second, d[1])
+		})
+		page, raw := getCalendar(t, f.admin, q, http.StatusOK)
+		if !fired.Load() {
+			t.Fatal("the calendar never reached its kept-dates seam")
+		}
+		if !hasTitle(page, "Isolated kept") || hasTitle(page, "Isolated newly kept") {
+			t.Fatalf("the in-flight answer is not the state its authority was judged in: %s", raw)
+		}
+		page, _ = getCalendar(t, f.admin, q, http.StatusOK)
+		if hasTitle(page, "Isolated kept") || hasTitle(page, "Isolated newly kept") {
+			t.Fatalf("after the demotion: %v", calendarTitles(page))
+		}
+	})
+
+	// carried runs N3m's and N3n's clock cases on one kept date that starts two
+	// hours before windowStart and lasts six, the range's only possible row.
+	carried := func(t *testing.T, windowStart time.Time, to time.Time) {
+		f := newKeptCalendar(t)
+		ev, d := f.event(t, "Carried series", 1, f.member)
+		start := windowStart.Add(-2 * time.Hour)
+		if !start.After(time.Now().Add(24 * time.Hour)) {
+			t.Fatalf("the fixture date starts too soon: %s", start)
+		}
+		f.place(t, &d[0], "Carried across the edge", day(start), start, 360)
+		f.leave(t, f.member, d[0])
+		q := calendarQuery(windowStart, to, "")
+		clock := newMutableClock(f.app, time.Now())
+		for _, at := range []time.Time{time.Now(), start.Add(-time.Minute)} {
+			clock.set(at)
+			if page, raw := getCalendar(t, f.leader, q, http.StatusOK); len(page.Occurrences) != 0 {
+				t.Fatalf("at %s, before the date starts, it was carried: %s", at, raw)
+			}
+		}
+		clock.set(start.Add(time.Minute))
+		page, raw := getCalendar(t, f.leader, q, http.StatusOK)
+		if len(page.Occurrences) != 1 || page.Occurrences[0].Date != day(start) || page.Occurrences[0].DateURL != occurrenceDatePath(ev.ID, day(start)) {
+			t.Fatalf("an underway kept date was not carried under its start day: %s", raw)
+		}
+		f.remove(t, ev.ID, d[0], f.memberU)
+		if page, raw := getCalendar(t, f.leader, q, http.StatusOK); len(page.Occurrences) != 0 {
+			t.Fatalf("carried after Remove: %s", raw)
+		}
+	}
+	t.Run("future week", func(t *testing.T) {
+		ws := midnight(time.Now().UTC()).AddDate(0, 0, 3)
+		carried(t, ws, ws.AddDate(0, 0, 6))
+	})
+	t.Run("future month", func(t *testing.T) {
+		// G: the first grid day (the Sunday on or before the 1st) of the first
+		// month whose grid starts at least two days after the wall clock.
+		wall := time.Now().UTC()
+		first := time.Date(wall.Year(), wall.Month(), 1, 0, 0, 0, 0, time.UTC)
+		var g time.Time
+		for {
+			g = first.AddDate(0, 0, -int(first.Weekday()))
+			if !g.Before(wall.Add(48 * time.Hour)) {
+				break
+			}
+			first = first.AddDate(0, 1, 0)
+		}
+		carried(t, g, g.AddDate(0, 0, 41))
+	})
 }

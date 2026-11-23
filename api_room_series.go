@@ -511,14 +511,14 @@ func (a *App) apiCheckRooms(c *gin.Context) {
 		jsonError(c, http.StatusForbidden, "admin required")
 		return
 	}
-	_, whens, err := a.specFrom(body.eventBody, nil, true)
+	_, x, err := a.specFrom(body.eventBody, nil, true)
 	if err != nil {
 		fail(c, err)
 		return
 	}
 	now := time.Now()
 	upcoming := []rooms.Window{}
-	for _, w := range whens {
+	for _, w := range x.Whens {
 		if w.StartsAt.After(now) {
 			upcoming = append(upcoming, rooms.Window{Start: w.StartsAt, End: w.EndsAt})
 		}

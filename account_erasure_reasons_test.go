@@ -1897,7 +1897,11 @@ func TestReasonReviewCensus(t *testing.T) {
 // inviteSendAllowed, apiTestMessage, apiPushSubscribe and apiPushTest only
 // count; eraseAuditDetailsIn updates in SQL and auditRetentionReportSQL aggregates (the five new actions
 // are classified in auditIPAttribution); contactHistoryQuery selects only the
-// actions in contactHistoryActions, which has no decision action.
+// actions in contactHistoryActions, which has no decision action;
+// cancelEvidenceIn (the cancelled-date tombstone's evidence) filters to
+// occurrence_access.ended on its registration and event.dates_restored on its
+// event, scans only the audit row's own id into a uint, and reads meta ids as
+// signed numbers it checks before use.
 //
 // legacySavePlanIn (T-301) is the deleted-accounts save's one row locker: inside
 // apiAdminLegacyReasonSave's fenced callback, under the exclusive gate, it locks
@@ -1935,6 +1939,7 @@ var reasonCensusPinned = map[string][]string{
 		"api_contact_history.go:contactHistoryQuery",
 		"api_household_conversion.go:conversionInviterDisabled",
 		"api_message_preview.go:apiTestMessage",
+		"api_occurrence_access.go:cancelEvidenceIn",
 		"api_push.go:apiPushSubscribe",
 		"api_push.go:apiPushTest",
 		"api_registrations.go:previouslyRegisteredPerson",
@@ -3806,6 +3811,10 @@ func settleOf(t *testing.T, c *apiClient, id string, subject uint) attemptSettle
 // connection holds.
 func TestReasonSpentBudget(t *testing.T) {
 	const budget, reserve = 3 * time.Second, time.Second
+	// The retry after a refusal runs under the real bounds: it proves the
+	// review is still usable, and 3s is too tight for a whole deletion on a
+	// loaded CI machine.
+	realBudget, realReserve := adminDeleteBudget, contactCommitReserve
 	setup := func(t *testing.T, n int) (reasonScene, []models.ContactRequest, map[string]any) {
 		s := newReasonScene(t)
 		var reqs []models.ContactRequest
@@ -3865,6 +3874,7 @@ func TestReasonSpentBudget(t *testing.T) {
 		t.Cleanup(func() { reasonGuardEvery, reasonRowHook = prevEvery, prevHook })
 		refused(t, s, reqs, deleteAccount(s.ac, s.target.ID, map[string]any{"reasonReview": review}))
 		reasonRowHook = nil
+		setAdminDeleteBounds(t, realBudget, realReserve)
 		if res := deleteAccount(s.ac, s.target.ID, map[string]any{"reasonReview": review}); res.code != http.StatusOK {
 			t.Fatalf("the same review afterwards: %d %s", res.code, res.body)
 		}
@@ -3889,6 +3899,7 @@ func TestReasonSpentBudget(t *testing.T) {
 		t.Cleanup(func() { reasonBatchHook = prevHook })
 		refused(t, s, reqs, deleteAccount(s.ac, s.target.ID, map[string]any{"reasonReview": review}))
 		reasonBatchHook = nil
+		setAdminDeleteBounds(t, realBudget, realReserve)
 		if res := deleteAccount(s.ac, s.target.ID, map[string]any{"reasonReview": review}); res.code != http.StatusOK {
 			t.Fatalf("the same review afterwards: %d %s", res.code, res.body)
 		}

@@ -66,21 +66,25 @@ func guardianCopyJobs(tx *gorm.DB, n *models.Notification, k notify.Kind, recipi
 	return specs, nil
 }
 
-// sendGuardianCopy is the job: read every fact in one lock-free transaction,
-// finish quietly when any of them says no, then send without holding a
-// transaction. A failed read is an error and retries. No lock is held from
-// the read to the provider, so an erasure, revocation or access change that
-// commits in that window may not stop that one copy; one committed before the
-// read does.
+// sendGuardianCopy is the job: read every fact in one read-only Repeatable
+// Read snapshot, finish quietly when any of them says no, then send without
+// holding a transaction. One snapshot means the teen's live access to the
+// subject (a grant and the date it admits) is judged in one committed state.
+// A failed read is an error and retries. No lock is held from the read to the
+// provider, so an erasure, revocation or access change that commits in that
+// window may not stop that one copy; one committed before the snapshot does.
 func (a *App) sendGuardianCopy(ctx context.Context, p guardianCopyJob) error {
 	var msg mail.Message
 	var suppressions []string
 	var send bool
 	err := a.DB.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if a.hooks.guardianCopyBegin != nil {
+			a.hooks.guardianCopyBegin()
+		}
 		var err error
-		msg, suppressions, send, err = a.prepareGuardianCopy(tx, p, a.now())
+		msg, suppressions, send, err = a.prepareGuardianCopy(tx, p)
 		return err
-	})
+	}, readSnapshot)
 	if err != nil {
 		log.Printf("mail: guardian copy of notice #%d preparation: %s", p.NotificationID, jobs.CleanError(err))
 		return err
@@ -109,7 +113,7 @@ func (a *App) sendGuardianCopy(ctx context.Context, p guardianCopyJob) error {
 // false for every "no": the notice, teen or link is gone or changed, the
 // switch is off, or the guardian may not or does not want it. Each no is
 // final, so the job is done.
-func (a *App) prepareGuardianCopy(tx *gorm.DB, p guardianCopyJob, now time.Time) (msg mail.Message, suppressions []string, send bool, err error) {
+func (a *App) prepareGuardianCopy(tx *gorm.DB, p guardianCopyJob) (msg mail.Message, suppressions []string, send bool, err error) {
 	var n models.Notification
 	if err := tx.Where("id = ?", p.NotificationID).First(&n).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -117,6 +121,7 @@ func (a *App) prepareGuardianCopy(tx *gorm.DB, p guardianCopyJob, now time.Time)
 		}
 		return msg, nil, false, err
 	}
+	now := a.now()
 	k, ok := notify.Lookup(n.Kind)
 	if !ok || !k.AllowEmail || k.Required {
 		return msg, nil, false, nil
@@ -142,12 +147,14 @@ func (a *App) prepareGuardianCopy(tx *gorm.DB, p guardianCopyJob, now time.Time)
 		return msg, nil, false, err
 	}
 	// A guardian who is a direct recipient of the same notice (membership
-	// departure) already has it. A notice with no dedupe key never matches.
+	// departure, a date both are signed up for) already has it. A notice with
+	// no dedupe key never matches. Every dedupe key names its subject, and the
+	// match leaves the subject columns out: a recipient who may not see a date
+	// gets a row with none (withheldDate).
 	if n.DedupeKey != nil {
 		var direct int64
 		if err := tx.Model(&models.Notification{}).
-			Where("user_id = ? AND kind = ? AND subject_type = ? AND subject_id IS NOT DISTINCT FROM ? AND dedupe_key = ?",
-				p.GuardianID, n.Kind, n.SubjectType, n.SubjectID, *n.DedupeKey).
+			Where("user_id = ? AND kind = ? AND dedupe_key = ?", p.GuardianID, n.Kind, *n.DedupeKey).
 			Count(&direct).Error; err != nil || direct > 0 {
 			return msg, nil, false, err
 		}

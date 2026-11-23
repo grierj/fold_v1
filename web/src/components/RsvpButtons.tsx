@@ -5,16 +5,16 @@ import { ChildcareRequestField, childcareCountProblem } from "./ChildcareRequest
 import { Button } from "./ui/Button";
 import { useEffect, useId, useRef, useState, type ReactNode } from "react";
 import { Events } from "../api/events";
-import type { AttendanceMode, EventOccurrence, RegistrationBatch, RegistrationCommand, HouseholdAnswer, RegistrationResponse, HouseholdRegistration, MyHouseholdRegistration, HouseholdPerson, SeriesRegistrationResponse } from "../types";
+import type { AttendanceMode, EventOccurrence, RegistrationBatch, RegistrationCommand, HouseholdAnswer, RegistrationResponse, HouseholdRegistration, MyHouseholdRegistration, HouseholdPerson } from "../types";
 import { errorCode, errorText } from "../lib/errors";
 import { Checkbox, Choices, Field, focusFirstInvalid, FormError, Input, Radio, Select, showFieldErrors } from "./ui/Field";
 import { SeriesRsvpDialog, type SeriesRsvpScope } from "./SeriesRsvpDialog";
+import { useConfirm, type PendingAction } from "./ui/ConfirmDialog";
 import { SegmentButton } from "./ui/SegmentButton";
-import { formatCalendarDay } from "../lib/when";
 import { answerLine } from "./AnswerLine";
 import { registrationStatusLabel } from "../lib/status";
 import { offersRemote, poolFull, registerBody, savedAnswer, savedAnswerFromState, type AnswerStatus, type RsvpAnswer, type SavedAnswer } from "../lib/registration";
-import { actorResultFromRegistration, type ActorRsvpResult, type SeriesFeedbackSignal } from "../lib/rsvpFeedback";
+import { actorResultFromRegistration, REFRESH_UNDO_CODES, seriesResultSummary as resultSummary, TERMINAL_UNDO_CODES, type ActorRsvpResult, type SeriesFeedbackSignal } from "../lib/rsvpFeedback";
 import { type RsvpMutationGate } from "../lib/useRsvpMutationGate";
 
 export type { SeriesFeedbackSignal } from "../lib/rsvpFeedback";
@@ -30,35 +30,9 @@ type SeriesAnswer = RsvpAnswer;
 
 type SeriesFeedbackReporter = (eventId: number, date: string, actorResults: ActorRsvpResult[]) => void;
 
-const humanDays = (days: string[]) => days.map(formatCalendarDay).join(" and ");
-
-function resultSummary(result: SeriesRegistrationResponse, prefix = "") {
-  const going = result.results.filter((row) => row.after.status === "going").length;
-  const maybe = result.results.filter((row) => row.after.status === "maybe").length;
-  const declined = result.results.filter((row) => row.after.status === "declined").length;
-  const waitlisted = result.results.filter((row) => row.after.status === "waitlisted").map((row) => row.date);
-  const parts = [going ? `Going to ${going} ${going === 1 ? "date" : "dates"}` : "", maybe ? `Maybe for ${maybe} ${maybe === 1 ? "date" : "dates"}` : "", declined ? `Can't go to ${declined} ${declined === 1 ? "date" : "dates"}` : ""].filter(Boolean);
-
-  if (waitlisted.length) parts.push(`waitlisted for ${humanDays(waitlisted)}`);
-
-  if (result.refusals.length) parts.push(`${result.refusals.length} ${result.refusals.length === 1 ? "date was" : "dates were"} left unchanged`);
-
-  if (result.capacityLoss?.length) parts.push(`a seat was no longer available for ${humanDays(result.capacityLoss)}`);
-  const fallback = prefix && result.results.length ? `Restored previous answers for ${result.results.length} ${result.results.length === 1 ? "date" : "dates"}.` : "No dates changed.";
-
-  return `${prefix}${parts.join(" · ") || fallback}`;
-}
-
-const TERMINAL_UNDO_CODES = new Set([
-  "undo_changed", "undo_authority_revoked", "undo_date_ended", "undo_not_found", "undo_expired", "undo_used",
-]);
-
-const REFRESH_UNDO_CODES = new Set([
-  "undo_changed", "undo_authority_revoked", "undo_date_ended", "undo_not_found", "undo_used",
-]);
-
 function useActorSeriesRsvp({
   instance,
+  seriesDates,
   onChange,
   seriesFeedback,
   onSeriesFeedback,
@@ -66,6 +40,7 @@ function useActorSeriesRsvp({
   mutationGate,
 }: {
   instance: EventOccurrence;
+  seriesDates: string;
   onChange: (reg: RegistrationBatch) => void;
   seriesFeedback?: SeriesFeedbackSignal | null;
   onSeriesFeedback?: SeriesFeedbackReporter;
@@ -74,9 +49,32 @@ function useActorSeriesRsvp({
 }) {
   const [error, setError] = useState<string | null>(null);
   const [statusMessage, setStatusMessage] = useState("");
-  const [pending, setPending] = useState<SeriesAnswer | null>(null);
+  // The answer waiting in the scope picker, the action that opened it and the terms it was chosen under.
+  const [pending, setPending] = useState<{ answer: SeriesAnswer; action: PendingAction; terms: string } | null>(null);
   const [undo, setUndo] = useState<null | { token: string; expiresAt: number }>(null);
   const statusRef = useRef<HTMLDivElement>(null);
+  // The picker is for this date as this address shows it: another address, even back again, or a long list
+  // hiding the date closes it and sends nothing (ConfirmShown). A refresh of the page leaves it open unless it
+  // changes the date's terms (scopeTerms below).
+  const beginScope = useConfirm(undefined, { followsPage: false });
+  // "These dates" are the ones the page showed when Can't go was chosen: any refresh of the page's
+  // data (another date added or cancelled, this person's answers) drops the question (usePageFacts).
+  const beginSeries = useConfirm();
+
+  // What an answer from the picker means on this date: when this date is (an edit of the date alone keeps its
+  // id and series date), what registerBody reads (remote, childcare), what the draft starts from (the saved
+  // answer), what may be asked (guests, waitlist), the series rule and the loaded dates a series answer covers
+  // (seriesDates). Any change while the picker is open closes it and sends nothing; it works the same on pages
+  // without the app's dialog (GroupDetail). Seat counts are left out: the server decides a full date.
+  const scopeTerms = JSON.stringify([instance.eventId, instance.date, instance.startsAt, instance.endsAt, instance.tzid,
+    instance.recurrenceRule, instance.rruleUntil ?? null, instance.seriesStartsLocal, seriesDates, instance.remoteAvailable,
+    offersRemote(instance), instance.childcareAvailable, instance.guestsAllowed, instance.waitlistEnabled, savedAnswer(instance)]);
+
+  useEffect(() => pending?.action.whenStale(() => setPending(null)), [pending]);
+
+  useEffect(() => {
+    if (pending && pending.terms !== scopeTerms) setPending(null);
+  }, [pending, scopeTerms]);
 
   useEffect(() => {
     if (!undo) return;
@@ -104,7 +102,14 @@ function useActorSeriesRsvp({
   }
 
   async function applySeries(answer: SeriesAnswer, scope: Exclude<SeriesRsvpScope, "just_this_date">): Promise<boolean> {
-    if (answer.status === "declined" && !window.confirm("Can't go to these dates? They will be removed from your calendar and personal feed.")) return false;
+    // Only a bulk Can't go asks first; every other answer acquires the gate in this same turn.
+    if (answer.status === "declined" && !(await beginSeries().ask({
+      title: "Can't go to these dates?",
+      body: "They will be removed from your calendar and personal feed.",
+      confirmLabel: "Can't go to these dates",
+      tone: "normal",
+      native: "Can't go to these dates? They will be removed from your calendar and personal feed.",
+    }))) return false;
     const release = mutationGate.acquire();
 
     if (!release) return false;
@@ -165,8 +170,17 @@ function useActorSeriesRsvp({
   }
 
   return {
-    error, mutationBusy: mutationGate.busy, pending, setPending, statusMessage, statusRef, undo,
+    error, mutationBusy: mutationGate.busy, pending, statusMessage, statusRef, undo,
     applySeries, undoSeries, reportDateMutation,
+    askScope(answer: SeriesAnswer) { setPending({ answer, action: beginScope(), terms: scopeTerms }); },
+    closeScope() { setPending(null); },
+    // Closes the picker and hands back its answer while it may still be sent: the date is still on screen at
+    // the address it was chosen on, and its terms are unchanged.
+    takeScope() {
+      setPending(null);
+
+      return pending?.action.current() && pending.terms === scopeTerms ? pending.answer : null;
+    },
     announce(message: string) { setStatusMessage(message); queueMicrotask(() => statusRef.current?.focus()); },
   };
 }
@@ -196,9 +210,10 @@ function SeriesScopeDialog({ series, onJustThisDate, onApplied }: {
 }) {
   if (!series.pending) return null;
 
-  return <SeriesRsvpDialog answer={registrationStatusLabel(series.pending.status)} disabled={series.mutationBusy} onCancel={() => series.setPending(null)} onChoose={(scope) => {
-    const answer = series.pending;
-    series.setPending(null);
+  return <SeriesRsvpDialog answer={registrationStatusLabel(series.pending.answer.status)} disabled={series.mutationBusy} onCancel={series.closeScope} onChoose={(scope) => {
+    // A stale picker sends nothing and asks nothing more (it closes as soon as it goes stale); a Can't go
+    // question it leads to starts here, on the page as it is now.
+    const answer = series.takeScope();
 
     if (!answer) return;
 
@@ -237,6 +252,7 @@ function useActorDraftReconciliation(instance: EventOccurrence, seriesFeedback: 
 
 function SingleRsvpButtons({
   instance,
+  seriesDates,
   onChange,
   seriesFeedback,
   onSeriesFeedback,
@@ -244,6 +260,7 @@ function SingleRsvpButtons({
   mutationGate,
 }: {
   instance: EventOccurrence;
+  seriesDates: string;
   onChange: (reg: RegistrationBatch) => void;
   seriesFeedback?: SeriesFeedbackSignal | null;
   onSeriesFeedback?: SeriesFeedbackReporter;
@@ -282,7 +299,7 @@ function SingleRsvpButtons({
     setAges(saved.ages);
     setSavedCare({ count: saved.children, ages: saved.ages });
   });
-  const series = useActorSeriesRsvp({ instance, onChange, seriesFeedback, onSeriesFeedback, onTerminalRefresh, mutationGate });
+  const series = useActorSeriesRsvp({ instance, seriesDates, onChange, seriesFeedback, onSeriesFeedback, onTerminalRefresh, mutationGate });
 
   const mine = instance.myRegistration;
   const removed = mine === "removed";
@@ -308,7 +325,7 @@ function SingleRsvpButtons({
 
   async function choose(answer: SeriesAnswer, switching = false, singleDate = false) {
     if (instance.recurrenceRule && !switching && !singleDate) {
-      series.setPending(answer);
+      series.askScope(answer);
 
       return;
     }
@@ -456,8 +473,10 @@ function SingleRsvpButtons({
 }
 
 // The household is loaded once by the page and shared across date editors.
-export function RsvpButtons({ instance, people = [], onChange, seriesFeedback, onSeriesFeedback, onTerminalRefresh, mutationGate, headingLevel = 4 }: {
+export function RsvpButtons({ instance, seriesDates, people = [], onChange, seriesFeedback, onSeriesFeedback, onTerminalRefresh, mutationGate, headingLevel = 4 }: {
   instance: EventOccurrence;
+  // This date's series as the page loaded it: its entry in seriesSchedules (lib/registration).
+  seriesDates: string;
   people?: HouseholdPerson[];
   headingLevel?: 3 | 4;
   onChange: (result: RegistrationBatch) => void;
@@ -466,9 +485,9 @@ export function RsvpButtons({ instance, people = [], onChange, seriesFeedback, o
   onTerminalRefresh?: () => void;
   mutationGate: RsvpMutationGate;
 }) {
-  if (!people.length) return <SingleRsvpButtons instance={instance} onChange={onChange} seriesFeedback={seriesFeedback} onSeriesFeedback={onSeriesFeedback} onTerminalRefresh={onTerminalRefresh} mutationGate={mutationGate} />;
+  if (!people.length) return <SingleRsvpButtons instance={instance} seriesDates={seriesDates} onChange={onChange} seriesFeedback={seriesFeedback} onSeriesFeedback={onSeriesFeedback} onTerminalRefresh={onTerminalRefresh} mutationGate={mutationGate} />;
 
-  return <HouseholdRsvp instance={instance} people={people} headingLevel={headingLevel} onChange={onChange} seriesFeedback={seriesFeedback} onSeriesFeedback={onSeriesFeedback} onTerminalRefresh={onTerminalRefresh} mutationGate={mutationGate} />;
+  return <HouseholdRsvp instance={instance} seriesDates={seriesDates} people={people} headingLevel={headingLevel} onChange={onChange} seriesFeedback={seriesFeedback} onSeriesFeedback={onSeriesFeedback} onTerminalRefresh={onTerminalRefresh} mutationGate={mutationGate} />;
 }
 
 type Answer = { selected: boolean; status: AnswerStatus; mode: AttendanceMode; care: boolean };
@@ -481,8 +500,9 @@ const ELIGIBILITY: Record<HouseholdPerson["registrationEligibility"], string> = 
   converted: "This person now has an account.", registration_holder_unavailable: "Ask your church office to check the responsible account.",
 };
 
-function HouseholdRsvp({ instance, people, onChange, seriesFeedback, onSeriesFeedback, onTerminalRefresh, mutationGate, headingLevel }: {
+function HouseholdRsvp({ instance, seriesDates, people, onChange, seriesFeedback, onSeriesFeedback, onTerminalRefresh, mutationGate, headingLevel }: {
   instance: EventOccurrence;
+  seriesDates: string;
   people: HouseholdPerson[];
   headingLevel: 3 | 4;
   onChange: (result: RegistrationBatch) => void;
@@ -518,7 +538,7 @@ function HouseholdRsvp({ instance, people, onChange, seriesFeedback, onSeriesFee
   const group = useId();
   const patch = (id: number, values: Partial<Answer>) => setDrafts((d) => ({ ...d, [id]: { ...d[id], ...values } }));
   const remoteOffered = offersRemote(instance);
-  const series = useActorSeriesRsvp({ instance, onChange, seriesFeedback, onSeriesFeedback, onTerminalRefresh, mutationGate });
+  const series = useActorSeriesRsvp({ instance, seriesDates, onChange, seriesFeedback, onSeriesFeedback, onTerminalRefresh, mutationGate });
   const disabled = mutationGate.busy;
 
   const answerFor = (status: AnswerStatus = me.selected ? me.status : "declined"): SeriesAnswer => ({
@@ -542,7 +562,7 @@ function HouseholdRsvp({ instance, people, onChange, seriesFeedback, onSeriesFee
     }
 
     setChildcareError(null);
-    series.setPending(answerFor());
+    series.askScope(answerFor());
   }
 
   async function saveActorDate(answer: SeriesAnswer) {

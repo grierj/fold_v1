@@ -20,6 +20,7 @@ import (
 	"fold/internal/mail"
 	"fold/internal/notify"
 	"fold/internal/providers"
+	"fold/internal/testdb"
 	"fold/models"
 
 	"gorm.io/gorm"
@@ -1532,5 +1533,86 @@ func TestMessagePipelineLinksPicturesByAddress(t *testing.T) {
 	}
 	if got, _ := devOutbox(t, f.app).LatestTo(f.teen.Email); got.Subject == "" {
 		t.Fatal("no email for the reader")
+	}
+}
+
+// TestBatchEmailHeldProviderWithConcurrentErasure: a date audience's batch
+// decides each row (its date authority and merge values) on the row's own
+// claim, takes no lock beyond that claim, and calls the provider holding only
+// it. While the first row's provider call is held, erasing another queued
+// recipient completes and that person is never sent to; erasing the held
+// recipient waits for the one in-flight send and then completes. Neither ends
+// in a deadlock, and the provider gets exactly the payloads the rows' own
+// readers may see.
+func TestBatchEmailHeldProviderWithConcurrentErasure(t *testing.T) {
+	for _, erased := range []string{"another queued recipient", "the held recipient"} {
+		t.Run(erased, func(t *testing.T) {
+			f := newReadVisFixture(t, models.VisibilityPublic)
+			held := newTestUser(t, f.app, "Held reader", "password1234", models.RoleMember)
+			queued := newTestUser(t, f.app, "Queued reader", "password1234", models.RoleMember)
+			f.register(t, held, f.occs[0])
+			f.register(t, queued, f.occs[0])
+			id, ids := seedSending(t, f.app, f.leaderU, f.occAudience(f.occs[0]), toRow(held), toRow(queued))
+			sender := newBlockingChoiceSender(t, nil)
+			f.app.Mailer = sender
+			done := make(chan error, 1)
+			go func() {
+				done <- f.app.deliverMessageBatchOnce(context.Background(), messageBatchJob{MessageID: id, RecipientIDs: ids})
+			}()
+			awaitDBSignal(t, sender.entered)
+			want := []string{held.Email, queued.Email}
+			if erased == "another queued recipient" {
+				if r := deleteAccount(f.admin, queued.ID, nil); r.code != http.StatusOK {
+					t.Fatalf("erasing a queued recipient while the provider is held: %d %s", r.code, r.body)
+				}
+				want = want[:1]
+				sender.resume()
+			} else {
+				result := make(chan httpResult, 1)
+				go func() { result <- deleteAccount(f.admin, held.ID, nil) }()
+				testdb.WaitUntil(t, "the erasure to wait on the held row", 10*time.Second, func() bool {
+					var n int64
+					gormMust(t, f.app.DB.Raw(`SELECT count(*) FROM pg_stat_activity WHERE wait_event_type = 'Lock'
+						AND query LIKE 'UPDATE message_recipients SET address%'`).Scan(&n))
+					return n > 0
+				})
+				sender.resume()
+				select {
+				case r := <-result:
+					if r.code != http.StatusOK {
+						t.Fatalf("erasing the held recipient: %d %s", r.code, r.body)
+					}
+				case <-time.After(30 * time.Second):
+					t.Fatal("the erasure never finished")
+				}
+			}
+			if err := awaitDBResult(t, done); err != nil {
+				t.Fatalf("the batch: %v", err)
+			}
+			sent := sender.sent()
+			if len(sent) != len(want) {
+				t.Fatalf("the provider got %d emails, want %v: %+v", len(sent), want, sent)
+			}
+			for i, m := range sent {
+				first := "Held"
+				if m.To == queued.Email {
+					first = "Queued"
+				}
+				if m.To != want[i] || m.Subject != "Vis night news for "+first || !strings.Contains(m.Text, "Vis night at "+f.when(f.occs[0])) {
+					t.Fatalf("email %d: to %s, %q / %q", i, m.To, m.Subject, m.Text)
+				}
+			}
+			var rows []models.MessageRecipient
+			gormMust(t, f.app.DB.Where("id IN ?", ids).Order("id").Find(&rows))
+			if rows[0].Status != models.RecipientSent {
+				t.Fatalf("the held row: %+v", rows[0])
+			}
+			if erased == "another queued recipient" && (rows[1].Status != models.RecipientSuppressed || rows[1].Address != "") {
+				t.Fatalf("the erased queued row: %+v", rows[1])
+			}
+			if erased == "the held recipient" && rows[0].Address != "" {
+				t.Fatalf("the held row kept the erased address: %+v", rows[0])
+			}
+		})
 	}
 }

@@ -141,3 +141,51 @@ it("close settles asks still waiting, whether the request had started or not", a
   act(() => { queued = result.current.retry(); result.current.close(); });
   expect(await Promise.race([Promise.all([started, queued]), new Promise((r) => setTimeout(() => r("hung"), 500))])).toEqual(["stale", "stale"]);
 });
+
+it("dataEpoch is the epoch the shown answer was asked for at: setData and a failed reload keep it, a later answer moves it past", async () => {
+  const fn = vi.fn().mockResolvedValueOnce(1).mockRejectedValueOnce(new Error("x")).mockResolvedValueOnce(3);
+  const { result } = renderHook(() => useLoad(fn, []));
+  expect(result.current.dataEpoch).toBe(0);
+  await waitFor(() => expect(result.current.data).toBe(1));
+  const first = result.current.dataEpoch;
+  expect(first).toBeGreaterThan(0);
+  expect(first).toBeLessThanOrEqual(result.current.epoch());
+
+  const before = result.current.epoch();
+  act(() => result.current.setData(2));
+  expect(result.current.dataEpoch).toBe(first);
+  act(() => { void result.current.reload(); });
+  await waitFor(() => expect(result.current.error).toBeTruthy());
+  expect(result.current.data).toBe(2);
+  expect(result.current.dataEpoch).toBe(first);
+
+  act(() => { void result.current.reload(); });
+  await waitFor(() => expect(result.current.data).toBe(3));
+  expect(result.current.dataEpoch).toBeGreaterThan(before);
+  act(() => { result.current.close(); });
+  expect(result.current.dataEpoch).toBe(0);
+});
+
+it("a setData updater gets the dataEpoch of the answer it lands on, even one committed but not yet rendered", async () => {
+  let release!: (value: number) => void;
+  const fn = vi.fn<() => Promise<number>>().mockResolvedValueOnce(1).mockReturnValueOnce(new Promise<number>((done) => { release = done; }));
+  const { result } = renderHook(() => useLoad(fn, []));
+  await waitFor(() => expect(result.current.data).toBe(1));
+  const first = result.current.dataEpoch;
+  const setData = result.current.setData;
+  act(() => { void result.current.reload(); });
+  const seen: Array<[number | undefined, number]> = [];
+
+  await act(async () => {
+    release(2);
+    await Promise.resolve();
+    setData((old, shown) => {
+      seen.push([old, shown]);
+
+      return old;
+    });
+  });
+  expect(result.current.data).toBe(2);
+  expect(seen[seen.length - 1]).toEqual([2, result.current.dataEpoch]);
+  expect(result.current.dataEpoch).not.toBe(first);
+});

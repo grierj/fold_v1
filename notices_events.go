@@ -11,11 +11,11 @@ import (
 
 // notifyOccurrences tells everyone going or waitlisted on these dates that
 // the date was cancelled (OccurrenceCancelled; M1.5: maybe no longer gets one)
-// or, after a series edit had cancelled it, is back on (OccurrenceRestored;
-// their registrations were never touched, so that notice says the sign-up is
-// still there). A registrant who can't see the group gets no group name,
-// place, or link (PR #41). One stored item per person per date; each archives
-// itself when the date would have ended.
+// or, after a series edit had cancelled it, is back on (OccurrenceRestored,
+// DEC-91; their registrations were never touched, so that notice says the
+// sign-up is still there). A registrant who can't see the group gets no group
+// name or group place; one who can't see the date gets the kind's nameless
+// text through withheldDate. One stored item per person per date.
 func notifyOccurrences(tx *gorm.DB, actor uint, occIDs []uint, kind string) error {
 	if len(occIDs) == 0 {
 		return nil
@@ -88,20 +88,27 @@ func notifyOccurrences(tx *gorm.DB, actor uint, occIDs []uint, kind string) erro
 				// Ordinary registrants still receive the cancellation notice below.
 				continue
 			}
-			vars, link := eventNoticeVars(ev, o, r.UserID, facts)
-			end := o.EndsAt
-			if end.IsZero() {
-				end = o.StartsAt
-			}
-			_, err := notify.Send(tx, notify.Msg{
+			// The title, time and place may have been set while the date was
+			// hidden from this person (a series edit's new title, a date edit
+			// in an archived group), so only someone who may see the date now
+			// is told them. Everyone else still hears that something they
+			// signed up for is off, or back on, naming nothing.
+			end := noticeEnd(o)
+			m := notify.Msg{
 				Kind: kind, To: []uint{r.UserID}, Actor: &actor,
-				SubjectType: "occurrence", SubjectID: o.ID, Link: link, Vars: vars,
-				Data: map[string]any{"eventId": ev.ID, "date": models.FormatCalendarDate(o.OriginalDate)},
 				// A date can be cancelled, restored and cancelled again, so the key
 				// carries the moment of this change (the row was just updated).
-				DedupeKey: fmt.Sprintf("%s:%d:%d", kind, o.ID, o.UpdatedAt.UnixNano()), ExpiresAt: &end,
-				Scope: scope,
-			})
+				DedupeKey: fmt.Sprintf("%s:%d:%d", kind, o.ID, o.UpdatedAt.UnixNano()),
+				Scope:     scope,
+			}
+			if facts.canSeeDate(r.UserID, ev, o) {
+				m.Vars, m.Link = eventNoticeVars(ev, o, r.UserID, facts)
+				m.SubjectType, m.SubjectID, m.ExpiresAt = "occurrence", o.ID, &end
+				m.Data = map[string]any{"eventId": ev.ID, "date": models.FormatCalendarDate(o.OriginalDate)}
+			} else {
+				m = withheldDate(m)
+			}
+			_, err := notify.Send(tx, m)
 			if err != nil {
 				return err
 			}
@@ -116,20 +123,46 @@ func notifyOccurrences(tx *gorm.DB, actor uint, occIDs []uint, kind string) erro
 // person knew the cancelled dates by, a date's own title included. date is
 // the calendar day of the one date cancelled, or "" for a series change: it is
 // joined to the title the person sees, and kept out of the plain title stored
-// in Data, which is all a guardian's copy shows (DEC-149).
+// in Data, which is all a guardian's copy shows (DEC-149). An empty ev.Title
+// is the caller withholding it because the date was hidden from the person
+// just before the change: the notice names no event and no date, and stores
+// no plain title, so it has no guardian copy.
 func notifyRegistrationCancelled(tx *gorm.DB, actor uint, ev *models.Event, userID uint, date string) error {
 	u, err := userIn(tx, userID)
 	if err != nil || u == nil || u.Status == models.UserDisabled {
 		return err
 	}
-	shown := ev.Title
-	if date != "" {
-		shown += " · " + date
+	var shown string
+	var data map[string]any
+	if ev.Title != "" {
+		shown = ev.Title
+		if date != "" {
+			shown += " · " + date
+		}
+		data = map[string]any{notify.DataEventTitle: ev.Title}
 	}
-	_, err = notify.Send(tx, notify.Msg{
+	m := notify.Msg{
 		Kind: notify.RegistrationCancelled, To: []uint{userID}, Actor: &actor,
 		SubjectType: "event", SubjectID: ev.ID, Link: "/", Vars: notify.Vars{Event: shown},
-		Data: map[string]any{notify.DataEventTitle: ev.Title},
-	})
+		Data: data,
+	}
+	if ev.Title == "" {
+		m = withheldDate(m)
+	}
+	_, err = notify.Send(tx, m)
 	return err
+}
+
+// withheldDate is m for a recipient who may not see the date it is about:
+// the kind's nameless text with no title, group, time, place or link. The row
+// keeps no subject, expiry or data either, because GET /notifications shows
+// the subject id, the feed archives a row at its expiry, and a PushSoon push
+// reads its subject's clock for urgency and quiet hours: none of them may
+// follow a date the recipient cannot see. The private dedupe key stays. Only
+// Vars that are the recipient's own survive: a household person they
+// registered, that person's badge and a note written to them.
+func withheldDate(m notify.Msg) notify.Msg {
+	m.Vars = notify.Vars{Person: m.Vars.Person, SubjectKind: m.Vars.SubjectKind, Note: m.Vars.Note, Change: m.Vars.Change}
+	m.SubjectType, m.SubjectID, m.Link, m.Data, m.ExpiresAt = "", 0, "/", nil, nil
+	return m
 }

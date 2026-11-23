@@ -32,7 +32,7 @@ func (a *App) apiCancelEmailChange(c *gin.Context) {
 		}
 		return audit.Write(tx, audit.Entry{Actor: &user.ID, Action: audit.EmailChangeCancelled,
 			TargetType: "user", TargetID: user.ID, IP: c.ClientIP()})
-	})
+	}, contactGateTx)
 	if errors.Is(err, errTokenInvalid) {
 		fail(c, errLinkExpired)
 		return

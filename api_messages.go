@@ -141,8 +141,9 @@ type messageFacts struct {
 	dates       map[uint]messageReminderJSON
 }
 
-// loadMessageFacts reads them for msgs in four queries, whatever the count.
-func (a *App) loadMessageFacts(msgs []models.Message) (messageFacts, error) {
+// loadMessageFactsIn reads them for msgs on db in four queries, whatever the
+// count.
+func loadMessageFactsIn(db *gorm.DB, msgs []models.Message) (messageFacts, error) {
 	out := messageFacts{authors: map[uint]string{}, failed: map[uint]int{}, pushWaiting: map[uint]int{}, dates: map[uint]messageReminderJSON{}}
 	ids, settled, occs, pushes := []uint{}, []uint{}, []uint{}, []uint{}
 	for _, m := range msgs {
@@ -163,7 +164,7 @@ func (a *App) loadMessageFacts(msgs []models.Message) (messageFacts, error) {
 		// A deleted event keeps its title here: an admin's list still says
 		// what the reminder was for.
 		var rows []messageReminderJSON
-		if err := a.DB.Raw(`SELECT o.id AS occurrence_id, o.event_id, COALESCE(o.title_override, e.title) AS event_title,
+		if err := db.Raw(`SELECT o.id AS occurrence_id, o.event_id, COALESCE(o.title_override, e.title) AS event_title,
 			to_char(o.original_date, 'YYYY-MM-DD') AS date, o.starts_at, e.tzid FROM event_occurrences o JOIN events e ON e.id = o.event_id WHERE o.id IN ?`,
 			dedupeIDs(occs)).Scan(&rows).Error; err != nil {
 			return out, err
@@ -174,7 +175,7 @@ func (a *App) loadMessageFacts(msgs []models.Message) (messageFacts, error) {
 	}
 	if len(ids) > 0 {
 		var users []models.User
-		if err := a.DB.Select("id, name, display_name").Where("id IN ?", dedupeIDs(ids)).Find(&users).Error; err != nil {
+		if err := db.Select("id, name, display_name").Where("id IN ?", dedupeIDs(ids)).Find(&users).Error; err != nil {
 			return out, err
 		}
 		for _, u := range users {
@@ -187,7 +188,7 @@ func (a *App) loadMessageFacts(msgs []models.Message) (messageFacts, error) {
 			N         int
 		}
 		// A message's counts follow its email; push rows are companions.
-		if err := a.DB.Model(&models.MessageRecipient{}).Select("message_id, count(*) AS n").
+		if err := db.Model(&models.MessageRecipient{}).Select("message_id, count(*) AS n").
 			Where("message_id IN ? AND status = ? AND channel = ?", settled, models.RecipientFailed, models.DeliveryEmail).Group("message_id").Scan(&counts).Error; err != nil {
 			return out, err
 		}
@@ -201,7 +202,7 @@ func (a *App) loadMessageFacts(msgs []models.Message) (messageFacts, error) {
 			N         int
 		}
 		// A push reminder's rows still to go (M3.13d3).
-		if err := a.DB.Model(&models.MessageRecipient{}).Select("message_id, count(*) AS n").
+		if err := db.Model(&models.MessageRecipient{}).Select("message_id, count(*) AS n").
 			Where("message_id IN ? AND status = ? AND channel = ?", pushes, models.RecipientQueued, models.DeliveryPush).Group("message_id").Scan(&counts).Error; err != nil {
 			return out, err
 		}
@@ -246,19 +247,55 @@ func messageErrorFor(stored string, admin bool) string {
 	return whyProvider
 }
 
-// freshMessageJSON reloads m and presents it to the caller, answering the 500
-// itself (false) when either read fails.
+// freshMessageJSON is the reply to a write on m: the message as it stands
+// after the write, presented to the session's user as they stand now
+// (presentMessage, at the "message reply" seam), never by the role the
+// request began with.
 func (a *App) freshMessageJSON(c *gin.Context, m *models.Message) (messageJSON, bool) {
-	if err := a.DB.First(m, m.ID).Error; err != nil {
+	return a.presentMessage(c, m.ID, "message reply")
+}
+
+// presentMessage reads the session's user, their right to message id
+// (messageHistoryAllowedIn) and what it shows (a reminder's event title and
+// date, counts, the author's name) in one read-only snapshot. It answers the
+// error itself (false): 401 when the session is no longer current, 404 when
+// the viewer may not see the message, 500 when a read fails. surface names
+// its readerAuthorized seam.
+func (a *App) presentMessage(c *gin.Context, id uint, surface string) (messageJSON, bool) {
+	var out messageJSON
+	var me *models.User
+	err := a.DB.Transaction(func(tx *gorm.DB) error {
+		var err error
+		if me, err = snapshotViewerIn(tx, apiUser(c)); err != nil || me == nil {
+			return err
+		}
+		var m models.Message
+		if err := tx.First(&m, id).Error; err != nil {
+			return err
+		}
+		if allowed, err := messageHistoryAllowedIn(tx, me, &m); err != nil {
+			return err
+		} else if !allowed {
+			return gorm.ErrRecordNotFound
+		}
+		if a.hooks.readerAuthorized != nil {
+			a.hooks.readerAuthorized(surface)
+		}
+		facts, err := loadMessageFactsIn(tx, []models.Message{m})
+		out = toMessageJSON(&m, me, facts)
+		return err
+	}, readSnapshot)
+	switch {
+	case me == nil && err == nil:
+		fail(c, errSecuritySession)
+	case errors.Is(err, gorm.ErrRecordNotFound):
+		jsonError(c, http.StatusNotFound, "message not found")
+	case err != nil:
 		jsonError(c, http.StatusInternalServerError, "could not load the message")
-		return messageJSON{}, false
+	default:
+		return out, true
 	}
-	facts, err := a.loadMessageFacts([]models.Message{*m})
-	if err != nil {
-		jsonError(c, http.StatusInternalServerError, "could not load the message")
-		return messageJSON{}, false
-	}
-	return toMessageJSON(m, apiUser(c), facts), true
+	return messageJSON{}, false
 }
 
 func (a *App) respondMessage(c *gin.Context, status int, m *models.Message) {
@@ -269,13 +306,16 @@ func (a *App) respondMessage(c *gin.Context, status int, m *models.Message) {
 
 // canCompose: the composer is for admins and anyone who leads an approved
 // group or hosts a church-wide event.
-func (a *App) canCompose(me *models.User) (bool, error) {
-	leads, err := leadsApprovedGroup(a.DB, me.ID)
+func (a *App) canCompose(me *models.User) (bool, error) { return canComposeIn(a.DB, me) }
+
+// canComposeIn is canCompose read on db.
+func canComposeIn(db *gorm.DB, me *models.User) (bool, error) {
+	leads, err := leadsApprovedGroup(db, me.ID)
 	if err != nil {
 		return false, err
 	}
 	var hosts int64
-	if err := a.DB.Model(&models.EventHost{}).Joins("JOIN events e ON e.id = event_hosts.event_id AND e.deleted_at IS NULL").
+	if err := db.Model(&models.EventHost{}).Joins("JOIN events e ON e.id = event_hosts.event_id AND e.deleted_at IS NULL").
 		Where("event_hosts.user_id = ?", me.ID).Count(&hosts).Error; err != nil {
 		return false, err
 	}
@@ -286,6 +326,12 @@ func (a *App) canCompose(me *models.User) (bool, error) {
 // who it reaches; false means the error response was sent.
 func (a *App) checkAudience(c *gin.Context, me *models.User, au *audienceJSON) ([]uint, bool) {
 	ids, err := a.resolveAudience(me, au, time.Now())
+	return ids, answerAudience(c, me, err)
+}
+
+// answerAudience answers a resolveAudience error for me; true means there was
+// none.
+func answerAudience(c *gin.Context, me *models.User, err error) bool {
 	switch {
 	case errors.Is(err, errAudienceInvalid):
 		fail(c, errAudienceInvalid)
@@ -298,16 +344,52 @@ func (a *App) checkAudience(c *gin.Context, me *models.User, au *audienceJSON) (
 	case err != nil:
 		jsonError(c, http.StatusInternalServerError, "could not check who gets this message")
 	default:
-		return ids, true
+		return true
 	}
-	return nil, false
+	return false
+}
+
+// summarizeAudienceFor checks that the session's user may message au and
+// counts who it reaches, with their names, in one read-only Repeatable Read
+// snapshot: the author's rights, the audience's targets, the dates that put
+// each registrant in it, the grants behind those dates and the names are one
+// committed state, so a preview never names someone no state admits. false
+// means the error response was sent.
+func (a *App) summarizeAudienceFor(c *gin.Context, au *audienceJSON) (audienceSummaryJSON, bool) {
+	var s audienceSummaryJSON
+	var me *models.User
+	err := a.DB.Transaction(func(tx *gorm.DB) error {
+		var err error
+		if me, err = snapshotViewerIn(tx, apiUser(c)); err != nil || me == nil {
+			return err
+		}
+		ids, err := a.resolveAudienceIn(tx, me, au, a.now())
+		if err != nil {
+			return err
+		}
+		s, err = a.summarizeAudience(tx, ids, policy.IsAdmin(asPerson(me)))
+		return err
+	}, readSnapshot)
+	switch {
+	case me == nil && err == nil:
+		fail(c, errSecuritySession)
+		return s, false
+	case errors.Is(err, errAudienceInvalid), errors.Is(err, errAudienceGone), errors.Is(err, errAudienceRefused):
+		return s, answerAudience(c, me, err)
+	case err != nil:
+		jsonError(c, http.StatusInternalServerError, "could not count who gets this message")
+		return s, false
+	}
+	return s, true
 }
 
 // errAudienceRefused: me may not message that audience (policy).
 var errAudienceRefused = errors.New("not allowed to message that audience")
 
 // resolveAudience normalizes au, checks that me may message it
-// (policy.CanMessageAudience) and returns who it reaches. The handlers and
+// (policy.CanMessageAudience) and returns who it reaches; an event audience
+// reaches only the registrants a date they may still see puts in it
+// (audienceSeers). The handlers and
 // message.send (at send time, PLAN 7.1 step 1) share it. Errors are
 // errAudienceInvalid, errAudienceGone, errAudienceRefused or a database
 // error.
@@ -328,7 +410,23 @@ func (a *App) resolveAudienceIn(db *gorm.DB, me *models.User, au *audienceJSON, 
 	if !policy.CanMessageAudience(asPerson(me), au.Type, targets) {
 		return nil, errAudienceRefused
 	}
-	return a.audienceUserIDs(db, *au, now)
+	ids, err := a.audienceUserIDs(db, *au, now)
+	if err != nil || !eventAudience(au.Type) {
+		return ids, err
+	}
+	// A registrant reaches an event audience only through a date they may
+	// still see (audienceSeers): the preview, the send and Try again agree.
+	seers, err := a.audienceSeers(db, *au, ids, now, now)
+	if err != nil {
+		return nil, err
+	}
+	kept := make([]uint, 0, len(ids))
+	for _, id := range ids {
+		if seers[id] {
+			kept = append(kept, id)
+		}
+	}
+	return kept, nil
 }
 
 // composeGroupJSON / composeEventJSON are what the picker offers.
@@ -375,8 +473,6 @@ const (
 // that only asks whether the viewer may write to it (the date page): the
 // same rules, no groups, and no events when they may not.
 func (a *App) apiComposeOptions(c *gin.Context) {
-	me := apiUser(c)
-	p := asPerson(me)
 	var onlyEvent uint64
 	if raw := c.Query("event"); raw != "" {
 		n, err := strconv.ParseUint(raw, 10, 63)
@@ -386,24 +482,51 @@ func (a *App) apiComposeOptions(c *gin.Context) {
 		}
 		onlyEvent = n
 	}
-	ok, err := a.canCompose(me)
-	if err != nil {
+	var out composeOptionsJSON
+	var me *models.User
+	// The session's user, what they lead and host, and the events and dates
+	// offered come from one read-only snapshot, so a leader who loses a group
+	// is never offered its events as they stood after.
+	err := a.DB.Transaction(func(tx *gorm.DB) error {
+		var err error
+		if me, err = snapshotViewerIn(tx, apiUser(c)); err != nil || me == nil {
+			return err
+		}
+		out, err = a.composeOptionsIn(tx, me, onlyEvent)
+		return err
+	}, readSnapshot)
+	switch {
+	case me == nil && err == nil:
+		fail(c, errSecuritySession)
+	case err != nil:
 		jsonError(c, http.StatusInternalServerError, "could not load the composer")
-		return
-	}
-	out := composeOptionsJSON{CanCompose: ok, CanMessageEveryone: policy.IsAdmin(p), PushEnabled: a.pushEnabled(), Groups: []composeGroupJSON{}, Events: []composeEventJSON{}}
-	if !ok {
+	default:
 		c.JSON(http.StatusOK, out)
-		return
+	}
+}
+
+// composeOptionsIn is the picker for me, read on tx.
+func (a *App) composeOptionsIn(tx *gorm.DB, me *models.User, onlyEvent uint64) (composeOptionsJSON, error) {
+	p := asPerson(me)
+	ok, err := canComposeIn(tx, me)
+	if err != nil {
+		return composeOptionsJSON{}, err
+	}
+	pushOn, err := boolSettingErrIn(tx, settingPushEnabled, true)
+	if err != nil {
+		return composeOptionsJSON{}, err
+	}
+	out := composeOptionsJSON{CanCompose: ok, CanMessageEveryone: policy.IsAdmin(p), PushEnabled: pushOn, Groups: []composeGroupJSON{}, Events: []composeEventJSON{}}
+	if !ok {
+		return out, nil
 	}
 	groups := []models.Group{}
-	gq := a.DB.Where("status = ?", models.GroupActive).Order("lower(name)")
+	gq := tx.Where("status = ?", models.GroupActive).Order("lower(name)")
 	if !p.Admin {
 		gq = gq.Where("id IN (SELECT group_id FROM memberships WHERE user_id = ? AND role = ? AND status = ?)", me.ID, models.MembershipLeader, models.MembershipActive)
 	}
 	if err := gq.Find(&groups).Error; err != nil {
-		jsonError(c, http.StatusInternalServerError, "could not load the composer")
-		return
+		return out, err
 	}
 	names := map[uint]string{}
 	gjson := []composeGroupJSON{}
@@ -413,8 +536,11 @@ func (a *App) apiComposeOptions(c *gin.Context) {
 		names[g.ID] = g.Name                                            // group-ok: same
 		gids = append(gids, g.ID)
 	}
-	now := time.Now()
-	eq := a.DB.Where("id IN (SELECT event_id FROM event_occurrences WHERE status = ? AND starts_at >= ?)", models.OccurrenceScheduled, now)
+	if a.hooks.readerAuthorized != nil {
+		a.hooks.readerAuthorized("compose picker")
+	}
+	now := a.now()
+	eq := tx.Where("id IN (SELECT event_id FROM event_occurrences WHERE status = ? AND starts_at >= ?)", models.OccurrenceScheduled, now)
 	if !p.Admin {
 		eq = eq.Where("(group_id IN ?) OR (group_id IS NULL AND id IN (SELECT event_id FROM event_hosts WHERE user_id = ?))", append(gids, 0), me.ID)
 	} else {
@@ -425,8 +551,7 @@ func (a *App) apiComposeOptions(c *gin.Context) {
 	}
 	var evs []models.Event
 	if err := eq.Order("lower(title), id").Limit(maxComposeEvents).Find(&evs).Error; err != nil {
-		jsonError(c, http.StatusInternalServerError, "could not load the composer")
-		return
+		return out, err
 	}
 	// Each event's next few dates, in one read.
 	eids := make([]uint, 0, len(evs))
@@ -439,12 +564,11 @@ func (a *App) apiComposeOptions(c *gin.Context) {
 		OriginalDate string
 		StartsAt     time.Time
 	}
-	if err := a.DB.Raw(`SELECT event_id, id, to_char(original_date, 'YYYY-MM-DD') AS original_date, starts_at FROM (
+	if err := tx.Raw(`SELECT event_id, id, to_char(original_date, 'YYYY-MM-DD') AS original_date, starts_at FROM (
 		SELECT event_id, id, original_date, starts_at, row_number() OVER (PARTITION BY event_id ORDER BY starts_at, id) AS n
 		FROM event_occurrences WHERE event_id IN ? AND status = ? AND starts_at >= ?) d WHERE n <= ? ORDER BY starts_at, id`,
 		append(eids, 0), models.OccurrenceScheduled, now, maxComposeDates).Scan(&dates).Error; err != nil {
-		jsonError(c, http.StatusInternalServerError, "could not load the composer")
-		return
+		return out, err
 	}
 	byEvent := map[uint][]composeDateJSON{}
 	for _, d := range dates {
@@ -465,7 +589,7 @@ func (a *App) apiComposeOptions(c *gin.Context) {
 	if onlyEvent > 0 {
 		out.Groups = []composeGroupJSON{}
 	}
-	c.JSON(http.StatusOK, out)
+	return out, nil
 }
 
 // apiAudiencePreview counts who an audience reaches and who will be
@@ -478,13 +602,8 @@ func (a *App) apiAudiencePreview(c *gin.Context) {
 		fail(c, errAudienceInvalid)
 		return
 	}
-	ids, ok := a.checkAudience(c, apiUser(c), &body.Audience)
+	s, ok := a.summarizeAudienceFor(c, &body.Audience)
 	if !ok {
-		return
-	}
-	s, err := a.summarizeAudience(a.DB, ids, policy.IsAdmin(asPerson(apiUser(c))))
-	if err != nil {
-		jsonError(c, http.StatusInternalServerError, "could not count who gets this message")
 		return
 	}
 	c.JSON(http.StatusOK, audienceSummaryResponseJSON{Summary: s})
@@ -577,7 +696,7 @@ func ownPictures(clean string, id uint) bool {
 // sendable checks that m could go out now: a subject, a body and at least
 // one person who can get it. It answers who it reaches; false means the
 // error response was sent.
-func (a *App) sendable(c *gin.Context, me *models.User, m *models.Message) (audienceJSON, audienceSummaryJSON, bool) {
+func (a *App) sendable(c *gin.Context, m *models.Message) (audienceJSON, audienceSummaryJSON, bool) {
 	var au audienceJSON
 	if m.Subject == "" {
 		fail(c, errMessageSubject)
@@ -588,13 +707,8 @@ func (a *App) sendable(c *gin.Context, me *models.User, m *models.Message) (audi
 		return au, audienceSummaryJSON{}, false
 	}
 	_ = json.Unmarshal([]byte(m.Audience), &au)
-	ids, ok := a.checkAudience(c, me, &au)
+	s, ok := a.summarizeAudienceFor(c, &au)
 	if !ok {
-		return au, audienceSummaryJSON{}, false
-	}
-	s, err := a.summarizeAudience(a.DB, ids, policy.IsAdmin(asPerson(me)))
-	if err != nil {
-		jsonError(c, http.StatusInternalServerError, "could not count who gets this message")
 		return au, s, false
 	}
 	if s.Eligible == 0 {
@@ -646,41 +760,51 @@ func (a *App) loadMessage(c *gin.Context) (*models.Message, bool) {
 		jsonError(c, http.StatusNotFound, "message not found")
 		return nil, false
 	}
-	p := asPerson(me)
-	isAuthor := m.AuthorID != nil && *m.AuthorID == me.ID
-	reminder := m.Category == models.MessageCategoryReminder
-	manages := false
-	if reminder && !p.Admin && m.OccurrenceID != nil {
-		var err error
-		if manages, err = a.managesOccurrenceEvent(me, *m.OccurrenceID); err != nil {
-			jsonError(c, http.StatusInternalServerError, "could not load the message")
-			return nil, false
-		}
+	allowed, err := messageHistoryAllowedIn(a.DB, me, &m)
+	if err != nil {
+		jsonError(c, http.StatusInternalServerError, "could not load the message")
+		return nil, false
 	}
-	if !policy.CanSeeMessageHistory(p, isAuthor, reminder, manages) {
+	if !allowed {
 		jsonError(c, http.StatusNotFound, "message not found")
 		return nil, false
 	}
 	return &m, true
 }
 
-// managesOccurrenceEvent: me manages the event a date belongs to, by the
-// facts the event page uses (policy.CanManageEvent). A deleted event or
-// date is managed by no one.
-func (a *App) managesOccurrenceEvent(me *models.User, occID uint) (bool, error) {
+// messageHistoryAllowedIn: me may see m and its history
+// (policy.CanSeeMessageHistory), a reminder's management read on db.
+func messageHistoryAllowedIn(db *gorm.DB, me *models.User, m *models.Message) (bool, error) {
+	p := asPerson(me)
+	isAuthor := m.AuthorID != nil && *m.AuthorID == me.ID
+	reminder := m.Category == models.MessageCategoryReminder
+	manages := false
+	if reminder && !p.Admin && m.OccurrenceID != nil {
+		var err error
+		if manages, err = managesOccurrenceEventIn(db, me, *m.OccurrenceID); err != nil {
+			return false, err
+		}
+	}
+	return policy.CanSeeMessageHistory(p, isAuthor, reminder, manages), nil
+}
+
+// managesOccurrenceEventIn: me manages the event a date belongs to, by the
+// facts the event page uses (policy.CanManageEvent), read on db. A deleted
+// event or date is managed by no one.
+func managesOccurrenceEventIn(db *gorm.DB, me *models.User, occID uint) (bool, error) {
 	var occ models.EventOccurrence
-	if err := a.DB.Select("id, event_id").First(&occ, occID).Error; errors.Is(err, gorm.ErrRecordNotFound) {
+	if err := db.Select("id, event_id").First(&occ, occID).Error; errors.Is(err, gorm.ErrRecordNotFound) {
 		return false, nil
 	} else if err != nil {
 		return false, err
 	}
 	var ev models.Event
-	if err := a.DB.First(&ev, occ.EventID).Error; errors.Is(err, gorm.ErrRecordNotFound) {
+	if err := db.First(&ev, occ.EventID).Error; errors.Is(err, gorm.ErrRecordNotFound) {
 		return false, nil
 	} else if err != nil {
 		return false, err
 	}
-	f, err := eventFactsIn(a.DB, me, &ev)
+	f, err := eventFactsIn(db, me, &ev)
 	if err != nil {
 		return false, err
 	}
@@ -708,9 +832,29 @@ func (a *App) loadOwnMessage(c *gin.Context) (*models.Message, bool) {
 	return m, true
 }
 
+// messageIDParam is the :id a message route names; a malformed one is
+// answered 404, as a message that isn't there is. It judges nothing: the
+// reader's snapshot decides the session, the message and the right to it.
+func messageIDParam(c *gin.Context) (uint, bool) {
+	id, err := strconv.ParseUint(c.Param("id"), 10, 63)
+	if err != nil {
+		jsonError(c, http.StatusNotFound, "message not found")
+		return 0, false
+	}
+	return uint(id), true
+}
+
+// apiGetMessage shows one message to whoever may read its history. The
+// session, the message's existence, the right to it and what it shows are all
+// decided in one snapshot (presentMessage), so a session revoked after the
+// middleware gets 401 whether or not the id is there.
 func (a *App) apiGetMessage(c *gin.Context) {
-	if m, ok := a.loadMessage(c); ok {
-		a.respondMessage(c, http.StatusOK, m)
+	id, ok := messageIDParam(c)
+	if !ok {
+		return
+	}
+	if out, ok := a.presentMessage(c, id, "message"); ok {
+		c.JSON(http.StatusOK, messageResponseJSON{Message: out})
 	}
 }
 
@@ -726,8 +870,11 @@ type messageListCursor struct {
 
 // Keyset pages retain the original author/category boundary on every read.
 // Cursors are positions, never authority. Existing clients still get 200 rows.
+// The session's user, the author filter their role decides, the rows and
+// their facts (authors, counts, a reminder's date) are read in one read-only
+// snapshot, so a list never pairs a role with rows or titles committed after
+// it was lost.
 func (a *App) apiListMessages(c *gin.Context) {
-	me := apiUser(c)
 	limit := 200
 	if raw := c.Query("limit"); raw != "" {
 		n, err := strconv.Atoi(raw)
@@ -737,61 +884,86 @@ func (a *App) apiListMessages(c *gin.Context) {
 		}
 		limit = n
 	}
-	q := a.DB.Order("updated_at DESC, id DESC").Limit(limit + 1)
+	var cursor *messageListCursor
 	if raw := c.Query("cursor"); raw != "" {
-		var cursor messageListCursor
+		var cur messageListCursor
 		data, err := base64.RawURLEncoding.DecodeString(raw)
-		if len(raw) > 512 || err != nil || json.Unmarshal(data, &cursor) != nil || cursor.ID == 0 || cursor.UpdatedAt.IsZero() {
+		if len(raw) > 512 || err != nil || json.Unmarshal(data, &cur) != nil || cur.ID == 0 || cur.UpdatedAt.IsZero() {
 			jsonError(c, http.StatusBadRequest, "invalid request")
 			return
 		}
-		q = q.Where("(updated_at, id) < (?, ?)", cursor.UpdatedAt, cursor.ID)
+		cursor = &cur
 	}
-	if search := strings.TrimSpace(c.Query("search")); search != "" {
-		q = q.Where("LOWER(subject) LIKE ? ESCAPE '\\'", likeContains(strings.ToLower(search)))
-	}
-	if status := c.Query("status"); status != "" {
-		switch status {
-		case models.MessageDraft, models.MessageScheduled, models.MessageSending, models.MessageSent, models.MessageFailed, models.MessageCancelled:
-			q = q.Where("status = ?", status)
-		default:
-			jsonError(c, http.StatusBadRequest, "invalid request")
-			return
-		}
-	}
-	switch cat := c.Query("category"); cat {
-	case "":
-	case models.MessageCategoryAnnouncement, models.MessageCategoryReminder:
-		q = q.Where("category = ?", cat)
+	search := strings.TrimSpace(c.Query("search"))
+	status := c.Query("status")
+	switch status {
+	case "", models.MessageDraft, models.MessageScheduled, models.MessageSending, models.MessageSent, models.MessageFailed, models.MessageCancelled:
 	default:
 		jsonError(c, http.StatusBadRequest, "invalid request")
 		return
 	}
-	if !policy.IsAdmin(asPerson(me)) {
-		q = q.Where("author_id = ?", me.ID)
-	}
-	var rows []models.Message
-	if err := q.Find(&rows).Error; err != nil {
-		jsonError(c, http.StatusInternalServerError, "could not list messages")
+	category := c.Query("category")
+	switch category {
+	case "", models.MessageCategoryAnnouncement, models.MessageCategoryReminder:
+	default:
+		jsonError(c, http.StatusBadRequest, "invalid request")
 		return
 	}
+	var out []messageJSON
 	nextCursor := ""
-	if len(rows) > limit {
-		rows = rows[:limit]
-		last := rows[len(rows)-1]
-		data, _ := json.Marshal(messageListCursor{UpdatedAt: last.UpdatedAt, ID: last.ID})
-		nextCursor = base64.RawURLEncoding.EncodeToString(data)
-	}
-	facts, err := a.loadMessageFacts(rows)
-	if err != nil {
+	var me *models.User
+	err := a.DB.Transaction(func(tx *gorm.DB) error {
+		var err error
+		if me, err = snapshotViewerIn(tx, apiUser(c)); err != nil || me == nil {
+			return err
+		}
+		q := tx.Order("updated_at DESC, id DESC").Limit(limit + 1)
+		if cursor != nil {
+			q = q.Where("(updated_at, id) < (?, ?)", cursor.UpdatedAt, cursor.ID)
+		}
+		if search != "" {
+			q = q.Where("LOWER(subject) LIKE ? ESCAPE '\\'", likeContains(strings.ToLower(search)))
+		}
+		if status != "" {
+			q = q.Where("status = ?", status)
+		}
+		if category != "" {
+			q = q.Where("category = ?", category)
+		}
+		if !policy.IsAdmin(asPerson(me)) {
+			q = q.Where("author_id = ?", me.ID)
+		}
+		if a.hooks.readerAuthorized != nil {
+			a.hooks.readerAuthorized("message list")
+		}
+		var rows []models.Message
+		if err := q.Find(&rows).Error; err != nil {
+			return err
+		}
+		if len(rows) > limit {
+			rows = rows[:limit]
+			last := rows[len(rows)-1]
+			data, _ := json.Marshal(messageListCursor{UpdatedAt: last.UpdatedAt, ID: last.ID})
+			nextCursor = base64.RawURLEncoding.EncodeToString(data)
+		}
+		facts, err := loadMessageFactsIn(tx, rows)
+		if err != nil {
+			return err
+		}
+		out = make([]messageJSON, 0, len(rows))
+		for i := range rows {
+			out = append(out, toMessageJSON(&rows[i], me, facts))
+		}
+		return nil
+	}, readSnapshot)
+	switch {
+	case me == nil && err == nil:
+		fail(c, errSecuritySession)
+	case err != nil:
 		jsonError(c, http.StatusInternalServerError, "could not list messages")
-		return
+	default:
+		c.JSON(http.StatusOK, messageListJSON{Messages: out, NextCursor: nextCursor})
 	}
-	out := make([]messageJSON, 0, len(rows))
-	for i := range rows {
-		out = append(out, toMessageJSON(&rows[i], me, facts))
-	}
-	c.JSON(http.StatusOK, messageListJSON{Messages: out, NextCursor: nextCursor})
 }
 
 // editable reports whether m can still change; false means 409 was sent.
@@ -824,7 +996,7 @@ func (a *App) apiUpdateMessage(c *gin.Context) {
 		s  audienceSummaryJSON
 	)
 	if scheduled {
-		au, s, ok = a.sendable(c, me, m)
+		au, s, ok = a.sendable(c, m)
 		if !ok {
 			return
 		}
@@ -918,7 +1090,7 @@ func (a *App) apiScheduleMessage(c *gin.Context) {
 		}
 	}
 	me := apiUser(c)
-	au, s, ok := a.sendable(c, me, m)
+	au, s, ok := a.sendable(c, m)
 	if !ok {
 		return
 	}

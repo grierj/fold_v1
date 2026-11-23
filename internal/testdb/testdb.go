@@ -73,6 +73,11 @@ func Shared(t testing.TB) *gorm.DB {
 	return sharedDB
 }
 
+var (
+	freshMu    sync.Mutex
+	freshNames = map[string]bool{}
+)
+
 // Fresh creates a throwaway database for one test (migrated, or empty when
 // migrated is false), returns its name, and drops it when the test ends.
 func Fresh(t testing.TB, migrated bool) string {
@@ -81,12 +86,28 @@ func Fresh(t testing.TB, migrated bool) string {
 	if err != nil {
 		t.Fatalf("testdb: %v", err)
 	}
+	freshMu.Lock()
+	freshNames[name] = true
+	freshMu.Unlock()
 	t.Cleanup(func() {
+		freshMu.Lock()
+		delete(freshNames, name)
+		freshMu.Unlock()
 		if err := dropDB(name); err != nil {
 			t.Errorf("testdb: drop %s: %v", name, err)
 		}
 	})
 	return name
+}
+
+// FromFresh reports whether Fresh returned name in this test process and the
+// database has not been dropped yet. Shared databases and templates are never
+// in it, so a test helper that destroys what a migration keeps (the recovery
+// floor, DEC-158) can refuse every database it was not given to throw away.
+func FromFresh(name string) bool {
+	freshMu.Lock()
+	defer freshMu.Unlock()
+	return freshNames[name]
 }
 
 // URL returns DATABASE_URL pointed at database name. Its sessions commit
