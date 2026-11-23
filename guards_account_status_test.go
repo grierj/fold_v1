@@ -26,31 +26,36 @@ import (
 //
 // Parse-only, root package. A users value is a name a function binds to
 // models.User (modelNames: by declared type, initializer, new, a declared
-// function's result or a range), a models.User literal, or an element of a
-// slice or map of them; a users query is a chain with Model(<users value or
-// collection>) or Table("users"), or a local name assigned one. A key names
-// the status column when GORM's schema lookup resolves it there ("status",
-// "Status", "STATUS"; userStatusKey). On a users query it reports Update or
-// UpdateColumn of the status column or of a column that is not a string
-// literal; Updates or UpdateColumns of a users struct (whatever Select names),
-// of a literal of another type (a struct with a status field writes it), of a
-// parameter, or of a map[...]{...} literal, inline or a local name assigned
-// one (:= or var), that has a status key or any key that is not a string
-// literal, or of a local map given such a key by an indexed assignment
+// function's result, a range or a type switch), a models.User literal, or an
+// element of a slice or map of them; a users query is a chain with Model(<users
+// value or collection>) or Table("users"), or a local name assigned one. A key
+// names the status column when GORM's schema lookup resolves it there
+// ("status", "Status", "STATUS"; userStatusKey). On a users query it reports
+// Update or UpdateColumn of the status column or of a column that is not a
+// string literal; Updates or UpdateColumns of a users struct (whatever Select
+// names), of a literal of another type (a struct with a status field writes
+// it), of a parameter, or of a map[...]{...} literal, inline or a local name
+// assigned one (:= or var), that has a status key or any key that is not a
+// string literal, or of a local map given such a key by an indexed assignment
 // (m["status"], m[k]). It reports the same maps passed to endAllSessionsIn,
-// whatever the chain; Save of a users value or collection; and raw SQL
-// "UPDATE users SET" that sets status or whose column list follows at run
-// time. GORM refuses a named map type (gin.H) or a map[string]string as
-// Updates' argument, so those write nothing.
+// whatever the chain; Save of a users value or collection; and raw SQL "UPDATE
+// users SET" that sets status or whose column list follows at run time. GORM
+// refuses a named map type (gin.H) or a map[string]string as Updates' argument,
+// so those write nothing. Two shapes it reports never write the status:
+// "Status" or "STATUS" on a Table("users") chain (no schema there, so Postgres
+// refuses the quoted column) and a named map literal (gin.H{...}) on a users
+// query, which GORM refuses.
 //
-// It does not see a users value or query reached through a struct field, an
-// interface, a parameter (a *gorm.DB already scoped to users) or a helper's
-// result the root package does not declare; a map built by a call (maps.Clone,
-// a helper), copied from another name, or held in a struct field; a struct of
-// another type held in a name; a SET clause passed through Clauses; a write
-// made in another package; an upsert (clause.OnConflict) or an
-// Assign(...).FirstOrCreate of a users row; or SQL assembled without the
-// "UPDATE users SET" literal.
+// It looks inside function declarations only, so it does not see a users value,
+// map or query declared at package level, or a GORM call in a function literal
+// held by a package-level var. It does not see a users value or query reached
+// through a struct field, an interface, a parameter (a *gorm.DB already scoped
+// to users) or a helper's result the root package does not declare; a map built
+// by a call (maps.Clone, a helper), copied from another name, or held in a
+// struct field; a struct of another type held in a name; a SET clause passed
+// through Clauses; a write made in another package; an upsert
+// (clause.OnConflict) or an Assign(...).FirstOrCreate of a users row; or SQL
+// assembled without the "UPDATE users SET" literal.
 // ---------------------------------------------------------------------------
 
 // accountStatusWriterCensus is every write of users.status the guard sees.
@@ -600,6 +605,14 @@ func roll(tx *gorm.DB, id uint) error {
 	r.Update("status", models.UserActive)
 	return tx.Table("public.users").Where("id = ?", id).Update("status", models.UserActive).Error
 }`, strings.Join([]string{`roll: Update("status")`, `roll: Update("status")`}, "\n")},
+		{"a type switch", `package main
+func roll(tx *gorm.DB, v any) error {
+	switch u := v.(type) {
+	case *models.User:
+		return tx.Model(u).Update("status", models.UserActive).Error
+	}
+	return nil
+}`, `roll: Update("status")`},
 		{"names that do not hold a users row or write its status", `package main
 func photo(tx *gorm.DB, id uint) error {
 	var u = models.User{ID: id}

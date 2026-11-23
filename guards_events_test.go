@@ -504,7 +504,8 @@ func exprKind(e ast.Expr, model string, b modelBindings, funcs modelResults) mod
 // modelNames is every name fd binds to a models.<model> value or collection:
 // its parameters and named results and those of its function literals, var
 // declarations by type or initializer, assignments (each result of a call to
-// a declared function by position), and range values over a collection.
+// a declared function by position), range values over a collection, and a
+// type switch's name in a case of the one type.
 func modelNames(fd *ast.FuncDecl, model string, funcs modelResults) modelBindings {
 	b := modelBindings{values: map[string]bool{}, collections: map[string]bool{}}
 	changed := false
@@ -580,6 +581,17 @@ func modelNames(fd *ast.FuncDecl, model string, funcs modelResults) modelBinding
 					}
 				}
 				pairs(names, s.Rhs)
+			case *ast.TypeSwitchStmt:
+				as, ok := s.Assign.(*ast.AssignStmt)
+				if !ok || len(as.Lhs) != 1 {
+					return true
+				}
+				v, _ := as.Lhs[0].(*ast.Ident)
+				for _, cc := range s.Body.List {
+					if c, ok := cc.(*ast.CaseClause); ok && v != nil && len(c.List) == 1 {
+						bind(v.Name, typeKind(c.List[0], model))
+					}
+				}
 			case *ast.RangeStmt:
 				if exprKind(s.X, model, b, funcs) == modelMany {
 					if v, ok := s.Value.(*ast.Ident); ok {

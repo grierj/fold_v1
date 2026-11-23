@@ -225,13 +225,14 @@ func TestTeenConversionStatusMovesEndSessionsAndAreAudited(t *testing.T) {
 // the conversion at one instant, read after the membership restore's group
 // locks (AGENTS.md: take now once per transaction). Another session holds the
 // teen's group, and the clock moves on while the consent waits for it: T0
-// before the wait, T1 (an hour before the church midnight of the teen's 18th
-// birthday) at the first read after it, T2 (an hour after) at every later
-// read. A date starting between T0 and T1 began while the consent waited, so
-// the restore leaves it alone; a later date comes back; a 17-year-old's
-// conversion completes. A read before the wait, or the wall clock in the
-// restore, brings the started date back; a second read finds an adult, whose
-// conversion waits.
+// before the wait, T1 (an hour before the church midnight B of the teen's 18th
+// birthday, yesterday) at the first read after it, T2 (an hour after B) at
+// every later read; the wall clock is a day or more past B. A date starting
+// between T0 and T1 began while the consent waited, so the restore leaves it
+// alone; dates after T1 come back; a 17-year-old's conversion completes. A
+// read before the wait brings the started date back; the wall clock in the
+// restore skips the date between T2 and the wall clock; a second read, or the
+// wall clock, finds an adult, whose conversion waits.
 func TestTeenConsentRestoreAndConversionShareOneInstant(t *testing.T) {
 	app := testApp(t)
 	admin, gid := openGroup(t, app, "One instant")
@@ -242,9 +243,9 @@ func TestTeenConsentRestoreAndConversionShareOneInstant(t *testing.T) {
 		t.Fatal(err)
 	}
 	wall := time.Now().In(loc)
-	birthday := time.Date(wall.Year(), wall.Month(), wall.Day()+2, 0, 0, 0, 0, loc)
+	birthday := time.Date(wall.Year(), wall.Month(), wall.Day()-1, 0, 0, 0, 0, loc)
 	if birthday.Month() == time.February && birthday.Day() == 29 {
-		birthday = birthday.AddDate(0, 0, 1)
+		birthday = birthday.AddDate(0, 0, -1)
 	}
 	t0, started, t1, t2 := birthday.Add(-3*time.Hour), birthday.Add(-2*time.Hour), birthday.Add(-time.Hour), birthday.Add(time.Hour)
 	born := time.Date(birthday.Year()-18, birthday.Month(), birthday.Day(), 0, 0, 0, 0, time.UTC)
@@ -261,7 +262,7 @@ func TestTeenConsentRestoreAndConversionShareOneInstant(t *testing.T) {
 	gormMust(t, app.DB.Create(&models.Membership{UserID: f.user.ID, GroupID: uint(groupID), Role: models.MembershipMember, Status: models.MembershipActive}))
 	eventID, _ := seedCappedEvent(t, app, admin, gid, nil, false)
 	seats := map[string]uint{}
-	for name, at := range map[string]time.Time{"started": started, "ahead": birthday.AddDate(0, 0, 7)} {
+	for name, at := range map[string]time.Time{"started": started, "before the wall clock": t2.Add(time.Hour), "ahead": birthday.AddDate(0, 0, 7)} {
 		at = at.UTC()
 		occurrence := models.EventOccurrence{EventID: eventID, OriginalDate: calDate(at.Format("2006-01-02")), StartsAt: at, EndsAt: at.Add(time.Hour), Status: models.OccurrenceScheduled}
 		gormMust(t, app.DB.Create(&occurrence))
@@ -317,7 +318,7 @@ func TestTeenConsentRestoreAndConversionShareOneInstant(t *testing.T) {
 	var person models.HouseholdPerson
 	gormMust(t, app.DB.First(&person, f.person.ID))
 	if user.Status != models.UserActive || person.ConvertedUserID == nil || *person.ConvertedUserID != user.ID {
-		t.Errorf("status %s, person converted to %v; want active and converted to %d: the conversion judged an instant after the restore's", user.Status, person.ConvertedUserID, user.ID)
+		t.Errorf("status %s, person converted to %v; want active and converted to %d: the conversion judged a later instant than the restore", user.Status, person.ConvertedUserID, user.ID)
 	}
 	judged := map[uint]string{}
 	var rows []models.AuditLog
@@ -334,8 +335,10 @@ func TestTeenConsentRestoreAndConversionShareOneInstant(t *testing.T) {
 	if got := judged[seats["started"]]; got != "" {
 		t.Errorf("the date that started while the consent waited was judged (%s): the restore read the clock before the group lock, or not the transaction's clock", got)
 	}
-	if got := judged[seats["ahead"]]; got != audit.RegistrationRestored {
-		t.Errorf("the later date was judged %q, want %s", got, audit.RegistrationRestored)
+	for _, name := range []string{"before the wall clock", "ahead"} {
+		if got := judged[seats[name]]; got != audit.RegistrationRestored {
+			t.Errorf("the date %s was judged %q, want %s: the restore did not judge the transaction's instant", name, got, audit.RegistrationRestored)
+		}
 	}
 	for name, id := range seats {
 		var reg models.Registration
