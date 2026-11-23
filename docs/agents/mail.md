@@ -216,3 +216,10 @@ exempt from the send checks. Sends are allowed only in the delivery files (`mail
 methods must be immediate too (never in a closure, `go`, `defer` or a method value). `api_dev.go`
 may unwrap and read the outbox, never send. **When you add a sender type, add it to the guard's
 list in the same change.** Its reach and limits are documented above `TestMailGoesThroughJobs`.
+
+## Rules and their tests
+
+| Rule | Enforced by |
+|------|-------------|
+| An event audience reaches only people a date they may still see puts in it, at preview, send, Try again and the read page | `TestEventAudienceLeavesOutADateTheyCannotSee`, `TestReadPageKeepsDecidedRowsAndChecksUndecidedOnes` |
+| A claimed batch email row and Try again decide on Read Committed from one facts statement (`loadDateFacts`) that reads only `factColumns` (each with a named reader; no credential, contact, note, place, group name, age or contact preference, and its rows never become a `ContactAccount`) and binds each id list as one array; the read page lets a person in for good only on a delivery or a recorded date check (`audience_admitted_at`), whatever came after | `TestBatchEmailNeverPairsALapsedGrantWithAMovedDate`, `TestBatchHonorsAChoiceCommittedRightAfterTheClaim`, `TestTryAgainNeverPairsALapsedGrantWithAMovedDate`, `TestTryAgainRechecksAReminderAfterTheLocks`, `TestTryAgainKeepsAReminderCopyOnlyUnderTheCopyRule`, `TestDateFactsMatchTheQueries`, `TestFactColumnsCoverTheModels`, `TestDateFactsStatementReturnsNoSecrets`, `TestFactsStatementRowsNeverBecomeAContactAccount`, `TestDateFactsBindsTheSameParametersForAnyCount`, `TestReadEntitlementNeedsProofTheCheckLetThemIn`, `TestReadEntitlementEvidenceSurvivesLaterOutcomes` |

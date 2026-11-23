@@ -288,3 +288,10 @@ definitive refusals discard the id; a `restore_detected` or `history_unavailable
 Delete off until the users list reloads successfully (`lib/deleteReload.ts`).
 
 The test-only attempt clock is described in `testing.md`.
+
+## Rules and their tests
+
+| Rule | Enforced by |
+|------|-------------|
+| A deletion leaves only the residue the PLAN names: every sentinel of the erased person in any text, JSON or byte column or blob must match an enabled rule in `erasure_residue.go` (a rule with no PLAN disposition accepts nothing); another person's and the church's values stay byte for byte; opt-out and suppression hashes are checked apart | `TestErasureLeavesOnlyTheNamedResidue` (its mutation map), `TestErasureResidueRefusesWhatThePlanDoesNotName`, `TestErasureResidueRulesNameRealPlaces` |
+| Every transaction that takes the contact gate runs at Read Committed whatever the database default (`contactMutation`, or `contactGateTx`; the gate refuses any other level) | `TestContactMutationsRunAtReadCommitted`, `TestContactMutationsPinReadCommitted`, `TestGatedTransactionsBeginReadCommitted`, `TestGatedMutationsHonorWhatCommittedWhileTheyWaited`, `TestContactSweepRunsAtReadCommittedOnAnyDefault` |
