@@ -128,7 +128,7 @@ func TestMeetingInstancesAreChronological(t *testing.T) {
 		t.Fatalf("not chronological: %s then %s", list.Events[0].StartsAt, list.Events[1].StartsAt)
 	}
 
-	w = admin.do("GET", "/api/v1/groups/"+gid, nil, false)
+	w = admin.do("GET", groupDetailPath(created.Group.ID), nil, false)
 	var detail struct {
 		Group groupSummaryJSON `json:"group"`
 	}
@@ -198,26 +198,22 @@ func TestRemoteSeatLimitValidation(t *testing.T) {
 	if ev.RemoteCapacity == nil || *ev.RemoteCapacity != 5 {
 		t.Fatalf("invalid update changed remote seats: %+v", ev.RemoteCapacity)
 	}
-	datePath := path + "/occurrences/" + date
 	for _, bad := range []any{-1, 1.5, "1e", 100001} {
-		apiDo(t, admin, "PUT", datePath, map[string]any{"remoteCapacityOverride": bad}, http.StatusBadRequest)
+		saveDate(t, admin, eventID, date, map[string]any{"remoteCapacityOverride": bad}, http.StatusBadRequest, "")
 	}
-	w := admin.do("PUT", datePath, map[string]any{"remoteCapacityOverride": 0}, true)
-	if w.Code != http.StatusOK {
-		t.Fatalf("close remote seats on one date: %d %s", w.Code, w.Body.String())
-	}
+	saveDate(t, admin, eventID, date, map[string]any{"remoteCapacityOverride": 0}, http.StatusOK, "")
 	var occ models.EventOccurrence
 	app.DB.Where("event_id = ? AND original_date = ?", eventID, date).First(&occ)
 	if occ.RemoteCapacityOverride == nil || *occ.RemoteCapacityOverride != 0 {
 		t.Fatalf("zero per-date override was not stored: %+v", occ.RemoteCapacityOverride)
 	}
-	apiDo(t, admin, "PUT", datePath, map[string]any{"title": "Same remote limit"}, http.StatusOK)
+	saveDate(t, admin, eventID, date, map[string]any{"title": "Same remote limit"}, http.StatusOK, "")
 	occ = models.EventOccurrence{}
 	app.DB.Where("event_id = ? AND original_date = ?", eventID, date).First(&occ)
 	if occ.RemoteCapacityOverride == nil || *occ.RemoteCapacityOverride != 0 {
 		t.Fatal("omitted remoteCapacityOverride changed the stored limit")
 	}
-	apiDo(t, admin, "PUT", datePath, map[string]any{"remoteCapacityOverride": nil}, http.StatusOK)
+	saveDate(t, admin, eventID, date, map[string]any{"remoteCapacityOverride": nil}, http.StatusOK, "")
 	occ = models.EventOccurrence{}
 	app.DB.Where("event_id = ? AND original_date = ?", eventID, date).First(&occ)
 	if occ.RemoteCapacityOverride != nil {
@@ -348,18 +344,8 @@ func TestSeriesEditKeepsRegistrationsAndOverrides(t *testing.T) {
 	register(sam, d3, "going")
 
 	// One date moves to 9:00 pm. Another only changes its room.
-	w = admin.do("PUT", "/api/v1/events/"+eid+"/occurrences/"+d2, map[string]any{
-		"startsLocal": d2 + "T21:00",
-	}, true)
-	if w.Code != http.StatusOK {
-		t.Fatalf("override time: %d %s", w.Code, w.Body.String())
-	}
-	w = admin.do("PUT", "/api/v1/events/"+eid+"/occurrences/"+d4, map[string]any{
-		"location": "Chapel",
-	}, true)
-	if w.Code != http.StatusOK {
-		t.Fatalf("override location: %d %s", w.Code, w.Body.String())
-	}
+	saveDate(t, admin, created.Event.ID, d2, map[string]any{"startsLocal": d2 + "T21:00"}, http.StatusOK, "")
+	saveDate(t, admin, created.Event.ID, d4, map[string]any{"location": "Chapel"}, http.StatusOK, "")
 	moved := occurrenceOn(t, listOccurrences(t, admin, gid, d0, windowEnd), d1)
 	var reg models.Registration
 	if err := app.DB.Where("user_id = ? AND occurrence_id = ?", samUser.ID, moved.ID).First(&reg).Error; err != nil {
@@ -809,7 +795,7 @@ func TestNewSeriesCopiesOnlyGroupVisibility(t *testing.T) {
 	if ev.Visibility != "private" || ev.LeaderOpened {
 		t.Fatalf("second series: visibility=%s leaderOpened=%v", ev.Visibility, ev.LeaderOpened)
 	}
-	w = admin.do("GET", "/api/v1/groups/"+gid, nil, false)
+	w = admin.do("GET", groupDetailPath(created.Group.ID), nil, false)
 	var detail struct {
 		UpcomingEvents []occurrenceJSON `json:"upcomingEvents"`
 	}
@@ -1528,8 +1514,7 @@ func TestHiddenSeriesListHidesDescriptionChildcareAndVideo(t *testing.T) {
 		"childcareCapacity": 7,
 		"videoProvider":     "link", "videoUrl": "https://example.com/SECRET-VIDEO", "videoReveal": "registered_only",
 	}, http.StatusOK)
-	apiDo(t, admin, "PUT", fmt.Sprintf("/api/v1/events/%d/occurrences/%s", ev.ID, models.FormatCalendarDate(dates[0].OriginalDate)),
-		map[string]any{"visibility": "public", "reason": "Open"}, http.StatusOK)
+	saveDate(t, admin, ev.ID, models.FormatCalendarDate(dates[0].OriginalDate), map[string]any{"visibility": "public"}, http.StatusOK, "", "reason", "Open")
 
 	listed, err := app.occurrencesForEventsErr([]uint{ev.ID}, models.FormatCalendarDate(dates[0].OriginalDate), models.FormatCalendarDate(dates[3].OriginalDate), nil, nil)
 	if err != nil || len(listed) != 1 {
@@ -1550,20 +1535,74 @@ func TestHiddenSeriesListHidesDescriptionChildcareAndVideo(t *testing.T) {
 }
 
 // The exact-date page shows no cancelled registration as the viewer's answer.
-func TestDatePageIgnoresCancelledRegistration(t *testing.T) {
+// The date page tells three cases apart (M8.1 brief 2.1, 2.2): a scheduled
+// date with the viewer's own cancelled answer, an unanswered scheduled date,
+// and a cancelled date's tombstone. The cancelled answer is history: its
+// status alone, with the capabilities of an unanswered date, and its .ics
+// carries no STATUS, as an unanswered one doesn't.
+func TestDatePageTellsACancelledAnswerFromNoAnswerAndACancelledDate(t *testing.T) {
 	app, admin, _, ev, dates := dateVisibilityFixture(t, models.VisibilityPublic)
-	_ = admin
-	member := newTestUser(t, app, "cancelled-member", "password1234", models.RoleMember)
-	if err := app.DB.Create(&models.Registration{
-		UserID: &member.ID, OccurrenceID: dates[0].ID, Status: models.RegCancelled,
-	}).Error; err != nil {
-		t.Fatal(err)
+	gormMust(t, app.DB.Model(&models.Event{}).Where("id = ?", ev.ID).Updates(map[string]any{"guests_allowed": 3, "remote_available": true}))
+	cancelled := newTestUser(t, app, "cancelled-member", "password1234", models.RoleMember)
+	newTestUser(t, app, "unanswered-member", "password1234", models.RoleMember)
+	gormMust(t, app.DB.Create(&models.Registration{
+		UserID: &cancelled.ID, OccurrenceID: dates[0].ID, Status: models.RegCancelled, AttendanceMode: models.AttendanceRemote, GuestCount: 2,
+	}))
+	gormMust(t, app.DB.Create(&models.Registration{
+		UserID: &cancelled.ID, OccurrenceID: dates[1].ID, Status: models.RegGoing, AttendanceMode: models.AttendanceInPerson,
+	}))
+	withAnswer := loginAPI(t, app, "cancelled-member", "password1234")
+	without := loginAPI(t, app, "unanswered-member", "password1234")
+	path := func(occ models.EventOccurrence) string {
+		return fmt.Sprintf("/api/v1/events/%d/dates/%s", ev.ID, models.FormatCalendarDate(occ.OriginalDate))
 	}
-	c := loginAPI(t, app, "cancelled-member", "password1234")
-	raw := apiDo(t, c, "GET", fmt.Sprintf("/api/v1/events/%d/dates/%s", ev.ID, models.FormatCalendarDate(dates[0].OriginalDate)), nil, http.StatusOK)
-	if strings.Contains(raw, `"myRegistration":"cancelled"`) {
-		t.Fatalf("cancelled registration came back: %s", raw)
+	read := func(c *apiClient, occ models.EventOccurrence) map[string]any {
+		t.Helper()
+		var body struct {
+			Occurrence map[string]any `json:"occurrence"`
+		}
+		if err := json.Unmarshal([]byte(apiDo(t, c, "GET", path(occ), nil, http.StatusOK)), &body); err != nil {
+			t.Fatal(err)
+		}
+		return body.Occurrence
 	}
+	history, none := read(withAnswer, dates[0]), read(without, dates[0])
+	if history["myRegistration"] != models.RegCancelled || none["myRegistration"] != nil {
+		t.Fatalf("answers: %v and %v", history["myRegistration"], none["myRegistration"])
+	}
+	for _, key := range []string{"myAttendanceMode", "myGuestCount"} {
+		if _, ok := history[key]; ok {
+			t.Fatalf("a cancelled answer carries %s: %v", key, history)
+		}
+	}
+	delete(history, "myRegistration")
+	delete(none, "myRegistration")
+	// Series coverage counts each reader's own answers on the other dates
+	// (the cancelled member is Going on the second); everything about this
+	// date, the series action included, must match.
+	for _, answer := range []map[string]any{history, none} {
+		series, ok := answer["series"].(map[string]any)
+		if !ok {
+			t.Fatalf("fixture: no series facts: %v", answer)
+		}
+		delete(series, "coveredDates")
+	}
+	if !reflect.DeepEqual(history, none) {
+		t.Fatalf("a cancelled answer changed the date's capabilities:\n%v\n%v", history, none)
+	}
+	if none["canRegister"] != true {
+		t.Fatalf("fixture: %v", none)
+	}
+	if ics := apiDo(t, withAnswer, "GET", path(dates[0])+"/calendar.ics", nil, http.StatusOK); strings.Contains(ics, "STATUS:") {
+		t.Fatalf("a cancelled answer's download has a STATUS: %s", ics)
+	}
+
+	apiDo(t, admin, "POST", fmt.Sprintf("/api/v1/events/%d/cancel", ev.ID), map[string]any{"date": models.FormatCalendarDate(dates[1].OriginalDate)}, http.StatusOK)
+	if got := read(withAnswer, dates[1]); !reflect.DeepEqual(got, map[string]any{"title": "Open evening", "date": models.FormatCalendarDate(dates[1].OriginalDate), "cancelled": true}) {
+		t.Fatalf("tombstone: %v", got)
+	}
+	apiDo(t, without, "GET", path(dates[1]), nil, http.StatusNotFound)
+	apiDo(t, withAnswer, "GET", path(dates[1])+"/calendar.ics", nil, http.StatusNotFound)
 }
 
 // occurrencesForEvents is occurrencesForEventsErr for tests that only look
@@ -1842,6 +1881,8 @@ func TestImpossibleDatesKeepTheirAnswers(t *testing.T) {
 		apiDo(t, admin, "GET", fmt.Sprintf("/api/v1/events/%d/dates/%s", eventID, bad), nil, http.StatusNotFound)
 		apiDo(t, admin, "GET", fmt.Sprintf("/api/v1/events/%d/dates/%s/calendar.ics", eventID, bad), nil, http.StatusNotFound)
 		apiDo(t, admin, "POST", fmt.Sprintf("/api/v1/events/%d/cancel", eventID), map[string]any{"date": bad}, http.StatusBadRequest)
+		apiDo(t, admin, "POST", dateEditPath(eventID, bad), dateEditBody(newDateAttempt(t), "1.0000000000000000.0.0.0.-", map[string]any{"location": "Hall"}), http.StatusBadRequest)
+		// The retired writer still refuses a malformed date before date_page_outdated.
 		apiDo(t, admin, "PUT", fmt.Sprintf("/api/v1/events/%d/occurrences/%s", eventID, bad), map[string]any{"location": "Hall"}, http.StatusBadRequest)
 		// parseDateWindow checks from and to on the group list and the calendar.
 		// The church-wide /api/v1/events list takes no window (it uses
@@ -1969,11 +2010,13 @@ func newRegistrantRace(t *testing.T) registrantRace {
 }
 
 // N-28 (inventory 9.2.2, a gated entry): a change to where or when a date is
-// held tells everyone going or waitlisted on it. The real operation is
-// PUT /events/:id/occurrences/:date {location} -> apiUpdateOccurrence ->
-// contactMutation (gate first, with the event id, so occurrence access is
-// reconciled first) -> the event row and occurrence row FOR UPDATE -> the date
-// is saved -> notifyEventChanged: the registrants of that date are read (listed
+// held tells everyone going or waitlisted on it. The real operation is the
+// guarded edit POST /events/:id/occurrences/:date/edits {changes: {location}},
+// on a base read through the manager's HTTP read before either order starts
+// -> apiEditDate -> singleDateMutation's contactMutation (gate first, with the
+// event id, so occurrence access is reconciled first) -> the actor, the event
+// row and the occurrence row FOR UPDATE -> the date is saved ->
+// notifyEventChanged: the registrants of that date are read (listed
 // users only), then notify.WithRecipients locks them all once and each Send
 // reuses the scope. The edit answers 200 in both orders.
 //
@@ -1988,9 +2031,10 @@ func newRegistrantRace(t *testing.T) registrantRace {
 func TestEventChangedNoticeSerializesWithRealAdminDelete(t *testing.T) {
 	runGatedErasureBarriers(t, 7402121, 7402122, func(t *testing.T) gatedErasureScene {
 		f := newRegistrantRace(t)
+		base := editBaseOf(t, f.admin, f.eventID, f.date)
 		return gatedErasureScene{app: f.app, victim: f.victim, sends: []string{notify.EventChanged},
 			run: func() error {
-				return doExpect(f.admin, "PUT", "/api/v1/events/"+itoa(f.eventID)+"/occurrences/"+f.date, map[string]any{"location": "The new hall"}, http.StatusOK)
+				return doExpect(f.admin, "POST", dateEditPath(f.eventID, f.date), dateEditBody(newDateAttempt(t), base.Revision, map[string]any{"location": "The new hall"}), http.StatusOK)
 			},
 			erase: eraseVia(f.eraser, f.victim),
 			told: func(t *testing.T) {
@@ -2035,6 +2079,79 @@ func TestOccurrenceCancelledNoticeSerializesWithRealAdminDelete(t *testing.T) {
 			},
 		}
 	})
+}
+
+// TestSeriesRestoreTellsAnEndedGrantOnlyThatItIsBack: a series edit that
+// brings back a date it had dropped tells everyone still signed up that it is
+// back on (DEC-91). The departed person, whose grant the drop ended and who
+// can't see the date, hears only that something they signed up for is back
+// on: not the title or place the same edit set, nor the date's subject or
+// clock. The grant stays ended. An active member still going is told
+// everything.
+func TestSeriesRestoreTellsAnEndedGrantOnlyThatItIsBack(t *testing.T) {
+	f := newDepartureReadFixture(t, models.VisibilityInviteOnly, models.RegGoing, policy.OccurrenceOriginDepartureSelf)
+	target := f.dates[1]
+	// A customized date is kept by series edits; this one must follow the rule.
+	gormMust(t, f.app.DB.Model(&models.EventOccurrence{}).Where("id = ?", target.ID).Updates(map[string]any{"title_override": nil, "location_override": nil}))
+	member := newTestUser(t, f.app, "restored member", "password1234", models.RoleMember)
+	gormMust(t, f.app.DB.Create(&models.Membership{UserID: member.ID, GroupID: f.group, Role: models.MembershipMember, Status: models.MembershipActive}))
+	gormMust(t, f.app.DB.Create(&models.Registration{UserID: &member.ID, OccurrenceID: target.ID, Status: models.RegGoing, AttendanceMode: models.AttendanceInPerson, Source: "web"}))
+	eid := itoa(f.event.ID)
+
+	apiDo(t, f.admin, "PUT", "/api/v1/events/"+eid, map[string]any{"recurrenceRule": "FREQ=WEEKLY;COUNT=1"}, http.StatusOK)
+	if o := occurrenceRow(t, f.app, target.ID); o.Status != models.OccurrenceCancelled || o.CancelSource != models.CancelSourceSeries {
+		t.Fatalf("fixture: the date was not dropped: %+v", o)
+	}
+	if got := savedOccurrenceAccess(t, f); got.Status != policy.OccurrenceAccessEnded {
+		t.Fatalf("fixture: dropping the date left the grant %+v", got)
+	}
+	if s := regStatus(t, f.app, f.recipient.ID, target.ID); s != models.RegGoing {
+		t.Fatalf("fixture: the departed row is %s", s)
+	}
+	mark := markNotices(t, f.app)
+
+	apiDo(t, f.admin, "PUT", "/api/v1/events/"+eid, map[string]any{"recurrenceRule": "FREQ=WEEKLY;COUNT=3",
+		"title": "NEWSECRETTITLE", "location": "NEWSECRETPLACE"}, http.StatusOK)
+	if o := occurrenceRow(t, f.app, target.ID); o.Status != models.OccurrenceScheduled {
+		t.Fatalf("the date did not come back: %+v", o)
+	}
+	if got := savedOccurrenceAccess(t, f); got.Status != policy.OccurrenceAccessEnded {
+		t.Fatalf("the restore revived the grant: %+v", got)
+	}
+	back := noticesSince(t, f.app, f.recipient.ID, notify.OccurrenceRestored, mark.notice)
+	if len(back) != 1 || back[0].Title != "Back on: Church event" || back[0].Body != "Your sign-up is still in place." {
+		t.Fatalf("the departed person's restore notices: %+v", back)
+	}
+	wantWithheld(t, f.app, "the departed person", back[0], f.client, target.ID)
+	drainNotices(t, f.app)
+	secrets := []string{"NEWSECRETTITLE", "NEWSECRETPLACE", "Retained hidden group", "Retained group place", "/events/" + eid}
+	var rows []models.Notification
+	gormMust(t, f.app.DB.Where("user_id = ? AND id > ?", f.recipient.ID, mark.notice).Find(&rows))
+	for _, n := range rows {
+		raw, err := json.Marshal(n)
+		gormMust(t, &gorm.DB{Error: err})
+		for _, secret := range secrets {
+			if strings.Contains(string(raw), secret) {
+				t.Fatalf("the departed person was told %s: %s", secret, raw)
+			}
+		}
+	}
+	mailed := false
+	for _, m := range mailSince(t, f.app, f.recipient.Email, mark) {
+		mailed = mailed || strings.Contains(m.Subject, "Back on: Church event")
+		for _, secret := range secrets {
+			if strings.Contains(m.Subject+m.Body, secret) {
+				t.Fatalf("the departed person was mailed %s: %q / %q", secret, m.Subject, m.Body)
+			}
+		}
+	}
+	if !mailed {
+		t.Fatal("the departed person was not mailed that the date is back on")
+	}
+	told := noticesSince(t, f.app, member.ID, notify.OccurrenceRestored, mark.notice)
+	if len(told) != 1 || !strings.Contains(told[0].Title+told[0].Body, "NEWSECRETTITLE") || told[0].SubjectID == nil || *told[0].SubjectID != target.ID {
+		t.Fatalf("the member still going: %+v", told)
+	}
 }
 
 // A viewer who can see only one date of a hidden series must get none of the
@@ -2429,7 +2546,7 @@ func TestCreateEventRechecksAfterHeldBody(t *testing.T) {
 					t.Fatal(err)
 				}
 				if change == "hidden group" {
-					apiDo(t, admin, "PUT", "/api/v1/groups/"+itoa(g.ID), map[string]any{"visibility": models.VisibilityInviteOnly, "confirm": true}, http.StatusOK)
+					apiDo(t, admin, "PUT", "/api/v1/groups/"+itoa(g.ID), confirmVisibility(t, admin, "/api/v1/groups/"+itoa(g.ID), map[string]any{"visibility": models.VisibilityInviteOnly}), http.StatusOK)
 					want = http.StatusNotFound
 				}
 			case "demoted admin":
@@ -2539,7 +2656,7 @@ func TestCreateEventUsesGroupVisibilityAfterHeldBody(t *testing.T) {
 				body["visibility"], body["visibilityReason"] = models.VisibilityPublic, "Guests welcome"
 			}
 			held := client.doHeld("POST", "/api/v1/groups/"+itoa(g.ID)+"/events", body)
-			apiDo(t, coLeader, "PUT", "/api/v1/groups/"+itoa(g.ID), map[string]any{"visibility": models.VisibilityPrivate, "confirm": true}, http.StatusOK)
+			apiDo(t, coLeader, "PUT", "/api/v1/groups/"+itoa(g.ID), confirmVisibility(t, coLeader, "/api/v1/groups/"+itoa(g.ID), map[string]any{"visibility": models.VisibilityPrivate}), http.StatusOK)
 			held.release()
 			ev := requireCreatedEvent(t, app, held.wait(t))
 			want, action := models.VisibilityPrivate, ""
@@ -2764,7 +2881,11 @@ func TestCreateEventRefusesMembersAndTeens(t *testing.T) {
 	}
 }
 
-func TestUpdateOccurrenceUsesZoneAfterHeldBody(t *testing.T) {
+// TestDateEditUsesZoneAfterHeldBody: a guarded date edit whose body is held
+// while the series changes zone is refused with date_changed and writes
+// nothing; the same change saved from a fresh base is read on the new zone,
+// across a day boundary each way.
+func TestDateEditUsesZoneAfterHeldBody(t *testing.T) {
 	for _, tc := range []struct {
 		zone      string
 		clock     string
@@ -2777,18 +2898,23 @@ func TestUpdateOccurrenceUsesZoneAfterHeldBody(t *testing.T) {
 			f := newEventWriterRace(t, false)
 			eventPath := "/api/v1/events/" + itoa(f.event.ID)
 			wall := f.date + "T" + tc.clock
-			held := f.actor.doHeld("PUT", eventPath+"/occurrences/"+f.date,
-				map[string]any{"startsLocal": " " + wall + " ", "durationMinutes": 90})
+			changes := map[string]any{"startsLocal": " " + wall + " ", "durationMinutes": 90}
+			base := editBaseOf(t, f.actor, f.event.ID, f.date)
+			held := f.actor.doHeld("POST", dateEditPath(f.event.ID, f.date), dateEditBody(newDateAttempt(t), base.Revision, changes))
 			apiDo(t, f.admin, "PUT", eventPath, map[string]any{"tzid": tc.zone}, http.StatusOK)
 			var before models.EventOccurrence
 			if err := f.app.DB.Where("event_id = ? AND original_date = ?", f.event.ID, f.date).First(&before).Error; err != nil {
 				t.Fatal(err)
 			}
+			state := eventWriterState(t, f.app, f.event.ID)
 			held.release()
-			w := held.wait(t)
-			if w.Code != http.StatusOK {
-				t.Fatalf("date edit after zone change: %d %s", w.Code, w.Body.String())
+			if w := held.wait(t); w.Code != http.StatusConflict || answerCode(t, w) != "date_changed" {
+				t.Fatalf("the held edit after a zone change: %d %s", w.Code, w.Body.String())
 			}
+			if after := eventWriterState(t, f.app, f.event.ID); after != state {
+				t.Fatalf("the refused held edit wrote:\n%s\n%s", state, after)
+			}
+			w := saveDate(t, f.actor, f.event.ID, f.date, changes, http.StatusOK, "")
 			day, err := models.ParseCalendarDate(f.date)
 			if err != nil {
 				t.Fatal(err)
@@ -2816,20 +2942,25 @@ func TestUpdateOccurrenceUsesZoneAfterHeldBody(t *testing.T) {
 	}
 }
 
-func TestUpdateOccurrenceInvalidStartAfterHeldBodyWritesNothing(t *testing.T) {
+// TestDateEditInvalidStartAfterHeldBodyWritesNothing: an invalid start held
+// across a zone change is refused (date_changed, its base is stale), and from
+// a fresh base it is invalid_start on the new zone; neither writes.
+func TestDateEditInvalidStartAfterHeldBodyWritesNothing(t *testing.T) {
 	f := newEventWriterRace(t, false)
 	eventPath := "/api/v1/events/" + itoa(f.event.ID)
-	held := f.actor.doHeld("PUT", eventPath+"/occurrences/"+f.date, map[string]any{
+	changes := map[string]any{
 		"startsLocal": "not a wall time", "durationMinutes": 90, "title": "Changed date",
-		"location": "New hall", "visibility": models.VisibilityPrivate, "confirm": true,
-	})
+		"location": "New hall", "visibility": models.VisibilityPrivate,
+	}
+	base := editBaseOf(t, f.actor, f.event.ID, f.date)
+	held := f.actor.doHeld("POST", dateEditPath(f.event.ID, f.date), dateEditBody(newDateAttempt(t), base.Revision, changes))
 	apiDo(t, f.admin, "PUT", eventPath, map[string]any{"tzid": "Asia/Tokyo"}, http.StatusOK)
 	before := eventWriterState(t, f.app, f.event.ID)
 	held.release()
-	w := held.wait(t)
-	if w.Code != http.StatusBadRequest {
-		t.Fatalf("invalid date start: %d %s", w.Code, w.Body.String())
+	if w := held.wait(t); w.Code != http.StatusConflict || answerCode(t, w) != "date_changed" {
+		t.Fatalf("the held edit after a zone change: %d %s", w.Code, w.Body.String())
 	}
+	w := saveDate(t, f.actor, f.event.ID, f.date, changes, http.StatusBadRequest, errInvalidStart.Code)
 	var answer map[string]any
 	decodeJSON(t, w, &answer)
 	if len(answer) != 2 || answer["code"] != errInvalidStart.Code || answer["error"] != errInvalidStart.Message {
@@ -2840,12 +2971,15 @@ func TestUpdateOccurrenceInvalidStartAfterHeldBodyWritesNothing(t *testing.T) {
 	}
 }
 
-func TestUpdateOccurrenceEventDeletedAfterHeldBody(t *testing.T) {
+// TestDateEditEventDeletedAfterHeldBody: a guarded date edit whose event is
+// deleted while its body is held answers the event's 404 and writes nothing.
+func TestDateEditEventDeletedAfterHeldBody(t *testing.T) {
 	f := newEventWriterRace(t, false)
 	eventPath := "/api/v1/events/" + itoa(f.event.ID)
-	held := f.actor.doHeld("PUT", eventPath+"/occurrences/"+f.date, map[string]any{
+	base := editBaseOf(t, f.actor, f.event.ID, f.date)
+	held := f.actor.doHeld("POST", dateEditPath(f.event.ID, f.date), dateEditBody(newDateAttempt(t), base.Revision, map[string]any{
 		"startsLocal": f.date + "T21:00", "location": "New hall", "visibility": models.VisibilityPrivate,
-	})
+	}))
 	apiDo(t, f.admin, "DELETE", eventPath, nil, http.StatusOK)
 	before := eventWriterState(t, f.app, f.event.ID)
 	held.release()
@@ -2960,7 +3094,9 @@ func TestEventWritersKeepEventFirstLockOrder(t *testing.T) {
 			case "cancel":
 				method, path, body = "POST", path+"/cancel", map[string]any{"date": f.date}
 			case "date":
-				path, body = path+"/occurrences/"+f.date, map[string]any{"visibility": models.VisibilityPrivate}
+				// The guarded edit, on a base read without a lock.
+				base := editBaseOf(t, f.actor, f.event.ID, f.date)
+				method, path, body = "POST", dateEditPath(f.event.ID, f.date), dateEditBody(newDateAttempt(t), base.Revision, map[string]any{"visibility": models.VisibilityPrivate})
 			}
 			done := queueContact(func() *httptest.ResponseRecorder { return f.actor.do(method, path, body, true) })
 			testdb.WaitUntil(t, "event writer waiting on its first row lock", 5*time.Second, func() bool {
@@ -2981,5 +3117,351 @@ func TestEventWritersKeepEventFirstLockOrder(t *testing.T) {
 				t.Fatalf("%s after lock release: %d %s", writer, w.Code, w.Body.String())
 			}
 		})
+	}
+}
+
+// A series edit writes clock evidence (DEC-155) for every date that was
+// upcoming before it, whatever it did to the date: kept by an override,
+// frozen, cancelled by a person, cancelled by the series, restored, moved
+// into the past; a date already past keeps what it had, known or not. The
+// repair after it changes no clock, notice, audit row, change time or
+// calendar output.
+func TestSeriesEditRecordsEvidenceForEveryUpcomingDate(t *testing.T) {
+	app := testApp(t)
+	leader := newTestUser(t, app, "Lou Leader", "password1234", models.RoleMember)
+	client := loginAPI(t, app, leader.Name, "password1234")
+	group := activeGroup(t, app, leader, "Evening Circle", models.VisibilityPublic, "")
+	start := feedStart(3)
+	ev := createFeedEvent(t, client, group.ID, "Evening Prayer", start, "FREQ=WEEKLY;COUNT=7")
+	eid := itoa(ev.ID)
+	dates := seriesClockTestDates(t, app.DB, ev.ID)
+	day := func(i int) string { return tombstoneDate(dates[i]) }
+	// d1 kept by a title override, d2 frozen at 18:00, d3 cancelled by a
+	// person; d0 and d6 are plain.
+	saveDate(t, client, ev.ID, day(1), map[string]any{"title": "Special"}, http.StatusOK, "")
+	moveDateTo(t, client, ev.ID, day(2), day(2)+"T18:00")
+	gormMust(t, app.DB.Model(&dates[3]).Updates(map[string]any{"status": models.OccurrenceCancelled, "cancel_source": models.CancelSourceManual}))
+
+	edit := func(body map[string]any) {
+		t.Helper()
+		apiDo(t, client, "PUT", "/api/v1/events/"+eid, body, http.StatusOK)
+	}
+	wantEvidence := func(i int, hhmm, written string) {
+		t.Helper()
+		rows := clockRowsOf(t, app.DB, dates[i].ID)
+		w := ""
+		if len(rows) == 1 && rows[0].WrittenLocal != nil {
+			w = *rows[0].WrittenLocal
+		}
+		if len(rows) != 1 || !rows[0].IsFirst || rows[0].StartsAt.UTC().Format("15:04") != hhmm || w != written {
+			t.Fatalf("date %d (%s) evidence %+v, want one first row at %s written %q", i, day(i), rows, hhmm, written)
+		}
+	}
+	// The series ends after d3: d4 to d6 are cancelled by the series, and
+	// their evidence is the series' written clock on a day the rule no
+	// longer makes.
+	edit(map[string]any{"rruleUntil": day(3)})
+	for i := 4; i <= 6; i++ {
+		wantEvidence(i, "19:00", day(i)+"T19:00")
+	}
+	wantEvidence(1, "19:00", "")
+	wantEvidence(2, "19:00", "")
+	wantEvidence(3, "19:00", "")
+	// The end is lifted: d4 to d6 are restored with the rule's own times.
+	edit(map[string]any{"rruleUntil": ""})
+	for i := 4; i <= 6; i++ {
+		var o models.EventOccurrence
+		gormMust(t, app.DB.First(&o, dates[i].ID))
+		if o.Status != models.OccurrenceScheduled {
+			t.Fatalf("fixture: date %d is %s", i, o.Status)
+		}
+		wantEvidence(i, "19:00", "")
+	}
+	wantUsual(t, readSeriesDate(t, client, ev.ID, day(2)), "19:00", changeTime)
+
+	// The clock moves to just before d0's start, and the series moves to
+	// 18:00: d0 goes from upcoming into the past in this edit and still gets
+	// its evidence.
+	app.clock = func() time.Time { return dates[0].StartsAt.Add(-30 * time.Minute) }
+	edit(map[string]any{"startsLocal": start.Add(-time.Hour).Format(events.WallLayout)})
+	wantEvidence(0, "18:00", "")
+	wantEvidence(6, "18:00", "")
+	// Later, d0 is past: a known past date keeps its evidence through
+	// another edit, and a past date with none stays unknown.
+	app.clock = func() time.Time { return dates[1].StartsAt.Add(-30 * time.Minute) }
+	gormMust(t, app.DB.Where("occurrence_id = ?", dates[0].ID).Delete(&models.OccurrenceSeriesStart{}))
+	app.clock = func() time.Time { return dates[2].StartsAt.Add(-30 * time.Minute) }
+	before1 := clockRowsOf(t, app.DB, dates[1].ID)
+	edit(map[string]any{"startsLocal": start.Add(-2 * time.Hour).Format(events.WallLayout)})
+	if rows := clockRowsOf(t, app.DB, dates[0].ID); len(rows) != 0 {
+		t.Fatalf("a past date with no evidence was given some: %+v", rows)
+	}
+	if rows := clockRowsOf(t, app.DB, dates[1].ID); !reflect.DeepEqual(rows, before1) {
+		t.Fatalf("a past date's evidence changed: %+v -> %+v", before1, rows)
+	}
+	wantEvidence(5, "17:00", "")
+	app.clock = nil
+
+	// The repair after the edits: give an upcoming date back its legacy
+	// state, then run it twice. Only that date's evidence comes back; no
+	// notice, audit row, change time or calendar output moves.
+	gormMust(t, app.DB.Where("occurrence_id = ?", dates[6].ID).Delete(&models.OccurrenceSeriesStart{}))
+	type sideEffects struct {
+		changed, restored int64
+		eventUpdated      time.Time
+		dateUpdated       []time.Time
+		ics, calendar     string
+	}
+	read := func() sideEffects {
+		t.Helper()
+		var s sideEffects
+		gormMust(t, app.DB.Model(&models.Notification{}).Where("kind = ?", notify.EventChanged).Count(&s.changed))
+		gormMust(t, app.DB.Model(&models.AuditLog{}).Where("action = ?", audit.EventDatesRestored).Count(&s.restored))
+		gormMust(t, app.DB.Raw(`SELECT updated_at FROM events WHERE id = ?`, ev.ID).Scan(&s.eventUpdated))
+		gormMust(t, app.DB.Model(&models.EventOccurrence{}).Where("event_id = ?", ev.ID).Order("id").Pluck("updated_at", &s.dateUpdated))
+		s.ics = apiDo(t, client, "GET", dateReadPath(ev.ID, day(5))+"/calendar.ics", nil, http.StatusOK)
+		from, to := feedDate(start), feedDate(start.AddDate(0, 0, 60))
+		s.calendar = apiDo(t, client, "GET", "/api/v1/calendar?from="+from+"&to="+to, nil, http.StatusOK)
+		return s
+	}
+	before := read()
+	runExtend(t, app)
+	repaired := clockRowsOf(t, app.DB, dates[6].ID)
+	if len(repaired) != 1 || repaired[0].StartsAt.UTC().Format("15:04") != "17:00" {
+		t.Fatalf("the repair gave the upcoming date %+v", repaired)
+	}
+	all := clockCount(t, app.DB)
+	runExtend(t, app)
+	if after := read(); !reflect.DeepEqual(after, before) {
+		t.Fatalf("the repair changed what else the app says:\n%+v\n%+v", before, after)
+	}
+	if clockCount(t, app.DB) != all || !reflect.DeepEqual(clockRowsOf(t, app.DB, dates[6].ID), repaired) {
+		t.Fatal("a second repair rewrote evidence")
+	}
+}
+
+// A past date keeps the evidence it was written with through a change of the
+// series zone, and is compared in that zone, so the zone change alone is not
+// a move; upcoming dates take the new zone's evidence.
+func TestSeriesZoneChangeKeepsAPastDatesComparison(t *testing.T) {
+	app := testApp(t)
+	leader := newTestUser(t, app, "Lou Leader", "password1234", models.RoleMember)
+	client := loginAPI(t, app, leader.Name, "password1234")
+	group := activeGroup(t, app, leader, "Evening Circle", models.VisibilityPublic, "")
+	boise := eventZone("America/Boise")
+	now := time.Now().In(boise)
+	first := time.Date(now.Year(), now.Month(), now.Day(), 19, 0, 0, 0, boise).AddDate(0, 0, -14)
+	w := client.do("POST", "/api/v1/groups/"+itoa(group.ID)+"/events", map[string]any{
+		"title": "Evening Prayer", "startsLocal": first.Format(events.WallLayout), "durationMinutes": 60,
+		"tzid": "America/Boise", "recurrenceRule": "FREQ=WEEKLY;COUNT=5",
+	}, true)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("create: %d %s", w.Code, w.Body.String())
+	}
+	var created struct {
+		Event eventJSON `json:"event"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &created); err != nil {
+		t.Fatal(err)
+	}
+	ev := created.Event
+	dates := seriesClockTestDates(t, app.DB, ev.ID)
+	past, upcoming := dates[0], dates[4]
+	apiDo(t, client, "PUT", "/api/v1/events/"+itoa(ev.ID), map[string]any{"tzid": "UTC"}, http.StatusOK)
+	r := readSeriesDate(t, client, ev.ID, tombstoneDate(past))
+	if r.StartsLocal[:10] == tombstoneDate(past) {
+		t.Fatalf("fixture: the past date still shows on its own day in UTC: %s", r.StartsLocal)
+	}
+	wantUsual(t, r, "19:00")
+	if rows := clockRowsOf(t, app.DB, past.ID); len(rows) != 1 || rows[0].TZID != "America/Boise" {
+		t.Fatalf("the past date's evidence: %+v", rows)
+	}
+	if rows := clockRowsOf(t, app.DB, upcoming.ID); len(rows) != 1 || rows[0].TZID != "UTC" {
+		t.Fatalf("an upcoming date's evidence: %+v", rows)
+	}
+	wantUsual(t, readSeriesDate(t, client, ev.ID, tombstoneDate(upcoming)), "19:00")
+}
+
+// TestDateEditEndPassingDuringARoomWaitReruns: the guarded date edit moves
+// its date's room after saving the date, and the room may be held by an
+// operation of another event. The date's end passes while the edit, which
+// shortens it and renames it, waits for the room. The fence at the end of the
+// edit rolls the first attempt back, and the rerun ends the retained grant
+// before the change: the departed person is told only that the invitation
+// ended and cannot read the changed date.
+func TestDateEditEndPassingDuringARoomWaitReruns(t *testing.T) {
+	f := newDepartureReadFixture(t, models.VisibilityInviteOnly, models.RegGoing, policy.OccurrenceOriginDepartureSelf)
+	target := f.dates[1]
+	date := models.FormatCalendarDate(target.OriginalDate)
+	if w := f.admin.do("PUT", "/api/v1/admin/settings/rooms", map[string]any{"enabled": true}, true); w.Code != http.StatusOK {
+		t.Fatalf("rooms on: %d %s", w.Code, w.Body.String())
+	}
+	var room struct {
+		Room roomJSON `json:"room"`
+	}
+	gormMust(t, &gorm.DB{Error: json.Unmarshal([]byte(apiDo(t, f.admin, "POST", "/api/v1/admin/rooms", map[string]any{"name": "Held hall", "capacity": 40}, http.StatusCreated)), &room)})
+	apiDo(t, f.admin, "PUT", "/api/v1/events/"+itoa(f.event.ID)+"/dates/"+date+"/room", map[string]any{"roomId": room.Room.ID}, http.StatusOK)
+	member := goingMember(t, f, target.ID)
+	mark := markNotices(t, f.app).notice
+	clock := newMutableClock(f.app, target.EndsAt.Add(-2*time.Minute))
+	attempts := countDateAttempts(f.app)
+	base := editBaseOf(t, f.admin, f.event.ID, date)
+	release := holdRows(t, f.app, "SELECT id FROM rooms WHERE id = ? FOR UPDATE", room.Room.ID)
+	// A minute shorter: a later end on this kept date is refused outright
+	// (DEC-156), and the new end is still ahead of the clock the first
+	// attempt judges on.
+	minutes := int(target.EndsAt.Sub(target.StartsAt)/time.Minute) - 1
+	answer := goPostDateEdit(f.admin, f.event.ID, date, dateEditBody(newDateAttempt(t), base.Revision, map[string]any{"durationMinutes": minutes, "title": "NEWSECRETTITLE"}))
+	waitForLockedUsersQuery(t, f.app, `%FROM "rooms"%FOR UPDATE%`)
+	after := target.EndsAt.Add(time.Minute)
+	clock.set(after)
+	release()
+	if w := awaitResponse(t, answer); w.Code != http.StatusOK {
+		t.Fatalf("the edit: %d %s", w.Code, w.Body.String())
+	}
+	if n := attempts.Load(); n != 2 {
+		t.Fatalf("the edit ran %d times, want a rerun after the room wait", n)
+	}
+	if o := occurrenceRow(t, f.app, target.ID); !o.EndsAt.Equal(target.EndsAt.Add(-time.Minute)) {
+		t.Fatalf("fixture: the date was not shortened: %+v", o)
+	}
+	wantGrantEndedAt(t, f, after)
+	wantOnlyGrantEnded(t, f, mark, date, "NEWSECRETTITLE")
+	if got := noticesSince(t, f.app, member.ID, notify.EventChanged, mark); len(got) != 1 {
+		t.Fatalf("the member was told %d changes: %+v", len(got), got)
+	}
+}
+
+// TestDateEditPromotionReadsItsOwnClock: the guarded date edit decides
+// promotion on a clock read when it promotes. A raised cap with a place
+// change waits on a going member's row (a recipient lock) while the date
+// enters the two-hour cutoff: nobody is promoted, and the leader is told
+// someone in line could take a seat.
+func TestDateEditPromotionReadsItsOwnClock(t *testing.T) {
+	f := newDepartureReadFixture(t, models.VisibilityInviteOnly, models.RegGoing, policy.OccurrenceOriginDepartureSelf)
+	target := f.dates[1]
+	date := models.FormatCalendarDate(target.OriginalDate)
+	gormMust(t, f.app.DB.Model(&models.Event{}).Where("id = ?", f.event.ID).Update("waitlist_enabled", true))
+	gormMust(t, f.app.DB.Model(&models.EventOccurrence{}).Where("id = ?", target.ID).Update("capacity_override", 1))
+	going := goingMember(t, f, target.ID)
+	waiter := newTestUser(t, f.app, "waiting member", "password1234", models.RoleMember)
+	gormMust(t, f.app.DB.Create(&models.Membership{UserID: waiter.ID, GroupID: f.group, Role: models.MembershipMember, Status: models.MembershipActive}))
+	at := time.Now().UTC().Add(-time.Minute)
+	gormMust(t, f.app.DB.Create(&models.Registration{UserID: &waiter.ID, OccurrenceID: target.ID, Status: models.RegWaitlisted, WaitlistedAt: &at, AttendanceMode: models.AttendanceInPerson, Source: "web"}))
+	leader := newTestUser(t, f.app, "series leader", "password1234", models.RoleMember)
+	gormMust(t, f.app.DB.Create(&models.Membership{UserID: leader.ID, GroupID: f.group, Role: models.MembershipLeader, Status: models.MembershipActive}))
+	mark := markNotices(t, f.app).notice
+	cutoff := target.StartsAt.Add(-events.CutoffWindow)
+	clock := newMutableClock(f.app, cutoff.Add(-time.Minute))
+	base := editBaseOf(t, f.admin, f.event.ID, date)
+	release := holdRows(t, f.app, "SELECT id FROM users WHERE id = ? FOR UPDATE", going.ID)
+	answer := goPostDateEdit(f.admin, f.event.ID, date, dateEditBody(newDateAttempt(t), base.Revision, map[string]any{"location": "A bigger hall", "capacityOverride": 3}))
+	waitForLockedUsersQuery(t, f.app, `%FROM users%FOR KEY SHARE%`)
+	clock.set(cutoff.Add(time.Minute))
+	release()
+	if w := awaitResponse(t, answer); w.Code != http.StatusOK {
+		t.Fatalf("the edit: %d %s", w.Code, w.Body.String())
+	}
+	if s := regStatus(t, f.app, waiter.ID, target.ID); s != models.RegWaitlisted {
+		t.Fatalf("the waiter was promoted inside the cutoff: %s", s)
+	}
+	if got := noticesSince(t, f.app, leader.ID, notify.WaitlistCutoff, mark); len(got) != 1 {
+		t.Fatalf("the leader got %d cutoff notices: %+v", len(got), got)
+	}
+}
+
+// TestDateEditRenameAndTightenAfterTheQuestionNamesTheKnownTitle: the same
+// rename and tightening agreed the way the date editor asks, through the
+// server's 409 date_needs_consent and the same attempt sent again with its
+// consent, tells the cancelled outsider, and both guardians' copies, the title
+// they knew and never the new private one.
+func TestDateEditRenameAndTightenAfterTheQuestionNamesTheKnownTitle(t *testing.T) {
+	renameAndTightenNamesTheKnownTitle(t, func(f dateEditFixture) {
+		impact := saveDateConsenting(t, f.admin, f.event.ID, f.date(1), map[string]any{"title": "NEWPRIVATETITLE", "visibility": "series"})
+		if impact.Tightened[0].Registrants != 1 {
+			t.Fatalf("the question counts %d registrants, want the one outsider", impact.Tightened[0].Registrants)
+		}
+	})
+}
+
+// keepOnLeaving signs subject up Going on occ and has them leave group through
+// the real departure route, keeping that date (DEC-74).
+func keepOnLeaving(t *testing.T, subject *apiClient, groupID uint, eventID uint, occ models.EventOccurrence) {
+	t.Helper()
+	if code, body := registerAs(subject, eventID, models.FormatCalendarDate(occ.OriginalDate), models.RegGoing, nil); code != http.StatusOK {
+		t.Fatalf("going: %d %s", code, body)
+	}
+	base := "/api/v1/groups/" + itoa(groupID)
+	preview := getDeparturePreview(t, subject, base+"/departure-preview", http.StatusOK)
+	if w := confirmDeparturePreview(t, subject, "POST", base+"/leave", preview, []uint{occ.ID}, ""); w.Code != http.StatusOK {
+		t.Fatalf("leave keeping %s: %d %s", models.FormatCalendarDate(occ.OriginalDate), w.Code, w.Body.String())
+	}
+}
+
+// seriesClockState is the event's stored clock evidence, for comparing
+// before and after an edit.
+func seriesClockState(t *testing.T, app *App, eventID uint) string {
+	t.Helper()
+	var rows []map[string]any
+	gormMust(t, app.DB.Raw("SELECT s.* FROM occurrence_series_starts s JOIN event_occurrences o ON o.id = s.occurrence_id WHERE o.event_id = ? ORDER BY s.occurrence_id", eventID).Scan(&rows))
+	return fmt.Sprint(rows)
+}
+
+// TestSeriesEditRefusesMovingAKeptDateLater (DEC-156): a series edit that
+// would move a date someone kept after leaving later, here a public date 121
+// days ahead, beyond the event page's list, is refused as a whole, listing
+// that date: no date moves, and the event row and its clock evidence are as
+// they were. Moving the series earlier applies and keeps the grant; after the
+// manager's Remove the same later edit applies.
+func TestSeriesEditRefusesMovingAKeptDateLater(t *testing.T) {
+	app := testApp(t)
+	adminUser := newTestUser(t, app, "series admin", "password1234", models.RoleAdmin)
+	admin := loginAPI(t, app, adminUser.Name, "password1234")
+	subject := newTestUser(t, app, "series leaver", "password1234", models.RoleMember)
+	groupID := createFeedGroup(t, admin, "Open series group", models.VisibilityPublic, "Open hall")
+	gormMust(t, app.DB.Create(&models.Membership{UserID: subject.ID, GroupID: groupID, Role: models.MembershipMember, Status: models.MembershipActive}))
+	ev := createFeedEvent(t, admin, groupID, "Weekly open", feedStart(2), "FREQ=WEEKLY;COUNT=20")
+	var dates []models.EventOccurrence
+	gormMust(t, app.DB.Where("event_id = ?", ev.ID).Order("starts_at").Find(&dates))
+	kept := dates[17]
+	if days := int(kept.StartsAt.Sub(feedStart(0)).Hours() / 24); days != 121 {
+		t.Fatalf("fixture: the kept date is %d days ahead", days)
+	}
+	date := models.FormatCalendarDate(kept.OriginalDate)
+	subjectC := loginAPI(t, app, subject.Name, "password1234")
+	keepOnLeaving(t, subjectC, groupID, ev.ID, kept)
+	var reg models.Registration
+	gormMust(t, app.DB.Where("occurrence_id = ? AND user_id = ?", kept.ID, subject.ID).First(&reg))
+	if reg.AccessOrigin != policy.OccurrenceOriginDepartureSelf || !reg.AccessLive() {
+		t.Fatalf("fixture: the date was not kept: %+v", reg)
+	}
+	path := "/api/v1/events/" + itoa(ev.ID)
+	later := map[string]any{"startsLocal": wallAt(dates[0].StartsAt.Add(time.Hour))}
+	state, clocks := eventWriterState(t, app, ev.ID), seriesClockState(t, app, ev.ID)
+	wantKeptDates(t, admin.do("PUT", path, later, true), keptDateCountJSON{Date: date, KeptCount: 1})
+	if after := eventWriterState(t, app, ev.ID); after != state {
+		t.Fatalf("the refused series edit wrote:\n%s\n%s", state, after)
+	}
+	// A6: the managers' read of a date beyond the event page's 90 days counts it too.
+	_, leader := groupLeader(t, app, groupID, "series leader")
+	wantManagedKept(t, admin, ev.ID, date, 1)
+	wantManagedKept(t, leader, ev.ID, date, 1)
+	if after := seriesClockState(t, app, ev.ID); after != clocks {
+		t.Fatalf("the refused series edit changed the clock evidence:\n%s\n%s", clocks, after)
+	}
+
+	apiDo(t, admin, "PUT", path, map[string]any{"startsLocal": wallAt(dates[0].StartsAt.Add(-time.Hour))}, http.StatusOK)
+	if o := occurrenceRow(t, app, kept.ID); !o.StartsAt.Equal(kept.StartsAt.Add(-time.Hour)) {
+		t.Fatalf("the earlier series edit did not move the kept date: %+v", o)
+	}
+	if row := loadAccessRow(t, app.DB, reg.ID); row.Status != policy.OccurrenceAccessActive {
+		t.Fatalf("the earlier series edit ended the grant: %+v", row)
+	}
+
+	apiDo(t, admin, "POST", path+"/registrations/remove", map[string]any{"date": date, "registrationId": reg.ID}, http.StatusOK)
+	wantManagedKept(t, leader, ev.ID, date, 0)
+	apiDo(t, admin, "PUT", path, later, http.StatusOK)
+	if o := occurrenceRow(t, app, kept.ID); !o.StartsAt.Equal(kept.StartsAt.Add(time.Hour)) {
+		t.Fatalf("the series edit after Remove did not move the date: %+v", o)
 	}
 }

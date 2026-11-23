@@ -56,7 +56,10 @@ type Action struct {
 //     scheduled date out of the series move. A person's cancellation is
 //     never restored. Past dates are never touched.
 //   - Per-date overrides are left alone, including their clock time.
-//   - Dates the new rule adds, and that are still in the future, are inserted.
+//   - Dates the new rule adds, and that are still in the future, are inserted,
+//     one row per original date: on a day the rule makes several future times,
+//     the last of them in the walk's order (the time a move takes on such a
+//     day), at the place the day first appears in the walk.
 func ApplySeries(existing []Existing, next []When, now time.Time) []Action {
 	byDate := make(map[string]When, len(next))
 	for _, w := range next {
@@ -88,10 +91,16 @@ func ApplySeries(existing []Existing, next []When, now time.Time) []Action {
 		}
 		out = append(out, Action{Kind: ActionMove, ID: e.ID, When: w})
 	}
+	added := map[string]int{}
 	for _, w := range next {
 		if seen[w.OriginalDate] || !w.StartsAt.After(now) {
 			continue
 		}
+		if i, ok := added[w.OriginalDate]; ok {
+			out[i].When = w
+			continue
+		}
+		added[w.OriginalDate] = len(out)
 		out = append(out, Action{Kind: ActionAdd, When: w})
 	}
 	return out

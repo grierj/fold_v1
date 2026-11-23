@@ -1770,11 +1770,19 @@ func TestRegistrationReadBudget(t *testing.T) {
 	// The test client drains queued notices after each request; that drain is
 	// harness work, not handler reads, so measured requests leave them queued.
 	admin.holdNotices, c.holdNotices = true, true
-	n := 0
+	n, savepoints := 0, 0
 	cb := func(*gorm.DB) { n++ }
 	_ = app.DB.Callback().Query().Before("gorm:query").Register("zz:q", cb)
 	_ = app.DB.Callback().Row().Before("gorm:row").Register("zz:r", cb)
-	_ = app.DB.Callback().Raw().Before("gorm:raw").Register("zz:raw", cb)
+	// A snapshot's lenient reads each run in a savepoint (lenientReadIn):
+	// those statements are counted apart from the reads.
+	_ = app.DB.Callback().Raw().Before("gorm:raw").Register("zz:raw", func(tx *gorm.DB) {
+		if sql := tx.Statement.SQL.String(); strings.HasPrefix(sql, "SAVEPOINT ") || strings.HasPrefix(sql, "ROLLBACK TO SAVEPOINT ") || strings.HasPrefix(sql, "RELEASE SAVEPOINT ") {
+			savepoints++
+			return
+		}
+		n++
+	})
 	n = 0
 	apiDo(t, admin, "PUT", "/api/v1/events/"+itoa(eventID)+"/registrations", map[string]any{"date": date, "status": "maybe"}, http.StatusOK)
 	// 12 since canRegisterIn always reads the membership instead of guessing
@@ -1782,10 +1790,16 @@ func TestRegistrationReadBudget(t *testing.T) {
 	if n > 12 {
 		t.Fatalf("solo PUT read %d times, budget 12", n)
 	}
-	n = 0
+	n, savepoints = 0, 0
 	apiDo(t, c, "GET", "/api/v1/events/"+itoa(eventID), nil, http.StatusOK)
 	if n > 23 {
 		t.Fatalf("holder GET read %d times, budget 23", n)
+	}
+	// The event page reads in one snapshot: its five lenient reads (seats,
+	// remote seats, childcare, the site name, the rooms) are a SAVEPOINT and
+	// a ROLLBACK TO each.
+	if savepoints > 10 {
+		t.Fatalf("holder GET took %d savepoint statements, budget 10", savepoints)
 	}
 	_ = newTestUser(t, app, "solo", "password1234", "member")
 	solo := loginAPI(t, app, "solo", "password1234")
@@ -1807,12 +1821,13 @@ func TestRegistrationReadBudget(t *testing.T) {
 	}
 	// GET /me/household: reads don't grow per person or
 	// per account (18 before batching, 9 before slice 3; the pending-approval
-	// lookup adds one, DEC-82). A six-person household reads the same.
+	// lookup adds one, DEC-82; judging the viewer again in the read's snapshot
+	// adds one). A six-person household reads the same.
 	n = 0
 	apiDo(t, c, "GET", "/api/v1/me/household", nil, http.StatusOK)
 	small := n
-	if n > 11 {
-		t.Fatalf("household GET read %d times, budget 11", n)
+	if n > 12 {
+		t.Fatalf("household GET read %d times, budget 12", n)
 	}
 	for i := 0; i < 6; i++ {
 		apiDo(t, c, "POST", "/api/v1/me/household/people", map[string]any{"firstName": "Extra" + itoa(uint(i)), "kind": "adult", "birthDate": "1990-01-01"}, http.StatusCreated)
@@ -2137,10 +2152,11 @@ func TestRemoteCapacityNullPromotesWaitlist(t *testing.T) {
 			}
 			eventID, date := seedRemoteEvent(t, app, admin, gid, nil, capacity, true)
 			path, field := fmt.Sprintf("/api/v1/events/%d", eventID), "remoteCapacity"
+			save := func(body map[string]any, status int) { apiDo(t, admin, "PUT", path, body, status) }
 			if scope == "date" {
-				path += "/occurrences/" + date
 				field = "remoteCapacityOverride"
-				apiDo(t, admin, "PUT", path, map[string]any{field: 1}, http.StatusOK)
+				save = func(body map[string]any, status int) { saveDate(t, admin, eventID, date, body, status, "") }
+				save(map[string]any{field: 1}, http.StatusOK)
 			}
 			var g models.Group
 			if err := app.DB.First(&g, gid).Error; err != nil {
@@ -2179,7 +2195,7 @@ func TestRemoteCapacityNullPromotesWaitlist(t *testing.T) {
 				t.Fatal(err)
 			}
 			t.Cleanup(func() { _ = app.DB.Callback().Create().Remove(callback) })
-			apiDo(t, admin, "PUT", path, map[string]any{field: nil}, http.StatusInternalServerError)
+			save(map[string]any{field: nil}, http.StatusInternalServerError)
 			_ = app.DB.Callback().Create().Remove(callback)
 			var after models.Registration
 			if err := app.DB.First(&after, before.ID).Error; err != nil {
@@ -2193,7 +2209,7 @@ func TestRemoteCapacityNullPromotesWaitlist(t *testing.T) {
 			if !failed || after.Status != before.Status || after.PromotedAt != nil || !intPtrEqual(capacityForMode(&ev, &occ, models.AttendanceRemote), intPtr(1)) || auditAfter != auditBefore {
 				t.Fatalf("failed promotion did not roll back: injected=%v registration=%+v event=%+v occurrence=%+v audits=%d->%d", failed, after, ev, occ, auditBefore, auditAfter)
 			}
-			apiDo(t, admin, "PUT", path, map[string]any{field: nil}, http.StatusOK)
+			save(map[string]any{field: nil}, http.StatusOK)
 			if got := regStatus(t, app, secondUser.ID, occ.ID); got != models.RegGoing {
 				t.Fatalf("unlimited remote reset did not promote: %s", got)
 			}
@@ -2212,11 +2228,12 @@ func TestRemoteCapacityNullDoesNotPromoteDisabledPool(t *testing.T) {
 			}
 			eventID, date := seedRemoteEvent(t, app, admin, gid, nil, capacity, true)
 			eventPath := fmt.Sprintf("/api/v1/events/%d", eventID)
-			path, field := eventPath, "remoteCapacity"
+			field := "remoteCapacity"
+			save := func(body map[string]any) { apiDo(t, admin, "PUT", eventPath, body, http.StatusOK) }
 			if scope == "date" {
-				path += "/occurrences/" + date
 				field = "remoteCapacityOverride"
-				apiDo(t, admin, "PUT", path, map[string]any{field: 1}, http.StatusOK)
+				save = func(body map[string]any) { saveDate(t, admin, eventID, date, body, http.StatusOK, "") }
+				save(map[string]any{field: 1})
 			}
 			var g models.Group
 			if err := app.DB.First(&g, gid).Error; err != nil {
@@ -2235,7 +2252,7 @@ func TestRemoteCapacityNullDoesNotPromoteDisabledPool(t *testing.T) {
 			} else {
 				apiDo(t, admin, "PUT", eventPath, map[string]any{"remoteAvailable": false}, http.StatusOK)
 			}
-			apiDo(t, admin, "PUT", path, body, http.StatusOK)
+			save(body)
 			var occ models.EventOccurrence
 			if err := app.DB.Where("event_id = ? AND original_date = ?", eventID, date).First(&occ).Error; err != nil {
 				t.Fatal(err)
@@ -2781,5 +2798,50 @@ func TestChurchWaitlistCutoffTellsOnlyLiveHosts(t *testing.T) {
 	}
 	if n, d := rowsFor(t, app.DB, "notifications", tomb.ID), rowsFor(t, app.DB, "notification_deliveries", tomb.ID); n != 0 || d != 0 {
 		t.Fatalf("the deleted host has %d notices and %d delivery rows", n, d)
+	}
+}
+
+// TestOrdinaryRSVPRefusesASessionRevokedWhileItWaited: an ordinary RSVP (no
+// household people, so never the gated repeat) waits for its own users row;
+// the holder of that row ends every session and commits. Once its lock is
+// granted the RSVP must answer the stale-session 401 and write nothing, even
+// though the account is still active.
+func TestOrdinaryRSVPRefusesASessionRevokedWhileItWaited(t *testing.T) {
+	app := testApp(t)
+	admin, gid := openGroup(t, app, "Choir")
+	eventID, date := seedCappedEvent(t, app, admin, gid, nil, false)
+	mem := newTestUser(t, app, "rsvper", "password1234", models.RoleMember)
+	memC := loginAPI(t, app, "rsvper", "password1234")
+	hold := holdUserRow(t, app, mem.ID)
+	type answer struct {
+		code int
+		body string
+	}
+	done := make(chan answer, 1)
+	go func() {
+		code, body := registerAs(memC, eventID, date, "going", nil)
+		done <- answer{code, body}
+	}()
+	pid := waitForLockedUsersQuery(t, app, "%users%FOR NO KEY UPDATE%")
+	if n := advisoryLocksHeldBy(t, app, pid); n != 0 {
+		t.Fatalf("the RSVP holds %d advisory locks: it is not the ordinary ungated attempt", n)
+	}
+	if err := endAllSessionsIn(hold, mem, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := hold.Commit().Error; err != nil {
+		t.Fatal(err)
+	}
+	got := <-done
+	if got.code != http.StatusUnauthorized {
+		t.Fatalf("the RSVP after its session ended: %d %s", got.code, got.body)
+	}
+	if n := regCount(app, mem, eventID); n != 0 {
+		t.Fatalf("the revoked session wrote %d registrations", n)
+	}
+	var fresh models.User
+	gormMust(t, app.DB.First(&fresh, mem.ID))
+	if fresh.Status != models.UserActive {
+		t.Fatalf("the account is %q; the test needs it active", fresh.Status)
 	}
 }

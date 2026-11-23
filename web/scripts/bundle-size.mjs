@@ -1,10 +1,10 @@
 // Fails when the entry and its eager modulepreloads exceed the budget (#152).
-// Run after `vite build`; lower BUDGET_GZIP_KB when the bundle shrinks.
+// Run after `vite build`.
 import { readFileSync, readdirSync } from "node:fs";
 import { gzipSync } from "node:zlib";
 
-// Raised from 140 for the product-audit slices (Grier, Oct 30, 2026: efficiency later).
-const BUDGET_GZIP_KB = 180;
+// Temporary milestone headroom; replace this size gate with performance checks (#419).
+const BUDGET_GZIP_KB = 145;
 const html = readFileSync("dist/index.html", "utf8");
 const entry = html.match(/<script[^>]+src="\/assets\/([^"]+\.js)"/)?.[1];
 

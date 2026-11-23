@@ -18,6 +18,7 @@ import (
 	"fold/models"
 
 	"github.com/gin-gonic/gin"
+	"github.com/gorilla/sessions"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 )
@@ -154,7 +155,7 @@ func (a *App) apiRequestEmailChange(c *gin.Context, u *models.User, newEmail str
 		var err error
 		validated, err = lockCurrentCredentials(tx, u)
 		return err
-	})
+	}, contactGateTx)
 	if answerStaleSession(c, err) {
 		return
 	}
@@ -218,7 +219,7 @@ func (a *App) apiRequestEmailChange(c *gin.Context, u *models.User, newEmail str
 		}
 		_, err = emailVerifyMailType.Enqueue(tx, accountTokenMailJob{AccountTokenID: verifyID}, time.Now(), "")
 		return err
-	})
+	}, contactGateTx)
 	if answerStaleSession(c, err) {
 		return
 	}
@@ -308,7 +309,7 @@ func (a *App) apiVerifyEmailChange(c *gin.Context) {
 		}
 		// Capture this commit's epoch, never a later password reset's epoch.
 		return tx.First(&fresh, u.ID).Error
-	})
+	}, contactGateTx)
 	switch {
 	case errors.Is(err, errTokenInvalid):
 		fail(c, errLinkExpired)
@@ -320,12 +321,17 @@ func (a *App) apiVerifyEmailChange(c *gin.Context) {
 		jsonError(c, http.StatusInternalServerError, "could not verify email")
 		return
 	}
-	// This browser stays logged in; every other session ends.
-	if session, serr := a.Store.Get(c.Request, sessionName); serr == nil {
-		if uid, ok := session.Values[sessionUserKey].(uint); ok && uid == fresh.ID {
-			session.Values[sessionVersionKey] = fresh.SessionVersion
-			_ = session.Save(c.Request, c.Writer)
+	// This browser stays logged in, with a new credential; every other session
+	// ends. Another account's or a signed-out cookie is left as it was.
+	if err := a.replaceCredential(c, func(s *sessions.Session) bool {
+		uid, ok := s.Values[sessionUserKey].(uint)
+		if !ok || uid != fresh.ID {
+			return false
 		}
+		setSessionVersion(s, fresh.SessionVersion)
+		return true
+	}); err != nil {
+		log.Printf("verify email for user %d: session: %v", fresh.ID, err)
 	}
 	c.JSON(http.StatusOK, userResponseJSON{User: a.toUserJSON(&fresh)})
 }

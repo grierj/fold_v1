@@ -336,36 +336,40 @@ func (a *App) deliverPush(ctx context.Context, p pushJob) error {
 	if p.NotificationID == 0 || p.DeviceID == 0 {
 		return nil // nothing else is valid
 	}
-	var dev models.PushSubscription
-	if err := a.DB.WithContext(ctx).First(&dev, p.DeviceID).Error; errors.Is(err, gorm.ErrRecordNotFound) {
-		return nil // turned off, gone, or rotated away since it was queued
-	} else if err != nil {
-		return err
-	}
+	db := a.DB.WithContext(ctx)
 	var n models.Notification
-	if err := a.DB.WithContext(ctx).First(&n, p.NotificationID).Error; errors.Is(err, gorm.ErrRecordNotFound) {
+	if err := db.First(&n, p.NotificationID).Error; errors.Is(err, gorm.ErrRecordNotFound) {
 		return nil
 	} else if err != nil {
 		return err
-	}
-	if n.UserID != dev.UserID {
-		return nil // the device changed hands since this was queued
 	}
 	kind, ok := notify.Lookup(n.Kind)
 	if !ok {
 		return nil
 	}
 	var u models.User
-	if err := a.DB.WithContext(ctx).Select("id", "status", "timezone").First(&u, n.UserID).Error; errors.Is(err, gorm.ErrRecordNotFound) {
+	if err := db.Select("id", "status", "timezone").First(&u, n.UserID).Error; errors.Is(err, gorm.ErrRecordNotFound) {
 		return nil
 	} else if err != nil {
 		return err
 	}
-	t := pushTarget{what: fmt.Sprintf("notification %d (%s)", n.ID, n.Kind), dev: dev, rec: notificationRecorder(n)}
-	if why, err := a.pushHeld(a.DB.WithContext(ctx), &u, kind.Category, kind.Required); err != nil {
+	// The account and its choices come before the device, as for an
+	// announcement (pushDestinationIn): devices go when an account stops
+	// being active, and that is "recipient not active", not "device gone".
+	t := pushTarget{what: fmt.Sprintf("notification %d (%s)", n.ID, n.Kind), rec: notificationRecorder(n), row: pushRow{notificationID: n.ID}}
+	if why, err := a.pushHeld(db, &u, kind.Category, kind.Required); err != nil {
 		return err
 	} else if why != "" {
 		return t.record(a, models.DeliverySuppressed, why)
+	}
+	if err := db.Where("id = ?", p.DeviceID).Limit(1).Find(&t.dev).Error; err != nil {
+		return err
+	}
+	if t.dev.ID == 0 || t.dev.UserID != n.UserID {
+		// Turned off, gone, or another account's since this was queued: it is
+		// never sent there, and the delivery is settled as a device that moved
+		// (settlePushMiss), so the notice's push is never left undecided.
+		return a.settlePushMiss(db, t, n.UserID, p.DeviceID, models.DeliverySuppressed, pushWhyGone)
 	}
 	now := a.pushNow()
 	if why := pushStale(&n, now); why != "" {
@@ -423,6 +427,7 @@ type pushTarget struct {
 	what string
 	dev  models.PushSubscription
 	rec  pushRecorder
+	row  pushRow
 }
 
 func (t pushTarget) record(a *App, status, reason string) error {
@@ -441,7 +446,9 @@ func (t pushTarget) tooLarge(a *App) error {
 // push on, and category not turned off unless the kind is required. It
 // returns why the push must not go, or "" when it may.
 func (a *App) pushHeld(db *gorm.DB, u *models.User, category string, required bool) (string, error) {
-	if !a.pushEnabled() {
+	if on, err := boolSettingErrIn(db, settingPushEnabled, true); err != nil {
+		return "", err
+	} else if !on {
 		return pushWhyChurchOff, nil
 	}
 	if u.Status != models.UserActive {
@@ -458,6 +465,97 @@ func (a *App) pushHeld(db *gorm.DB, u *models.User, category string, required bo
 	}
 	return "", nil
 }
+
+// pushDest is where an announcement or reminder push goes, as the snapshot
+// that builds its payload sees it: the person, the device it is sent to, and
+// why it must not go. moved means the device is gone or belongs to someone
+// else now; gone means the account is.
+type pushDest struct {
+	user  models.User
+	dev   models.PushSubscription
+	why   string
+	moved bool
+	gone  bool
+}
+
+func (d pushDest) sends() bool { return d.why == "" && !d.moved && !d.gone }
+
+// pushDestinationIn reads, on tx (the snapshot that builds the payload), the
+// account, the church's switch, consent and the device's owner. The device is
+// what is sent to, so a device rebound to another account (same endpoint and
+// keys, api_push.go) or turned off before the snapshot is never sent this
+// person's payload. The provider is still called after the snapshot ends: a
+// change committed after it began can't stop that one send.
+func (a *App) pushDestinationIn(tx *gorm.DB, userID, deviceID uint, category string, required bool) (pushDest, error) {
+	var d pushDest
+	if err := tx.Where("id = ?", userID).Limit(1).Find(&d.user).Error; err != nil {
+		return d, err
+	}
+	if d.user.ID == 0 {
+		d.gone = true
+		return d, nil
+	}
+	why, err := a.pushHeld(tx, &d.user, category, required)
+	if err != nil || why != "" {
+		d.why = why
+		return d, err
+	}
+	if err := tx.Where("id = ?", deviceID).Limit(1).Find(&d.dev).Error; err != nil {
+		return d, err
+	}
+	d.moved = d.dev.ID == 0 || d.dev.UserID != d.user.ID
+	return d, nil
+}
+
+// pushDestOutcome records what a destination that doesn't send means: a
+// device that moved is a miss for that device alone (settlePushMiss).
+func (a *App) pushDestOutcome(db *gorm.DB, t pushTarget, d pushDest, deviceID uint) error {
+	switch {
+	case d.gone:
+		return nil
+	case d.why != "":
+		return t.record(a, models.RecipientSuppressed, d.why)
+	}
+	return a.settlePushMiss(db, t, d.user.ID, deviceID, models.RecipientSuppressed, pushWhyGone)
+}
+
+// pushSettleTx is a push settlement's transaction: each statement sees what
+// committed while the one before waited on the row lock, such as a sibling
+// that went back to waiting for quiet hours.
+var pushSettleTx = &sql.TxOptions{Isolation: sql.LevelReadCommitted}
+
+// settlePushMiss records, on t's row, an attempt that ended without
+// delivering for a reason about its device alone (gone, moved, refused, not
+// reached), unless another of userID's devices' jobs for the row will still
+// run and decide it.
+func (a *App) settlePushMiss(db *gorm.DB, t pushTarget, userID, deviceID uint, status, reason string) error {
+	return db.Transaction(func(tx *gorm.DB) error {
+		return a.settlePushMissIn(tx, t, userID, deviceID, status, reason)
+	}, pushSettleTx)
+}
+
+// settlePushMissIn is settlePushMiss on tx, which must be a pushSettleTx. An
+// announcement's or reminder's row is locked first, which orders this with a
+// sibling's wait for quiet hours (pushWaitIn): one that waited first is seen
+// as a job that will run again, and one that waits after moves this miss
+// back to waiting.
+func (a *App) settlePushMissIn(tx *gorm.DB, t pushTarget, userID, deviceID uint, status, reason string) error {
+	if t.row.recipientID != 0 {
+		var locked []uint
+		if err := tx.Raw("SELECT id FROM message_recipients WHERE id = ? FOR UPDATE", t.row.recipientID).Scan(&locked).Error; err != nil {
+			return err
+		}
+	}
+	if waiting, err := pushSiblingWaiting(tx, t.row, userID, deviceID); err != nil || waiting {
+		return err
+	}
+	return t.rec(tx, status, reason, a.pushNow())
+}
+
+// pushDeviceMisses are the reasons settlePushMiss records: each is about one
+// device, so another of the person's devices that is still to run may yet
+// deliver the row (pushWaitIn).
+var pushDeviceMisses = []string{pushWhyGone, pushWhyNotReached, pushWhyRefused}
 
 func pushWhyCategoryOff(category string) string {
 	return "push turned off for " + notify.CategoryEmailName(category)
@@ -493,27 +591,73 @@ func (a *App) sendPush(ctx context.Context, t pushTarget, body []byte, opts push
 	return a.pushOutcome(ctx, t, a.pushClient().Send(ctx, pushSubscription(t.dev), body, opts), sentWhy, false)
 }
 
-func pushDevicesLeft(db *gorm.DB, userID uint) (bool, error) {
-	var left int64
-	err := db.Model(&models.PushSubscription{}).Where("user_id = ?", userID).Count(&left).Error
-	return left > 0, err
+// pushRow names the one row a push's outcome goes on, for finding the jobs
+// that may still decide it: a notification's push delivery, or an
+// announcement's or reminder's push row. The person's own test has neither.
+type pushRow struct{ notificationID, recipientID uint }
+
+func (r pushRow) key(deviceID uint) string {
+	if r.recipientID != 0 {
+		return pushRecipientKey(r.recipientID, deviceID)
+	}
+	return pushNotificationKey(r.notificationID, deviceID)
+}
+
+// pushSiblingWaiting reports whether a push.deliver job for row, to another of
+// userID's devices than except, will run again (jobs.WillRunAgain): queued,
+// including one gone back to wait for quiet hours (pushWaitIn), or waiting
+// to retry. It will decide the row, so an attempt that took nothing may leave
+// it. Any running sibling decides for itself, and a delivery upgrades whatever
+// this attempt records to sent (messagePushRecorder, recordPushIn); a device
+// added after the jobs were queued, or whose job has ended, takes nothing.
+// Only real jobs count, so two last attempts never each leave the row to the
+// other.
+func pushSiblingWaiting(db *gorm.DB, row pushRow, userID, except uint) (bool, error) {
+	if row == (pushRow{}) {
+		return false, nil
+	}
+	var devices []uint
+	if err := db.Model(&models.PushSubscription{}).Where("user_id = ? AND id <> ?", userID, except).Order("id").Pluck("id", &devices).Error; err != nil || len(devices) == 0 {
+		return false, err
+	}
+	keys := make([]string, len(devices))
+	for i, d := range devices {
+		keys[i] = row.key(d)
+	}
+	var waiting int64
+	err := jobs.WillRunAgain(db.Model(&models.Job{}).Where("unique_key IN ?", keys)).Limit(1).Count(&waiting).Error
+	return waiting > 0, err
+}
+
+// dispatchedDevice narrows q to the device as it was when the push went: the
+// same row, owner, keys and binding generation. A shared browser rebound to
+// another account, or the same owner's renewed subscription, saved while the
+// push service was answering, is a different subscription, and the old
+// attempt's outcome must not stamp, fail or delete it. The generation goes up
+// on every change of owner or key (migration 00011) and never repeats for a
+// row, so a browser handed away and back, or renewed and given its old keys
+// again, before the answer is not the device as sent either. No timestamp
+// stands in for it: a clock reading can repeat.
+func dispatchedDevice(q *gorm.DB, d models.PushSubscription) *gorm.DB {
+	return q.Where("id = ? AND user_id = ? AND p256dh = ? AND auth = ? AND binding_generation = ?", d.ID, d.UserID, d.P256dh, d.Auth, d.BindingGeneration)
 }
 
 // markPushUsed stamps a device that took a push (at most once a day, and
 // clearing an earlier failure). It never turns a delivery into a retry.
-func (a *App) markPushUsed(id uint) {
-	if err := a.DB.Exec(`UPDATE push_subscriptions SET last_used_at = now(), failed_at = NULL
-		WHERE id = ? AND (last_used_at < now() - interval '1 day' OR failed_at IS NOT NULL)`, id).Error; err != nil {
-		log.Printf("push: device %d: marking it used: %v", id, err)
+func (a *App) markPushUsed(d models.PushSubscription) {
+	if err := dispatchedDevice(a.DB.Model(&models.PushSubscription{}), d).
+		Where("last_used_at < now() - interval '1 day' OR failed_at IS NOT NULL").
+		UpdateColumns(map[string]any{"last_used_at": gorm.Expr("now()"), "failed_at": nil}).Error; err != nil {
+		log.Printf("push: device %d: marking it used: %v", d.ID, err)
 	}
 }
 
 // stampPushUsed stamps a device that took the person's own test, every
 // time, and clears an earlier failure.
-func (a *App) stampPushUsed(id uint) {
-	if err := a.DB.Model(&models.PushSubscription{}).Where("id = ?", id).
+func (a *App) stampPushUsed(d models.PushSubscription) {
+	if err := dispatchedDevice(a.DB.Model(&models.PushSubscription{}), d).
 		UpdateColumns(map[string]any{"last_used_at": time.Now().UTC(), "failed_at": nil}).Error; err != nil {
-		log.Printf("push: device %d: marking it used: %v", id, err)
+		log.Printf("push: device %d: marking it used: %v", d.ID, err)
 	}
 }
 
@@ -559,9 +703,9 @@ func (a *App) pushOutcome(ctx context.Context, t pushTarget, res push.Result, se
 		// It went: nothing below may turn this into a retry, which would
 		// send it again.
 		if ownTest {
-			a.stampPushUsed(dev.ID)
+			a.stampPushUsed(dev)
 		} else {
-			a.markPushUsed(dev.ID)
+			a.markPushUsed(dev)
 		}
 		if err := record(models.DeliverySent, sentWhy); err != nil {
 			log.Printf("push: %s: recording the delivery: %v", what, err)
@@ -570,16 +714,32 @@ func (a *App) pushOutcome(ctx context.Context, t pushTarget, res push.Result, se
 	case push.Gone:
 		log.Printf("push: device gone for user %d (device %d, %d)", dev.UserID, dev.ID, res.Code)
 		return a.DB.Transaction(func(tx *gorm.DB) error {
-			if err := tx.Delete(&models.PushSubscription{}, dev.ID).Error; err != nil {
-				return err
+			res := dispatchedDevice(tx, dev).Delete(&models.PushSubscription{})
+			if res.Error != nil {
+				return res.Error
 			}
-			if left, err := pushDevicesLeft(tx, dev.UserID); err != nil {
-				return err
-			} else if left {
-				return nil // another device may still take it
+			// Not the device as sent: rebound, renewed or bound back while the
+			// push service answered (still there), or already deleted (gone).
+			var changed models.PushSubscription
+			if res.RowsAffected == 0 && !ownTest {
+				if err := tx.Select("id", "user_id").Where("id = ?", dev.ID).Limit(1).Find(&changed).Error; err != nil {
+					return err
+				}
 			}
-			return t.rec(tx, models.DeliverySuppressed, pushWhyGone, a.pushNow())
-		})
+			if changed.ID != 0 && !jobs.LastAttempt(ctx) {
+				// The next attempt reads it again: still the person's, it gets
+				// the push; someone else's, it is decided as a moved device.
+				return fmt.Errorf("push: device %d changed while its push was answered (retrying)", dev.ID)
+			}
+			// This device's job ends here: the row waits only for another of
+			// the person's devices' jobs that will still run.
+			if changed.ID != 0 && changed.UserID == dev.UserID {
+				// Still the person's device, but its last attempt never reached
+				// it as it is now.
+				return a.settlePushMissIn(tx, t, dev.UserID, dev.ID, models.DeliveryFailed, pushWhyNotReached)
+			}
+			return a.settlePushMissIn(tx, t, dev.UserID, dev.ID, models.DeliverySuppressed, pushWhyGone)
+		}, pushSettleTx)
 	case push.TooLarge:
 		log.Printf("push: %s was too large for the push service (%d): a bug in its push text", what, res.Code)
 		return record(models.DeliveryFailed, pushWhyTooLarge)
@@ -587,23 +747,24 @@ func (a *App) pushOutcome(ctx context.Context, t pushTarget, res push.Result, se
 		if !jobs.LastAttempt(ctx) {
 			return fmt.Errorf("push: device %d: %s (retrying): %w", dev.ID, res.Status, res.Err)
 		}
-		a.markPushFailed(dev.ID)
-		if err := record(models.DeliveryFailed, pushWhyNotReached); err != nil {
+		a.markPushFailed(dev)
+		if err := a.settlePushMiss(a.DB, t, dev.UserID, dev.ID, models.DeliveryFailed, pushWhyNotReached); err != nil {
 			return err
 		}
 		return fmt.Errorf("push: device %d: %s: %w", dev.ID, res.Status, res.Err)
 	default:
 		log.Printf("push: %s to device %d: %s (%d)", what, dev.ID, res.Status, res.Code)
-		a.markPushFailed(dev.ID)
-		return record(models.DeliveryFailed, pushWhyRefused)
+		a.markPushFailed(dev)
+		return a.settlePushMiss(a.DB, t, dev.UserID, dev.ID, models.DeliveryFailed, pushWhyRefused)
 	}
 }
 
 // markPushFailed stamps a device's first failure; the daily cleanup
 // removes it 30 days later unless a send succeeds first.
-func (a *App) markPushFailed(id uint) {
-	if err := a.DB.Exec("UPDATE push_subscriptions SET failed_at = now() WHERE id = ? AND failed_at IS NULL", id).Error; err != nil {
-		log.Printf("push: device %d: marking it failed: %v", id, err)
+func (a *App) markPushFailed(d models.PushSubscription) {
+	if err := dispatchedDevice(a.DB.Model(&models.PushSubscription{}), d).Where("failed_at IS NULL").
+		UpdateColumn("failed_at", gorm.Expr("now()")).Error; err != nil {
+		log.Printf("push: device %d: marking it failed: %v", d.ID, err)
 	}
 }
 

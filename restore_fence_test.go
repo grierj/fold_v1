@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"go/ast"
@@ -11,6 +12,7 @@ import (
 	"math/rand"
 	"net"
 	"net/http"
+	"net/http/cookiejar"
 	"net/http/httptest"
 	neturl "net/url"
 	"os"
@@ -28,10 +30,15 @@ import (
 	"time"
 
 	"fold/internal/guardkit"
+	"fold/internal/mail"
 
 	"fold/internal/testdb"
+	"fold/migrations"
 	"fold/models"
+	"fold/storage"
 
+	"github.com/gin-gonic/gin"
+	"golang.org/x/crypto/bcrypt"
 	"gorm.io/gorm"
 )
 
@@ -404,7 +411,12 @@ func TestRestoreFenceBoot(t *testing.T) {
 		t.Fatalf("a second process: floor %d (want %d), the first keeps %d", second.restoreFenceFloor(), n+1, app.restoreFenceFloor())
 	}
 	// An unparsable value stops the boot and names the row.
-	if err := app.DB.Exec("UPDATE settings SET value = 'abc' WHERE key = 'restore_fence'").Error; err != nil {
+	if err := app.DB.Transaction(func(tx *gorm.DB) error {
+		if err := declareRecoveryLevelIn(tx); err != nil {
+			return err
+		}
+		return tx.Exec("UPDATE settings SET value = 'abc' WHERE key = 'restore_fence'").Error
+	}); err != nil {
 		t.Fatal(err)
 	}
 	err := (&App{DB: app.DB}).bootRestoreFence()
@@ -876,7 +888,18 @@ func fenceRestore(t *testing.T, db *gorm.DB, dump string, dataOnly bool, others 
 	if err := db.Exec("TRUNCATE settings, admin_operation_attempts").Error; err != nil {
 		t.Fatal(err)
 	}
+	// The data-only COPY writes the restore_fence row with no declared
+	// recovery level, which 00015's start fence refuses. The test owns the
+	// table, so it turns the fence off around the COPY: it stands in for an
+	// operator who bypasses the fence, and the barrier must still detect the
+	// restore.
+	if err := db.Exec("ALTER TABLE settings DISABLE TRIGGER settings_recovery_floor").Error; err != nil {
+		t.Fatal(err)
+	}
 	fenceRun(t, "pg_restore", "--data-only", "--no-owner", "-t", "settings", "-t", "admin_operation_attempts", "-d", url, dump)
+	if err := db.Exec("ALTER TABLE settings ENABLE TRIGGER settings_recovery_floor").Error; err != nil {
+		t.Fatal(err)
+	}
 }
 
 // recycleConnections closes the idle connections of pools that were open while
@@ -2821,4 +2844,721 @@ func TestRaceNoteRestoreDetectedRestartsOnce(t *testing.T) {
 	if !bare.restoreDetected() {
 		t.Fatal("a restore noticed with no restart hook was not marked")
 	}
+}
+
+// --- Real binaries (DEC-158): the current build and the tagged v0.1.0 ---
+
+var (
+	foldBuildsMu  sync.Mutex
+	foldBuilds    = map[string]string{}
+	foldBuildDirs []string
+)
+
+// removeFoldBuilds deletes the directories buildFold made; TestMain calls it
+// once the tests are done.
+func removeFoldBuilds() {
+	foldBuildsMu.Lock()
+	defer foldBuildsMu.Unlock()
+	for _, d := range foldBuildDirs {
+		os.RemoveAll(d)
+	}
+}
+
+// buildFold builds the current tree (ref "") or a tagged release from git
+// (git archive, web/dist holding only its README), CGO off, once per process.
+// A missing tag or toolchain fails under CI and skips locally. scripts/go-test.sh
+// builds both before its shards start and names them in FOLD_TEST_BUILD_CURRENT
+// and FOLD_TEST_BUILD_V0_1_0, so no shard compiles beside the timing tests.
+func buildFold(t *testing.T, ref string) string {
+	t.Helper()
+	foldBuildsMu.Lock()
+	defer foldBuildsMu.Unlock()
+	if bin, ok := foldBuilds[ref]; ok {
+		return bin
+	}
+	env := "FOLD_TEST_BUILD_CURRENT"
+	if ref != "" {
+		env = "FOLD_TEST_BUILD_" + strings.NewReplacer(".", "_").Replace(strings.ToUpper(ref))
+	}
+	if bin := os.Getenv(env); bin != "" {
+		if _, err := os.Stat(bin); err != nil {
+			t.Fatalf("%s names %s: %v", env, bin, err)
+		}
+		foldBuilds[ref] = bin
+		return bin
+	}
+	unavailable := func(format string, args ...any) {
+		t.Helper()
+		if os.Getenv("CI") != "" {
+			t.Fatalf(format, args...)
+		}
+		t.Skipf(format, args...)
+	}
+	dir, err := os.MkdirTemp("", "fold-build-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	foldBuildDirs = append(foldBuildDirs, dir)
+	bin := filepath.Join(dir, "fold")
+	src, _ := os.Getwd()
+	if ref != "" {
+		src = filepath.Join(dir, "src")
+		if err := os.MkdirAll(src, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		archive := exec.Command("sh", "-c", "git archive "+ref+" | tar -x -C "+src)
+		if out, err := archive.CombinedOutput(); err != nil {
+			unavailable("git archive %s (needs the tag and full history): %v %s", ref, err, out)
+		}
+	}
+	build := exec.Command("go", "build", "-o", bin, ".")
+	build.Dir = src
+	build.Env = append(os.Environ(), "CGO_ENABLED=0")
+	if out, err := build.CombinedOutput(); err != nil {
+		unavailable("build %q: %v %s", ref, err, out)
+	}
+	foldBuilds[ref] = bin
+	return bin
+}
+
+// foldProc is one running fold serve.
+type foldProc struct {
+	cmd    *exec.Cmd
+	port   string
+	out    *syncBuffer
+	exited chan error
+}
+
+type syncBuffer struct {
+	mu sync.Mutex
+	b  bytes.Buffer
+}
+
+func (s *syncBuffer) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.Write(p)
+}
+func (s *syncBuffer) String() string { s.mu.Lock(); defer s.mu.Unlock(); return s.b.String() }
+
+func freePort(t *testing.T) string {
+	t.Helper()
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.Close()
+	return strconv.Itoa(l.Addr().(*net.TCPAddr).Port)
+}
+
+// runFold runs bin with args against database name and returns its output
+// and exit error.
+func runFold(t *testing.T, bin, name string, args ...string) (string, error) {
+	t.Helper()
+	dsn, err := testdb.URL(name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command(bin, args...)
+	cmd.Env = append(os.Environ(), "APP_ENV=dev", "DATABASE_URL="+dsn, "SESSION_SECRET=real-binary-secret-real-binary-secret", "UPLOAD_DIR="+t.TempDir(), "PORT="+freePort(t))
+	out, err := cmd.CombinedOutput()
+	return string(out), err
+}
+
+// startFold starts bin serve on database name. It returns once /healthz
+// answers, or once the process exits (exited then holds its error).
+func startFold(t *testing.T, bin, name string) *foldProc {
+	t.Helper()
+	dsn, err := testdb.URL(name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := &foldProc{port: freePort(t), out: &syncBuffer{}, exited: make(chan error, 1)}
+	p.cmd = exec.Command(bin, "serve")
+	p.cmd.Env = append(os.Environ(), "APP_ENV=dev", "DATABASE_URL="+dsn, "SESSION_SECRET=real-binary-secret-real-binary-secret", "UPLOAD_DIR="+t.TempDir(), "PORT="+p.port)
+	p.cmd.Stdout, p.cmd.Stderr = p.out, p.out
+	if err := p.cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	go func() { p.exited <- p.cmd.Wait() }()
+	t.Cleanup(p.stop)
+	deadline := time.Now().Add(60 * time.Second)
+	for time.Now().Before(deadline) {
+		select {
+		case err := <-p.exited:
+			p.exited <- err
+			return p
+		default:
+		}
+		if p.healthy() {
+			return p
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	t.Fatalf("fold serve neither answered nor exited in 60s:\n%s", p.out.String())
+	return p
+}
+
+func (p *foldProc) healthy() bool {
+	c := http.Client{Timeout: time.Second}
+	res, err := c.Get("http://127.0.0.1:" + p.port + "/healthz")
+	if err != nil {
+		return false
+	}
+	res.Body.Close()
+	return res.StatusCode == http.StatusOK
+}
+
+// exitedWith is the process's exit error once it has ended, or nil, false.
+func (p *foldProc) exitedWith() (bool, error) {
+	select {
+	case err := <-p.exited:
+		p.exited <- err
+		return true, err
+	default:
+		return false, nil
+	}
+}
+
+func (p *foldProc) stop() {
+	if done, _ := p.exitedWith(); done {
+		return
+	}
+	_ = p.cmd.Process.Signal(os.Interrupt)
+	select {
+	case <-p.exited:
+	case <-time.After(10 * time.Second):
+		_ = p.cmd.Process.Kill()
+	}
+}
+
+// foldSession is a signed-in browser of one running process.
+type foldSession struct {
+	t      *testing.T
+	base   string
+	client *http.Client
+	csrf   string
+}
+
+func (p *foldProc) session(t *testing.T, email string) *foldSession {
+	t.Helper()
+	jar, _ := cookiejar.New(nil)
+	s := &foldSession{t: t, base: "http://127.0.0.1:" + p.port, client: &http.Client{Jar: jar, Timeout: 30 * time.Second}}
+	var tok struct {
+		CSRFToken string `json:"csrfToken"`
+	}
+	if code, body := s.call("GET", "/api/v1/auth/csrf", nil, &tok); code != http.StatusOK {
+		t.Fatalf("csrf: %d %s", code, body)
+	}
+	s.csrf = tok.CSRFToken
+	if code, body := s.call("POST", "/api/v1/auth/login", map[string]any{"email": email, "password": "password1234"}, nil); code != http.StatusOK {
+		t.Fatalf("login %s: %d %s", email, code, body)
+	}
+	s.call("GET", "/api/v1/auth/csrf", nil, &tok)
+	s.csrf = tok.CSRFToken
+	return s
+}
+
+func (s *foldSession) call(method, path string, body any, into any) (int, string) {
+	s.t.Helper()
+	var rd io.Reader
+	if body != nil {
+		b, _ := json.Marshal(body)
+		rd = bytes.NewReader(b)
+	}
+	req, _ := http.NewRequest(method, s.base+path, rd)
+	req.Header.Set("Content-Type", "application/json")
+	if s.csrf != "" {
+		req.Header.Set("X-CSRF-Token", s.csrf)
+	}
+	res, err := s.client.Do(req)
+	if err != nil {
+		s.t.Fatalf("%s %s: %v", method, path, err)
+	}
+	defer res.Body.Close()
+	b, _ := io.ReadAll(res.Body)
+	if into != nil && res.StatusCode < 300 {
+		if err := json.Unmarshal(b, into); err != nil {
+			s.t.Fatalf("%s %s: %v %s", method, path, err, b)
+		}
+	}
+	return res.StatusCode, string(b)
+}
+
+func (s *foldSession) want(method, path string, body any, want int, into any) string {
+	s.t.Helper()
+	code, out := s.call(method, path, body, into)
+	if code != want {
+		s.t.Fatalf("%s %s: %d %s, want %d", method, path, code, out, want)
+	}
+	return out
+}
+
+// seedUsers inserts an admin and a member with SQL (the release has no
+// admin user-create route, and its setup counts users only).
+func seedUsers(t *testing.T, db *gorm.DB) {
+	t.Helper()
+	hash, err := bcrypt.GenerateFromPassword([]byte("password1234"), bcrypt.MinCost)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gormMust(t, db.Exec(`INSERT INTO users (name, email, password_hash, role, status) VALUES ('Admin', 'admin@example.com', ?, 'admin', 'active'), ('Member', 'member@example.com', ?, 'member', 'active')`, string(hash), string(hash)))
+}
+
+const startRefusal = "this database needs Fold at recovery level 3 or later (exact visibility consent, DEC-158)"
+
+func wantRefusedStart(t *testing.T, p *foldProc, label string) {
+	t.Helper()
+	done, err := p.exitedWith()
+	if !done || err == nil || !strings.Contains(p.out.String(), startRefusal) {
+		t.Fatalf("%s: exited %v (%v), want a non-zero exit naming recovery level 3:\n%s", label, done, err, p.out.String())
+	}
+	if p.healthy() {
+		t.Fatalf("%s: the refused process answered", label)
+	}
+}
+
+func goose(t *testing.T, db *gorm.DB) int64 {
+	t.Helper()
+	var v int64
+	gormMust(t, db.Raw("SELECT coalesce(max(version_id), 0) FROM goose_db_version WHERE is_applied").Scan(&v))
+	return v
+}
+
+// priorStartRefused starts the earlier release on database name and requires
+// the start fence's refusal: a non-zero exit naming recovery level 3, nothing
+// served, the restore_fence counter and the users unchanged, and the goose
+// version wantVersion afterwards.
+func priorStartRefused(t *testing.T, prior, name string, db *gorm.DB, label string, wantVersion int64) {
+	t.Helper()
+	counter := func() string {
+		var v string
+		gormMust(t, db.Raw("SELECT coalesce((SELECT value FROM settings WHERE key = 'restore_fence'), '')").Scan(&v))
+		return v
+	}
+	users := func() int64 {
+		var n int64
+		gormMust(t, db.Raw("SELECT count(*) FROM users").Scan(&n))
+		return n
+	}
+	before, people := counter(), users()
+	wantRefusedStart(t, startFold(t, prior, name), label)
+	if counter() != before || users() != people {
+		t.Fatalf("%s: the refused start wrote (counter %s -> %s, users %d -> %d)", label, before, counter(), people, users())
+	}
+	if v := goose(t, db); v != wantVersion {
+		t.Fatalf("%s: version %d, want %d", label, v, wantVersion)
+	}
+}
+
+// restoreInto restores dump into a fresh database with restore.sh's flags
+// and returns its name and a handle.
+func restoreInto(t *testing.T, dump string) (string, *gorm.DB) {
+	t.Helper()
+	name := testdb.Fresh(t, false)
+	db, err := testdb.Open(name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fenceRun(t, "pg_restore", "--no-owner", "--no-acl", "--single-transaction", "--exit-on-error", "-d", fenceDatabaseURL(t, db), dump)
+	return name, db
+}
+
+// TestPriorReleaseRefusesToStart (C17): v0.1.0 started on a database this
+// release ran exits non-zero with the level-3 message and serves nothing:
+// after setup, after the current binary's live Down, after a restore of that
+// database, and on a database before setup walked down below 7. Its own
+// down-one above its files fails. A dump taken before the upgrade still
+// starts it (L1, pinned so the docs stay honest). The current binary then
+// starts each time.
+func TestPriorReleaseRefusesToStart(t *testing.T) {
+	cur, prior := buildFold(t, ""), buildFold(t, "v0.1.0")
+	migrated := func(t *testing.T, bin string) (string, *gorm.DB) {
+		t.Helper()
+		name := testdb.Fresh(t, false)
+		db, err := testdb.Open(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if out, err := runFold(t, bin, name, "migrate", "up"); err != nil {
+			t.Fatalf("migrate up: %v %s", err, out)
+		}
+		return name, db
+	}
+	downOne := func(t *testing.T, bin, name string) {
+		t.Helper()
+		if out, err := runFold(t, bin, name, "migrate", "down-one"); err != nil {
+			t.Fatalf("down-one: %v %s", err, out)
+		}
+	}
+	t.Run("after setup, the live Down and a restore", func(t *testing.T) {
+		fenceTools(t)
+		name, db := migrated(t, cur)
+		if p := startFold(t, cur, name); !p.healthy() {
+			t.Fatalf("the current binary did not start:\n%s", p.out.String())
+		} else {
+			p.stop()
+		}
+		seedUsers(t, db)
+		priorStartRefused(t, prior, name, db, "v0.1.0 at 15 after setup", 15)
+		dump := fenceDump(t, db)
+		downOne(t, cur, name)
+		priorStartRefused(t, prior, name, db, "v0.1.0 after the live Down", 14)
+		if out, err := runFold(t, prior, name, "migrate", "down-one"); err == nil || goose(t, db) != 14 {
+			t.Fatalf("v0.1.0's own down-one above its files: %v, version %d: %s", err, goose(t, db), out)
+		}
+		restored, rdb := restoreInto(t, dump)
+		// C14's restore case: both fences come back with the dump.
+		var fences int64
+		gormMust(t, rdb.Raw("SELECT count(*) FROM pg_trigger WHERE NOT tgisinternal AND tgname IN ('settings_recovery_floor', 'audit_logs_visibility_consent')").Scan(&fences))
+		if fences != 2 {
+			t.Fatalf("the restored copy has %d of the two fences", fences)
+		}
+		priorStartRefused(t, prior, restored, rdb, "v0.1.0 after a restore", 15)
+		if p := startFold(t, cur, restored); !p.healthy() {
+			t.Fatalf("the current binary on the restored copy:\n%s", p.out.String())
+		}
+	})
+	t.Run("L1: a dump taken before the upgrade", func(t *testing.T) {
+		fenceTools(t)
+		_, db := migrated(t, prior)
+		seedUsers(t, db)
+		dump := fenceDump(t, db)
+		restored, rdb := restoreInto(t, dump)
+		old := startFold(t, prior, restored)
+		if !old.healthy() {
+			t.Fatalf("v0.1.0 on its own pre-upgrade dump did not start (L1 says it does):\n%s", old.out.String())
+		}
+		old.stop()
+		if p := startFold(t, cur, restored); !p.healthy() {
+			t.Fatalf("the current binary on the pre-upgrade dump:\n%s", p.out.String())
+		} else {
+			p.stop()
+		}
+		priorStartRefused(t, prior, restored, rdb, "v0.1.0 once the current binary ran", 15)
+	})
+	t.Run("before first-run setup, walked down", func(t *testing.T) {
+		name, db := migrated(t, cur)
+		first := startFold(t, cur, name)
+		if !first.healthy() {
+			t.Fatalf("the current binary did not start:\n%s", first.out.String())
+		}
+		first.stop()
+		check := func(label string, want int64) {
+			t.Helper()
+			priorStartRefused(t, prior, name, db, label, want)
+			var n int64
+			gormMust(t, db.Raw("SELECT count(*) FROM users").Scan(&n))
+			if n != 0 {
+				t.Fatalf("%s: %d users before setup", label, n)
+			}
+		}
+		check("v0.1.0 at 15, before setup", 15)
+		downOne(t, cur, name)
+		check("v0.1.0 at 14", 14)
+		if out, err := runFold(t, prior, name, "migrate", "down-one"); err == nil || goose(t, db) != 14 {
+			t.Fatalf("v0.1.0's own down-one above its files: %v, version %d: %s", err, goose(t, db), out)
+		}
+		for goose(t, db) > 7 {
+			downOne(t, cur, name)
+		}
+		check("v0.1.0 at 7", 7)
+		for goose(t, db) > 1 {
+			downOne(t, cur, name)
+		}
+		for _, bin := range []string{cur, prior} {
+			out, err := runFold(t, bin, name, "migrate", "down-one")
+			if err == nil || !strings.Contains(out, "audit_logs") || goose(t, db) != 1 {
+				t.Fatalf("the baseline down-one: %v, version %d: %s, want a refusal naming audit_logs", err, goose(t, db), out)
+			}
+		}
+		// v0.1.0's own Up returns the database to 7 before its boot is refused.
+		check("v0.1.0 at 1", 7)
+		if p := startFold(t, cur, name); !p.healthy() {
+			t.Fatalf("the current binary after the walk:\n%s", p.out.String())
+		}
+	})
+}
+
+// TestRealServeRestartRotatesTheEpoch: two real starts rotate the epoch; a
+// token from before the second start gets one 409, and its fresh token saves.
+func TestRealServeRestartRotatesTheEpoch(t *testing.T) {
+	cur := buildFold(t, "")
+	name := testdb.Fresh(t, false)
+	db, err := testdb.Open(name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out, err := runFold(t, cur, name, "migrate", "up"); err != nil {
+		t.Fatalf("migrate up: %v %s", err, out)
+	}
+	seedUsers(t, db)
+	p := startFold(t, cur, name)
+	admin := p.session(t, "admin@example.com")
+	var ev struct {
+		Event struct {
+			ID uint `json:"id"`
+		} `json:"event"`
+	}
+	admin.want("POST", "/api/v1/events", map[string]any{"title": "Restart supper", "startsLocal": time.Now().UTC().AddDate(0, 0, 7).Format("2006-01-02") + "T19:00", "durationMinutes": 60, "tzid": "UTC"}, http.StatusCreated, &ev)
+	path := fmt.Sprintf("/api/v1/events/%d/visibility", ev.Event.ID)
+	var impact visibilityImpactJSON
+	admin.want("GET", path+"-impact?visibility=private&resetOverrides=1", nil, http.StatusOK, &impact)
+	e1 := ""
+	gormMust(t, db.Raw("SELECT value FROM settings WHERE key = 'visibility_consent_epoch'").Scan(&e1))
+	p.stop()
+	q := startFold(t, cur, name)
+	e2 := ""
+	gormMust(t, db.Raw("SELECT value FROM settings WHERE key = 'visibility_consent_epoch'").Scan(&e2))
+	if e1 == "" || e1 == e2 {
+		t.Fatalf("a real restart did not rotate the epoch: %q -> %q", e1, e2)
+	}
+	admin2 := q.session(t, "admin@example.com")
+	code, body := admin2.call("PUT", path, map[string]any{"visibility": "private", "resetOverrides": true, "consent": impact.Consent}, nil)
+	if code != http.StatusConflict || !strings.Contains(body, `"needsDecision":true`) {
+		t.Fatalf("a token from before the restart: %d %s", code, body)
+	}
+	var answer struct {
+		Impact visibilityImpactJSON `json:"impact"`
+	}
+	_ = json.Unmarshal([]byte(body), &answer)
+	admin2.want("PUT", path, map[string]any{"visibility": "private", "resetOverrides": true, "consent": answer.Impact.Consent}, http.StatusOK, nil)
+}
+
+// TestPriorProcessRunningAcrossTheUpgrade (C18): v0.1.0, already serving when
+// the current binary applies 00015, changes no event's or date's visibility
+// and cancels nobody (each answers 500 and writes nothing), keeps serving
+// everything else, and cannot start again.
+func TestPriorProcessRunningAcrossTheUpgrade(t *testing.T) {
+	cur, prior := buildFold(t, ""), buildFold(t, "v0.1.0")
+	name := testdb.Fresh(t, false)
+	db, err := testdb.Open(name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out, err := runFold(t, prior, name, "migrate", "up"); err != nil {
+		t.Fatalf("v0.1.0 migrate up: %v %s", err, out)
+	}
+	seedUsers(t, db)
+	// 00008-00014 change columns v0.1.0 reads with SELECT *, and a process
+	// that prepared those statements before they changed fails them with
+	// 0A000 (cached plan must not change result type) before it reaches any
+	// audit row. So v0.1.0 starts on the schema at 14, and only 00015, which
+	// changes no column, lands while it serves: every refusal below is the
+	// audit fence's.
+	sqlDB, err := db.DB()
+	if err != nil {
+		t.Fatal(err)
+	}
+	provider, err := migrations.NewProvider(sqlDB)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := provider.UpTo(context.Background(), 14); err != nil {
+		t.Fatal(err)
+	}
+	old := startFold(t, prior, name)
+	if !old.healthy() {
+		t.Fatalf("v0.1.0 did not start:\n%s", old.out.String())
+	}
+	admin := old.session(t, "admin@example.com")
+	member := old.session(t, "member@example.com")
+	day := func(n int) string { return time.Now().UTC().AddDate(0, 0, n).Format("2006-01-02") }
+	type created struct {
+		Event struct {
+			ID uint `json:"id"`
+		} `json:"event"`
+		Group struct {
+			ID uint `json:"id"`
+		} `json:"group"`
+	}
+	var e1, e2, e3, e5, e6 created
+	// These requests go to v0.1.0, so its date writer is its own PUT
+	// /events/:id/occurrences/:date, which this binary retired.
+	admin.want("POST", "/api/v1/events", map[string]any{"title": "E1", "startsLocal": day(3) + "T19:00", "durationMinutes": 60, "tzid": "UTC", "recurrenceRule": "FREQ=WEEKLY;COUNT=3"}, http.StatusCreated, &e1)
+	admin.want("PUT", fmt.Sprintf("/api/v1/events/%d/occurrences/%s", e1.Event.ID, day(3)), map[string]any{"visibility": "private"}, http.StatusOK, nil)
+	admin.want("POST", "/api/v1/events", map[string]any{"title": "E2", "startsLocal": day(4) + "T19:00", "durationMinutes": 60, "tzid": "UTC"}, http.StatusCreated, &e2)
+	admin.want("PUT", fmt.Sprintf("/api/v1/events/%d/visibility", e2.Event.ID), map[string]any{"visibility": "private"}, http.StatusOK, nil)
+	var g, g2, g3 created
+	for _, x := range []*created{&g, &g2, &g3} {
+		admin.want("POST", "/api/v1/groups", map[string]any{"name": fmt.Sprintf("Group %p", x), "visibility": "public", "location": "Hall"}, http.StatusCreated, x)
+	}
+	admin.want("POST", fmt.Sprintf("/api/v1/groups/%d/events", g.Group.ID), map[string]any{"title": "E3", "startsLocal": day(5) + "T19:00", "durationMinutes": 60, "tzid": "UTC"}, http.StatusCreated, &e3)
+	admin.want("POST", fmt.Sprintf("/api/v1/groups/%d/events", g2.Group.ID), map[string]any{"title": "E5", "startsLocal": day(5) + "T19:00", "durationMinutes": 60, "tzid": "UTC"}, http.StatusCreated, &e5)
+	admin.want("POST", fmt.Sprintf("/api/v1/groups/%d/events", g3.Group.ID), map[string]any{"title": "E6", "startsLocal": day(6) + "T19:00", "durationMinutes": 60, "tzid": "UTC"}, http.StatusCreated, &e6)
+	member.want("PUT", fmt.Sprintf("/api/v1/events/%d/registrations", e5.Event.ID), map[string]any{"status": "going", "date": day(5)}, http.StatusOK, nil)
+
+	// The current binary starts beside it and applies 00015.
+	next := startFold(t, cur, name)
+	if !next.healthy() || goose(t, db) != 15 {
+		t.Fatalf("the current binary beside v0.1.0: %d\n%s", goose(t, db), next.out.String())
+	}
+	curAdmin := next.session(t, "admin@example.com")
+	var impact visibilityImpactJSON
+	p1 := fmt.Sprintf("/api/v1/events/%d/visibility", e1.Event.ID)
+	curAdmin.want("GET", p1+"-impact?visibility=private&resetOverrides=1", nil, http.StatusOK, &impact)
+	curAdmin.want("PUT", p1, map[string]any{"visibility": "private", "resetOverrides": true, "consent": impact.Consent}, http.StatusOK, nil)
+
+	snapshot := func() string {
+		var rows []string
+		gormMust(t, db.Raw(`SELECT string_agg(x, ';' ORDER BY x) FROM (
+			SELECT 'event ' || id || ' ' || visibility || ' ' || leader_opened || ' ' || title AS x FROM events
+			UNION ALL SELECT 'date ' || id || ' ' || coalesce(visibility_override, '-') FROM event_occurrences
+			UNION ALL SELECT 'reg ' || id || ' ' || status FROM registrations
+			UNION ALL SELECT 'group ' || id || ' ' || visibility FROM groups
+			UNION ALL SELECT 'audit ' || action FROM audit_logs WHERE action IN ('event.visibility_changed', 'event.visibility_override', 'registration.cancelled', 'event.created')
+		) s`).Scan(&rows))
+		return strings.Join(rows, "")
+	}
+	before := snapshot()
+	for _, r := range []struct {
+		label        string
+		method, path string
+		body         map[string]any
+	}{
+		{"the stale empty reset", "PUT", p1, map[string]any{"visibility": "public", "resetOverrides": true, "confirm": false}},
+		{"a series opening", "PUT", fmt.Sprintf("/api/v1/events/%d/visibility", e2.Event.ID), map[string]any{"visibility": "public"}},
+		{"a date's own value", "PUT", fmt.Sprintf("/api/v1/events/%d/occurrences/%s", e1.Event.ID, day(10)), map[string]any{"visibility": "public"}},
+		{"a group event with its own visibility", "POST", fmt.Sprintf("/api/v1/groups/%d/events", g.Group.ID), map[string]any{"title": "E4", "startsLocal": day(8) + "T19:00", "durationMinutes": 60, "tzid": "UTC", "visibility": "private"}},
+		{"a group tightening with nobody to cancel", "PUT", fmt.Sprintf("/api/v1/groups/%d", g3.Group.ID), map[string]any{"visibility": "private"}},
+		{"a tightening that cancels", "PUT", fmt.Sprintf("/api/v1/events/%d/visibility", e5.Event.ID), map[string]any{"visibility": "invite_only", "confirm": true}},
+	} {
+		mark := len(old.out.String())
+		code, body := admin.call(r.method, r.path, r.body, nil)
+		if code != http.StatusInternalServerError {
+			t.Errorf("v0.1.0 %s: %d %s, want 500", r.label, code, body)
+		}
+		// Each refusal is the audit fence's own, in v0.1.0's log.
+		testdb.WaitUntil(t, "v0.1.0 to log the refusal", 5*time.Second, func() bool {
+			logged := old.out.String()[mark:]
+			return strings.Contains(logged, "checks visibility consent (DEC-158)") && strings.Contains(logged, "SQLSTATE 23514")
+		})
+		if logged := old.out.String()[mark:]; strings.Contains(logged, "0A000") {
+			t.Errorf("v0.1.0 %s failed on a stale plan, not the fence:\n%s", r.label, logged)
+		}
+		if after := snapshot(); after != before {
+			t.Fatalf("v0.1.0 %s changed rows:\n%s\nwant\n%s", r.label, after, before)
+		}
+	}
+	out := old.out.String()
+	if !strings.Contains(out, "checks visibility consent (DEC-158)") || !strings.Contains(out, "SQLSTATE 23514") {
+		t.Fatalf("v0.1.0's log lacks the audit fence's refusal:\n%s", out)
+	}
+	if !old.healthy() {
+		t.Fatal("v0.1.0 stopped answering /healthz")
+	}
+	admin.want("PUT", fmt.Sprintf("/api/v1/events/%d", e3.Event.ID), map[string]any{"title": "E3 renamed", "startsLocal": day(5) + "T19:00", "durationMinutes": 60, "tzid": "UTC"}, http.StatusOK, nil)
+	old.stop()
+	wantRefusedStart(t, startFold(t, prior, name), "v0.1.0's restart")
+}
+
+// TestRealServeBootWaitsForAnOpenConfirmation (C26): the real binary's boot
+// rotation waits for an in-test App's checked confirmation that holds the
+// epoch FOR SHARE, and serves only after it commits. A token minted before
+// that start then gets a 409 decision, and its fresh token saves through the
+// binary's own API.
+func TestRealServeBootWaitsForAnOpenConfirmation(t *testing.T) {
+	cur := buildFold(t, "")
+	name := testdb.Fresh(t, false)
+	if out, err := runFold(t, cur, name, "migrate", "up"); err != nil {
+		t.Fatalf("migrate up: %v %s", err, out)
+	}
+	db, err := testdb.Open(name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	seedUsers(t, db)
+	app := appOn(t, db, []byte("real-binary-secret-real-binary-secret"))
+	admin := loginAPI(t, app, "admin@example.com", "password1234")
+	member := loginAPI(t, app, "member@example.com", "password1234")
+	body := map[string]any{"visibility": models.VisibilityInviteOnly}
+	var paths [2]string
+	var consents [2]string
+	gid := createGroupAs(t, admin, "Boot supper", models.VisibilityPublic)
+	for i := range paths {
+		ev := requireCreatedEvent(t, app, admin.do("POST", "/api/v1/groups/"+itoa(gid)+"/events", createEventBodyForTest(), true))
+		var occ models.EventOccurrence
+		gormMust(t, db.Where("event_id = ?", ev.ID).First(&occ))
+		apiDo(t, member, "PUT", fmt.Sprintf("/api/v1/events/%d/registrations", ev.ID), map[string]any{"status": models.RegGoing, "date": models.FormatCalendarDate(occ.OriginalDate)}, http.StatusOK)
+		paths[i] = fmt.Sprintf("/api/v1/events/%d/visibility", ev.ID)
+		consents[i] = confirmVisibility(t, admin, paths[i], body)["consent"].(string)
+	}
+	e1 := ""
+	gormMust(t, db.Raw("SELECT value FROM settings WHERE key = 'visibility_consent_epoch'").Scan(&e1))
+	parked := make(chan int, 1)
+	release := make(chan struct{})
+	t.Cleanup(func() { closeOnce(release) })
+	var once sync.Once
+	app.hooks.consentEpochLocked = func(tx *gorm.DB, epoch string) {
+		once.Do(func() {
+			var pid int
+			if err := tx.Raw("SELECT pg_backend_pid()").Scan(&pid).Error; err != nil {
+				t.Error(err)
+			}
+			if epoch != e1 {
+				t.Errorf("the confirmation read %q, want %q", epoch, e1)
+			}
+			parked <- pid
+			<-release
+		})
+	}
+	answer := make(chan *httptest.ResponseRecorder, 1)
+	go func() { answer <- admin.do("PUT", paths[0], with(body, "consent", consents[0]), true) }()
+	var holder int
+	select {
+	case holder = <-parked:
+	case w := <-answer:
+		t.Fatalf("the confirmation answered before it held the epoch: %d %s", w.Code, w.Body.String())
+	}
+	started := make(chan *foldProc, 1)
+	go func() { started <- startFold(t, cur, name) }()
+	waitingOn(t, db, "%ON CONFLICT (key) DO UPDATE%", holder)
+	time.Sleep(300 * time.Millisecond)
+	select {
+	case <-started:
+		t.Fatal("the boot finished while a confirmation held the epoch")
+	default:
+	}
+	if now := ""; db.Raw("SELECT value FROM settings WHERE key = 'visibility_consent_epoch'").Scan(&now).Error != nil || now != e1 {
+		t.Fatalf("the epoch moved under the open confirmation: %q", now)
+	}
+	closeOnce(release)
+	if w := <-answer; w.Code != http.StatusOK {
+		t.Fatalf("the open confirmation: %d %s", w.Code, w.Body.String())
+	}
+	var p *foldProc
+	select {
+	case p = <-started:
+	case <-time.After(70 * time.Second):
+		t.Fatal("the boot never finished after the confirmation ended")
+	}
+	if !p.healthy() {
+		t.Fatalf("the boot after the confirmation ended:\n%s", p.out.String())
+	}
+	e2 := ""
+	gormMust(t, db.Raw("SELECT value FROM settings WHERE key = 'visibility_consent_epoch'").Scan(&e2))
+	if e2 == e1 {
+		t.Fatal("the boot did not rotate the epoch")
+	}
+	stale := admin.do("PUT", paths[1], with(body, "consent", consents[1]), true)
+	fresh := wantDecision(t, stale)
+	p.session(t, "admin@example.com").want("PUT", paths[1], with(body, "consent", fresh.Consent), http.StatusOK, nil)
+}
+
+// appOn is testApp's App on another database, with the given secret: an
+// in-test instance beside a real binary.
+func appOn(t *testing.T, db *gorm.DB, secret []byte) *App {
+	t.Helper()
+	gin.SetMode(gin.TestMode)
+	uploads, err := storage.NewLocalStore(t.TempDir(), uploadsURLPrefix)
+	if err != nil {
+		t.Fatal(err)
+	}
+	app := &App{
+		DB: db, Store: newSessionStore(secret, false), Uploads: uploads,
+		Config: Config{Env: "dev", Port: "8080", SessionSecret: secret, SetupToken: strings.Repeat("a", 64)},
+		Mailer: mail.WithSuppressions(db, mail.NewDevOutbox(db, "Fold <noreply@example.com>")),
+	}
+	bootFence(t, app)
+	return app
 }

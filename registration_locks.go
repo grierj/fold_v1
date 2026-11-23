@@ -25,6 +25,19 @@ import (
 //   - Then the date (lockOccurrence). An account erasure holds the account's row
 //     and then wants the date (promoteOnDisable), so a writer that held the date
 //     first and wrote the account last could be one side of a cycle.
+//   - Registration rows, locked or updated, come after their date. A
+//     self-service RSVP, and a household change across several dates, holds a
+//     date while it promotes another holder's waitlisted row, which may carry
+//     a live exact-date grant. The guarded date edit (singleDateMutation,
+//     contactChange.SingleDate) locks only its own date's registration rows,
+//     after the date, and reads its clock after those locks; a date end that
+//     passes later in the edit reruns it once. Its refusal of a later end on
+//     a kept date (keptDatesIn, DEC-156), and the series edit's, is a plain
+//     read of rows their before pass already holds, so it adds no lock.
+//     Every other contactMutation with an event scope runs the event's
+//     "before" access pass in the wrapper, locking every live grant row of the
+//     event ahead of its own date locks; against such a writer the database
+//     breaks the cycle with one 40P01 and one of the two requests fails whole.
 //   - A guest's signup row is claimed last, in its own statement.
 //   - A series write locks contact gate, actor, group, event, then its dates;
 //     rooms lock the event, then the date, then the room.

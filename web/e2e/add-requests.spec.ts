@@ -1,7 +1,7 @@
 import AxeBuilder from "@axe-core/playwright";
 import { expect, test, type Page } from "@playwright/test";
 import { mkdirSync, writeFileSync } from "node:fs";
-import { apiAs, email, fromMore, PASSWORD, signInTo, soon } from "./helpers";
+import { apiAs, email, fromMore, groupDetailPath, PASSWORD, signInTo, soon } from "./helpers";
 import { measure } from "./ui-measure.mjs";
 
 const adminName = process.env.VERIFY_URL ? "verify-admin" : "grier";
@@ -70,7 +70,7 @@ test("group teen ask uses opaque selection, both approvals and neutral hidden pr
   await capture(page, "teen-hidden-group-review");
   await page.getByRole("button", { name: "Approve adding" }).click();
   await expect(page.getByText("Added", { exact: true })).toBeVisible();
-  expect((await page.request.get(`/api/v1/groups/${group.id}`)).status()).toBe(200);
+  expect((await page.request.get(`/api/v1${groupDetailPath(group.id)}`)).status()).toBe(200);
   const grants = await (await page.request.get("/api/v1/contact-grants")).json(); expect(grants.grants).toEqual([]);
   await capture(page, "teen-added");
   await page.goto("/profile/requests");

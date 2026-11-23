@@ -1,4 +1,6 @@
 import { ApiError } from "../api/core";
+import type { KeptDateCount } from "../types";
+import { isJsonObject, isNumber, isString } from "./wireValues";
 
 // What people read when something goes wrong (UI makeover PR 4, DEC-61).
 // The API sends a stable code with every error; this is the only place
@@ -63,6 +65,7 @@ export const ERROR_COPY = {
   legacy_save_outcome_unknown: "Fold couldn't confirm whether your choices were saved. Fold is checking.",
   legacy_save_busy: "Someone was changing a request that involves this account at the same moment, so nothing was saved. Try again in a moment.",
   reason_review_outdated: "Fold was updated while this page was open. Reload this page, then review the reasons again.",
+  visibility_review_outdated: "Fold was updated while this page was open. Reload this page, then review the change again.",
   reason_review_not_allowed: "Only an adult admin can review these reasons. Ask another admin to delete this account.",
   reason_review_busy: "Fold couldn't load the reasons just now. Try again in a minute.",
   attempt_expired: "This delete request was too old to run, so Fold didn't run it. Fold is checking what happened.",
@@ -158,6 +161,11 @@ export const ERROR_COPY = {
   party_too_big: "There aren't enough seats left for everyone in your party. Try fewer guests.",
   too_many_guests: "That's more guests than this event allows. Try fewer.",
   date_closed: "This date isn't open for registration anymore.",
+  date_changed: "This date may have changed since you opened it. Check it and save again.",
+  date_needs_consent: "Saving this date would cancel some sign-ups. Check the question and save again.",
+  date_kept_after_leaving: "Someone who left the group kept this date, so it can't end later yet. Remove anyone marked “Kept after leaving” below, then save again.",
+  date_edit_invalid: "We couldn't save this date. Refresh the page and try again.",
+  date_page_outdated: "Fold was updated while this page was open. Reload this page, then edit the date again.",
   registration_removed: "A leader or host removed your registration for this date. Ask them to add you back.",
   needs_host: "A church-wide event needs at least one host.",
   church_event_invite_only: "Church-wide events can be public or private, but not invite only.",
@@ -256,9 +264,19 @@ export function errorCode(cause: unknown): ErrorCode | "" {
   return cause instanceof ApiError && isCode(cause.code) ? cause.code : "";
 }
 
-// needsDecision is true for the group or event update the server refused
-// because the events it would change are not the ones the leader was shown:
-// it answers 409 with `needsDecision` in the body, and no code of its own.
-export function needsDecision(cause: unknown): boolean {
-  return cause instanceof ApiError && cause.status === 409 && cause.data.needsDecision === true;
+// keptDatesOf reads the dates a 409 date_kept_after_leaving names (DEC-156): null for any other error, and an
+// empty list when the body's list can't be read.
+export function keptDatesOf(cause: unknown): KeptDateCount[] | null {
+  if (!(cause instanceof ApiError) || cause.status !== 409 || cause.code !== "date_kept_after_leaving") return null;
+  const list = cause.data.keptDates;
+
+  if (!Array.isArray(list)) return [];
+  const dates: KeptDateCount[] = [];
+
+  for (const item of list) {
+    if (!isJsonObject(item) || !isString(item.date) || !/^\d{4}-\d{2}-\d{2}$/.test(item.date)) return [];
+    dates.push({ date: item.date, keptCount: isNumber(item.keptCount) ? item.keptCount : 0 });
+  }
+
+  return dates;
 }

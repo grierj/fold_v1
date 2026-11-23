@@ -65,7 +65,7 @@ func (a *App) unlockSetup(c *gin.Context) {
 	session, err := a.Store.Get(c.Request, sessionName)
 	if err == nil {
 		session.Values[setupSessionKey] = setupTokenHash(a.Config.SetupToken)
-		err = session.Save(c.Request, c.Writer)
+		err = a.writeSession(c, session)
 	}
 	if err != nil {
 		c.String(http.StatusInternalServerError, "Setup isn't available right now. Try again in a moment.")

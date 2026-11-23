@@ -6,6 +6,7 @@ import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { RsvpButtons, type SeriesFeedbackSignal } from "./RsvpButtons";
 import { useRsvpMutationGate } from "../lib/useRsvpMutationGate";
+import { seriesSchedules } from "../lib/registration";
 import { Button } from "./ui/Button";
 import { ApiError } from "../api/core";
 import { Events } from "../api/events";
@@ -14,9 +15,9 @@ import type { RegistrationBatch } from "../types";
 
 stubService(Events, () => ({ register: vi.fn(), registerSeries: vi.fn(), undoSeriesRegistration: vi.fn() }));
 
-// The pages own the gate; these tests stand in for a page.
-function Rsvp(props: Omit<ComponentProps<typeof RsvpButtons>, "mutationGate">) {
-  return <RsvpButtons {...props} mutationGate={useRsvpMutationGate()} />;
+// The pages own the gate and the loaded dates; these tests stand in for a page that shows this one date.
+function Rsvp(props: Omit<ComponentProps<typeof RsvpButtons>, "mutationGate" | "seriesDates">) {
+  return <RsvpButtons {...props} seriesDates={seriesSchedules([props.instance]).get(props.instance.eventId) ?? ""} mutationGate={useRsvpMutationGate()} />;
 }
 
 describe("RsvpButtons", () => {

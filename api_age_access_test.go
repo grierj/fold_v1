@@ -69,7 +69,7 @@ func TestPendingTeenBrowsesPubliclyWithoutAnAuthenticatedSession(t *testing.T) {
 	}
 	for name, browser := range map[string]*apiClient{"new login": client, "old cookie": legacy} {
 		t.Run(name, func(t *testing.T) {
-			for _, path := range []string{"/api/v1/site", "/api/v1/groups", "/api/v1/groups/" + itoa(public.ID), "/api/v1/events", "/api/v1/events/" + itoa(event.ID), "/api/v1/calendar"} {
+			for _, path := range []string{"/api/v1/site", "/api/v1/groups", groupDetailPath(public.ID), "/api/v1/events", "/api/v1/events/" + itoa(event.ID), "/api/v1/calendar"} {
 				w := browser.do("GET", path, nil, false)
 				if w.Code != 200 || w.Header().Get("Cache-Control") != "no-store" || strings.Contains(w.Body.String(), private.Name) {
 					t.Errorf("public GET %s: %d %s", path, w.Code, w.Body.String())

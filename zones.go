@@ -33,6 +33,11 @@ func churchZoneIn(tx *gorm.DB) (*time.Location, error) {
 	if err != nil {
 		return nil, err
 	}
+	return churchZoneOf(v, found)
+}
+
+// churchZoneOf reads a stored church zone as churchZoneIn does.
+func churchZoneOf(v string, found bool) (*time.Location, error) {
 	if !found || strings.TrimSpace(v) == "" {
 		return time.UTC, nil
 	}

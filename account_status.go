@@ -28,8 +28,8 @@ func newAccountStatus(accountType string, hasPassword bool) string {
 // Order is fixed by what each step needs to see:
 //   - Enabling (disabled -> listed): memberships and registrations come back
 //     first, while the row still says disabled, so the kept rows and seats are
-//     not counted twice and each registration is judged against the status it
-//     is coming back to (DEC-38, DEC-47).
+//     not counted twice and each registration is judged against the status
+//     and role it is coming back to (DEC-38, DEC-47).
 //   - The write itself ends every old session when the status changes, and
 //     records the new status.
 //   - Disabling (listed -> disabled): the write comes first, so the rest of the
@@ -49,7 +49,7 @@ func (a *App) setAccountStatusIn(tx *gorm.DB, u *models.User, updates map[string
 		if err := restoreMemberships(tx, u.ID, actor, ip); err != nil {
 			return err
 		}
-		if err := a.restoreRegistrations(tx, u.ID, status, &actor, ip, a.now().UTC()); err != nil {
+		if err := a.restoreRegistrations(tx, u.ID, updates, &actor, ip, a.now().UTC()); err != nil {
 			return err
 		}
 	}

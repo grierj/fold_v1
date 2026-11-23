@@ -5,6 +5,7 @@ import type { AddRequest, PersonSearchResult } from "../types";
 import { ERROR_COPY, errorText } from "../lib/errors";
 import { Button, ButtonLink } from "./ui/Button";
 import { Checkbox, Field, FormError, Textarea, showFieldErrors } from "./ui/Field";
+import { useConfirm } from "./ui/ConfirmDialog";
 
 export function AddRequestForm({ person, scope, full = false, onClose }: {
   person: PersonSearchResult;
@@ -19,6 +20,8 @@ export function AddRequestForm({ person, scope, full = false, onClose }: {
   const [created, setCreated] = useState<AddRequest | null>(null);
   const group = scope.contextType === "group";
   const [over, setOver] = useState(group ? scope.overLimit === true : scope.overCapacity === true);
+  // Asked about the page as it was (usePageFacts where the page supplies the dialog): a refresh drops the question.
+  const beginSubmit = useConfirm();
 
   async function submit(e: React.FormEvent<HTMLFormElement>) {
     e.preventDefault();
@@ -29,7 +32,14 @@ export function AddRequestForm({ person, scope, full = false, onClose }: {
       return;
     }
 
-    if (over && !confirm(group ? "Allow this ask to add someone over the group's member limit? This choice is logged and cannot be changed on this request." : "Allow this ask to add someone over this date's capacity? This choice is logged and cannot be changed on this request.")) return;
+    if (busy) return;
+    const action = beginSubmit();
+    const question = group ? "Allow this ask to add someone over the group's member limit?" : "Allow this ask to add someone over this date's capacity?";
+    const consequence = "This choice is logged and cannot be changed on this request.";
+
+    if (over && !(await action.ask({ title: question, body: consequence, confirmLabel: "Allow and send", tone: "normal", native: `${question} ${consequence}` }))) return;
+
+    if (!action.current()) return;
     setBusy(true); setError(""); setReasonError("");
 
     const body: AddRequestInput = scope.contextType === "group"

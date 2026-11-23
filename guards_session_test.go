@@ -69,3 +69,118 @@ func TestSessionEpochsAreComparedOnlyBySessionCurrent(t *testing.T) {
 		t.Errorf("the guard flagged an unrelated comparison: %v", p)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// The browser credential has one writer (M8.1): only session_state.go saves
+// the session cookie, sets a cookie, or writes the login keys and the CSRF
+// token, and the login setters run only inside a replaceCredential change, so
+// every credential replacement mints a fresh T and its marker.
+//
+// Parse-only, root package: it flags a .Save call with two or more arguments
+// (gorm's Save takes one), any SetCookie or NewCookie call, an assignment to
+// or delete of a session's credential key or its whole Values, and a call of
+// setSessionLogin, clearSessionLogin or setSessionVersion outside a function
+// literal passed to replaceCredential. It does not see writes through other
+// helpers or packages.
+// ---------------------------------------------------------------------------
+
+var credentialKeys = map[string]bool{"sessionUserKey": true, "sessionVersionKey": true, "sessionLogoutKey": true, "csrfSessionKey": true}
+
+var loginSetters = map[string]bool{"setSessionLogin": true, "clearSessionLogin": true, "setSessionVersion": true}
+
+func credentialWriterProblems(sources guardkit.Sources) []string {
+	parsed := sources.Parse(0)
+	bad := append([]string{}, parsed.Problems...)
+	for _, f := range parsed.Package("main") {
+		if strings.Contains(f.Path, "/") || f.Path == "session_state.go" {
+			continue
+		}
+		at := func(n ast.Node, what string) {
+			bad = append(bad, fmt.Sprintf("%s:%d: %s; go through replaceCredential or writeSession (session_state.go)", f.Path, parsed.Fset.Position(n.Pos()).Line, what))
+		}
+		credentialKey := func(e ast.Expr) bool {
+			idx, ok := guardkit.Unparen(e).(*ast.IndexExpr)
+			if !ok {
+				return false
+			}
+			sel, ok := guardkit.Unparen(idx.X).(*ast.SelectorExpr)
+			key, isIdent := guardkit.Unparen(idx.Index).(*ast.Ident)
+			return ok && sel.Sel.Name == "Values" && isIdent && credentialKeys[key.Name]
+		}
+		guardkit.InspectStack(f.AST, func(n ast.Node, stack []ast.Node) bool {
+			switch n := n.(type) {
+			case *ast.AssignStmt:
+				for _, lhs := range n.Lhs {
+					if sel, ok := guardkit.Unparen(lhs).(*ast.SelectorExpr); ok && sel.Sel.Name == "Values" {
+						at(n, "replaces a session's Values")
+					} else if credentialKey(lhs) {
+						at(n, "writes a credential key")
+					}
+				}
+			case *ast.CallExpr:
+				switch name := guardkit.Callee(n); {
+				case name == "Save" && len(n.Args) >= 2:
+					at(n, "saves a session")
+				case name == "SetCookie" || name == "NewCookie":
+					at(n, "sets a cookie")
+				case name == "delete" && len(n.Args) == 2 && credentialKey(&ast.IndexExpr{X: n.Args[0], Index: n.Args[1]}):
+					at(n, "deletes a credential key")
+				case loginSetters[name] && !insideReplaceCredential(stack):
+					at(n, "changes the login outside replaceCredential")
+				}
+			}
+			return true
+		})
+	}
+	return bad
+}
+
+// insideReplaceCredential: some enclosing function literal is an argument of
+// a replaceCredential call.
+func insideReplaceCredential(stack []ast.Node) bool {
+	for i := len(stack) - 1; i > 0; i-- {
+		lit, ok := stack[i].(*ast.FuncLit)
+		if !ok {
+			continue
+		}
+		if call, ok := stack[i-1].(*ast.CallExpr); ok && guardkit.Callee(call) == "replaceCredential" {
+			for _, arg := range call.Args {
+				if arg == lit {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+func TestBrowserCredentialHasOneWriter(t *testing.T) {
+	for _, p := range credentialWriterProblems(guardkit.Production(t)) {
+		t.Error(p)
+	}
+	for name, body := range map[string]string{
+		"save":           "s.Save(r, w)",
+		"store save":     "a.Store.Save(r, w, s)",
+		"set cookie":     "http.SetCookie(w, ck)",
+		"epoch":          "s.Values[sessionVersionKey] = 2",
+		"token":          "s.Values[csrfSessionKey] = t",
+		"delete token":   "delete(s.Values, csrfSessionKey)",
+		"whole values":   "s.Values = nil",
+		"bare login":     "setSessionLogin(s, u)",
+		"other callback": "a.other(c, func(s *S) bool { setSessionVersion(s, 2); return true })",
+	} {
+		src := "package main\nfunc f() { " + body + " }"
+		if len(credentialWriterProblems(guardkit.Sources{"x.go": src})) == 0 {
+			t.Errorf("%s: the guard accepted %q", name, body)
+		}
+	}
+	for _, body := range []string{
+		"a.replaceCredential(c, func(s *S) bool { setSessionLogin(s, u); return true })",
+		"tx.Save(&row)",
+		"s.Values[setupSessionKey] = h",
+	} {
+		if p := credentialWriterProblems(guardkit.Sources{"x.go": "package main\nfunc f() { " + body + " }"}); len(p) != 0 {
+			t.Errorf("the guard flagged %q: %v", body, p)
+		}
+	}
+}

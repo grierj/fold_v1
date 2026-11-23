@@ -62,33 +62,33 @@ type renderedMessage struct {
 	Unsubscribe string `json:"-"`
 }
 
-// sampleValues previews the audience's next date, or its latest when none is
-// upcoming. An event that is gone leaves its fields out.
-func (a *App) sampleValues(m *models.Message, me *models.User) (map[string]string, error) {
+// sampleValuesIn previews the audience's next date, or its latest when none is
+// upcoming, read on db. An event that is gone leaves its fields out.
+func (a *App) sampleValuesIn(db *gorm.DB, m *models.Message, me *models.User, now time.Time) (map[string]string, error) {
 	vals := map[string]string{content.FieldFirstName: firstName(me.PublicName())}
 	var au audienceJSON
 	_ = json.Unmarshal([]byte(m.Audience), &au)
 	if au.Type != policy.AudienceOccurrence && au.Type != policy.AudienceEventSeries {
 		return vals, nil
 	}
-	ids, err := a.audienceEventIDs(a.DB, au)
+	ids, err := a.audienceEventIDs(db, au)
 	if errors.Is(err, errAudienceGone) || (err == nil && len(ids) != 1) {
 		return vals, nil
 	} else if err != nil {
 		return nil, err
 	}
 	var ev models.Event
-	if err := a.DB.Select("id, title, tzid").First(&ev, ids[0]).Error; errors.Is(err, gorm.ErrRecordNotFound) {
+	if err := db.Select("id, title, tzid").First(&ev, ids[0]).Error; errors.Is(err, gorm.ErrRecordNotFound) {
 		return vals, nil
 	} else if err != nil {
 		return nil, err
 	}
 	var occ models.EventOccurrence
-	q := a.DB.Select("id, starts_at, title_override").Where("event_id = ?", ev.ID)
+	q := db.Select("id, starts_at, title_override").Where("event_id = ?", ev.ID)
 	if au.Type == policy.AudienceOccurrence {
 		q = q.Where("id = ?", au.OccurrenceID)
 	} else {
-		q = q.Where("status = ? AND starts_at >= ?", models.OccurrenceScheduled, time.Now()).Order("starts_at")
+		q = q.Where("status = ? AND starts_at >= ?", models.OccurrenceScheduled, now).Order("starts_at")
 	}
 	found := true
 	if err := q.First(&occ).Error; errors.Is(err, gorm.ErrRecordNotFound) {
@@ -98,7 +98,7 @@ func (a *App) sampleValues(m *models.Message, me *models.User) (map[string]strin
 	}
 	if !found && au.Type == policy.AudienceEventSeries {
 		// Nothing upcoming: show the latest date, so the preview isn't blank.
-		err := a.DB.Select("id, starts_at").Where("event_id = ?", ev.ID).Order("starts_at DESC").First(&occ).Error
+		err := db.Select("id, starts_at").Where("event_id = ?", ev.ID).Order("starts_at DESC").First(&occ).Error
 		if found = err == nil; err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil, err
 		}
@@ -119,8 +119,8 @@ func firstName(name string) string {
 	return name
 }
 
-func (a *App) renderMessage(m *models.Message, u *models.User, vals map[string]string, baseURL string) (renderedMessage, error) {
-	footer, err := footerFactsIn(a.DB)
+func (a *App) renderMessageIn(db *gorm.DB, m *models.Message, u *models.User, vals map[string]string, baseURL string) (renderedMessage, error) {
+	footer, err := footerFactsIn(db)
 	if err != nil {
 		return renderedMessage{}, err
 	}
@@ -157,30 +157,73 @@ func (a *App) renderMessageWith(m *models.Message, u *models.User, to string, va
 // renderedForViewer loads a message the viewer may see and renders it as
 // they would get it. The audience is checked again first, since roles and
 // events change after a draft is saved: a preview shows an event's title
-// and time only to someone who may still write to its people. false means
-// the error response was sent. baseURL is "" for a page shown here, which
-// keeps pictures relative, and the church's address for mail that leaves
-// (renderMessageWith).
+// and time only to someone who may still write to its people. The session's
+// user, their right to the message and its audience, the sample values and
+// the church's footer are read in one read-only snapshot, so a title or time
+// written after the viewer lost the audience never shows. The message's
+// existence and the composer's right (loadOwnMessage's answers, in its order:
+// 404 to anyone who may not see its history, then 409 for an automatic
+// reminder, else 404) are judged there too, so a session revoked after the
+// middleware gets 401 for any id. false means the error response was sent.
+// baseURL is "" for a page shown here, which keeps pictures relative, and the
+// church's address for mail that leaves (renderMessageWith).
 func (a *App) renderedForViewer(c *gin.Context, baseURL string) (*models.Message, renderedMessage, bool) {
-	m, ok := a.loadOwnMessage(c)
+	id, ok := messageIDParam(c)
 	if !ok {
 		return nil, renderedMessage{}, false
 	}
-	me := apiUser(c)
-	var au audienceJSON
-	_ = json.Unmarshal([]byte(m.Audience), &au)
-	if _, ok := a.checkAudience(c, me, &au); !ok {
-		return nil, renderedMessage{}, false
-	}
-	vals, err := a.sampleValues(m, me)
-	if err == nil {
-		var r renderedMessage
-		if r, err = a.renderMessage(m, me, vals, baseURL); err == nil {
-			return m, r, true
+	var m models.Message
+	var r renderedMessage
+	var me *models.User
+	err := a.DB.Transaction(func(tx *gorm.DB) error {
+		var err error
+		if me, err = snapshotViewerIn(tx, apiUser(c)); err != nil || me == nil {
+			return err
 		}
-	}
-	if err != nil {
+		if err := tx.First(&m, id).Error; err != nil {
+			return err
+		}
+		if allowed, err := messageHistoryAllowedIn(tx, me, &m); err != nil {
+			return err
+		} else if !allowed {
+			return gorm.ErrRecordNotFound
+		}
+		reminder := m.Category == models.MessageCategoryReminder
+		if !policy.CanEditMessage(asPerson(me), m.AuthorID != nil && *m.AuthorID == me.ID, reminder) {
+			if reminder {
+				return errMessageReminder
+			}
+			return gorm.ErrRecordNotFound
+		}
+		var au audienceJSON
+		_ = json.Unmarshal([]byte(m.Audience), &au)
+		now := a.now()
+		if _, err := a.resolveAudienceIn(tx, me, &au, now); err != nil {
+			return err
+		}
+		if a.hooks.readerAuthorized != nil {
+			a.hooks.readerAuthorized("message preview")
+		}
+		vals, err := a.sampleValuesIn(tx, &m, me, now)
+		if err != nil {
+			return err
+		}
+		r, err = a.renderMessageIn(tx, &m, me, vals, baseURL)
+		return err
+	}, readSnapshot)
+	switch {
+	case me == nil && err == nil:
+		fail(c, errSecuritySession)
+	case errors.Is(err, gorm.ErrRecordNotFound):
+		jsonError(c, http.StatusNotFound, "message not found")
+	case errors.Is(err, errMessageReminder):
+		fail(c, err)
+	case errors.Is(err, errAudienceInvalid), errors.Is(err, errAudienceGone), errors.Is(err, errAudienceRefused):
+		answerAudience(c, me, err)
+	case err != nil:
 		jsonError(c, http.StatusInternalServerError, "could not show the preview")
+	default:
+		return &m, r, true
 	}
 	return nil, renderedMessage{}, false
 }

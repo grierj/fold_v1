@@ -120,6 +120,11 @@ var (
 )
 
 func (a *App) recipientCounts(id uint) (recipientCountsJSON, map[string]int, error) {
+	return recipientCountsIn(a.DB, id)
+}
+
+// recipientCountsIn is recipientCounts read on db.
+func recipientCountsIn(db *gorm.DB, id uint) (recipientCountsJSON, map[string]int, error) {
 	var groups []struct {
 		Push   bool
 		Status string
@@ -130,7 +135,7 @@ func (a *App) recipientCounts(id uint) (recipientCountsJSON, map[string]int, err
 	}
 	// A push row's reason is kept whatever its status (why it missed, or
 	// when it waits until); an email row's only when it was skipped.
-	err := a.DB.Raw(`SELECT r.channel = ? AS push, r.status,
+	err := db.Raw(`SELECT r.channel = ? AS push, r.status,
 		CASE WHEN r.channel = ? OR (r.status = ? AND r.copy_of_user_id IS NULL) THEN r.reason ELSE '' END AS reason,
 		(u.account_type = ? AND r.copy_of_user_id IS NULL) AS teen, r.copy_of_user_id IS NOT NULL AS copy, count(*) AS n
 		FROM message_recipients r JOIN users u ON u.id = r.user_id
@@ -230,7 +235,7 @@ func pushHistoryStatus(status, reason string, admin bool) *historyPushJSON {
 // historyRecipients lists the first rows by name in one query, and says
 // whether there are more. Only an admin's list has guardian copies, each
 // with its teen; a leader or host never sees a guardian's name (DEC-132).
-func (a *App) historyRecipients(id uint, admin bool) ([]historyRecipientJSON, bool, error) {
+func historyRecipientsIn(db *gorm.DB, id uint, admin bool) ([]historyRecipientJSON, bool, error) {
 	var rows []struct {
 		Status          string
 		Reason          string
@@ -248,7 +253,7 @@ func (a *App) historyRecipients(id uint, admin bool) ([]historyRecipientJSON, bo
 	// person's push row joined on (never a copy's). A push row with no
 	// email row beside it (a push reminder's, M3.13d3) is the person's row
 	// itself.
-	err := a.DB.Raw(`SELECT r.status, r.reason, r.error, r.copy_of_user_id IS NOT NULL AS copy,
+	err := db.Raw(`SELECT r.status, r.reason, r.error, r.copy_of_user_id IS NOT NULL AS copy,
 		u.name, u.display_name, u.account_type, COALESCE(t.name, '') AS teen_name, COALESCE(t.display_name, '') AS teen_display_name,
 		p.status AS push_status, p.reason AS push_reason
 		FROM message_recipients r JOIN users u ON u.id = r.user_id LEFT JOIN users t ON t.id = r.copy_of_user_id
@@ -306,14 +311,14 @@ func goingOut(m *models.Message) bool { return m.Status == models.MessageSending
 // the author's name, whoever presses it. It reads on a.DB, outside the
 // retry transaction, so it is only the quick refusal and the source of
 // canRetry; apiRetryMessage decides again inside its transaction
-// (recheckAnnouncementRows), where each failed person is checked against
-// today's audience too.
-func (a *App) authorMayResend(m *models.Message) (bool, error) {
+// (decideRetryIn), where each failed person is checked against today's
+// audience too.
+func (a *App) authorMayResend(db *gorm.DB, m *models.Message) (bool, error) {
 	if m.AuthorID == nil {
 		return false, nil
 	}
 	var author models.User
-	if err := a.DB.First(&author, *m.AuthorID).Error; errors.Is(err, gorm.ErrRecordNotFound) {
+	if err := db.First(&author, *m.AuthorID).Error; errors.Is(err, gorm.ErrRecordNotFound) {
 		return false, nil
 	} else if err != nil {
 		return false, err
@@ -323,7 +328,7 @@ func (a *App) authorMayResend(m *models.Message) (bool, error) {
 	}
 	var au audienceJSON
 	_ = json.Unmarshal([]byte(m.Audience), &au)
-	_, err := a.resolveAudience(&author, &au, time.Now())
+	_, err := a.resolveAudienceIn(db, &author, &au, time.Now())
 	switch {
 	case err == nil:
 		return true, nil
@@ -337,9 +342,9 @@ func (a *App) authorMayResend(m *models.Message) (bool, error) {
 // needs only what reminder.send needs: its date still scheduled and not
 // yet started, and its event's reminders still on (who pressed it was
 // checked by loadMessage: an admin or a manager of the event). Each person
-// is checked again by recheckReminderRows. A push reminder (M3.13d3) is
-// never sent again, as no push is.
-func (a *App) reminderMayResend(m *models.Message) (bool, error) {
+// is checked again by decideRetryIn, with the date, the switch and who
+// pressed it. A push reminder (M3.13d3) is never sent again, as no push is.
+func reminderMayResend(db *gorm.DB, m *models.Message) (bool, error) {
 	if m.OccurrenceID == nil || reminderKind(m) == reminderPushKind {
 		return false, nil
 	}
@@ -350,13 +355,13 @@ func (a *App) reminderMayResend(m *models.Message) (bool, error) {
 		return false, nil
 	}
 	var occ models.EventOccurrence
-	if err := a.DB.First(&occ, *m.OccurrenceID).Error; errors.Is(err, gorm.ErrRecordNotFound) {
+	if err := db.First(&occ, *m.OccurrenceID).Error; errors.Is(err, gorm.ErrRecordNotFound) {
 		return false, nil
 	} else if err != nil {
 		return false, err
 	}
 	var ev models.Event
-	if err := a.DB.Select("id, reminder_email_minutes").First(&ev, occ.EventID).Error; errors.Is(err, gorm.ErrRecordNotFound) {
+	if err := db.Select("id, reminder_email_minutes").First(&ev, occ.EventID).Error; errors.Is(err, gorm.ErrRecordNotFound) {
 		return false, nil
 	} else if err != nil {
 		return false, err
@@ -372,80 +377,6 @@ const (
 	skipNoLongerWaitlist = "no longer on the waitlist"
 )
 
-// recheckReminderRows checks a reminder's failed rows again before a Try
-// again, as message.send does: someone no longer going (or no longer on
-// the waitlist, for the waitlist note), or who can no longer see the date
-// (M1.13), is skipped with that reason, not sent to. A guardian copy
-// follows its teen. It answers the row ids still to send: email rows only,
-// since a push is never sent again.
-func (a *App) recheckReminderRows(tx *gorm.DB, m *models.Message, ids []uint, now time.Time) ([]uint, error) {
-	if len(ids) == 0 || m.OccurrenceID == nil {
-		return ids, nil
-	}
-	var rows []models.MessageRecipient
-	if err := tx.Select("id, user_id, copy_of_user_id").Where("id IN ? AND channel = ?", ids, models.DeliveryEmail).Order("id").Find(&rows).Error; err != nil {
-		return nil, err
-	}
-	subject := func(r models.MessageRecipient) uint {
-		if r.CopyOfUserID != nil {
-			return *r.CopyOfUserID
-		}
-		return r.UserID
-	}
-	// Who the reminder's audience reaches now (the date's registrants with
-	// its status, a household person's through its account holder).
-	var au audienceJSON
-	_ = json.Unmarshal([]byte(m.Audience), &au)
-	current := map[uint]bool{}
-	if err := au.normalize(); err != nil {
-		// reminderMayResend refuses this first; should it slip through,
-		// nobody is sent to, under the neutral reason.
-		if err := tx.Model(&models.MessageRecipient{}).Where("id IN ? AND status = ?", ids, models.RecipientFailed).
-			Updates(map[string]any{"status": models.RecipientSuppressed, "reason": skipCantSeeDate, "error": "", "updated_at": now}).Error; err != nil {
-			return nil, err
-		}
-		return []uint{}, nil
-	}
-	still, err := a.audienceUserIDs(tx, au, now)
-	if err != nil {
-		return nil, err
-	}
-	for _, id := range still {
-		current[id] = true
-	}
-	people := make([]uint, 0, len(rows))
-	for _, r := range rows {
-		people = append(people, subject(r))
-	}
-	can, err := a.reminderReaders(tx, *m.OccurrenceID, dedupeIDs(people), now)
-	if err != nil {
-		return nil, err
-	}
-	answer := skipNoLongerGoing
-	if reminderKind(m) == reminderWaitlist {
-		answer = skipNoLongerWaitlist
-	}
-	keep := []uint{}
-	drop := map[string][]uint{}
-	for _, r := range rows {
-		switch {
-		case !current[subject(r)]:
-			drop[answer] = append(drop[answer], r.ID)
-		case !can[subject(r)]:
-			drop[skipCantSeeDate] = append(drop[skipCantSeeDate], r.ID)
-		default:
-			keep = append(keep, r.ID)
-		}
-	}
-	for why, list := range drop {
-		if err := tx.Model(&models.MessageRecipient{}).Where("id IN ? AND status = ?", list, models.RecipientFailed).
-			Updates(map[string]any{"status": models.RecipientSuppressed, "reason": why, "error": "", "updated_at": now}).Error; err != nil {
-			return nil, err
-		}
-	}
-	return keep, nil
-}
-
 // Why an announcement's failed row isn't sent again: its person has left
 // the audience message.send would build today, or a guardian copy no
 // longer follows from its teen. A copy's reason reaches only an admin's
@@ -455,162 +386,74 @@ const (
 	skipNoGuardianCopy = "guardian copy no longer sent"
 )
 
-// recheckAnnouncementRows checks an announcement's failed rows against
-// today's audience before a Try again, in the author's name, as
-// message.send does: the twin of recheckReminderRows. A row is sent again
-// only if message.send would build it now: a direct row's person is still
-// in the audience; a guardian copy's teen is, the church still sends
-// copies, the guardian is not in the direct audience, the link is still confirmed, the teen is still a teen account
-// and would still get the message under the usual recipient filters. Any
-// other row is marked skipped with its reason. It answers the row ids still
-// to send, in ascending order: email rows only, since a push is never sent
-// again. An author who can no longer write to the audience, or whose account
-// is no longer active, refuses the whole retry (errMessageRetryRefused) and
-// the transaction rolls back.
-//
-// Consistency window: the audience, the link, the teen's account and the
-// copy switch are read here in the retry transaction at READ COMMITTED,
-// after the actor and message locks (users row, then messages row, then
-// plain reads; no lock is taken here). A change committed before a read
-// starts is honored. One committed after may not stop this retry's
-// batches, because batch delivery rechecks only the account, the email
-// choice and suppression, not membership, registration, links or teen
-// eligibility, as with the first send's snapshot. The next retry checks
-// again.
-func (a *App) recheckAnnouncementRows(tx *gorm.DB, m *models.Message, ids []uint, now time.Time) ([]uint, error) {
-	if len(ids) == 0 {
-		return ids, nil
-	}
-	if m.AuthorID == nil {
-		return nil, errMessageRetryRefused
-	}
-	var author models.User
-	if err := tx.First(&author, *m.AuthorID).Error; errors.Is(err, gorm.ErrRecordNotFound) {
-		return nil, errMessageRetryRefused
-	} else if err != nil {
-		return nil, err
-	}
-	if author.Status != models.UserActive {
-		return nil, errMessageRetryRefused
-	}
-	var au audienceJSON
-	_ = json.Unmarshal([]byte(m.Audience), &au)
-	today, err := a.resolveAudienceIn(tx, &author, &au, now)
-	switch {
-	case errors.Is(err, errAudienceRefused), errors.Is(err, errAudienceGone), errors.Is(err, errAudienceInvalid):
-		return nil, errMessageRetryRefused
-	case err != nil:
-		return nil, err
-	}
-	current := map[uint]bool{}
-	for _, id := range today {
-		current[id] = true
-	}
-	var rows []models.MessageRecipient
-	if err := tx.Select("id, user_id, copy_of_user_id").Where("id IN ? AND channel = ?", ids, models.DeliveryEmail).Order("id").Find(&rows).Error; err != nil {
-		return nil, err
-	}
-	// What a guardian copy needs besides its teen being in the audience.
-	var teens []uint
-	pairs := map[[2]uint]bool{}
-	teenFacts := map[uint]recipientFact{}
-	copiesOn := false
-	for _, r := range rows {
-		if r.CopyOfUserID != nil {
-			teens = append(teens, *r.CopyOfUserID)
-		}
-	}
-	if len(teens) > 0 {
-		teens = dedupeIDs(teens)
-		copiesOn = boolSettingIn(tx, settingGuardianCopies, false)
-		if copiesOn {
-			var links []models.GuardianLink
-			if err := tx.Select("guardian_user_id, teen_user_id").Where("teen_user_id IN ? AND status = ?", teens, models.GuardianConfirmed).Find(&links).Error; err != nil {
-				return nil, err
-			}
-			for _, l := range links {
-				if l.TeenUserID != nil {
-					pairs[[2]uint{l.GuardianUserID, *l.TeenUserID}] = true
-				}
-			}
-			facts, err := recipientFacts(tx, teens, messageCategory(m))
-			if err != nil {
-				return nil, err
-			}
-			for _, f := range facts {
-				teenFacts[f.User.ID] = f
-			}
-		}
-	}
-	keep := []uint{}
-	drop := map[string][]uint{}
-	for _, r := range rows {
-		switch {
-		case r.CopyOfUserID == nil:
-			if current[r.UserID] {
-				keep = append(keep, r.ID)
-			} else {
-				drop[skipNoLongerOnList] = append(drop[skipNoLongerOnList], r.ID)
-			}
-		case !current[*r.CopyOfUserID]:
-			drop[skipNoLongerOnList] = append(drop[skipNoLongerOnList], r.ID)
-		default:
-			teen, known := teenFacts[*r.CopyOfUserID]
-			if copiesOn && !current[r.UserID] && known && pairs[[2]uint{r.UserID, *r.CopyOfUserID}] &&
-				teen.User.AccountType == models.AccountTeen && teen.Skip == "" {
-				keep = append(keep, r.ID)
-			} else {
-				drop[skipNoGuardianCopy] = append(drop[skipNoGuardianCopy], r.ID)
-			}
-		}
-	}
-	for why, list := range drop {
-		if err := tx.Model(&models.MessageRecipient{}).Where("id IN ? AND status = ?", list, models.RecipientFailed).
-			Updates(map[string]any{"status": models.RecipientSuppressed, "reason": why, "error": "", "updated_at": now}).Error; err != nil {
-			return nil, err
-		}
-	}
-	return keep, nil
-}
-
 // mayResend is whether m can go out again, and if not, why: an
 // announcement's author must still be able to write to its people; a
 // reminder's date must still be ahead.
-func (a *App) mayResend(m *models.Message) (bool, *apiError, error) {
+func (a *App) mayResend(db *gorm.DB, m *models.Message) (bool, *apiError, error) {
 	if m.Category == models.MessageCategoryReminder {
-		ok, err := a.reminderMayResend(m)
+		ok, err := reminderMayResend(db, m)
 		return ok, errReminderRetryRefused, err
 	}
-	ok, err := a.authorMayResend(m)
+	ok, err := a.authorMayResend(db, m)
 	return ok, errMessageRetryRefused, err
 }
 
 // apiMessageRecipients is a message's history, for whoever may read it
-// (loadMessage): its author, an admin, or a reminder's event managers.
+// (loadMessage): its author, an admin, or a reminder's event managers. The
+// session's user, their right to the history (and whether they are an admin,
+// which shows guardian copies and private reasons), the counts, the names and
+// canRetry are read in one read-only snapshot, so a manager who loses the
+// event never sees a name written after. The message's existence is judged
+// there too: a session revoked after the middleware gets 401 for any id.
 func (a *App) apiMessageRecipients(c *gin.Context) {
-	m, ok := a.loadMessage(c)
+	id, ok := messageIDParam(c)
 	if !ok {
 		return
 	}
-	admin := policy.IsAdmin(asPerson(apiUser(c)))
-	counts, by, err := a.recipientCounts(m.ID)
-	if err != nil {
-		jsonError(c, http.StatusInternalServerError, "could not load who got the message")
-		return
-	}
-	list, more, err := a.historyRecipients(m.ID, admin)
-	if err != nil {
-		jsonError(c, http.StatusInternalServerError, "could not load who got the message")
-		return
-	}
-	out := messageRecipientsJSON{Counts: counts, SkippedBy: by, Recipients: list, More: more}
-	if retryable(m, counts) {
-		if out.CanRetry, _, err = a.mayResend(m); err != nil {
-			jsonError(c, http.StatusInternalServerError, "could not load who got the message")
-			return
+	var out messageRecipientsJSON
+	var me *models.User
+	err := a.DB.Transaction(func(tx *gorm.DB) error {
+		var err error
+		if me, err = snapshotViewerIn(tx, apiUser(c)); err != nil || me == nil {
+			return err
 		}
+		var m models.Message
+		if err := tx.First(&m, id).Error; err != nil {
+			return err
+		}
+		if allowed, err := messageHistoryAllowedIn(tx, me, &m); err != nil {
+			return err
+		} else if !allowed {
+			return gorm.ErrRecordNotFound
+		}
+		if a.hooks.readerAuthorized != nil {
+			a.hooks.readerAuthorized("message recipients")
+		}
+		admin := policy.IsAdmin(asPerson(me))
+		counts, by, err := recipientCountsIn(tx, m.ID)
+		if err != nil {
+			return err
+		}
+		list, more, err := historyRecipientsIn(tx, m.ID, admin)
+		if err != nil {
+			return err
+		}
+		out = messageRecipientsJSON{Counts: counts, SkippedBy: by, Recipients: list, More: more}
+		if retryable(&m, counts) {
+			out.CanRetry, _, err = a.mayResend(tx, &m)
+		}
+		return err
+	}, readSnapshot)
+	switch {
+	case me == nil && err == nil:
+		fail(c, errSecuritySession)
+	case errors.Is(err, gorm.ErrRecordNotFound):
+		jsonError(c, http.StatusNotFound, "message not found")
+	case err != nil:
+		jsonError(c, http.StatusInternalServerError, "could not load who got the message")
+	default:
+		c.JSON(http.StatusOK, out)
 	}
-	c.JSON(http.StatusOK, out)
 }
 
 // apiRetryMessage is "Try again" (DEC-131): the people a send failed for
@@ -618,16 +461,15 @@ func (a *App) apiMessageRecipients(c *gin.Context) {
 // nobody it reached gets it twice. A message that failed before anyone
 // was chosen is prepared again from the start.
 //
-// The pre-transaction mayResend is the quick refusal and the source of
-// canRetry; the check that decides runs inside the transaction, after the
-// actor and message locks and the daily-limit count: recheckAnnouncementRows
-// (or recheckReminderRows) drops each failed person who message.send would
-// no longer reach. Those reads are at READ COMMITTED: a change committed
-// before one starts is honored; one committed after may not stop this
-// retry's batches (batch delivery does not recheck membership,
-// registration, guardian links or teen eligibility), and the next retry
-// checks again. Lock order is unchanged: actor users row, the messages row,
-// then plain reads.
+// The pre-transaction loadMessage and mayResend are the quick refusal and
+// the source of canRetry. The transaction is pinned to Read Committed and
+// locks the presser's users row, then the messages row, then takes the
+// daily-limit count; everything that then decides (who pressed it, the
+// author's right to the audience or the reminder's date and switch, and
+// which failed people message.send would still reach) comes from one later
+// statement (decideRetryIn), so none of it straddles a commit. A change
+// committed after that statement may not stop this retry's batches; each
+// batch row decides its date again, and the next retry checks everything.
 func (a *App) apiRetryMessage(c *gin.Context) {
 	m, ok := a.loadMessage(c)
 	if !ok {
@@ -646,7 +488,7 @@ func (a *App) apiRetryMessage(c *gin.Context) {
 		fail(c, errMessageNothingToRetry)
 		return
 	}
-	if may, why, err := a.mayResend(m); err != nil {
+	if may, why, err := a.mayResend(a.DB, m); err != nil {
 		jsonError(c, http.StatusInternalServerError, "could not send the message again")
 		return
 	} else if !may {
@@ -688,6 +530,22 @@ func (a *App) apiRetryMessage(c *gin.Context) {
 				a.hooks.messageLimitAfterCount(tx)
 			}
 		}
+		if a.hooks.retryLocked != nil {
+			a.hooks.retryLocked(tx)
+		}
+		// The failed rows' ids and people (fixed once written), then one
+		// statement for everything that decides (decideRetryIn).
+		var failed []models.MessageRecipient
+		if counts.failedRows > 0 {
+			if err := tx.Select("id, user_id, copy_of_user_id").Where("message_id = ? AND status = ? AND channel = ?", m.ID, models.RecipientFailed, models.DeliveryEmail).
+				Order("id").Find(&failed).Error; err != nil {
+				return err
+			}
+		}
+		decision, err := a.decideRetryIn(tx, freshActor, m, failed, a.now().UTC())
+		if err != nil {
+			return err
+		}
 		// The claim holds only if nobody else retried it meanwhile.
 		claim := func(fields map[string]any) error {
 			res := tx.Model(&models.Message{}).Where("id = ? AND status = ? AND updated_at = ?", m.ID, m.Status, m.UpdatedAt).Updates(fields)
@@ -699,7 +557,7 @@ func (a *App) apiRetryMessage(c *gin.Context) {
 			}
 			return nil
 		}
-		var ids []uint
+		ids := decision.keep
 		if counts.failedRows == 0 {
 			if err := claim(map[string]any{"status": models.MessageScheduled, "scheduled_at": now, "error": "", "updated_at": now}); err != nil {
 				return err
@@ -717,26 +575,18 @@ func (a *App) apiRetryMessage(c *gin.Context) {
 			if err := claim(fields); err != nil {
 				return err
 			}
+			mark := func(list []uint, fields map[string]any) error {
+				return eachIDChunk(list, func(chunk []uint) error {
+					return tx.Model(&models.MessageRecipient{}).Where("id IN ? AND status = ?", chunk, models.RecipientFailed).Updates(fields).Error
+				})
+			}
+			for why, list := range decision.drop {
+				if err := mark(list, map[string]any{"status": models.RecipientSuppressed, "reason": why, "error": "", "updated_at": now}); err != nil {
+					return err
+				}
+			}
 			// Email only: a push is never sent again (M3.13d2).
-			if err := tx.Model(&models.MessageRecipient{}).Where("message_id = ? AND status = ? AND channel = ?", m.ID, models.RecipientFailed, models.DeliveryEmail).
-				Order("id").Pluck("id", &ids).Error; err != nil {
-				return err
-			}
-			// Each failed person is checked against today's audience, in the
-			// author's name (reminders: against the date's registrants).
-			if m.Category == models.MessageCategoryReminder {
-				var err error
-				if ids, err = a.recheckReminderRows(tx, m, ids, now); err != nil {
-					return err
-				}
-			} else {
-				var err error
-				if ids, err = a.recheckAnnouncementRows(tx, m, ids, now); err != nil {
-					return err
-				}
-			}
-			if err := tx.Model(&models.MessageRecipient{}).Where("id IN ? AND status = ?", ids, models.RecipientFailed).
-				Updates(map[string]any{"status": models.RecipientQueued, "error": "", "updated_at": now}).Error; err != nil {
+			if err := mark(ids, map[string]any{"status": models.RecipientQueued, "error": "", "updated_at": now}); err != nil {
 				return err
 			}
 			if len(ids) == 0 {
@@ -750,7 +600,11 @@ func (a *App) apiRetryMessage(c *gin.Context) {
 		}
 		return audit.Write(tx, audit.Entry{Actor: &me.ID, Action: audit.MessageRetried, TargetType: "message", TargetID: m.ID,
 			Meta: map[string]any{"people": len(ids), "byOther": m.AuthorID == nil || *m.AuthorID != me.ID}, IP: c.ClientIP()})
-	})
+	}, readCommitted)
+	if errors.Is(err, errRetryNotShown) {
+		jsonError(c, http.StatusNotFound, "message not found")
+		return
+	}
 	if errors.Is(err, errLocked) {
 		// Someone else pressed it first.
 		if a.DB.First(m, m.ID).Error == nil && goingOut(m) {

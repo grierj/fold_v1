@@ -420,7 +420,7 @@ func TestGuestVisibilityAndTightening(t *testing.T) {
 	// A private event also refuses new guests, and tightening to
 	// private cancels the guest who can no longer see it, retaining history.
 	apiDo(t, admin, "PUT", fmt.Sprintf("/api/v1/events/%d/visibility", ev.ID),
-		map[string]any{"visibility": models.VisibilityPrivate, "confirm": true}, http.StatusOK)
+		confirmVisibility(t, admin, fmt.Sprintf("/api/v1/events/%d/visibility", ev.ID), map[string]any{"visibility": models.VisibilityPrivate}), http.StatusOK)
 	guestSubmit(t, anon, ev.ID, guestBody("Late", "late@example.com", true), http.StatusNotFound)
 	if regCount(app, &u, ev.ID) != 1 || regCount(app, mem, ev.ID) != 1 {
 		t.Fatalf("after tightening: guest %d, member %d", regCount(app, &u, ev.ID), regCount(app, mem, ev.ID))
@@ -458,7 +458,7 @@ func TestTighteningCancelsWaitlistedGuest(t *testing.T) {
 	// Tightening to invite-only cancels the waitlisted guest row and
 	// tells them; the member's seat is untouched.
 	apiDo(t, admin, "PUT", fmt.Sprintf("/api/v1/events/%d/visibility", ev.ID),
-		map[string]any{"visibility": models.VisibilityInviteOnly, "confirm": true}, http.StatusOK)
+		confirmVisibility(t, admin, fmt.Sprintf("/api/v1/events/%d/visibility", ev.ID), map[string]any{"visibility": models.VisibilityInviteOnly}), http.StatusOK)
 	if regCount(app, &u, ev.ID) != 1 || regCount(app, mem, ev.ID) != 1 {
 		t.Fatalf("after tightening: guest %d, member %d", regCount(app, &u, ev.ID), regCount(app, mem, ev.ID))
 	}
@@ -1090,7 +1090,7 @@ func TestGuestManageReauthorizesCancelledLinks(t *testing.T) {
 				apiDo(t, anon, "POST", path+"/cancel", nil, http.StatusOK)
 				apiDo(t, anon, "POST", path+"/cancel", nil, http.StatusOK)
 			}
-			apiDo(t, admin, "PUT", fmt.Sprintf("/api/v1/events/%d/visibility", ev.ID), map[string]any{"visibility": "private", "confirm": true}, http.StatusOK)
+			apiDo(t, admin, "PUT", fmt.Sprintf("/api/v1/events/%d/visibility", ev.ID), confirmVisibility(t, admin, fmt.Sprintf("/api/v1/events/%d/visibility", ev.ID), map[string]any{"visibility": "private"}), http.StatusOK)
 			apiDo(t, anon, "GET", path, nil, http.StatusNotFound)
 			apiDo(t, anon, "POST", path+"/cancel", nil, http.StatusNotFound)
 			u := guestUser(t, app, "manage@example.com")
@@ -1114,10 +1114,11 @@ func TestGuestManageReauthorizesDateOverride(t *testing.T) {
 	anon := anonClient(t, app, "10.4.0.34")
 	_, token := guestConfirm(t, app, anon, ev.ID, "Guest", "date-manage@example.com", false)
 	path := "/api/v1/guest-registrations/manage/" + token
-	apiDo(t, admin, "PUT", fmt.Sprintf("/api/v1/events/%d/occurrences/%s", ev.ID, guestDate), map[string]any{"visibility": "private", "confirm": true}, http.StatusOK)
+	// Making the date private cancels the confirmed guest, so the save asks first.
+	saveDateConsenting(t, admin, ev.ID, guestDate, map[string]any{"visibility": "private"})
 	apiDo(t, anon, "GET", path, nil, http.StatusNotFound)
 	apiDo(t, anon, "POST", path+"/cancel", nil, http.StatusNotFound)
-	apiDo(t, admin, "PUT", fmt.Sprintf("/api/v1/events/%d/occurrences/%s", ev.ID, guestDate), map[string]any{"visibility": "public"}, http.StatusOK)
+	saveDate(t, admin, ev.ID, guestDate, map[string]any{"visibility": "public"}, http.StatusOK, "")
 	apiDo(t, anon, "GET", path, nil, http.StatusOK)
 }
 
@@ -2459,5 +2460,51 @@ func TestGuestVerificationBurstStoresAtMostTheCap(t *testing.T) {
 	}
 	if n := len(mailJobsOfKind(t, app, kindGuestVerifyMail)); n != guestVerifyPerHour {
 		t.Fatalf("queued %d verification mails, want %d", n, guestVerifyPerHour)
+	}
+}
+
+// TestGuestManageRendersOnItsOwnConnection: redeeming, showing and cancelling
+// a guest registration hold the contact gate (and the registration and date
+// locks), and an event whose group a visitor may not see is "hosted by" the
+// church, so rendering needs the church's name. On a one-connection pool any
+// read of it outside the transaction would wait for the connection the
+// transaction holds and fail; each request must succeed and name the host.
+func TestGuestManageRendersOnItsOwnConnection(t *testing.T) {
+	app := testApp(t)
+	newTestUser(t, app, "admin", "password1234", models.RoleAdmin)
+	admin := loginAPI(t, app, "admin", "password1234")
+	gormMust(t, app.DB.Create(&models.Setting{Key: settingSiteName, Value: "Grace Chapel"}))
+	gid := createGroupAs(t, admin, "Hidden Care", models.VisibilityInviteOnly)
+	ev := scheduleGroupEvent(t, admin, gid, "Open House")
+	setVisibility(t, admin, ev.ID, models.VisibilityPublic, "", http.StatusOK)
+	anon := anonClient(t, app, "10.4.9.1")
+	guestSubmit(t, anon, ev.ID, guestBody("Gail Guest", "gail@example.com", true), http.StatusOK)
+	token := tokenInEmail(t, latestEmail(t, app, "gail@example.com"))
+	one := oneConnectionPool(t, app)
+	decode := func(what string, w *httptest.ResponseRecorder) guestRegistrationJSON {
+		t.Helper()
+		if w.Code != http.StatusOK {
+			t.Fatalf("%s on one connection: %d %s", what, w.Code, w.Body.String())
+		}
+		var res struct {
+			Registration guestRegistrationJSON `json:"registration"`
+			ManageToken  string                `json:"manageToken"`
+		}
+		decodeJSON(t, w, &res)
+		if res.Registration.HostedBy != "Grace Chapel" || res.Registration.GroupName != "" {
+			t.Fatalf("%s names the host as %+v", what, res.Registration)
+		}
+		if res.ManageToken != "" {
+			token = res.ManageToken
+		}
+		return res.Registration
+	}
+	oneConnection(t, app, one)
+	decode("redeem", anon.do("POST", "/api/v1/guest-registrations/confirm", map[string]string{"token": token}, true))
+	oneConnection(t, app, one)
+	decode("show", anon.do("GET", "/api/v1/guest-registrations/manage/"+token, nil, false))
+	oneConnection(t, app, one)
+	if got := decode("cancel", anon.do("POST", "/api/v1/guest-registrations/manage/"+token+"/cancel", nil, true)); got.Status != models.RegCancelled {
+		t.Fatalf("cancel left the registration %q", got.Status)
 	}
 }

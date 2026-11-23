@@ -1,7 +1,8 @@
-// The digest tests compare against Node's SHA-256, and the seeded suites record
-// the seeds they ran through the filesystem. The web project carries no
-// @types/node, so this declares the little they use: two crypto functions, two
-// fs functions and the env record vitest provides.
+// The digest tests compare against Node's SHA-256, the seeded suites record
+// the seeds they ran through the filesystem, and the date-edit retention test
+// asks for a real garbage collection. The web project carries no @types/node,
+// so this declares the little they use: two crypto functions, two fs functions,
+// the env record vitest provides, and the v8 flag and vm context that reach gc().
 declare module "node:crypto" {
   interface Hash {
     update(data: Uint8Array | string): Hash;
@@ -20,4 +21,13 @@ declare module "node:fs" {
 
 declare module "node:process" {
   export const env: Record<string, string | undefined>;
+}
+
+declare module "node:v8" {
+  export function setFlagsFromString(flags: string): void;
+}
+
+declare module "node:vm" {
+  // Only once setFlagsFromString("--expose-gc") has run does a new context have gc.
+  export function runInNewContext(code: "gc"): () => void;
 }

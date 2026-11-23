@@ -192,6 +192,8 @@ func (a *App) apiCreateGroup(c *gin.Context) {
 
 const maxGroupUpcomingOccurrences = 25
 
+const groupDetailDatePaging = "2"
+
 // Cursors are positions, never authority: each page rechecks date visibility.
 // StartsAt and ID match the occurrence list's deterministic sort order.
 type groupUpcomingCursor struct {
@@ -211,26 +213,30 @@ type groupDetailJSON struct {
 	IsMember       bool             `json:"isMember"`
 }
 
-func parseGroupUpcomingPage(c *gin.Context, groupID uint) (int, *groupUpcomingCursor, bool) {
+// groupUpcomingPage reads a group date list's limit and cursor:
+// errInvalidUpcomingPage for a limit outside 1..100 or a cursor that is
+// malformed, too long or another group's.
+func groupUpcomingPage(c *gin.Context, groupID uint) (int, *groupUpcomingCursor, error) {
 	limit := maxGroupUpcomingOccurrences
 	if raw, present := c.GetQuery("limit"); present {
 		n, err := strconv.Atoi(raw)
 		if err != nil || n < 1 || n > 100 {
-			fail(c, errInvalidUpcomingPage)
-			return 0, nil, false
+			return 0, nil, errInvalidUpcomingPage
 		}
 		limit = n
 	}
 	var cursor *groupUpcomingCursor
 	if raw, present := c.GetQuery("cursor"); present {
 		cursor = &groupUpcomingCursor{}
+		if len(raw) > 512 {
+			return 0, nil, errInvalidUpcomingPage
+		}
 		data, err := base64.RawURLEncoding.DecodeString(raw)
-		if len(raw) > 512 || err != nil || json.Unmarshal(data, cursor) != nil || cursor.GroupID != groupID || cursor.ID == 0 || cursor.StartsAt.IsZero() {
-			fail(c, errInvalidUpcomingPage)
-			return 0, nil, false
+		if err != nil || json.Unmarshal(data, cursor) != nil || cursor.GroupID != groupID || cursor.ID == 0 || cursor.StartsAt.IsZero() {
+			return 0, nil, errInvalidUpcomingPage
 		}
 	}
-	return limit, cursor, true
+	return limit, cursor, nil
 }
 
 func nextGroupUpcomingCursor(groupID uint, dates []occurrenceJSON, hasMore bool) string {
@@ -238,70 +244,101 @@ func nextGroupUpcomingCursor(groupID uint, dates []occurrenceJSON, hasMore bool)
 		return ""
 	}
 	last := dates[len(dates)-1]
-	data, _ := json.Marshal(groupUpcomingCursor{GroupID: groupID, StartsAt: last.StartsAt, ID: last.ID})
+	return groupCursorAfter(groupID, last.StartsAt, last.ID)
+}
+
+// groupCursorAfter is the cursor of the page that starts after the date at
+// (startsAt, id).
+func groupCursorAfter(groupID uint, startsAt time.Time, id uint) string {
+	data, _ := json.Marshal(groupUpcomingCursor{GroupID: groupID, StartsAt: startsAt, ID: id})
 	return base64.RawURLEncoding.EncodeToString(data)
 }
 
+// apiGetGroup reads the group, its visible roster and its upcoming dates in one snapshot.
 func (a *App) apiGetGroup(c *gin.Context) {
 	id, _ := strconv.Atoi(c.Param("id"))
-	g, rel, ok := a.loadGroupFor(c, uint(id))
-	if !ok {
-		return
-	}
-	limit, cursor, ok := parseGroupUpcomingPage(c, g.ID)
-	if !ok {
-		return
-	}
-	me := apiUser(c)
-	p := asPerson(me)
-
-	memberList := []memberJSON{}
-	if policy.CanSeeRoster(p, asGroup(g), rel) {
-		var err error
-		if memberList, err = a.rosterFor(g.ID, me, policy.CanManageGroup(p, rel)); err != nil {
-			jsonError(c, http.StatusInternalServerError, "could not load group")
-			return
+	var out groupDetailJSON
+	err := a.readGroup(c, uint(id), false, func(r groupRead) error {
+		// The marker names a client built for the current date pages; a tab
+		// from an older release gets the reload answer on its first page,
+		// continuation and refresh alike. Checked once the group is visible,
+		// so a hidden or missing group stays the same 404.
+		if c.Query("datePaging") != groupDetailDatePaging {
+			return errInvalidUpcomingPage
 		}
-	}
-
-	now := time.Now().UTC()
-	var eventIDs []uint
-	if err := a.DB.Model(&models.Event{}).Where("group_id = ?", g.ID).Pluck("id", &eventIDs).Error; err != nil {
-		jsonError(c, http.StatusInternalServerError, "could not load group")
-		return
-	}
-	from, to := upcomingWindow(now)
-	upcoming, hasMore, err := a.occurrencesForEventsAfterErr(eventIDs, from, to, &now, me, limit, cursor)
-	if err != nil {
-		log.Printf("group %d dates: %v", g.ID, err)
-		jsonError(c, http.StatusInternalServerError, "could not load group")
-		return
-	}
-	summary, err := a.groupSummary(me, g)
-	if err != nil {
-		jsonError(c, http.StatusInternalServerError, "could not load group")
-		return
-	}
-	c.JSON(http.StatusOK, groupDetailJSON{
-		Group: summary, Members: memberList, UpcomingEvents: upcoming,
-		Truncated: hasMore, HasMore: hasMore, NextCursor: nextGroupUpcomingCursor(g.ID, upcoming, hasMore),
-		CanManage: policy.CanManageGroup(p, rel), IsMember: rel.Member,
+		limit, cursor, err := groupUpcomingPage(c, r.group.ID)
+		if err != nil {
+			return err
+		}
+		p := asPerson(r.viewer)
+		manager := policy.CanManageGroup(p, r.rel)
+		roster := policy.CanSeeRoster(p, asGroup(r.group), r.rel)
+		a.groupReadAuthorized("group detail")
+		out = groupDetailJSON{Members: []memberJSON{}, CanManage: manager, IsMember: r.rel.Member}
+		if roster {
+			if out.Members, err = a.rosterIn(r.tx, r.group.ID, r.viewer, manager); err != nil {
+				return err
+			}
+		}
+		from, to := upcomingWindow(r.now)
+		upcoming, hasMore, err := a.groupDatesIn(r, from, to, &r.now, limit, cursor)
+		if err != nil {
+			log.Printf("group %d dates: %v", r.group.ID, err)
+			return err
+		}
+		summaries, err := a.groupSummariesIn(r.tx, r.viewer, []models.Group{*r.group}, &r.now)
+		if err != nil {
+			return err
+		}
+		out.Group, out.UpcomingEvents = summaries[0], upcoming
+		out.Truncated, out.HasMore, out.NextCursor = hasMore, hasMore, nextGroupUpcomingCursor(r.group.ID, upcoming, hasMore)
+		return nil
 	})
+	if err != nil {
+		answerGroupRead(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, out)
 }
 
-func (a *App) respondRoster(c *gin.Context, groupID uint, manager bool) {
-	members, err := a.rosterFor(groupID, apiUser(c), manager)
+// groupDatesIn is one page of a group's scheduled dates in [from, to] as the
+// group read's viewer may see them, read on its snapshot and clock.
+func (a *App) groupDatesIn(r groupRead, from, to string, startAfter *time.Time, limit int, cursor *groupUpcomingCursor) ([]occurrenceJSON, bool, error) {
+	var eventIDs []uint
+	if err := r.tx.Model(&models.Event{}).Where("group_id = ?", r.group.ID).Pluck("id", &eventIDs).Error; err != nil {
+		return nil, false, err
+	}
+	return a.listDatesIn(dateListRead{db: r.tx, now: r.now, strict: true}, eventIDs, from, to, startAfter, r.viewer, limit, cursor)
+}
+
+// answerMembers answers a group's roster (GET /groups/:id/members, and a role
+// change's reply) from one snapshot: the signed-in viewer as that snapshot
+// has them, 403 members_only when they may see the group and not its roster.
+func (a *App) answerMembers(c *gin.Context, id uint, surface string) {
+	var members []memberJSON
+	err := a.readGroup(c, id, true, func(r groupRead) error {
+		p := asPerson(r.viewer)
+		if !policy.CanSeeRoster(p, asGroup(r.group), r.rel) {
+			return errMembersOnly
+		}
+		manager := policy.CanManageGroup(p, r.rel)
+		a.groupReadAuthorized(surface)
+		var err error
+		members, err = a.rosterIn(r.tx, r.group.ID, r.viewer, manager)
+		return err
+	})
 	if err != nil {
-		jsonError(c, http.StatusInternalServerError, "could not load members")
+		answerGroupRead(c, err)
 		return
 	}
 	c.JSON(http.StatusOK, membersResponseJSON{Members: members})
 }
 
-// rosterFor exposes minor identities and badges only to the group's managers.
-func (a *App) rosterFor(groupID uint, viewer *models.User, manager bool) ([]memberJSON, error) {
+// rosterIn is a group's active roster on db. It exposes minor identities and
+// badges only to the group's managers.
+func (a *App) rosterIn(db *gorm.DB, groupID uint, viewer *models.User, manager bool) ([]memberJSON, error) {
 	var members []models.Membership
-	if err := a.DB.Preload("User").Joins(listedUsers("memberships")).
+	if err := db.Preload("User").Joins(listedUsers("memberships")).
 		Where("memberships.group_id = ? AND memberships.status = ?", groupID, models.MembershipActive).
 		Order("memberships.joined_at").Find(&members).Error; err != nil {
 		return nil, err
@@ -310,7 +347,7 @@ func (a *App) rosterFor(groupID uint, viewer *models.User, manager bool) ([]memb
 	for i := range members {
 		users[members[i].User.ID] = &members[i].User
 	}
-	guardians := a.confirmedContactGuardians(viewer, users)
+	guardians := confirmedContactGuardians(db, viewer, users)
 	out := make([]memberJSON, 0, len(members))
 	for i := range members {
 		if members[i].User.AccountType == models.AccountTeen && !policy.CanSeeMinorRosterIdentity(asPerson(viewer), manager) {
@@ -351,6 +388,10 @@ func (a *App) apiUpdateGroup(c *gin.Context) {
 		// "tighten" decision for each leader-opened event that is wider than
 		// the new value, keyed by event id (DEC-48). See visibility-impact.
 		OpenedEvents map[string]string `json:"openedEvents"`
+		// Consent is the token of the reviewed impact (the preview or a
+		// 409's); a tightening that cancels anyone needs the token of the
+		// impact as the write finds it (DEC-158).
+		Consent *string `json:"consent"`
 		// MemberLimit: a number sets it, null clears it (DEC-39). Lowering it
 		// below the current count is fine; nobody is removed.
 		MemberLimit json.RawMessage `json:"memberLimit"`
@@ -487,7 +528,7 @@ func (a *App) apiUpdateGroup(c *gin.Context) {
 		}
 		if body.Visibility != nil {
 			var err error
-			if impact, err = a.applyGroupTightening(tx, u, c.ClientIP(), g, locked.Visibility, body.OpenedEvents); err != nil {
+			if impact, err = a.applyGroupTightening(tx, u, c.ClientIP(), g, locked.Visibility, body.OpenedEvents, body.Consent); err != nil {
 				return err
 			}
 		}
@@ -534,6 +575,10 @@ func (a *App) apiUpdateGroup(c *gin.Context) {
 			"needsDecision": true,
 			"impact":        impact,
 		})
+		return
+	}
+	if errors.Is(err, errVisibilityReviewOutdated) {
+		fail(c, err)
 		return
 	}
 	if err != nil {
@@ -615,15 +660,7 @@ func (a *App) membershipAdded(c *gin.Context, g *models.Group, userID uint) {
 
 func (a *App) apiGroupMembers(c *gin.Context) {
 	id, _ := strconv.Atoi(c.Param("id"))
-	g, rel, ok := a.loadGroupFor(c, uint(id))
-	if !ok {
-		return
-	}
-	if !policy.CanSeeRoster(asPerson(apiUser(c)), asGroup(g), rel) {
-		fail(c, errMembersOnly)
-		return
-	}
-	a.respondRoster(c, g.ID, policy.CanManageGroup(asPerson(apiUser(c)), rel))
+	a.answerMembers(c, uint(id), "group members")
 }
 
 func validGroupStatus(s string) bool {
@@ -720,7 +757,10 @@ func (a *App) apiSetMemberRole(c *gin.Context) {
 		jsonError(c, http.StatusInternalServerError, "could not change role")
 		return
 	}
-	a.respondRoster(c, g.ID, true)
+	// The change is committed. The reply is the roster as the actor may see
+	// it now, read in its own snapshot like GET /members: a reply that fails
+	// or refuses leaves the change in place.
+	a.answerMembers(c, g.ID, "group roster reply")
 }
 
 // errRoleRefused means policy said no once the group row was locked.
@@ -1139,36 +1179,15 @@ func joinTags(tags []string) string {
 	return strings.Join(clean, ",")
 }
 
-func (a *App) relOf(u *models.User, groupID uint) (policy.Rel, error) {
-	if u == nil {
-		return policy.Rel{}, nil
-	}
-	return groupRel(a.DB, u.ID, groupID)
-}
-
 // loadGroupFor loads group id for u: 404 when it doesn't exist or u can't
 // see it (invite-only groups never answer 403 to outsiders).
 func (a *App) loadGroupFor(c *gin.Context, id uint) (*models.Group, policy.Rel, bool) {
-	u := apiUser(c)
-	var g models.Group
-	if err := a.DB.First(&g, id).Error; err != nil {
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			jsonError(c, http.StatusNotFound, "group not found")
-		} else {
-			fail(c, err)
-		}
-		return nil, policy.Rel{}, false
-	}
-	rel, err := a.relOf(u, g.ID)
+	g, rel, err := loadGroupIn(a.DB, apiUser(c), id)
 	if err != nil {
-		fail(c, err)
+		answerGroupRead(c, err)
 		return nil, policy.Rel{}, false
 	}
-	if !policy.CanSeeGroup(asPerson(u), asGroup(&g), rel) {
-		jsonError(c, http.StatusNotFound, "group not found")
-		return nil, policy.Rel{}, false
-	}
-	return &g, rel, true
+	return g, rel, true
 }
 
 // loadManagedGroupID is loadGroupFor plus CanManageGroup (403 when the

@@ -111,46 +111,51 @@ func WindowEnd(start, now time.Time) time.Time {
 	return end
 }
 
-// Expand returns every occurrence from the series start through horizonEnd.
-// A one-time event is its single date, even when that date is past the
-// horizon. Times stay on the local clock: 19:00 in America/Boise is 19:00
-// on both sides of a daylight-saving change.
-func Expand(spec Spec, horizonEnd time.Time) ([]When, error) {
+// Expand walks the series from its start through horizonEnd. Its Whens are
+// every occurrence the writers store: a one-time event is its single date,
+// even when that date is past the horizon. Times stay on the local clock:
+// 19:00 in America/Boise is 19:00 on both sides of a daylight-saving change.
+// The same walk also keeps what it proves about each day's clocks
+// (Expansion.Clocks).
+func Expand(spec Spec, horizonEnd time.Time) (Expansion, error) {
 	start, loc, err := ParseWall(spec.StartsLocal, spec.TZID)
 	if err != nil {
-		return nil, err
+		return Expansion{}, err
 	}
 	if !ValidDuration(spec.DurationMinutes) {
-		return nil, ErrBadDuration
+		return Expansion{}, ErrBadDuration
 	}
 	until := strings.TrimSpace(spec.Until)
 	if until != "" {
 		if _, err := models.ParseCalendarDate(until); err != nil {
-			return nil, fmt.Errorf("rruleUntil must be YYYY-MM-DD")
+			return Expansion{}, fmt.Errorf("rruleUntil must be YYYY-MM-DD")
 		}
 	}
+	x := Expansion{loc: loc, written: writtenClock(spec.StartsLocal), replayable: !start.IsZero()}
 	dur := time.Duration(spec.DurationMinutes) * time.Minute
 	rule := strings.TrimSpace(spec.RRule)
 	if rule == "" {
 		w := whenOf(start, dur, loc)
+		x.ended = true
 		if until != "" && w.OriginalDate > until {
-			return nil, nil
+			return x, nil
 		}
-		return []When{w}, nil
+		x.Whens = []When{w}
+		return x, nil
 	}
 	if strings.Contains(strings.ToUpper(rule), "DTSTART") || strings.Contains(rule, "\n") {
-		return nil, fmt.Errorf("invalid recurrence rule")
+		return Expansion{}, fmt.Errorf("invalid recurrence rule")
 	}
 	dt := start.Format("20060102T150405")
 	ics := fmt.Sprintf("DTSTART;TZID=%s:%s\nRRULE:%s", loc.String(), dt, rule)
 	r, err := rrule.StrToRRule(ics)
 	if err != nil {
-		return nil, fmt.Errorf("invalid recurrence rule")
+		return Expansion{}, fmt.Errorf("invalid recurrence rule")
 	}
 	// Events repeat at most once a day (Grier, Oct 29, 2026). BYHOUR and the
 	// like are still held by MaxOccurrences.
 	if r.OrigOptions.Freq >= rrule.HOURLY {
-		return nil, ErrTooFrequent
+		return Expansion{}, ErrTooFrequent
 	}
 	if horizonEnd.Before(start) {
 		horizonEnd = start
@@ -161,22 +166,29 @@ func Expand(spec Spec, horizonEnd time.Time) ([]When, error) {
 	// the end date or the horizon ends the walk.
 	next := r.Iterator()
 	var out []When
+	var past time.Time
 	denseFrom, dense := horizonEnd.AddDate(-2, 0, 0), 0
 	for steps := 0; ; steps++ {
 		if steps >= MaxExpandSteps {
-			return nil, ErrTooManyDates
+			return Expansion{}, ErrTooManyDates
 		}
 		t, ok := next()
-		if !ok || t.After(horizonEnd) {
+		if !ok {
+			x.ended = true
+			break
+		}
+		if t.After(horizonEnd) {
+			past = t
 			break
 		}
 		w := whenOf(t.In(loc), dur, loc)
 		if until != "" && w.OriginalDate > until {
+			x.ended = true
 			break
 		}
 		if !t.Before(denseFrom) {
 			if dense++; dense > MaxOccurrences {
-				return nil, ErrTooManyDates
+				return Expansion{}, ErrTooManyDates
 			}
 		}
 		out = append(out, w)
@@ -184,7 +196,11 @@ func Expand(spec Spec, horizonEnd time.Time) ([]When, error) {
 	if out == nil {
 		out = []When{}
 	}
-	return out, nil
+	x.Whens = out
+	if !x.ended {
+		x.walkTail(next, past, horizonEnd, dur, until)
+	}
+	return x, nil
 }
 
 func whenOf(start time.Time, dur time.Duration, loc *time.Location) When {
