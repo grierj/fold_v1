@@ -85,8 +85,8 @@ func (a *App) setAccountStatusIn(tx *gorm.DB, u *models.User, updates map[string
 
 // txClock is a transaction's one now (AGENTS.md: take now once per
 // transaction). The first step that needs it reads the clock, after the locks
-// taken before that step, where that step read the clock on its own before;
-// every later step judges the same instant.
+// the steps before it took, so a lock wait never moves a cutoff earlier; every
+// later step judges the same instant.
 type txClock struct {
 	read func() time.Time
 	t    time.Time
