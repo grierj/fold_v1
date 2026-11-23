@@ -13,6 +13,7 @@ import (
 	"fold/internal/audit"
 	"fold/internal/mail"
 	"fold/internal/notify"
+	"fold/internal/policy"
 	"fold/models"
 )
 
@@ -360,10 +361,8 @@ func eraseActivityRowsIn(tx *gorm.DB, s erasureSubject) error {
 // back, and the admin sees a generic server error and can retry. The handler logs
 // "could not delete user".
 func eraseMessagesIn(tx *gorm.DB, s erasureSubject, actor *uint, ip string) error {
-	var cancelled []uint
-	if err := tx.Raw(`UPDATE messages SET status = ?, updated_at = now()
-		WHERE author_id = ? AND status = ? RETURNING id`,
-		models.MessageCancelled, s.ID, models.MessageScheduled).Scan(&cancelled).Error; err != nil {
+	cancelled, err := moveMessagesWhere(tx, policy.MessageEraseAuthor, "author_id = ?", s.ID)
+	if err != nil {
 		return err
 	}
 	sort.Slice(cancelled, func(i, j int) bool { return cancelled[i] < cancelled[j] })

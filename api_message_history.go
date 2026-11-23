@@ -292,7 +292,7 @@ func historyRecipientsIn(db *gorm.DB, id uint, admin bool) ([]historyRecipientJS
 // failed before anyone was chosen because it couldn't be got ready.
 func retryable(m *models.Message, c recipientCountsJSON) bool {
 	switch {
-	case m.Status != models.MessageSent && m.Status != models.MessageFailed:
+	case !policy.MessageRetrySending.Allows(m.Status):
 		return false
 	case c.failedRows > 0:
 		return true
@@ -304,7 +304,7 @@ func retryable(m *models.Message, c recipientCountsJSON) bool {
 // first send is still going). A scheduled message, due or not, has nothing
 // to retry: it was never sent, or a retry of one that never got ready is
 // about to prepare it.
-func goingOut(m *models.Message) bool { return m.Status == models.MessageSending }
+func goingOut(m *models.Message) bool { return policy.MessageGoingOut(m.Status) }
 
 // authorMayResend checks again, as message.send does, that m's author is
 // active and may still write to its audience: a "Try again" goes out in
@@ -547,19 +547,16 @@ func (a *App) apiRetryMessage(c *gin.Context) {
 			return err
 		}
 		// The claim holds only if nobody else retried it meanwhile.
-		claim := func(fields map[string]any) error {
-			res := tx.Model(&models.Message{}).Where("id = ? AND status = ? AND updated_at = ?", m.ID, m.Status, m.UpdatedAt).Updates(fields)
-			if res.Error != nil {
-				return res.Error
-			}
-			if res.RowsAffected == 0 {
+		claim := func(move policy.MessageMove, fields map[string]any) error {
+			moved, err := moveMessage(tx, m.ID, move, fields, "status = ? AND updated_at = ?", m.Status, m.UpdatedAt)
+			if err == nil && !moved {
 				return errLocked
 			}
-			return nil
+			return err
 		}
 		ids := decision.keep
 		if counts.failedRows == 0 {
-			if err := claim(map[string]any{"status": models.MessageScheduled, "scheduled_at": now, "error": "", "updated_at": now}); err != nil {
+			if err := claim(policy.MessageRetryScheduled, map[string]any{"scheduled_at": now, "error": "", "updated_at": now}); err != nil {
 				return err
 			}
 			if err := enqueueMessageSend(tx, m.ID, now); err != nil {
@@ -568,11 +565,11 @@ func (a *App) apiRetryMessage(c *gin.Context) {
 		} else {
 			// An announcement's retry is charged to the church day it goes out
 			// on, as the never-prepared branch above already does.
-			fields := map[string]any{"status": models.MessageSending, "error": "", "updated_at": now}
+			fields := map[string]any{"error": "", "updated_at": now}
 			if m.Category != models.MessageCategoryReminder {
 				fields["scheduled_at"] = now
 			}
-			if err := claim(fields); err != nil {
+			if err := claim(policy.MessageRetrySending, fields); err != nil {
 				return err
 			}
 			mark := func(list []uint, fields map[string]any) error {
