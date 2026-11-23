@@ -29,7 +29,9 @@ import (
 // it can read whole: a map literal, or a local map the function makes and
 // only sets, keys and passes to Updates (no other call, no second name for
 // it), whose keys are all plain column names in string literals, none of
-// them status. So a message struct, any
+// them status. A name counts once per function, whatever scope binds it, so
+// a name ever bound to something the guard did not see made is unreadable
+// everywhere in that function. So a message struct, any
 // other struct, a parameter's map, a map with a computed key and a map built
 // elsewhere are all reported, whatever Select precedes them. "Status", the
 // field's name, counts as the column, as gorm resolves it. Anywhere it reports a
@@ -284,18 +286,29 @@ func messageLocalMaps(fd *ast.FuncDecl) (status, computed, made, params map[stri
 			addParams(v.Type.Params)
 		case *ast.ValueSpec:
 			for i, name := range v.Names {
-				if i < len(v.Values) {
+				switch {
+				case len(v.Values) == len(v.Names):
 					st, comp := messageMapLit(v.Values[i])
 					status[name.Name] = status[name.Name] || st
+					if messageMapMade(v.Values[i]) {
+						made[name.Name] = true
+					} else {
+						comp = true
+					}
 					computed[name.Name] = computed[name.Name] || comp
-					made[name.Name] = made[name.Name] || messageMapMade(v.Values[i])
+				case len(v.Values) > 0:
+					// One call fills several names.
+					computed[name.Name] = true
 				}
 			}
 		case *ast.AssignStmt:
 			for i, l := range v.Lhs {
 				switch lv := l.(type) {
 				case *ast.Ident:
-					if i < len(v.Rhs) {
+					if len(v.Lhs) != len(v.Rhs) {
+						// One call fills several names.
+						computed[lv.Name] = true
+					} else {
 						st, comp := messageMapLit(v.Rhs[i])
 						status[lv.Name] = status[lv.Name] || st
 						computed[lv.Name] = computed[lv.Name] || comp
@@ -613,6 +626,21 @@ func (a *App) send(tx *gorm.DB, m *models.Message) error {
 func (a *App) send(tx *gorm.DB, m *models.Message, cols map[string]any) error {
 	fields := map[string]any{"error": ""}
 	maps.Copy(fields, cols)
+	return tx.Model(m).Updates(fields).Error
+}`, "send: Updates of a map with computed keys"},
+		{"a shadowing name bound to a call's map", `package main
+func (a *App) send(tx *gorm.DB, m *models.Message, late bool) error {
+	fields := map[string]any{"error": ""}
+	if late {
+		var fields = sentColumns()
+		return tx.Model(m).Updates(fields).Error
+	}
+	return nil
+}`, "send: Updates of a map with computed keys"},
+		{"a map assigned from a call's second result", `package main
+func (a *App) send(tx *gorm.DB, m *models.Message) error {
+	fields := map[string]any{"error": ""}
+	_, fields = sentColumns()
 	return tx.Model(m).Updates(fields).Error
 }`, "send: Updates of a map with computed keys"},
 		{"a local map under a second name", `package main
