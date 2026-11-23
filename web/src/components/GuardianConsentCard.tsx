@@ -1,5 +1,5 @@
 import { Form } from "./ui/Form";
-import { lazy, Suspense, useEffect, useState } from "react";
+import { lazy, Suspense, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { Guardians, type GuardianConsentScope } from "../api/guardians";
 import type { GuardianTeen } from "../types";
 import { errorText } from "../lib/errors";
@@ -10,12 +10,26 @@ import { ErrorNotice } from "./ErrorNotice";
 
 const GuardianContactGrants = lazy(() => import("./GuardianContactGrants").then((m) => ({ default: m.GuardianContactGrants })));
 
+// A change that saved but whose refresh failed leaves `stale` set: the status shown may be out of date, so no
+// consent action is offered until a refresh lands, and only that clears it.
 function TeenConsentControls({ teen, onChanged }: { teen: GuardianTeen; onChanged: () => Promise<void> }) {
   const [showGrants, setShowGrants] = useState(false);
   const [scope, setScope] = useState<GuardianConsentScope>("account");
   const action = useAction();
   const { state } = action;
+  const [stale, setStale] = useState(false);
+  const refresh = useAction();
+  const consentButton = useRef<HTMLButtonElement>(null);
+  const refreshButton = useRef<HTMLButtonElement>(null);
+  // A landed refresh removes its button: focus that was on it goes to the consent action it brings back.
+  const refocus = useRef(false);
   const granted = scope === "account" ? teen.accountConsent : scope === "sms" ? teen.smsConsent : teen.photosConsent;
+
+  useLayoutEffect(() => {
+    if (stale || !refocus.current) return;
+    refocus.current = false;
+    consentButton.current?.focus({ preventScroll: true });
+  }, [stale]);
 
   async function change(status: "granted" | "revoked") {
     if (status === "revoked" && !confirm(scope === "account" ? `Revoke account consent for ${teen.teenName}? They will be signed out and unable to use Fold until consent is granted again.` : `Revoke ${scope} consent for ${teen.teenName}?`)) return;
@@ -24,7 +38,25 @@ function TeenConsentControls({ teen, onChanged }: { teen: GuardianTeen; onChange
       setShowGrants(false);
 
       return `${scope === "sms" ? "SMS" : scope === "photos" ? "Photo" : "Account"} consent ${status}.`;
-    }, { followUp: onChanged });
+    }, {
+      followUp: async () => {
+        try {
+          await onChanged();
+        } catch (cause) {
+          refresh.reset();
+          setStale(true);
+          throw cause;
+        }
+      },
+    });
+  }
+
+  function reload() {
+    void refresh.run(async () => {
+      await onChanged();
+      refocus.current = document.activeElement === refreshButton.current;
+      setStale(false);
+    });
   }
 
   function email() {
@@ -35,23 +67,33 @@ function TeenConsentControls({ teen, onChanged }: { teen: GuardianTeen; onChange
     <h3 className="font-semibold">{teen.teenName}</h3>
     <Button variant="link" aria-expanded={showGrants} onClick={() => setShowGrants(!showGrants)}>{showGrants ? "Close contact access" : "View active contact access"}</Button>
     {showGrants && <Suspense fallback={<p role="status">Loading contact access…</p>}><GuardianContactGrants teenUserId={teen.teenUserId} /></Suspense>}
-    <Field id={`guardian-scope-${teen.linkId}`} label="Consent" hint="Account consent lets your teen use Fold. SMS consent also needs their own opt-in before any texts can be sent.">
-      <Select value={scope} onChange={(e) => {
-        const value = e.target.value;
+    {!stale && <>
+      <Field id={`guardian-scope-${teen.linkId}`} label="Consent" hint="Account consent lets your teen use Fold. SMS consent also needs their own opt-in before any texts can be sent.">
+        <Select value={scope} onChange={(e) => {
+          const value = e.target.value;
 
-        if (value === "account" || value === "sms" || value === "photos") { setScope(value); action.reset(); }
-      }}>
-        <option value="account">Account</option><option value="sms">SMS</option><option value="photos">Photos</option>
-      </Select>
-    </Field>
-    <p className="text-sm text-text-muted mt-2">{granted ? "Consent granted" : "Consent not granted"}</p>
+          if (value === "account" || value === "sms" || value === "photos") {
+            setScope(value);
+
+            if (!action.running) action.reset();
+          }
+        }}>
+          <option value="account">Account</option><option value="sms">SMS</option><option value="photos">Photos</option>
+        </Select>
+      </Field>
+      <p className="text-sm text-text-muted mt-2">{granted ? "Consent granted" : "Consent not granted"}</p>
+    </>}
     {state.status === "failed" && <FormError layout="mt-2">{state.text}</FormError>}
-    {state.status === "done" && state.followUpFailed && <FormError layout="mt-2">We couldn't refresh your teen's consent here, so this page may be out of date. Reload the page to see the latest.</FormError>}
     {state.status === "done" && state.text && <p role="status" className="text-sm mt-2">{state.text}</p>}
-    <div className="flex flex-wrap gap-3 mt-3">
-      {granted ? <Button key="revoke" variant="danger-outline" layout="w-full sm:w-auto" disabled={action.running} onClick={() => change("revoked")}>Revoke consent</Button> : <Button key="grant" variant="primary" layout="w-full sm:w-auto" disabled={action.running} onClick={() => change("granted")}>Grant consent</Button>}
+    {stale ? <>
+      <FormError layout="mt-2">{refresh.state.status === "failed" ? refresh.state.text : `Your change is saved, but we couldn't load ${teen.teenName}'s latest consent. Refresh to see it before you change anything else.`}</FormError>
+      <div className="flex flex-wrap gap-3 mt-3">
+        <Button ref={refreshButton} variant="secondary" layout="w-full sm:w-auto" onClick={reload}>{refresh.running ? "Refreshing…" : "Refresh consent"}</Button>
+      </div>
+    </> : <div className="flex flex-wrap gap-3 mt-3">
+      {granted ? <Button ref={consentButton} key="revoke" variant="danger-outline" layout="w-full sm:w-auto" disabled={action.running} onClick={() => change("revoked")}>Revoke consent</Button> : <Button ref={consentButton} key="grant" variant="primary" layout="w-full sm:w-auto" disabled={action.running} onClick={() => change("granted")}>Grant consent</Button>}
       {scope === "account" && <Button variant="secondary" layout="w-full sm:w-auto" disabled={action.running} onClick={email}>Email me a consent link</Button>}
-    </div>
+    </div>}
   </div>;
 }
 

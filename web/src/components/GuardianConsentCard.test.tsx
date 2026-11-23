@@ -1,5 +1,5 @@
 import { stubService } from "../test/service";
-import { act, render, screen } from "@testing-library/react";
+import { act, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, expect, test, vi } from "vitest";
 import { MemoryRouter } from "react-router-dom";
@@ -93,14 +93,45 @@ test.each(["cancelled", "failed"])("%s consent revocation preserves the expanded
   expect(Guardians.teens).toHaveBeenCalledTimes(1);
 });
 
-test("a consent change that saved but whose reload failed says it was saved and asks for a reload (#430)", async () => {
-  vi.mocked(Guardians.teens).mockResolvedValueOnce({ teens: [teen] }).mockRejectedValueOnce(new Error("offline"));
+test("a consent change that saved but whose refresh failed offers no consent action until a refresh lands (#430)", async () => {
+  vi.mocked(Guardians.teens).mockResolvedValueOnce({ teens: [teen] }).mockRejectedValueOnce(new Error("offline")).mockRejectedValueOnce(new Error("offline"))
+    .mockResolvedValueOnce({ teens: [{ ...teen, accountConsent: false }] });
   vi.mocked(Guardians.change).mockResolvedValue({});
   render(<MemoryRouter><GuardianConsentCard /></MemoryRouter>);
   await userEvent.click(await screen.findByRole("button", { name: "Revoke consent" }));
-  expect(await screen.findByText("Account consent revoked.")).toBeInTheDocument();
-  expect(screen.getByRole("alert")).toHaveTextContent("We couldn't refresh your teen's consent here, so this page may be out of date. Reload the page to see the latest.");
+  expect(await screen.findByRole("status")).toHaveTextContent("Account consent revoked.");
+  expect(screen.getByRole("alert")).toHaveTextContent("Your change is saved, but we couldn't load Sam Teen's latest consent. Refresh to see it before you change anything else.");
+
+  const stale = () => {
+    expect(screen.queryByText("Consent granted")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /^(Grant|Revoke) consent$/ })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Email me a consent link" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("combobox", { name: /^Consent/ })).not.toBeInTheDocument();
+  };
+
+  stale();
+  const refresh = screen.getByRole("button", { name: "Refresh consent" });
+  await userEvent.click(refresh);
+  await waitFor(() => expect(screen.getByRole("alert")).toHaveTextContent("couldn't reach"));
+  stale();
+  expect(screen.getByRole("status")).toHaveTextContent("Account consent revoked.");
+  expect(refresh).toHaveFocus();
+  await userEvent.click(refresh);
+  expect(await screen.findByText("Consent not granted")).toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "Refresh consent" })).not.toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Grant consent" })).toHaveFocus();
   expect(Guardians.change).toHaveBeenCalledOnce();
+});
+
+test("changing the consent type while a change is on its way keeps that change's answer", async () => {
+  vi.mocked(Guardians.teens).mockResolvedValue({ teens: [teen] });
+  let refuse!: (cause: unknown) => void;
+  vi.mocked(Guardians.change).mockReturnValueOnce(new Promise((_, reject) => { refuse = reject; }));
+  render(<MemoryRouter><GuardianConsentCard /></MemoryRouter>);
+  await userEvent.click(await screen.findByRole("button", { name: "Revoke consent" }));
+  await userEvent.selectOptions(screen.getByRole("combobox", { name: /^Consent/ }), "sms");
+  await act(async () => { refuse(new ApiError(403, "private", { code: "contact_unavailable" })); });
+  expect(await screen.findByRole("alert")).toHaveTextContent("no longer available to you");
 });
 
 test("a new guardian link request clears the last one's success line (#430)", async () => {

@@ -1,5 +1,5 @@
 import { publicName } from "../lib/can";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { AdminTeenConsents } from "../api/adminUsers";
 import type { TeenConsent, User } from "../types";
 import { errorText } from "../lib/errors";
@@ -25,6 +25,15 @@ export default function TeenConsentPanel({ user, onUpdated, onClose }: { user: U
   const action = useAction();
   const busy = action.running;
   const ref = useRef<HTMLDivElement>(null);
+  // A change that saved but whose refresh failed: what is shown may be out of date, so no consent action is
+  // offered until a refresh lands, and only that clears it.
+  const [stale, setStale] = useState(false);
+  const refresh = useAction();
+  const grantButton = useRef<HTMLButtonElement>(null);
+  const closeButton = useRef<HTMLButtonElement>(null);
+  const refreshButton = useRef<HTMLButtonElement>(null);
+  // A landed refresh removes its button: focus that was on it goes to Grant consent (Close consent for an adult).
+  const refocus = useRef(false);
 
   const load = useCallback(async () => {
     const result = await AdminTeenConsents.list(user.id);
@@ -34,6 +43,20 @@ export default function TeenConsentPanel({ user, onUpdated, onClose }: { user: U
   }, [user.id]);
 
   useEffect(() => { load().catch((e) => setError(errorText(e, "We couldn't load consent history."))); }, [load]);
+
+  useLayoutEffect(() => {
+    if (stale || !refocus.current) return;
+    refocus.current = false;
+    (grantButton.current ?? closeButton.current)?.focus({ preventScroll: true });
+  }, [stale]);
+
+  function reload() {
+    void refresh.run(async () => {
+      await load();
+      refocus.current = document.activeElement === refreshButton.current;
+      setStale(false);
+    });
+  }
 
   async function change(status: TeenConsent["status"]) {
     if (status === "granted" && !evidence.trim()) {
@@ -52,7 +75,18 @@ export default function TeenConsentPanel({ user, onUpdated, onClose }: { user: U
       onUpdated();
 
       return `${scopes.find((item) => item.value === scope)?.label} consent ${status}.`;
-    }, { fallback: "We couldn't save consent.", followUp: load });
+    }, {
+      fallback: "We couldn't save consent.",
+      followUp: async () => {
+        try {
+          await load();
+        } catch (cause) {
+          refresh.reset();
+          setStale(true);
+          throw cause;
+        }
+      },
+    });
   }
 
   const { state } = action;
@@ -61,10 +95,10 @@ export default function TeenConsentPanel({ user, onUpdated, onClose }: { user: U
     <div ref={ref} className="mt-4 border-t border-border pt-4 space-y-4 whitespace-normal" aria-label={`Consent for ${publicName(user)}`}>
       <div className="flex flex-wrap items-center justify-between gap-2">
         <h3 className="font-semibold">Teen consent</h3>
-        <Button variant="ghost" onClick={onClose}>Close consent</Button>
+        <Button ref={closeButton} variant="ghost" onClick={onClose}>Close consent</Button>
       </div>
       {!loaded && !error && <p role="status">Loading consent…</p>}
-      {loaded && <>
+      {loaded && !stale && <>
         <ul className="space-y-1">
           {scopes.map((item) => <li key={item.value}>
             {item.label}: <strong>{history.find((row) => row.scope === item.value)?.status === "granted" ? "Granted" : "Not granted"}</strong>
@@ -81,7 +115,7 @@ export default function TeenConsentPanel({ user, onUpdated, onClose }: { user: U
           </Field>
           <p className="text-sm text-text-muted">SMS consent also needs their own SMS opt-in before any texts can be sent. Photo consent applies to galleries.</p>
           <div className="flex flex-wrap gap-2">
-            <Button variant="primary" onClick={() => void change("granted")} disabled={busy}>{busy ? "Saving…" : "Grant consent"}</Button>
+            <Button ref={grantButton} variant="primary" onClick={() => void change("granted")} disabled={busy}>{busy ? "Saving…" : "Grant consent"}</Button>
             <Button variant="danger-outline" onClick={() => void change("revoked")} disabled={busy}>Revoke consent</Button>
           </div>
         </> : <p className="text-text-muted">This person is now an adult. Their teen consent history stays on file.</p>}
@@ -98,8 +132,11 @@ export default function TeenConsentPanel({ user, onUpdated, onClose }: { user: U
       </>}
       {error && <FormError>{error}</FormError>}
       {state.status === "failed" && <FormError>{state.text}</FormError>}
-      {state.status === "done" && state.followUpFailed && <FormError>We couldn't refresh the consent history, so it may be out of date. Reload the page to see the latest.</FormError>}
       <p role="status" className="text-success empty:hidden">{state.status === "done" ? state.text : ""}</p>
+      {stale && <>
+        <FormError>{refresh.state.status === "failed" ? refresh.state.text : `Your change is saved, but we couldn't load ${publicName(user)}'s latest consent. Refresh to see it before you change anything else.`}</FormError>
+        <Button ref={refreshButton} variant="secondary" onClick={reload}>{refresh.running ? "Refreshing…" : "Refresh consent"}</Button>
+      </>}
     </div>
   );
 }

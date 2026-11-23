@@ -75,17 +75,34 @@ it("explains independent suspension and keeps adult history read-only", async ()
   expect(screen.getByText("Signed parent form")).toBeVisible();
 });
 
-it("says a grant was saved when only the history reload after it fails (#430)", async () => {
+it("says a grant was saved when only the refresh after it fails, and offers no consent action until a refresh lands (#430)", async () => {
   const updated = vi.fn();
   render(<TeenConsentPanel user={teen} onUpdated={updated} onClose={vi.fn()} />);
   await userEvent.type(await screen.findByLabelText("Consent evidence"), "Signed parent form");
-  vi.mocked(AdminTeenConsents.list).mockRejectedValue(new Error("offline"));
+  vi.mocked(AdminTeenConsents.list).mockRejectedValueOnce(new Error("offline")).mockRejectedValueOnce(new Error("offline"));
   await userEvent.click(screen.getByRole("button", { name: "Grant consent" }));
   expect(AdminTeenConsents.change).toHaveBeenCalledOnce();
   expect(await screen.findByRole("status")).toHaveTextContent("Account access consent granted.");
-  expect(screen.getByRole("alert")).toHaveTextContent("We couldn't refresh the consent history, so it may be out of date. Reload the page to see the latest.");
+  expect(screen.getByRole("alert")).toHaveTextContent("Your change is saved, but we couldn't load Casey's latest consent. Refresh to see it before you change anything else.");
   expect(screen.queryByText(/couldn't save/)).not.toBeInTheDocument();
-  expect(screen.getByLabelText("Consent evidence")).toHaveValue("");
+
+  const stale = () => {
+    expect(screen.queryByRole("button", { name: /^(Grant|Revoke) consent$/ })).not.toBeInTheDocument();
+    expect(screen.queryAllByText(/Not granted|Granted/)).toHaveLength(0);
+    expect(screen.queryByLabelText("Consent evidence")).not.toBeInTheDocument();
+  };
+
+  stale();
   expect(updated).toHaveBeenCalledOnce();
-  expect(screen.getByRole("button", { name: "Grant consent" })).toBeEnabled();
+  const refresh = screen.getByRole("button", { name: "Refresh consent" });
+  await userEvent.click(refresh);
+  await waitFor(() => expect(screen.getByRole("alert")).toHaveTextContent("couldn't reach"));
+  stale();
+  expect(refresh).toHaveFocus();
+  vi.mocked(AdminTeenConsents.list).mockResolvedValueOnce({ consents: [consent], administrativelyDisabled: false });
+  await userEvent.click(refresh);
+  expect(await screen.findByText("Granted")).toBeInTheDocument();
+  expect(screen.getByLabelText("Consent evidence")).toHaveValue("");
+  expect(screen.getByRole("button", { name: "Grant consent" })).toHaveFocus();
+  expect(AdminTeenConsents.change).toHaveBeenCalledOnce();
 });
