@@ -23,17 +23,20 @@ import (
 // Parse-only, root package. A users value is a name a function binds to
 // models.User (modelNames), a models.User literal, or an element of a slice or
 // map of them. On a chain with Model(<users value>) or Table("users"), it
-// reports Update or UpdateColumn of "status" or of a column it cannot read;
-// Updates or UpdateColumns of a map
-// holding a "status" key (a literal, or a local map given one), of a map whose
-// keys are computed or that came in as a parameter, or of a users struct; and
-// Save of a users value. It also reports a map holding "status", or a
-// parameter's map, passed to endAllSessionsIn, and raw SQL "UPDATE users SET"
-// that sets status or whose column list follows at run time.
+// reports Update or UpdateColumn of "status" or of a column that is not a
+// string literal; Updates or UpdateColumns of a users struct, of a parameter,
+// or of a map[...]{...} literal, inline or a local name assigned one (:= or
+// var), that has a "status" key or any key that is not a string literal, or of
+// a local map given such a key by an indexed assignment (m["status"], m[k]).
+// It reports the same maps passed to endAllSessionsIn, whatever the chain;
+// Save of a users value; and raw SQL "UPDATE users SET" that sets status or
+// whose column list follows at run time.
 //
 // It does not see a users value reached through a struct field, an interface
-// or a helper's result the root package does not declare; a write made in
-// another package; an upsert (clause.OnConflict) of a users row; or SQL
+// or a helper's result the root package does not declare; a map of a named map
+// type (gin.H, or a type declared elsewhere), a map built by a call (maps.Clone,
+// a helper), copied from another name, or held in a struct field; a write made
+// in another package; an upsert (clause.OnConflict) of a users row; or SQL
 // assembled without the "UPDATE users SET" literal.
 // ---------------------------------------------------------------------------
 
@@ -59,9 +62,15 @@ var (
 type statusWrite struct{ at, fn, shape string }
 
 // localMaps is what fd does to each local map name: given a literal "status"
-// key (in its literal or by assignment), or given a computed key.
+// key, or given a key that is not a string literal, in its map literal or by
+// an indexed assignment.
 func localMaps(fd ast.Node) (status, computed map[string]bool) {
 	status, computed = map[string]bool{}, map[string]bool{}
+	mark := func(name string, e ast.Expr) {
+		hasStatus, hasComputed := mapLitKeys(e)
+		status[name] = status[name] || hasStatus
+		computed[name] = computed[name] || hasComputed
+	}
 	ast.Inspect(fd, func(n ast.Node) bool {
 		as, ok := n.(*ast.AssignStmt)
 		if !ok {
@@ -70,8 +79,8 @@ func localMaps(fd ast.Node) (status, computed map[string]bool) {
 		for i, l := range as.Lhs {
 			switch v := l.(type) {
 			case *ast.Ident:
-				if i < len(as.Rhs) && mapHasStatus(as.Rhs[i]) {
-					status[v.Name] = true
+				if i < len(as.Rhs) {
+					mark(v.Name, as.Rhs[i])
 				}
 			case *ast.IndexExpr:
 				x, ok := guardkit.Unparen(v.X).(*ast.Ident)
@@ -90,8 +99,8 @@ func localMaps(fd ast.Node) (status, computed map[string]bool) {
 	ast.Inspect(fd, func(n ast.Node) bool {
 		if vs, ok := n.(*ast.ValueSpec); ok {
 			for i, name := range vs.Names {
-				if i < len(vs.Values) && mapHasStatus(vs.Values[i]) {
-					status[name.Name] = true
+				if i < len(vs.Values) {
+					mark(name.Name, vs.Values[i])
 				}
 			}
 		}
@@ -100,22 +109,25 @@ func localMaps(fd ast.Node) (status, computed map[string]bool) {
 	return status, computed
 }
 
-func mapHasStatus(e ast.Expr) bool {
+// mapLitKeys reports whether e is a map[...]{...} literal with a "status" key,
+// and whether it has a key that is not a string literal (a constant, a
+// variable, a call), which may name status.
+func mapLitKeys(e ast.Expr) (status, computed bool) {
 	lit, ok := guardkit.Unparen(e).(*ast.CompositeLit)
 	if !ok {
-		return false
+		return false, false
 	}
 	if _, ok := lit.Type.(*ast.MapType); !ok {
-		return false
+		return false, false
 	}
 	for _, el := range lit.Elts {
 		if kv, ok := el.(*ast.KeyValueExpr); ok {
-			if s, ok := stringLit(kv.Key); ok && s == "status" {
-				return true
-			}
+			s, lit := stringLit(kv.Key)
+			status = status || (lit && s == "status")
+			computed = computed || !lit
 		}
 	}
-	return false
+	return status, computed
 }
 
 // paramNames is every parameter name of fd and its function literals.
@@ -171,8 +183,11 @@ func usersChain(x ast.Expr, users modelBindings) bool {
 
 // mapShape is how a map argument carries "status", or "" when it does not.
 func mapShape(e ast.Expr, status, computed, params map[string]bool) string {
-	if mapHasStatus(e) {
+	switch hasStatus, hasComputed := mapLitKeys(e); {
+	case hasStatus:
 		return `a map with "status"`
+	case hasComputed:
+		return "a map with computed keys"
 	}
 	id, ok := guardkit.Unparen(e).(*ast.Ident)
 	if !ok {
@@ -375,6 +390,35 @@ func (a *App) roll(tx *gorm.DB, u *models.User, col string) error {
 func writeUser(tx *gorm.DB, u *models.User, cols map[string]any) error {
 	return tx.Model(u).Updates(cols).Error
 }`, "writeUser: Updates of a parameter's map"},
+		{"a computed key in an inline map", `package main
+func (a *App) roll(tx *gorm.DB, user *models.User, key string, value any) error {
+	return tx.Model(user).Updates(map[string]any{key: value}).Error
+}`, "roll: Updates of a map with computed keys"},
+		{"a constant key in an inline map", `package main
+const statusColumn = "status"
+func (a *App) roll(tx *gorm.DB, id uint) error {
+	return tx.Model(&models.User{}).Where("id = ?", id).UpdateColumns(map[string]any{"name": "x", statusColumn: models.UserActive}).Error
+}`, "roll: UpdateColumns of a map with computed keys"},
+		{"a computed key in a local map literal", `package main
+func (a *App) roll(tx *gorm.DB, user *models.User, key string) error {
+	cols := map[string]any{key: models.UserActive}
+	return tx.Model(user).Updates(cols).Error
+}`, "roll: Updates of a map with computed keys"},
+		{"a computed key in a var map literal", `package main
+func (a *App) roll(tx *gorm.DB, user *models.User, key string) error {
+	var cols = map[string]any{key: models.UserActive}
+	return tx.Model(user).Updates(cols).Error
+}`, "roll: Updates of a map with computed keys"},
+		{"a session end with a computed key", `package main
+func (a *App) roll(tx *gorm.DB, u *models.User, key string) error {
+	return endAllSessionsIn(tx, u, map[string]any{key: models.UserActive})
+}`, "roll: endAllSessionsIn with a map with computed keys"},
+		{"literal keys that are not status", `package main
+func (a *App) photo(tx *gorm.DB, u *models.User) error {
+	cols := map[string]any{"avatar_key": ""}
+	tx.Model(u).Updates(cols)
+	return tx.Model(u).Updates(map[string]any{"name": "x"}).Error
+}`, ""},
 		{"another table's status", `package main
 func (a *App) leave(tx *gorm.DB, m *models.Membership) error {
 	tx.Model(m).Update("status", models.MembershipLeft)
