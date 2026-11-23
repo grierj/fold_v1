@@ -671,7 +671,7 @@ func (a *App) eraseAccountIn(tx *gorm.DB, s erasureSubject, opts erasureOptions)
 	if out.Households, err = a.eraseHouseholdRecordsIn(tx, s, homes, opts.Actor, opts.IP); err != nil {
 		return out, err
 	}
-	if err := a.promoteOnDisable(tx, s.ID, opts.Live != nil); err != nil {
+	if err := a.promoteOnDisable(tx, s.ID, opts.Live != nil, a.now()); err != nil {
 		return out, err
 	}
 	if err := eraseDependentRecordsIn(tx, s, opts.Actor, opts.IP); err != nil {

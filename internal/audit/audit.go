@@ -83,6 +83,15 @@ const (
 	// UserEnabled: an admin enabled a disabled account again.
 	UserEnabled = "user.enabled"
 
+	// UserStatusChanged: an account's status moved for a reason no other
+	// action names: a household teen's conversion waiting for consent and a
+	// guardian (active to pending_consent) or completing (to active). Target is
+	// the user; meta has previousStatus, status and reason
+	// ("household_conversion"). It stores no actor and no IP: who ran a
+	// completion step is not kept until the owner decides erasure inventory
+	// option P5 (DEC-159).
+	UserStatusChanged = "user.status_changed"
+
 	// MemberRestored: a disabled account was enabled and one of its kept
 	// memberships came back as a plain member (DEC-38). Meta: userId, status.
 	MemberRestored = "membership.restored"
