@@ -224,7 +224,7 @@ func toMessageJSON(m *models.Message, me *models.User, facts messageFacts) messa
 	reminder := m.Category == models.MessageCategoryReminder
 	out := messageJSON{ID: m.ID, Channel: m.Channel, Status: m.Status, Subject: m.Subject, BodyHTML: m.BodyHTML,
 		Audience: au, ScheduledAt: m.ScheduledAt, SentAt: m.SentAt, AuthorName: name,
-		Editable:  (m.Status == models.MessageDraft || m.Status == models.MessageScheduled) && policy.CanEditMessage(asPerson(me), isAuthor, reminder),
+		Editable:  policy.MessageEditable(m.Status) && policy.CanEditMessage(asPerson(me), isAuthor, reminder),
 		UpdatedAt: m.UpdatedAt, Error: messageErrorFor(m.Error, policy.IsAdmin(asPerson(me))), FailedCount: facts.failed[m.ID],
 		Category: m.Category, PushAlert: m.PushAlert, PushWaiting: facts.pushWaiting[m.ID]}
 	if reminder && m.OccurrenceID != nil {
@@ -724,7 +724,7 @@ func (a *App) apiCreateMessage(c *gin.Context) {
 		fail(c, errMessageNotYours)
 		return
 	}
-	m := models.Message{AuthorID: &me.ID, Status: models.MessageDraft, Category: models.MessageCategoryAnnouncement}
+	m := models.Message{AuthorID: &me.ID, Status: policy.MessageCreateDraft.To(), Category: models.MessageCategoryAnnouncement}
 	if !a.applyMessageBody(c, me, &m) {
 		return
 	}
@@ -968,7 +968,7 @@ func (a *App) apiListMessages(c *gin.Context) {
 
 // editable reports whether m can still change; false means 409 was sent.
 func editable(c *gin.Context, m *models.Message) bool {
-	if m.Status != models.MessageDraft && m.Status != models.MessageScheduled {
+	if !policy.MessageEditable(m.Status) {
 		fail(c, errMessageLocked)
 		return false
 	}
@@ -1031,11 +1031,9 @@ func (a *App) apiUpdateMessage(c *gin.Context) {
 				a.hooks.messageLimitAfterCount(tx)
 			}
 		}
-		res := tx.Model(&models.Message{}).Where("id = ? AND status = ?", m.ID, m.Status).Updates(fields)
-		if res.Error != nil {
-			return res.Error
-		}
-		if res.RowsAffected == 0 {
+		if moved, err := moveMessage(tx, m.ID, policy.MessageEdit, fields, "status = ?", m.Status); err != nil {
+			return err
+		} else if !moved {
 			return errLocked
 		}
 		// Changing what is already scheduled, or someone else's message, is
@@ -1108,7 +1106,7 @@ func (a *App) apiScheduleMessage(c *gin.Context) {
 			}
 			return err
 		}
-		if cur.Status != models.MessageDraft && cur.Status != models.MessageScheduled {
+		if !policy.MessageSchedule.Allows(cur.Status) {
 			return errLocked
 		}
 		// The count below judges the audience that was validated.
@@ -1123,12 +1121,10 @@ func (a *App) apiScheduleMessage(c *gin.Context) {
 		if a.hooks.messageLimitAfterCount != nil {
 			a.hooks.messageLimitAfterCount(tx)
 		}
-		res := tx.Model(&models.Message{}).Where("id = ? AND status IN ?", m.ID, []string{models.MessageDraft, models.MessageScheduled}).
-			Updates(map[string]any{"status": models.MessageScheduled, "scheduled_at": when, "recipient_count": s.Eligible, "updated_at": now})
-		if res.Error != nil {
-			return res.Error
-		}
-		if res.RowsAffected == 0 {
+		if moved, err := moveMessage(tx, m.ID, policy.MessageSchedule,
+			map[string]any{"scheduled_at": when, "recipient_count": s.Eligible, "updated_at": now}, ""); err != nil {
+			return err
+		} else if !moved {
 			return errLocked
 		}
 		if err := enqueueMessageSend(tx, m.ID, when); err != nil {
@@ -1164,12 +1160,9 @@ func (a *App) apiCancelMessage(c *gin.Context) {
 	}
 	me := apiUser(c)
 	err := a.DB.Transaction(func(tx *gorm.DB) error {
-		res := tx.Model(&models.Message{}).Where("id = ? AND status IN ?", m.ID, []string{models.MessageDraft, models.MessageScheduled}).
-			Updates(map[string]any{"status": models.MessageCancelled, "updated_at": time.Now()})
-		if res.Error != nil {
-			return res.Error
-		}
-		if res.RowsAffected == 0 {
+		if moved, err := moveMessage(tx, m.ID, policy.MessageCancel, map[string]any{"updated_at": time.Now()}, ""); err != nil {
+			return err
+		} else if !moved {
 			return errLocked
 		}
 		return audit.Write(tx, audit.Entry{Actor: &me.ID, Action: audit.MessageCancelled, TargetType: "message", TargetID: m.ID, IP: c.ClientIP()})

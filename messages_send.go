@@ -134,7 +134,7 @@ func (a *App) prepareMessageOnce(ctx context.Context, id uint) error {
 	}
 	now := time.Now()
 	// Cancelled, already taken, or moved later (its own job comes then).
-	if m.Status != models.MessageScheduled || m.ScheduledAt == nil || m.ScheduledAt.After(now.Add(time.Second)) {
+	if !policy.MessageClaim.Allows(m.Status) || m.ScheduledAt == nil || m.ScheduledAt.After(now.Add(time.Second)) {
 		return nil
 	}
 	read := &m
@@ -182,12 +182,12 @@ func (a *App) prepareMessageOnce(ctx context.Context, id uint) error {
 		rows = revalidateSnapshotRows(rows, live)
 		// The claim holds only if nobody changed the message since it was
 		// read; if somebody did, it is checked again (stillDue).
-		res := tx.Model(&models.Message{}).Where("id = ? AND status = ? AND scheduled_at = ? AND updated_at = ?", m.ID, models.MessageScheduled, m.ScheduledAt, m.UpdatedAt).
-			Updates(map[string]any{"status": models.MessageSending, "error": "", "updated_at": time.Now()})
-		if res.Error != nil {
-			return res.Error
+		moved, err := moveMessage(tx, m.ID, policy.MessageClaim, map[string]any{"error": "", "updated_at": time.Now()},
+			"scheduled_at = ? AND updated_at = ?", m.ScheduledAt, m.UpdatedAt)
+		if err != nil {
+			return err
 		}
-		if res.RowsAffected == 0 {
+		if !moved {
 			return stillDue(tx, m.ID)
 		}
 		claimed = true
@@ -386,15 +386,15 @@ func guardianCopyRows(db *gorm.DB, messageID uint, teens []uint, direct map[uint
 // changed since, the refusal is left to the next job.
 func (a *App) refuseMessage(db *gorm.DB, m *models.Message, read *models.Message, why string) error {
 	return db.Transaction(func(tx *gorm.DB) error {
-		q := tx.Model(&models.Message{}).Where("id = ? AND status = ?", m.ID, models.MessageScheduled)
+		where, args := "", []any(nil)
 		if read != nil {
-			q = q.Where("updated_at = ?", read.UpdatedAt)
+			where, args = "updated_at = ?", []any{read.UpdatedAt}
 		}
-		res := q.Updates(map[string]any{"status": models.MessageFailed, "error": why, "updated_at": time.Now()})
-		if res.Error != nil {
-			return res.Error
+		moved, err := moveMessage(tx, m.ID, policy.MessageRefuse, map[string]any{"error": why, "updated_at": time.Now()}, where, args...)
+		if err != nil {
+			return err
 		}
-		if res.RowsAffected == 0 {
+		if !moved {
 			if read != nil {
 				return stillDue(tx, m.ID)
 			}
@@ -427,7 +427,7 @@ func (a *App) settleMessage(tx *gorm.DB, id uint) error {
 		return nil
 	}
 	reached := by[models.RecipientSent] + by[models.RecipientDelivered] + by[models.RecipientBounced] + by[models.RecipientComplained]
-	status, why := models.MessageSent, ""
+	move, why := policy.MessageSettleSent, ""
 	if by[models.RecipientFailed] > 0 {
 		var first models.MessageRecipient
 		if err := tx.Select("error").Where("message_id = ? AND status = ? AND channel = ?", id, models.RecipientFailed, models.DeliveryEmail).Order("id").First(&first).Error; err != nil {
@@ -435,21 +435,19 @@ func (a *App) settleMessage(tx *gorm.DB, id uint) error {
 		}
 		why = first.Error
 		if reached == 0 {
-			status = models.MessageFailed
+			move = policy.MessageSettleFailed
 		}
 	}
 	now := time.Now()
-	res := tx.Model(&models.Message{}).Where("id = ? AND status = ?", id, models.MessageSending).
-		Updates(map[string]any{"status": status, "sent_at": now, "error": why, "updated_at": now})
-	if res.Error != nil || res.RowsAffected == 0 {
-		return res.Error
+	if moved, err := moveMessage(tx, id, move, map[string]any{"sent_at": now, "error": why, "updated_at": now}, ""); err != nil || !moved {
+		return err
 	}
 	var m models.Message
 	if err := tx.Select("id, author_id").First(&m, id).Error; err != nil {
 		return err
 	}
 	return audit.Write(tx, audit.Entry{Actor: m.AuthorID, Action: audit.MessageSent, TargetType: "message", TargetID: id,
-		Meta: map[string]any{"status": status, "sent": reached, "skipped": by[models.RecipientSuppressed], "failed": by[models.RecipientFailed]}})
+		Meta: map[string]any{"status": move.To(), "sent": reached, "skipped": by[models.RecipientSuppressed], "failed": by[models.RecipientFailed]}})
 }
 
 // batchDeadline keeps a batch well inside the jobs lease (15 minutes), so
@@ -850,8 +848,8 @@ func (a *App) reapMessages(ctx context.Context, now time.Time) error {
 	reminderLive := `EXISTS (SELECT 1 FROM jobs j WHERE j.kind = '` + kindReminderSend + `' AND j.status IN ('queued', 'running', 'failed')
 		AND j.unique_key = ` + reminderJobKeySQL("messages.reminder_key") + `)`
 	var stuck []models.Message
-	if err := db.Select("id, author_id").Where("status = ? AND scheduled_at < ? AND "+live(kindMessageSend)+" AND NOT (category = ? AND "+reminderLive+")",
-		models.MessageScheduled, now.Add(-time.Hour), models.MessageCategoryReminder).
+	if err := db.Select("id, author_id").Where("status IN ? AND scheduled_at < ? AND "+live(kindMessageSend)+" AND NOT (category = ? AND "+reminderLive+")",
+		policy.MessageRefuse.From(), now.Add(-time.Hour), models.MessageCategoryReminder).
 		Find(&stuck).Error; err != nil {
 		return err
 	}
@@ -861,7 +859,7 @@ func (a *App) reapMessages(ctx context.Context, now time.Time) error {
 		}
 	}
 	var sending []uint
-	if err := db.Model(&models.Message{}).Where("status = ? AND updated_at < ? AND "+live(kindMessageBatch), models.MessageSending, now.Add(-time.Hour)).
+	if err := db.Model(&models.Message{}).Where("status IN ? AND updated_at < ? AND "+live(kindMessageBatch), policy.MessageSettleSent.From(), now.Add(-time.Hour)).
 		Pluck("id", &sending).Error; err != nil {
 		return err
 	}
@@ -985,7 +983,7 @@ func stillDue(tx *gorm.DB, id uint) error {
 	if err := tx.Select("id, status, scheduled_at").First(&m, id).Error; err != nil {
 		return err
 	}
-	if m.Status == models.MessageScheduled && m.ScheduledAt != nil && !m.ScheduledAt.After(time.Now().Add(time.Second)) {
+	if policy.MessageClaim.Allows(m.Status) && m.ScheduledAt != nil && !m.ScheduledAt.After(time.Now().Add(time.Second)) {
 		return errChangedWhilePreparing
 	}
 	return nil
