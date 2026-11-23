@@ -170,6 +170,9 @@ export function SeriesEditor({
   const refreshButton = useRef<HTMLButtonElement | null>(null);
   // Holds Close and the saved lines, brought into view when focus moves there.
   const outcome = useRef<HTMLDivElement>(null);
+  // Focus this editor put on the form because Close was off, to hand to Close once it is on. A press in the form
+  // is the person's own focus there, which is left alone.
+  const waitsForClose = useRef(false);
   // A read that lands removes the Refresh button, whoever asked for it (this editor's Refresh or the page's own
   // Try again): focus that was on it as it left the page goes to Close.
   const refocus = useRef(false);
@@ -190,8 +193,9 @@ export function SeriesEditor({
   // still in the form goes there, and the saved lines come into view with it. While another save in the panel keeps
   // Close off, focus waits on the form, where a save keeps it, and goes to Close once it can be pressed.
   const showOutcome = (target: HTMLButtonElement | null) => {
-    const able = target !== null && !target.disabled ? target : root.current;
-    able?.focus({ preventScroll: true });
+    const able = target !== null && !target.disabled;
+    waitsForClose.current = !able;
+    (able ? target : root.current)?.focus({ preventScroll: true });
     outcome.current?.scrollIntoView?.({ block: "nearest" });
   };
 
@@ -208,7 +212,10 @@ export function SeriesEditor({
     showOutcome(close.current);
   }, [stale]);
   useLayoutEffect(() => {
-    if (finished && !closeOff && document.activeElement === root.current) showOutcome(close.current);
+    if (!finished || closeOff || !waitsForClose.current) return;
+    waitsForClose.current = false;
+
+    if (document.activeElement === root.current) showOutcome(close.current);
   }, [finished, closeOff, root]);
 
   useLayoutEffect(() => {
@@ -325,7 +332,8 @@ export function SeriesEditor({
   }
 
   return (<>
-    <Form ref={root} tabIndex={-1} noValidate onSubmit={save} className="mt-3 space-y-4 border-t border-border pt-3">
+    <Form ref={root} tabIndex={-1} noValidate onSubmit={save} onPointerDown={() => { waitsForClose.current = false; }}
+      className="mt-3 space-y-4 border-t border-border pt-3">
       <p className="text-sm text-text-muted">
         This changes every future date that has not been edited on its own. Customized dates stay as they are. Dates
         the new schedule drops are cancelled, and people who were going or maybe are told.
