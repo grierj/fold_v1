@@ -27,7 +27,8 @@ type adminJobJSON struct {
 	// Label says what the job does in plain words.
 	Label string `json:"label"`
 	// RunsDaily: tomorrow's run will try again by itself.
-	RunsDaily bool      `json:"runsDaily"`
+	RunsDaily bool `json:"runsDaily"`
+	// Attempts counts the attempts that ran (jobs.AttemptsRun).
 	Attempts  int       `json:"attempts"`
 	LastError string    `json:"lastError"`
 	FailedAt  time.Time `json:"failedAt"`
@@ -66,7 +67,7 @@ func (a *App) jobManager() gin.HandlerFunc {
 
 func (a *App) apiAdminDeadJobs(c *gin.Context) {
 	var rows []models.Job
-	if err := a.DB.Select("id, kind, attempts, last_error, updated_at").Where("status = ?", models.JobDead).
+	if err := a.DB.Select("id, kind, attempts, max_attempts, last_error, updated_at").Where("status = ?", models.JobDead).
 		Order("updated_at DESC, id DESC").Limit(maxDeadJobsListed + 1).Find(&rows).Error; err != nil {
 		jsonError(c, http.StatusInternalServerError, "could not load background jobs")
 		return
@@ -94,7 +95,7 @@ func (a *App) apiAdminDeadJobs(c *gin.Context) {
 			label = j.Kind
 		}
 		out = append(out, adminJobJSON{ID: j.ID, Kind: j.Kind, Label: label, RunsDaily: k.Daily,
-			Attempts: j.Attempts, LastError: j.LastError, FailedAt: j.UpdatedAt})
+			Attempts: jobs.AttemptsRun(j.Attempts, j.MaxAttempts), LastError: j.LastError, FailedAt: j.UpdatedAt})
 	}
 	c.JSON(http.StatusOK, adminJobsJSON{Jobs: out, More: more, Deliveries: deliveries})
 }

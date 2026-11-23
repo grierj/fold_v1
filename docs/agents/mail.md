@@ -22,6 +22,11 @@ suppressions. The guards named here are parse-only; each test file states its ow
   on a UTF8 database (`TestSuppressionMatchingBasis`).
 - Notices are delivered by the `notify.deliver` job that `notify.Send` queues, never by their
   callers (`TestNoticesAreDeliveredBySendNotByCallers`).
+- Dismissing a dead `notify.deliver` job marks its email row suppressed (its `OnDismiss`). A run of
+  that job that outlived its lease (only a frozen process: the providers time out in seconds) can
+  still send that one email afterwards; the row stays suppressed, because `updateEmailDelivery`
+  changes only queued or deferred rows. This is accepted (Grier): closing it would need a claim
+  check inside the send.
 
 ## Optional email choices
 

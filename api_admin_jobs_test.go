@@ -91,7 +91,7 @@ func TestDeadNoticeJobDecisions(t *testing.T) {
 
 func deadJob(t *testing.T, app *App, kind, key, lastError string) models.Job {
 	t.Helper()
-	if _, err := enqueueJob(app.DB, kind, map[string]string{"email": "secret@example.com"}, time.Now(), key, 1); err != nil {
+	if _, err := enqueueJob(app.DB, kind, map[string]string{"email": "secret@example.com"}, time.Now(), key, 5); err != nil {
 		t.Fatal(err)
 	}
 	var j models.Job
@@ -108,6 +108,10 @@ func TestSystemPageListsDeadJobsForAdmins(t *testing.T) {
 	admin, member := loginAPI(t, app, "admin", "password1234"), loginAPI(t, app, "member", "password1234")
 	extend := deadJob(t, app, "occurrences.extend", "occurrences.extend:2026-10-30", "connection refused")
 	deadJob(t, app, "mystery.kind", "mystery:1", "no handler")
+	// Its worker stopped during the last attempt: the claim that took it back
+	// counted a sixth attempt that never ran.
+	stopped := deadJob(t, app, "contact.sweep", "contact.sweep:stopped", "the worker stopped while running it")
+	app.DB.Model(&stopped).Update("attempts", 6)
 	enqueueJob(app.DB, "accounts.age_rollover", nil, time.Now(), "alive", 0) // queued, not listed
 
 	if w := member.do("GET", "/api/v1/admin/jobs", nil, false); w.Code != http.StatusForbidden {
@@ -124,7 +128,7 @@ func TestSystemPageListsDeadJobsForAdmins(t *testing.T) {
 		More bool           `json:"more"`
 	}
 	decodeJSON(t, w, &out)
-	if len(out.Jobs) != 2 || out.More {
+	if len(out.Jobs) != 3 || out.More {
 		t.Fatalf("dead jobs: %s", body)
 	}
 	byKind := map[string]adminJobJSON{}
@@ -136,6 +140,9 @@ func TestSystemPageListsDeadJobsForAdmins(t *testing.T) {
 	}
 	if j := byKind["mystery.kind"]; j.Label != "mystery.kind" || j.RunsDaily {
 		t.Fatalf("an unknown kind is named by its kind: %+v", j)
+	}
+	if j := byKind["contact.sweep"]; j.Attempts != 5 {
+		t.Fatalf("a claim past the last attempt counted as a try: %+v", j)
 	}
 	// The payload can name people and never reaches the page.
 	if strings.Contains(body, "secret@example.com") || strings.Contains(body, "payload") {
