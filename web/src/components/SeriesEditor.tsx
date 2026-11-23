@@ -173,7 +173,7 @@ export function SeriesEditor({ series, roomDate, onStale, action: shared, locked
   const action = shared ?? own;
   const frozen = action.running || locked;
 
-  // Not while a save is on its way: its answer belongs to the form that sent it. The render after it catches up.
+  // Not while a save is on its way: nothing in the form changes under it. The render after it catches up.
   if (!frozen && (series.revision !== seen.revision || !same(stored, seen.form))) {
     const next = rebasedDraft(draft.current, seen.form, stored);
 
@@ -209,6 +209,7 @@ export function SeriesEditor({ series, roomDate, onStale, action: shared, locked
       draft={draft}
       notice={notice?.text ?? null}
       noticeRef={noticeRef}
+      // Only while one shows: React keeps a no-op update queued and replays it after the notice a restart sets in render.
       onEdit={() => { if (notice) setNotice(null); }}
       onChanged={(text) => {
         setNotice({ text });

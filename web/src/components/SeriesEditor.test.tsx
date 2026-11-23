@@ -815,6 +815,22 @@ describe("SeriesEditor following a newer read", () => {
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
   });
 
+  it("changes nothing while a save is on its way, and starts again from a read that landed then once it ends", async () => {
+    const put = deferred<{ event: ReturnType<typeof testEvent> }>();
+    vi.mocked(Events.update).mockReset().mockReturnValueOnce(put.promise);
+    const view = render(<SeriesEditor series={weekly} {...props} />);
+    const title = screen.getByRole("textbox", { name: "Title" });
+    await userEvent.type(title, " night{Enter}");
+    view.rerender(<SeriesEditor series={{ ...weekly, description: "Bring a dish", revision: "r2" }} {...props} />);
+    expect(screen.getByRole("textbox", { name: "Title" })).toBe(title);
+    expect(screen.getByRole("textbox", { name: /^Description/ })).toHaveValue("");
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    await act(async () => { put.reject(new Error("offline")); await put.promise.catch(() => {}); });
+    expect(screen.getByRole("textbox", { name: /^Description/ })).toHaveValue("Bring a dish");
+    expect(screen.getByRole("textbox", { name: "Title" })).toHaveValue("Supper night");
+    expect(screen.getByRole("alert")).toHaveTextContent(editing);
+  });
+
   it("does nothing visible when a newer read moves only the revision, and saves with it", async () => {
     const jitsi = deferred<{ url: string }>();
     vi.mocked(Events.generateJitsi).mockReturnValueOnce(jitsi.promise);
