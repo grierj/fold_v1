@@ -55,7 +55,7 @@ func (a *App) rolloverAges(now time.Time) (int, error) {
 			// even when the preliminary try-locked sweep was busy.
 			err = a.reconcileContacts(tx, now, contactChange{UserID: id})
 			return err
-		})
+		}, contactGateTx)
 		if err != nil {
 			failures = append(failures, fmt.Errorf("user %d: %w", id, err))
 			continue
@@ -169,7 +169,7 @@ func (a *App) rolloverTeen(tx *gorm.DB, user *models.User, today, now time.Time)
 		if err := restoreMemberships(tx, user.ID, 0, ""); err != nil {
 			return false, err
 		}
-		if err := a.restoreRegistrations(tx, user.ID, status, nil, "", now); err != nil {
+		if err := a.restoreRegistrations(tx, user.ID, map[string]any{"status": status}, nil, "", now); err != nil {
 			return false, err
 		}
 	}

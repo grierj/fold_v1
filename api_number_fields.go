@@ -55,6 +55,18 @@ func parseCapacity(raw *json.RawMessage) (cap *int, set bool, err error) {
 	return n, set, nil
 }
 
+// parseDateCapacity is one date's in-person cap override: null clears it to the
+// event's capacity, a positive whole number sets it. raw is empty when absent.
+// The event's own parseCapacity is separate on purpose: its body binds a
+// pointer, and a null there has always read as absent.
+func parseDateCapacity(raw json.RawMessage) (cap *int, set bool, err error) {
+	n, set, ok := seatLimitField.parse(raw, len(raw) != 0)
+	if !ok {
+		return nil, false, errInvalidCapacity
+	}
+	return n, set, nil
+}
+
 // parseRemoteCapacity permits 0 only for a per-date override, to close
 // remote seats on that date. For an event, uncheck remote attendance.
 func parseRemoteCapacity(raw json.RawMessage, allowZero bool) (cap *int, set bool, err error) {

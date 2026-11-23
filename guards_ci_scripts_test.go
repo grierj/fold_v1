@@ -436,6 +436,155 @@ func TestMergeRulesCheckScript(t *testing.T) {
 	})
 }
 
+// TestE2ERunnerRefusesBadArguments runs web/e2e/run.sh with arguments that
+// would break a filtered run: a reporter replaces the JSON reports it counts,
+// a spec file name (or a word after an option the runner takes no value for)
+// is added to every shard's planned files, and a short option with = changes
+// the value Playwright reads. It must refuse
+// them before it builds or starts anything; a stand-in go and npx fail the
+// test fast if it ever gets that far.
+func TestE2ERunnerRefusesBadArguments(t *testing.T) {
+	if _, err := exec.LookPath("bash"); err != nil {
+		if os.Getenv("CI") != "" {
+			t.Fatalf("bash is required for the e2e runner tests: %v", err)
+		}
+		t.Skipf("bash is not installed; CI runs this test")
+	}
+	stubs := t.TempDir()
+	for _, tool := range []string{"go", "npx", "node"} {
+		if err := os.WriteFile(filepath.Join(stubs, tool), []byte("#!/bin/sh\necho \"run.sh started $0\" >&2\nexit 99\n"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cases := []struct {
+		name string
+		args []string
+		want string
+	}{
+		{"a reporter with =", []string{"--reporter=dot"}, "reporter overrides are not allowed"},
+		{"a reporter as its own word", []string{"--reporter", "dot"}, "reporter overrides are not allowed"},
+		{"a reporter after a filter", []string{"--grep", "hosts", "--reporter=json"}, "reporter overrides are not allowed"},
+		{"an option terminator", []string{"--", "--grep", "hosts"}, "option terminator is not allowed"},
+		{"a spec file", []string{"hosts.spec.ts"}, "is not a Playwright option"},
+		{"a spec file after a filter", []string{"--grep", "hosts", "e2e/hosts.spec.ts"}, "is not a Playwright option"},
+		{"a spec file after an inverted short filter", []string{"-G", "hosts", "hosts.spec.ts"}, "is not a Playwright option"},
+		{"list mode", []string{"--list"}, "--list is not available"},
+		{"list mode after a filter", []string{"--grep", "hosts", "--list"}, "--list is not available"},
+		{"a short filter with =", []string{"-G=hosts"}, "give a short option's value as the next word"},
+		{"short workers with =", []string{"-j=2"}, "give a short option's value as the next word"},
+		{"a value for an option the runner does not take values for", []string{"--output", "results"}, "'results' is not a Playwright option"},
+		{"a second project name", []string{"--project", "chromium", "firefox"}, "'firefox' is not a Playwright option"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			cmd := exec.Command("bash", append([]string{"web/e2e/run.sh"}, c.args...)...)
+			cmd.Env = append(os.Environ(),
+				"PATH="+stubs+string(os.PathListSeparator)+os.Getenv("PATH"),
+				"DATABASE_URL=postgres://unused.invalid/fold",
+				"E2E_RUNNER=1/1",
+				"E2E_SHARDS=1",
+			)
+			out, err := cmd.CombinedOutput()
+			var exit *exec.ExitError
+			if !errors.As(err, &exit) || exit.ExitCode() != 2 || !strings.Contains(string(out), c.want) {
+				t.Fatalf("run.sh %v: got %v, output %q; want exit 2 with %q", c.args, err, out, c.want)
+			}
+		})
+	}
+}
+
+// TestE2ERunnerForwardsFilters runs a copy of web/e2e/run.sh in a throwaway
+// tree whose go, node and npx are stand-ins, so nothing is built or started.
+// Every accepted filter form, the short aliases included, each option the
+// runner takes a value for, flags with no value, and an option value that looks
+// like a spec file or an option, must reach Playwright unchanged in every
+// shard, the dev shard too, after the shard's own spec files.
+func TestE2ERunnerForwardsFilters(t *testing.T) {
+	if _, err := exec.LookPath("bash"); err != nil {
+		if os.Getenv("CI") != "" {
+			t.Fatalf("bash is required for the e2e runner tests: %v", err)
+		}
+		t.Skipf("bash is not installed; CI runs this test")
+	}
+	runner, err := os.ReadFile(filepath.Join("web", "e2e", "run.sh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	stubs := map[string]string{
+		"go":   "#!/bin/sh\nexit 0\n",
+		"node": "#!/bin/sh\ncase \"$2\" in\nplan) echo '|hosts.spec.ts' ;;\nran) echo 1 ;;\n*) echo \"unexpected node $*\" >&2; exit 98 ;;\nesac\n",
+		"npx":  "#!/bin/sh\nprintf '%s\\n' \"$@\" >\"$RUNNER_ARGS/$E2E_SHARD.args\"\necho '  1 passed (1.0s)'\n",
+	}
+	cases := []struct {
+		name string
+		args []string
+	}{
+		{"short grep", []string{"-g", "hosts"}},
+		{"short grep-invert", []string{"-G", "hosts"}},
+		{"long grep", []string{"--grep", `hosts\.spec|series-rsvp`}},
+		{"long grep-invert", []string{"--grep-invert", "hosts"}},
+		{"grep with =", []string{"--grep=hosts"}},
+		{"grep-invert with =", []string{"--grep-invert=hosts"}},
+		{"a value that looks like a spec file", []string{"-G", "hosts.spec.ts"}},
+		{"several options", []string{"--grep", "hosts", "-G", "slow", "--project", "chromium", "--workers", "2", "--headed"}},
+		{"global timeout", []string{"--global-timeout", "120000"}},
+		{"global timeout with =", []string{"--global-timeout=120000"}},
+		{"test timeout and failure limit", []string{"--timeout", "5000", "--max-failures=1", "-x"}},
+		{"repeats and retries", []string{"--repeat-each", "2", "--retries", "1"}},
+		{"short workers and a trace mode", []string{"-j", "2", "--trace", "on"}},
+		{"a value that looks like an option", []string{"--grep", "-x", "--headed"}},
+		{"a value that looks like a spec file after a timeout", []string{"--timeout", "5000", "--grep", "hosts.spec.ts"}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			root := t.TempDir()
+			e2e := filepath.Join(root, "web", "e2e")
+			bin := filepath.Join(root, "bin")
+			recorded := filepath.Join(root, "args")
+			for _, dir := range []string{e2e, bin, recorded} {
+				if err := os.MkdirAll(dir, 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			files := map[string]string{
+				filepath.Join(e2e, "run.sh"):         string(runner),
+				filepath.Join(e2e, "outbox.spec.ts"): "// reads /dev/outbox\n",
+				filepath.Join(bin, "go"):             stubs["go"],
+				filepath.Join(bin, "node"):           stubs["node"],
+				filepath.Join(bin, "npx"):            stubs["npx"],
+			}
+			for path, body := range files {
+				if err := os.WriteFile(path, []byte(body), 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			cmd := exec.Command("bash", append([]string{filepath.Join(e2e, "run.sh")}, c.args...)...)
+			cmd.Env = append(os.Environ(),
+				"PATH="+bin+string(os.PathListSeparator)+os.Getenv("PATH"),
+				"DATABASE_URL=postgres://unused.invalid/fold",
+				"E2E_RUNNER=1/1",
+				"E2E_SHARDS=1",
+				"E2E_RECORD_DURATIONS=",
+				"RUNNER_ARGS="+recorded,
+			)
+			out, err := cmd.CombinedOutput()
+			if err != nil || !strings.Contains(string(out), "e2e: the filter selected 1 tests") {
+				t.Fatalf("run.sh %v: got %v, output %q; want a filtered run that passes", c.args, err, out)
+			}
+			for shard, spec := range map[string]string{"1": "e2e/hosts.spec.ts", "dev": "e2e/outbox.spec.ts"} {
+				got, err := os.ReadFile(filepath.Join(recorded, shard+".args"))
+				if err != nil {
+					t.Fatalf("shard %s never started Playwright: %v; output %q", shard, err, out)
+				}
+				want := append([]string{"playwright", "test", "--reporter=list,json", "--pass-with-no-tests", "seed", spec}, c.args...)
+				if lines := strings.Split(strings.TrimSuffix(string(got), "\n"), "\n"); strings.Join(lines, "\x00") != strings.Join(want, "\x00") {
+					t.Fatalf("shard %s ran npx %q, want %q", shard, lines, want)
+				}
+			}
+		})
+	}
+}
+
 // contractGateEnv is a git environment that reads nothing from the machine:
 // empty global and system config, a throwaway HOME, no inherited GIT_*
 // variables (a hook may set GIT_DIR), a fixed identity and a ceiling so a

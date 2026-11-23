@@ -8,6 +8,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -715,19 +716,19 @@ func TestDepartureSupersedesManagerAccessForExactEndLifecycle(t *testing.T) {
 
 			boundary := occ.EndsAt
 			before := boundary.Add(-time.Nanosecond)
-			dateBefore, err := f.app.scopedOccurrenceReads(f.subject, f.app.DB.Where("id = ?", occ.ID), before)
+			dateBefore, err := f.app.scopedOccurrenceReadsIn(f.app.DB, f.subject, f.app.DB.Where("id = ?", occ.ID), before)
 			if err != nil || dateBefore[occ.ID] == nil {
 				t.Fatalf("date access before end: %v %+v", err, dateBefore)
 			}
-			dateAt, err := f.app.scopedOccurrenceReads(f.subject, f.app.DB.Where("id = ?", occ.ID), boundary)
+			dateAt, err := f.app.scopedOccurrenceReadsIn(f.app.DB, f.subject, f.app.DB.Where("id = ?", occ.ID), boundary)
 			if err != nil || dateAt[occ.ID] != nil {
 				t.Fatalf("date access at exact end: %v %+v", err, dateAt)
 			}
-			calendarBefore, err := f.app.scopedOccurrenceReads(f.subject, f.app.DB.Where("starts_at >= ? AND starts_at < ?", now, boundary.Add(time.Hour)), before)
+			calendarBefore, err := f.app.scopedOccurrenceReadsIn(f.app.DB, f.subject, f.app.DB.Where("starts_at >= ? AND starts_at < ?", now, boundary.Add(time.Hour)), before)
 			if err != nil || calendarBefore[occ.ID] == nil {
 				t.Fatalf("calendar access before end: %v %+v", err, calendarBefore)
 			}
-			calendarAt, err := f.app.scopedOccurrenceReads(f.subject, f.app.DB.Where("starts_at >= ? AND starts_at < ?", now, boundary.Add(time.Hour)), boundary)
+			calendarAt, err := f.app.scopedOccurrenceReadsIn(f.app.DB, f.subject, f.app.DB.Where("starts_at >= ? AND starts_at < ?", now, boundary.Add(time.Hour)), boundary)
 			if err != nil || calendarAt[occ.ID] != nil {
 				t.Fatalf("calendar access at exact end: %v %+v", err, calendarAt)
 			}
@@ -926,7 +927,7 @@ func TestDepartureRemovalResponseStaysPrivateDuringDelayedMailDemotion(t *testin
 		}
 	}
 
-	get := f.leaderC.do("GET", "/api/v1/groups/"+itoa(f.group.ID), nil, false)
+	get := f.leaderC.do("GET", groupDetailPath(f.group.ID), nil, false)
 	if get.Code != http.StatusOK || !strings.Contains(get.Body.String(), `"canManage":false`) {
 		t.Fatalf("authorized GET did not apply current role: %d %s", get.Code, get.Body.String())
 	}
@@ -1615,5 +1616,238 @@ func TestRemovalDepartureNoticeSerializesWithRealAdminDelete(t *testing.T) {
 				}
 			})
 		})
+	}
+}
+
+// keptRaise is a raw stand-in for a writer outside the contact gate: one Read
+// Committed UPDATE that makes the date end an hour later.
+const keptRaise = `UPDATE event_occurrences SET ends_at = ends_at + interval '1 hour' WHERE id = ?`
+
+func refusedByKeptDateTrigger(err error) bool {
+	return pgConstraint(err, "23514", "event_occurrences_kept_date_end")
+}
+
+// keptRaceFixture is a member Going on a public date about 30 days ahead, the
+// fifth of a weekly series that has no date-level override, with their
+// departure preview not yet taken. replaced makes it A5b's same-row
+// replacement: the person kept the date once, a series edit cancelled it
+// (ending that grant occurrence_cancelled) and another restored it, and they
+// rejoined, so their next departure writes a new grant on the same row.
+type keptRaceFixture struct {
+	departureTestFixture
+	ev  eventJSON
+	occ models.EventOccurrence
+	reg models.Registration
+}
+
+func newKeptRaceFixture(t *testing.T, replaced bool) keptRaceFixture {
+	t.Helper()
+	f := keptRaceFixture{departureTestFixture: newDepartureTestFixture(t)}
+	f.ev = createFeedEvent(t, f.leaderC, f.group.ID, "Kept race series", feedStart(2), "FREQ=WEEKLY;COUNT=6")
+	var dates []models.EventOccurrence
+	gormMust(t, f.app.DB.Where("event_id = ?", f.ev.ID).Order("starts_at").Find(&dates))
+	f.occ = dates[4]
+	if replaced {
+		keepOnLeaving(t, f.subjectC, f.group.ID, f.ev.ID, f.occ)
+		apiDo(t, f.leaderC, "PUT", "/api/v1/events/"+itoa(f.ev.ID), map[string]any{"recurrenceRule": "FREQ=WEEKLY;COUNT=4"}, http.StatusOK)
+		apiDo(t, f.leaderC, "PUT", "/api/v1/events/"+itoa(f.ev.ID), map[string]any{"recurrenceRule": "FREQ=WEEKLY;COUNT=6"}, http.StatusOK)
+		apiDo(t, f.subjectC, "POST", "/api/v1/groups/"+itoa(f.group.ID)+"/join", nil, http.StatusOK)
+	} else if code, body := registerAs(f.subjectC, f.ev.ID, models.FormatCalendarDate(f.occ.OriginalDate), models.RegGoing, nil); code != http.StatusOK {
+		t.Fatalf("going: %d %s", code, body)
+	}
+	gormMust(t, f.app.DB.Where("occurrence_id = ? AND user_id = ?", f.occ.ID, f.subject.ID).First(&f.reg))
+	if replaced {
+		if row := loadAccessRow(t, f.app.DB, f.reg.ID); row.Status != policy.OccurrenceAccessEnded || row.EndReason != policy.OccurrenceCancelled {
+			t.Fatalf("the replaced fixture's first grant: %+v", row)
+		}
+	}
+	f.occ = occurrenceRow(t, f.app, f.occ.ID)
+	return f
+}
+
+func (f keptRaceFixture) preview(t *testing.T) departurePreviewJSON {
+	t.Helper()
+	return getDeparturePreview(t, f.subjectC, "/api/v1/groups/"+itoa(f.group.ID)+"/departure-preview", http.StatusOK)
+}
+
+func (f keptRaceFixture) leave(t *testing.T, preview departurePreviewJSON) <-chan *httptest.ResponseRecorder {
+	client := cloneContactClient(f.subjectC)
+	return queueContact(func() *httptest.ResponseRecorder {
+		return confirmDeparturePreview(t, client, "POST", "/api/v1/groups/"+itoa(f.group.ID)+"/leave", preview, []uint{f.occ.ID}, "")
+	})
+}
+
+// wantKeptLive checks the date kept its stored times and the person's
+// departure grant on it is live.
+func (f keptRaceFixture) wantKeptLive(t *testing.T) {
+	t.Helper()
+	if o := occurrenceRow(t, f.app, f.occ.ID); !o.StartsAt.Equal(f.occ.StartsAt) || !o.EndsAt.Equal(f.occ.EndsAt) || o.EditRevision != f.occ.EditRevision {
+		t.Fatalf("the date moved: %+v, want %+v", o, f.occ)
+	}
+	if row := loadAccessRow(t, f.app.DB, f.reg.ID); row.Status != policy.OccurrenceAccessActive || row.Origin != policy.OccurrenceOriginDepartureSelf {
+		t.Fatalf("the kept grant: %+v", row)
+	}
+}
+
+// TestKeptDateRaiseBehindTheIssuerIsRefused (00014, C1): a departure that
+// keeps a date holds that date's row lock from lockDepartureOccurrences to
+// its commit. A raw Read Committed raise sent while the issuer is parked
+// right after applyDeparture waits on that lock, and once the issuer commits
+// the trigger's EXISTS (a new statement, so a new snapshot) sees the grant and
+// refuses. Without the trigger the raise commits and the person keeps a date
+// that now ends later.
+func TestKeptDateRaiseBehindTheIssuerIsRefused(t *testing.T) {
+	for _, c := range []struct {
+		name     string
+		replaced bool
+	}{{"C1a fresh issuance", false}, {"C1b same-row replacement", true}} {
+		t.Run(c.name, func(t *testing.T) {
+			f := newKeptRaceFixture(t, c.replaced)
+			preview := f.preview(t)
+			park := newParkPoint(t)
+			seam := park.seam()
+			f.app.hooks.departureStep = func(tx *gorm.DB, step string) {
+				if step == "granted" {
+					seam(tx)
+				}
+			}
+			t.Cleanup(func() { f.app.hooks.departureStep = nil })
+			depart := f.leave(t, preview)
+			issuer := park.await(t)
+			raised := make(chan error, 1)
+			go func() { raised <- f.app.DB.Exec(keptRaise, f.occ.ID).Error }()
+			waiterBlockedBy(t, f.app.DB, issuer, "ends_at = ends_at + interval")
+			park.open()
+			if w := awaitContactResponse(t, depart); w.Code != http.StatusOK {
+				t.Fatalf("the departure: %d %s", w.Code, w.Body.String())
+			}
+			select {
+			case err := <-raised:
+				if !refusedByKeptDateTrigger(err) {
+					t.Fatalf("the raise behind the issuer: %v, want 23514 event_occurrences_kept_date_end", err)
+				}
+			case <-time.After(10 * time.Second):
+				t.Fatal("the raise never returned")
+			}
+			f.wantKeptLive(t)
+		})
+	}
+}
+
+// TestDepartureAfterARaiseAnswersStale (00014, C2): a raw raise that holds the
+// date row uncommitted makes a departure whose preview was taken before it
+// wait at lockDepartureOccurrences. Once the raise commits, the departure
+// re-reads the moved times, its facts no longer match the preview, and it
+// answers departure_stale with no grant, audit row or notice.
+func TestDepartureAfterARaiseAnswersStale(t *testing.T) {
+	for _, c := range []struct {
+		name     string
+		replaced bool
+	}{{"C2a fresh issuance", false}, {"C2b same-row replacement", true}} {
+		t.Run(c.name, func(t *testing.T) {
+			f := newKeptRaceFixture(t, c.replaced)
+			preview := f.preview(t)
+			grantBefore := loadAccessRow(t, f.app.DB, f.reg.ID)
+			counts := departureWriteCounts(t, f.app)
+			raiser := f.app.DB.Begin()
+			gormMust(t, raiser)
+			t.Cleanup(func() { raiser.Rollback() })
+			gormMust(t, raiser.Exec(keptRaise, f.occ.ID))
+			depart := f.leave(t, preview)
+			waiterBlockedBy(t, f.app.DB, backendPID(raiser), "FOR UPDATE")
+			gormMust(t, raiser.Commit())
+			if w := awaitContactResponse(t, depart); w.Code != http.StatusConflict || answerCode(t, w) != "departure_stale" {
+				t.Fatalf("the departure after the raise: %d %s", w.Code, w.Body.String())
+			}
+			if after := departureWriteCounts(t, f.app); !mapsEqualCounts(after, counts) {
+				t.Fatalf("the stale departure wrote: %v, want %v", after, counts)
+			}
+			if row := loadAccessRow(t, f.app.DB, f.reg.ID); !reflect.DeepEqual(row, grantBefore) {
+				t.Fatalf("the stale departure changed the grant: %+v, want %+v", row, grantBefore)
+			}
+			if membershipStatus(f.app, f.subject, f.group) != models.MembershipActive {
+				t.Fatal("the stale departure ended the membership")
+			}
+			if o := occurrenceRow(t, f.app, f.occ.ID); !o.EndsAt.Equal(f.occ.EndsAt.Add(time.Hour)) {
+				t.Fatalf("the raise did not commit: %+v", o)
+			}
+		})
+	}
+}
+
+// TestDateEditAndDepartureRaceLeaveNoMovedKeptDate (00014, C3): the guarded
+// edit that makes a date end later and a departure that keeps it both take
+// the contact gate. Queued behind it in either order, exactly one wins: the
+// edit (200) and a stale departure, or the departure (200) and the edit's 409
+// date_kept_after_leaving. The date never ends later while the grant is live.
+func TestDateEditAndDepartureRaceLeaveNoMovedKeptDate(t *testing.T) {
+	outcomes := map[string]bool{}
+	for _, first := range []string{"edit", "departure"} {
+		t.Run(first+" first", func(t *testing.T) {
+			f := newKeptRaceFixture(t, false)
+			preview := f.preview(t)
+			date := models.FormatCalendarDate(f.occ.OriginalDate)
+			base := editBaseOf(t, f.leaderC, f.ev.ID, date)
+			body := dateEditBody(newDateAttempt(t), base.Revision, map[string]any{"durationMinutes": int(f.occ.EndsAt.Sub(f.occ.StartsAt)/time.Minute) + 30})
+			gate := holdContactGate(t, f.app)
+			edit := func() <-chan *httptest.ResponseRecorder {
+				return goPostDateEdit(cloneContactClient(f.leaderC), f.ev.ID, date, body)
+			}
+			var editC, departC <-chan *httptest.ResponseRecorder
+			if first == "edit" {
+				editC = edit()
+				waitContactWaiters(t, f.app, 1)
+				departC = f.leave(t, preview)
+			} else {
+				departC = f.leave(t, preview)
+				waitContactWaiters(t, f.app, 1)
+				editC = edit()
+			}
+			waitContactWaiters(t, f.app, 2)
+			gormMust(t, gate.Rollback())
+			we, wd := awaitContactResponse(t, editC), awaitContactResponse(t, departC)
+			var won string
+			switch {
+			case we.Code == http.StatusOK && wd.Code == http.StatusConflict && answerCode(t, wd) == "departure_stale":
+				won = "edit"
+			case wd.Code == http.StatusOK && we.Code == http.StatusConflict && answerCode(t, we) == "date_kept_after_leaving":
+				won = "departure"
+			default:
+				t.Fatalf("not exactly one winner: edit %d %s; departure %d %s", we.Code, we.Body.String(), wd.Code, wd.Body.String())
+			}
+			outcomes[won] = true
+			o := occurrenceRow(t, f.app, f.occ.ID)
+			row := loadAccessRow(t, f.app.DB, f.reg.ID)
+			if o.EndsAt.After(f.occ.EndsAt) && row.Status == policy.OccurrenceAccessActive {
+				t.Fatalf("a moved date with a live grant: %+v, %+v", o, row)
+			}
+			if won == "departure" {
+				f.wantKeptLive(t)
+			} else if !o.EndsAt.Equal(f.occ.EndsAt.Add(30*time.Minute)) || row.Origin != "" {
+				t.Fatalf("the edit's win: %+v, grant %+v", o, row)
+			}
+		})
+	}
+	if len(outcomes) != 2 {
+		t.Fatalf("both orders gave the same winner: %v", outcomes)
+	}
+}
+
+// TestRepeatableReadIssuerCannotLockAMovedDate (00014, C4) records the
+// PostgreSQL behavior the trigger's isolation refusal relies on: a Repeatable
+// Read transaction that read a date before a raise committed cannot then lock
+// it, so an issuer at that level could never pair its snapshot with the moved
+// row; it fails with 40001.
+func TestRepeatableReadIssuerCannotLockAMovedDate(t *testing.T) {
+	f := newKeptRaceFixture(t, false)
+	issuer := f.app.DB.Begin(&sql.TxOptions{Isolation: sql.LevelRepeatableRead})
+	gormMust(t, issuer)
+	t.Cleanup(func() { issuer.Rollback() })
+	var seen models.EventOccurrence
+	gormMust(t, issuer.First(&seen, f.occ.ID))
+	gormMust(t, f.app.DB.Exec(keptRaise, f.occ.ID))
+	err := issuer.Exec("SELECT id FROM event_occurrences WHERE id = ? FOR UPDATE", f.occ.ID).Error
+	if pgCode(err) != "40001" {
+		t.Fatalf("the Repeatable Read issuer's lock on the moved date: %v (code %q), want 40001", err, pgCode(err))
 	}
 }

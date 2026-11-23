@@ -10,6 +10,8 @@ import (
 	"net/textproto"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -17,8 +19,11 @@ import (
 
 	"fold/internal/audit"
 	"fold/internal/mail"
+	"fold/internal/notify"
 	"fold/internal/providers"
 	"fold/models"
+
+	"gorm.io/gorm"
 )
 
 func (f composeFixture) history(t *testing.T, c *apiClient, id uint) (messageRecipientsJSON, string) {
@@ -967,5 +972,295 @@ func TestMessageRetrySkipReasonPrivacy(t *testing.T) {
 	}
 	if !copied {
 		t.Fatalf("an admin sees no copy reason: %+v", adm.Recipients)
+	}
+}
+
+// TestTryAgainRechecksAReminderAfterTheLocks: a reminder's Try again judges,
+// after the presser's and the message's locks, who pressed it (a manager of
+// the event, not an admin) and whether the date may still be reminded of.
+// The leader pressing it loses the group's leadership, or the event's
+// reminders are switched off, in a commit right after those locks: the press
+// answers as if the message were not theirs to see (404), or is refused, and
+// nothing is queued. The control commits nothing and sends again.
+func TestTryAgainRechecksAReminderAfterTheLocks(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		change func(t *testing.T, f composeFixture)
+		code   int
+	}{
+		{"nothing changes", nil, http.StatusOK},
+		{"the presser stops leading the group", func(t *testing.T, f composeFixture) {
+			gormMust(t, f.app.DB.Model(&models.Membership{}).Where("user_id = ? AND group_id = ?", f.leaderUser.ID, f.group.ID).Update("role", models.MembershipMember))
+		}, http.StatusNotFound},
+		{"the event's reminders are switched off", func(t *testing.T, f composeFixture) {
+			gormMust(t, f.app.DB.Model(&models.Event{}).Where("id = ?", f.groupEvent.ID).Update("reminder_email_minutes", 0))
+		}, http.StatusForbidden},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newComposeFixture(t)
+			f.admin.holdNotices, f.leader.holdNotices = true, true
+			id, outsider := failedReminder(t, f)
+			var row models.MessageRecipient
+			gormMust(t, f.app.DB.Where("message_id = ? AND user_id = ? AND channel = ?", id, outsider.ID, models.DeliveryEmail).First(&row))
+			if row.Status != models.RecipientFailed {
+				t.Fatalf("setup: %+v", row)
+			}
+			batches := jobCountFor(t, f.app, kindMessageBatch, id)
+			fired := 0
+			f.app.hooks.retryLocked = func(*gorm.DB) {
+				if fired++; tc.change != nil {
+					tc.change(t, f)
+				}
+			}
+			w := f.retry(f.leader, id)
+			if fired != 1 || w.Code != tc.code {
+				t.Fatalf("Try again: %d %s (seam fired %d)", w.Code, w.Body.String(), fired)
+			}
+			var got models.MessageRecipient
+			gormMust(t, f.app.DB.First(&got, row.ID))
+			queued := jobCountFor(t, f.app, kindMessageBatch, id) - batches
+			if tc.code == http.StatusOK {
+				if got.Status != models.RecipientQueued || queued == 0 {
+					t.Fatalf("the control was not queued again: %+v, %d batches", got, queued)
+				}
+				return
+			}
+			if got.Status != models.RecipientFailed || queued != 0 || auditCountFor(t, f.app, audit.MessageRetried, id) != 0 {
+				t.Fatalf("a refused Try again changed things: %+v, %d batches", got, queued)
+			}
+		})
+	}
+}
+
+// badAddresses fails every send to one of its addresses with a permanent
+// error and passes the rest on.
+type badAddresses struct {
+	next mail.Sender
+	bad  map[string]bool
+}
+
+func (s badAddresses) SendEmail(ctx context.Context, m mail.Message) (string, error) {
+	if s.bad[m.To] {
+		return "", fmt.Errorf("mail: rcpt: %w", &textproto.Error{Code: 550, Msg: "no"})
+	}
+	return mail.Unwrap(s.next).SendEmail(ctx, m)
+}
+
+func (badAddresses) Capabilities() providers.EmailCaps {
+	return providers.EmailCaps{Name: "bad addresses"}
+}
+
+// TestTryAgainKeepsAReminderCopyOnlyUnderTheCopyRule: a reminder failed for
+// a teen and for the guardian copy of it. Try again sends the copy again only
+// while message.send would still build it: the church still sends copies, the
+// link is confirmed, and the teen would get the reminder under their own
+// email filters. A teen who turns off event updates stops the copy whether
+// the choice commits before the press, after its locks, or after its facts
+// statement (the teen's filters are read last); the teen's own row is then
+// skipped at its send, and neither person is emailed.
+func TestTryAgainKeepsAReminderCopyOnlyUnderTheCopyRule(t *testing.T) {
+	type when int
+	const (
+		before when = iota
+		afterLocks
+		afterFacts
+	)
+	optOut := func(t *testing.T, f composeFixture) {
+		gormMust(t, f.app.DB.Create(&models.Consent{UserID: f.teen.ID, Channel: models.ConsentEmail, Scope: categoryScope(notify.CatEvents),
+			Status: models.ConsentOptedOut, Source: models.ConsentSourceWebForm}))
+	}
+	for _, tc := range []struct {
+		name   string
+		at     when
+		change func(t *testing.T, f composeFixture)
+		copy   string // "" means the copy is sent once
+		teen   string // the teen's own row's skip, "" when sent
+	}{
+		{"nothing changes", before, nil, "", ""},
+		{"the teen turns off event updates", before, optOut, skipNoGuardianCopy, skipEventsOff},
+		{"the teen turns off event updates after the locks", afterLocks, optOut, skipNoGuardianCopy, skipEventsOff},
+		{"the teen turns off event updates after the facts statement", afterFacts, optOut, skipNoGuardianCopy, skipEventsOff},
+		{"copies turned off", before, func(t *testing.T, f composeFixture) {
+			gormMust(t, f.app.DB.Model(&models.Setting{}).Where("key = ?", settingGuardianCopies).Update("value", "false"))
+		}, skipNoGuardianCopy, ""},
+		{"link revoked", before, func(t *testing.T, f composeFixture) {
+			gormMust(t, f.app.DB.Model(&models.GuardianLink{}).Where("teen_user_id = ?", f.teen.ID).Update("status", "revoked"))
+		}, skipNoGuardianCopy, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newComposeFixture(t)
+			f.admin.holdNotices, f.leader.holdNotices = true, true
+			parent := newTestUser(t, f.app, "parent", "password1234", models.RoleMember)
+			gormMust(t, f.app.DB.Create(&models.GuardianLink{GuardianUserID: parent.ID, TeenUserID: &f.teen.ID, Status: models.GuardianConfirmed}))
+			gormMust(t, f.app.DB.Create(&models.Setting{Key: settingGuardianCopies, Value: "true"}))
+			gormMust(t, f.app.DB.Create(&models.Registration{OccurrenceID: f.groupOcc.ID, UserID: &f.teen.ID, Status: models.RegGoing}))
+			next := f.app.Mailer
+			f.app.Mailer = badAddresses{next: next, bad: map[string]bool{f.teen.Email: true, parent.Email: true}}
+			reminderFor(t, f.app, f.groupOcc, 1440)
+			f.app.Mailer = next
+			var m models.Message
+			gormMust(t, f.app.DB.Where("occurrence_id = ? AND category = ?", f.groupOcc.ID, models.MessageCategoryReminder).First(&m))
+			key := "copy:" + parent.Email
+			if rows := recipientsOf(t, f.app, m.ID); rows[key].Status != models.RecipientFailed || rows[f.teen.Email].Status != models.RecipientFailed {
+				t.Fatalf("setup: %+v", rows)
+			}
+			if tc.change != nil && tc.at == before {
+				tc.change(t, f)
+			}
+			fired := false
+			if tc.at == afterLocks {
+				f.app.hooks.retryLocked = func(*gorm.DB) { tc.change(t, f) }
+			}
+			if tc.at == afterFacts {
+				f.app.hooks.dateFactsRead = func() {
+					if !fired {
+						fired = true
+						tc.change(t, f)
+					}
+				}
+			}
+			if w := f.retry(f.leader, m.ID); w.Code != http.StatusOK {
+				t.Fatalf("Try again: %d %s", w.Code, w.Body.String())
+			}
+			f.app.hooks.retryLocked, f.app.hooks.dateFactsRead = nil, nil
+			if tc.at == afterFacts && !fired {
+				t.Fatal("the facts statement never ran")
+			}
+			copyRow := recipientsOf(t, f.app, m.ID)[key]
+			runMessageJobs(t, f.app)
+			rows := recipientsOf(t, f.app, m.ID)
+			if tc.copy == "" {
+				if copyRow.Status != models.RecipientQueued || mailsToAddr(t, f.app, parent.Email) != 1 {
+					t.Fatalf("copy: %+v, mails %d", copyRow, mailsToAddr(t, f.app, parent.Email))
+				}
+			} else if copyRow.Status != models.RecipientSuppressed || copyRow.Reason != tc.copy || mailsToAddr(t, f.app, parent.Email) != 0 {
+				t.Fatalf("copy: %+v, mails %d", copyRow, mailsToAddr(t, f.app, parent.Email))
+			}
+			teen := rows[f.teen.Email]
+			if tc.teen == "" {
+				if teen.Status != models.RecipientSent || mailsToAddr(t, f.app, f.teen.Email) != 1 {
+					t.Fatalf("teen: %+v, mails %d", teen, mailsToAddr(t, f.app, f.teen.Email))
+				}
+			} else if teen.Status != models.RecipientSuppressed || teen.Reason != tc.teen || mailsToAddr(t, f.app, f.teen.Email) != 0 {
+				t.Fatalf("teen: %+v, mails %d", teen, mailsToAddr(t, f.app, f.teen.Email))
+			}
+		})
+	}
+}
+
+// TestTryAgainRefusesAnAuthorDemotedAfterTheLocks: the author of a group
+// announcement presses Try again and, right after the locks and the daily
+// count, loses the group's leadership in another commit. Their right to the
+// audience is read after that, with the audience, so the retry is refused.
+// On a pool whose default is Repeatable Read the transaction is still pinned
+// to Read Committed, so the demotion is seen there too.
+func TestTryAgainRefusesAnAuthorDemotedAfterTheLocks(t *testing.T) {
+	for _, repeatable := range []bool{false, true} {
+		t.Run(fmt.Sprintf("repeatable read default=%v", repeatable), func(t *testing.T) {
+			f := newComposeFixture(t)
+			id, x, y := f.twoFailures(t)
+			orig := f.app.DB
+			if repeatable {
+				f.app.DB = repeatableReadPool(t, f.app)
+				t.Cleanup(func() { f.app.DB = orig })
+			}
+			f.app.hooks.retryLocked = func(*gorm.DB) {
+				gormMust(t, orig.Model(&models.Membership{}).Where("user_id = ? AND group_id = ?", f.leaderUser.ID, f.group.ID).Update("role", models.MembershipMember))
+			}
+			if w := f.retry(f.leader, id); w.Code != http.StatusForbidden || errorCodeOf(w) != "message_retry_refused" {
+				t.Fatalf("Try again: %d %s", w.Code, w.Body.String())
+			}
+			rows := recipientsOf(t, f.app, id)
+			if rows[x.Email].Status != models.RecipientFailed || rows[y.Email].Status != models.RecipientFailed {
+				t.Fatalf("a refused Try again changed the rows: %+v", rows)
+			}
+		})
+	}
+}
+
+// TestTryAgainNeverPairsALapsedGrantWithAMovedDate: Try again on a one-date
+// announcement whose departed person's kept date reached its old end (their
+// grant has lapsed), beside a member going to it. Right after Try again's
+// facts statement, the real guarded edit moves the date later, retitles it and
+// stamps the grant ended. The decision is the statement's alone: the departed
+// person's kept date no longer shows to them, so their row is skipped in the
+// batch's words and is not queued again; the member is.
+// After its locks and daily count the transaction reads nothing that decides
+// but the failed rows and that one statement.
+func TestTryAgainNeverPairsALapsedGrantWithAMovedDate(t *testing.T) {
+	f := newDatedBatchFixture(t, false)
+	id, rows := seedDatedSending(t, f.app, f.issuer, f.target, false, f.subjectRow(), toRow(f.control))
+	for _, r := range rows {
+		gormMust(t, f.app.DB.Model(&models.MessageRecipient{}).Where("id = ?", r.ID).Updates(map[string]any{"status": models.RecipientFailed, "error": whyProvider}))
+	}
+	gormMust(t, f.app.DB.Model(&models.Message{}).Where("id = ?", id).Update("status", models.MessageFailed))
+	base := editBaseOf(t, f.admin, f.event.ID, models.FormatCalendarDate(f.target.OriginalDate))
+	newMutableClock(f.app, f.target.EndsAt)
+	var edited atomic.Bool
+	var edit *httptest.ResponseRecorder
+	commit := func() {
+		if edited.CompareAndSwap(false, true) {
+			edit = f.guardedEdit(t, base)
+		}
+	}
+	f.app.hooks.dateFactsRead = commit
+	f.app.hooks.invitationReadStep = func(step string) {
+		if step == "grants" {
+			commit()
+		}
+	}
+	var mu sync.Mutex
+	var reads []string
+	var retryTx gorm.ConnPool
+	f.app.hooks.retryLocked = func(tx *gorm.DB) { mu.Lock(); retryTx = tx.Statement.ConnPool; mu.Unlock() }
+	rec := func(tx *gorm.DB) {
+		mu.Lock()
+		defer mu.Unlock()
+		if retryTx != nil && tx.Statement.ConnPool == retryTx {
+			reads = append(reads, tx.Statement.SQL.String())
+		}
+	}
+	gormMust(t, &gorm.DB{Error: f.app.DB.Callback().Query().After("gorm:query").Register("test:retry-reads", rec)})
+	gormMust(t, &gorm.DB{Error: f.app.DB.Callback().Row().After("gorm:row").Register("test:retry-reads", rec)})
+	t.Cleanup(func() {
+		_ = f.app.DB.Callback().Query().Remove("test:retry-reads")
+		_ = f.app.DB.Callback().Row().Remove("test:retry-reads")
+	})
+	if w := f.admin.do("POST", "/api/v1/messages/"+itoa(id)+"/retry", nil, true); w.Code != http.StatusOK {
+		t.Fatalf("Try again: %d %s", w.Code, w.Body.String())
+	}
+	if edit == nil || edit.Code != http.StatusOK {
+		t.Fatalf("the edit: %v", edit)
+	}
+	var grant models.Registration
+	gormMust(t, f.app.DB.First(&grant, f.access.RegistrationID))
+	if grant.AccessEndedAt == nil {
+		t.Fatal("the edit did not stamp the lapsed grant ended")
+	}
+	var departed, control models.MessageRecipient
+	gormMust(t, f.app.DB.First(&departed, rows[0].ID))
+	gormMust(t, f.app.DB.First(&control, rows[1].ID))
+	if departed.Status != models.RecipientSuppressed || departed.Reason != skipCantSeeDate {
+		t.Fatalf("the departed person's row: %+v", departed)
+	}
+	if control.Status != models.RecipientQueued {
+		t.Fatalf("the member's row: %+v", control)
+	}
+	facts := 0
+	for _, r := range reads {
+		switch {
+		case strings.Contains(r, "named_occ AS"):
+			facts++
+		case strings.Contains(r, "message_recipients") && facts == 0:
+		default:
+			for _, table := range []string{"event_occurrences", "registrations", "memberships", "event_hosts", "guardian_links", "teen_consents", `"events"`, `"groups"`, `"users"`} {
+				if strings.Contains(r, table) {
+					t.Fatalf("Try again read %s outside its facts statement: %s", table, r)
+				}
+			}
+		}
+	}
+	if facts != 1 {
+		t.Fatalf("Try again read %d facts statements, want 1: %q", facts, reads)
 	}
 }

@@ -90,6 +90,10 @@ Before the release is written it also checks both images pull with no login.
 
 ## Upgrade notes
 
+- **Nov 2026 (M8.1): exact visibility consent (DEC-158).** From this release on,
+  an earlier release refuses to start on the upgraded database, even after
+  `fold migrate down-one`. Keep this release; restore data only with its own
+  restore tooling.
 - **Nov 2026 (M5.1): Compose pulls a published image.** `docker-compose.yml` no
   longer builds; it needs `FOLD_VERSION` in `.env` and refuses to start without
   it. An older install that built on the box keeps working by adding the
@@ -158,7 +162,7 @@ Useful env vars:
 |---|---|---|
 | `APP_ENV` | `prod` | `dev` enables debug logging + insecure cookie defaults |
 | `PORT` | `8080` | |
-| `SESSION_SECRET` | — | **Required** unless `APP_ENV=dev`; at least 32 characters |
+| `SESSION_SECRET` | — | **Required** unless `APP_ENV=dev`; at least 32 characters; the same value in every app process; change it only with every process stopped |
 | `FOLD_SETUP_TOKEN` | generated at startup | Optional shared setup code, generated with `openssl rand -hex 32`; all app processes must use the same value |
 | `DATABASE_URL` | — | Postgres DSN. **Required** everywhere |
 | `FOLD_TRUSTED_PROXIES` | `172.30.0.0/24` | Proxies allowed to set `X-Forwarded-For` (the compose subnet). A `/0` range (`0.0.0.0/0`, `::/0`) is refused at startup, in dev too |
@@ -174,6 +178,14 @@ Do not use schema downgrade as a live rollback path. This pre-release milestone
 has no live users; if a rollback guard refuses a test database, reset that test
 database instead. Production rollback restores the pre-upgrade backup as
 specified in `docs/DEPLOY-DIGITALOCEAN.md`.
+
+Once a release with exact visibility consent (DEC-158) has run on a database,
+no earlier release starts on it, and `fold migrate down-one` cannot take its
+baseline step there; to discard such a database, drop it. Restoring the dump
+you took before upgrading, and then starting an earlier release, is the one
+way back that Fold cannot refuse. It brings back cancellations and date resets
+without exact consent, and it is not recommended: restore with the current
+release instead.
 
 ## Tests
 

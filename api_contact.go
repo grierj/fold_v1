@@ -110,7 +110,7 @@ func (a *App) runContactOperation(c *gin.Context, k *requestKind, lock func(*gor
 			return k.refuse(tx, &op, models.ContactRequest{}, "stale_session", c.ClientIP())
 		}
 		return fn(tx, &op)
-	})
+	}, contactGateTx)
 	if err != nil {
 		jsonError(c, http.StatusInternalServerError, "could not complete contact operation")
 		return
@@ -402,7 +402,7 @@ func (a *App) auditRefusal(c *gin.Context, reason string) error {
 			return err
 		}
 		return audit.Write(tx, audit.Entry{Actor: actor, Action: kind.action, TargetType: kind.target, IP: c.ClientIP(), Meta: map[string]any{"reason": reason, "method": c.Request.Method, "route": c.FullPath()}})
-	})
+	}, contactGateTx)
 }
 
 // addRequestJSON is a safe request preview, not a group/member/contact DTO.

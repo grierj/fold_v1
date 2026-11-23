@@ -83,8 +83,11 @@ UI_PAGES=schedule-event,admin UI_WIDTHS=390 node .cursor/skills/verify-ui/drive-
    | admin-users | admin | `/admin?tab=users` |
    | new-group | admin | `/groups/new` |
    | church-event | admin | `/events/new` |
+   | date-moved, date-recurring, date-waitlisted, date-invited, date-cancelled | member | `/events/<id>/dates/<date>` |
+   | date-cancelled-denied | leader | the cancelled date |
+   | date-guest | none | a public date |
 
-   Each page waits for a visible handle (heading, label or group name) and for network idle, then takes a full-page screenshot and runs the checks.
+   Each page waits for a visible handle (heading, label or group name) and for network idle, then takes a full-page screenshot and runs the checks. The `date-*` pages (M8.1 exact dates, browser zone `America/New_York`) are captured viewport-only at 390×844, 768×900 and 1280×900, first screen and mid-scroll, and also run axe `heading-order`; on `date-moved` the six answers must lie between the header and the answer bar without scrolling. `UI_PAGES=dates` runs only those.
 
 **Checks.** The first five are hard failures and make the exit code 1.
 
@@ -103,7 +106,7 @@ UI_PAGES=schedule-event,admin UI_WIDTHS=390 node .cursor/skills/verify-ui/drive-
 ## Evidence
 
 Everything goes to `$VERIFY_EVIDENCE/ui/` (that is, `/tmp/fold-verify-proof/<RUN_ID>/ui/`):
-- `<page>-<width>.png`: a full-page screenshot for every page and width (27 pages × 3 widths = 81 files for a full run).
+- `<page>-<width>.png`: a full-page screenshot for every page and width (27 pages × 3 widths = 81 files for a full run), plus `date-*-<width>-first.png` and `-mid.png` for the 7 date pages.
 - `results.json`: the URL, the seed ids, and per page and width: failures, the screenshot name, and the under-44px list at 390.
 - `result.txt`: the feature id (`ui-checks`), the entry point, the hard-failure count, and one line per page and width.
 

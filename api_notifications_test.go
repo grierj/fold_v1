@@ -447,17 +447,9 @@ func TestOccurrenceTimeAndPlaceChangesNotify(t *testing.T) {
 	}
 
 	// Time change on the date.
-	w := admin.do("PUT", fmt.Sprintf("/api/v1/events/%d/occurrences/%s", eventID, date),
-		map[string]any{"startsLocal": date + "T21:00"}, true)
-	if w.Code != http.StatusOK {
-		t.Fatalf("time change: %d %s", w.Code, w.Body.String())
-	}
+	saveDate(t, admin, eventID, date, map[string]any{"startsLocal": date + "T21:00"}, http.StatusOK, "")
 	// Place change on the date.
-	w = admin.do("PUT", fmt.Sprintf("/api/v1/events/%d/occurrences/%s", eventID, date),
-		map[string]any{"location": "New Hall"}, true)
-	if w.Code != http.StatusOK {
-		t.Fatalf("place change: %d %s", w.Code, w.Body.String())
-	}
+	saveDate(t, admin, eventID, date, map[string]any{"location": "New Hall"}, http.StatusOK, "")
 	for _, tc := range []struct {
 		c    *apiClient
 		name string
@@ -539,7 +531,8 @@ func weekdayCode(date string) string {
 // Cancelling a date with 30 registrants must not re-read the occurrence,
 // event, group, membership and zone per person (issue #76: 276 reads).
 // The notices still say the same thing: a member gets the group's name,
-// place and link in their own zone; an outsider gets none of them.
+// place and link in their own zone; an outsider, who can't see the
+// invite-only date, gets none of them and no time either.
 func TestCancelDateNoticeReadsStayBounded(t *testing.T) {
 	app := testApp(t)
 	app.DB.Create(&models.Setting{Key: settingTimezone, Value: "America/Chicago"})
@@ -550,7 +543,7 @@ func TestCancelDateNoticeReadsStayBounded(t *testing.T) {
 	}
 	g.Location = "Secret Hall"
 	start := time.Date(2035, 7, 14, 22, 30, 0, 0, time.UTC)
-	ev, occ := seedEvent(t, app, &g, leader.ID, start)
+	_, occ := seedEvent(t, app, &g, leader.ID, start)
 
 	users := make([]models.User, 30)
 	for i := range users {
@@ -635,9 +628,7 @@ func TestCancelDateNoticeReadsStayBounded(t *testing.T) {
 		t.Fatalf("member notice: %+v", member)
 	}
 	outsider := byUser[users[29].ID]
-	if outsider.Title != "Cancelled: Church event" || outsider.Link != fmt.Sprintf("/events/%d", ev.ID) ||
-		!strings.Contains(outsider.Body, "Sat, Jul 14 · 5:30 PM CDT") ||
-		strings.Contains(outsider.Body, "Secret Hall") || strings.Contains(outsider.Title, "Query Group") {
+	if outsider.Title != "Cancelled: Church event" || outsider.Link != "/" || outsider.Body != "" {
 		t.Fatalf("outsider notice: %+v", outsider)
 	}
 }
@@ -706,8 +697,7 @@ func TestOccurrenceChangeEmailsGoingAndWaitlisted(t *testing.T) {
 		t.Fatalf("cm2 = %q, want waitlisted", got)
 	}
 	registerAs(c3, eventID, date, "maybe", nil)
-	apiDo(t, admin, "PUT", fmt.Sprintf("/api/v1/events/%d/occurrences/%s", eventID, date),
-		map[string]any{"location": "Annex"}, http.StatusOK)
+	saveDate(t, admin, eventID, date, map[string]any{"location": "Annex"}, http.StatusOK, "")
 	for _, tc := range []struct {
 		name string
 		want bool
@@ -730,8 +720,7 @@ func TestEventItemsArchiveAfterOccurrenceEnds(t *testing.T) {
 	app.DB.Where("id = ?", gid).First(&g)
 	u, c := mkUser(t, app, &g, "ex1")
 	registerAs(c, eventID, date, "going", nil)
-	apiDo(t, admin, "PUT", fmt.Sprintf("/api/v1/events/%d/occurrences/%s", eventID, date),
-		map[string]any{"location": "Annex"}, http.StatusOK)
+	saveDate(t, admin, eventID, date, map[string]any{"location": "Annex"}, http.StatusOK, "")
 	var occ models.EventOccurrence
 	app.DB.Where("event_id = ?", eventID).First(&occ)
 	var row models.Notification
@@ -766,7 +755,7 @@ func TestHouseholdEventNoticesDeduplicateByHolder(t *testing.T) {
 	eventID, date := seedCappedEvent(t, app, admin, gid, nil, true)
 	holder, c, spouse, child := householdFamily(t, app, admin, "noticeholder")
 	batchAnswer(t, c, eventID, date, map[string]any{"people": []map[string]any{{"personId": spouse.ID, "status": "going"}, {"personId": child.ID, "status": "going"}}}, http.StatusOK)
-	apiDo(t, admin, "PUT", fmt.Sprintf("/api/v1/events/%d/occurrences/%s", eventID, date), map[string]any{"location": "New place"}, http.StatusOK)
+	saveDate(t, admin, eventID, date, map[string]any{"location": "New place"}, http.StatusOK, "")
 	var notices []models.Notification
 	app.DB.Where("kind = ?", notify.EventChanged).Find(&notices)
 	if len(notices) != 1 || notices[0].UserID != holder.ID {

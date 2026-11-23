@@ -1,5 +1,5 @@
 import { Form } from "./ui/Form";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Guests } from "../api/events";
 import type { EventOccurrence } from "../types";
 import { browserTimeZone } from "../lib/when";
@@ -14,8 +14,18 @@ import { Button } from "./ui/Button";
 // redeemed, so this form only ever ends in "check your email". The
 // hidden website field is the honeypot the account form also carries.
 // A failed submit keeps what was typed, like every other Fold form.
-export function GuestRegistrationForm({ instance }: { instance: Pick<EventOccurrence, "id" | "eventId" | "date"> }) {
-  const [open, setOpen] = useState(false);
+// A page that shows the opener elsewhere (the date page's answer bar) passes
+// `open` and `onOpenChange`: the form then renders only while open, starts on
+// its first field, and Never mind hands the choice back.
+export function GuestRegistrationForm({ instance, open: shown, onOpenChange }: {
+  instance: Pick<EventOccurrence, "id" | "eventId" | "date">;
+  open?: boolean;
+  onOpenChange?: (open: boolean) => void;
+}) {
+  const [ownOpen, setOwnOpen] = useState(false);
+  const controlled = shown !== undefined;
+  const open = controlled ? shown : ownOpen;
+  const setOpen = (next: boolean) => { if (controlled) onOpenChange?.(next); else setOwnOpen(next); };
   const [name, setName] = useState("");
   const [email, setEmail] = useState("");
   const [over18, setOver18] = useState(false);
@@ -25,6 +35,8 @@ export function GuestRegistrationForm({ instance }: { instance: Pick<EventOccurr
   const [done, setDone] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const p = `guest-${instance.id}`;
+
+  useEffect(() => { if (controlled && open) document.getElementById(`${p}-name`)?.focus(); }, [controlled, open, p]);
 
   async function submit(e: React.FormEvent) {
     e.preventDefault();
@@ -48,6 +60,8 @@ export function GuestRegistrationForm({ instance }: { instance: Pick<EventOccurr
   }
 
   if (!open && !done) {
+    if (controlled) return null;
+
     return (
       <Button variant="primary" onClick={() => setOpen(true)}>
         Register as a guest

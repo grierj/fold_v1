@@ -694,6 +694,9 @@ func TestMessageImageUploadStoresReencodedPicture(t *testing.T) {
 }
 
 func TestMessageImageUploadRefusals(t *testing.T) {
+	// Its own temp dir: another test process (a go-test.sh shard) uploading
+	// into the shared one moves the count mid-test.
+	t.Setenv("TMPDIR", t.TempDir())
 	f := newMessageImageFixture(t)
 	tmp := uploadTempFiles(t)
 	pic := tinyPNG(t)

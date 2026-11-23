@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -302,75 +301,117 @@ const pushReminderGrace = 15 * time.Minute
 // Unix seconds; a job without one uses the row's updated_at, when the
 // sweep wrote it), it is skipped as "outside quiet hours". The hourly limit
 // never stops a reminder, though a sent one counts toward it (DEC-126).
-func (a *App) deliverReminderPush(ctx context.Context, t pushTarget, row *models.MessageRecipient, u *models.User, m *models.Message, plannedAt int64) error {
-	db := a.DB.WithContext(ctx)
+func (a *App) deliverReminderPush(ctx context.Context, t pushTarget, row *models.MessageRecipient, u *models.User, m *models.Message, deviceID uint, plannedAt int64) error {
 	t.rec = pushReminderRecorder(*row)
-	record := func(status, reason string) error { return t.record(a, status, reason) }
-	now := a.pushNow()
+	var plan reminderPushPlan
+	var dest pushDest
+	db := a.DB.WithContext(ctx)
+	// The destination, every check and the payload come from one read-only
+	// snapshot, so the device it goes to and the date it shows are the ones
+	// its checks judged; the provider is called after it ends, holding
+	// nothing.
+	if a.hooks.pushStep != nil {
+		a.hooks.pushStep("snapshot")
+	}
+	if err := db.Transaction(func(tx *gorm.DB) error {
+		var err error
+		if dest, err = a.pushDestinationIn(tx, u.ID, deviceID, messageCategory(m), false); err != nil || !dest.sends() {
+			return err
+		}
+		if a.hooks.pushStep != nil {
+			a.hooks.pushStep("destination")
+		}
+		plan, err = a.planReminderPushIn(tx, row, &dest.user, m, plannedAt)
+		return err
+	}, readSnapshot); err != nil {
+		return err
+	}
+	if !dest.sends() {
+		return a.pushDestOutcome(db, t, dest, deviceID)
+	}
+	if plan.why != "" {
+		return t.record(a, models.RecipientSuppressed, plan.why)
+	}
+	t.dev = dest.dev
+	t.what = fmt.Sprintf("reminder %d recipient %d", m.ID, row.ID)
+	body, err := push.MarshalPayload(push.NewPayload(plan.note))
+	if err != nil {
+		return t.tooLarge(a)
+	}
+	return a.sendPush(ctx, t, body, recipientPushOptions(row.ID, plan.ttl), "")
+}
+
+// reminderPushPlan is what planReminderPushIn decided: why the push must not
+// go, or its lock screen and how long the push service keeps it.
+type reminderPushPlan struct {
+	why  string
+	note push.Notification
+	ttl  time.Duration
+}
+
+func (a *App) planReminderPushIn(tx *gorm.DB, row *models.MessageRecipient, u *models.User, m *models.Message, plannedAt int64) (reminderPushPlan, error) {
+	skip := func(why string) (reminderPushPlan, error) { return reminderPushPlan{why: why}, nil }
 	start, ok := pushReminderStart(m.ReminderKey)
 	if !ok || m.OccurrenceID == nil {
-		return record(models.RecipientSuppressed, pushWhyStale)
+		return skip(pushWhyStale)
 	}
 	var occ models.EventOccurrence
-	if err := db.First(&occ, *m.OccurrenceID).Error; errors.Is(err, gorm.ErrRecordNotFound) {
-		return record(models.RecipientSuppressed, pushWhyDateChanged)
-	} else if err != nil {
-		return err
+	if err := tx.Where("id = ?", *m.OccurrenceID).Limit(1).Find(&occ).Error; err != nil {
+		return reminderPushPlan{}, err
 	}
-	if occ.Status != models.OccurrenceScheduled || occ.StartsAt.Unix() != start {
-		return record(models.RecipientSuppressed, pushWhyDateChanged)
+	now := a.pushNow()
+	if occ.ID == 0 || occ.Status != models.OccurrenceScheduled || occ.StartsAt.Unix() != start {
+		return skip(pushWhyDateChanged)
 	}
 	if !occ.StartsAt.After(now) {
-		return record(models.RecipientSuppressed, pushWhyStale)
+		return skip(pushWhyStale)
 	}
 	var ev models.Event
-	if err := db.First(&ev, occ.EventID).Error; errors.Is(err, gorm.ErrRecordNotFound) {
-		return record(models.RecipientSuppressed, pushWhyDateChanged)
-	} else if err != nil {
-		return err
+	if err := tx.Where("id = ?", occ.EventID).Limit(1).Find(&ev).Error; err != nil {
+		return reminderPushPlan{}, err
+	}
+	if ev.ID == 0 {
+		return skip(pushWhyDateChanged)
 	}
 	if !ev.ReminderPush {
-		return record(models.RecipientSuppressed, pushWhyReminderOff)
+		return skip(pushWhyReminderOff)
 	}
 	var going int64
-	if err := db.Model(&models.Registration{}).Where("occurrence_id = ? AND status = ? AND COALESCE(user_id, registered_by) = ?", occ.ID, models.RegGoing, u.ID).
+	if err := tx.Model(&models.Registration{}).Where("occurrence_id = ? AND status = ? AND COALESCE(user_id, registered_by) = ?", occ.ID, models.RegGoing, u.ID).
 		Count(&going).Error; err != nil {
-		return err
+		return reminderPushPlan{}, err
 	}
 	if going == 0 {
-		return record(models.RecipientSuppressed, skipNoLongerGoing)
+		return skip(skipNoLongerGoing)
 	}
-	can, err := a.reminderReaders(db, occ.ID, []uint{u.ID}, now)
+	can, err := a.reminderReaders(tx, occ.ID, []uint{u.ID}, now)
 	if err != nil {
-		return err
+		return reminderPushPlan{}, err
 	}
 	if !can[u.ID] {
-		return record(models.RecipientSuppressed, skipCantSeeDate)
+		return skip(skipCantSeeDate)
 	}
-	loc := userZoneIn(db, u.Timezone)
+	loc := time.UTC
+	lenientReadIn(tx, func(sp *gorm.DB) { loc = userZoneIn(sp, u.Timezone) })
 	planned := time.Unix(plannedAt, 0)
 	if plannedAt == 0 {
 		planned = row.UpdatedAt
 	}
 	if inside, _ := a.pushQuietHours().Check(now, loc); !inside && now.After(planned.Add(pushReminderGrace)) {
-		return record(models.RecipientSuppressed, pushWhyQuietHours)
+		return skip(pushWhyQuietHours)
 	}
 	title := ev.Title
 	if occ.TitleOverride != nil {
 		title = *occ.TitleOverride
 	}
 	head, text := reminderPushText(title, occ.StartsAt, loc, now)
-	t.what = fmt.Sprintf("reminder %d recipient %d", m.ID, row.ID)
-	body, err := push.MarshalPayload(push.NewPayload(push.Notification{
-		Title: head, Body: text, Navigate: a.emailLink(occurrenceDatePath(ev.ID, models.FormatCalendarDate(occ.OriginalDate))), Tag: "r" + idString(occ.ID),
-	}))
-	if err != nil {
-		return t.tooLarge(a)
-	}
 	// Kept by the push service until the date starts, never longer than a
 	// day: a reminder for a date already begun is no use.
-	ttl := min(max(occ.StartsAt.Sub(now), time.Minute), pushTTL)
-	return a.sendPush(ctx, t, body, recipientPushOptions(row.ID, ttl), "")
+	return reminderPushPlan{
+		note: push.Notification{Title: head, Body: text,
+			Navigate: a.emailLink(occurrenceDatePath(ev.ID, models.FormatCalendarDate(occ.OriginalDate))), Tag: "r" + idString(occ.ID)},
+		ttl: min(max(occ.StartsAt.Sub(now), time.Minute), pushTTL),
+	}, nil
 }
 
 // reminderPushText is a push reminder's lock screen (DEC-124, DEC-136):

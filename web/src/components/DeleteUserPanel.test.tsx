@@ -15,6 +15,7 @@ import type { AttemptSettleResponse as SettleContract, ErasureReasonItem, Erasur
 import { REMOVE, ReasonReviewStore } from "../lib/reasonReviewStore";
 import { DigestUnavailableError, lastDigestPath, reasonReviewBody, resetDigestChoice } from "../lib/reasonSetDigest";
 import { QC1_WEB } from "../test/qc1Facts";
+import { bootstrapAnswer } from "../test/credential";
 import { DeleteUserPanel } from "./DeleteUserPanel";
 
 type AttemptSettleResponse = Pick<SettleContract, "result" | "subjectDeleted">;
@@ -36,7 +37,7 @@ function render(ui: ReactNode) {
 
           return viewer;
         },
-        loading: false, isAdmin: true, canCompose: true,
+        loading: false, isAdmin: true, canCompose: true, credential: null,
         login: async () => {}, logout: async () => {}, refresh: async () => {}, signedIn: async () => "/",
       }}>{children}</AuthContext.Provider>;
     },
@@ -935,7 +936,7 @@ describe("DeleteUserPanel through the real fetch wrapper", () => {
     vi.stubGlobal("fetch", vi.fn(async (url: RequestInfo | URL, init?: RequestInit) => {
       const path = String(url).replace("/api/v1", "");
 
-      if (path === "/auth/csrf") return new Response(JSON.stringify({ csrfToken: "csrf" }), { status: 200 });
+      if (path === "/auth/bootstrap") return bootstrapAnswer({ token: "csrf" });
       const call: Call = { method: init?.method ?? "GET", path, body: init?.body ? JSON.parse(String(init.body)) : undefined };
       calls.push(call);
 
@@ -1792,7 +1793,7 @@ describe("DeleteUserPanel reason review", () => {
   ])("treats %s as a failed unit, not as an empty one", async (_name, bad) => {
     vi.mocked(AdminUsers.erasureReasonsPage).mockImplementation(realAdminUsers.erasureReasonsPage);
     vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) =>
-      String(input).endsWith("/auth/csrf") ? Response.json({ csrfToken: "csrf" }) : Response.json(bad),
+      String(input).endsWith("/auth/bootstrap") ? bootstrapAnswer({ token: "csrf" }) : Response.json(bad),
     ));
     open();
     expect(await screen.findByRole("button", { name: "Try again" })).toBeInTheDocument();

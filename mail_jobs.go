@@ -459,7 +459,7 @@ func (a *App) prepareAndSend(ctx context.Context, kind string, subjectID uint, p
 		var err error
 		msg, send, err = prep(tx)
 		return err
-	})
+	}, contactGateTx)
 	if err != nil {
 		log.Printf("mail: %s #%d preparation: %s", kind, subjectID, jobs.CleanError(err))
 		return err

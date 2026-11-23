@@ -1,0 +1,213 @@
+#!/usr/bin/env bash
+# Model-checks the job queue (JobQueue.tla) and reports whether the Go code
+# the model describes has changed since it was last confirmed (coverage.txt).
+#
+#   check          drift, then the model
+#   check drift    only the drift check
+#   check model    only the model (TLC on JobQueue.cfg, then JobQueueDeep.cfg)
+#   check breaks   each deliberate defect must break the rule it guards
+#   check accept   rewrite coverage.txt from the code as it is now
+#
+# Needs Java 11+ on PATH. The first run downloads tla2tools.jar (pinned by
+# version and checksum) into ~/.cache/fold; FOLD_TLA_JAR points at a copy
+# you already have.
+set -euo pipefail
+
+here=$(cd "$(dirname "$0")" && pwd -P)
+repo=$(git -C "$here" rev-parse --show-toplevel)
+coverage="$here/coverage.txt"
+
+TLA_VERSION=1.7.4
+TLA_SHA256=936a262061c914694dfd669a543be24573c45d5aa0ff20a8b96b23d01e050e88
+TLA_URL="https://github.com/tlaplus/tlaplus/releases/download/v$TLA_VERSION/tla2tools.jar"
+cache=${XDG_CACHE_HOME:-$HOME/.cache}/fold
+[[ $cache = /* ]] || cache=$PWD/$cache
+jar=${FOLD_TLA_JAR:-$cache/tla2tools-$TLA_VERSION.jar}
+[[ $jar = /* ]] || jar=$PWD/$jar
+
+# The Go functions the model's actions stand for (SKILL.md maps each one).
+covered=(
+	"./internal/jobs Runner.Start"
+	"./internal/jobs Runner.RunOnce"
+	"./internal/jobs safeRun"
+	"./internal/jobs Runner.finish"
+	"./internal/jobs Runner.callOnDead"
+	"./internal/jobs heldBy"
+	"./internal/jobs WithClaim"
+	"./internal/jobs LaterIn"
+	"./internal/jobs laterUpdates"
+	"./internal/jobs Later"
+	"./internal/jobs Requeued"
+	"./internal/jobs Retry"
+	"./internal/jobs Dismiss"
+	"./internal/jobs decideDead"
+	"./internal/jobs PruneDone"
+	". App.decideDeadJob"
+	". App.deliverMessagePush"
+	". pushWaitIn"
+)
+
+manifest() {
+	cd "$repo"
+	local item pkg sym src
+	for item in "${covered[@]}"; do
+		pkg=${item%% *}
+		sym=${item#* }
+		src=$(go doc -u -src "$pkg" "$sym") || {
+			echo "check: go doc found no $sym in $pkg; fix the covered list" >&2
+			return 1
+		}
+		echo "func $(sha256sum <<<"$src" | cut -c1-16) $pkg $sym"
+	done
+	# Every function in the package: a new state change belongs here (dead.go).
+	git grep --untracked -E '^func ' -- 'internal/jobs/*.go' ':!*_test.go' |
+		sed -E 's/[[:space:]]*\{$//; s/^/decl /' | LC_ALL=C sort
+	# Line counts flag possible writers, including reads that use models.Job{}.
+	git grep -c --untracked -E 'UPDATE jobs|DELETE FROM jobs|INSERT INTO jobs|models\.Job\{' \
+		-- '*.go' '*.sql' ':!*_test.go' ':!.claude/' ':!.cursor/' ':!web/' | sed 's/^/writer /'
+	git grep -l --untracked -w jobs -- 'migrations/*.sql' | sed 's/^/migration /'
+	# File names flag possible LaterIn/Requeued callers.
+	git grep -l --untracked -E 'jobs\.LaterIn\(|jobs\.Requeued\(' \
+		-- '*.go' ':!*_test.go' ':!.claude/' ':!.cursor/' | sed 's/^/waiter /'
+}
+
+drift() {
+	local now
+	now=$(manifest) || return 2
+	if diff -u --label coverage.txt --label "code now" "$coverage" <(echo "$now"); then
+		echo "drift: none; the recorded hashes and scans match."
+		return 0
+	fi
+	cat >&2 <<-'EOF'
+
+		drift: the code above changed since the model was last confirmed.
+		Read the change (git diff <sync commit> -- <file>), update the matching
+		action in JobQueue.tla (SKILL.md, "What each action stands for"),
+		run `check model` and `check breaks`, then `check accept`.
+	EOF
+	return 1
+}
+
+verify_jar() {
+	if [[ $(sha256sum <"$1" | cut -d' ' -f1) != "$TLA_SHA256" ]]; then
+		echo "$1 differs from the pinned SHA-256 for tla2tools.jar $TLA_VERSION" >&2
+		return 2
+	fi
+}
+
+download_jar() (
+	mkdir -p "$(dirname "$jar")" || exit 2
+	local part
+	part=$(mktemp "$jar.part.XXXXXX") || exit 2
+	trap 'rm -f -- "$part"' EXIT
+	echo "downloading tla2tools.jar $TLA_VERSION" >&2
+	curl -fsSL -o "$part" "$TLA_URL" || exit 2
+	verify_jar "$part" || exit 2
+	mv -- "$part" "$jar"
+)
+
+ensure_jar() {
+	if [[ -n ${FOLD_TLA_JAR:-} && ! -f $jar ]]; then
+		echo "FOLD_TLA_JAR=$jar does not exist" >&2
+		exit 2
+	fi
+	if [[ -f $jar ]]; then
+		verify_jar "$jar" || exit 2
+	else
+		download_jar || exit 2
+	fi
+}
+
+# tlc <cfg file> [extra TLC flags]: runs TLC in a scratch directory under
+# ~/.cache/fold: not the repo (no states/ folder), not /tmp (liveness
+# checking writes its graph to disk and can fill a tmpfs quota).
+tlc() {
+	local cfg=$1
+	shift
+	local work rc=0
+	mkdir -p "$cache"
+	work=$(mktemp -d "$cache/tlc-run.XXXXXX")
+	# shellcheck disable=SC2064 # expand $work now: the trap outlives this call
+	trap "rm -rf '$work'" EXIT
+	cp "$here/JobQueue.tla" "$work/"
+	cp "$cfg" "$work/JobQueue.cfg"
+	(cd "$work" && java -XX:+UseParallelGC "-Djava.io.tmpdir=$work" -cp "$jar" tlc2.TLC -workers auto -metadir "$work/states" "$@" \
+		-config JobQueue.cfg JobQueue.tla) || rc=$?
+	rm -rf "$work"
+	return $rc
+}
+
+model() {
+	ensure_jar
+	local cfg out
+	for cfg in JobQueue.cfg JobQueueDeep.cfg; do
+		if out=$(tlc "$here/$cfg" 2>&1); then
+			echo "$cfg: $(grep -E 'distinct states found' <<<"$out" | tail -1)"
+			continue
+		fi
+		echo "$out"
+		if grep -qE "is violated|were violated|Deadlock reached" <<<"$out"; then
+			echo "model ($cfg): a rule broke (above). Read it with the statechart skill before changing anything." >&2
+		else
+			echo "model ($cfg): TLC did not finish (above); fix the spec or the setup, not a rule." >&2
+		fi
+		return 1
+	done
+	echo "model: every rule holds."
+}
+
+# Each break is the removal of one Go guard; the rule after the colon must fail.
+breaks_list=(
+	"no_claim_seq:TwoRunsOnlyAfterALeaseRunsOut"
+	"no_stopped_check:AttemptBudget"
+	"on_dead_unchecked:OnDeadAtMostOncePerDeath"
+	"retry_unchecked:FinishedStaysFinished"
+	"no_lease_recovery:RunningEnds"
+	"no_failed_claim:WaitingIsPickedUp"
+)
+
+breaks() {
+	ensure_jar
+	local entry name rule kind cfg out failed=0
+	for entry in "${breaks_list[@]}"; do
+		name=${entry%%:*}
+		rule=${entry#*:}
+		kind=INVARIANT
+		case $rule in FinishedStaysFinished | RunningEnds | WaitingIsPickedUp) kind=PROPERTY ;; esac
+		cfg=$(mktemp)
+		{
+			echo "SPECIFICATION Spec"
+			echo "CONSTANTS Workers = {w1, w2, w3} NoOne = NoOne MaxAttempts = 2 MaxRetries = 1 MaxCrashes = 1 MaxSlow = 2"
+			echo "CONSTANT Break = \"$name\""
+			echo "$kind $rule"
+		} >"$cfg"
+		if out=$(tlc "$cfg" -deadlock 2>&1); then
+			echo "break $name: $rule still holds; the model no longer sees this guard" >&2
+			failed=1
+		elif grep -qE "Invariant $rule is violated|Action property $rule|Temporal properties were violated" <<<"$out"; then
+			echo "break $name: $rule fails, as it should."
+		else
+			echo "$out" >&2
+			echo "break $name: TLC failed for another reason (above)" >&2
+			failed=1
+		fi
+		rm -f "$cfg"
+	done
+	return $failed
+}
+
+case ${1:-all} in
+all) drift && model ;;
+drift) drift ;;
+model) model ;;
+breaks) breaks ;;
+accept)
+	next=$(manifest)
+	echo "$next" >"$coverage"
+	echo "coverage.txt rewritten; move the sync commit in SKILL.md."
+	;;
+*)
+	echo "usage: check [drift|model|breaks|accept]" >&2
+	exit 2
+	;;
+esac

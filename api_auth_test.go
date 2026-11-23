@@ -7,6 +7,7 @@ import (
 	foldmail "fold/internal/mail"
 	"fold/models"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"sync"
 	"testing"
@@ -923,4 +924,111 @@ func capConnections(t *testing.T, db *gorm.DB, n int) {
 	was := sqlDB.Stats().MaxOpenConnections
 	sqlDB.SetMaxOpenConns(n)
 	t.Cleanup(func() { sqlDB.SetMaxOpenConns(was) })
+}
+
+// bootstrapAs reads GET /auth/bootstrap with the client's cookies (no token).
+func bootstrapAs(t *testing.T, c *apiClient) (*httptest.ResponseRecorder, sessionBootstrapJSON) {
+	t.Helper()
+	w := c.do("GET", "/api/v1/auth/bootstrap", nil, false)
+	var body sessionBootstrapJSON
+	if w.Code == http.StatusOK {
+		decodeJSON(t, w, &body)
+	}
+	return w, body
+}
+
+// GET /auth/bootstrap names the viewer the cookie authenticates (null when
+// none), the CSRF token and its marker, and acknowledges both; it is no-store.
+// A first visit gets a fresh pair; an older cookie keeps its T and gets only
+// the marker it lacks; a wrong marker, a doubled one or one beside the other
+// name gets its marker set again (the other name expired; a doubled copy stays,
+// as the server cannot tell it apart: TestMarkerCopiesAtOtherPathsStayAndFailClosed); a
+// session ended elsewhere keeps its T and answers no one.
+func TestSessionBootstrap(t *testing.T) {
+	app := testApp(t)
+	alice := newTestUser(t, app, "alice", "password1234", models.RoleMember)
+	want := func(what string, c *apiClient, w *httptest.ResponseRecorder, body sessionBootstrapJSON, viewer string) {
+		t.Helper()
+		token, marker := credentialOf(t, c)
+		if w.Code != http.StatusOK || w.Header().Get("Cache-Control") != "no-store" || body.CSRFToken != token || body.CredentialMarker != marker || marker == "" {
+			t.Fatalf("%s: %d %s (cookie T %q M %q)", what, w.Code, w.Body.String(), token, marker)
+		}
+		if got := w.Header().Get(sessionCheckedHeader); got != "v2 "+marker+" "+viewer {
+			t.Fatalf("%s: acknowledgment %q", what, got)
+		}
+		if (body.User != nil) != (viewer != "anon") || (body.User != nil && body.User.ID != alice.ID) {
+			t.Fatalf("%s: user %+v", what, body.User)
+		}
+	}
+
+	first := newAPIClient(t, app)
+	w, body := bootstrapAs(t, first)
+	want("first visit", first, w, body, "anon")
+	if !setsCookie(w, sessionName) {
+		t.Fatal("a first visit got no session cookie")
+	}
+
+	signedIn := loginAPI(t, app, "alice", "password1234")
+	token, _ := credentialOf(t, signedIn)
+	w, body = bootstrapAs(t, signedIn)
+	want("signed in", signedIn, w, body, itoa(alice.ID))
+	if len(w.Header().Values("Set-Cookie")) != 0 || body.CSRFToken != token {
+		t.Fatalf("a current pair was rewritten: %v", w.Header().Values("Set-Cookie"))
+	}
+
+	for _, jar := range []string{"missing", "wrong", "doubled", "other name too"} {
+		c := newAPIClient(t, app)
+		c.jar[sessionName] = signedIn.jar[sessionName]
+		switch jar {
+		case "wrong":
+			c.jar[app.credentialCookieName()] = &http.Cookie{Name: app.credentialCookieName(), Value: "forged"}
+		case "doubled":
+			c.jar[app.credentialCookieName()] = signedIn.jar[app.credentialCookieName()]
+			c.jar["copy"] = &http.Cookie{Name: app.credentialCookieName(), Value: "forged"}
+		case "other name too":
+			// Left from a switch between HTTP and HTTPS, even with the right value.
+			c.jar[app.credentialCookieName()] = signedIn.jar[app.credentialCookieName()]
+			c.jar[app.otherCredentialCookieName()] = &http.Cookie{Name: app.otherCredentialCookieName(), Value: signedIn.jar[app.credentialCookieName()].Value}
+		}
+		w, body = bootstrapAs(t, c)
+		if !setsCookie(w, app.credentialCookieName()) || (jar == "doubled" && c.jar["copy"].Value != "forged") {
+			t.Fatalf("%s marker: not set again, or the copy changed: %v", jar, w.Header().Values("Set-Cookie"))
+		}
+		if setsCookie(w, sessionName) || body.CSRFToken != token {
+			t.Fatalf("%s marker: the session was rewritten or its T changed", jar)
+		}
+		want(jar+" marker", c, w, body, itoa(alice.ID))
+		if ck := c.jar[app.otherCredentialCookieName()]; jar == "other name too" && (ck == nil || ck.MaxAge >= 0) {
+			t.Fatalf("the other marker name was not expired: %v", w.Header().Values("Set-Cookie"))
+		}
+	}
+
+	legacy := newAPIClient(t, app)
+	legacy.jar[sessionName] = legacySessionCookie(t, app, alice)
+	w, body = bootstrapAs(t, legacy)
+	want("cookie with no T", legacy, w, body, itoa(alice.ID))
+
+	// The plain endpoints are unchanged.
+	if w := signedIn.do("GET", "/api/v1/auth/me", nil, false); w.Code != http.StatusOK || w.Header().Get(sessionCheckedHeader) != "" {
+		t.Fatalf("/auth/me: %d", w.Code)
+	}
+	var csrf struct {
+		CSRFToken string `json:"csrfToken"`
+	}
+	decodeJSON(t, signedIn.do("GET", "/api/v1/auth/csrf", nil, false), &csrf)
+	if csrf.CSRFToken != token {
+		t.Fatal("/auth/csrf no longer answers the session's token")
+	}
+
+	// Ended elsewhere: the cookie's T stays, and it answers no one.
+	other := loginAPI(t, app, "alice", "password1234")
+	stale := newAPIClient(t, app)
+	stale.jar[sessionName] = other.jar[sessionName]
+	staleToken, _ := credentialOf(t, stale)
+	apiDo(t, other, "POST", "/api/v1/auth/logout", nil, http.StatusOK)
+	w, body = bootstrapAs(t, stale)
+	want("ended elsewhere", stale, w, body, "anon")
+	if body.CSRFToken != staleToken {
+		t.Fatal("a stale cookie's T changed")
+	}
 }

@@ -340,7 +340,7 @@ func TestDirectoryVisibility(t *testing.T) {
 	if !containsName(got, "Public Choir") || !containsName(got, "Private Band") || !containsName(got, "Invite Prayer") {
 		t.Fatalf("admin directory: %v", got)
 	}
-	if w := admin.do("GET", "/api/v1/groups/"+itoa(invite.ID), nil, false); w.Code != http.StatusOK {
+	if w := admin.do("GET", groupDetailPath(invite.ID), nil, false); w.Code != http.StatusOK {
 		t.Fatalf("admin open invite: %d %s", w.Code, w.Body.String())
 	}
 
@@ -466,7 +466,7 @@ func TestLeadershipAndDeletion(t *testing.T) {
 	var detail struct {
 		Group groupSummaryJSON `json:"group"`
 	}
-	w = leader.do("GET", "/api/v1/groups/"+gid, nil, false)
+	w = leader.do("GET", groupDetailPath(created.Group.ID), nil, false)
 	decodeJSON(t, w, &detail)
 	if detail.Group.LeaderID != samUser.ID {
 		t.Fatalf("leader id: %d", detail.Group.LeaderID)
@@ -531,7 +531,7 @@ func TestNarrowEventHiddenFromGroupLists(t *testing.T) {
 		for _, o := range listOccurrences(t, c, itoa(gid), "2026-11-01", "2026-12-31") {
 			b.WriteString(o.Title + "|")
 		}
-		w := c.do("GET", "/api/v1/groups/"+itoa(gid), nil, false)
+		w := c.do("GET", groupDetailPath(gid), nil, false)
 		b.WriteString(w.Body.String())
 		return b.String()
 	}
@@ -550,11 +550,11 @@ func TestNarrowEventHiddenFromGroupLists(t *testing.T) {
 	if !strings.Contains(ad, secret.Title) {
 		t.Fatal("admin lost the invite-only event")
 	}
-	anonNext, anonBody := nextAtOf(t, anon, "/api/v1/groups/"+itoa(gid), 0)
+	anonNext, anonBody := nextAtOf(t, anon, groupDetailPath(gid), 0)
 	if (anonNext != nil && anonNext.Equal(soonAt)) || strings.Contains(anonBody, rfc3339(soonAt)) {
 		t.Fatalf("anonymous nextEventAt gave away the hidden early date: %v %s", anonNext, anonBody)
 	}
-	if adminNext, _ := nextAtOf(t, admin, "/api/v1/groups/"+itoa(gid), 0); adminNext == nil || !adminNext.Equal(soonAt) {
+	if adminNext, _ := nextAtOf(t, admin, groupDetailPath(gid), 0); adminNext == nil || !adminNext.Equal(soonAt) {
 		t.Fatalf("admin nextEventAt = %v, want %s", adminNext, rfc3339(soonAt))
 	}
 }
@@ -592,7 +592,7 @@ func TestLeadershipChangesAreAuditedAndNotified(t *testing.T) {
 	var detail struct {
 		CanManage bool `json:"canManage"`
 	}
-	decodeJSON(t, bobC.do("GET", "/api/v1/groups/"+gid, nil, false), &detail)
+	decodeJSON(t, bobC.do("GET", groupDetailPath(g.ID), nil, false), &detail)
 	if !detail.CanManage {
 		t.Fatal("co-leader can't manage")
 	}
@@ -674,7 +674,7 @@ func TestInviteOnlyIs404AndVisibilityEnum(t *testing.T) {
 	}
 
 	annC := loginAPI(t, app, "ann", "password1234")
-	w := annC.do("GET", "/api/v1/groups/"+gid, nil, false)
+	w := annC.do("GET", groupDetailPath(g.ID), nil, false)
 	if strings.Contains(w.Body.String(), "inviteOnly") || !strings.Contains(w.Body.String(), `"visibility":"invite_only"`) {
 		t.Fatalf("group JSON: %s", w.Body.String())
 	}
@@ -716,7 +716,7 @@ func TestDirectoryMatchesPolicy(t *testing.T) {
 		}
 		var want []string
 		for _, g := range groups {
-			rel, err := app.relOf(u, g.ID)
+			rel, err := viewerRelIn(app.DB, u, g.ID)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -750,7 +750,7 @@ func TestRosterIsForMembers(t *testing.T) {
 	var detail struct {
 		Members []memberJSON `json:"members"`
 	}
-	decodeJSON(t, sam.do("GET", "/api/v1/groups/"+gid, nil, false), &detail)
+	decodeJSON(t, sam.do("GET", groupDetailPath(g.ID), nil, false), &detail)
 	if len(detail.Members) != 0 {
 		t.Fatalf("outsider sees members in detail: %v", detail.Members)
 	}
@@ -853,7 +853,7 @@ func TestLeadersRemoveMembers(t *testing.T) {
 	if w.Code != http.StatusForbidden || !strings.Contains(w.Body.String(), "removed you") {
 		t.Fatalf("rejoin: %d %s", w.Code, w.Body.String())
 	}
-	for _, p := range []string{"/api/v1/auth/me", "/api/v1/me/groups", "/api/v1/groups/" + itoa(g.ID), "/api/v1/notifications"} {
+	for _, p := range []string{"/api/v1/auth/me", "/api/v1/me/groups", groupDetailPath(g.ID), "/api/v1/notifications"} {
 		if body := removed.do("GET", p, nil, false).Body.String(); strings.Contains(body, "asked to leave") {
 			t.Fatalf("%s shows the removal note: %s", p, body)
 		}
@@ -883,7 +883,7 @@ func TestRosterFlagsAdmins(t *testing.T) {
 	g := newTestGroup(t, app, lead, "G", models.GroupActive)
 	addMember(t, app, adminUser, g, models.MembershipMember)
 	addMember(t, app, sam, g, models.MembershipMember)
-	for _, path := range []string{"/api/v1/groups/" + itoa(g.ID), "/api/v1/groups/" + itoa(g.ID) + "/members"} {
+	for _, path := range []string{groupDetailPath(g.ID), "/api/v1/groups/" + itoa(g.ID) + "/members"} {
 		var body struct {
 			Members []memberJSON `json:"members"`
 		}
@@ -953,7 +953,7 @@ func TestGroupListCarriesNextEventAt(t *testing.T) {
 	if !found {
 		t.Fatalf("group not listed: %s", w.Body.String())
 	}
-	w = admin.do("GET", "/api/v1/groups/"+gid, nil, false)
+	w = admin.do("GET", groupDetailPath(created.Group.ID), nil, false)
 	var detail struct {
 		Group groupSummaryJSON `json:"group"`
 	}
@@ -1203,7 +1203,7 @@ func TestGroupDetailUpcomingCapAfterVisibility(t *testing.T) {
 	read := func(n int) {
 		t.Helper()
 		counter := countDBReads(t, app.DB)
-		w := client.do("GET", "/api/v1/groups/"+itoa(g.ID), nil, false)
+		w := client.do("GET", groupDetailPath(g.ID), nil, false)
 		reads := counter.Reads()
 		counter.Stop()
 		if w.Code != http.StatusOK {
@@ -1279,7 +1279,7 @@ func TestGroupDetailUpcomingContinuation(t *testing.T) {
 	leader := newTestUser(t, app, "leader", "pw", models.RoleMember)
 	g := newTestGroup(t, app, leader, "Paged group", models.GroupActive)
 	client := newAPIClient(t, app)
-	path := "/api/v1/groups/" + itoa(g.ID)
+	path := groupDetailPath(g.ID)
 	start := time.Now().UTC().Add(24 * time.Hour).Truncate(time.Minute)
 	visible := []uint{}
 	for i := 0; i < 55; i++ {
@@ -1307,7 +1307,7 @@ func TestGroupDetailUpcomingContinuation(t *testing.T) {
 	if len(first.UpcomingEvents) != 25 || !first.HasMore || !first.Truncated || first.NextCursor == "" {
 		t.Fatalf("first page: %d dates, hasMore=%v truncated=%v cursor=%q", len(first.UpcomingEvents), first.HasMore, first.Truncated, first.NextCursor)
 	}
-	second := read("?cursor=" + first.NextCursor)
+	second := read("&cursor=" + first.NextCursor)
 	if len(second.UpcomingEvents) != 2 || second.HasMore || second.Truncated || second.NextCursor != "" {
 		t.Fatalf("last page: %d dates, hasMore=%v truncated=%v cursor=%q", len(second.UpcomingEvents), second.HasMore, second.Truncated, second.NextCursor)
 	}
@@ -1320,12 +1320,12 @@ func TestGroupDetailUpcomingContinuation(t *testing.T) {
 	if err := app.DB.Model(&models.EventOccurrence{}).Where("id IN ?", visible[25:]).Update("visibility_override", models.VisibilityInviteOnly).Error; err != nil {
 		t.Fatal(err)
 	}
-	last := read("?cursor=" + first.NextCursor)
+	last := read("&cursor=" + first.NextCursor)
 	if len(last.UpcomingEvents) != 0 || last.HasMore || last.Truncated || last.NextCursor != "" {
 		t.Fatal("hidden tail leaked into continuation metadata")
 	}
 	for _, limit := range []string{"1", "100"} {
-		page := read("?limit=" + limit)
+		page := read("&limit=" + limit)
 		want := 25
 		if limit == "1" {
 			want = 1
@@ -1335,11 +1335,11 @@ func TestGroupDetailUpcomingContinuation(t *testing.T) {
 		}
 	}
 	other := newTestGroup(t, app, leader, "Other group", models.GroupActive)
-	w := client.do("GET", "/api/v1/groups/"+itoa(other.ID)+"?cursor="+first.NextCursor, nil, false)
+	w := client.do("GET", groupDetailPath(other.ID, "cursor="+first.NextCursor), nil, false)
 	if w.Code != 400 {
 		t.Fatalf("cross-group cursor: %d %s", w.Code, w.Body.String())
 	}
-	for _, query := range []string{"?limit=0", "?limit=-1", "?limit=101", "?limit=abc", "?cursor=invalid", "?cursor=e30"} {
+	for _, query := range []string{"&limit=0", "&limit=-1", "&limit=101", "&limit=abc", "&cursor=invalid", "&cursor=e30"} {
 		w := client.do("GET", path+query, nil, false)
 		if w.Code != 400 || !strings.Contains(w.Body.String(), `"code":"group_upcoming_page"`) {
 			t.Fatalf("%s: %d %s", query, w.Code, w.Body.String())
@@ -2105,7 +2105,7 @@ func TestGroupMemberLimitJoinOverrideAndLowering(t *testing.T) {
 	var d struct {
 		Group groupSummaryJSON `json:"group"`
 	}
-	decodeJSON(t, leader.do("GET", path, nil, false), &d)
+	decodeJSON(t, leader.do("GET", groupDetailPath(g.ID), nil, false), &d)
 	if d.Group.MemberLimit == nil || *d.Group.MemberLimit != 2 || d.Group.MemberCount != 1 {
 		t.Fatalf("summary: %+v", d.Group)
 	}
@@ -2371,7 +2371,7 @@ func TestGroupNextEventAtCountsOnlyVisibleDates(t *testing.T) {
 	nextEventSeed(t, app, g, leader.ID, inviteAt, models.VisibilityInviteOnly, nil)
 	nextEventSeed(t, app, g, leader.ID, privateAt, models.VisibilityPrivate, nil)
 	nextEventSeed(t, app, g, leader.ID, publicAt, models.VisibilityPublic, nil)
-	detail, list := "/api/v1/groups/"+itoa(g.ID), "/api/v1/groups"
+	detail, list := groupDetailPath(g.ID), "/api/v1/groups"
 	cases := []struct {
 		who    string
 		client *apiClient
@@ -2445,7 +2445,7 @@ func TestGroupNextEventAtFollowsDateOverrides(t *testing.T) {
 	g := newTestGroup(t, app, admin, "Choir", models.GroupActive)
 	adminC := loginAPI(t, app, "admin", "password1234")
 	anon := newAPIClient(t, app)
-	detail := "/api/v1/groups/" + itoa(g.ID)
+	detail := groupDetailPath(g.ID)
 
 	first := time.Now().UTC().Add(24 * time.Hour).Truncate(time.Minute)
 	second := first.Add(24 * time.Hour)
@@ -2457,8 +2457,7 @@ func TestGroupNextEventAtFollowsDateOverrides(t *testing.T) {
 	got, _ := nextAtOf(t, anon, detail, 0)
 	requireNextAt(t, "before narrowing", got, &first)
 
-	apiDo(t, adminC, "PUT", fmt.Sprintf("/api/v1/events/%d/occurrences/%s", ev.ID, models.FormatCalendarDate(occ.OriginalDate)),
-		map[string]any{"visibility": models.VisibilityInviteOnly, "confirm": true}, http.StatusOK)
+	saveDate(t, adminC, ev.ID, models.FormatCalendarDate(occ.OriginalDate), map[string]any{"visibility": models.VisibilityInviteOnly}, http.StatusOK, "")
 	got, body := nextAtOf(t, anon, detail, 0)
 	requireNextAt(t, "after narrowing the soonest date", got, &second)
 	if strings.Contains(body, rfc3339(first)) {
@@ -2472,7 +2471,7 @@ func TestGroupNextEventAtFollowsDateOverrides(t *testing.T) {
 	public := models.VisibilityPublic
 	_, _ = nextEventSeed(t, app, g2, admin.ID, first, models.VisibilityInviteOnly, nil)
 	_, widened := nextEventSeed(t, app, g2, admin.ID, second, models.VisibilityInviteOnly, &public)
-	got, _ = nextAtOf(t, anon, "/api/v1/groups/"+itoa(g2.ID), 0)
+	got, _ = nextAtOf(t, anon, groupDetailPath(g2.ID), 0)
 	requireNextAt(t, "widened date", got, &widened.StartsAt)
 }
 
@@ -2529,7 +2528,7 @@ func TestGroupNextEventAtForPendingAndArchivedGroups(t *testing.T) {
 	nextEventSeed(t, app, archived, leader.ID, start, models.VisibilityPublic, nil)
 
 	leaderC := loginAPI(t, app, "leader", "password1234")
-	got, _ := nextAtOf(t, leaderC, "/api/v1/groups/"+itoa(pending.ID), 0)
+	got, _ := nextAtOf(t, leaderC, groupDetailPath(pending.ID), 0)
 	requireNextAt(t, "leader of pending group", got, &start)
 	got, _ = nextAtOf(t, leaderC, "/api/v1/me/groups", archived.ID)
 	requireNextAt(t, "leader of archived group", got, &start)

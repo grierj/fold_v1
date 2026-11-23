@@ -95,6 +95,7 @@ func (a *App) registerAPIRoutes(r *gin.Engine) {
 
 	// Auth (csrf token endpoint is public; login/logout need the token).
 	v1.GET("/auth/csrf", a.apiGetCSRF)
+	v1.GET("/auth/bootstrap", a.optionalUser(), a.apiBootstrap)
 	v1.POST("/auth/login", a.apiLogin)
 	v1.POST("/auth/logout", a.apiLogout)
 	v1.GET("/auth/me", a.apiAuth(), a.apiMe)
@@ -300,7 +301,13 @@ func (a *App) registerAPIRoutes(r *gin.Engine) {
 	v1.POST("/events/:id/hosts", a.apiAuth(), a.apiAdmin(), a.apiAddEventHost)
 	v1.DELETE("/events/:id/hosts/:userId", a.apiAuth(), a.apiAdmin(), a.apiRemoveEventHost)
 	v1.POST("/events/:id/cancel", a.apiAuth(), a.apiCancelOccurrence)
-	v1.PUT("/events/:id/occurrences/:date", a.apiAuth(), a.apiUpdateOccurrence)
+	// The retired date writer: a tab from before the guarded edit is told to
+	// reload (date_page_outdated).
+	v1.PUT("/events/:id/occurrences/:date", a.apiAuth(), a.apiRetiredDatePut)
+	// The guarded date edit (M8.1) and its edit base: a manager's read of one
+	// date, scheduled or cancelled, with the revision token the edit names.
+	v1.GET("/events/:id/occurrences/:date", a.apiAuth(), a.apiGetManagedDate)
+	v1.POST("/events/:id/occurrences/:date/edits", a.apiAuth(), a.apiEditDate)
 	v1.PUT("/events/:id/registrations", a.apiAuth(), a.apiRegister)
 	// Actor-only bulk responses freeze the currently generated future dates;
 	// occurrences extended later remain unanswered (M1.14).

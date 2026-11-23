@@ -2,7 +2,7 @@ import { canRegisterAsGuest } from "../lib/can";
 import { Form } from "../components/ui/Form";
 import { useHousehold } from "../lib/useHousehold";
 import { SeriesEditor } from "../components/SeriesEditor";
-import { lazy, Suspense, useEffect, useRef, useState } from "react";
+import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { ApiError } from "../api/core";
 import { Events } from "../api/events";
@@ -11,7 +11,7 @@ import { OccurrenceCard } from "../components/OccurrenceCard";
 import { EventIntro } from "../components/EventIntro";
 import { CompactDates } from "../components/CompactDates";
 import { Attendance } from "../components/Attendance";
-import { DateEditor } from "../components/DateEditor";
+import { ManagedDateEditor } from "../components/ManagedDateEditor";
 import { NeedsRoomList } from "../components/NeedsRoomList";
 import { Menu } from "../components/ui/Menu";
 import { composePath, EMAIL_GOING } from "../components/messages/composeLinks";
@@ -35,14 +35,20 @@ import { EmptyState } from "../components/ui/EmptyState";
 import { Skeleton } from "../components/ui/Skeleton";
 import { applyActorRsvpResults, type ActorRsvpResult, type SeriesFeedbackSignal } from "../lib/rsvpFeedback";
 import { useRsvpMutationGate, type RsvpMutationGate } from "../lib/useRsvpMutationGate";
+import { ConfirmProvider, useConfirm, usePageFacts } from "../components/ui/ConfirmDialog";
+import { useLeaveQuestion } from "../lib/leaveQuestion";
+import { useDateAttempts, useDateWrites } from "../lib/dateWrites";
+import { dateKey, useEditRefresh } from "../lib/editBase";
+import { seriesSchedules } from "../lib/registration";
 
 const ManageRoster = lazy(() => import("../components/ManageRoster").then((module) => ({ default: module.ManageRoster })));
 
 export function EventDetail() {
   const { id } = useParams<{ id: string }>();
 
-  // Another event must never inherit the editor, feedback or pending loads.
-  return <EventDetailContent key={id} />;
+  // Another event must never inherit the editor, feedback, pending loads or an open question.
+  // Questions on this page ask in the app's dialog, never the browser's.
+  return <ConfirmProvider key={id}><EventDetailContent /></ConfirmProvider>;
 }
 
 function EventDetailContent() {
@@ -53,6 +59,9 @@ function EventDetailContent() {
   const { user, loading: authLoading, isAdmin, canCompose } = useAuth();
   const { people, error: householdError, retry: retryHousehold } = useHousehold(user);
   const [deleteError, setDeleteError] = useState<string | null>(null);
+  // From the first ask until the DELETE answers: the menu cannot start a second one.
+  const [deleting, setDeleting] = useState(false);
+  const deletingNow = useRef(false);
   const [editing, setEditing] = useState(false);
   const [seriesFeedback, setSeriesFeedback] = useState<SeriesFeedbackSignal | null>(null);
   const seriesFeedbackRevision = useRef(0);
@@ -76,11 +85,38 @@ function EventDetailContent() {
   // refresh calls) drops the page at once, so protected data cannot linger, and
   // only the newest request may commit anything.
   const load = useLoad(() => Events.get(id ?? ""), [id], { enabled: !!id });
+
+  // A roster write on one of its dates (a row's, or a kept-dates panel's inside an editor) holds that date's
+  // Edit until this page shows an answer asked for after it. A date's own edits are held per credential by the
+  // guarded attempts (lib/dateWrites), which ask this page and the date's editor again when one settles.
+  const dateWrites = useDateWrites({
+    epoch: load.epoch,
+    dataEpoch: load.dataEpoch,
+    shows: (target) => target.eventId === Number(id),
+    reload: () => refreshDates(),
+    rosters: true,
+  });
+
+  useEditRefresh((eventId) => eventId === Number(id), () => refreshDates());
+
   const page = load.data ?? null;
   const loading = load.loading;
   const notFound = load.error instanceof ApiError && load.error.status === 404;
-  const error = deleteError ?? (load.error && !notFound ? errorText(load.error, "We couldn't load this event.") : null);
+  const error = load.error && !notFound ? errorText(load.error, "We couldn't load this event.") : null;
   const setPage = load.setData;
+
+  // After a date changes, here or from another page: the dates that need a room are asked for again with the
+  // event, since a moved date can lose its booking (NeedsRoomList keeps its own request).
+  const refreshDates = () => {
+    setRoomsRevision((n) => n + 1);
+    void load.reload();
+  };
+
+  // Every question on this page is about what it shows: any change to the loaded event, its dates or what
+  // this person may do (a refresh, a sibling's answer) makes a pending question stale, even if it changes back.
+  usePageFacts(useMemo(() => JSON.stringify(page), [page]));
+  const beginDelete = useConfirm();
+  useLeaveQuestion();
 
   function handleRsvp() { void load.reload(); }
 
@@ -120,18 +156,30 @@ function EventDetailContent() {
   const single = !event.recurrenceRule && occurrences.length === 1;
   const next = occurrences[0];
   const line = whenLine(event.recurrenceRule, occurrences);
+  const schedules = seriesSchedules(occurrences);
   // A single date's confirmed room is its place; a series header keeps the typed location (M2.1b).
   const headerPlace = placeLine(single ? next.room : undefined, event.location);
 
   async function deleteEvent() {
-    if (!confirm(`Delete “${title}”? This removes every date and its registrations.`)) return;
-    setDeleteError(null);
+    if (deletingNow.current) return;
+    const action = beginDelete();
+    deletingNow.current = true;
+    setDeleting(true);
+    const question = `Delete “${title}”?`;
+    const consequence = "This removes every date and its registrations.";
 
     try {
+      if (!(await action.ask({ title: question, body: consequence, confirmLabel: "Delete event", tone: "danger", native: `${question} ${consequence}` }))) return;
+      setDeleteError(null);
       await Events.delete(event.id);
-      navigate("/", { replace: true });
+
+      // Only the page that asked moves on: someone who went elsewhere meanwhile stays there.
+      if (action.here()) navigate("/", { replace: true });
     } catch (e) {
-      setDeleteError(errorText(e, "We couldn't delete the event."));
+      if (action.here()) setDeleteError(errorText(e, "We couldn't delete the event."));
+    } finally {
+      deletingNow.current = false;
+      setDeleting(false);
     }
   }
 
@@ -150,7 +198,7 @@ function EventDetailContent() {
             </Button>
             <Menu label="More event actions" items={[
               ...(canCompose ? [{ label: EMAIL_GOING, onSelect: () => navigate(composePath({ event: event.id })) }] : []),
-              { label: "Delete event", onSelect: () => void deleteEvent(), danger: true },
+              { label: "Delete event", onSelect: () => void deleteEvent(), danger: true, disabled: deleting },
             ]} />
           </div>
         )}
@@ -168,7 +216,9 @@ function EventDetailContent() {
         </div>
         {event.description && <p className="text-text-muted whitespace-pre-wrap">{event.description}</p>}
       </div>
-      {error && <div className="text-danger mt-3">{error}</div>}
+      {deleteError && <div className="text-danger mt-3">{deleteError}</div>}
+      {/* A refresh that failed keeps what was shown; a date it was asked for after an update stays closed until Try again lands. */}
+      {error && <div className="mt-3"><ErrorNotice message={error} onRetry={refreshDates} /></div>}
 
 
       {isAdmin && event.churchWide && (
@@ -219,12 +269,17 @@ function EventDetailContent() {
           {(m) => <DateRow
             key={`${m.eventId}-${m.date}`}
             instance={m}
+            seriesDates={schedules.get(m.eventId) ?? ""}
             single={single}
             eventTitle={title}
             headerLocation={event.location}
             loggedIn={!!user}
             canManage={canManage}
             manageRequested={canManage && manageDate === m.date}
+            writingDate={dateWrites.writing(m.eventId, m.date)}
+            settlingDate={dateWrites.settling(m.eventId, m.date)}
+            generation={load.dataEpoch}
+            pageFailed={load.error != null}
             editRequest={pickRequest?.date === m.date ? pickRequest.seq : 0}
             onRsvp={handleRsvp}
             people={people}
@@ -232,7 +287,7 @@ function EventDetailContent() {
             mutationGate={rsvpMutationGate}
             onSeriesFeedback={reportSeriesFeedback}
             onTerminalRefresh={() => void load.retry()}
-            onChanged={() => { setRoomsRevision((n) => n + 1); void load.reload(); }}
+            onChanged={refreshDates}
             onNeedLogin={() => navigate("/login", { state: { from: `/events/${id}` } })}
           />}
         </CompactDates>
@@ -243,12 +298,17 @@ function EventDetailContent() {
 
 function DateRow({
   instance,
+  seriesDates,
   single,
   eventTitle,
   headerLocation,
   loggedIn,
   canManage,
   manageRequested,
+  writingDate,
+  settlingDate,
+  generation,
+  pageFailed,
   editRequest,
   onRsvp,
   people,
@@ -260,6 +320,7 @@ function DateRow({
   onNeedLogin,
 }: {
   instance: EventOccurrence;
+  seriesDates: string;
   // The page header already says this date's title, place and time.
   single: boolean;
   eventTitle: string;
@@ -268,6 +329,13 @@ function DateRow({
   canManage: boolean;
   // ?manage=<this date> asked for the Manage sign-ups panel to open (DEC-99).
   manageRequested: boolean;
+  // A roster write on this date is on its way, or answered and the page does not show it yet (EventDetailContent's dateWrites).
+  writingDate: boolean;
+  settlingDate: boolean;
+  // The page's shown answer: the date's editor reads the date again for each. While the page's latest read
+  // failed, the editor shows nothing of the date.
+  generation: number;
+  pageFailed: boolean;
   // Counts up each time "Pick a room" asks for this date's editor; 0 when it hasn't.
   editRequest: number;
   onRsvp: () => void;
@@ -282,6 +350,10 @@ function DateRow({
   const navigate = useNavigate();
   const { canCompose } = useAuth();
   const [editingDate, setEditingDate] = useState(false);
+  // This date's guarded edit: anything but idle closes Edit; a save whose answer never arrived is reached
+  // through its own opener, outside the menu, so Close or leaving never strands it.
+  const attempts = useDateAttempts();
+  const editStatus = attempts?.status(dateKey(instance.eventId, instance.date)) ?? "idle";
   const [managing, setManaging] = useState(manageRequested);
   const manageRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
@@ -306,23 +378,40 @@ function DateRow({
     const editor = editorRef.current;
     editor?.scrollIntoView?.({ block: "start" });
   }, [editRequest, editingDate]);
-  const [cancelling, setCancelling] = useState(false);
+  // "asking" from the first ask, "cancelling" while the request runs: either way the menu cannot start another.
+  const [cancelStep, setCancelStep] = useState<"asking" | "cancelling" | null>(null);
+  const cancelNow = useRef(false);
   const [cancelError, setCancelError] = useState<string | null>(null);
+  const beginCancel = useConfirm();
   const time = formatTime(instance.startsAt);
   const held = heldIn(instance.startsAt, instance.tzid);
   const place = placeLine(instance.room, instance.location);
 
   async function cancel() {
-    if (!confirm(`Cancel this date on ${instance.date}?`)) return;
-    setCancelling(true);
+    if (cancelNow.current) return;
+    const action = beginCancel();
+    cancelNow.current = true;
+    setCancelStep("asking");
+    const question = `Cancel this date on ${instance.date}?`;
+
+    if (!(await action.ask({ title: question, confirmLabel: "Cancel this date", cancelLabel: "Keep this date", tone: "danger", native: question }))) {
+      cancelNow.current = false;
+      setCancelStep(null);
+
+      return;
+    }
+
+    setCancelStep("cancelling");
     setCancelError(null);
 
     try {
       await Events.cancelOccurrence(instance.eventId, instance.date);
+      // Stays "Cancelling…" until the refresh takes the date away.
       onChanged();
     } catch (e) {
       setCancelError(errorText(e, "We couldn't cancel that date."));
-      setCancelling(false);
+      cancelNow.current = false;
+      setCancelStep(null);
     }
   }
 
@@ -343,11 +432,11 @@ function DateRow({
         tone="quiet"
         label={`More for ${instance.date}`}
         items={[
-          { label: "Edit this date", onSelect: () => { setFocusRoom(false); setEditingDate((v) => !v); } },
+          { label: "Edit this date", onSelect: () => { setFocusRoom(false); setEditingDate((v) => !v); }, disabled: writingDate || settlingDate || editStatus !== "idle" },
           { label: "Manage sign-ups", onSelect: () => setManaging((v) => !v) },
           // A single date's people are the event's: the header's menu has it.
           ...(canCompose && !single ? [{ label: EMAIL_GOING, onSelect: () => navigate(composePath({ occurrence: instance.id })) }] : []),
-          { label: cancelling ? "Cancelling…" : "Cancel this date", onSelect: () => void cancel(), danger: true, disabled: cancelling },
+          { label: cancelStep === "cancelling" ? "Cancelling…" : "Cancel this date", onSelect: () => void cancel(), danger: true, disabled: cancelStep !== null },
         ]}
       />}
     >
@@ -370,7 +459,7 @@ function DateRow({
     <div>
         <div>
           {loggedIn ? (
-            <RsvpButtons instance={instance} people={people} headingLevel={single ? 3 : 4} onChange={onRsvp} seriesFeedback={seriesFeedback}
+            <RsvpButtons instance={instance} seriesDates={seriesDates} people={people} headingLevel={single ? 3 : 4} onChange={onRsvp} seriesFeedback={seriesFeedback}
               mutationGate={mutationGate} onSeriesFeedback={onSeriesFeedback} onTerminalRefresh={onTerminalRefresh} />
           ) : canRegisterAsGuest(loggedIn, instance.visibility) ? (
             <div className="space-y-2">
@@ -386,17 +475,26 @@ function DateRow({
             </Button>
           )}
         </div>
-        {editingDate && (
+        {canManage && !editingDate && editStatus === "unsure" && (
+          <Button variant="secondary" layout="w-full sm:w-auto" onClick={() => { setFocusRoom(false); setEditingDate(true); }}>Check your last change to this date</Button>
+        )}
+        {canManage && editingDate && (
           <div ref={editorRef} className="scroll-mt-4">
-          <DateEditor
-            instance={instance}
+          <ManagedDateEditor
+            opener={{ eventId: instance.eventId, date: instance.date, occurrenceId: instance.id }}
+            generation={generation}
+            pageFailed={pageFailed}
             onRoomChanged={onChanged}
             focusRoom={focusRoom}
-            onSaved={() => {
-              setEditingDate(false);
-              onChanged();
+            onSaved={(stillOpen) => {
+              // An editor that went away while its save ran (managing rights came and went) closes nothing it did not own.
+              if (stillOpen) setEditingDate(false);
             }}
             onClose={() => setEditingDate(false)}
+            onRefused={() => {
+              setEditingDate(false);
+              onTerminalRefresh();
+            }}
           />
           </div>
         )}

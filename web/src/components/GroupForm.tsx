@@ -1,4 +1,4 @@
-import { useId, useRef, useState } from "react";
+import { useId, useRef, useState, type Ref } from "react";
 import { flushSync } from "react-dom";
 import type { Visibility } from "../types";
 import { errorText } from "../lib/errors";
@@ -28,6 +28,7 @@ export function GroupForm({
   saveLabel,
   onSaved,
   onCancel,
+  saveRef,
 }: {
   initial: {
     name: string; description: string; location: string; tags: string[];
@@ -43,6 +44,8 @@ export function GroupForm({
   // Resolve false to say nothing was saved (the leader still has a review to confirm).
   onSaved: (data: GroupFormData) => Promise<void | false>;
   onCancel: () => void;
+  // The submit button, for a review that hands focus back to it.
+  saveRef?: Ref<HTMLButtonElement>;
 }) {
   const [name, setName] = useState(initial.name);
   const [description, setDescription] = useState(initial.description);
@@ -186,7 +189,7 @@ export function GroupForm({
         </div>
       </section>
       <FormActions>
-        <Button variant="primary" layout="w-full sm:w-auto" type="submit" disabled={busy}>
+        <Button ref={saveRef} variant="primary" layout="w-full sm:w-auto" type="submit" disabled={busy}>
           {busy ? "Saving…" : saveLabel}
         </Button>
         <Button variant="secondary" layout="w-full sm:w-auto" onClick={onCancel}>

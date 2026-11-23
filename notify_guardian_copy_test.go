@@ -5,12 +5,17 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"fold/internal/jobs"
+	"fold/internal/mail"
 	"fold/internal/notify"
+	"fold/internal/policy"
+	"fold/internal/providers"
 	"fold/models"
 
 	"gorm.io/gorm"
@@ -878,11 +883,10 @@ func singleDateCancellation(t *testing.T, eventTitle, dateTitle string) *singleD
 		}
 	}
 	s := &singleDateScene{app: app, day: models.FormatCalendarDate(dates[0].OriginalDate), occ: dates[0], event: ev}
-	path := fmt.Sprintf("/api/v1/events/%d/occurrences/%s", ev.ID, s.day)
 	if dateTitle != "" {
-		apiDo(t, admin, "PUT", path, map[string]any{"title": dateTitle}, 200)
+		saveDate(t, admin, ev.ID, s.day, map[string]any{"title": dateTitle}, http.StatusOK, "")
 	}
-	apiDo(t, admin, "PUT", path, map[string]any{"visibility": "public"}, 200)
+	saveDate(t, admin, ev.ID, s.day, map[string]any{"visibility": "public"}, http.StatusOK, "")
 	s.teen = newTestUser(t, app, "sam", "password1234", models.RoleMember)
 	if err := app.DB.Model(s.teen).Update("account_type", models.AccountTeen).Error; err != nil {
 		t.Fatal(err)
@@ -903,7 +907,8 @@ func singleDateCancellation(t *testing.T, eventTitle, dateTitle string) *singleD
 	if err := app.DB.Create(&models.Registration{OccurrenceID: dates[0].ID, UserID: &s.teen.ID, Status: models.RegGoing}).Error; err != nil {
 		t.Fatal(err)
 	}
-	apiDo(t, admin, "PUT", path, map[string]any{"visibility": nil, "confirm": true}, 200)
+	// Back to the invite-only series: the teen is shut out and cancelled.
+	saveDateConsenting(t, admin, ev.ID, s.day, map[string]any{"visibility": nil})
 	return s
 }
 
@@ -1003,6 +1008,188 @@ func TestNoticeGuardianCopyNeedsThePlainTitle(t *testing.T) {
 			}
 			if len(copyJobs(t, f.app)) != len(f.guardians) {
 				t.Fatalf("copy jobs %d, want one per guardian: the control arm lost its jobs", len(copyJobs(t, f.app)))
+			}
+		})
+	}
+}
+
+// queryingSender stands in for the provider and reads the database through
+// app.DB once per send, so a send made while a transaction holds a
+// one-connection pool waits and fails.
+type queryingSender struct {
+	app  *App
+	sent []mail.Message
+	errs []error
+}
+
+func (s *queryingSender) SendEmail(ctx context.Context, m mail.Message) (string, error) {
+	var one int
+	err := s.app.DB.Raw("SELECT 1").Scan(&one).Error
+	s.errs = append(s.errs, err)
+	s.sent = append(s.sent, m)
+	return "", err
+}
+
+func (s *queryingSender) Capabilities() providers.EmailCaps { return providers.EmailCaps{} }
+
+// TestGuardianCopyReadsInOneSnapshotAndSendsAfter: the copy job reads every
+// fact (the notice, the teen, the link, the teen's access to the subject, the
+// guardian's choice) through its one snapshot and calls the provider after it
+// ends: on a one-connection pool a read outside the snapshot, or a send inside
+// it, would wait for the connection the snapshot holds.
+func TestGuardianCopyReadsInOneSnapshotAndSendsAfter(t *testing.T) {
+	f := newCopyFixture(t)
+	id := f.notice(t, notify.WaitlistCutoff, "event", f.event.ID, notify.Vars{Event: "Youth night", When: "Fri 7pm"})
+	if err := f.app.deliverOneNotification(context.Background(), id); err != nil {
+		t.Fatal(err)
+	}
+	sender := &queryingSender{app: f.app}
+	f.app.Mailer = sender
+	one := oneConnectionPool(t, f.app)
+	ctx := oneConnection(t, f.app, one)
+	if err := f.app.sendGuardianCopy(ctx, guardianCopyJob{NotificationID: id, GuardianID: f.guardians[0].ID}); err != nil {
+		t.Fatalf("on one connection: %v", err)
+	}
+	if len(sender.sent) != 1 || sender.errs[0] != nil || sender.sent[0].To != f.guardians[0].Email || !strings.HasPrefix(sender.sent[0].Subject, "Copy: ") {
+		t.Fatalf("the copy: %+v, errors %v", sender.sent, sender.errs)
+	}
+}
+
+// TestGuardianCopyOfADateNeverStraddlesAnEdit: a guardian copy of a notice
+// about a date goes only while the teen may still see that date, judged in
+// the copy job's one snapshot. The teen left the group and kept an
+// invite-only date. In the control the date is still ahead and the copy goes.
+// Otherwise the date reaches its old end and the real guarded edit ends the
+// grant and moves the date in one commit, at the "grants" seam of the teen's
+// access check: before the edit the grant had lapsed and after it the grant
+// is stamped, so no committed state lets the teen see the date and no copy
+// goes. A check read over separate statements would pair the live grant with
+// the moved date and send it.
+func TestGuardianCopyOfADateNeverStraddlesAnEdit(t *testing.T) {
+	for _, straddle := range []bool{false, true} {
+		t.Run(fmt.Sprintf("straddle=%v", straddle), func(t *testing.T) {
+			f := newDepartureReadFixture(t, models.VisibilityInviteOnly, models.RegGoing, policy.OccurrenceOriginDepartureSelf)
+			target := f.dates[1]
+			date := models.FormatCalendarDate(target.OriginalDate)
+			gormMust(t, f.app.DB.Model(f.recipient).Update("account_type", models.AccountTeen))
+			gormMust(t, f.app.DB.Create(&models.TeenConsent{TeenUserID: f.recipient.ID, Scope: models.TeenConsentAccount, Status: models.ConsentGranted, GrantedBy: f.issuer.ID, GranterRole: models.ConsentAdmin, EvidenceText: "verified consent", At: time.Now().Add(-time.Minute)}))
+			guardian := newTestUser(t, f.app, "copy guardian", "password1234", models.RoleMember)
+			gormMust(t, f.app.DB.Model(guardian).Update("account_type", models.AccountAdult))
+			gormMust(t, f.app.DB.Create(&models.GuardianLink{GuardianUserID: guardian.ID, TeenUserID: &f.recipient.ID, Status: models.GuardianConfirmed}))
+			gormMust(t, f.app.DB.Create(&models.Setting{Key: settingGuardianCopies, Value: "true"}))
+			ids, err := notify.Send(f.app.DB, notify.Msg{Kind: notify.EventChanged, To: []uint{f.recipient.ID}, SubjectType: "occurrence", SubjectID: target.ID,
+				Link: occurrenceDatePath(f.event.ID, date), Vars: notify.Vars{Event: "Retained date title", Change: "The time changed."}})
+			if err != nil || len(ids) != 1 {
+				t.Fatalf("notice: %v %v", ids, err)
+			}
+			sender := &deliverySender{}
+			f.app.Mailer = sender
+			if err := f.app.deliverOneNotification(context.Background(), ids[0]); err != nil {
+				t.Fatal(err)
+			}
+			if len(sender.msgs) != 1 || sender.msgs[0].To != f.recipient.Email {
+				t.Fatalf("the teen's own email: %+v", sender.msgs)
+			}
+			var fired atomic.Bool
+			if straddle {
+				base := editBaseOf(t, f.admin, f.event.ID, date)
+				newMutableClock(f.app, target.EndsAt)
+				f.app.hooks.invitationReadStep = func(step string) {
+					if step != "grants" || !fired.CompareAndSwap(false, true) {
+						return
+					}
+					w := postDateEdit(f.admin, f.event.ID, date, dateEditBody(newDateAttempt(t), base.Revision,
+						map[string]any{"startsLocal": target.StartsAt.Add(2 * time.Hour).UTC().Format("2006-01-02T15:04")}))
+					if w.Code != http.StatusOK {
+						t.Errorf("the edit at the seam: %d %s", w.Code, w.Body.String())
+					}
+				}
+			}
+			copies := &deliverySender{}
+			f.app.Mailer = copies
+			if err := f.app.sendGuardianCopy(context.Background(), guardianCopyJob{NotificationID: ids[0], GuardianID: guardian.ID}); err != nil {
+				t.Fatal(err)
+			}
+			// The edit at the seam mails its own notices; only the
+			// guardian's mail is the copy.
+			var toGuardian []mail.Message
+			for _, m := range copies.msgs {
+				if m.To == guardian.Email {
+					toGuardian = append(toGuardian, m)
+				}
+			}
+			if straddle {
+				if !fired.Load() {
+					t.Fatal("the copy never reached the grants step: no straddle was tried")
+				}
+				if len(toGuardian) != 0 {
+					t.Fatalf("a copy went for a date no committed state lets the teen see: %+v", toGuardian)
+				}
+				return
+			}
+			if len(toGuardian) != 1 || !strings.HasPrefix(toGuardian[0].Subject, "Copy: ") {
+				t.Fatalf("the control copy: %+v", copies.msgs)
+			}
+		})
+	}
+}
+
+// TestGuardianCopyReadsItsClockInItsSnapshot: the copy judges the teen's
+// access by a clock read after its snapshot has read the notice. The teen
+// left the group and kept an invite-only date, whose grant ends with the
+// date. In the control the date is a minute from its end and the copy goes.
+// Otherwise the date ends after the job starts and before the snapshot's
+// first statement: a clock read before the snapshot would still let the grant
+// stand and send the date's title to the guardian.
+func TestGuardianCopyReadsItsClockInItsSnapshot(t *testing.T) {
+	for _, crosses := range []bool{false, true} {
+		t.Run(fmt.Sprintf("crosses=%v", crosses), func(t *testing.T) {
+			f := newDepartureReadFixture(t, models.VisibilityInviteOnly, models.RegGoing, policy.OccurrenceOriginDepartureSelf)
+			target := f.dates[1]
+			date := models.FormatCalendarDate(target.OriginalDate)
+			gormMust(t, f.app.DB.Model(f.recipient).Update("account_type", models.AccountTeen))
+			gormMust(t, f.app.DB.Create(&models.TeenConsent{TeenUserID: f.recipient.ID, Scope: models.TeenConsentAccount, Status: models.ConsentGranted, GrantedBy: f.issuer.ID, GranterRole: models.ConsentAdmin, EvidenceText: "verified consent", At: time.Now().Add(-time.Minute)}))
+			guardian := newTestUser(t, f.app, "clock guardian", "password1234", models.RoleMember)
+			gormMust(t, f.app.DB.Model(guardian).Update("account_type", models.AccountAdult))
+			gormMust(t, f.app.DB.Create(&models.GuardianLink{GuardianUserID: guardian.ID, TeenUserID: &f.recipient.ID, Status: models.GuardianConfirmed}))
+			gormMust(t, f.app.DB.Create(&models.Setting{Key: settingGuardianCopies, Value: "true"}))
+			ids, err := notify.Send(f.app.DB, notify.Msg{Kind: notify.EventChanged, To: []uint{f.recipient.ID}, SubjectType: "occurrence", SubjectID: target.ID,
+				Link: occurrenceDatePath(f.event.ID, date), Vars: notify.Vars{Event: "Retained date title", Change: "The time changed."}})
+			if err != nil || len(ids) != 1 {
+				t.Fatalf("notice: %v %v", ids, err)
+			}
+			clock := newMutableClock(f.app, target.EndsAt.Add(-time.Minute))
+			sender := &deliverySender{}
+			f.app.Mailer = sender
+			if err := f.app.deliverOneNotification(context.Background(), ids[0]); err != nil {
+				t.Fatal(err)
+			}
+			if len(sender.msgs) != 1 || sender.msgs[0].To != f.recipient.Email {
+				t.Fatalf("the teen's own email: %+v", sender.msgs)
+			}
+			var began atomic.Int32
+			f.app.hooks.guardianCopyBegin = func() {
+				began.Add(1)
+				if crosses {
+					clock.set(target.EndsAt.Add(time.Minute))
+				}
+			}
+			copies := &deliverySender{}
+			f.app.Mailer = copies
+			if err := f.app.sendGuardianCopy(context.Background(), guardianCopyJob{NotificationID: ids[0], GuardianID: guardian.ID}); err != nil {
+				t.Fatal(err)
+			}
+			if began.Load() != 1 {
+				t.Fatalf("the copy's snapshot began %d times", began.Load())
+			}
+			if crosses {
+				if len(copies.msgs) != 0 {
+					t.Fatalf("a copy went for a date whose grant had ended before the snapshot read anything: %+v", copies.msgs)
+				}
+				return
+			}
+			if len(copies.msgs) != 1 || copies.msgs[0].To != guardian.Email || !strings.HasPrefix(copies.msgs[0].Subject, "Copy: ") {
+				t.Fatalf("the control copy: %+v", copies.msgs)
 			}
 		})
 	}

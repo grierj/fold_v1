@@ -8,9 +8,13 @@ import (
 	"encoding/gob"
 	"encoding/json"
 	"fmt"
+	"fold/internal/guardkit"
 	"fold/internal/httpx"
 	"fold/models"
 	"github.com/gin-gonic/gin"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"io"
 	"net"
 	"net/http"
@@ -373,6 +377,90 @@ func TestManifestCarriesTheChurchName(t *testing.T) {
 		m, _ := read()
 		if m.Name != name || m.ShortName != short {
 			t.Fatalf("%q: name %q, short_name %q", name, m.Name, m.ShortName)
+		}
+	}
+}
+
+// serveBootProblems: in the function that runs bootRestoreFence, the boot step
+// (which declares the recovery level and rotates the consent epoch, DEC-158)
+// comes before setup, the router, the jobs and the listener, and its failure
+// returns a non-zero exit.
+func serveBootProblems(src string) []string {
+	fset := token.NewFileSet()
+	f, err := parser.ParseFile(fset, "main.go", src, 0)
+	if err != nil {
+		return []string{err.Error()}
+	}
+	var bad []string
+	for _, d := range f.Decls {
+		fd, ok := d.(*ast.FuncDecl)
+		if !ok || fd.Body == nil {
+			continue
+		}
+		pos := map[string]token.Pos{}
+		var bootIf *ast.IfStmt
+		ast.Inspect(fd, func(n ast.Node) bool {
+			if ifs, ok := n.(*ast.IfStmt); ok && ifs.Init != nil {
+				ast.Inspect(ifs.Init, func(m ast.Node) bool {
+					if c, ok := m.(*ast.CallExpr); ok && guardkit.Callee(c) == "bootRestoreFence" {
+						bootIf = ifs
+					}
+					return true
+				})
+			}
+			if c, ok := n.(*ast.CallExpr); ok {
+				if name := guardkit.Callee(c); pos[name] == 0 {
+					pos[name] = c.Pos()
+				}
+			}
+			return true
+		})
+		boot, found := pos["bootRestoreFence"]
+		if !found {
+			continue
+		}
+		for _, later := range []string{"setupComplete", "setupRouter", "startJobs", "newHTTPServer"} {
+			if p, ok := pos[later]; !ok || p < boot {
+				bad = append(bad, fd.Name.Name+": "+later+" does not come after bootRestoreFence")
+			}
+		}
+		exits := false
+		if bootIf != nil {
+			for _, st := range bootIf.Body.List {
+				if r, ok := st.(*ast.ReturnStmt); ok && len(r.Results) == 1 {
+					if lit, ok := r.Results[0].(*ast.BasicLit); ok && lit.Value != "0" {
+						exits = true
+					}
+				}
+			}
+		}
+		if !exits {
+			bad = append(bad, fd.Name.Name+": a failed bootRestoreFence does not return a non-zero exit")
+		}
+		return bad
+	}
+	return append(bad, "no function runs bootRestoreFence")
+}
+
+func TestServeBootStepComesFirst(t *testing.T) {
+	b, err := os.ReadFile("main.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	src := string(b)
+	for _, v := range serveBootProblems(src) {
+		t.Error(v)
+	}
+	for name, mutated := range map[string]string{
+		"the router before the boot": strings.Replace(src, "if err := app.bootRestoreFence(); err != nil {", "_ = app.setupRouter()\n\tif err := app.bootRestoreFence(); err != nil {", 1),
+		"a zero exit on failure":     strings.Replace(src, "fmt.Fprintln(stderr, \"fold:\", err)\n\t\treturn 1\n\t}\n\tready, err := app.setupComplete()", "fmt.Fprintln(stderr, \"fold:\", err)\n\t\treturn 0\n\t}\n\tready, err := app.setupComplete()", 1),
+		"no boot":                    strings.Replace(src, "app.bootRestoreFence()", "app.initAttempts()", 1),
+	} {
+		if mutated == src {
+			t.Fatalf("%s: the fixture did not change main.go", name)
+		}
+		if len(serveBootProblems(mutated)) == 0 {
+			t.Errorf("%s: the guard missed it", name)
 		}
 	}
 }
