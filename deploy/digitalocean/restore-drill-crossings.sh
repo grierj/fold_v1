@@ -1,30 +1,32 @@
 #!/usr/bin/env bash
 # R4-6c-V / T07B-2-V: real-binary recovery-level crossings, the current-release
-# restore and the older-archive restores. Sourced only by restore-drill.sh (and
-# by restore-crossings-fixtures.sh, which tests the pure functions without a
-# daemon). Nothing here changes a shipped script: it builds real images from
+# restore and the older-archive restores. Sourced only by restore-drill.sh.
+# Nothing here changes a shipped script: it builds real images from
 # real commits, pushes them to the drill registry the runner already owns, and
 # drives the installed entry points.
 #
 # Every image is built from `git archive <sha>` of a commit and must report the
 # FOLD_VERSION it was built with, so a binary is tied to its commit. The
 # candidate is the committed head (the runner refuses a dirty tree) and must be
-# recovery level 2 (reason review, T07B-2b).
+# recovery level 3 (exact visibility consent, DEC-158).
 #
 # Roles (each proved from git before any image is built):
-#   candidate  the committed head, level 2.
+#   candidate  the committed head, level 3.
 #   landing    T07B-1-V's landing commit, level 1 (the restore barrier without
 #              reason review), before restore.sh existed.
 #   lane       LANE_BASE, the recorded level-0 preflight base.
-#   prior      the level-2 release before the candidate (T07B-2b's landing, the
-#              same schema), the only legal rollback target.
+#   prior      the level-2 release before the candidate (T306's landing, a
+#              descendant of v0.1.0). It is a lineage origin: its own tools
+#              provision it on a fresh site, and the candidate's tools upgrade
+#              it. No earlier release can run on the candidate's schema (00015
+#              refuses them at start, DEC-158), so none is a rollback target.
 #   archive    INTEGRATION's first parent of T07B-2a-V's landing merge (level 1
 #              or 0): migrations without the reason-review file, whose data is
 #              restored by the candidate. The lane commit is also dumped
 #              (the older table-set archive, kept from R4-6c-V).
 #
 # Cases, each failing the runner on any deviation:
-#   real_binary_refusals        The main site (floor 2) runs the real candidate
+#   real_binary_refusals        The main site (floor 3) runs the real candidate
 #                               image. upgrade.sh --commit/--image and
 #                               restore.sh --commit/--image toward LANE_BASE
 #                               (level 0) and toward the landing (level 1), each
@@ -33,10 +35,7 @@
 #                               release lacks (the restore barrier for level 0,
 #                               reason review for both), reach no backup/record/
 #                               checkout/pin/stop/swap step in an xtrace, and
-#                               leave snapshot_state byte-identical. Two further
-#                               rows per rollback kind and target are
-#                               SUPPLEMENTARY FIXTURE rows (S-*): a same-level
-#                               release.prev is rewritten to name the target.
+#                               leave snapshot_state byte-identical.
 #   real_level_lineage          Four fresh sites (origin level 0 and level 1, each
 #                               in image and build mode), separate from the main
 #                               one. Each is first a genuine host of its origin
@@ -44,22 +43,60 @@
 #                               that commit's image (image mode) or source
 #                               (build mode, compiled on the box). The candidate's
 #                               tools then upgrade it for real. Smoke passes, the
-#                               floor reads 2 and release.prev names the origin
+#                               floor reads 3 and release.prev names the origin
 #                               naturally. Then upgrade.sh --rollback, from the
 #                               installed copy and from the candidate tool copy,
 #                               must be refused as above (R-rollback-genuine).
 #                               The build-mode sites, running the genuine build
 #                               at the head, also take the full forward and
 #                               restore refusal matrix toward both targets.
-#   real_same_level_rollback    The real prior (level 2) image deployed, forward
-#                               to the candidate image, then upgrade.sh
-#                               --rollback: succeeds, runs restore.sh from
-#                               DIR/recovery-tools, leaves DIR and
-#                               DIR/deploy-tools at the candidate's bytes, and
-#                               the recovery instance and the reopened app run
-#                               one image id that reports recoveryPolicy 2.
+#   real_lower_level_rollback_refused  A fresh site provisioned by the prior's
+#                               own tools with the prior image (level 2, no
+#                               fence), upgraded for real by the candidate's
+#                               tools (smoke passes, floor 3, release.prev names
+#                               the prior). upgrade.sh --rollback, from the
+#                               installed copy and from the candidate tool copy,
+#                               exits 1 naming exact visibility consent (level 3),
+#                               reaches no backup/record/checkout/pin/stop/swap
+#                               step and leaves snapshot_state byte-identical.
+#                               Then the SUPPLEMENTARY FIXTURE rows (S-*) on the
+#                               same site: release.prev is rewritten to name the
+#                               level-0 and level-1 targets, each refused, and
+#                               the natural record is put back.
+#   real_l1_pre_upgrade_dump    Measured (L1): the pre-upgrade dump release.prev
+#                               names is restored by hand into a scratch database
+#                               and the prior image started on it with docker
+#                               run. It starts: the dump predates 00015.
+#   real_level0_started_by_hand Measured (L4): the lane image started by hand on
+#                               a copy of the upgraded database starts, and its
+#                               group tightening over a registrant, its
+#                               zero-registration reset and its series opening
+#                               each answer an error and change nothing.
+#   real_prior_refused_at_start On that site, the operator's hand path (the app
+#                               image pinned back to the prior, compose up -d
+#                               app) exits non-zero with the level-3 message,
+#                               /healthz never answers and the restore_fence
+#                               counter is unchanged; the same after the
+#                               candidate's migrate down-one. Then a fresh
+#                               candidate site before first-run setup: refused at
+#                               14; the candidate walks down to 1 with the app
+#                               stopped; the baseline step is refused naming
+#                               audit_logs; the prior's own Up then returns the
+#                               database to the prior's last file before the
+#                               start fence refuses it. /setup never answers and
+#                               users stays empty. The candidate then serves.
+#   real_prior_running_across_upgrade  A fresh prior site, seeded through its
+#                               API, keeps running while the candidate image,
+#                               started as a second container on the same
+#                               database, applies 00015. The prior's group
+#                               tightening over a registrant, its zero-registration
+#                               reset, its stale empty reset, its series opening,
+#                               its date value and its group event created with
+#                               its own visibility each answer 500 and change
+#                               nothing, its log naming the audit fence; a title
+#                               edit answers 200; the prior cannot start again.
 #   real_current_release_restore  restore.sh --dump of a current dump with the
-#                               candidate (level 2) completes into private
+#                               candidate (level 3) completes into private
 #                               recovery, and a reason-review panel meets the
 #                               restore four ways. An OPEN panel holds no attempt
 #                               id (the Delete press mints it): (1) after the
@@ -110,12 +147,24 @@ CROSSING_PREFLIGHT_BASE=8c07c85265c0f43ab8350cd945efdc14363c21bd
 CROSSING_LANE_DEFAULT="$CROSSING_PREFLIGHT_BASE"
 # T07B-1-V's landing: "Integrate tracked deletion outcomes", level 1, no restore.sh.
 CROSSING_LANDING_DEFAULT=d400b7755f4564c60524167105f31e33bed9b51b
-# T306: "contract suppressions to hash-only (R4-SC)", level 2, the candidate's schema.
+# T306: "contract suppressions to hash-only (R4-SC)", level 2, migrations to 00008.
 CROSSING_PRIOR_DEFAULT=52e60ff0fd1a90f39d8ae4a887ed555b8efd7dfa
 # ARCH_SHA: the first parent of T07B-2a-V's landing merge a1198e6 (level 0,
 # migrations 00001-00006, no reason-review file).
 CROSSING_ARCHIVE_DEFAULT=89899794046c4f2cd8a59f0fe6d0184a1d825afd
-CROSSING_CANDIDATE_LEVEL=2
+CROSSING_CANDIDATE_LEVEL=3
+# The file name (after its number) of the migration that refuses earlier
+# releases (DEC-158): the candidate has it and the prior lacks it.
+CROSSING_CONSENT_MIGRATION=visibility_consent
+# The people the prior-origin cases seed with SQL: the prior has no admin
+# user-create route and its setup only counts users. The hash is bcrypt (cost
+# 10) of CROSSING_PEOPLE_PASSWORD, fixed so the drill needs no hashing tool.
+CROSSING_PEOPLE_PASSWORD=crossing-drill-password
+CROSSING_PEOPLE_HASH='$2a$10$NPKcU5jeXCc5XL/t441C1en/owieUWT0nWSopaQJrB0qasVOgOJga'
+# The start fence's refusal (restore_fence.go startRefusal) and the audit
+# fence's phrase (00015), as the prior's log prints them.
+CROSSING_START_REFUSAL='this database needs Fold at recovery level 3 or later'
+CROSSING_AUDIT_REFUSAL='checks visibility consent (DEC-158)'
 # The file name (after its number) of T07B-2a's migration. Its version is read
 # from git, never hard-coded.
 CROSSING_REASON_MIGRATION=reason_review_erasure_scrub
@@ -135,8 +184,7 @@ CROSSING_HOST_BEFORE=()
 crossing_dir() { printf '%s/crossings' "$WORK"; }
 
 # ---------------------------------------------------------------------------
-# Pure functions. No daemon and no runner globals; restore-crossings-fixtures.sh
-# exercises each of them.
+# Pure functions. No daemon and no runner globals.
 # ---------------------------------------------------------------------------
 
 # Migration file versions at a revision, as a sorted comma list ("1,2,3").
@@ -210,17 +258,20 @@ crossing_validate_revisions() {
     echo "crossing: landing $landing already has restore.sh; it must precede the restore tooling" >&2; bad=1
   fi
   if [[ "$prior" == "$head" ]]; then
-    echo "crossing: prior $prior is the candidate itself; a same-level rollback needs an earlier level-2 release" >&2; bad=1
+    echo "crossing: prior $prior is the candidate itself; the prior-origin cases need an earlier level-2 release" >&2; bad=1
   fi
   if git -C "$src" grep -q -e admin_operation_attempts "$lane" -- migrations/ 2>/dev/null; then
     echo "crossing: LANE_BASE $lane already has admin_operation_attempts; the table difference D would be empty" >&2; bad=1
   fi
-  # The rollback target must have the candidate's schema, or "rollback" would
-  # be a restore across schemas, which this case does not claim.
-  pv="$(crossing_migration_versions "$src" "$prior")" || return 1
-  hv="$(crossing_migration_versions "$src" "$head")" || return 1
-  if [[ "$pv" != "$hv" ]]; then
-    echo "crossing: prior migrations ($pv) differ from the candidate's ($hv); a same-schema rollback is impossible" >&2; bad=1
+  # The prior's schema must be wholly inside the candidate's, and the candidate
+  # must add the consent migration: a real upgrade from the prior lands 00015.
+  if ! pv="$(crossing_migration_difference "$src" "$prior" "$head")"; then
+    bad=1
+  else
+    hv="$(git -C "$src" ls-tree --name-only "$head" -- migrations/ | sed -En "s|^migrations/0*([0-9]+)_${CROSSING_CONSENT_MIGRATION}\.sql$|\1|p")"
+    if [[ -z "$hv" ]] || ! grep -Eq "(^|,)${hv}(,|$)" <<<"$pv"; then
+      echo "crossing: the migrations the candidate adds to the prior ($pv) do not include the ${CROSSING_CONSENT_MIGRATION} migration" >&2; bad=1
+    fi
   fi
   # The archive must lack T07B-2a's migration and the candidate must have it,
   # with the archive's migrations wholly inside the candidate's.
@@ -247,6 +298,7 @@ crossing_missing_text() { # target floor
   local target="$1" floor="$2" missing=""
   if (( target < 1 && floor >= 1 )); then missing="the restore barrier (level 1)"; fi
   if (( target < 2 && floor >= 2 )); then missing="${missing:+$missing and }reason review (level 2)"; fi
+  if (( target < 3 && floor >= 3 )); then missing="${missing:+$missing and }exact visibility consent (level 3)"; fi
   printf '%s' "$missing"
 }
 
@@ -374,7 +426,8 @@ crossing_recovery_tools_problems() {
 }
 
 # Complete, all-passing evidence. cases.jsonl and images.jsonl are inputs.
-# Acceptance rows (R-, A-) are never fixtures; S- rows always are. A refusal
+# Acceptance and measured rows (R-, A-, M-) are never fixtures; S- rows always
+# are, and they run on the prior-origin site. A refusal
 # row carries its site, the target level it asked for ("level0" or "level1")
 # and the mode it was deployed in; the matrices (forward, restore) run on the
 # main site and on both build-mode lineage sites toward both targets, each with
@@ -388,26 +441,35 @@ crossing_evidence_complete() {
     def matrix($a): [.[] | select(.acceptance == $a)] | group_by([.site, .target]) | map(length) | all(. == 2);
     def want: {"R-forward-commit": 12, "R-forward-image": 12, "R-restore-commit": 12, "R-restore-image": 12,
                "R-rollback-genuine": 8, "S-rollback-commit-record": 4, "S-rollback-image-record": 4,
-               "A-lineage-upgrade": 4, "A-same-level-rollback": 1, "A-current-release-restore": 1, "A-older-archive": 2};
+               "A-lineage-upgrade": 4, "A-current-release-restore": 1, "A-older-archive": 2,
+               "A-prior-origin-upgrade": 1, "R-rollback-lower-level": 2, "A-prior-refused-at-start": 5,
+               "A-prior-running-across-upgrade": 1, "M-l1-pre-upgrade-dump": 1, "M-level0-started-by-hand": 1};
     . as $all
     | (want | to_entries | all(.key as $k | .value as $n | ($all | count($k)) == $n and ($all | passed($k)) == $n))
     and ([.[] | .acceptance] | all(. as $a | want | has($a)))
     and ([.[] | select(.kind == "refusal") | .deployed] | unique) == ["build", "image"]
     and ([.[] | select(.kind == "refusal") | .exitCode] | all(. == 1))
     and ([.[] | select(.acceptance | startswith("S-")) | .fixture] | all(. == true))
-    and ([.[] | select(.acceptance | startswith("R-") or startswith("A-")) | .fixture // false] | all(. == false))
+    and ([.[] | select(.acceptance | startswith("R-") or startswith("A-") or startswith("M-")) | .fixture // false] | all(. == false))
     and ([.[] | select(.acceptance == "R-rollback-genuine") | .deployed] | unique) == ["build", "image"]
     and ([.[] | select(.acceptance == "R-rollback-genuine") | .site] | unique) == ["lineage-l0-build", "lineage-l0-image", "lineage-l1-build", "lineage-l1-image"]
     and ([.[] | select(.acceptance == "R-rollback-genuine") | [.site, .target]] | unique) == [["lineage-l0-build","level0"], ["lineage-l0-image","level0"], ["lineage-l1-build","level1"], ["lineage-l1-image","level1"]]
     and ([.[] | select(.acceptance == "R-forward-commit") | .site] | unique) == ["lineage-l0-build", "lineage-l1-build", "main"]
     and ([.[] | select(.kind == "refusal" and (.acceptance | startswith("R-forward") or startswith("R-restore"))) | .target] | unique) == ["level0", "level1"]
     and ([.[] | select(.acceptance | startswith("S-")) | .target] | unique) == ["level0", "level1"]
+    and ([.[] | select(.acceptance | startswith("S-")) | .site] | unique) == ["lineage-prior-image"]
+    and ([.[] | select(.acceptance == "R-rollback-lower-level") | [.site, .target, .deployed]] | unique) == [["lineage-prior-image", "level2", "image"]]
+    and ([.[] | select(.acceptance == "A-prior-refused-at-start") | .id] | sort) == ["prior-refused-running-restart", "prior-refused-upgraded-down-one",
+          "prior-refused-upgraded-latest", "prior-refused-userless-baseline", "prior-refused-userless-down-one"]
+    and ([.[] | select(.acceptance == "A-prior-refused-at-start") | (.exitedNonZero and (.answered | not) and .versionAsStated and .counterUnchanged and .usersUnchanged)] | all)
+    and ([.[] | select(.acceptance == "A-prior-refused-at-start" and (.id | startswith("prior-refused-userless"))) | .users] | all(. == "0"))
+    and ([.[] | select(.acceptance == "A-prior-running-across-upgrade") | (.requests | length == 7 and all(.[]; .status == "500" and .fenceLogged and .unchanged))] | all)
+    and ([.[] | select(.acceptance == "M-level0-started-by-hand") | (.requests | all(.[]; .unchanged))] | all)
     and matrix("R-forward-commit") and matrix("R-forward-image") and matrix("R-restore-commit") and matrix("R-restore-image")
     and ([.[] | select(.acceptance == "A-lineage-upgrade") | [.mode, .origin]] | sort) == [["build",0], ["build",1], ["image",0], ["image",1]]
-    and ([.[] | select(.acceptance == "A-lineage-upgrade") | .floor] | all(. == "2"))
+    and ([.[] | select(.acceptance == "A-lineage-upgrade" or .acceptance == "A-prior-origin-upgrade") | .floor] | all(. == "3"))
     and ([.[] | select(.acceptance == "A-older-archive") | .archive.id] | sort) == ["lane-base", "reason-review"]
-    and ([.[] | select(.acceptance == "A-same-level-rollback") | .reopenedVersion.recoveryPolicy] | all(. == 2))
-    and ([.[] | select(.acceptance == "A-current-release-restore") | .level] | all(. == 2))
+    and ([.[] | select(.acceptance == "A-current-release-restore") | .level] | all(. == 3))
     and ([.[] | select(.acceptance == "A-current-release-restore") | .scenarios] | all(
           .noAttempt == {unchanged:"applied", changed:"reason_review_changed", reloadedPress:"applied"}
           and .retainedLive == {answer:"restore_detected", replay:"attempt_expired", settle:"history_unavailable", reloadShowsAccount:true, freshPress:"applied"}
@@ -417,7 +479,8 @@ crossing_evidence_complete() {
   ' "$cases" >/dev/null || { echo 'crossing: refusal/positive cases are incomplete or failed' >&2; return 1; }
   jq -s -e '
     ([.[] | .role] | sort) == ["archive", "candidate", "landing", "lane", "prior"]
-    and (map(select(.role == "candidate" or .role == "prior")) | all(.level == 2))
+    and (map(select(.role == "candidate")) | all(.level == 3))
+    and (map(select(.role == "prior")) | all(.level == 2))
     and (map(select(.role == "landing")) | all(.level == 1))
     and (map(select(.role == "lane")) | all(.level == 0))
     and (map(select(.role == "archive")) | all(.level == 0 or .level == 1))
@@ -441,9 +504,10 @@ crossing_use_main() {
 }
 
 # The two refusal targets, by name: level0 is LANE_BASE, level1 the landing.
-crossing_target_commit() { case "$1" in level0) printf '%s' "$LANE_REVISION" ;; level1) printf '%s' "$LANDING_REVISION" ;; *) return 1 ;; esac; }
-crossing_target_image() { case "$1" in level0) printf '%s' "$CROSSING_LANE_IMG" ;; level1) printf '%s' "$CROSSING_LANDING_IMG" ;; *) return 1 ;; esac; }
-crossing_target_level() { case "$1" in level0) printf 0 ;; level1) printf 1 ;; *) return 1 ;; esac; }
+# level2 is the prior, refused as a rollback target on the prior-origin site.
+crossing_target_commit() { case "$1" in level0) printf '%s' "$LANE_REVISION" ;; level1) printf '%s' "$LANDING_REVISION" ;; level2) printf '%s' "$PRIOR_REVISION" ;; *) return 1 ;; esac; }
+crossing_target_image() { case "$1" in level0) printf '%s' "$CROSSING_LANE_IMG" ;; level1) printf '%s' "$CROSSING_LANDING_IMG" ;; level2) printf '%s' "$CROSSING_PRIOR_IMG" ;; *) return 1 ;; esac; }
+crossing_target_level() { case "$1" in level0) printf 0 ;; level1) printf 1 ;; level2) printf 2 ;; *) return 1 ;; esac; }
 
 # One explicit fixture row: a denied group_add request with a reason, the
 # shape migrations/reason_review_test.go already proves against the schema.
@@ -647,15 +711,20 @@ crossing_prepare_tools() {
   local -a cand=()
   cdir="$(crossing_dir)"
   CROSSING_TOOLS_CAND="$cdir/tools-cand"; CROSSING_TOOLS_LANE="$cdir/tools-lane"; CROSSING_TOOLS_LANDING="$cdir/tools-landing"
+  CROSSING_TOOLS_PRIOR="$cdir/tools-prior"
   for f in $(runtime_tools); do cand+=("$f"); done
   crossing_copy_tools candidate "$REVISION" "$CROSSING_TOOLS_CAND" "${cand[@]}"
   crossing_copy_tools lane "$LANE_REVISION" "$CROSSING_TOOLS_LANE" \
     provision.sh upgrade.sh checks.sh backup.sh smoke.sh email-dns.sh backup.env.example
   crossing_copy_tools landing "$LANDING_REVISION" "$CROSSING_TOOLS_LANDING" \
     provision.sh upgrade.sh checks.sh backup.sh smoke.sh email-dns.sh backup.env.example deploy-tools-version
+  # The prior's own runtime_tools list (its checks.sh), which its provisioner installs.
+  crossing_copy_tools prior "$PRIOR_REVISION" "$CROSSING_TOOLS_PRIOR" \
+    provision.sh upgrade.sh checks.sh backup.sh smoke.sh email-dns.sh backup.env.example restore.sh compose.recovery.yml deploy-tools-version
   crossing_write_smoke "$CROSSING_TOOLS_CAND/smoke.sh"
   crossing_write_smoke "$CROSSING_TOOLS_LANE/smoke.sh"
   crossing_write_smoke "$CROSSING_TOOLS_LANDING/smoke.sh"
+  crossing_write_smoke "$CROSSING_TOOLS_PRIOR/smoke.sh"
   crossing_emit tools.jsonl --arg label all --arg file smoke.sh '{label:$label, file:$file, replacedByDrill:true}'
 }
 
@@ -676,7 +745,7 @@ crossing_assert_deployed() {
 
 # One refused invocation, run under xtrace from the entry point named by the
 # caller. Fails the runner unless crossing_problems finds nothing. target is
-# level0 or level1: the release the invocation asks for.
+# level0, level1 or level2: the release the invocation asks for.
 crossing_refuse() {
   local deployed="$1" acceptance="$2" kind="$3" target="$4" label="$5"; shift 5
   local -a cmd=("$@")
@@ -739,11 +808,11 @@ crossing_forward_restore_matrix() {
   [[ ! -e "$CX_DIR/recovery.lock" ]]
 }
 
-# SUPPLEMENTARY FIXTURE rows (S-*). A real same-level forward upgrade gives a
+# SUPPLEMENTARY FIXTURE rows (S-*). The prior-origin site's real upgrade gives a
 # genuine release.prev and dump; its previous release is then rewritten to name
 # the target, the way deploy-drill.sh's own legacy rollback refusal does. These
 # prove only that the level check reads the record; the natural records are the
-# R-rollback-genuine rows of the lineage sites.
+# R-rollback-genuine rows of the lineage sites and R-rollback-lower-level.
 crossing_record_release() {
   local mode="$1" image="$2" commit="$3"
   [[ -f "$CX_DIR/release.prev" ]] || { echo 'crossing: no release.prev to rewrite' >&2; return 1; }
@@ -751,15 +820,9 @@ crossing_record_release() {
   chmod 600 "$CX_DIR/release.prev"
 }
 crossing_supplementary_rollback_rows() {
-  local i log t
+  local i t
   local -a common=(--deploy-dir "$CX_DIR" --source-dir "$CX_SOURCE")
   local -a ups=("$CX_DIR/upgrade.sh" "$CX_TOOLS/upgrade.sh") names=(installed candidate-tools)
-  log="$(crossing_dir)/prepare-supplementary-rollback.log"
-  # A same-level (2 -> 2) forward upgrade: the prior release, then the candidate.
-  reset_case "$CROSSING_PRIOR_IMG"
-  "$CX_DIR/upgrade.sh" "${common[@]}" --image "$CROSSING_CAND_IMG" >"$log" 2>&1 || { tail -n 40 "$log" >&2; return 1; }
-  wait_public
-  crossing_assert_deployed "$CROSSING_CAND_TAG"
   CX_FIXTURE=true
   for t in level0 level1; do
     crossing_record_release build "" "$(crossing_target_commit "$t")"
@@ -779,16 +842,15 @@ real_binary_refusals() {
   drill_step refusals/main-image
   crossing_deploy_main
   crossing_forward_restore_matrix image
-  crossing_supplementary_rollback_rows
-  # The host floor is 2 for the rest of the run: a fixture level-1 image
-  # would be refused, so every reset names the candidate.
+  # The host floor is 3 for the rest of the run: an earlier image would be
+  # refused, so every reset names the candidate.
   reset_case "$CROSSING_CAND_IMG"
 }
 
 # ---------------------------------------------------------------------------
 # Genuine lineage on fresh sites (production Compose and Caddy per commit, the
 # same method as the T07B-1-V drill): origin level 0 (LANE_BASE) and origin
-# level 1 (the landing), each upgraded for real to the level-2 candidate.
+# level 1 (the landing), each upgraded for real to the level-3 candidate.
 # ---------------------------------------------------------------------------
 
 # A repository whose objects come from ROOT by alternates, clean at one commit.
@@ -986,93 +1048,446 @@ real_level_lineage() {
 }
 
 # ---------------------------------------------------------------------------
-# Same-level rollback and the older archive on the main site.
+# The prior as a lineage origin (DEC-158). No earlier release can run on the
+# candidate's schema, so the prior is never a rollback target: these cases
+# prove that every way back to it is refused, and measure the limits that are
+# not (L1, L4 in docs/DEPLOY-DIGITALOCEAN.md).
 # ---------------------------------------------------------------------------
 
-crossing_tool_hashes() {
-  local f
-  for f in $(runtime_tools); do
-    printf '%s DIR %s\n' "$(sha256sum <"$DIR/$f" | cut -d' ' -f1)" "$f"
-    printf '%s deploy-tools %s\n' "$(sha256sum <"$DIR/deploy-tools/$f" | cut -d' ' -f1)" "$f"
-  done
+# Every lineage site serves the drill domain through its own Caddy (internal TLS).
+CROSSING_TLS=(-k --resolve "$CROSSING_DOMAIN:443:127.0.0.1")
+CROSSING_PRIOR_SITE=""
+crossing_site_base() { printf 'https://%s' "$CROSSING_DOMAIN"; }
+crossing_day() { date -u -d "+$1 day" +%F; }
+
+# jar base method path data out -> prints the HTTP status; the answer is in
+# out. An error status is an answer, not a failure of the runner.
+crossing_http() {
+  local jar="$1" base="$2" method="$3" path="$4" data="${5-}" out="$6" token
+  [[ -n "$data" ]] || data='{}'
+  token="$(curl -fsS "${CROSSING_TLS[@]}" -b "$jar" -c "$jar" "$base/api/v1/auth/csrf" | jq -er .csrfToken)" || return 1
+  curl -sS "${CROSSING_TLS[@]}" -o "$out" -w '%{http_code}' -b "$jar" -c "$jar" -X "$method" \
+    -H "X-CSRF-Token: $token" -H 'Content-Type: application/json' --data-binary "$data" "$base/api/v1$path"
+}
+# jar base method path data want -> prints the answer; fails on any other status.
+crossing_http_want() {
+  local out status
+  out="$(mktemp)"
+  status="$(crossing_http "$1" "$2" "$3" "$4" "$5" "$out")" || { rm -f "$out"; return 1; }
+  if [[ "$status" != "$6" ]]; then echo "crossing: $3 $4 answered $status, want $6: $(cat "$out")" >&2; rm -f "$out"; return 1; fi
+  cat "$out"
+  rm -f "$out"
+}
+crossing_http_login() { # jar base email
+  rm -f "$1"
+  crossing_http_want "$1" "$2" POST /auth/login "$(jq -nc --arg e "$3" --arg p "$CROSSING_PEOPLE_PASSWORD" '{email:$e,password:$p}')" 200 >/dev/null
+}
+# The status of one GET on the site's public origin; 000 when nothing answers.
+crossing_public_status() { curl -sS "${CROSSING_TLS[@]}" -o /dev/null -w '%{http_code}' --max-time 5 "$(crossing_site_base)$1" 2>/dev/null || true; }
+
+crossing_goose() { crossing_cpg fold -c 'SELECT coalesce(max(version_id), 0) FROM goose_db_version WHERE is_applied'; }
+crossing_fence_counter() { crossing_cpg fold -c "SELECT coalesce((SELECT value FROM settings WHERE key = 'restore_fence'), 'absent')"; }
+crossing_users() { crossing_cpg fold -c 'SELECT count(*) FROM users'; }
+crossing_last_version() { crossing_migration_versions "$ROOT" "$1" | tr ',' '\n' | tail -n 1; }
+crossing_seed_people() {
+  crossing_cpg fold -c "INSERT INTO users (name, email, password_hash, role, status) VALUES
+    ('Crossing Admin', 'crossing-admin@example.invalid', '$CROSSING_PEOPLE_HASH', 'admin', 'active'),
+    ('Crossing Member', 'crossing-member@example.invalid', '$CROSSING_PEOPLE_HASH', 'member', 'active')" >/dev/null
 }
 
-crossing_wait_ready() {
-  local file="$1" pattern="$2" pid="$3" end=$((SECONDS+${4:-300}))
-  while (( SECONDS < end )); do
-    if [[ -f "$file" ]] && grep -q -- "$pattern" "$file"; then return 0; fi
-    kill -0 "$pid" 2>/dev/null || { echo "crossing: the holder exited before $file reached $pattern" >&2; return 1; }
-    sleep .1
+# The operator's hand path to another image. The drill's images come from its
+# registry, so provision.sh pinned the app by its image line (the
+# "# fold-app-image" marker), not by FOLD_VERSION; the hand edit is that line.
+crossing_pin_by_hand() { # image
+  sed -i -E "s|^    image: .* # fold-app-image$|    image: $1 # fold-app-image|" "$CX_DIR/docker-compose.yml"
+  grep -qxF "    image: $1 # fold-app-image" "$CX_DIR/docker-compose.yml" \
+    || { echo "crossing: $CX_DIR/docker-compose.yml has no pinned app image line to change" >&2; return 1; }
+}
+crossing_wait_app() {
+  local i
+  for ((i = 0; i < 180; i++)); do
+    if crossing_cdc exec -T app /fold healthcheck >/dev/null 2>&1; then return 0; fi
+    sleep 1
   done
-  echo "crossing: $file never reached $pattern" >&2
+  echo "crossing: the app on $CX_SITE never became healthy" >&2
   return 1
 }
+# The candidate back on the site, its own Up re-applying what a down-one removed.
+crossing_restore_candidate() {
+  crossing_pin_by_hand "$CROSSING_CAND_IMG"
+  crossing_cdc up -d --no-deps --force-recreate app >/dev/null 2>&1
+  crossing_wait_app
+  [[ "$(crossing_goose)" == "$(crossing_last_version "$REVISION")" ]]
+}
+# The candidate's migrate down-one with the app stopped. Prints its output.
+crossing_down_one() {
+  crossing_pin_by_hand "$CROSSING_CAND_IMG"
+  crossing_cdc stop app >/dev/null 2>&1
+  crossing_cdc run --rm --no-deps -T app migrate down-one 2>&1
+}
 
-real_same_level_rollback() {
-  local cdir trace log recovery_image rid rjson ajson aid f problems
-  crossing_prepare
-  crossing_use_main
+# label want-version: the prior, started by the operator's hand path, exits
+# non-zero with the start fence's message; /healthz and /setup never answer
+# while it tries (Compose restarts it, and every restart is refused the same
+# way); the restore_fence counter and the users are unchanged; the goose
+# version is want-version. The app is left stopped. Emits one row.
+crossing_refused_start() {
+  local label="$1" want="$2" cdir users_before counter_before cid i st code restarts health setup answered=false exited=false log version
   cdir="$(crossing_dir)"
-  trace="$cdir/rollback.trace"; log="$cdir/forward-to-candidate.log"
-  drill_step prior-deployed
-  reset_case "$CROSSING_PRIOR_IMG"
-  ajson="$(dc exec -T app /fold version --json)"
-  jq -e --arg v "$CROSSING_PRIOR_TAG" '.version == $v and ((.recoveryPolicy // 0) == 2)' <<<"$ajson" >/dev/null \
-    || { echo "crossing: the deployed app is not the real prior image (level 2): $ajson" >&2; return 1; }
-  drill_step forward-to-candidate
-  "$DIR/upgrade.sh" --deploy-dir "$DIR" --source-dir "$SOURCE" --image "$CROSSING_CAND_IMG" >"$log" 2>&1 || { tail -n 40 "$log" >&2; return 1; }
-  wait_public
-  crossing_assert_deployed "$CROSSING_CAND_TAG"
-  grep -qx 'mode=image' "$DIR/release.prev"
-  grep -qx "previous_image=$CROSSING_PRIOR_IMG" "$DIR/release.prev"
-  crossing_tool_hashes >"$cdir/tools.before"
-  drill_step rollback-held-in-recovery
-  rm -f "$DIR/drill.ready"
-  [[ -p "$DIR/drill.fifo" ]] || mkfifo "$DIR/drill.fifo"
-  RESTORE_DRILL_PAUSE=recovering env SHELLOPTS=xtrace bash -x "$DIR/upgrade.sh" --deploy-dir "$DIR" --source-dir "$SOURCE" --rollback >"$trace" 2>&1 &
-  holder=$!
-  crossing_wait_ready "$DIR/drill.ready" '^recovering$' "$holder"
-  [[ "$(jq -er .phase "$DIR/recovery.lock")" == recovering && "$(jq -er .count "$DIR/recovery.lock")" == 0 ]]
-  rid="$(recovery_ids)"
-  [[ -n "$rid" && "$rid" != *$'\n'* ]]
-  recovery_image="$(jq -er .imageId "$DIR/recovery.lock")"
-  assert_image "$rid" "$recovery_image"
-  [[ "$recovery_image" == "$(docker image inspect --format '{{.Id}}' "$CROSSING_PRIOR_IMG")" ]]
-  [[ "$(jq -er .level "$DIR/recovery.lock")" == 2 ]]
-  rjson="$(docker exec "$rid" /fold version --json)"
-  jq -e --arg v "$CROSSING_PRIOR_TAG" '.version == $v and .recoveryPolicy == 2' <<<"$rjson" >/dev/null \
-    || { echo "crossing: the recovery instance is not the prior image at level 2: $rjson" >&2; return 1; }
-  if port_open "$PUBLIC_PORT"; then echo 'crossing: public port open during recovery' >&2; return 1; fi
-  curl -fsS http://localhost:18080/healthz >/dev/null
-  release_barrier
-  drill_step rollback-reopened
-  [[ ! -e "$DIR/recovery.lock" && -z "$(recovery_ids)" ]]
-  wait_public
-  aid="$(dc ps -q app)"
-  [[ -n "$aid" && "$aid" != *$'\n'* ]]
-  assert_image "$aid" "$recovery_image"
-  ajson="$(dc exec -T app /fold version --json)"
-  jq -e --arg v "$CROSSING_PRIOR_TAG" '.version == $v and .recoveryPolicy == 2' <<<"$ajson" >/dev/null \
-    || { echo "crossing: the reopened app is not the prior image at level 2: $ajson" >&2; return 1; }
-  [[ "$(cat "$DIR/recovery-policy-floor")" == 2 ]]
-  grep -q 'Accounts this archive would revive: 0' "$trace"
-  problems="$(crossing_recovery_tools_problems "$trace" "$DIR" "$SOURCE/deploy/digitalocean/")"
-  if [[ -n "$problems" ]]; then printf 'crossing: restore.sh did not run from DIR/recovery-tools:\n%s\n' "$problems" >&2; return 1; fi
-  [[ ! -e "$WORK/bypass-marker" ]]
-  crossing_tool_hashes >"$cdir/tools.after"
-  cmp "$cdir/tools.before" "$cdir/tools.after"
-  for f in $(runtime_tools); do
-    cmp "$TOOLS_DIR/$f" "$DIR/$f"
-    cmp "$TOOLS_DIR/$f" "$DIR/deploy-tools/$f"
-    cmp "$TOOLS_DIR/$f" "$DIR/recovery-tools/$f"
-    if [[ "$f" != smoke.sh ]]; then cmp "$ROOT/deploy/digitalocean/$f" "$DIR/$f"; fi
+  users_before="$(crossing_users)"; counter_before="$(crossing_fence_counter)"
+  crossing_pin_by_hand "$CROSSING_PRIOR_IMG"
+  crossing_cdc stop app >/dev/null 2>&1 || true
+  crossing_cdc up -d --no-deps --force-recreate app >"$cdir/refused-$label.up.log" 2>&1
+  cid="$(crossing_cdc ps -aq app)"
+  [[ -n "$cid" && "$cid" != *$'\n'* ]]
+  for ((i = 0; i < 120; i++)); do
+    read -r st code restarts <<<"$(docker inspect --format '{{.State.Status}} {{.State.ExitCode}} {{.RestartCount}}' "$cid")"
+    health="$(crossing_public_status /healthz)"; setup="$(crossing_public_status /setup)"
+    if [[ "$health" =~ ^[23] || "$setup" =~ ^[23] ]]; then answered=true; fi
+    if (( restarts >= 1 )) || [[ "$st" == exited && "$code" != 0 ]]; then exited=true; break; fi
+    sleep 1
   done
-  crossing_emit cases.jsonl --arg acceptance A-same-level-rollback --arg image "$CROSSING_PRIOR_IMG" \
-    --arg recoveryImageId "$recovery_image" --argjson recovery "$rjson" --argjson reopened "$ajson" \
-    --arg toolsSha "$(sha256sum <"$cdir/tools.after" | cut -d' ' -f1)" \
-    '{kind:"positive", acceptance:$acceptance, id:"same-level-rollback", fixture:false, pass:true, image:$image,
-      recoveryImageId:$recoveryImageId, recoveryVersion:$recovery, reopenedVersion:$reopened, toolsSha256:$toolsSha}'
-  reset_case "$CROSSING_CAND_IMG"
+  log="$cdir/refused-$label.log"
+  docker logs "$cid" >"$log" 2>&1 || true
+  crossing_cdc stop app >/dev/null 2>&1
+  version="$(crossing_goose)"
+  crossing_emit cases.jsonl --arg acceptance A-prior-refused-at-start --arg id "prior-refused-$label" --arg site "$CX_SITE" \
+    --argjson exited "$exited" --argjson answered "$answered" --arg message "$(grep -m1 -F "$CROSSING_START_REFUSAL" "$log" || true)" \
+    --argjson restarts "$restarts" --arg version "$version" --arg want "$want" \
+    --argjson counterUnchanged "$([[ "$(crossing_fence_counter)" == "$counter_before" ]] && echo true || echo false)" \
+    --argjson usersUnchanged "$([[ "$(crossing_users)" == "$users_before" ]] && echo true || echo false)" --arg users "$users_before" \
+    '{kind:"positive", acceptance:$acceptance, id:$id, site:$site, fixture:false, exitedNonZero:$exited, answered:$answered, message:$message,
+      restarts:$restarts, gooseVersion:$version, wantVersion:$want, versionAsStated:($version == $want), counterUnchanged:$counterUnchanged,
+      usersUnchanged:$usersUnchanged, users:$users,
+      pass:($exited and ($answered | not) and ($message != "") and ($version == $want) and $counterUnchanged and $usersUnchanged)}'
+  if [[ "$exited" != true || "$answered" != false || "$version" != "$want" ]] || ! grep -qF "$CROSSING_START_REFUSAL" "$log"; then
+    echo "crossing: the prior's start ($label) was not refused as accepted (exited $exited, answered $answered, version $version, want $want; see $log)" >&2
+    return 1
+  fi
+  [[ "$(crossing_fence_counter)" == "$counter_before" && "$(crossing_users)" == "$users_before" ]] \
+    || { echo "crossing: the refused start ($label) changed the restore_fence counter or the users" >&2; return 1; }
+}
+
+# name: a fresh site provisioned by the prior's own tools with the prior's own
+# image (level 2, no fence), the lineage origin of the prior-site cases.
+crossing_prior_site() {
+  local name="$1" cdir rc=0 json
+  cdir="$(crossing_dir)"
+  crossing_site_prereqs
+  crossing_site_begin "$name" "$REVISION" "$PRIOR_REVISION"
+  timeout --kill-after=15 2700 "$CROSSING_TOOLS_PRIOR/provision.sh" --skip-harden --allow-os --domain "$CROSSING_DOMAIN" --deploy-dir "$CX_DIR" \
+    --source-dir "$CX_ORIGIN_SRC" --image "$CROSSING_PRIOR_IMG" >"$cdir/$name-origin-provision.log" 2>&1 </dev/null || rc=$?
+  (( rc == 0 )) || { tail -n 40 "$cdir/$name-origin-provision.log" >&2; echo "crossing: the prior's own provision failed (rc=$rc)" >&2; return 1; }
+  json="$(crossing_cdc exec -T app /fold version --json)"
+  jq -e --arg v "$CROSSING_PRIOR_TAG" '.version == $v and .recoveryPolicy == 2' <<<"$json" >/dev/null \
+    || { echo "crossing: the prior-origin host is not the real prior at level 2: $json" >&2; return 1; }
+  [[ "$(cat "$CX_DIR/recovery-policy-floor")" == 2 ]]
+  [[ "$(crossing_goose)" == "$(crossing_last_version "$PRIOR_REVISION")" ]]
+}
+crossing_require_prior_site() {
+  [[ -n "$CROSSING_PRIOR_SITE" && "${CX_SITE:-}" == "$CROSSING_PRIOR_SITE" ]] \
+    || { echo 'crossing: the prior-origin site is not up (real_lower_level_rollback_refused runs first)' >&2; return 1; }
+}
+
+real_lower_level_rollback_refused() {
+  local cdir trace rc=0 i
+  local -a ups names
+  crossing_prepare
+  cdir="$(crossing_dir)"
+  drill_step prior-origin/provision
+  crossing_prior_site prior-image
+  crossing_seed_people
+  drill_step prior-origin/upgrade
+  trace="$cdir/prior-image-upgrade.trace"
+  timeout --kill-after=15 2700 env SHELLOPTS=xtrace bash -x "$CROSSING_TOOLS_CAND/upgrade.sh" --deploy-dir "$CX_DIR" --source-dir "$CX_SOURCE" \
+    --image "$CROSSING_CAND_IMG" >"$trace" 2>&1 </dev/null || rc=$?
+  (( rc == 0 )) || { tail -n 40 "$trace" >&2; echo "crossing: the upgrade from the prior failed (rc=$rc)" >&2; return 1; }
+  if grep -Fq -- "$CX_SOURCE/deploy/digitalocean/provision.sh" "$trace"; then echo 'crossing: the upgrade ran a checkout provision.sh' >&2; return 1; fi
+  crossing_assert_deployed "$CROSSING_CAND_TAG"
+  grep -qx 'mode=image' "$CX_DIR/release.prev"
+  grep -qx "previous_image=$CROSSING_PRIOR_IMG" "$CX_DIR/release.prev"
+  [[ "$(crossing_goose)" == "$(crossing_last_version "$REVISION")" ]]
+  crossing_emit cases.jsonl --arg acceptance A-prior-origin-upgrade --arg site "$CX_SITE" --arg release "$(cat "$CX_DIR/release.prev")" \
+    --arg floor "$(cat "$CX_DIR/recovery-policy-floor")" --argjson candidate "$(crossing_cdc exec -T app /fold version --json)" \
+    '{kind:"positive", acceptance:$acceptance, id:"prior-origin-upgrade", site:$site, fixture:false, pass:true,
+      releasePrev:$release, floor:$floor, candidateVersion:$candidate}'
+  drill_step prior-origin/rollback-refused
+  ups=("$CX_DIR/upgrade.sh" "$CROSSING_TOOLS_CAND/upgrade.sh"); names=(installed candidate-tools)
+  for i in 0 1; do
+    crossing_refuse image R-rollback-lower-level rollback-image level2 "rollback-lower-level.${names[i]}" "${ups[i]}" \
+      --deploy-dir "$CX_DIR" --source-dir "$CX_SOURCE" --rollback
+  done
+  drill_step prior-origin/supplementary-records
+  # The S rows rewrite release.prev; the natural record is put back for the
+  # cases that read it next.
+  cp -p "$CX_DIR/release.prev" "$cdir/prior-image-release.prev"
+  crossing_supplementary_rollback_rows
+  cp -p "$cdir/prior-image-release.prev" "$CX_DIR/release.prev"
+  CROSSING_PRIOR_SITE="$CX_SITE"
+}
+
+# L1, measured: an earlier release starts on a dump taken before the upgrade.
+real_l1_pre_upgrade_dump() {
+  local cdir dump cid i started=false
+  crossing_prepare
+  crossing_require_prior_site
+  cdir="$(crossing_dir)"
+  dump="$(sed -n 's/^dump=//p' "$CX_DIR/release.prev")"
+  [[ -n "$dump" && -f "$dump" ]] || { echo "crossing: release.prev names no dump on disk: $dump" >&2; return 1; }
+  drill_step prior-origin/l1-restore-by-hand
+  crossing_cpg postgres -c 'DROP DATABASE IF EXISTS fold_l1' -c 'CREATE DATABASE fold_l1' >/dev/null
+  crossing_cdc exec -T db pg_restore -U church -d fold_l1 --no-owner --no-acl --single-transaction --exit-on-error <"$dump"
+  cid="$(docker run -d --label "com.docker.compose.project=$CX_PROJECT" --network "${CX_PROJECT}_default" --pull never \
+    -e APP_ENV=dev -e PORT=8080 -e SESSION_SECRET=drill-disposable-session-secret-0123456789abcdef \
+    -e 'DATABASE_URL=postgres://church:drill-disposable-db-password@db:5432/fold_l1?sslmode=disable' "$CROSSING_PRIOR_IMG")"
+  for ((i = 0; i < 120; i++)); do
+    if docker exec "$cid" /fold healthcheck >/dev/null 2>&1; then started=true; break; fi
+    [[ "$(docker inspect --format '{{.State.Running}}' "$cid")" == true ]] || break
+    sleep 1
+  done
+  docker logs "$cid" >"$cdir/l1-prior-on-pre-upgrade-dump.log" 2>&1 || true
+  docker rm -f "$cid" >/dev/null
+  crossing_cpg postgres -c 'DROP DATABASE fold_l1' >/dev/null
+  [[ "$started" == true ]] || { echo 'crossing: the prior did not start on its own pre-upgrade dump, which L1 says it does' >&2; return 1; }
+  crossing_emit cases.jsonl --arg acceptance M-l1-pre-upgrade-dump --arg site "$CX_SITE" --arg dump "$dump" \
+    '{kind:"measured", acceptance:$acceptance, id:"l1-pre-upgrade-dump", site:$site, fixture:false, pass:true, dump:$dump, priorStarted:true,
+      expected:"L1: a dump taken before the upgrade predates 00015, so an earlier release starts on it"}'
+}
+
+# The visibility snapshot of the given events, their first dates, their
+# registrations and their groups, in one database.
+crossing_visibility_state() { # database event-ids(comma list)
+  crossing_cpg "$1" -c "SELECT coalesce(string_agg(x, ';' ORDER BY x), '') FROM (
+    SELECT 'event ' || id || ' ' || visibility || ' ' || leader_opened || ' ' || title AS x FROM events WHERE id IN ($2)
+    UNION ALL SELECT 'date ' || id || ' ' || coalesce(visibility_override, '-') FROM event_occurrences
+      WHERE event_id IN ($2) AND starts_at < now() + interval '40 days'
+    UNION ALL SELECT 'reg ' || r.id || ' ' || r.status FROM registrations r JOIN event_occurrences o ON o.id = r.occurrence_id WHERE o.event_id IN ($2)
+    UNION ALL SELECT 'group ' || g.id || ' ' || g.visibility FROM groups g WHERE g.id IN (SELECT group_id FROM events WHERE id IN ($2))
+    UNION ALL SELECT 'events in group ' || group_id || ' ' || count(*) FROM events WHERE group_id IN (SELECT group_id FROM events WHERE id IN ($2)) GROUP BY group_id) s"
+}
+
+crossing_make_date_private() { # jar base occurrence-path writer
+  local jar="$1" base="$2" path="$3" writer="$4" occurrence id revision attempt body
+  case "$writer" in
+    prior)
+      crossing_http_want "$jar" "$base" PUT "$path" '{"visibility":"private"}' 200 >/dev/null
+      ;;
+    candidate)
+      occurrence="$(crossing_http_want "$jar" "$base" GET "$path" '' 200)" || return 1
+      id="$(jq -er '.occurrence.id | numbers' <<<"$occurrence")" || return 1
+      revision="$(jq -er '.occurrence.revision | strings | select(length > 0)' <<<"$occurrence")" || return 1
+      attempt="$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')" || return 1
+      body="$(jq -nc --arg a "$attempt" --arg r "$revision" '{attempt:$a,revision:$r,changes:{visibility:"private"}}')" || return 1
+      crossing_http_want "$jar" "$base" POST "$path/edits" "$body" 200 |
+        jq -e --argjson id "$id" '.occurrence | .id == $id and .visibilityOverride == "private"' >/dev/null
+      ;;
+    *) echo "crossing: unknown date writer $writer" >&2; return 1 ;;
+  esac
+}
+
+# Fixtures through a release's own API at base, signed in as the seeded admin
+# (jar) and member (mjar): a group with an event a member signed up for, two
+# public church-wide series each with one private date and nobody registered,
+# a private event, and a group whose one event nobody signed up for.
+# Prints "group reg reset stale private group3 event3" as ids.
+crossing_visibility_fixtures() { # jar mjar base writer
+  local jar="$1" mjar="$2" base="$3" writer="$4" g g3 e5 e6 r s p
+  g="$(crossing_http_want "$jar" "$base" POST /groups '{"name":"Crossing group","visibility":"public","location":"Hall"}' 201 | jq -er .group.id)"
+  g3="$(crossing_http_want "$jar" "$base" POST /groups '{"name":"Crossing quiet group","visibility":"public","location":"Hall"}' 201 | jq -er .group.id)"
+  e5="$(crossing_http_want "$jar" "$base" POST "/groups/$g/events" "$(jq -nc --arg d "$(crossing_day 6)" '{title:"Crossing E5",startsLocal:($d+"T19:00"),durationMinutes:60,tzid:"UTC"}')" 201 | jq -er .event.id)"
+  e6="$(crossing_http_want "$jar" "$base" POST "/groups/$g3/events" "$(jq -nc --arg d "$(crossing_day 7)" '{title:"Crossing E6",startsLocal:($d+"T19:00"),durationMinutes:60,tzid:"UTC"}')" 201 | jq -er .event.id)"
+  crossing_http_want "$mjar" "$base" PUT "/events/$e5/registrations" "$(jq -nc --arg d "$(crossing_day 6)" '{status:"going",date:$d}')" 200 >/dev/null
+  r="$(crossing_http_want "$jar" "$base" POST /events "$(jq -nc --arg d "$(crossing_day 3)" '{title:"Crossing reset",startsLocal:($d+"T19:00"),durationMinutes:60,tzid:"UTC",recurrenceRule:"FREQ=WEEKLY;COUNT=3"}')" 201 | jq -er .event.id)"
+  crossing_make_date_private "$jar" "$base" "/events/$r/occurrences/$(crossing_day 3)" "$writer" || return 1
+  s="$(crossing_http_want "$jar" "$base" POST /events "$(jq -nc --arg d "$(crossing_day 4)" '{title:"Crossing stale reset",startsLocal:($d+"T19:00"),durationMinutes:60,tzid:"UTC",recurrenceRule:"FREQ=WEEKLY;COUNT=3"}')" 201 | jq -er .event.id)"
+  crossing_make_date_private "$jar" "$base" "/events/$s/occurrences/$(crossing_day 4)" "$writer" || return 1
+  p="$(crossing_http_want "$jar" "$base" POST /events "$(jq -nc --arg d "$(crossing_day 5)" '{title:"Crossing private",startsLocal:($d+"T19:00"),durationMinutes:60,tzid:"UTC"}')" 201 | jq -er .event.id)"
+  crossing_http_want "$jar" "$base" PUT "/events/$p/visibility" '{"visibility":"private"}' 200 >/dev/null
+  printf '%s %s %s %s %s %s %s\n' "$g" "$e5" "$r" "$s" "$p" "$g3" "$e6"
+}
+
+# L4, measured: the lane image (level 0) started by hand on a copy of the
+# upgraded database starts, and its visibility changes are refused there.
+real_level0_started_by_hand() {
+  local cdir base jar mjar fixture g e5 r s p g3 e6 cid i started=false port=18092 lbase ljar before status out results='[]' label method path body
+  crossing_prepare
+  crossing_require_prior_site
+  cdir="$(crossing_dir)"
+  drill_step prior-origin/level0-by-hand
+  base="$(crossing_site_base)"; jar="$cdir/l4-admin.jar"; mjar="$cdir/l4-member.jar"
+  crossing_http_login "$jar" "$base" crossing-admin@example.invalid
+  crossing_http_login "$mjar" "$base" crossing-member@example.invalid
+  fixture="$(crossing_visibility_fixtures "$jar" "$mjar" "$base" candidate)" || return 1
+  read -r g e5 r s p g3 e6 <<<"$fixture"
+  [[ "$r" =~ ^[0-9]+$ && "$s" =~ ^[0-9]+$ ]] || return 1
+  if [[ "$(crossing_cpg fold -c "SELECT count(*) FROM event_occurrences WHERE visibility_override = 'private'
+      AND ((event_id = $r AND original_date = '$(crossing_day 3)') OR (event_id = $s AND original_date = '$(crossing_day 4)'))")" != 2 ]]; then
+    echo 'crossing: both private date overrides must be set before copying the database' >&2
+    return 1
+  fi
+  crossing_cpg postgres -c 'DROP DATABASE IF EXISTS fold_l4' -c 'CREATE DATABASE fold_l4' >/dev/null
+  crossing_cdc exec -T db sh -c 'pg_dump -U church -Fc fold | pg_restore -U church -d fold_l4 --no-owner --no-acl --exit-on-error'
+  cid="$(docker run -d --label "com.docker.compose.project=$CX_PROJECT" --network "${CX_PROJECT}_default" -p "127.0.0.1:$port:8080" --pull never \
+    -e APP_ENV=dev -e PORT=8080 -e SESSION_SECRET=drill-disposable-session-secret-0123456789abcdef \
+    -e 'DATABASE_URL=postgres://church:drill-disposable-db-password@db:5432/fold_l4?sslmode=disable' "$CROSSING_LANE_IMG")"
+  for ((i = 0; i < 120; i++)); do
+    if curl -fsS -o /dev/null --max-time 2 "http://127.0.0.1:$port/healthz"; then started=true; break; fi
+    [[ "$(docker inspect --format '{{.State.Running}}' "$cid")" == true ]] || break
+    sleep 1
+  done
+  [[ "$started" == true ]] || { docker logs "$cid" >&2 || true; docker rm -f "$cid" >/dev/null; echo 'crossing: the lane image did not start by hand on the upgraded copy, which L4 says it does' >&2; return 1; }
+  lbase="http://127.0.0.1:$port"; ljar="$cdir/l4-lane.jar"
+  crossing_http_login "$ljar" "$lbase" crossing-admin@example.invalid
+  out="$cdir/l4-answer.json"
+  while read -r -u 3 label method path body; do
+    before="$(crossing_visibility_state fold_l4 "$e5,$r,$p")"
+    status="$(crossing_http "$ljar" "$lbase" "$method" "$path" "$body" "$out")"
+    results="$(jq -c --arg l "$label" --arg s "$status" --argjson same "$([[ "$(crossing_visibility_state fold_l4 "$e5,$r,$p")" == "$before" ]] && echo true || echo false)" \
+      --arg answer "$(head -c 300 "$out")" '. + [{label:$l, status:$s, unchanged:$same, answer:$answer}]' <<<"$results")"
+  done 3<<EOF
+group-tightening PUT /groups/$g {"visibility":"private"}
+zero-registration-reset PUT /events/$r/visibility {"visibility":"public","resetOverrides":true,"confirm":false}
+series-opening PUT /events/$p/visibility {"visibility":"public"}
+EOF
+  docker logs "$cid" >"$cdir/l4-lane-by-hand.log" 2>&1 || true
+  docker rm -f "$cid" >/dev/null
+  crossing_cpg postgres -c 'DROP DATABASE fold_l4' >/dev/null
+  crossing_emit cases.jsonl --arg acceptance M-level0-started-by-hand --arg site "$CX_SITE" --argjson requests "$results" \
+    '{kind:"measured", acceptance:$acceptance, id:"level0-started-by-hand", site:$site, fixture:false, laneStarted:true, requests:$requests,
+      pass:($requests | length == 3 and all(.[]; (.status | test("^2") | not) and .unchanged)),
+      expected:"L4: a level-0 release started by hand on an upgraded copy starts, and every visibility change it tries is refused"}'
+  jq -e 'length == 3 and all(.[]; (.status | test("^2") | not) and .unchanged)' <<<"$results" >/dev/null \
+    || { echo "crossing: the level-0 image changed a visibility by hand: $results" >&2; return 1; }
+}
+
+real_prior_refused_at_start() {
+  local out rc=0 last
+  crossing_prepare
+  crossing_require_prior_site
+  drill_step prior-start/upgraded
+  crossing_refused_start upgraded-latest "$(crossing_last_version "$REVISION")"
+  crossing_restore_candidate
+  drill_step prior-start/after-down-one
+  out="$(crossing_down_one)" || { printf '%s\n' "$out" >&2; return 1; }
+  crossing_refused_start upgraded-down-one "$(( $(crossing_last_version "$REVISION") - 1 ))"
+  crossing_restore_candidate
+  crossing_site_end
+  CROSSING_PRIOR_SITE=""
+  # A second, fresh candidate site before its first-run setup: no user ever.
+  drill_step prior-start/userless
+  crossing_site_prereqs
+  crossing_site_begin candidate-userless "$REVISION" "$REVISION"
+  timeout --kill-after=15 2700 "$CROSSING_TOOLS_CAND/provision.sh" --skip-harden --allow-os --domain "$CROSSING_DOMAIN" --deploy-dir "$CX_DIR" \
+    --source-dir "$CX_SOURCE" --image "$CROSSING_CAND_IMG" >"$(crossing_dir)/candidate-userless-provision.log" 2>&1 </dev/null || rc=$?
+  (( rc == 0 )) || { tail -n 40 "$(crossing_dir)/candidate-userless-provision.log" >&2; echo "crossing: the userless candidate provision failed (rc=$rc)" >&2; return 1; }
+  crossing_assert_deployed "$CROSSING_CAND_TAG"
+  [[ "$(crossing_users)" == 0 ]]
+  out="$(crossing_down_one)" || { printf '%s\n' "$out" >&2; return 1; }
+  crossing_refused_start userless-down-one "$(( $(crossing_last_version "$REVISION") - 1 ))"
+  # The candidate walks to 1 with the app stopped; the prior is never started
+  # below its own last file on the way.
+  while (( $(crossing_goose) > 1 )); do
+    out="$(crossing_down_one)" || { printf '%s\n' "$out" >&2; return 1; }
+  done
+  rc=0; out="$(crossing_down_one)" || rc=$?
+  if (( rc == 0 )) || ! grep -q audit_logs <<<"$out" || [[ "$(crossing_goose)" != 1 ]]; then
+    printf 'crossing: the baseline step was not refused naming audit_logs (rc=%s, version %s):\n%s\n' "$rc" "$(crossing_goose)" "$out" >&2
+    return 1
+  fi
+  # The prior's own Up returns the database to its last file, then the start
+  # fence (kept by every Down) refuses it.
+  last="$(crossing_last_version "$PRIOR_REVISION")"
+  crossing_refused_start userless-baseline "$last"
+  crossing_restore_candidate
+  [[ "$(crossing_public_status /healthz)" == 200 && "$(crossing_users)" == 0 ]]
+  [[ "$(crossing_public_status /setup)" =~ ^[23] ]] || { echo 'crossing: the candidate does not offer first-run setup after the walk' >&2; return 1; }
+  crossing_site_end
+  crossing_use_main
+}
+
+# C18 on a real host: the prior keeps serving while the candidate applies
+# 00015 beside it, and every visibility change it tries is refused.
+real_prior_running_across_upgrade() {
+  local cdir base jar mjar fixture g e5 r s p g3 e6 cid cbase cjar consent t0 since before after status attempt out ok results='[]' label method path body
+  local fenced stale audits notes i
+  crossing_prepare
+  cdir="$(crossing_dir)"
+  drill_step prior-running/provision
+  crossing_prior_site prior-running
+  crossing_seed_people
+  base="$(crossing_site_base)"; jar="$cdir/running-admin.jar"; mjar="$cdir/running-member.jar"
+  crossing_http_login "$jar" "$base" crossing-admin@example.invalid
+  crossing_http_login "$mjar" "$base" crossing-member@example.invalid
+  fixture="$(crossing_visibility_fixtures "$jar" "$mjar" "$base" prior)" || return 1
+  read -r g e5 r s p g3 e6 <<<"$fixture"
+  drill_step prior-running/second-container
+  # The candidate as a second container on the same database, the way a
+  # rolling upgrade would start it. APP_ENV=dev so its API answers plain HTTP
+  # on a loopback port; the path up to its boot is the same in every mode.
+  cid="$(docker run -d --label "com.docker.compose.project=$CX_PROJECT" --name "$CX_PROJECT-candidate" --network "${CX_PROJECT}_default" \
+    -p 127.0.0.1:18093:8080 --pull never -e APP_ENV=dev -e PORT=8080 -e SESSION_SECRET=drill-disposable-session-secret-0123456789abcdef \
+    -e 'DATABASE_URL=postgres://church:drill-disposable-db-password@db:5432/fold?sslmode=disable' "$CROSSING_CAND_IMG")"
+  for ((i = 0; i < 180; i++)); do
+    if docker exec "$cid" /fold healthcheck >/dev/null 2>&1; then break; fi
+    sleep 1
+  done
+  docker exec "$cid" /fold healthcheck >/dev/null 2>&1 || { docker logs "$cid" >&2 || true; echo 'crossing: the second candidate container never became healthy' >&2; return 1; }
+  [[ "$(crossing_goose)" == "$(crossing_last_version "$REVISION")" ]]
+  [[ "$(crossing_public_status /healthz)" == 200 ]] || { echo 'crossing: the prior stopped serving when 00015 landed' >&2; return 1; }
+  # Another manager, through the candidate: the stale reset's event becomes
+  # private with its dates reset (preview, then its token).
+  cbase=http://127.0.0.1:18093; cjar="$cdir/running-candidate.jar"
+  crossing_http_login "$cjar" "$cbase" crossing-admin@example.invalid
+  consent="$(crossing_http_want "$cjar" "$cbase" GET "/events/$s/visibility-impact?visibility=private&resetOverrides=1" '' 200 | jq -er .consent)"
+  crossing_http_want "$cjar" "$cbase" PUT "/events/$s/visibility" "$(jq -nc --arg c "$consent" '{visibility:"private",resetOverrides:true,consent:$c}')" 200 >/dev/null
+  [[ "$(crossing_cpg fold -c "SELECT visibility || ' ' || (SELECT count(*) FROM event_occurrences WHERE event_id = $s AND visibility_override IS NOT NULL) FROM events WHERE id = $s")" == 'private 0' ]]
+  drill_step prior-running/refusals
+  out="$cdir/running-answer.json"
+  while read -r -u 3 label method path body; do
+    before="$(crossing_visibility_state fold "$e5,$r,$s,$p,$e6")"
+    t0="$(crossing_cpg fold -c 'SELECT now()')"
+    ok=false; fenced=false; stale=0
+    # A statement the prior prepared before 00009-00014 changed its columns
+    # fails once per connection with 0A000 before it reaches the fence; that
+    # attempt rolls back, and the request is sent again (at most five times)
+    # until the audit fence itself refuses it.
+    for ((attempt = 1; attempt <= 5; attempt++)); do
+      since="$(date -u +%Y-%m-%dT%H:%M:%S.%NZ)"
+      status="$(crossing_http "$jar" "$base" "$method" "$path" "$body" "$out")"
+      sleep 1
+      if crossing_cdc logs --no-color --since "$since" app 2>&1 | grep -qF "$CROSSING_AUDIT_REFUSAL"; then fenced=true; break; fi
+      if crossing_cdc logs --no-color --since "$since" app 2>&1 | grep -qF 0A000; then stale=$((stale+1)); continue; fi
+      break
+    done
+    after="$(crossing_visibility_state fold "$e5,$r,$s,$p,$e6")"
+    audits="$(crossing_cpg fold -c "SELECT count(*) FROM audit_logs WHERE at >= '$t0' AND (action LIKE 'event.visibility%' OR action IN ('registration.cancelled','event.created'))")"
+    notes="$(crossing_cpg fold -c "SELECT count(*) FROM notifications WHERE created_at >= '$t0' AND subject_type = 'event' AND subject_id IN ($e5,$r,$s,$p,$e6)")"
+    if [[ "$status" == 500 && "$fenced" == true && "$before" == "$after" && "$audits" == 0 && "$notes" == 0 ]]; then ok=true; fi
+    results="$(jq -c --arg l "$label" --arg s "$status" --argjson fenced "$fenced" --argjson stale "$stale" --argjson same "$([[ "$before" == "$after" ]] && echo true || echo false)" \
+      --arg audits "$audits" --arg notes "$notes" --argjson ok "$ok" --arg answer "$(head -c 300 "$out")" \
+      '. + [{label:$l, status:$s, fenceLogged:$fenced, staleAttempts:$stale, unchanged:$same, auditRows:$audits, notifications:$notes, pass:$ok, answer:$answer}]' <<<"$results")"
+    [[ "$ok" == true ]] || { echo "crossing: the running prior's $label was not refused by the audit fence with nothing written: $(jq -c '.[-1]' <<<"$results")" >&2; return 1; }
+    [[ "$(crossing_public_status /healthz)" == 200 ]] || { echo "crossing: the prior stopped answering /healthz after $label" >&2; return 1; }
+  done 3<<EOF
+group-tightening PUT /groups/$g {"visibility":"private"}
+zero-registration-reset PUT /events/$r/visibility {"visibility":"public","resetOverrides":true,"confirm":false}
+stale-empty-reset PUT /events/$s/visibility {"visibility":"public","resetOverrides":true,"confirm":false}
+series-opening PUT /events/$p/visibility {"visibility":"public"}
+date-value PUT /events/$p/occurrences/$(crossing_day 5) {"visibility":"public"}
+group-event-own-visibility POST /groups/$g3/events {"title":"Crossing E7","startsLocal":"$(crossing_day 8)T19:00","durationMinutes":60,"tzid":"UTC","visibility":"private"}
+zero-loser-group-tightening PUT /groups/$g3 {"visibility":"private"}
+EOF
+  # The positive control: a write that changes no visibility still saves.
+  crossing_http_want "$jar" "$base" PUT "/events/$e6" "$(jq -nc --arg d "$(crossing_day 7)" '{title:"Crossing E6 renamed",startsLocal:($d+"T19:00"),durationMinutes:60,tzid:"UTC"}')" 200 >/dev/null
+  [[ "$(crossing_cpg fold -c "SELECT title FROM events WHERE id = $e6")" == 'Crossing E6 renamed' ]]
+  crossing_emit cases.jsonl --arg acceptance A-prior-running-across-upgrade --arg site "$CX_SITE" --argjson requests "$results" \
+    '{kind:"positive", acceptance:$acceptance, id:"prior-running-across-upgrade", site:$site, fixture:false, requests:$requests, titleEdit:200,
+      proof:"protocol: curl against the prior process and the database while the candidate container ran beside it",
+      pass:($requests | length == 7 and all(.[]; .pass))}'
+  docker rm -f "$cid" >/dev/null
+  crossing_refused_start running-restart "$(crossing_last_version "$REVISION")"
+  crossing_site_end
+  crossing_use_main
 }
 
 
@@ -1118,8 +1533,8 @@ crossing_panel_mint() { # target file: a press that minted its id (and kept it)
 # items-json [attempt-id]: the set-v1 DELETE body the panel sends for a review's
 # items: the first removed, the rest kept (two bits a reason, a digest over the
 # ids and hashes it came with). It is built by qc1/set-v1.mjs, an implementation
-# independent of the browser's and held to the shared vectors by its selftest
-# (restore-crossings-fixtures.sh). No attempt id: a body without attemptId.
+# independent of the browser's and held to the shared vectors by its selftest.
+# No attempt id: a body without attemptId.
 crossing_set_body() {
   local items="$1" id="${2-}" n codes
   n="$(jq 'length' <<<"$items")"
@@ -1254,9 +1669,9 @@ real_current_release_restore() {
   # --dump completes into private recovery with the site closed.
   restore --dump "$dump"
   assert_private
-  jq -e --arg v "$CROSSING_CAND_TAG" '.version == $v and .recoveryPolicy == 2' <<<"$(docker exec "$(recovery_ids)" /fold version --json)" >/dev/null \
-    || { echo 'crossing: the recovery instance is not the committed head at level 2' >&2; return 1; }
-  [[ "$(jq -er .level "$DIR/recovery.lock")" == 2 ]]
+  jq -e --arg v "$CROSSING_CAND_TAG" --argjson l "$CROSSING_CANDIDATE_LEVEL" '.version == $v and .recoveryPolicy == $l' <<<"$(docker exec "$(recovery_ids)" /fold version --json)" >/dev/null \
+    || { echo "crossing: the recovery instance is not the committed head at level $CROSSING_CANDIDATE_LEVEL" >&2; return 1; }
+  [[ "$(jq -er .level "$DIR/recovery.lock")" == "$CROSSING_CANDIDATE_LEVEL" ]]
   URL=http://localhost:18080; login
   # t1: opened, never pressed. The press mints its own id and applies at once.
   status="$(crossing_press "$t1" "$cdir/panel-$t1.json" "$out")"
@@ -1530,13 +1945,13 @@ assert_crossing_evidence() {
 # ---------------------------------------------------------------------------
 # restore-drill.sh --crossings-only: a PARTIAL DIAGNOSTIC, never the acceptance run.
 #
-# The full drill takes about an hour; the five real-binary crossing cases come last, so a deterministic runner
+# The full drill takes about an hour; the nine real-binary crossing cases come last, so a deterministic runner
 # problem in them (a missing tool, an OS check, a path) costs a whole run to find. This mode runs exactly what
 # those cases need and nothing else:
 #   bootstrap          the same deploy-drill.sh --prepare-only stack as the full run
 #   base-prerequisites the full run's base-proof fixture setup only: setup wizard, users, group, jobs and
 #                      notifications, and the pg_dump that reset_case restores from (DB_DUMP)
-#   the five real_* families, called exactly as the full run calls them (bare, errexit on)
+#   the nine real_* families, called exactly as the full run calls them (bare, errexit on)
 #   crossings-evidence assert_crossing_evidence, the same check the full run ends with
 # It skips the restore proofs themselves (swap proof, restore --dump, the 60 s observation, the db restart,
 # the Chromium delete-panel proof), the interruption matrices and the twelve lifecycle/review families, the
@@ -1548,20 +1963,21 @@ assert_crossing_evidence() {
 # (the full run writes neither); the banner and the last line say so; and a pass exits with
 # DRILL_PARTIAL_PASS_EXIT (10), which the full run never returns (its pass is exit 0).
 # ---------------------------------------------------------------------------
-CROSSINGS_ONLY_FAMILIES=(real_binary_refusals real_level_lineage real_same_level_rollback real_current_release_restore real_older_archive_restore)
+CROSSINGS_ONLY_FAMILIES=(real_binary_refusals real_level_lineage real_lower_level_rollback_refused real_l1_pre_upgrade_dump real_level0_started_by_hand real_prior_refused_at_start real_prior_running_across_upgrade real_current_release_restore real_older_archive_restore)
 CROSSINGS_ONLY_PLAN=(bootstrap base-prerequisites "${CROSSINGS_ONLY_FAMILIES[@]}" crossings-evidence)
-# The full run's case names, in order. restore-drill-modes-fixtures.sh keeps this equal to the plan restore-drill.sh passes to drill_progress_init.
+# The full run's case names, in order: the plan restore-drill.sh passes to drill_progress_init.
 DRILL_FULL_PLAN_NAMES=(bootstrap base-proof recovery-interruptions reopen-interruptions abort-interruptions tamper accidental-app-reuse abort-ack-loss operations-lock recovery-configuration
   count_races archive_failures pin_and_abort_cases cleanup_and_tamper_cases concurrency_cases lifecycle_cases legacy_archive_case review_reconciliation_cases
   review_backup_archive_cases review_cleanup_retry_cases review_orphaned_restore_case review_moving_tag_case
   uploads_erasure_cases uploads_interruption_cases backup_exclusion_cases
-  real_binary_refusals real_level_lineage real_same_level_rollback real_current_release_restore real_older_archive_restore final-verification)
+  real_binary_refusals real_level_lineage real_lower_level_rollback_refused real_l1_pre_upgrade_dump real_level0_started_by_hand
+  real_prior_refused_at_start real_prior_running_across_upgrade real_current_release_restore real_older_archive_restore final-verification)
 
 drill_mode_banner() {
   printf '%s\n' '################################################################################' \
     '# restore-drill.sh --crossings-only: PARTIAL DIAGNOSTIC. This is NOT the full drill and' \
-    '# NOT acceptance. It runs the bootstrap, the fixture prerequisites and the five real' \
-    '# level-2 crossing cases only. A pass exits 10; only a full run exits 0.' \
+    '# NOT acceptance. It runs the bootstrap, the fixture prerequisites and the nine real' \
+    '# recovery-level crossing cases only. A pass exits 10; only a full run exits 0.' \
     '################################################################################'
 }
 
@@ -1572,7 +1988,7 @@ drill_mode_begin() {
   skipped="$(printf '%s\n' "${DRILL_FULL_PLAN_NAMES[@]}" | jq -Rn --argjson ran "$ran" '[inputs] - $ran | map(select(. != "base-proof"))')"
   drill_mode_banner
   printf '%s\n' 'PARTIAL DIAGNOSTIC (restore-drill.sh --crossings-only). This directory is NOT full-drill evidence and NOT acceptance.' \
-    'It holds the bootstrap, the fixture prerequisites and the five real level-2 crossing cases only. See drill-mode.json for what ran and what did not.' \
+    'It holds the bootstrap, the fixture prerequisites and the nine real recovery-level crossing cases only. See drill-mode.json for what ran and what did not.' \
     'A pass is exit 10 and status "partial". Acceptance needs a full run (exit 0, status "complete").' >"$WORK/PARTIAL-NOT-FULL-ACCEPTANCE.txt"
   jq -n --argjson ran "$ran" --argjson skipped "$skipped" --argjson pass "$DRILL_PARTIAL_PASS_EXIT" --arg at "$(date -u +%FT%TZ)" --arg revision "${REVISION:-}" \
     '{mode:"crossings-only", partial:true, fullAcceptance:false, startedAt:$at, revision:$revision, passExitCode:$pass,

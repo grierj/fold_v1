@@ -9,6 +9,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -262,4 +263,55 @@ func samePreviousWriter(t *testing.T, before, after int64, run func(*testing.T, 
 		t.Errorf("the previous writer's outcomes differ at version %d:\n%s\nwant (version %d)\n%s", after, c, before, p)
 	}
 	sameRows(t, "rows after the previous writer's script", currentRows, previousRows)
+}
+
+// recoveryFloorCleanupTarget is nil only for a database this test process
+// made with testdb.Fresh, not yet dropped, that db is connected to. Anything
+// else (a Shared database, a template, a database another test or a person
+// uses) keeps 00015's fences (DEC-158).
+func recoveryFloorCleanupTarget(name string, db *sql.DB) error {
+	if !testdb.FromFresh(name) {
+		return fmt.Errorf("%s was not made by testdb.Fresh in this test process", name)
+	}
+	var current string
+	if err := db.QueryRow("SELECT current_database()").Scan(&current); err != nil {
+		return err
+	}
+	if current != name {
+		return fmt.Errorf("the handle is connected to %s, not %s", current, name)
+	}
+	return nil
+}
+
+// releaseRecoveryFloor removes what 00015 keeps through every Down (both
+// fences, the hold and the epoch row) from a throwaway database, so a test can
+// reach a pristine empty schema. It refuses, before any statement, every
+// database recoveryFloorCleanupTarget refuses. The goose version is left
+// alone; a caller at the latest version is deliberately off the chain's
+// contract and goes straight to DownTo(0).
+func releaseRecoveryFloor(t *testing.T, name string, db *sql.DB) {
+	t.Helper()
+	if err := recoveryFloorCleanupTarget(name, db); err != nil {
+		t.Fatalf("release the recovery floor: %v", err)
+	}
+	tx, err := db.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback()
+	for _, stmt := range []string{
+		"DROP VIEW recovery_floor_hold",
+		"DROP TRIGGER settings_recovery_floor ON settings",
+		"DROP TRIGGER audit_logs_visibility_consent ON audit_logs",
+		"DROP FUNCTION settings_recovery_floor()",
+		"DROP FUNCTION audit_logs_visibility_consent()",
+		"DELETE FROM settings WHERE key = 'visibility_consent_epoch'",
+	} {
+		if _, err := tx.Exec(stmt); err != nil {
+			t.Fatalf("release the recovery floor: %s: %v", stmt, err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
 }

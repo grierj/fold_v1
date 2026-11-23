@@ -15,12 +15,43 @@ import (
 	"fold/models"
 
 	"github.com/gin-gonic/gin"
+	"github.com/gorilla/sessions"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 )
 
 func (a *App) apiGetCSRF(c *gin.Context) {
-	c.JSON(http.StatusOK, gin.H{"csrfToken": c.GetString("csrfToken")})
+	c.JSON(http.StatusOK, gin.H{"csrfToken": c.GetString(csrfContextKey)})
+}
+
+// apiBootstrap establishes this browser's credential (M8.1): the viewer its
+// cookie authenticates, judged in this request's read, with the token T and
+// marker M a tab pins. csrfMiddleware has already bound a T (minting one, with
+// its marker, for a first visit); a cookie whose marker is missing, wrong or
+// duplicated gets the marker for its T alone. An invalid or stale session
+// answers user null: the marker never carries a login.
+func (a *App) apiBootstrap(c *gin.Context) {
+	token := c.GetString(csrfContextKey)
+	marker, err := a.credentialMarker(token)
+	if err != nil {
+		jsonError(c, http.StatusInternalServerError, "session error")
+		return
+	}
+	if a.requestMarker(c) != marker {
+		a.writeMarker(c, marker)
+	}
+	me := apiUser(c)
+	body := sessionBootstrapJSON{CSRFToken: token, CredentialMarker: marker}
+	if me != nil {
+		u := a.toUserJSON(me)
+		body.User = &u
+		body.CanCompose = a.canComposeOrLog(me)
+	}
+	if err := a.acknowledgeSession(c, me); err != nil {
+		jsonError(c, http.StatusInternalServerError, "session error")
+		return
+	}
+	c.JSON(http.StatusOK, body)
 }
 
 func (a *App) apiLogin(c *gin.Context) {
@@ -168,7 +199,7 @@ func (a *App) apiChangePassword(c *gin.Context) {
 		}
 		fresh = *locked
 		return nil
-	})
+	}, contactGateTx)
 	if answerStaleSession(c, err) {
 		return
 	}
@@ -176,13 +207,10 @@ func (a *App) apiChangePassword(c *gin.Context) {
 		jsonError(c, http.StatusInternalServerError, "could not change password")
 		return
 	}
-	session, err := a.Store.Get(c.Request, sessionName)
-	if err != nil {
-		jsonError(c, http.StatusInternalServerError, "session error")
-		return
-	}
-	setSessionLogin(session, &fresh)
-	if err := session.Save(c.Request, c.Writer); err != nil {
+	if err := a.replaceCredential(c, func(s *sessions.Session) bool {
+		setSessionLogin(s, &fresh)
+		return true
+	}); err != nil {
 		jsonError(c, http.StatusInternalServerError, "session error")
 		return
 	}
@@ -195,9 +223,9 @@ func (a *App) apiChangePassword(c *gin.Context) {
 // M7.2 slice b). It leaves session_version, the credential epoch, alone, so
 // emailed links and push devices survive an ordinary sign-out. The cookie
 // is also expired (MaxAge -1), so the browser drops it along with its CSRF
-// token. The SPA then reloads. A body of {pushEndpoint} deletes this
-// browser's push device in the same request (M3.13b): a separate call after
-// logout would have no CSRF token.
+// token and credential marker. The SPA then reloads. A body of
+// {pushEndpoint} deletes this browser's push device in the same request
+// (M3.13b): a separate call after logout would have no CSRF token.
 func (a *App) apiLogout(c *gin.Context) {
 	var body struct {
 		PushEndpoint string `json:"pushEndpoint"`
@@ -207,12 +235,7 @@ func (a *App) apiLogout(c *gin.Context) {
 	}
 	a.endPushDeviceAtLogout(body.PushEndpoint)
 	bumpErr := a.endSessionsAtLogout(c)
-	session, _ := a.Store.Get(c.Request, sessionName)
-	session.Values = map[any]any{}
-	opts := *a.Store.Options
-	opts.MaxAge = -1
-	session.Options = &opts
-	_ = session.Save(c.Request, c.Writer)
+	_ = a.expireSession(c)
 	if bumpErr != nil {
 		log.Printf("logout: ending sessions: %v", bumpErr)
 		jsonError(c, http.StatusInternalServerError, "could not sign out everywhere")
@@ -346,7 +369,7 @@ func (a *App) apiRequestPasswordReset(c *gin.Context) {
 		}
 		return audit.Write(tx, audit.Entry{Actor: &user.ID, Action: audit.PasswordResetRequested,
 			TargetType: "user", TargetID: user.ID, IP: c.ClientIP()})
-	})
+	}, contactGateTx)
 	if err != nil {
 		// Logged, not leaked: an error status here would tell the caller
 		// the account exists.
@@ -394,7 +417,7 @@ func (a *App) redeemPasswordLink(c *gin.Context, kind, auditAction, failMsg stri
 			}
 			fresh = *u
 			return nil
-		})
+		}, contactGateTx)
 	}
 	if errors.Is(err, errTokenInvalid) {
 		fail(c, errLinkExpired)
@@ -421,20 +444,16 @@ func (a *App) apiConfirmPasswordReset(c *gin.Context) {
 
 // signInSession stores only an eligible login. Password setup/reset can also
 // reach here for pending teens: clear authentication (including a previous
-// account's login). Both branches drop the CSRF token; the next request mints
-// a fresh one, so public browsing keeps working.
+// account's login). Both branches replace the browser credential, so a token
+// fixed or leaked before sign-in never outlives it (M7.2 slice b), and a
+// same-account sign-in still gives every tab a new credential (M8.1).
 func (a *App) signInSession(c *gin.Context, u *models.User) error {
-	session, err := a.Store.Get(c.Request, sessionName)
-	if err != nil {
-		return err
-	}
-	// A token fixed or leaked before sign-in must not outlive it: drop it, and
-	// the next request mints a fresh one (csrfToken; M7.2 slice b).
-	delete(session.Values, csrfSessionKey)
-	if u.CanSignIn() {
-		setSessionLogin(session, u)
-	} else {
-		clearSessionLogin(session)
-	}
-	return session.Save(c.Request, c.Writer)
+	return a.replaceCredential(c, func(s *sessions.Session) bool {
+		if u.CanSignIn() {
+			setSessionLogin(s, u)
+		} else {
+			clearSessionLogin(s)
+		}
+		return true
+	})
 }

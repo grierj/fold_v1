@@ -440,7 +440,7 @@ func (a *App) apiAcceptInvitation(c *gin.Context) {
 		userID = u.ID
 		return audit.Write(tx, audit.Entry{Actor: &inv.InvitedBy, Action: audit.InvitationAccepted,
 			TargetType: "invitation", TargetID: inv.ID, Meta: meta, IP: c.ClientIP()})
-	})
+	}, contactGateTx)
 	switch {
 	case errors.Is(err, errTokenInvalid):
 		fail(c, errInvitationExpired)

@@ -429,7 +429,7 @@ func (a *App) html(c *gin.Context, code int, name string, data gin.H) {
 	if data == nil {
 		data = gin.H{}
 	}
-	data["csrfField"] = csrfField(c.GetString("csrfToken"))
+	data["csrfField"] = csrfField(c.GetString(csrfContextKey))
 	data["SiteName"] = a.siteName()
 	c.HTML(code, name, data)
 }

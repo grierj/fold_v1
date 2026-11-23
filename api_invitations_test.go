@@ -607,7 +607,7 @@ func TestInvitationHashDoesNotHoldContactGate(t *testing.T) {
 			return err
 		}
 		return lockContacts(tx)
-	})
+	}, contactGateTx)
 	if err != nil {
 		t.Fatalf("a contact mutation waited on invitation password preparation: %v", err)
 	}

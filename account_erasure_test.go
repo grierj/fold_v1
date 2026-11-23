@@ -867,7 +867,7 @@ func TestQueuedAccountMailForErasedAccountSendsNothing(t *testing.T) {
 	// Each mail is deliverable before the erasure; the transaction is rolled
 	// back so nothing is minted or rotated.
 	for _, p := range preparations {
-		tx := db.Begin()
+		tx := db.Begin(contactGateTx)
 		_, eligible, err := p.run(tx)
 		tx.Rollback()
 		if err != nil || !eligible {
@@ -929,7 +929,7 @@ func TestQueuedAccountMailForErasedAccountSendsNothing(t *testing.T) {
 			var err error
 			_, ok, err = p.run(tx)
 			return err
-		})
+		}, contactGateTx)
 		if err != nil || ok {
 			t.Errorf("%s: ok=%v err=%v, want nothing to send and no error", p.name, ok, err)
 		}
@@ -2574,7 +2574,7 @@ func TestQueuedDependentMailForErasedAccountSendsNothing(t *testing.T) {
 	// Each is deliverable before the erasure; the rollback keeps any minted
 	// or rotated capability from being committed.
 	for _, p := range preparations {
-		tx := db.Begin()
+		tx := db.Begin(contactGateTx)
 		_, eligible, err := p.run(tx)
 		tx.Rollback()
 		if err != nil || !eligible {

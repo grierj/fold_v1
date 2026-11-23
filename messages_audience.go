@@ -137,29 +137,35 @@ func (a *App) audienceEventIDs(db *gorm.DB, au audienceJSON) ([]uint, error) {
 // audienceTargets are the groups and events an audience reaches, as the
 // author relates to them, for policy.CanMessageAudience.
 func (a *App) audienceTargets(db *gorm.DB, me *models.User, au audienceJSON) ([]policy.MessageTarget, error) {
+	return audienceTargetsFrom(a.dbDates(db), me, au)
+}
+
+// audienceTargetsFrom is audienceTargets on any fact source (dateFactSource).
+func audienceTargetsFrom(src dateFactSource, me *models.User, au audienceJSON) ([]policy.MessageTarget, error) {
 	if au.Type == policy.AudienceGroup {
-		var g models.Group
-		if err := db.First(&g, au.GroupID).Error; err != nil {
+		g, err := src.liveGroup(au.GroupID)
+		if err != nil || g == nil {
 			return nil, errAudienceGone
 		}
-		rel, err := groupRel(db, me.ID, g.ID)
-		return []policy.MessageTarget{{Group: asGroup(&g), Rel: rel}}, err
+		rel, err := src.groupRel(me.ID, g.ID)
+		return []policy.MessageTarget{{Group: asGroup(g), Rel: rel}}, err
 	}
-	ids, err := a.audienceEventIDs(db, au)
+	ids, err := src.audienceEventIDs(au)
 	if err != nil || len(ids) == 0 {
 		return nil, err
 	}
-	var evs []models.Event
-	if err := db.Where("id IN ?", ids).Find(&evs).Error; err != nil {
+	evs, err := src.liveEvents(ids)
+	if err != nil {
 		return nil, err
 	}
 	if len(evs) != len(dedupeIDs(ids)) {
 		return nil, errAudienceGone
 	}
-	facts, err := loadFactSet(db, me, evs, false)
+	sets, err := src.factSets([]uint{me.ID}, evs)
 	if err != nil {
 		return nil, err
 	}
+	facts := sets[me.ID]
 	out := make([]policy.MessageTarget, 0, len(evs))
 	for i := range evs {
 		f := facts.of(&evs[i])
@@ -219,6 +225,134 @@ func (a *App) audienceUserIDs(db *gorm.DB, au audienceJSON, now time.Time) ([]ui
 		}
 	}
 	return dedupeIDs(out), err
+}
+
+// eventAudience is an audience that reaches people through their
+// registrations on dates (a date, a series, or several events).
+func eventAudience(t string) bool {
+	return t == policy.AudienceOccurrence || t == policy.AudienceEventSeries || t == policy.AudienceEvents
+}
+
+// audienceSeers judges which of holders a date they may still see puts in
+// au. A holder is in the map when a registration they hold (their own, or one
+// they made for a household person, DEC-8) is in au's statuses, on au's date
+// or, for a series or several events, on a scheduled date of them starting at
+// or after since; the value is whether one of those dates is one they may see
+// now as a date: ordinarily (canSeeDate) or through a live exact-date grant,
+// judged as eventViewer judges the reader. A holder with no such registration
+// is absent (no longer on the list); one whose every such date is hidden from
+// them is false, so the author's own words never reach someone a date no
+// longer shows to (a departed member whose kept date ended and was moved, a
+// guest of a date made private). since is now for a preview or a preparation
+// and the message's scheduled time once it goes out, so a date that starts
+// while a message is sending still counts. Every read is on db; a failed read
+// is returned, never read as "may not see".
+func (a *App) audienceSeers(db *gorm.DB, au audienceJSON, holders []uint, since, now time.Time) (map[uint]bool, error) {
+	return audienceSeersFrom(a.dbDates(db), au, holders, since, now)
+}
+
+// audienceSeersFrom is audienceSeers on any fact source (dateFactSource).
+func audienceSeersFrom(src dateFactSource, au audienceJSON, holders []uint, since, now time.Time) (map[uint]bool, error) {
+	out := map[uint]bool{}
+	if len(holders) == 0 || !eventAudience(au.Type) {
+		return out, nil
+	}
+	statuses := au.Statuses
+	if len(statuses) == 0 {
+		statuses = defaultRegStatuses
+	}
+	var eventIDs []uint
+	if au.Type != policy.AudienceOccurrence {
+		var err error
+		if eventIDs, err = src.audienceEventIDs(au); err != nil || len(eventIDs) == 0 {
+			return out, err
+		}
+	}
+	held, err := src.holdings(au, eventIDs, dedupeIDs(holders), statuses, since)
+	if err != nil || len(held) == 0 {
+		return out, err
+	}
+	occIDs, uids := []uint{}, []uint{}
+	for _, h := range held {
+		occIDs, uids = append(occIDs, h.OccurrenceID), append(uids, h.UID)
+	}
+	occIDs, uids = dedupeIDs(occIDs), dedupeIDs(uids)
+	occs, err := src.occurrences(occIDs)
+	if err != nil {
+		return nil, err
+	}
+	var evIDs []uint
+	for _, occ := range occs {
+		evIDs = append(evIDs, occ.EventID)
+	}
+	evs, err := src.liveEvents(evIDs)
+	if err != nil {
+		return nil, err
+	}
+	byID := make(map[uint]*models.Event, len(evs))
+	for i := range evs {
+		byID[evs[i].ID] = &evs[i]
+	}
+	users, err := src.liveUsers(uids)
+	if err != nil {
+		return nil, err
+	}
+	viewerIDs := []uint{0}
+	for id, u := range users {
+		if src.viewer(u) != nil {
+			viewerIDs = append(viewerIDs, id)
+		}
+	}
+	facts, err := src.factSets(viewerIDs, evs)
+	if err != nil {
+		return nil, err
+	}
+	hidden := map[uint][]uint{}
+	for _, h := range held {
+		u, occ := users[h.UID], occs[h.OccurrenceID]
+		if out[h.UID] || u == nil || occ == nil {
+			continue
+		}
+		viewer := src.viewer(u)
+		var vid uint
+		if viewer != nil {
+			vid = viewer.ID
+		}
+		vs := visibleSet{ByID: byID, factSet: facts[vid]}
+		if vs.canSeeDate(viewer, byID[occ.EventID], occ) {
+			out[h.UID] = true
+			continue
+		}
+		out[h.UID] = false
+		if viewer != nil {
+			hidden[h.UID] = append(hidden[h.UID], occ.ID)
+		}
+	}
+	for uid, ids := range hidden {
+		if out[uid] {
+			continue
+		}
+		scoped, err := src.scoped(users[uid], ids, false, now)
+		if err != nil {
+			return nil, err
+		}
+		out[uid] = len(scoped) > 0
+	}
+	return out, nil
+}
+
+// audienceSkip is why a send to userID no longer goes, by audienceSeers: no
+// registration in the audience any more, or only dates hidden from them; ""
+// when it goes.
+func audienceSkip(seers map[uint]bool, userID uint) string {
+	may, held := seers[userID]
+	switch {
+	case !held:
+		return skipNoLongerOnList
+	case !may:
+		return skipCantSeeDate
+	}
+	return ""
 }
 
 // Why someone an audience names won't get the email. Admins see the reason
@@ -317,7 +451,9 @@ func (a *App) summarizeAudience(db *gorm.DB, ids []uint, reasons bool) (audience
 		return out, err
 	}
 	pushOn := map[uint]bool{}
-	if a.pushEnabled() {
+	if on, err := boolSettingErrIn(db, settingPushEnabled, true); err != nil {
+		return out, err
+	} else if on {
 		if pushOn, err = pushReady(db, pushCandidates(facts), notify.CatMessages); err != nil {
 			return out, err
 		}

@@ -130,7 +130,10 @@ func (f *subjectFacts) eligible(a *App, tx *gorm.DB, r models.Registration, ev *
 	}
 	allowed, loaded := access[holder.ID]
 	if !loaded {
-		allowed = a.canRegisterDateIn(tx, holder, ev, r.OccurrenceID)
+		var err error
+		if allowed, err = a.canRegisterDateErrIn(tx, holder, ev, r.OccurrenceID); err != nil {
+			return false, err
+		}
 		access[holder.ID] = allowed
 	}
 	if !allowed && r.UserID != nil && r.ID != 0 {
@@ -194,6 +197,10 @@ func householdPersonName(tx *gorm.DB, id uint) (string, error) {
 
 // reconcileHouseholdPerson runs while the household is locked, and locks
 // affected dates in ID order before cancelling or clearing invalid requests.
+// A date is selected unlocked, so each is judged again under its lock: one
+// cancelled or started since is skipped, as if it had been so at the
+// selection. A cancelled date's details may have changed after its holder
+// lost sight of it, and only its tombstone rule may name it.
 func (a *App) reconcileHouseholdPerson(tx *gorm.DB, person *models.HouseholdPerson, deleting bool, actor *uint, ip string) error {
 	var regs []models.Registration
 	now := time.Now().UTC()
@@ -205,6 +212,9 @@ func (a *App) reconcileHouseholdPerson(tx *gorm.DB, person *models.HouseholdPers
 		o, err := lockOccurrence(tx, r.OccurrenceID)
 		if err != nil {
 			return err
+		}
+		if o.Status != models.OccurrenceScheduled || !o.StartsAt.After(now) {
+			continue
 		}
 		if err := tx.First(&r, r.ID).Error; err != nil {
 			return err
@@ -325,6 +335,28 @@ func (a *App) requestFacts() *subjectFacts {
 	f := newSubjectFacts(time.Time{})
 	f.clock = func() time.Time { return time.Now().UTC().In(churchZoneOrUTC(a.DB)) }
 	return f
+}
+
+// requestFactsAt is one snapshot's shared facts on the church clock at now.
+// Household visibility and ages count from churchClockIn(tx, now), so a failed
+// or invalid zone read is an error, never UTC. It reads the zone at once:
+// day() cannot fail, so a lazy clock would decide on a zero day first.
+func requestFactsAt(tx *gorm.DB, now time.Time) (*subjectFacts, error) {
+	today, err := churchClockIn(tx, now)
+	if err != nil {
+		return nil, err
+	}
+	return newSubjectFacts(today), nil
+}
+
+// rosterRead is where a roster's rows are read and on which clock. The event
+// list reads on a.DB and leaves out a recoverable row whose eligibility it
+// cannot read. A snapshot (the manager's exact-date read) returns every
+// failed read, so its answer is never a guess.
+type rosterRead struct {
+	db       *gorm.DB
+	now      time.Time
+	snapshot bool
 }
 
 // load adds the facts for regs and viewer that aren't loaded yet, so one
@@ -480,7 +512,7 @@ func (f *subjectFacts) attendee(r models.Registration, o models.EventOccurrence,
 	return &out
 }
 
-func (a *App) attendeeNames(kept []models.EventOccurrence, show, childcare, managers map[uint]bool, me *models.User, facts *subjectFacts) (map[uint][]attendeeJSON, map[uint][]attendeeJSON, error) {
+func (a *App) attendeeNames(rr rosterRead, kept []models.EventOccurrence, show, childcare, managers map[uint]bool, me *models.User, facts *subjectFacts) (map[uint][]attendeeJSON, map[uint][]attendeeJSON, error) {
 	out, removed := map[uint][]attendeeJSON{}, map[uint][]attendeeJSON{}
 	var ids []uint
 	byID := map[uint]models.EventOccurrence{}
@@ -495,21 +527,23 @@ func (a *App) attendeeNames(kept []models.EventOccurrence, show, childcare, mana
 	}
 	var rows []struct {
 		models.Registration
-		LeaderAdded bool
+		LeaderAdded      bool
+		KeptAfterLeaving bool
 	}
-	// The leader-added flag is the row's own live manager-add provenance: no
-	// second table, so the page's dates in the outer filter are the only bound.
-	if err := a.DB.Model(&models.Registration{}).Select("registrations.*, (registrations.access_origin = ? AND registrations.access_granted_at IS NOT NULL AND registrations.access_ended_at IS NULL) AS leader_added", policy.OccurrenceOriginManagerAdd).Joins(listedRegistrations()).Where("registrations.occurrence_id IN ? AND registrations.status <> ?", ids, models.RegCancelled).Order("registrations.waitlisted_at ASC NULLS FIRST, registrations.id").Find(&rows).Error; err != nil {
+	// Both flags are the row's own live provenance: no second table, so the
+	// page's dates in the outer filter are the only bound. The kept flag is
+	// keptDatesIn's predicate (DEC-156).
+	if err := rr.db.Model(&models.Registration{}).Select("registrations.*, (registrations.access_origin = ? AND registrations.access_granted_at IS NOT NULL AND registrations.access_ended_at IS NULL) AS leader_added, (registrations.user_id IS NOT NULL AND "+keptDateSQL+") AS kept_after_leaving", policy.OccurrenceOriginManagerAdd).Joins(listedRegistrations()).Where("registrations.occurrence_id IN ? AND registrations.status <> ?", ids, models.RegCancelled).Order("registrations.waitlisted_at ASC NULLS FIRST, registrations.id").Find(&rows).Error; err != nil {
 		return nil, nil, err
 	}
 	registrations := make([]models.Registration, 0, len(rows))
 	for _, row := range rows {
 		registrations = append(registrations, row.Registration)
 	}
-	if err := facts.load(a.DB, registrations, me); err != nil {
+	if err := facts.load(rr.db, registrations, me); err != nil {
 		return nil, nil, err
 	}
-	now := time.Now().UTC()
+	now := rr.now
 	for _, row := range rows {
 		r := row.Registration
 		o := byID[r.OccurrenceID]
@@ -521,8 +555,8 @@ func (a *App) attendeeNames(kept []models.EventOccurrence, show, childcare, mana
 			continue
 		}
 		if managers[o.EventID] {
-			added := row.LeaderAdded
-			dto.AddedByLeader = &added
+			added, kept := row.LeaderAdded, row.KeptAfterLeaving
+			dto.AddedByLeader, dto.KeptAfterLeaving = &added, &kept
 		}
 		if r.Status == models.RegRemoved {
 			removed[o.ID] = append(removed[o.ID], *dto)
@@ -530,18 +564,20 @@ func (a *App) attendeeNames(kept []models.EventOccurrence, show, childcare, mana
 			out[o.ID] = append(out[o.ID], *dto)
 		}
 	}
-	if err := a.appendRecoverableRegistrations(kept, managers, me, removed, now, facts); err != nil {
+	if err := a.appendRecoverableRegistrations(rr, kept, managers, me, removed, facts); err != nil {
 		return nil, nil, err
 	}
 	return out, removed, nil
 }
 
-func (a *App) myHouseholdAnswers(occurrenceIDs []uint, viewer *models.User, facts *subjectFacts) (map[uint][]myHouseholdRegistrationJSON, error) {
+// myHouseholdAnswers is the answers of the viewer's household people on these
+// dates, every read on db.
+func myHouseholdAnswers(db *gorm.DB, occurrenceIDs []uint, viewer *models.User, facts *subjectFacts) (map[uint][]myHouseholdRegistrationJSON, error) {
 	out := map[uint][]myHouseholdRegistrationJSON{}
 	if viewer == nil {
 		return out, nil
 	}
-	if err := facts.load(a.DB, nil, viewer); err != nil {
+	if err := facts.load(db, nil, viewer); err != nil {
 		return nil, err
 	}
 	acct, found := facts.accounts[viewer.ID]
@@ -549,10 +585,10 @@ func (a *App) myHouseholdAnswers(occurrenceIDs []uint, viewer *models.User, fact
 		return out, nil
 	}
 	var regs []models.Registration
-	if err := a.DB.Joins("JOIN household_people ON household_people.id = registrations.household_person_id AND household_people.deleted_at IS NULL AND household_people.converted_user_id IS NULL").Where("household_people.household_id = ? AND registrations.occurrence_id IN ? AND registrations.status <> ?", acct.HouseholdID, occurrenceIDs, models.RegCancelled).Find(&regs).Error; err != nil {
+	if err := db.Joins("JOIN household_people ON household_people.id = registrations.household_person_id AND household_people.deleted_at IS NULL AND household_people.converted_user_id IS NULL").Where("household_people.household_id = ? AND registrations.occurrence_id IN ? AND registrations.status <> ?", acct.HouseholdID, occurrenceIDs, models.RegCancelled).Find(&regs).Error; err != nil {
 		return nil, err
 	}
-	if err := facts.load(a.DB, regs, viewer); err != nil {
+	if err := facts.load(db, regs, viewer); err != nil {
 		return nil, err
 	}
 	for _, r := range regs {
@@ -572,7 +608,7 @@ func (a *App) myHouseholdAnswers(occurrenceIDs []uint, viewer *models.User, fact
 		}
 		var pos *int
 		if !unavailable && status == models.RegWaitlisted {
-			n, err := waitlistPosition(a.DB, r.OccurrenceID, r.ID)
+			n, err := waitlistPosition(db, r.OccurrenceID, r.ID)
 			if err != nil {
 				return nil, err
 			}
@@ -604,7 +640,7 @@ func householdGoingMap(db *gorm.DB, occurrenceIDs []uint, viewer *models.User, r
 
 // Recovery data comes only from this event's audited dropped rows. It is
 // revalidated for the manager and holder before exposing any person facts.
-func (a *App) appendRecoverableRegistrations(occs []models.EventOccurrence, managers map[uint]bool, me *models.User, out map[uint][]attendeeJSON, now time.Time, facts *subjectFacts) error {
+func (a *App) appendRecoverableRegistrations(rr rosterRead, occs []models.EventOccurrence, managers map[uint]bool, me *models.User, out map[uint][]attendeeJSON, facts *subjectFacts) error {
 	if me == nil {
 		return nil
 	}
@@ -620,7 +656,7 @@ func (a *App) appendRecoverableRegistrations(occs []models.EventOccurrence, mana
 		return nil
 	}
 	var logs []models.AuditLog
-	if err := a.DB.Where("action = ? AND target_type = 'event' AND target_id IN ?", audit.RegistrationNotRestored, eventIDs).Order("id DESC").Find(&logs).Error; err != nil {
+	if err := rr.db.Where("action = ? AND target_type = 'event' AND target_id IN ?", audit.RegistrationNotRestored, eventIDs).Order("id DESC").Find(&logs).Error; err != nil {
 		return err
 	}
 	var regs []models.Registration
@@ -650,31 +686,36 @@ func (a *App) appendRecoverableRegistrations(occs []models.EventOccurrence, mana
 		}
 		seen[key] = true
 		var n int64
-		if err := subject.query(a.DB, o.ID).Model(&models.Registration{}).Count(&n).Error; err != nil {
+		if err := subject.query(rr.db, o.ID).Model(&models.Registration{}).Count(&n).Error; err != nil {
 			return err
 		}
 		if n != 0 {
 			continue
 		}
 		var holder models.User
-		if err := a.DB.Limit(1).Find(&holder, subject.holderID).Error; err != nil {
+		if err := rr.db.Limit(1).Find(&holder, subject.holderID).Error; err != nil {
 			return err
 		}
 		if holder.ID == 0 || holder.Status != models.UserActive {
 			continue
 		}
-		// A page that cannot read the church zone leaves the row out.
-		if ok, err := a.eligibleRegistration(a.DB, r, &o.Event, now); err != nil || !ok {
+		// A list that cannot read the church zone leaves the row out; a
+		// snapshot answers the error.
+		eligible, err := a.eligibleRegistration(rr.db, r, &o.Event, rr.now)
+		if err != nil && rr.snapshot {
+			return err
+		}
+		if err != nil || !eligible {
 			continue
 		}
 		regs = append(regs, r)
 	}
-	if err := facts.load(a.DB, regs, me); err != nil {
+	if err := facts.load(rr.db, regs, me); err != nil {
 		return err
 	}
 	for _, r := range regs {
 		o := byOcc[r.OccurrenceID]
-		dto := facts.attendee(r, o, me, true, false, now)
+		dto := facts.attendee(r, o, me, true, false, rr.now)
 		if dto != nil {
 			out[o.ID] = append(out[o.ID], *dto)
 		}
@@ -691,7 +732,10 @@ func householdSubjectFrom(person *models.HouseholdPerson, acct models.HouseholdA
 }
 
 type attendeeJSON struct {
-	AddedByLeader      *bool                  `json:"addedByLeader,omitempty"`
+	AddedByLeader *bool `json:"addedByLeader,omitempty"`
+	// KeptAfterLeaving is a live grant that ends with its date on this row
+	// (keptDateSQL), set only for the event's managers like AddedByLeader.
+	KeptAfterLeaving   *bool                  `json:"keptAfterLeaving,omitempty"`
 	Email              *string                `json:"email,omitempty"`
 	Phone              *string                `json:"phone,omitempty"`
 	AccountType        string                 `json:"accountType,omitempty"`

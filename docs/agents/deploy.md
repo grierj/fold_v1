@@ -39,15 +39,25 @@ that changes how an operator upgrades, rolls back or restores. The operator-faci
   `UPDATE_QC1_FACTS=1 go test -run TestQC1AppFacts .` regenerates the `go` section for review).
   The facts include the text of the erasure's retention report and, once the QC-1 work that records
   it has merged, of discovery's first audit statement; a saved real-server log under
-  `deploy/digitalocean/testdata/` is checked against that text. Never
-  regenerate a fact with a changed statement to make a check pass: `provision` goes red, and only a new
-  Docker-captured log fixes it (`docs/agents/erasure.md`).
+  `deploy/digitalocean/testdata/` is checked against that text (`TestQC1SuccessorIsTheLoggedStatement`,
+  which also pins the log's hash). Never regenerate a fact with a changed statement to make a check
+  pass: that test fails, and only a new Docker-captured log fixes it (`docs/agents/erasure.md`).
 
 ## Recovery levels (R4-RP)
 
 - The level is integer `recoveryPolicy` from `/fold version --json` in an image, or the one-line
   `deploy/recovery-policy` at a source commit (it equals `recoveryPolicyLevel` in
-  `restore_fence.go`). Absent metadata means 0; malformed metadata refuses.
+  `restore_fence.go`). Absent metadata means 0; malformed metadata refuses. Levels: 1 = the restore
+  barrier, 2 = reason review, 3 = exact visibility consent (DEC-158); from level 3 the database also
+  refuses an earlier release's start (`00015`'s start fence), so a refused script is not the only
+  stop.
+- A restored database's first start migrates it, declares level 3 and rotates the visibility
+  consent epoch, so every review open before the restore asks once more.
+- A starting instance's boot waits for a visibility confirmation already in flight on another
+  instance, and a confirmation that meets a boot's rotation waits for that boot to commit (both
+  hold the consent epoch row). A start or a confirmation that stays waiting shows in
+  `pg_stat_activity` as waiting on a lock; `pg_blocking_pids` names the holder, and restarting
+  that instance ends it.
 - Scripted provision, forward upgrade and rollback refuse a target below the greater of
   `DIR/recovery-policy-floor` and the level of the locally pinned image. The floor file is written
   only after smoke passes and never decreases; a higher pin enforces refusal even after failed
@@ -172,15 +182,9 @@ section at the end of `checks.sh`.
   under `/var/backups/fold` through the same no-replace copy (a differing file of that name refuses before the
   checkout or the pin changes). The recorded `release.prev` dump is that host file, so rollback is unchanged.
   Older deployments keep host production.
-- **Tests.** `backup-archives-fixtures.sh` (inside `make provision-dry-run`) runs these as root against a
-  fake Docker root and `PATH` stubs of `docker`, `date`, `cp`, `ln`, `rm`, `mv`, `sync`, `find`, `stat` and
-  `awk`; the shipped scripts have no test hook. The cutover cases (`cutover`, `cutover_refusals`,
-  `cutover_deadline`) cut `cutover_fail`, `cutover_wait_lastok` and `backup_cutover` out of `provision.sh` by name
-  and run them unchanged in a strict shell: an initial and a repeat cutover to the cron switch, a failed
-  replacement, a service that never succeeds, refused identities and paths, and stalled Docker reads (only the
-  cron file's directory is redirected). `backup-test.sh` covers the image. The November 17
-  real-droplet checks covered backup, restore and archive expiry; remaining live checks are in
-  `docs/FIRST-CHURCH-CHECKS.md`.
+- **Tests.** `backup-test.sh` covers the image. The host side is proven on a real droplet, not in CI
+  (DEC-154): the November 17 real-droplet checks covered backup, restore and archive expiry; remaining
+  live checks are in `docs/FIRST-CHURCH-CHECKS.md`.
 
 ## Restore (`restore.sh`)
 
@@ -217,7 +221,7 @@ from version 1 finds every tombstone with an older or no marker once, and runs t
 pipeline for it under the contact gate (200 subjects per page; admin deletes and contact changes
 may wait briefly that day). It clears audit `ip` blanks that the earlier pipeline left, which cannot be
 undone in the live database; backups keep the old values until they expire. There is no migration, the
-recovery level stays 2 and deploy stays one `docker compose up`. A rollback to a release that sweeps at
+recovery level is unchanged by it and deploy stays one `docker compose up`. A rollback to a release that sweeps at
 version 1 leaves version-2 markers as swept, and a deletion made during that window is found again by
 the version-2 sweep after the next upgrade. A dump taken before the upgrade restores version-1 markers;
 the next sweep clears them again. The tests model the restore in SQL; no real restore was run, and the
@@ -236,6 +240,11 @@ released.
   being prepared or a reviewer asks for one more run.
 - `--crossings-only` is a partial diagnostic and never counts as the full drill, so it does not
   reset the 30 days.
+- From recovery level 3 no earlier release can run on the candidate's schema, so the crossings
+  (`restore-drill-crossings.sh`) use the prior release as a lineage origin: its own tools provision
+  it on a fresh site and the candidate's tools upgrade it. Every way back to it (scripted rollback,
+  the hand-pinned image, after a down-one, on a site before setup) must be refused; an earlier
+  release on a pre-upgrade dump (L1) and a level-0 image started by hand (L4) are measured rows.
 
 `scripts/reason-review-scale.sh` wraps this drill (`docs/agents/testing.md`, "Reason-review scale
 run") and requires `--drill-reason` for a full drill step; this section stays the only statement

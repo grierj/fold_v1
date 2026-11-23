@@ -1,5 +1,6 @@
 import type { JsonObject } from "../src/lib/wireValues";
 import * as schema from "valibot";
+import { addDays, addMonths, weekdayIndex } from "../src/lib/days";
 import { expect, type APIRequestContext, type Locator, type Page, type Request } from "@playwright/test";
 import { apiAs, email, fromMore, LONG_GROUP_NAME } from "./helpers";
 import { uiLegacyAccount } from "./legacy-reasons";
@@ -16,8 +17,9 @@ export async function uiPages(request: APIRequestContext): Promise<UIPage[]> {
   const householdEvents = await admin("GET", `/groups/${room.id}/events`);
   const householdEvent = schema.parse(schema.array(schema.looseObject({ id: schema.number(), title: schema.string() })), householdEvents.events).find((e) => e.title === "Household check night")!;
   const lee = await apiAs(request, "lee");
-  const { events = [] } = schema.parse(schema.looseObject({ events: schema.optional(schema.array(schema.looseObject({ id: schema.number(), title: schema.string() }))) }), (await lee("GET", `/groups/${room.id}/events`)));
-  let event = events.find((e) => e.title === "UI check night");
+  const { events = [] } = schema.parse(schema.looseObject({ events: schema.optional(schema.array(schema.looseObject({ eventId: schema.number(), title: schema.string() }))) }), (await lee("GET", `/groups/${room.id}/events`)));
+  const listed = events.find((e) => e.title === "UI check night");
+  let event = listed && { id: listed.eventId, title: listed.title };
 
   if (!event) {
     const d = new Date(Date.now() + 7 * 864e5).toISOString().slice(0, 10);
@@ -43,6 +45,42 @@ export async function uiPages(request: APIRequestContext): Promise<UIPage[]> {
   const legacy = await uiLegacyAccount(request);
   const heading = (name: string) => (p: Page) => p.getByRole("heading", { name, level: 1 });
 
+  // The manager's date page (DEC-157): a date of lee's event, with its tools closed, open, and while the page
+  // checks or can't check that lee still manages it (the next date read held, or failed, after a focus).
+  const leeAgain = await apiAs(request, "lee");
+  const { occurrences: leeDates } = schema.parse(schema.looseObject({ occurrences: schema.array(schema.looseObject({ date: schema.string() })) }), await leeAgain("GET", `/events/${event!.id}`));
+  const managedDatePath = `/events/${event!.id}/dates/${leeDates[0].date}`;
+  const manageHeading = (p: Page) => p.getByRole("heading", { name: "Manage this date" });
+
+  const recheckDate = (answer: "hold" | "fail") => async (p: Page) => {
+    await p.route("**/api/v1/events/*/dates/*", (route) => (answer === "fail" ? route.abort() : new Promise<void>(() => {})), { times: 1 });
+    await p.evaluate(() => window.dispatchEvent(new Event("focus")));
+    await expect(p.getByText(answer === "fail" ? "We couldn't check that you can still manage this date. What you typed is kept." : "Checking that you can still manage this date…")).toBeVisible();
+  };
+
+  // Week and Month with a row that began before the grid (8b-4): the next period's one calendar answer.
+  // The calendar's days are the browser's, not UTC's: near midnight the two name different days, so today and
+  // the row's start are read in the page's own zone.
+  const startedEarlier = (unit: "week" | "month") => async (p: Page) => {
+    const today = await p.evaluate(() => new Intl.DateTimeFormat("en-CA", { year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date()));
+    const next = unit === "week" ? addDays(today, 7) : addMonths(today, 1);
+    const gridStart = unit === "week" ? next : `${next.slice(0, 7)}-01`;
+    const first = addDays(gridStart, -weekdayIndex(gridStart));
+    const date = addDays(first, -1);
+
+    // Noon of the day before the grid, on the browser's clock, through the two days after.
+    const [startsAt, endsAt] = await p.evaluate((day) => {
+      const [y, m, d] = day.split("-").map(Number);
+
+      return [new Date(y, m - 1, d, 12).toISOString(), new Date(y, m - 1, d + 2, 12).toISOString()];
+    }, date);
+
+    const row = { eventId: householdEvent.id, date, dateUrl: `/events/${householdEvent.id}/dates/${date}`, startsAt, endsAt, title: "Weekend retreat", location: "Camp", groupId: room.id, groupName: "Room 201 class", churchWide: false, remoteAvailable: false, childcareAvailable: false, myStatus: null, ownScope: false };
+    await p.route("**/api/v1/calendar?**", (route) => route.fulfill({ json: { occurrences: [row], truncated: false } }), { times: 1 });
+    await p.getByRole("button", { name: unit === "week" ? "Next week" : "Next month" }).click();
+    await expect(p.getByRole("region", { name: "Already underway" })).toBeVisible();
+  };
+
   return [
     { id: "home-signed-out", who: null, path: "/", ready: (p) => p.getByText("Room 201 class").first() },
     { id: "login", who: null, path: "/login", ready: heading("Log in to") },
@@ -51,6 +89,8 @@ export async function uiPages(request: APIRequestContext): Promise<UIPage[]> {
     { id: "home", who: "sam", path: "/", ready: (p) => p.getByText("Room 201 class").first() },
     { id: "my-groups", who: "sam", path: "/my-groups", ready: (p) => p.getByText("Room 201 class").first() },
     { id: "group-member", who: "sam", path: `/groups/${room.id}`, ready: heading("Room 201 class") },
+    // The same date as an ordinary member reads it (M8.1): the six answers and the answer bar, with no manager tools.
+    { id: "date-member", who: "sam", path: managedDatePath, ready: (p) => p.getByRole("region", { name: "Answer this date" }) },
     { id: "event", who: "household-parent", path: `/events/${householdEvent.id}`, ready: heading("Household check night") },
     { id: "profile", who: "household-parent", path: "/profile", ready: heading("Your profile") },
     { id: "profile-details", who: "household-parent", path: "/profile/details", ready: heading("Profile details") },
@@ -65,6 +105,11 @@ export async function uiPages(request: APIRequestContext): Promise<UIPage[]> {
     { id: "profile-requests", who: "household-parent", path: "/profile/requests", ready: heading("Contact and add requests") },
     { id: "group-leader", who: "lee", path: `/groups/${room.id}`, ready: heading("Room 201 class") },
     { id: "event-leader", who: "lee", path: `/events/${householdEvent.id}`, ready: heading("Household check night"), prepare: async (p) => { await p.getByRole("button", { name: /^More for/ }).first().click(); await p.getByRole("menuitem", { name: "Manage sign-ups" }).click(); await expect(p.getByRole("region", { name: "Manage sign-ups" })).toBeVisible(); } },
+    { id: "date-manager", who: "lee", path: managedDatePath, ready: manageHeading },
+    { id: "date-manager-editor", who: "lee", path: managedDatePath, ready: manageHeading, prepare: async (p) => { await p.getByRole("button", { name: "Edit this date" }).click(); await expect(p.getByRole("spinbutton", { name: "Minutes" })).toBeVisible(); } },
+    { id: "date-manager-roster", who: "lee", path: managedDatePath, ready: manageHeading, prepare: async (p) => { await p.getByRole("button", { name: "Manage sign-ups" }).click(); await expect(p.getByRole("region", { name: "Manage sign-ups" })).toBeVisible(); } },
+    { id: "date-manager-checking", who: "lee", path: managedDatePath, ready: manageHeading, prepare: recheckDate("hold") },
+    { id: "date-manager-unknown", who: "lee", path: managedDatePath, ready: manageHeading, prepare: recheckDate("fail") },
     { id: "schedule-event", who: "lee", path: `/groups/${room.id}/events/new`, ready: (p) => p.getByRole("button", { name: "Change time zone" }) },
     { id: "messages", who: "lee", path: "/messages", ready: heading("Messages") },
     // The editor loads with import(); the live count is part of the page.
@@ -141,9 +186,12 @@ export async function uiPages(request: APIRequestContext): Promise<UIPage[]> {
     { id: "calendar-agenda", who: "sam", path: "/calendar", ready: heading("Calendar") },
     { id: "calendar-week", who: "sam", path: "/calendar?view=week", ready: (p) => p.getByRole("button", { name: "Next week" }) },
     { id: "calendar-month", who: "sam", path: "/calendar?view=month", ready: (p) => p.getByRole("table") },
+    { id: "calendar-week-underway", who: "sam", path: "/calendar?view=week", ready: (p) => p.getByRole("button", { name: "Next week" }), prepare: startedEarlier("week") },
+    { id: "calendar-month-underway", who: "sam", path: "/calendar?view=month", ready: (p) => p.getByRole("table"), prepare: startedEarlier("month") },
     { id: "calendar-rooms", who: "sam", path: "/calendar/rooms", ready: (p) => p.getByText(/^Times are in /) },
     { id: "calendar-rooms-week", who: "sam", path: "/calendar/rooms?view=week", ready: (p) => p.getByText(/^Times are in /) },
     { id: "calendar-signed-out", who: null, path: "/calendar", ready: (p) => p.getByText("Showing public events.") },
+    { id: "date-signed-out", who: null, path: managedDatePath, ready: (p) => p.getByRole("region", { name: "Answer this date" }).getByRole("button", { name: "Register as a guest" }) },
     { id: "not-found", who: "sam", path: "/no-such-page", ready: heading("Page not found") },
   ];
 }
@@ -202,10 +250,10 @@ export function uiPart<T>(list: T[], part: number): T[] {
   return list.slice(Math.floor((part * list.length) / UI_PARTS), Math.floor(((part + 1) * list.length) / UI_PARTS));
 }
 
-// e2e/run.sh hands each shard its share of the page checks in E2E_PARTS, as
-// "<spec>:<part>" words ("a11y:0 layout:3 a11y:rest"; rest is the spec's
-// tests outside the parts). Unset, as in a plain `npx playwright test`,
-// every part runs.
+// e2e/run.sh hands each shard its share of the specs that run in parts
+// (e2e/shards.mjs lists them) in E2E_PARTS, as "<spec>:<part>" words
+// ("a11y:0 layout:3 a11y:rest reason-review:390"; rest is the spec's tests
+// outside the parts). Unset, as in a plain `npx playwright test`, every part runs.
 export function partSelected(spec: string, part: number | "rest"): boolean {
   const parts = process.env.E2E_PARTS;
 

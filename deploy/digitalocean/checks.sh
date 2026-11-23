@@ -460,7 +460,8 @@ require_recovery_level() {
   if (( target < floor )); then
     if (( target < 1 && floor >= 1 )); then missing="the restore barrier (level 1)"; fi
     if (( target < 2 && floor >= 2 )); then missing="${missing:+$missing and }reason review (level 2)"; fi
-    if (( floor > 2 )); then missing="${missing:+$missing and }the protection required by level $floor"; fi
+    if (( target < 3 && floor >= 3 )); then missing="${missing:+$missing and }exact visibility consent (level 3)"; fi
+    if (( floor > 3 )); then missing="${missing:+$missing and }the protection required by level $floor"; fi
     check_fail "target recovery level ${target} is below host level ${floor}. The older release lacks ${missing}. Restore data with the current release; use restore.sh --dump once installed."
     return 1
   fi

@@ -1,5 +1,6 @@
 import { Tabs } from "../components/ui/Tabs";
-import { DateEditor } from "../components/DateEditor";
+import { ManagedDateEditor } from "../components/ManagedDateEditor";
+import { ConfirmProvider } from "../components/ui/ConfirmDialog";
 import { AddPeople } from "../components/AddPeople";
 import { RequestContactButton } from "../components/RequestContactButton";
 import { ContactDetails } from "../components/ContactDetails";
@@ -21,7 +22,10 @@ import { Attendance } from "../components/Attendance";
 import { Menu } from "../components/ui/Menu";
 import { composePath, EMAIL_GOING, EMAIL_MEMBERS } from "../components/messages/composeLinks";
 import { placeLine } from "../lib/place";
-import { EventVisibilityControl, visibilityRank } from "../components/EventVisibility";
+import { EventVisibilityControl } from "../components/EventVisibility";
+import { ROSTER_STALE, visibilityRank } from "../lib/visibilityChange";
+import { useFocusHome, useKeepFocusHome } from "../lib/focusHome";
+import { decisionImpact, reviewOutdated } from "../lib/visibilityConsent";
 import { GroupVisibilityReview } from "../components/GroupVisibilityReview";
 import { GroupDepartureDialog } from "../components/GroupDepartureDialog";
 import { RsvpButtons } from "../components/RsvpButtons";
@@ -37,18 +41,22 @@ import { Illustration } from "../components/ui/Illustration";
 import { Skeleton } from "../components/ui/Skeleton";
 import { focalPosition, prepareUpload } from "../lib/image";
 import { formatTime, formatWhen } from "../lib/when";
-import { errorText, needsDecision } from "../lib/errors";
+import { errorText } from "../lib/errors";
 import { useLoad } from "../lib/useLoad";
 import { FormError, HiddenFileInput } from "../components/ui/Field";
 import { Button, ButtonLink } from "../components/ui/Button";
 import { applyActorRsvpResults, type ActorRsvpResult, type SeriesFeedbackSignal } from "../lib/rsvpFeedback";
 import { useRsvpMutationGate, type RsvpMutationGate } from "../lib/useRsvpMutationGate";
+import { useDateAttempts, useDateWrites, useRosterActivityOf } from "../lib/dateWrites";
+import { dateKey, useEditRefresh } from "../lib/editBase";
+import { seriesSchedules } from "../lib/registration";
 
 type Tab = "events" | "about" | "members";
 
 
 function EventRow({
   instance,
+  seriesDates,
   groupName,
   groupVisibility,
   canManage,
@@ -64,8 +72,15 @@ function EventRow({
   onTerminalRefresh,
   onCancelled,
   onChanged,
+  writingDate,
+  settlingDate,
+  groupId,
+  generation,
+  pageFailed,
 }: {
   instance: EventOccurrence;
+  // Every loaded date of this series, though only the next is shown (seriesSchedules).
+  seriesDates: string;
   groupName: string;
   groupVisibility: Visibility;
   canManage: boolean;
@@ -83,12 +98,26 @@ function EventRow({
   onTerminalRefresh: () => void;
   onCancelled: (eventId: number, date: string) => void;
   onChanged: () => void;
+  // A roster write on this date is on its way, or answered and this page does not show it yet
+  // (GroupDetailContent's dateWrites).
+  writingDate: boolean;
+  settlingDate: boolean;
+  // The group this page is for, which the date must still belong to, and the page's shown answer: the date's
+  // editor reads the date again for each.
+  groupId: number;
+  generation: number;
+  // The page's latest read failed: the editor shows nothing of the date until one succeeds.
+  pageFailed: boolean;
 }) {
   const navigate = useNavigate();
   const { canCompose } = useAuth();
   const [cancelling, setCancelling] = useState(false);
   const [cancelError, setCancelError] = useState<string | null>(null);
   const [editor, setEditor] = useState<null | "date" | "series">(null);
+  // This date's guarded edit: anything but idle closes Edit; a save whose answer never arrived is reached
+  // through its own opener, outside the menu.
+  const attempts = useDateAttempts();
+  const editStatus = attempts?.status(dateKey(instance.eventId, instance.date)) ?? "idle";
   const time = formatTime(instance.startsAt);
   const loc = placeLine(instance.room, instance.location);
   const name = instance.title || groupName;
@@ -116,7 +145,7 @@ function EventRow({
         tone="quiet"
         label={`More for ${name} on ${instance.date}`}
         items={[
-          { label: "Edit this date", onSelect: () => setEditor(editor === "date" ? null : "date") },
+          { label: "Edit this date", onSelect: () => setEditor(editor === "date" ? null : "date"), disabled: writingDate || settlingDate || editStatus !== "idle" },
           // The event page opens its Manage sign-ups panel for this date (DEC-99).
           { label: "Manage sign-ups", onSelect: () => navigate(`/events/${instance.eventId}?manage=${instance.date}`) },
           ...(canCompose ? [{ label: EMAIL_GOING, onSelect: () => navigate(composePath({ occurrence: instance.id })) }] : []),
@@ -131,7 +160,7 @@ function EventRow({
         <Attendance instance={instance} />
         {loggedIn && (
           <div className="mt-2">
-            <RsvpButtons instance={instance} people={people} onChange={onRsvp} seriesFeedback={seriesFeedback}
+            <RsvpButtons instance={instance} seriesDates={seriesDates} people={people} onChange={onRsvp} seriesFeedback={seriesFeedback}
               mutationGate={mutationGate} onSeriesFeedback={onSeriesFeedback} onTerminalRefresh={onTerminalRefresh} />
           </div>
         )}
@@ -147,7 +176,16 @@ function EventRow({
             {totalKnown ? `See all ${moreDates + 1} dates` : "See more dates"}
           </Link>
         )}
-        {editor === "date" && <DateEditor instance={instance} onSaved={onChanged} onRoomChanged={onChanged} onClose={() => setEditor(null)} />}
+        {canManage && editor !== "date" && editStatus === "unsure" && (
+          <Button variant="secondary" layout="w-full sm:w-auto" onClick={() => setEditor("date")}>Check your last change to this date</Button>
+        )}
+        {/* The date's own question asks in the app's dialog; every other question on this page stays the browser's. */}
+        {canManage && editor === "date" && <ConfirmProvider><ManagedDateEditor opener={{ eventId: instance.eventId, date: instance.date, occurrenceId: instance.id, groupId }} generation={generation} pageFailed={pageFailed}
+          onSaved={() => {}} onRoomChanged={onChanged} onClose={() => setEditor(null)}
+          onRefused={() => {
+            setEditor(null);
+            onTerminalRefresh();
+          }} /></ConfirmProvider>}
         {editor === "series" && (
           <>
             <SeriesEditor
@@ -266,6 +304,9 @@ async function fetchGroup(id: string, loaded: number): Promise<GroupDetailRespon
   return { ...next, upcomingEvents: dates };
 }
 
+// The events a group review lists, whose sign-up updates withdraw it.
+const impactEventIds = (impact: VisibilityImpact) => [...impact.tightened, ...impact.leaderOpened].map((e) => e.id);
+
 function GroupDetailContent() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
@@ -274,9 +315,16 @@ function GroupDetailContent() {
   const [tab, setTab] = useState<Tab>("events");
   const sectionsRef = useRef<HTMLDivElement>(null);
   const [editing, setEditing] = useState(false);
-  const [review, setReview] = useState<{ data: GroupFormData; impact: VisibilityImpact } | null>(null);
+  // `mark` is the session roster sequence the request behind the review was sent at.
+  const [review, setReview] = useState<{ data: GroupFormData; impact: VisibilityImpact; mark: number } | null>(null);
   const [reviewBusy, setReviewBusy] = useState(false);
   const [reviewError, setReviewError] = useState<string | null>(null);
+  const groupSave = useRef<HTMLButtonElement>(null);
+  // Holds the review and its lines while editing; keeps keyboard focus when a sign-up update withdraws a review.
+  const reviewHome = useFocusHome<HTMLDivElement>();
+  useKeepFocusHome(reviewHome);
+  const activity = useRosterActivityOf();
+  const reviewCommitting = useRef(false);
   const [joinBusy, setJoinBusy] = useState(false);
   const [coverBusy, setCoverBusy] = useState(false);
   const [memberBusy, setMemberBusy] = useState(false);
@@ -293,14 +341,70 @@ function GroupDetailContent() {
   const [coverError, setCoverError] = useState<string | null>(null);
   // A refresh keeps as many dates as are on screen, not just the first page.
   const loadedDates = useRef(0);
+  // A "Load more" is on its way: a refresh meanwhile reads its page too, from fresh cursors.
+  const continuing = useRef(false);
   const rsvpMutationGate = useRsvpMutationGate();
 
   // `reload` keeps ordinary RSVP drafts mounted; `retry` (also what a
   // terminal refresh calls) drops the page at once, so stale authority cannot
   // reappear, and only the newest request may commit anything.
-  const load = useLoad(() => fetchGroup(id ?? "", loadedDates.current), [id], { enabled: !!id });
+  const load = useLoad(() => fetchGroup(id ?? "", loadedDates.current + (continuing.current ? 1 : 0)), [id], { enabled: !!id });
+
+  // The same hold on a date's update as the event page's (lib/dateWrites); questions here stay the browser's
+  // own, except a date editor's, which asks in its own ConfirmProvider. This page lists every date of its group's events; an update whose group the
+  // editor was not shown counts too, and so does a kept-dates panel's roster write inside one of its editors.
+  const dateWrites = useDateWrites({
+    epoch: load.epoch,
+    dataEpoch: load.dataEpoch,
+    shows: (target) => target.groupId === undefined || target.groupId === Number(id),
+    reload: () => void load.reload(),
+    rosters: true,
+  });
+
   const detail = load.data ?? null;
   useEffect(() => { if (detail) loadedDates.current = detail.upcomingEvents.length; }, [detail]);
+  // A guarded edit settled (from here or the event page): the page is asked for again. Any date may be one this
+  // group lists, as a read on its way may hold it, so this is decided from the address, never from what is loaded.
+  useEditRefresh(() => true, () => void load.reload());
+
+  // A sign-up update on one of these events began, ended or is in flight since `mark`: a review's counts may
+  // no longer be who is signed up. A write on any other event leaves the review alone.
+  const moved = (mark: number, ids: number[]) => activity.changedSince(mark, ids) || activity.pendingFor(ids) > 0;
+
+  // Withdraws the review (or never opens one) and says so; focus on the form or the review goes to the review's
+  // home, so a keyboard user hears the line and Save group is the next stop.
+  function staleReview() {
+    const active = document.activeElement;
+    const home = reviewHome.ref.current;
+
+    if (!active || active === document.body || home?.contains(active) || groupSave.current === active) reviewHome.moveHere();
+    setReview(null);
+    setReviewError(ROSTER_STALE.group);
+  }
+
+  // A review is judged from its request's mark until a listener is armed: a write that began (and maybe ended)
+  // after the request's last check, before this commit, is never shown and withdraws it. After that, a begin on
+  // one of its events withdraws it. A commit on its way decides from its own answer.
+  const reviewIds = review ? impactEventIds(review.impact) : null;
+  const reviewMoved = review !== null && !reviewBusy && !reviewCommitting.current && moved(review.mark, reviewIds ?? []);
+  useLayoutEffect(() => {
+    if (!review) return;
+    const ids = impactEventIds(review.impact);
+
+    if (!reviewCommitting.current && moved(review.mark, ids)) {
+      staleReview();
+
+      return;
+    }
+
+    return activity.subscribe((event) => {
+      if (event.end === undefined && ids.includes(event.eventId) && !reviewCommitting.current) {
+        setReview(null);
+        setReviewError(ROSTER_STALE.group);
+      }
+    });
+  }, [activity, review]);
+
   const loading = load.loading;
   const notFound = load.error instanceof ApiError && load.error.status === 404;
   const error = load.error && !notFound ? errorText(load.error, "We couldn't load this group.") : null;
@@ -311,18 +415,33 @@ function GroupDetailContent() {
   // Adds the next page of dates to the ones on screen.
   async function loadMore() {
     if (!id || !detail?.hasMore || !detail.nextCursor) return;
+    const cursor = detail.nextCursor;
+    // The committed answer this cursor came from; a later answer (even with the same cursor) is not extended.
+    const source = load.dataEpoch;
     const stamp = load.epoch();
+    continuing.current = true;
     setLoadingMore(true);
     setMoreFailure(null);
 
     try {
-      const next = await Groups.get(id, { cursor: detail.nextCursor });
+      const next = await Groups.get(id, { cursor });
 
+      // Anything asked for since (a refresh, a date's update answering) replaces this page.
       if (load.epoch() !== stamp) return;
-      setDetail((old) => old && { ...next, upcomingEvents: mergeDates(old.upcomingEvents, next.upcomingEvents) });
+      // A refresh asked before these dates are shown still reads them.
+      loadedDates.current += next.upcomingEvents.length;
+      // Only dates and paging come from the continuation: group, roster and authority stay the committed answer's.
+      setDetail((old, shown) => old && shown === source && old.nextCursor === cursor ? {
+        ...old,
+        upcomingEvents: mergeDates(old.upcomingEvents, next.upcomingEvents),
+        truncated: next.truncated,
+        hasMore: next.hasMore,
+        nextCursor: next.nextCursor,
+      } : old);
     } catch (e) {
       if (load.epoch() === stamp) setMoreFailure({ text: errorText(e, "We couldn't load this group."), epoch: stamp });
     } finally {
+      continuing.current = false;
       setLoadingMore(false);
     }
   }
@@ -372,6 +491,8 @@ function GroupDetailContent() {
     if (!datesPerEvent.has(m.eventId)) nextDates.push(m);
     datesPerEvent.set(m.eventId, (datesPerEvent.get(m.eventId) ?? 0) + 1);
   }
+
+  const schedules = seriesSchedules(events);
 
   // Leadership comes from membership roles (several leaders allowed).
   const leaderCount = (members ?? []).filter((m) => m.role === "leader").length;
@@ -456,48 +577,94 @@ function GroupDetailContent() {
 
   async function saveEdit(data: GroupFormData): Promise<void | false> {
     // Making the group more private can change its events (DEC-48): show
-    // the leader the list and get a decision before anything is saved.
+    // the leader the list and get a decision before anything is saved. The
+    // save carries the preview's consent, so a change since the preview is
+    // shown again from the server's own answer (DEC-158). A sign-up update on
+    // one of the listed events while either was asked withdraws it.
+    let impact: VisibilityImpact | null = null;
+    setReviewError(null);
+
     if (visibilityRank(data.visibility) < visibilityRank(group.visibility)) {
-      const impact = await Groups.visibilityImpact(id!, data.visibility);
+      const mark = activity.mark();
+      impact = await Groups.visibilityImpact(id!, data.visibility);
+
+      if (moved(mark, impactEventIds(impact))) {
+        staleReview();
+
+        return false;
+      }
 
       if (impact.tightened.length > 0 || impact.leaderOpened.length > 0) {
-        setReview({ data, impact });
+        setReview({ data, impact, mark });
 
         return false;
       }
     }
 
-    await commitEdit(data);
+    const at = { mark: activity.mark() };
+
+    try {
+      await commitEdit(data, undefined, impact?.consent ?? "", at);
+    } catch (e) {
+      const fresh = decisionImpact(e);
+
+      // A refusal this page cannot review again shows the outdated copy.
+      if (!fresh && reviewOutdated(e)) throw new ApiError(409, "visibility review outdated", { code: "visibility_review_outdated" });
+
+      if (!fresh) throw e;
+
+      if (moved(at.mark, impactEventIds(fresh))) {
+        staleReview();
+
+        return false;
+      }
+
+      setReview({ data, impact: fresh, mark: at.mark });
+      setReviewError("We checked again before saving. Please review the group's events again.");
+
+      return false;
+    }
   }
 
   async function confirmReview(decisions: Record<string, OpenedDecision>) {
-    if (!review) return;
+    if (!review || reviewCommitting.current || activity.pendingFor(impactEventIds(review.impact)) > 0) return;
+    reviewCommitting.current = true;
     setReviewBusy(true);
     setReviewError(null);
+    const at = { mark: activity.mark() };
 
     try {
-      await commitEdit(review.data, decisions);
+      await commitEdit(review.data, decisions, review.impact.consent ?? "", at);
       setReview(null);
     } catch (e) {
-      if (needsDecision(e)) {
-        // The events changed since the preview; show the new list.
-        setReview({ data: review.data, impact: await Groups.visibilityImpact(id!, review.data.visibility) });
-        setReviewError("The group's events changed. Please review them again.");
+      const fresh = decisionImpact(e);
+
+      if (fresh && moved(at.mark, [...impactEventIds(fresh), ...impactEventIds(review.impact)])) {
+        staleReview();
+      } else if (fresh) {
+        setReview({ data: review.data, impact: fresh, mark: at.mark });
+        setReviewError("We checked again before saving. Please review the group's events again.");
       } else {
-        setReviewError(errorText(e, "We couldn't save your changes."));
+        // After a sign-up update on its events since the review's own request (a cover upload's await included)
+        // the review is withdrawn too: the next Save previews again.
+        if (moved(review.mark, impactEventIds(review.impact))) setReview(null);
+        setReviewError(reviewOutdated(e) ?? errorText(e, "We couldn't save your changes."));
       }
     } finally {
+      reviewCommitting.current = false;
       setReviewBusy(false);
     }
   }
 
-  async function commitEdit(data: GroupFormData, openedEvents?: Record<string, OpenedDecision>) {
+  // `at.mark` is taken again just before the update, so a 409's review is judged from the request that answered it.
+  async function commitEdit(data: GroupFormData, openedEvents: Record<string, OpenedDecision> | undefined, consent: string, at: { mark: number }) {
     if (data.coverFile) {
       await GroupCover.upload(id!, data.coverFile);
     } else if (data.removeCover) {
       await GroupCover.remove(id!);
     }
 
+    at.mark = activity.mark();
     await Groups.update(id!, {
       name: data.name,
       description: data.description,
@@ -507,8 +674,10 @@ function GroupDetailContent() {
       visibility: data.visibility,
       memberLimit: data.memberLimit,
       openedEvents,
+      consent,
     });
     setEditing(false);
+    setReviewError(null);
     await load.retry();
   }
 
@@ -678,20 +847,22 @@ function GroupDetailContent() {
         {joinError && <div className="mb-4"><ErrorNotice message={joinError} /></div>}
         {coverError && <div className="mb-4"><ErrorNotice message={coverError} /></div>}
         {departureStatus && <p role="status" className="mb-4 rounded-lg border border-border bg-sunken px-4 py-3 text-sm">{departureStatus}</p>}
-        {editing && review && (
-          <>
+        {editing && (
+          <div ref={reviewHome.ref} tabIndex={-1}>
             {reviewError && <FormError layout="mb-2">{reviewError}</FormError>}
-            <GroupVisibilityReview
+            {review && !reviewMoved && <GroupVisibilityReview
               key={JSON.stringify(review.impact)}
               impact={review.impact}
               busy={reviewBusy}
+              waiting={activity.pendingFor(reviewIds ?? []) > 0}
               onConfirm={(d) => void confirmReview(d)}
               onCancel={() => {
                 setReview(null);
                 setReviewError(null);
               }}
-            />
-          </>
+              returnFocus={groupSave}
+            />}
+          </div>
         )}
         {editing ? (
           <GroupForm
@@ -709,8 +880,13 @@ function GroupDetailContent() {
               memberLimit: group.memberLimit,
             }}
             saveLabel="Save group"
+            saveRef={groupSave}
             onSaved={saveEdit}
-            onCancel={() => setEditing(false)}
+            onCancel={() => {
+              setEditing(false);
+              setReview(null);
+              setReviewError(null);
+            }}
           />
         ) : (
           <>
@@ -761,6 +937,7 @@ function GroupDetailContent() {
                   {(m) => <EventRow
                     key={`${m.eventId}-${m.date}`}
                     instance={m}
+                    seriesDates={schedules.get(m.eventId) ?? ""}
                     groupName={group.name}
                     groupVisibility={group.visibility}
                     canManage={canManage}
@@ -776,6 +953,11 @@ function GroupDetailContent() {
                     onTerminalRefresh={() => void load.retry()}
                     onCancelled={handleCancelled}
                     onChanged={() => void refresh()}
+                    writingDate={dateWrites.writing(m.eventId, m.date)}
+                    settlingDate={dateWrites.settling(m.eventId, m.date)}
+                    groupId={group.id}
+                    generation={load.dataEpoch}
+                    pageFailed={load.error != null}
                   />}
                 </CompactDates>
                 {detail.hasMore && <Button variant="secondary" disabled={loadingMore} onClick={() => void loadMore()}>{loadingMore ? "Loading dates…" : "Load more dates"}</Button>}

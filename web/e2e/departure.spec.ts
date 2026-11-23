@@ -61,7 +61,7 @@ test("a delayed pre-leave group response cannot restore leader controls or roste
   const oldRelease = new Promise<void>((resolve) => { releaseOld = resolve; });
   const oldFulfilled = new Promise<void>((resolve) => { markOldFulfilled = resolve; });
   let held = false;
-  const groupRoute = `**/api/v1/groups/${group.id}`;
+  const groupRoute = (url: URL) => url.pathname === `/api/v1/groups/${group.id}`;
   await page.route(groupRoute, async (route) => {
     if (route.request().method() !== "GET" || held) return route.continue();
     held = true;

@@ -5,6 +5,14 @@ import { formatNextMeeting } from "../lib/when";
 import { coverSrc } from "../lib/covers";
 import { groupStatusLabel } from "../lib/status";
 import { CalendarIcon } from "./icons";
+import { opensRoute, pageChunk } from "./RouteErrorBoundary";
+
+// The group page is its own chunk, started on a card's first hover or focus
+// and loaded by App's route (pageChunk retries a failed start).
+// "/groups/new" is NewGroup's route.
+export const groupDetailChunk = pageChunk(() => import("../pages/GroupDetail").then((m) => ({ default: m.GroupDetail })), {
+  needed: opensRoute("/groups/:id", ["/groups/new"]),
+});
 
 // One link target per directory row, with the same image/name/date rhythm
 // at every width. Tags stay quiet text; the directory toolbar owns filtering.
@@ -37,6 +45,8 @@ export function GroupCard({
   return (
     <Link
       to={`/groups/${group.id}`}
+      onPointerEnter={groupDetailChunk.warm}
+      onFocus={groupDetailChunk.warm}
       className="fold-list-row flex gap-4 rounded-sm hover:bg-sunken"
     >
       <div className="size-[88px] shrink-0 overflow-hidden rounded-lg bg-sunken sm:size-28">

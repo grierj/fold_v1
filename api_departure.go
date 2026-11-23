@@ -799,6 +799,9 @@ func (a *App) departureConfirm(c *gin.Context, subjectID uint) {
 			return err
 		}
 		result, err = a.applyDeparture(tx, current, locked, keep, now, body.Note, c.ClientIP())
+		if err == nil && a.hooks.departureStep != nil {
+			a.hooks.departureStep(tx, "granted")
+		}
 		return err
 	})
 	if err != nil {

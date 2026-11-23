@@ -73,3 +73,19 @@ export function savedAnswerFromState(state: SeriesRegistrationState): SavedAnswe
     ages: has ? state.childcareAgesNote ?? "" : "",
   };
 }
+
+// The dates a page has loaded for each series, by event: which dates a series answer from the scope picker
+// covers and when each one is, as the person saw them. RsvpButtons closes the picker when its series' entry
+// changes (a date moved, added or cancelled, or the viewer was removed or restored).
+// Other answers and seat counts are left out.
+export function seriesSchedules(dates: EventOccurrence[]): Map<number, string> {
+  const byEvent = new Map<number, string[][]>();
+
+  for (const date of dates) {
+    const rows = byEvent.get(date.eventId) ?? [];
+    rows.push([date.date, date.startsAt, date.endsAt, date.myRegistration === "removed" ? "removed" : ""]);
+    byEvent.set(date.eventId, rows);
+  }
+
+  return new Map([...byEvent].map(([eventId, rows]) => [eventId, JSON.stringify(rows)]));
+}

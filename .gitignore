@@ -35,7 +35,10 @@ fold
 # The directory itself must exist for go:embed; only the marker file is committed.
 web/dist/*
 !web/dist/README.txt
-web/node_modules
+node_modules/
+# Local verification output.
+/evidence/
+/flow/evidence/
 # Playwright output (make e2e).
 web/test-results/
 web/screens/

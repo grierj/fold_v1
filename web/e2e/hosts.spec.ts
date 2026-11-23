@@ -1,6 +1,7 @@
 import * as schema from "valibot";
 import { expect, test } from "@playwright/test";
 import { apiAs, email, signIn, signOut, fromMore } from "./helpers";
+import { expectModalDialog } from "./dialogs";
 
 test.use({ locale: "en-US", timezoneId: "America/New_York" });
 
@@ -116,7 +117,9 @@ test("opening an invite-only group's event hides the group and the names", async
 });
 
 test("an admin edits one date, cancels a date, and deletes a church-wide event", async ({ page, request }) => {
-  page.on("dialog", (d) => d.accept());
+  // The event page asks in its own labelled dialog; a browser prompt here is a regression.
+  const nativeDialogs: string[] = [];
+  page.on("dialog", (d) => { nativeDialogs.push(d.message()); void d.dismiss(); });
   const admin = await apiAs(request, "grier");
 
   const mk = async (title: string, days: number) =>
@@ -145,6 +148,11 @@ test("an admin edits one date, cancels a date, and deletes a church-wide event",
   const cancelled = await mk("Cancel night", 27);
   await page.goto(`/events/${cancelled.id}`);
   await fromMore(page, "Cancel this date");
+  const cancelQuestion = page.getByRole("dialog", { name: /^Cancel this date on / });
+  await expect(cancelQuestion.getByRole("button", { name: "Keep this date" })).toBeFocused();
+  await expectModalDialog(page, cancelQuestion, "date-cancel-question");
+  await cancelQuestion.getByRole("button", { name: "Cancel this date" }).click();
+  await expect(cancelQuestion).toBeHidden();
   await expect(page.getByText("No upcoming dates.")).toBeVisible();
 
   // Members without manage rights see none of these controls.
@@ -158,9 +166,110 @@ test("an admin edits one date, cancels a date, and deletes a church-wide event",
   await signIn(page, "grier");
   await page.goto(`/events/${edited.id}`);
   await fromMore(page, "Delete event", "More event actions");
+  const deleteQuestion = page.getByRole("dialog", { name: "Delete “Date night”?" });
+  await expect(deleteQuestion).toContainText("This removes every date and its registrations.");
+  await expect(deleteQuestion.getByRole("button", { name: "Cancel" })).toBeFocused();
+  await expectModalDialog(page, deleteQuestion, "event-delete-question");
+  // Escape answers no, even after a click on the heading took focus off the buttons: nothing is deleted and focus is back on the menu button.
+  await deleteQuestion.getByRole("heading").click();
+  await page.keyboard.press("Escape");
+  await expect(deleteQuestion).toBeHidden();
+  await expect(page.getByRole("button", { name: "More event actions" })).toBeFocused();
+  await expect(page.getByRole("heading", { name: "Date night", level: 1 })).toBeVisible();
+  await fromMore(page, "Delete event", "More event actions");
+  await deleteQuestion.getByRole("button", { name: "Delete event" }).click();
   await expect(page).toHaveURL(/\/$/);
   await page.goto(`/events/${edited.id}`);
   await expect(page.getByRole("heading", { name: "Event not found" })).toBeVisible();
+  expect(nativeDialogs).toEqual([]);
+});
+
+test("a 200-character unbroken title wraps inside the delete question, and both answers stay reachable on a short phone screen", async ({ page, request }) => {
+  const admin = await apiAs(request, "grier");
+  const title = "W".repeat(200);
+
+  const { event } = schema.parse(schema.looseObject({ event: schema.looseObject({ id: schema.number() }) }), (await admin("POST", "/events", {
+    title, startsLocal: `${futureDate(28)}T19:00`, durationMinutes: 60, tzid: "America/Boise", location: "Hall", visibility: "public", hosts: [], recurrenceRule: "",
+  })));
+
+  await signIn(page, "grier");
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto(`/events/${event.id}`);
+  await fromMore(page, "Delete event", "More event actions");
+  const question = page.getByRole("dialog", { name: `Delete “${title}”?` });
+  await expect(question.getByRole("heading", { name: `Delete “${title}”?` })).toBeVisible();
+  await expectModalDialog(page, question, "event-delete-long-title");
+  await page.keyboard.press("Escape");
+  await expect(question).toBeHidden();
+  await expect(page.getByRole("button", { name: "More event actions" })).toBeFocused();
+});
+
+// Pressing the browser's history buttons again while the leave question is open
+// asks nothing more; Keep editing keeps the draft and Leave goes to the page the
+// last press was for, not the first.
+test("repeated history navigation with unsaved edits asks once in the app's dialog", async ({ page, request }) => {
+  const admin = await apiAs(request, "grier");
+
+  const { event } = schema.parse(schema.looseObject({ event: schema.looseObject({ id: schema.number() }) }), (await admin("POST", "/events", {
+    title: "Draft night", startsLocal: `${futureDate(29)}T19:00`, durationMinutes: 60, tzid: "America/Boise", location: "Hall", visibility: "public", hosts: [], recurrenceRule: "",
+  })));
+
+  const nativeDialogs: string[] = [];
+  page.on("dialog", (d) => { nativeDialogs.push(d.message()); void d.dismiss(); });
+  await signIn(page, "grier");
+  await page.setViewportSize({ width: 390, height: 844 });
+  const eventUrl = new RegExp(`/events/${event.id}$`);
+  await page.goto(`/events/${event.id}`);
+  await expect(page.getByRole("heading", { name: "Draft night", level: 1 })).toBeVisible();
+  // Two in-app steps away and back, so the next two history entries (My groups, then Home) are in this document.
+  const tabs = page.getByRole("navigation", { name: "Tabs" });
+  await tabs.getByRole("link", { name: "My groups" }).click();
+  await expect(page).toHaveURL(/\/my-groups$/);
+  await tabs.getByRole("link", { name: "Home" }).click();
+  await expect(page).toHaveURL(/\/$/);
+  await page.goBack();
+  await expect(page).toHaveURL(/\/my-groups$/);
+  await page.goBack();
+  await expect(page).toHaveURL(eventUrl);
+
+  await page.getByRole("button", { name: "Edit event" }).click();
+  const titleField = page.getByLabel("Title", { exact: true });
+  await titleField.fill("Draft night, changed");
+  await titleField.focus();
+
+  const leave = page.getByRole("dialog", { name: "Leave without saving?" });
+  await page.goForward({ waitUntil: "commit" });
+  await expect(leave).toBeVisible();
+  await expect(page).toHaveURL(eventUrl);
+  await page.goForward({ waitUntil: "commit" });
+  await expect(page).toHaveURL(eventUrl);
+  await expect(page.getByRole("dialog")).toHaveCount(1);
+  await expect(leave).toContainText("Your changes will be lost.");
+  await expect(leave.getByRole("button", { name: "Leave without saving" })).toBeFocused();
+  await expectModalDialog(page, leave, "leave-without-saving");
+
+  await leave.getByRole("button", { name: "Keep editing" }).click();
+  await expect(leave).toBeHidden();
+  await expect(page).toHaveURL(eventUrl);
+  await expect(titleField).toHaveValue("Draft night, changed");
+  await expect(titleField).toBeFocused();
+
+  // First Forward is for My groups; then, with the question open, a jump of two entries is for Home.
+  await page.goForward({ waitUntil: "commit" });
+  await expect(leave).toBeVisible();
+  await expect(page).toHaveURL(eventUrl);
+  // Resolves once the app has seen that jump (its popstate listener runs first), so Leave cannot race it.
+  await page.evaluate(() => new Promise<void>((resolve) => {
+    window.addEventListener("popstate", () => window.setTimeout(resolve, 50), { once: true });
+    history.go(2);
+  }));
+  await expect(page).toHaveURL(eventUrl);
+  await expect(page.getByRole("dialog")).toHaveCount(1);
+  await leave.getByRole("button", { name: "Leave without saving" }).click();
+  await expect(page).toHaveURL(/\/$/);
+  await expect(page).not.toHaveURL(/\/my-groups$/);
+  await expect(page.getByRole("dialog")).toHaveCount(0);
+  expect(nativeDialogs).toEqual([]);
 });
 
 test("a non-admin host can edit the church-wide event they host", async ({ page, request }) => {

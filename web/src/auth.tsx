@@ -1,7 +1,7 @@
-import { createContext, useCallback, useContext, useEffect, useMemo, useState } from "react";
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
 import { Auth as AuthApi } from "./api/auth";
 import { Profile } from "./api/profile";
-import { ensureCsrf } from "./api/core";
+import { bootstrapCredential, credentialCurrent, watchCredential, type BootstrapSession, type Credential } from "./api/core";
 import { errorCode } from "./lib/errors";
 import { browserTimeZone } from "./lib/when";
 import { leaveWithoutAsking } from "./lib/unsavedChanges";
@@ -42,6 +42,9 @@ interface AuthState {
   // The person may write announcements: they lead an approved group, host
   // a church-wide event, or are an admin (M3.4c). Shows Messages in the nav.
   canCompose: boolean;
+  // The browser credential's lifetime (M8.1): a new object whenever the
+  // viewer, token or marker changes, null while a change is settling.
+  credential: Credential | null;
 }
 
 /** @public Allows component tests to supply a session through the real provider. */
@@ -54,6 +57,7 @@ export const AuthContext = createContext<AuthState>({
   signedIn: async () => "/",
   isAdmin: false,
   canCompose: false,
+  credential: null,
 });
 
 // withZone fills in a person's time zone from this browser the first time
@@ -83,6 +87,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [user, setUser] = useState<User | null>(null);
   const [loading, setLoading] = useState(true);
   const [canCompose, setCanCompose] = useState(false);
+  const [credential, setCredential] = useState<Credential | null>(null);
+  const refreshes = useRef(0);
 
   useEffect(() => {
     dropSession = () => {
@@ -95,19 +101,39 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     };
   }, []);
 
-  const refresh = useCallback(async () => {
-    try {
-      await ensureCsrf();
-      const { user, canCompose } = await AuthApi.me();
-      setCanCompose(!!user && !!canCompose);
-      setUser(user ? await withZone(user) : user);
-    } catch {
-      setCanCompose(false);
-      setUser(null);
-    } finally {
-      setLoading(false);
-    }
+  // Every adopted credential, whoever asked for it (this provider, a request
+  // that found the cookie changed, another tab's hint), is what the app shows.
+  useEffect(() => watchCredential((session) => {
+    setCredential(session?.credential ?? null);
+
+    if (!session) return;
+    setCanCompose(session.canCompose);
+    setUser(session.user);
+  }), []);
+
+  // A first sign-in fills the time zone; the answer is shown only while the
+  // credential that asked is still this tab's.
+  const fillZone = useCallback(async (session: BootstrapSession) => {
+    if (!session.user) return;
+    const zoned = await withZone(session.user);
+
+    if (zoned !== session.user && credentialCurrent(session.credential)) setUser(zoned);
   }, []);
+
+  const refresh = useCallback(async () => {
+    const mine = ++refreshes.current;
+
+    try {
+      await fillZone(await bootstrapCredential(true));
+    } catch {
+      if (mine === refreshes.current) {
+        setCanCompose(false);
+        setUser(null);
+      }
+    } finally {
+      if (mine === refreshes.current) setLoading(false);
+    }
+  }, [fillZone]);
 
   useEffect(() => {
     refresh();
@@ -121,16 +147,16 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
   const login = useCallback(async (email: string, password: string) => {
     try {
-      const { user, canCompose } = await AuthApi.login(email, password);
-      setCanCompose(!!canCompose);
-      setUser(await withZone(user));
+      await AuthApi.login(email, password);
     } catch (error) {
       // A verified pending-teen attempt clears any previous server login.
       if (errorCode(error) === "consent_required") { setCanCompose(false); setUser(null); }
 
       throw error;
     }
-  }, []);
+
+    await refresh();
+  }, [refresh]);
 
   // Logout ends the server session, then drops every client-side copy of
   // the user's data. Pages keep what they fetched in component state and
@@ -164,8 +190,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       signedIn,
       isAdmin: user?.role === "admin",
       canCompose: !!user && canCompose,
+      credential,
     }),
-    [user, loading, login, logout, refresh, signedIn, canCompose]
+    [user, loading, login, logout, refresh, signedIn, canCompose, credential]
   );
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;

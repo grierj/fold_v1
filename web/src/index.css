@@ -246,6 +246,8 @@
   .segment[aria-current="page"] { @apply relative z-[1] border-primary bg-primary text-primary-foreground hover:text-primary-foreground; }
   .segment[aria-pressed="true"] { @apply relative z-[1] border-primary bg-primary text-primary-foreground hover:text-primary-foreground; }
   .segment[aria-pressed="true"]::before { content: "✓" / ""; }
+  /* Busy, but still focusable: the person's place in the bar survives a save. */
+  .segment[aria-disabled="true"] { @apply opacity-50; }
 }
 
 /* Shared app compositions: one outer measure; narrower reading and form
@@ -280,6 +282,13 @@
   .fold-tab[aria-current="page"] svg { stroke-width: 2.5; }
   .fold-cover :focus-visible { outline-color: var(--color-inverse-foreground); }
   .fold-cover [role="menuitem"]:focus-visible { outline-color: var(--color-focus); }
+  /* The exact-date answer bar (StickyRsvpBar): above the phone Tabs it measures, under every dialog
+     (z-50), aligned with the reading column. Its measured height plus the Tabs' is the page's bottom
+     scroll padding while it is shown. */
+  .date-bar { @apply fixed inset-x-0 z-20 border-t border-border bg-surface pl-[env(safe-area-inset-left)] pr-[env(safe-area-inset-right)]; }
+  .date-bar-inset { padding-bottom: env(safe-area-inset-bottom); }
+  .date-bar-row { @apply mx-auto flex flex-wrap items-center gap-2 py-2; max-width: var(--fold-reading-width); padding-inline: var(--fold-gutter); }
+  html.fold-date-bar { scroll-padding-bottom: calc(var(--fold-date-bar, 0px) + 1rem); }
 }
 
 /* The composer's email editor (M3.4c). TipTap's injected CSS is off (CSP,

@@ -119,3 +119,41 @@ func TestApplySeriesRestoresSeriesCancelledDates(t *testing.T) {
 		}
 	}
 }
+
+// A series edit that adds a day with several future times inserts that day
+// once, at its last time in the walk's order (the time a move takes on such
+// a day), keeping the order in which the added days first appear; a day
+// whose only times are past adds nothing.
+func TestApplySeriesAddsAMultiTimeDayOnce(t *testing.T) {
+	now := at("2026-10-14", "09:30")
+	existing := []Existing{
+		{ID: 1, OriginalDate: "2026-10-07", StartsAt: at("2026-10-07", "09:00"), EndsAt: at("2026-10-07", "10:00")},
+	}
+	next := []When{
+		{OriginalDate: "2026-10-07", StartsAt: at("2026-10-07", "09:00"), EndsAt: at("2026-10-07", "10:00")},
+		{OriginalDate: "2026-10-07", StartsAt: at("2026-10-07", "10:00"), EndsAt: at("2026-10-07", "11:00")},
+		// Today: 09:00 is past, 10:00 is not.
+		{OriginalDate: "2026-10-14", StartsAt: at("2026-10-14", "09:00"), EndsAt: at("2026-10-14", "10:00")},
+		{OriginalDate: "2026-10-14", StartsAt: at("2026-10-14", "10:00"), EndsAt: at("2026-10-14", "11:00")},
+		{OriginalDate: "2026-10-21", StartsAt: at("2026-10-21", "09:00"), EndsAt: at("2026-10-21", "10:00")},
+		{OriginalDate: "2026-10-21", StartsAt: at("2026-10-21", "10:00"), EndsAt: at("2026-10-21", "11:00")},
+		{OriginalDate: "2026-10-28", StartsAt: at("2026-10-28", "09:00"), EndsAt: at("2026-10-28", "10:00")},
+	}
+	got := ApplySeries(existing, next, now)
+	var adds []string
+	for _, a := range got {
+		if a.Kind != ActionAdd {
+			continue
+		}
+		adds = append(adds, a.When.OriginalDate+" "+a.When.StartsAt.Format("15:04"))
+	}
+	want := []string{"2026-10-14 10:00", "2026-10-21 10:00", "2026-10-28 09:00"}
+	if len(adds) != len(want) {
+		t.Fatalf("adds %v, want %v", adds, want)
+	}
+	for i := range want {
+		if adds[i] != want[i] {
+			t.Fatalf("adds %v, want %v", adds, want)
+		}
+	}
+}

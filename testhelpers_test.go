@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"fold/internal/audit"
+	"fold/internal/dbopen"
 	"fold/internal/jobs"
 	"fold/internal/mail"
 	"fold/internal/notify"
@@ -21,10 +22,12 @@ import (
 	"image"
 	"image/png"
 	"io"
+	"maps"
 	"mime/multipart"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"reflect"
 	"regexp"
@@ -39,6 +42,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"golang.org/x/crypto/bcrypt"
 	"gorm.io/gorm"
+	"gorm.io/gorm/logger"
 )
 
 // calDate reads a YYYY-MM-DD for a date column such as OriginalDate. It panics
@@ -80,7 +84,9 @@ func loginAPIExpectFail(t *testing.T, app *App, name, password string) bool {
 // tests that measure timing call realPasswordCost.
 func TestMain(m *testing.M) {
 	models.PasswordCost = bcrypt.MinCost
-	os.Exit(testdb.Main(m))
+	code := testdb.Main(m)
+	removeFoldBuilds()
+	os.Exit(code)
 }
 
 // realPasswordCost restores production bcrypt cost for one test, so timing
@@ -96,8 +102,8 @@ func realPasswordCost(t *testing.T) {
 // t.Parallel, so they share that database safely.
 func testApp(t *testing.T) *App {
 	t.Helper()
-	gin.SetMode(gin.TestMode)
 	db := testdb.Shared(t)
+	gin.SetMode(gin.TestMode)
 	store := newSessionStore([]byte("test-secret"), false)
 	uploads, err := storage.NewLocalStore(t.TempDir(), uploadsURLPrefix)
 	if err != nil {
@@ -201,6 +207,9 @@ type apiClient struct {
 	ip          string          // client address for requests; empty uses httptest's default
 	ua          string          // User-Agent for requests; empty sends none
 	ctx         context.Context // request context; nil uses httptest's background context
+	// pinned sends every request as a participating one (M8.1): the session
+	// check header and the client's T as X-CSRF-Token, on reads too.
+	pinned bool
 	// autoReview makes a DELETE of an account (DELETE /api/v1/admin/users/:id)
 	// carry a "keep" choice for every contact-request reason that account has,
 	// read through the real review pages, unless the body already has a
@@ -379,8 +388,11 @@ func (c *apiClient) do(method, path string, jsonBody any, csrf bool) *httptest.R
 	for _, ck := range c.jar {
 		req.AddCookie(ck)
 	}
-	if csrf {
+	if csrf || c.pinned {
 		req.Header.Set("X-CSRF-Token", c.token)
+	}
+	if c.pinned {
+		req.Header.Set(sessionCheckHeader, sessionCheckVersion)
 	}
 	w := httptest.NewRecorder()
 	c.router.ServeHTTP(w, req)
@@ -537,6 +549,17 @@ func loginAPI(t *testing.T, app *App, name, password string) *apiClient {
 }
 
 func itoa(u uint) string { return strconv.FormatUint(uint64(u), 10) }
+
+// groupDatePaging is the marker the current client sends on every GET
+// /api/v1/groups/:id.
+const groupDatePaging = "datePaging=2"
+
+// groupDetailPath is GET /api/v1/groups/:id as the current client asks for
+// it, with any page parameters ("limit=1", "cursor=..."). A 404 probe, or a
+// request that stays an older client's, writes its path out by hand.
+func groupDetailPath(group uint, params ...string) string {
+	return "/api/v1/groups/" + itoa(group) + "?" + strings.Join(append([]string{groupDatePaging}, params...), "&")
+}
 
 // newTestGroup creates a group led (through its membership, C12) by leader.
 func newTestGroup(t *testing.T, app *App, leader *models.User, name, status string) *models.Group {
@@ -1318,13 +1341,16 @@ func countSiteNameReads(t *testing.T, db *gorm.DB) *int {
 	return n
 }
 
-// signInPaths are the routes that call signInSession, which rotates the CSRF
-// token; web/src/api marks these calls rotatesCsrf (and logout).
+// signInPaths are the routes that replace the browser credential
+// (replaceCredential), which rotates the CSRF token; web/src/api marks these
+// calls rotatesCsrf (and logout).
 var signInPaths = map[string]bool{
 	"/api/v1/auth/login":                  true,
 	"/api/v1/auth/password-reset/confirm": true,
 	"/api/v1/account-requests/confirm":    true,
 	"/api/v1/invitations/accept":          true,
+	"/api/v1/me/password":                 true,
+	"/api/v1/me/email/verify":             true,
 }
 
 func setsCookie(w *httptest.ResponseRecorder, name string) bool {
@@ -1446,3 +1472,98 @@ END $$`, fn)
 // serverErrorBody is the public wire body of an unexplained 5xx (errorBody in
 // api_errors.go).
 const serverErrorBody = `{"code":"server_error","error":"server error"}`
+
+// oneConnectionPool is a pool of one connection to app's test database. A
+// test points app.DB at it (with a short context, oneConnection) to prove a
+// snapshot read reads only through its own transaction and dispatches after
+// it: a statement on app.DB while the transaction is open waits for the one
+// connection the transaction holds and fails at the context's deadline.
+func oneConnectionPool(t *testing.T, app *App) *gorm.DB {
+	t.Helper()
+	var name string
+	gormMust(t, app.DB.Raw("SELECT current_database()").Scan(&name))
+	dsn, err := testdb.URL(name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	one, err := dbopen.Open(dsn, logger.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sqlDB, err := one.DB()
+	if err != nil {
+		t.Fatal(err)
+	}
+	sqlDB.SetMaxOpenConns(1)
+	t.Cleanup(func() { sqlDB.Close() })
+	orig := app.DB
+	t.Cleanup(func() { app.DB = orig })
+	return one
+}
+
+// oneConnection points app.DB at the one-connection pool for one call, with a
+// context that ends a wait for a second connection in a few seconds.
+func oneConnection(t *testing.T, app *App, one *gorm.DB) context.Context {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	t.Cleanup(cancel)
+	app.DB = one.WithContext(ctx)
+	return ctx
+}
+
+var (
+	eventVisibilityPath = regexp.MustCompile(`^/api/v1/events/(\d+)/visibility$`)
+	datePutPath         = regexp.MustCompile(`^/api/v1/events/(\d+)/occurrences/(\d{4}-\d{2}-\d{2})$`)
+	groupPutPath        = regexp.MustCompile(`^/api/v1/groups/(\d+)$`)
+)
+
+// visibilityPreviewPath is the preview a page runs before it sends body to
+// path (a PUT of an event's visibility, a date or a group).
+func visibilityPreviewPath(t *testing.T, path string, body map[string]any) string {
+	t.Helper()
+	q := url.Values{}
+	switch v := body["visibility"].(type) {
+	case nil:
+		q.Set("visibility", "series")
+	case string:
+		q.Set("visibility", v)
+	default:
+		t.Fatalf("visibility %v is not a string or null", v)
+	}
+	switch {
+	case eventVisibilityPath.MatchString(path):
+		if reset, _ := body["resetOverrides"].(bool); reset {
+			q.Set("resetOverrides", "1")
+		}
+		return path + "-impact?" + q.Encode()
+	case datePutPath.MatchString(path):
+		if s, ok := body["startsLocal"].(string); ok {
+			q.Set("startsLocal", s)
+		}
+		if d, ok := body["durationMinutes"]; ok {
+			q.Set("durationMinutes", fmt.Sprint(d))
+		}
+		return path + "/visibility-impact?" + q.Encode()
+	case groupPutPath.MatchString(path):
+		return path + "/visibility-impact?" + q.Encode()
+	}
+	t.Fatalf("%s has no visibility preview", path)
+	return ""
+}
+
+// confirmVisibility is body with the consent a page sends after its review
+// (DEC-158): the preview's token for exactly this change, read as c. A change
+// that needs no review ignores it.
+func confirmVisibility(t *testing.T, c *apiClient, path string, body map[string]any) map[string]any {
+	t.Helper()
+	var impact visibilityImpactJSON
+	if err := json.Unmarshal([]byte(apiDo(t, c, "GET", visibilityPreviewPath(t, path, body), nil, http.StatusOK)), &impact); err != nil {
+		t.Fatal(err)
+	}
+	if impact.Consent == "" {
+		t.Fatalf("the preview of %s carried no consent", path)
+	}
+	out := maps.Clone(body)
+	out["consent"] = impact.Consent
+	return out
+}

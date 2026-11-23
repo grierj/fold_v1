@@ -4,10 +4,12 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"slices"
 	"strconv"
 	"time"
 
 	"fold/internal/audit"
+	"fold/internal/consent"
 	"fold/internal/policy"
 	"fold/models"
 
@@ -45,13 +47,19 @@ type impactEventJSON struct {
 	Registrants int64 `json:"registrants"`
 }
 
-// visibilityImpactJSON is what a group visibility change would do to its
-// events. Both lists are empty unless the change is more private.
+// visibilityImpactJSON is what a visibility change would do. Both lists are
+// empty unless the change is more private. CurrentVisibility is the scope's
+// own visibility before the change; ResetDates (an event reset only) are the
+// dates the reset changes; Consent is the token that confirms exactly this
+// impact (DEC-158).
 type visibilityImpactJSON struct {
-	FutureOverrides int64             `json:"futureOverrides,omitempty"`
-	Visibility      string            `json:"visibility"`
-	Tightened       []impactEventJSON `json:"tightened"`
-	LeaderOpened    []impactEventJSON `json:"leaderOpened"`
+	FutureOverrides   int64                 `json:"futureOverrides,omitempty"`
+	Visibility        string                `json:"visibility"`
+	CurrentVisibility string                `json:"currentVisibility"`
+	Tightened         []impactEventJSON     `json:"tightened"`
+	LeaderOpened      []impactEventJSON     `json:"leaderOpened"`
+	ResetDates        []impactResetDateJSON `json:"resetDates,omitempty"`
+	Consent           string                `json:"consent,omitempty"`
 }
 
 func (v visibilityImpactJSON) empty() bool {
@@ -96,10 +104,29 @@ const seriesDates = uint(0)
 // rows are included: a waitlisted person who loses access must not be
 // promoted into the event later.
 func losersForDate(tx *gorm.DB, ev *models.Event, newVis string, now time.Time, occurrenceID uint) *gorm.DB {
+	return losersWhere(tx, ev, newVis, now, occurrenceID, clause.Expr{SQL: "event_occurrences.starts_at > ?", Vars: []any{now}})
+}
+
+// losersForDateAt is losersForDate for one date judged at startsAt, the
+// date's start as it would be saved: the date is upcoming when startsAt is
+// after now, decided here in place of the stored starts_at predicate. A
+// preview passes the prospective start; once that start is saved the two
+// forms agree (TestLosersAtMatchTheStoredForm).
+func losersForDateAt(tx *gorm.DB, ev *models.Event, newVis string, now time.Time, occurrenceID uint, startsAt time.Time) *gorm.DB {
+	upcoming := clause.Expr{SQL: "FALSE"}
+	if startsAt.After(now) {
+		upcoming = clause.Expr{SQL: "TRUE"}
+	}
+	return losersWhere(tx, ev, newVis, now, occurrenceID, upcoming)
+}
+
+// losersWhere is losersForDate with the "the date is upcoming" condition
+// given by the caller.
+func losersWhere(tx *gorm.DB, ev *models.Event, newVis string, now time.Time, occurrenceID uint, upcoming clause.Expr) *gorm.DB {
 	q := tx.Table("registrations").
 		Joins("JOIN event_occurrences ON event_occurrences.id = registrations.occurrence_id").
 		Joins("JOIN users ON users.id = COALESCE(registrations.user_id,registrations.registered_by)").
-		Where("event_occurrences.event_id = ? AND event_occurrences.starts_at > ?", ev.ID, now).
+		Where("event_occurrences.event_id = ?", ev.ID).Where(upcoming).
 		Where("registrations.status IN ?", models.CurrentRegStatuses)
 	if occurrenceID != seriesDates {
 		q = q.Where("event_occurrences.id = ?", occurrenceID)
@@ -145,54 +172,18 @@ func losersForDate(tx *gorm.DB, ev *models.Event, newVis string, now time.Time, 
 	}
 }
 
-func toImpact(tx *gorm.DB, evs []models.Event, newVis string, now time.Time) ([]impactEventJSON, error) {
-	out := []impactEventJSON{}
-	for i := range evs {
-		var n int64
-		if err := losersForDate(tx, &evs[i], newVis, now, seriesDates).Select("COUNT(DISTINCT (registrations.user_id,registrations.household_person_id))").Scan(&n).Error; err != nil {
-			return nil, err
-		}
-		out = append(out, impactEventJSON{ID: evs[i].ID, Title: evs[i].Title, Visibility: evs[i].Visibility, Registrants: n})
-	}
-	return out, nil
-}
-
-// impactOf is what making g newVis would do to its events and dates. g holds
-// the stored visibility. The caller that goes on to write locks the rows first
-// (lockGroupDates).
-func impactOf(tx *gorm.DB, g *models.Group, newVis string) (visibilityImpactJSON, []models.Event, []models.Event, error) {
-	now := time.Now().UTC()
-	auto, opened, err := affectedEvents(tx, g.ID, g.Visibility, newVis)
-	if err != nil {
-		return visibilityImpactJSON{}, nil, nil, err
-	}
-	tightened, err := toImpact(tx, auto, newVis, now)
-	if err != nil {
-		return visibilityImpactJSON{}, nil, nil, err
-	}
-	leaderOpened, err := toImpact(tx, opened, newVis, now)
-	if err != nil {
-		return visibilityImpactJSON{}, nil, nil, err
-	}
-	dates, evs, err := openedDates(tx, g.ID, g.Visibility, newVis)
-	if err != nil {
-		return visibilityImpactJSON{}, nil, nil, err
-	}
-	for i := range dates {
-		date := &dates[i]
-		ev := evs[date.EventID]
-		var count int64
-		if err := losersForDate(tx, ev, newVis, now, date.ID).Count(&count).Error; err != nil {
-			return visibilityImpactJSON{}, nil, nil, err
-		}
-		leaderOpened = append(leaderOpened, impactEventJSON{ID: ev.ID, Title: ev.Title, Date: models.FormatCalendarDate(date.OriginalDate), OccurrenceID: date.ID, DecisionKey: dateDecisionKey(date.ID), Visibility: *date.VisibilityOverride, Registrants: count})
-	}
-	return visibilityImpactJSON{Visibility: newVis, Tightened: tightened, LeaderOpened: leaderOpened}, auto, opened, nil
-}
+// groupPreviewRefused: the viewer may not see the group (404) or may not
+// manage it (403), judged in the preview's snapshot.
+var (
+	errGroupPreviewHidden    = errors.New("group not found")
+	errGroupPreviewForbidden = errors.New("group preview forbidden")
+)
 
 // apiGroupVisibilityImpact previews a visibility change so the SPA can show
 // the leader which events tighten and ask about leader-opened ones before
-// saving. GET /groups/:id/visibility-impact?visibility=...
+// saving. GET /groups/:id/visibility-impact?visibility=... The viewer, their
+// authority, the rows and the consent token are read in one snapshot, on one
+// clock, with the selections a write would cancel (DEC-158).
 func (a *App) apiGroupVisibilityImpact(c *gin.Context) {
 	id, _ := strconv.Atoi(c.Param("id"))
 	g, _, ok := a.loadManagedGroupID(c, uint(id))
@@ -204,28 +195,87 @@ func (a *App) apiGroupVisibilityImpact(c *gin.Context) {
 		jsonError(c, http.StatusBadRequest, msg)
 		return
 	}
-	impact, _, _, err := impactOf(a.DB, g, vis)
-	if err != nil {
+	var impact visibilityImpactJSON
+	err := a.DB.Transaction(func(tx *gorm.DB) error {
+		me, err := snapshotViewerIn(tx, apiUser(c))
+		if err != nil {
+			return err
+		}
+		if me == nil {
+			return errSecuritySession
+		}
+		var group models.Group
+		if err := tx.First(&group, g.ID).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return errGroupPreviewHidden
+			}
+			return err
+		}
+		rel, err := groupRel(tx, me.ID, group.ID)
+		if err != nil {
+			return err
+		}
+		if !policy.CanSeeGroup(asPerson(me), asGroup(&group), rel) {
+			return errGroupPreviewHidden
+		}
+		if !policy.CanManageGroup(asPerson(me), rel) {
+			return errGroupPreviewForbidden
+		}
+		now := a.now().UTC()
+		b, h, _, err := groupImpactIn(tx, previewSelector(tx, now), now, me.ID, group.ID, group.Visibility, vis)
+		if err != nil {
+			return err
+		}
+		impact = b.impact
+		impact.Consent, err = a.consentTokenIn(tx, h, b.entries)
+		return err
+	}, readSnapshot)
+	switch {
+	case errors.Is(err, errGroupPreviewHidden):
+		jsonError(c, http.StatusNotFound, "group not found")
+	case errors.Is(err, errGroupPreviewForbidden):
+		jsonError(c, http.StatusForbidden, "forbidden")
+	case isAPIError(err):
+		fail(c, err)
+	case err != nil:
 		jsonError(c, http.StatusInternalServerError, "could not check the group's events")
-		return
+	default:
+		c.JSON(http.StatusOK, impact)
 	}
-	c.JSON(http.StatusOK, impact)
+}
+
+func eventRowKey(list uint8, ev *models.Event) consent.Key {
+	return consent.Key{List: list, Shape: consent.ShapeEvent, Event: uint64(ev.ID)}
+}
+
+func dateRowKey(list uint8, ev *models.Event, occ *models.EventOccurrence) consent.Key {
+	return consent.Key{List: list, Shape: consent.ShapeDate, Event: uint64(ev.ID), Occurrence: uint64(occ.ID)}
 }
 
 // applyGroupTightening runs inside the group update transaction, after the
 // group row is locked and before it is saved. oldVis is the stored value.
 // decisions maps event id to keep or tighten; a leader-opened event without
-// one returns errNeedDecision and impact, and nothing is written.
-func (a *App) applyGroupTightening(tx *gorm.DB, actor *models.User, ip string, g *models.Group, oldVis string, decisions map[string]string) (visibilityImpactJSON, error) {
+// one returns errNeedDecision and impact, and nothing is written. Every row is
+// selected under its locks on one clock before anything is written, and the
+// change goes on only with the consent of that exact impact when it cancels
+// anyone (checkConsentIn); a stale consent also answers errNeedDecision, with
+// the fresh impact and token.
+func (a *App) applyGroupTightening(tx *gorm.DB, actor *models.User, ip string, g *models.Group, oldVis string, decisions map[string]string, given *string) (visibilityImpactJSON, error) {
 	newVis := g.Visibility
-	if err := lockGroupDates(tx, g.ID, oldVis, newVis); err != nil {
+	if !policy.MoreOpen(oldVis, newVis) {
+		return newImpactBuilder(newVis, oldVis).impact, nil
+	}
+	now := a.now().UTC()
+	if err := lockGroupDates(tx, now, g.ID, oldVis, newVis); err != nil {
 		return visibilityImpactJSON{}, err
 	}
-	before := *g
-	before.Visibility = oldVis
-	impact, auto, opened, err := impactOf(tx, &before, newVis)
-	if err != nil || impact.empty() {
-		return impact, err
+	b, h, rows, err := groupImpactIn(tx, lockingSelector(tx, now), now, actor.ID, g.ID, oldVis, newVis)
+	if err != nil {
+		return visibilityImpactJSON{}, err
+	}
+	impact := b.impact
+	if impact.empty() {
+		return impact, nil
 	}
 	for _, row := range impact.LeaderOpened {
 		key := row.DecisionKey
@@ -233,16 +283,41 @@ func (a *App) applyGroupTightening(tx *gorm.DB, actor *models.User, ip string, g
 			key = eventDecisionKey(row.ID)
 		}
 		if d := decisions[key]; d != openedKeep && d != openedTighten {
+			if impact.Consent, err = a.consentTokenIn(tx, h, b.entries); err != nil {
+				return impact, err
+			}
 			return impact, errNeedDecision
 		}
 	}
-	now := time.Now().UTC()
-	tighten := func(ev *models.Event, reason string) error {
+	for i := range rows.opened {
+		ev := &rows.opened[i]
+		b.setCancels(eventRowKey(consent.ListLeaderOpened, ev), decisions[eventDecisionKey(ev.ID)] == openedTighten)
+	}
+	for i := range rows.dates {
+		d := &rows.dates[i]
+		b.setCancels(dateRowKey(consent.ListLeaderOpened, rows.evs[d.EventID], d), decisions[dateDecisionKey(d.ID)] != openedKeep)
+	}
+	plan, token, err := a.checkConsentIn(tx, given, h, b.entries)
+	if errors.Is(err, errConsentMismatch) {
+		impact.Consent = token
+		return impact, errNeedDecision
+	}
+	if err != nil {
+		return impact, err
+	}
+	tighten := func(ev *models.Event, list uint8, reason string) error {
+		if h := a.hooks.consentSkipTake; h != nil && h(eventRowKey(list, ev)) {
+			return nil
+		}
+		c, err := plan.Take(eventRowKey(list, ev))
+		if err != nil {
+			return err
+		}
 		old, oldOpened := ev.Visibility, ev.LeaderOpened
 		if err := tx.Model(ev).Updates(map[string]any{"visibility": newVis, "leader_opened": false}).Error; err != nil {
 			return err
 		}
-		if err := a.cancelDateLosers(tx, actor, ip, ev, newVis, now, seriesDates); err != nil {
+		if err := a.cancelSelectedLosers(tx, c, actor, ip, ev, newVis, seriesDates); err != nil {
 			return err
 		}
 		return audit.Write(tx, audit.Entry{Actor: &actor.ID, Action: audit.VisibilityChanged, TargetType: "event", TargetID: ev.ID,
@@ -250,15 +325,15 @@ func (a *App) applyGroupTightening(tx *gorm.DB, actor *models.User, ip string, g
 				"oldLeaderOpened": oldOpened, "leaderOpened": false, "reason": reason},
 			IP: ip})
 	}
-	for i := range auto {
-		if err := tighten(&auto[i], "group_more_private"); err != nil {
+	for i := range rows.auto {
+		if err := tighten(&rows.auto[i], consent.ListTightened, "group_more_private"); err != nil {
 			return impact, err
 		}
 	}
-	for i := range opened {
-		ev := &opened[i]
+	for i := range rows.opened {
+		ev := &rows.opened[i]
 		if decisions[eventDecisionKey(ev.ID)] == openedTighten {
-			if err := tighten(ev, "group_more_private_leader_chose_tighten"); err != nil {
+			if err := tighten(ev, consent.ListLeaderOpened, "group_more_private_leader_chose_tighten"); err != nil {
 				return impact, err
 			}
 			continue
@@ -275,22 +350,24 @@ func (a *App) applyGroupTightening(tx *gorm.DB, actor *models.User, ip string, g
 			return impact, err
 		}
 	}
-	dates, evs, err := openedDates(tx, g.ID, oldVis, newVis)
-	if err != nil {
-		return impact, err
-	}
-	for i := range dates {
-		date := &dates[i]
-		value := date.VisibilityOverride
-		keep := decisions[dateDecisionKey(date.ID)] == openedKeep
-		if !keep {
-			value = &newVis
+	for i := range rows.dates {
+		date := &rows.dates[i]
+		ev := rows.evs[date.EventID]
+		if decisions[dateDecisionKey(date.ID)] == openedKeep {
+			if err := a.changeDateVisibilitySelected(tx, actor, ip, ev, date, g, date.VisibilityOverride, "group_more_private", true, consent.Checked[dateLosers]{}); err != nil {
+				return impact, err
+			}
+			continue
 		}
-		if err := a.changeDateVisibility(tx, actor, ip, evs[date.EventID], date, g, value, "group_more_private", keep); err != nil {
+		c, err := plan.Take(dateRowKey(consent.ListLeaderOpened, ev, date))
+		if err != nil {
+			return impact, err
+		}
+		if err := a.changeDateVisibilitySelected(tx, actor, ip, ev, date, g, &newVis, "group_more_private", false, c); err != nil {
 			return impact, err
 		}
 	}
-	return impact, nil
+	return impact, plan.Done()
 }
 
 // keptOpenReason is the audit and notice reason for a leader-opened event the
@@ -308,7 +385,7 @@ func eventDecisionKey(id uint) string { return strconv.FormatUint(uint64(id), 10
 // that carry an override, for a change to newVis from oldVis. Reads that
 // follow in the same transaction see them as locked. Nothing is locked unless
 // the change is more private.
-func lockGroupDates(tx *gorm.DB, groupID uint, oldVis, newVis string) error {
+func lockGroupDates(tx *gorm.DB, now time.Time, groupID uint, oldVis, newVis string) error {
 	if !policy.MoreOpen(oldVis, newVis) {
 		return nil
 	}
@@ -318,36 +395,99 @@ func lockGroupDates(tx *gorm.DB, groupID uint, oldVis, newVis string) error {
 		return err
 	}
 	var dates []uint
-	return futureOverrides(tx, ids...).Clauses(clause.Locking{Strength: "UPDATE"}).
+	return futureOverridesAt(tx, now, ids...).Clauses(lockForUpdate).
 		Order("id").Pluck("id", &dates).Error
 }
 
-// cancelDateLosers cancels upcoming registrations of people who could not see
-// ev at newVis, on occurrenceID's date or (seriesDates) on the series dates,
-// writing one registration.cancelled audit row per person; the person gets a
-// stored notification.
-func (a *App) cancelDateLosers(tx *gorm.DB, actor *models.User, ip string, ev *models.Event, newVis string, now time.Time, occurrenceID uint) error {
+// lockForUpdate is FOR UPDATE on the statement's table.
+var lockForUpdate = clause.Locking{Strength: "UPDATE"}
+
+// dateLosers is one selection, under one clock, of the registrations a
+// tightening cancels. A write selects it under its locks, checks consent over
+// it, and cancels exactly the copy its checked plan hands back
+// (cancelSelectedLosers). Every field is copied by Clone.
+type dateLosers struct {
+	now    time.Time
+	occIDs []uint
+	dates  map[uint]*models.EventOccurrence // locked
+	rows   []models.Registration            // locked
+	// oldVis is the selected dates' effective visibility before the change.
+	// Only a loser who could see a date at it is told its title.
+	oldVis string
+	// prior is a date as it was before the change, for a caller that saved
+	// the date before selecting: a title set in the same change as the
+	// tightening was never a loser's to see.
+	prior map[uint]*models.EventOccurrence
+	// callerPromotes: the caller runs the one promotion pass itself, on its
+	// own final copy of the date, after its other writes. dates holds each
+	// date as locked at the selection, before the caller's visibility write
+	// (and, for the guarded edit, its cap write), so promoting from it would
+	// judge and notify on the old date.
+	callerPromotes bool
+}
+
+// dateBefore is date id as it was before the change.
+func (sel dateLosers) dateBefore(id uint) *models.EventOccurrence {
+	if o := sel.prior[id]; o != nil {
+		return o
+	}
+	return sel.dates[id]
+}
+
+// selectDateLosers locks the affected occurrences, then selects the losers,
+// locking their rows in id order, so the set cannot change before
+// cancelSelectedLosers cancels it.
+func selectDateLosers(tx *gorm.DB, ev *models.Event, oldVis, newVis string, now time.Time, occurrenceID uint) (dateLosers, error) {
 	// Lock all affected occurrences before re-reading losers, so a concurrent
 	// batch either sees the tightened visibility or is included here.
-	var occIDs []uint
+	sel := dateLosers{now: now, oldVis: oldVis, dates: map[uint]*models.EventOccurrence{}}
 	q := tx.Model(&models.EventOccurrence{}).Where("event_id = ? AND starts_at > ?", ev.ID, now)
 	if occurrenceID != seriesDates {
 		q = q.Where("id = ?", occurrenceID)
 	}
-	if err := q.Order("id").Pluck("id", &occIDs).Error; err != nil {
-		return err
+	if err := q.Order("id").Pluck("id", &sel.occIDs).Error; err != nil {
+		return sel, err
 	}
-	dates := map[uint]*models.EventOccurrence{}
-	for _, id := range occIDs {
+	for _, id := range sel.occIDs {
 		o, err := lockOccurrence(tx, id)
 		if err != nil {
-			return err
+			return sel, err
 		}
-		dates[id] = o
+		sel.dates[id] = o
 	}
-	var rows []models.Registration
-	if err := losersForDate(tx, ev, newVis, now, occurrenceID).Select("registrations.*").Order("registrations.id").Scan(&rows).Error; err != nil {
+	err := losersForDate(tx, ev, newVis, now, occurrenceID).Select("registrations.*").Order("registrations.id").
+		Clauses(clause.Locking{Strength: "UPDATE", Table: clause.Table{Name: "registrations"}}).Scan(&sel.rows).Error
+	return sel, err
+}
+
+// cancelSelectedLosers cancels exactly the checked selection's rows, audits
+// and notifies their holders, then, unless callerPromotes, promotes on the
+// dates that lost someone. It verifies the copy it was handed against the
+// checked identities before any write, and reads nothing else of the plan.
+func (a *App) cancelSelectedLosers(tx *gorm.DB, c consent.Checked[dateLosers], actor *models.User, ip string, ev *models.Event, newVis string, occurrenceID uint) error {
+	sel := c.Selection()
+	if h := a.hooks.consentSelection; h != nil {
+		h(&sel)
+	}
+	if err := c.Verify(sel.ConsentIdentities()); err != nil {
 		return err
+	}
+	dates, rows, now := sel.dates, sel.rows, sel.now
+	knew, err := a.knewDateTitles(tx, ev, sel)
+	if err != nil {
+		return err
+	}
+	titleOf := func(r models.Registration) string {
+		if knew[holderDate{registrationHolder(r), r.OccurrenceID}] {
+			return effectiveOccurrenceTitle(ev, sel.dateBefore(r.OccurrenceID))
+		}
+		return ""
+	}
+	// The nameless notice adds nothing for a holder already told by name
+	// that their registrations for dates they can no longer access went.
+	named := map[uint]bool{}
+	for _, r := range rows {
+		named[registrationHolder(r)] = named[registrationHolder(r)] || titleOf(r) != ""
 	}
 	holders := map[string]bool{}
 	affected := map[uint]bool{}
@@ -368,9 +508,9 @@ func (a *App) cancelDateLosers(tx *gorm.DB, actor *models.User, ip string, ev *m
 			return err
 		}
 		holder := registrationHolder(r)
-		title := effectiveOccurrenceTitle(ev, dates[r.OccurrenceID])
+		title := titleOf(r)
 		key := fmt.Sprintf("%d:%s", holder, title)
-		if holders[key] {
+		if holders[key] || (title == "" && named[holder]) {
 			continue
 		}
 		holders[key] = true
@@ -384,8 +524,11 @@ func (a *App) cancelDateLosers(tx *gorm.DB, actor *models.User, ip string, ev *m
 			return err
 		}
 	}
+	if sel.callerPromotes {
+		return nil
+	}
 	// All losers are cancelled before any survivor competes for the freed seats.
-	for _, id := range occIDs {
+	for _, id := range sel.occIDs {
 		if !affected[id] {
 			continue
 		}
@@ -396,24 +539,73 @@ func (a *App) cancelDateLosers(tx *gorm.DB, actor *models.User, ip string, ev *m
 	return nil
 }
 
-// eventImpactOf is what setting one event to newVis would do, in the same
-// shape as a group change: the event is listed under tightened when newVis
-// is more private, with the registrants that would be cancelled.
-func eventImpactOf(tx *gorm.DB, ev *models.Event, newVis string) (visibilityImpactJSON, error) {
-	impact := visibilityImpactJSON{Visibility: newVis, Tightened: []impactEventJSON{}, LeaderOpened: []impactEventJSON{}}
-	if policy.MoreOpen(ev.Visibility, newVis) {
-		var err error
-		impact.Tightened, err = toImpact(tx, []models.Event{*ev}, newVis, time.Now().UTC())
-		if err != nil {
-			return impact, err
+// holderDate is one holder of a selected registration and its date.
+type holderDate struct{ holder, occurrenceID uint }
+
+// knewDateTitles is, per holder and date of sel's rows, whether the holder
+// could see that date just before the change: the same facts (membership,
+// group status, account) at sel.oldVis. Nothing but the visibility changes in
+// a tightening, so those facts, read now under its locks, are the ones before
+// it. A cancelled date showed its title only to someone entitled to its
+// tombstone (policy.CanSeeCancelledOccurrence): their own standing row with
+// that ordinary access, or a grant valid at the cancellation. Anyone else (a
+// retained registrant of an archived group, a holder whose only row on a
+// cancelled date is a household person's) is told no title, since it may have
+// been set while the date was hidden from them. It reads before any row is
+// cancelled.
+func (a *App) knewDateTitles(tx *gorm.DB, ev *models.Event, sel dateLosers) (map[holderDate]bool, error) {
+	if len(sel.rows) == 0 {
+		return nil, nil
+	}
+	ids := make([]uint, 0, len(sel.rows))
+	var cancelled []uint
+	for _, r := range sel.rows {
+		ids = append(ids, registrationHolder(r))
+		if o := sel.dateBefore(r.OccurrenceID); o != nil && o.Status == models.OccurrenceCancelled && !slices.Contains(cancelled, o.ID) {
+			cancelled = append(cancelled, o.ID)
 		}
 	}
-	return impact, nil
+	facts, err := loadNoticeFacts(tx, eventGroupIDs(ev), ids)
+	if err != nil {
+		return nil, err
+	}
+	before := *ev
+	before.Visibility = sel.oldVis
+	ordinary := func(holder uint) bool { return facts.canSeeDate(holder, &before, &models.EventOccurrence{}) }
+	knew := make(map[holderDate]bool, len(sel.rows))
+	for _, r := range sel.rows {
+		holder := registrationHolder(r)
+		if o := sel.dateBefore(r.OccurrenceID); o == nil || o.Status != models.OccurrenceCancelled {
+			knew[holderDate{holder, r.OccurrenceID}] = ordinary(holder)
+		}
+	}
+	if len(cancelled) == 0 {
+		return knew, nil
+	}
+	var own []models.Registration
+	if err := tx.Where("user_id IN ? AND occurrence_id IN ? AND household_person_id IS NULL", ids, cancelled).Order("id").Find(&own).Error; err != nil {
+		return nil, err
+	}
+	grants, err := loadOccurrenceInvitationFacts(tx, own, sel.now)
+	if err != nil {
+		return nil, err
+	}
+	for _, row := range own {
+		holder := *row.UserID
+		ok, err := a.cancelledDateEntitledIn(tx, holder, row, grants, ev, sel.dateBefore(row.OccurrenceID), ordinary(holder), sel.now)
+		if err != nil {
+			return nil, err
+		}
+		knew[holderDate{holder, row.OccurrenceID}] = ok
+	}
+	return knew, nil
 }
 
 // apiEventVisibilityImpact previews a single-event visibility change, like
 // apiGroupVisibilityImpact does for a group. Managers only.
-// GET /events/:id/visibility-impact?visibility=...
+// GET /events/:id/visibility-impact?visibility=...[&resetOverrides=1]. The
+// viewer, their authority, the impact (with the reset dates when asked) and
+// the consent token are read in one snapshot, on one clock.
 func (a *App) apiEventVisibilityImpact(c *gin.Context) {
 	ev, f, ok := a.loadVisibleEvent(c)
 	if !ok {
@@ -428,10 +620,48 @@ func (a *App) apiEventVisibilityImpact(c *gin.Context) {
 		jsonError(c, http.StatusBadRequest, msg)
 		return
 	}
-	impact, err := eventImpactOfReset(a.DB, ev, vis, c.Query("resetOverrides") == "1")
-	if err != nil {
+	reset := c.Query("resetOverrides") == "1"
+	var impact visibilityImpactJSON
+	err := a.DB.Transaction(func(tx *gorm.DB) error {
+		me, err := snapshotViewerIn(tx, apiUser(c))
+		if err != nil {
+			return err
+		}
+		if me == nil {
+			return errSecuritySession
+		}
+		var current models.Event
+		if err := tx.First(&current, ev.ID).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return errEventNotFound
+			}
+			return err
+		}
+		f, err := eventFactsIn(tx, me, &current)
+		if err != nil {
+			return err
+		}
+		if !f.canSee(me) {
+			return errEventNotFound
+		}
+		if !f.canManage(me) {
+			return errCannotChangeEvent
+		}
+		now := a.now().UTC()
+		b, h, _, err := eventImpactIn(tx, previewSelector(tx, now), now, me.ID, &current, vis, reset, false)
+		if err != nil {
+			return err
+		}
+		impact = b.impact
+		impact.Consent, err = a.consentTokenIn(tx, h, b.entries)
+		return err
+	}, readSnapshot)
+	switch {
+	case isAPIError(err):
+		fail(c, err)
+	case err != nil:
 		jsonError(c, http.StatusInternalServerError, "could not preview visibility")
-		return
+	default:
+		c.JSON(http.StatusOK, impact)
 	}
-	c.JSON(http.StatusOK, impact)
 }

@@ -240,6 +240,27 @@ export function formatCalendarDay(day: string): string {
   return fmt(asDate(day), "UTC", { month: "short", day: "numeric" });
 }
 
+// "Tuesday, December 1, 2026", for a stored calendar day shown on its own,
+// such as a cancelled date, which may be in another year.
+export function formatDayFull(day: string): string {
+  return fmt(asDate(day), "UTC", { weekday: "long", month: "long", day: "numeric", year: "numeric" });
+}
+
+// "Tuesday, December 1, 2026 at 7:00 PM", for an event's own wall clock ("2026-12-01T19:00") as an edit form
+// holds it: read as written, never converted, so a time a clock change skips still reads as typed. The form names
+// the zone (zoneNote). Anything else comes back as it is.
+export function formatWallClock(local: string): string {
+  const m = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})$/.exec(local);
+
+  if (!m) return local;
+  const at = Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3]), Number(m[4]), Number(m[5]));
+
+  if (!Number.isFinite(at) || new Date(at).toISOString().slice(0, 16) !== local) return local;
+  const iso = new Date(at).toISOString();
+
+  return `${fmt(iso, "UTC", { weekday: "long", month: "long", day: "numeric", year: "numeric" })} at ${formatTime(iso, "UTC")}`;
+}
+
 // "May 4, 2016", for a birth date stored as YYYY-MM-DD.
 export function formatBirthDate(day: string): string {
   return fmt(asDate(day), "UTC", { month: "long", day: "numeric", year: "numeric" });

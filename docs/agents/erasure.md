@@ -27,8 +27,8 @@ are in `docs/plan/M7.4-ERASURE-INVENTORY.md` (section numbers below point there)
   (`TestAuditHistoricalActorStatementShape`). **Send nothing between the report and statement 1,
   start no other statement with the first 90 characters of statement 1, and never change
   statement 1's text or regenerate `deploy/digitalocean/qc1/app-facts.json` with a different one**:
-  the saved real-server log pins it, so `provision` goes red and only a new Docker-captured log
-  fixes it (`deploy.md`; `TestAuditDiscoveryStatementsAndBinds`, `TestAuditConversionRequestStatementShape`).
+  the saved real-server log pins it, so `TestQC1SuccessorIsTheLoggedStatement` fails and only a new
+  Docker-captured log fixes it (`deploy.md`; `TestAuditDiscoveryStatementsAndBinds`, `TestAuditConversionRequestStatementShape`).
   Design: `docs/plan/design/r4-conversion-ip-minimization.md` sections 14 and 15.
 - Which rows keep an address, and under which owner statement, is the C3 table in inventory 6.5.2
   (DEC-148). A new registry action needs a row there, or `TestC3ChecklistCoversTheRegistry` fails; its
@@ -259,6 +259,15 @@ see `deploy.md`).
   `TestLegacySaveOutcomes`, `TestLegacySaveVsConversion`,
   `TestDefinitiveResponsesEndTheAttempt`, `TestOutcomeClassification`, `TestSettleAuthorization`,
   `TestSettleUnknownCommit`, `TestRestoreFenceFencedIdAcrossARestart`.
+- The guarded date edit (`api_date_edits.go`) derives its keys from the same per-process key
+  (`processKey`), so its tokens and the receipt it stores on a date (`event_occurrences.edit_receipt`)
+  never match after a restart, restore or rollback. The receipt is a 32-byte HMAC with no readable
+  person id, reason or draft text; erasure writes no `events` or `event_occurrences` column, and the
+  residue scan reads the bytes like any other. It does not reuse `admin_operation_attempts`: the
+  receipt is one value per date that any tracked change clears, and needs no sweep. A database
+  restored under a still-running process keeps the process key, the same limit as the barrier's
+  (`TestDateEditRestoreUnderLiveProcessIsTheStatedLimit`; `TestDateEditRestartRefusesOldTokens`,
+  `TestDateEditRestoredDumpRefusesExactOldToken`).
 
 ## Actor seal
 
@@ -279,3 +288,10 @@ definitive refusals discard the id; a `restore_detected` or `history_unavailable
 Delete off until the users list reloads successfully (`lib/deleteReload.ts`).
 
 The test-only attempt clock is described in `testing.md`.
+
+## Rules and their tests
+
+| Rule | Enforced by |
+|------|-------------|
+| A deletion leaves only the residue the PLAN names: every sentinel of the erased person in any text, JSON or byte column or blob must match an enabled rule in `erasure_residue.go` (a rule with no PLAN disposition accepts nothing); another person's and the church's values stay byte for byte; opt-out and suppression hashes are checked apart | `TestErasureLeavesOnlyTheNamedResidue` (its mutation map), `TestErasureResidueRefusesWhatThePlanDoesNotName`, `TestErasureResidueRulesNameRealPlaces` |
+| Every transaction that takes the contact gate runs at Read Committed whatever the database default (`contactMutation`, or `contactGateTx`; the gate refuses any other level) | `TestContactMutationsRunAtReadCommitted`, `TestContactMutationsPinReadCommitted`, `TestGatedTransactionsBeginReadCommitted`, `TestGatedMutationsHonorWhatCommittedWhileTheyWaited`, `TestContactSweepRunsAtReadCommittedOnAnyDefault` |

@@ -2,12 +2,17 @@ package main
 
 import (
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
 
+	"fold/internal/notify"
 	"fold/internal/policy"
 	"fold/models"
+
+	"gorm.io/gorm"
 )
 
 func TestRegistrationSubjectIdentity(t *testing.T) {
@@ -294,4 +299,203 @@ func TestTeenAccountTypeOnlyForLeadersAndAdmins(t *testing.T) {
 	if dto := f.attendee(row, models.EventOccurrence{}, &admin, false, false, time.Now()); dto == nil || dto.AccountType != models.AccountTeen {
 		t.Fatal("admin lost the badge")
 	}
+}
+
+// TestHouseholdReconcileSkipsADateCancelledWhileItWaited: removing a household
+// person selects their scheduled dates, then locks each. A date cancelled and
+// renamed while the removal, by another adult of the household, waited for
+// its lock is left as a date cancelled before the selection would be: the row
+// stays, and the adult who signed the person up, who reached the date only
+// through that row, is told nothing, least of all the new title.
+func TestHouseholdReconcileSkipsADateCancelledWhileItWaited(t *testing.T) {
+	f := newDateEditFixture(t)
+	target := f.dates[1]
+	gormMust(t, f.app.DB.Model(&models.EventOccurrence{}).Where("id = ?", target.ID).Update("visibility_override", models.VisibilityPublic))
+	holder, _, spouse, _ := householdFamily(t, f.app, f.admin, "waiting household holder")
+	partner := newTestUser(t, f.app, "household partner", "password1234", models.RoleMember)
+	gormMust(t, f.app.DB.Create(&models.HouseholdAccount{HouseholdID: spouse.HouseholdID, UserID: partner.ID, Relation: models.HouseholdRelationAdult}))
+	row := models.Registration{HouseholdPersonID: &spouse.ID, RegisteredBy: &holder.ID, OccurrenceID: target.ID, Status: models.RegGoing, AttendanceMode: models.AttendanceInPerson, Source: "web"}
+	gormMust(t, f.app.DB.Create(&row))
+	mark := markNotices(t, f.app)
+
+	blocker := f.app.DB.Begin()
+	gormMust(t, blocker)
+	t.Cleanup(func() { blocker.Rollback() })
+	if _, err := lockOccurrence(blocker, target.ID); err != nil {
+		t.Fatal(err)
+	}
+	deleter := loginAPI(t, f.app, partner.Name, "password1234")
+	removal := queueContact(func() *httptest.ResponseRecorder {
+		return deleter.do("DELETE", "/api/v1/me/household/people/"+itoa(spouse.ID), nil, true)
+	})
+	waitForLockedUsersQuery(t, f.app, `%FROM "event_occurrences"%FOR UPDATE%`)
+	gormMust(t, blocker.Model(&models.EventOccurrence{}).Where("id = ?", target.ID).Updates(map[string]any{
+		"status": models.OccurrenceCancelled, "cancel_source": models.CancelSourceManual, "title_override": "RENAMEDSECRET"}))
+	gormMust(t, blocker.Commit())
+	if w := awaitContactResponse(t, removal); w.Code != http.StatusOK {
+		t.Fatalf("the removal: %d %s", w.Code, w.Body.String())
+	}
+
+	var after models.Registration
+	gormMust(t, f.app.DB.First(&after, row.ID))
+	if after.Status != models.RegGoing {
+		t.Fatalf("the row on the cancelled date was reconciled: %s", after.Status)
+	}
+	drainNotices(t, f.app)
+	if got := noticesSince(t, f.app, holder.ID, notify.RegistrationRemoved, mark.notice); len(got) != 0 {
+		t.Fatalf("the holder was told about a cancelled date: %+v", got)
+	}
+	noSecrets(t, f.app, "the household holder", holder.ID, holder.Email, mark, []string{"RENAMEDSECRET"})
+}
+
+// householdAcrossTwoDates is a household person going on dates A and B of a
+// series (A first by id), with A full, and a departed member, w, holding live
+// departure grants on both: going on B, and waitlisted on A behind the
+// household person. w's row on B has the lower id, so an id-ordered lock of
+// the event's grant rows takes it before w's row on A.
+type householdAcrossTwoDates struct {
+	f          dateEditFixture
+	a, b       models.EventOccurrence
+	spouse     householdPersonJSON
+	deleter    *apiClient
+	w          *models.User
+	wOnA, wOnB models.Registration
+}
+
+func newHouseholdAcrossTwoDates(t *testing.T) householdAcrossTwoDates {
+	t.Helper()
+	f := newDateEditFixture(t)
+	h := householdAcrossTwoDates{f: f, a: f.dates[0], b: f.dates[1]}
+	if h.a.ID >= h.b.ID {
+		t.Fatalf("fixture: date A %d is not before B %d by id", h.a.ID, h.b.ID)
+	}
+	gormMust(t, f.app.DB.Model(&models.Event{}).Where("id = ?", f.event.ID).Update("waitlist_enabled", true))
+	gormMust(t, f.app.DB.Model(&models.EventOccurrence{}).Where("id = ?", h.a.ID).Update("capacity_override", 1))
+	holder, _, spouse, _ := householdFamily(t, f.app, f.admin, "two date holder")
+	h.spouse = spouse
+	partner := newTestUser(t, f.app, "two date partner", "password1234", models.RoleMember)
+	gormMust(t, f.app.DB.Create(&models.HouseholdAccount{HouseholdID: spouse.HouseholdID, UserID: partner.ID, Relation: models.HouseholdRelationAdult}))
+	h.deleter = loginAPI(t, f.app, partner.Name, "password1234")
+	for _, occ := range []uint{h.a.ID, h.b.ID} {
+		gormMust(t, f.app.DB.Create(&models.Registration{HouseholdPersonID: &spouse.ID, RegisteredBy: &holder.ID, OccurrenceID: occ, Status: models.RegGoing, AttendanceMode: models.AttendanceInPerson, Source: "web"}))
+	}
+	h.w = newTestUser(t, f.app, "departed waiter", "password1234", models.RoleMember)
+	membership := models.Membership{UserID: h.w.ID, GroupID: f.group, Role: models.MembershipMember, Status: models.MembershipActive}
+	gormMust(t, &gorm.DB{Error: f.app.DB.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Create(&membership).Error; err != nil {
+			return err
+		}
+		at := time.Now().UTC().Add(-time.Minute)
+		h.wOnB = models.Registration{UserID: &h.w.ID, OccurrenceID: h.b.ID, Status: models.RegGoing, Source: models.RegSourceAdmin, AttendanceMode: models.AttendanceInPerson}
+		h.wOnA = models.Registration{UserID: &h.w.ID, OccurrenceID: h.a.ID, Status: models.RegWaitlisted, WaitlistedAt: &at, Source: models.RegSourceAdmin, AttendanceMode: models.AttendanceInPerson}
+		for _, r := range []*models.Registration{&h.wOnB, &h.wOnA} {
+			if err := tx.Create(r).Error; err != nil {
+				return err
+			}
+			if _, err := seedAccessGrantIn(tx, r.ID, accessGrant{Origin: policy.OccurrenceOriginDepartureSelf, DepartureMembershipID: &membership.ID, DepartureActorID: &h.w.ID}, &h.w.ID, time.Now().UTC()); err != nil {
+				return err
+			}
+		}
+		return nil
+	})})
+	gormMust(t, &gorm.DB{Error: f.app.contactMutation(contactChange{UserID: h.w.ID}, func(tx *gorm.DB) error {
+		return tx.Model(&models.Membership{}).Where("id = ?", membership.ID).Update("status", "removed").Error
+	})})
+	if h.wOnB.ID >= h.wOnA.ID {
+		t.Fatalf("fixture: w's row on B (%d) is not before its row on A (%d)", h.wOnB.ID, h.wOnA.ID)
+	}
+	return h
+}
+
+func (h householdAcrossTwoDates) remove() <-chan *httptest.ResponseRecorder {
+	return queueContact(func() *httptest.ResponseRecorder {
+		return h.deleter.do("DELETE", "/api/v1/me/household/people/"+itoa(h.spouse.ID), nil, true)
+	})
+}
+
+func (h householdAcrossTwoDates) editB(t *testing.T) <-chan *httptest.ResponseRecorder {
+	t.Helper()
+	date := models.FormatCalendarDate(h.b.OriginalDate)
+	base := editBaseOf(t, h.f.admin, h.f.event.ID, date)
+	return goPostDateEdit(h.f.admin, h.f.event.ID, date, dateEditBody(newDateAttempt(t), base.Revision, map[string]any{"title": "Edited B"}))
+}
+
+// both waits for the edit and the removal and checks each applied: w was
+// promoted on A with its grant, and B carries the edit.
+func (h householdAcrossTwoDates) both(t *testing.T, edit, removal <-chan *httptest.ResponseRecorder) {
+	t.Helper()
+	w1, w2 := awaitResponse(t, edit), awaitContactResponse(t, removal)
+	if w1.Code != http.StatusOK || w2.Code != http.StatusOK {
+		t.Fatalf("the edit %d %s; the removal %d %s", w1.Code, w1.Body.String(), w2.Code, w2.Body.String())
+	}
+	var onA models.Registration
+	gormMust(t, h.f.app.DB.First(&onA, h.wOnA.ID))
+	if onA.Status != models.RegGoing || onA.AccessEndedAt != nil {
+		t.Fatalf("w on A: %s, grant ended %v", onA.Status, onA.AccessEndedAt)
+	}
+	if o := occurrenceRow(t, h.f.app, h.b.ID); o.TitleOverride == nil || *o.TitleOverride != "Edited B" {
+		t.Fatalf("the edit of B did not apply: %+v", o)
+	}
+}
+
+// TestHouseholdRemovalAndDateEditBeforePassDoNotDeadlock: a session holds w's
+// live grant row on B, so the edit of B parks in its before pass holding B.
+// The household removal locks A, cancels the person there, promotes w and so
+// holds w's row on A, then waits for B behind the edit. Released, the edit
+// asks only for B's grant rows and finishes; the removal then takes B. With an
+// event-wide before pass the edit would ask for w's row on A next and the
+// database would abort one side with 40P01.
+func TestHouseholdRemovalAndDateEditBeforePassDoNotDeadlock(t *testing.T) {
+	h := newHouseholdAcrossTwoDates(t)
+	release := holdRows(t, h.f.app, holdRegistrationRow, h.wOnB.ID)
+	edit := h.editB(t)
+	editor := waitForLockedUsersQuery(t, h.f.app, `%FROM "registrations"%FOR UPDATE%`)
+	removal := h.remove()
+	waiterBlockedBy(t, h.f.app.DB, editor, "event_occurrences")
+	release()
+	h.both(t, edit, removal)
+}
+
+// TestHouseholdRemovalAndDateEditAfterPassDoNotDeadlock: the edit of B is
+// parked at its "effects" step, past its before pass and holding B. The
+// household removal promotes w on A, holding w's row there, and waits on B's
+// occurrence lock behind the edit. Released, the edit's after pass locks only
+// B's grant rows and both finish. This guards a partial fix that scopes the
+// before pass but leaves the wrapper's after pass event-wide: that after pass
+// would ask for w's row on A and close the cycle. (Against fix7's event-wide
+// before pass this schedule cannot be set up: the edit already holds w's row
+// on A, so the removal blocks on that row and never reaches B.)
+func TestHouseholdRemovalAndDateEditAfterPassDoNotDeadlock(t *testing.T) {
+	h := newHouseholdAcrossTwoDates(t)
+	parked, resume := make(chan int, 1), make(chan struct{})
+	t.Cleanup(func() {
+		select {
+		case <-resume:
+		default:
+			close(resume)
+		}
+	})
+	h.f.app.hooks.dateEditStep = func(tx *gorm.DB, step string) error {
+		if step != "effects" {
+			return nil
+		}
+		var pid int
+		if err := tx.Raw("SELECT pg_backend_pid()").Scan(&pid).Error; err != nil {
+			return err
+		}
+		parked <- pid
+		<-resume
+		return nil
+	}
+	edit := h.editB(t)
+	var editor int
+	select {
+	case editor = <-parked:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the edit never reached its effects step")
+	}
+	removal := h.remove()
+	waiterBlockedBy(t, h.f.app.DB, editor, "event_occurrences")
+	close(resume)
+	h.both(t, edit, removal)
 }
