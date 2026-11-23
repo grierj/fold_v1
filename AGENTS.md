@@ -34,9 +34,12 @@ SaaS operator) must be able to run it with `docker compose up`. The shipped arti
 
 | Area | Read |
 |---|---|
-| Account deletion, tombstones, `contact_requests` text, households in erasure, restore fence, attempt ids | `docs/agents/erasure.md` |
-| Anything that sends email, email choices, suppressions | `docs/agents/mail.md` |
+| Account deletion, tombstones, `contact_requests` text, the contact gate, households in erasure, restore fence, attempt ids | `docs/agents/erasure.md` |
+| Anything that sends email, email choices, suppressions, event audiences | `docs/agents/mail.md` |
 | Web push, devices, the service worker | `docs/agents/push.md` |
+| Who can see an event or date, tightening and resets (consent), kept dates, the date page, rosters | `docs/agents/visibility.md` |
+| A read authorized by a grant, a link, a switch, a filter or a role; acknowledging a decision | `docs/agents/snapshots.md` |
+| The job runner (`internal/jobs`), Retry/Dismiss, a handler that waits (`LaterIn`), a new writer of `jobs` | `.cursor/skills/verify-job-queue` (run its `check`) |
 | A file in `migrations/` | `docs/agents/migrations.md` |
 | Dockerfile, compose, `deploy/`, releases, restore | `docs/agents/deploy.md` |
 | Test setup, source guards, the e2e harness | `docs/agents/testing.md` |
@@ -82,12 +85,10 @@ Full model: PLAN 5.3 and `models/models.go`. Chain: `User` → `Membership` → 
   months ahead. Rules repeat at most once a day, under a date cap (`events.Expand`, DEC-89).
   `internal/events` is the pure clock (no database); `internal/eventdates` writes the rows
   (`Ensure` at creation, `Extend` daily under its advisory lock).
-- An event's `visibility` is its own value, copied from the group at creation (DEC-48). A nullable
-  occurrence `visibility_override` wins for that date (`policy.EffectiveVisibility`); date
-  candidates never authorize the series. Making a group or one event more private previews the
-  cancellations, needs the preview's `consent` (`internal/consent`, `visibility_consent.go`), and
-  cancels and tells the people it shuts out (`cancelLosers`, `visibility-impact`,
-  `api_group_visibility.go`).
+- An event's `visibility` is its own value, copied from the group at creation (DEC-48); an
+  occurrence's `visibility_override` wins for that date (`policy.EffectiveVisibility`). Making a
+  group or one event more private previews, needs consent, cancels and tells the people it shuts
+  out: `docs/agents/visibility.md`.
 - `cancel_source` is `series` (a series edit dropped the date; a later edit that includes it
   schedules it again and tells registrants, DEC-91) or `manual` (a person).
 - Render any name with `User.PublicName()`, never the email. Sign-in needs `User.CanSignIn()`;
@@ -170,8 +171,7 @@ section or decision; check it still exists.
   write only with `setSettingIn`. Keys derived from `SESSION_SECRET` come from `deriveKey`
   (`keys.go`): a new use gets a new `purpose:vN`, and an existing purpose's bytes never change.
   `setSettingIn` refuses `restore_fence` and `visibility_consent_epoch`; only the boot step
-  (`bootRestoreFence`) writes them. A token check reads the epoch with `lockConsentEpochIn`
-  (`FOR SHARE`), so a boot's rotation waits for a confirmation in flight; previews read it plainly.
+  (`bootRestoreFence`) writes them.
 - Small shared helpers: SQLSTATE checks use `pgCode`/`pgConstraint` (`pgerrors.go`); long id
   lists go through `eachChunk` (`chunks.go`); several users are locked with `lockUsersByID`
   (`user_locks.go`). Enum values are owned by `internal/policy` and aliased by `models`;
@@ -191,19 +191,13 @@ section or decision; check it still exists.
   `groupRels`, `userRels`, `hostedEvents`, `loadFactSet`, `eventFactsIn`) and `group_members.go`
   (`memberCount`, `leaderCount`). They return errors: a failed read is never "not visible" or
   "no member". Host rows count only on church-wide events (DEC-7).
-- A tightening's or reset's consent is the token `internal/consent` computes over the displayed
-  impact (the current visibility and the reset dates included) and the locked selections; a
-  change that cancels anyone, and every reset request, needs it (DEC-158). Every visibility write
-  runs `checkConsentIn` once, before `changeDateVisibilitySelected`. A cancellation runs only
-  from the checked plan's `Take`, and `cancelSelectedLosers` verifies the rows against it. Every
-  writer of an `event.visibility_*` audit row runs `checkConsentIn` first, group-event creation
-  included (`TestEventVisibilityAuditWritersDeclareConsent`). `00015` refuses a visibility
-  cancellation without a passed check, any event visibility audit row without the consent rule,
-  and an earlier release's start.
-- Visibility is `visibleTo` in `internal/policy`; its SQL forms (`directoryQuery`,
-  `losersForDate`) are kept equal by `TestDirectoryMatchesPolicy` and `TestLosersMatchPolicy`.
-  Event and notice output never shows a hidden group's name, place or id: go through
-  `a.groupShownTo`.
+- Visibility is `visibleTo` in `internal/policy`. Every visibility write runs `checkConsentIn`
+  once (DEC-158), and a date someone kept after leaving never ends later (DEC-156); the consent
+  token, kept dates and their tests are in `docs/agents/visibility.md`. Event and notice output
+  never shows a hidden group's name, place or id: go through `a.groupShownTo`.
+- A read authorized by a grant, a link's scope, a switch, a group filter or a role decides its
+  authority and what it shows in one snapshot, and acknowledges only the viewer that snapshot
+  judged (`docs/agents/snapshots.md`).
 - Membership rules live in `internal/policy` (`CanRemoveMember`, `CanBeSuccessor`, role changes).
   Removal keeps the row with `status=removed` (DEC-35); departure keeps `status=left` (DEC-86).
   Adding anyone goes through `changeRole`, which locks the group row and checks
@@ -251,7 +245,8 @@ section or decision; check it still exists.
   what it waits for (it then returns `jobs.Requeued`, and the runner writes nothing). A claim is
   its `claim_seq` (`jobs.Claim`), never the worker label or attempt count, which repeat. Handlers
   must be safe to run twice and return their error. **Never start a goroutine ticker for periodic
-  work.**
+  work.** A change to the runner, Retry/Dismiss, `LaterIn` or a writer of `jobs` runs the TLA+
+  model in `.cursor/skills/verify-job-queue` (`check`).
 - Notifications are stored rows (PLAN 5.12) written by `notify.Send(tx, notify.Msg{...})` in the
   same transaction as the change and its audit row; the `notify.deliver` job sends the email and
   push after commit, so callers never deliver a notice themselves. A fan-out takes the recipient
@@ -384,26 +379,14 @@ After a merge, merge master into the other open branches (never rebase) and repo
 ## Rules and what enforces them
 
 Add a row when Grier corrects a repeat mistake; drop it once the mistake can't happen. Prefer
-structure, then types, then a check, then a test. Rules specific to one area are listed with their
-tests in that area's `docs/agents/` file.
+structure, then types, then a check, then a test. This table is for rules that cross areas. A rule
+for one area goes, with its tests, in that area's `docs/agents/` file (the "Read before you touch"
+table), and a new area gets a new file there and a row in that table, not a row here.
 
 | Rule | Enforced by |
 |------|-------------|
 | Every list of event dates hides events the viewer can't see | `TestNarrowEventHiddenFromGroupLists` |
-| A surface authorized by an exact-date grant, a link's scope, a switch, a group filter or a role reads it and what it shows in one snapshot (`.ics`, calendar, feeds, room feed and room calendar, message read page, audience preview, the composer's picker and preview, a message and its history, the message list and a write's reply, preparation and the rows it writes, announcement and reminder pushes with their device and message, guardian copies, the manager's exact-date roster, the calendar's kept-date fact, the group page, its dates and its roster, a role change's roster reply, the event page with its hosts, my household) | `TestEventPageReadsOneSnapshotAndAcknowledgesIt`, `TestMyHouseholdReadsOneSnapshotAndAcknowledgesIt`, `TestManagedDateRosterReadsAuthorityInItsSnapshot`, `TestGroupReadsJudgeAuthorityInTheirSnapshot`, `TestGroupReadsJudgeTheSessionInTheirSnapshot`, `TestGroupReadsShowAnErasureWhole`, `TestGroupReadsUseOneConnection`, `TestGroupReadsDecideOnOneClock`, `TestGroupReadFailuresStayWhole`, `TestGroupReadRevisionsAreEditBases`, `TestGroupReadsJudgeEveryAuthorityChangeInTheirSnapshot`, `TestGroupReadsCrossTheCareWindowOnOneClock`, `TestGroupReadCommitFailureAnswersNothing`, `TestGroupDatesReachTheTwoHundredFirst`, `TestRoleChangeRepliesWithTheActorsCurrentRoster`, `TestManagersReachKeptDatesOnTheirCalendar`, `TestRoleGatedMessageViewsReadOneSnapshot`, `TestMessageListAndWriteRepliesReadOneSnapshot`, `TestPreparationChoosesItsRowsInTheAudiencesSnapshot`, `TestPreparationSnapshotsAHouseholdHolder`, `TestPreparationSnapshotsAMixedVisibilitySeries`, `TestQueuedSeriesPushCountsFromTheCutoffTryAgainSet`, `TestReadPageCountsFromTheCutoffTryAgainSet`, `TestPushReminderReadsItsClockInItsSnapshot`, `TestMessageViewsJudgeTheSessionInTheirSnapshot`, `TestInvitationReadersNeverStraddleAnEdit`, `TestInvitationReadersUseOneConnection`, `TestPersonalFeedReadsItsLinkInTheFeedsSnapshot`, `TestCalendarGroupFilterIsJudgedInTheListsSnapshot`, `TestRoomFeedReadsItsLinkAndSwitchInOneSnapshot`, `TestRoomCalendarReadsTheSwitchInItsSnapshot`, `TestAudiencePreviewNeverStraddlesAnEdit`, `TestPreparationDecidesItsAudienceInOneSnapshot`, `TestAnnouncementPushNeverStraddlesAnEdit`, `TestPushesDecideInOneSnapshotAndSendAfter`, `TestPushDestinationIsReadInThePayloadSnapshot`, `TestPushPayloadComesFromTheDestinationsSnapshot`, `TestGuardianCopyReadsInOneSnapshotAndSendsAfter`, `TestGuardianCopyOfADateNeverStraddlesAnEdit`, `TestGuardianCopyReadsItsClockInItsSnapshot` |
-| A participating reader's or the guarded edit's answer (M8.1; `/auth/bootstrap` acknowledges the middleware's fresh read instead) is acknowledged (`acknowledgeDecision`) only for the viewer its deciding snapshot judged or its writer locked (`sessionJudgment`), once the transaction has ended, on an answer or a refusal it decided; never on a 401, a failure, a failed COMMIT or an unconfirmed rollback (a reader's runs in `decidingSnapshot`), and a missing resource exactly like a hidden one | `TestGroupReadsAcknowledgeTheViewerTheirSnapshotJudged`, `TestSnapshotRefusalsNeedAConfirmedRollback`, `TestEventPageReadsOneSnapshotAndAcknowledgesIt`, `TestDatePageAcknowledgesTheReadThatDecided`, `TestManagedDateReadAcknowledgesItsSnapshotViewer`, `TestDateEditAcknowledgesTheWritersOutcome`, `TestMyHouseholdReadsOneSnapshotAndAcknowledgesIt`, `TestDecidedRefusalIsAnActionable4xx` |
-| An event audience reaches only people a date they may still see puts in it, at preview, send, Try again and the read page | `TestEventAudienceLeavesOutADateTheyCannotSee`, `TestReadPageKeepsDecidedRowsAndChecksUndecidedOnes` |
-| A claimed batch email row and Try again decide on Read Committed from one facts statement (`loadDateFacts`) that reads only `factColumns` (each with a named reader; no credential, contact, note, place, group name, age or contact preference, and its rows never become a `ContactAccount`) and binds each id list as one array; the read page lets a person in for good only on a delivery or a recorded date check (`audience_admitted_at`), whatever came after | `TestBatchEmailNeverPairsALapsedGrantWithAMovedDate`, `TestBatchHonorsAChoiceCommittedRightAfterTheClaim`, `TestTryAgainNeverPairsALapsedGrantWithAMovedDate`, `TestTryAgainRechecksAReminderAfterTheLocks`, `TestTryAgainKeepsAReminderCopyOnlyUnderTheCopyRule`, `TestDateFactsMatchTheQueries`, `TestFactColumnsCoverTheModels`, `TestDateFactsStatementReturnsNoSecrets`, `TestFactsStatementRowsNeverBecomeAContactAccount`, `TestDateFactsBindsTheSameParametersForAnyCount`, `TestReadEntitlementNeedsProofTheCheckLetThemIn`, `TestReadEntitlementEvidenceSurvivesLaterOutcomes` |
-| Every transaction that takes the contact gate runs at Read Committed whatever the database default (`contactMutation`, or `contactGateTx`; the gate refuses any other level) | `TestContactMutationsRunAtReadCommitted`, `TestContactMutationsPinReadCommitted`, `TestGatedTransactionsBeginReadCommitted`, `TestGatedMutationsHonorWhatCommittedWhileTheyWaited`, `TestContactSweepRunsAtReadCommittedOnAnyDefault` |
 | Event and notice output never shows a hidden group's name, place or id | `TestGroupDetailsGoThroughGroupShownTo` (an exception line ends with `// group-ok: <reason>`) |
-| Making a group or one event more private previews, confirms, cancels and tells people | `TestGroupMorePrivateTightensAndCancels`, `TestEventMorePrivateCancelsShutOutRegistrants`, `e2e/event-visibility.spec.ts` |
-| A tightening cancels only what its reviewer was shown, a reset resets only the dates and saves only the series value its reviewer was shown (even cancelling nobody), and a release without that check never starts on a database this release has run, nor changes who can see an event or a date while still running (DEC-158) | `TestConsentKeyIsStableAcrossAppValues`, `TestVisibilityConsentAcrossServeRestart`, `TestServeBootStepComesFirst`, `TestVisibilityConsentAcrossSecrets`, `TestNoConsentWhereNothingIsReviewRequired`, `TestStaleTabBodiesAreRefused`, `TestVisibilityCancellationsCancelExactlyTheCheckedSet`, `TestVisibilityConsentFenceMigration`, `TestVisibilityConsentFenceInFlight`, `TestPriorReleaseRefusesToStart`, `TestRealServeRestartRotatesTheEpoch`, `TestDatabaseRecoveryFloorIsNotAboveTheBinary`, `TestVisibilityCancellationsConsumeACheckedPlan`, `TestCancellationRefusesRowsOutsideItsPlan`, `TestDateLosersCloneIsDeep`, `TestEventResetIsReviewedWithNoLosers`, `TestEventResetBindsTheCurrentSeries`, `TestDateEditReasonNamedLikeAResetSaves`, `TestVisibilityConsentReadsTheInjectedClock`, `TestConsentEpochHasOneWriter`, `TestRecoveryFloorSurvivesTheWholeChainDown`, `TestRecoveryFloorIsDroppedOnlyByTheTestCleanup`, `TestRecoveryFloorCleanupRefusesForeignDatabases`, `TestPriorProcessRunningAcrossTheUpgrade`, `TestEveryEventVisibilityWriterDeclaresConsent`, `TestEventVisibilityAuditWritersDeclareConsent`, `TestConsentEpochCheckIsOrderedWithTheBoot`, `TestRealServeBootWaitsForAnOpenConfirmation`, `TestConsentEpochIsLockedOnlyWhereATokenIsChecked`, `TestVisibilityConsentLifecycleMatrix`, `TestVisibilityConsentSerializesWithLifecycleWriters`, `TestConsentEpochLockAddsNoDeadlockWithTheGates`, `TestVisibilityConsentAcrossARestore`, `TestVisibilityConsentPreviewMatchesWrite`, `TestVisibilityConsentAuthority`, `TestConsentTokenDefinition`, `TestDateEditConsentRefusalsRunOnce`, `internal/consent` tests |
-| A date someone kept after leaving never ends later while kept (DEC-156): every writer of a date's end and the date preview refuse it, and the `event_occurrences_kept_date_end` trigger (`00014`) refuses a raise in the database for issuers that lock the date first | `TestLaterEndRefusedWhileADateIsKept`, `TestSeriesEditRefusesMovingAKeptDateLater`, `TestDatePreviewRefusesALaterEndOnAKeptDate`, `TestKeptDateSQLMatchesPolicy`, `TestEndsAtWritersCheckKeptDates`, `TestDepartureGrantsAreIssuedUnderTheDateLock`, `TestKeptDateEndMigration`, `TestKeptDateRaiseBehindTheIssuerIsRefused` |
-| The manager's exact-date read carries a roster only for a scheduled date that has not ended, and decides household visibility and ages on its snapshot's one clock and church zone | `TestManagedDateCarriesItsRoster`, `TestManagedDateHouseholdAgeFollowsTheSnapshotClock`, `TestManagedDateRefusesABadChurchZone` |
-| A manager's calendar links each date the event page doesn't list to its date page, and keeps a date someone kept after leaving in Everything (not Just mine or the feeds) until Remove or its end, including an underway one that began before the first day shown, which Week and Month show under "Already underway" (DEC-157) | `TestManagerCalendarLinkMatchesTheEventPageList`, `TestManagersReachKeptDatesOnTheirCalendar`, `TestDecideCalendarManagerKept`, `Calendar.test.tsx`, `web/e2e/kept-calendar.spec.ts`, `web/e2e/kept-dates.spec.ts` |
-| The date page shows manager content only while its latest answer grants it, and its roster never stays on screen while a refresh after a recheck or a roster write is pending, nor remounts while a roster write on that date is in flight after a recheck; every roster write on the date, the editor's kept-dates panel's included, rereads the managed date fail-closed, so a question asked before it never submits; a draft is held, not shown, while authority is checked | `EventDate.test.tsx`, `ManageDate.test.tsx`, `dateWrites.test.tsx` |
-| On the event and group pages, a roster write on a date that may have changed it (any end but "answered": a date row's, or a kept-dates panel's in a date or series editor) holds that date like an update and asks for the page again; a date save started before it never writes (an open question closes as no, the count is read again), and the editor keeps its draft and focus. On every host a roster write that begins on a date closes its open consent question and disables Save until it ends (`useRosterActivity`); the event and group visibility reviews open (from a preview or a 409) and commit only when no matching roster write began, ended or is pending since their mark (`useRosterActivityOf`), with confirm waiting while one is pending | `EventDetail.test.tsx`, `GroupDetail.test.tsx`, `ManageDate.test.tsx`, `dateWrites.test.tsx`, `DateEditor.test.tsx`, `EventVisibility.test.tsx`, `GroupVisibilityReview.test.tsx` |
-| A roster's focus or care-boundary recheck, and the refresh after a roster write, never shows the old roster while it waits, and no roster remounts or starts a second write while a roster write on that date is in flight after a recheck. The kept-dates panel shows nothing kept-specific until a fresh read of the selected date answers, and never says a set of dates is clear | `ManageRoster.test.tsx`, `dateWrites.test.tsx`, `KeptDatesPanel.test.tsx`, `SeriesEditor.test.tsx`, `DateEditor.test.tsx`, `EventDetail.test.tsx`, `GroupDetail.test.tsx` |
 | Notification rows are private to their owner; text has no contact details; inline actions are allow-listed and checked on the server | `TestStoredNotificationsAcceptance`, registry and privacy tests in `internal/notify`, account-request handler tests |
 | `web/src/types.ts` matches the Go JSON structs field for field | `TestWebTypesMatchGoJSON` |
 | Every state-changing route goes through CSRF, except `csrfExemptRoutes` | `TestCSRFExemptRoutesAreExact` |
@@ -418,13 +401,11 @@ tests in that area's `docs/agents/` file.
 | No new raw controls, `!` overrides, misused danger color, literal `style=` or date formatting outside `lib/when.ts` | `TestUIRatchets` (counts in `ui-ratchet.json`; lower them when a page gets better), `TestUIRatchetsCatchPastMistakes` |
 | React forms use the shared `Form`; secret whitespace is never trimmed | `TestReactFormsUseCustomValidation`, `TestReactFormValidationGuard`, `components/ui/Form.test.tsx` |
 | Selected chips are stronger than unselected; field errors are announced | `Chip.test.tsx`, `Field.test.tsx` |
-| A visibility review and the date question state the current and the new value as their accessible description (`changeSentence`), and Cancel returns focus to the Save button that opened the review | `visibilityChange.test.ts`, `GroupVisibilityReview.test.tsx`, `DateEditor.test.tsx`, `EventVisibility.test.tsx`, `GroupDetail.test.tsx` |
 | A photo-less group's cover comes from `coverSrc` (DEC-66); empty states are never red | `web/src/lib/covers.test.ts`, `EmptyState.test.tsx` |
 | Token contrast: text 4.5:1, control edges 3:1 | `npm run contrast` (in CI) |
 | The entry JS chunk stays under its gzip budget; rarely needed libraries load with `import()` | `npm run bundle-size` (in CI) |
 | Seat counts never overrun under concurrent registration | `TestConcurrentGoingRespectsCapacity` |
 | Secrets in URLs never reach the access log | `TestAccessLogKeepsSecretsOut` |
-| A deletion leaves only the residue the PLAN names: every sentinel of the erased person in any text, JSON or byte column or blob must match an enabled rule in `erasure_residue.go` (a rule with no PLAN disposition accepts nothing); another person's and the church's values stay byte for byte; opt-out and suppression hashes are checked apart | `TestErasureLeavesOnlyTheNamedResidue` (its mutation map), `TestErasureResidueRefusesWhatThePlanDoesNotName`, `TestErasureResidueRulesNameRealPlaces` |
 | Tests sit next to their code | `TestTestFilesSitNextToTheirSource` |
 | Source guards read the whole production tree, not a directory glob | `internal/guardkit` tests, `TestContactRequestTextGuardReadsTheRealTree` |
 | Schema changes are new goose files; models match them | `migrations/migrations_test.go`, `TestBaselineFileShape` (see `docs/agents/migrations.md`) |
