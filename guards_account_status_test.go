@@ -284,6 +284,10 @@ func otherLiteral(e ast.Expr) bool {
 // mapShape is how a map argument carries the status column, or "" when it
 // does not.
 func mapShape(e ast.Expr, status, computed, params map[string]bool) string {
+	// gorm reads through a pointer to a map as it does the map.
+	if u, ok := guardkit.Unparen(e).(*ast.UnaryExpr); ok && u.Op == token.AND {
+		e = u.X
+	}
 	switch hasStatus, hasComputed := mapLitKeys(e); {
 	case hasStatus:
 		return `a map with "status"`
@@ -434,6 +438,11 @@ func (a *App) roll(tx *gorm.DB, user *models.User, status string) error {
 	updates := map[string]any{"status": status}
 	updates["session_version"] = sessionVersionBump()
 	return tx.Model(user).Updates(updates).Error
+}`, `roll: Updates of a map given "status"`},
+		{"a pointer to a local map", `package main
+func (a *App) roll(tx *gorm.DB, u *models.User) error {
+	cols := map[string]any{"Status": models.UserActive}
+	return tx.Model(u).Updates(&cols).Error
 }`, `roll: Updates of a map given "status"`},
 		{"a map given status later", `package main
 func (a *App) roll(tx *gorm.DB, id uint) error {
