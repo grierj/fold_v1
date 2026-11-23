@@ -1353,7 +1353,7 @@ func TestFeedSiteNameFallback(t *testing.T) {
 
 func mustBuildFeed(t *testing.T, app *App, viewer *models.User, opts feedOptions, now time.Time) events.Feed {
 	t.Helper()
-	feed, err := app.buildFeed(viewer, opts, now)
+	feed, err := app.buildFeedIn(app.DB, viewer, opts, now)
 	if err != nil {
 		t.Fatalf("build feed: %v", err)
 	}
@@ -1692,5 +1692,79 @@ func TestPersonalFeedHostRowOnGroupEventRevealsNoVideoLink(t *testing.T) {
 	}
 	if strings.Contains(hostFeed, videoLink) {
 		t.Fatalf("a host row on a group event revealed the video link: %s", hostFeed)
+	}
+}
+
+// readerSeams are the two places a snapshot reader test commits a change:
+// "authorized", right after the reader judges what authorizes it (wherever
+// that is: a judgment moved before the snapshot began would see the commit's
+// data), and "grants", inside the date reads after that judgment.
+var readerSeams = []string{"authorized", "grants"}
+
+// atReaderSeam runs commit once, at seam, for surface.
+func atReaderSeam(app *App, seam, surface string, commit func()) *atomic.Bool {
+	var fired atomic.Bool
+	once := func() {
+		if fired.CompareAndSwap(false, true) {
+			commit()
+		}
+	}
+	if seam == "authorized" {
+		app.hooks.readerAuthorized = func(s string) {
+			if s == surface {
+				once()
+			}
+		}
+	} else {
+		app.hooks.invitationReadStep = func(step string) {
+			if step == seam {
+				once()
+			}
+		}
+	}
+	return &fired
+}
+
+// TestPersonalFeedReadsItsLinkInTheFeedsSnapshot: a secret link's scope and
+// its existence are read in the snapshot the feed's dates come from. Right
+// after the link is judged, and again at the "grants" seam, the link is
+// narrowed to "mine" (or revoked) and a date only "all" shows is retitled, in
+// one commit: the feed must not pair the old scope, or a link already gone,
+// with the newer title.
+func TestPersonalFeedReadsItsLinkInTheFeedsSnapshot(t *testing.T) {
+	for _, seam := range readerSeams {
+		for _, change := range []string{"narrowed", "revoked"} {
+			t.Run(seam+"/"+change, func(t *testing.T) {
+				f := newDepartureReadFixture(t, models.VisibilityInviteOnly, models.RegGoing, policy.OccurrenceOriginDepartureSelf)
+				open := createFeedGroup(t, f.admin, "Open circle", models.VisibilityPublic, "Open place")
+				ev := createFeedEvent(t, f.admin, open, "Open night", f.dates[1].StartsAt.AddDate(0, 0, -1).UTC(), "")
+				path := personalFeedPath(t, f.client, models.CalendarFeedAll)
+				const renamed = "Retitled after the link changed"
+				fired := atReaderSeam(f.app, seam, "personal feed", func() {
+					if err := f.app.DB.Transaction(func(tx *gorm.DB) error {
+						q := tx.Model(&models.CalendarToken{}).Where("user_id = ?", f.recipient.ID)
+						var err error
+						if change == "narrowed" {
+							err = q.Update("scope", models.CalendarFeedMine).Error
+						} else {
+							err = tx.Where("user_id = ?", f.recipient.ID).Delete(&models.CalendarToken{}).Error
+						}
+						if err != nil {
+							return err
+						}
+						return tx.Model(&models.EventOccurrence{}).Where("event_id = ?", ev.ID).Update("title_override", renamed).Error
+					}); err != nil {
+						t.Error(err)
+					}
+				})
+				w := f.client.do("GET", path, nil, false)
+				if !fired.Load() {
+					t.Fatalf("the feed never reached the %s seam", seam)
+				}
+				if w.Code != http.StatusOK || strings.Contains(w.Body.String(), renamed) || !strings.Contains(w.Body.String(), "Open night") {
+					t.Fatalf("the feed paired its link as read with newer dates: %d %s", w.Code, w.Body.String())
+				}
+			})
+		}
 	}
 }
