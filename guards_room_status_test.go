@@ -39,7 +39,9 @@ import (
 // function the scanned tree does not declare; a package that imports models
 // under another name; an upsert's DoUpdates; gorm calls in a function literal
 // at package level (there it reads only raw SQL); or SQL assembled without the
-// "UPDATE <table> SET" or "INSERT INTO <table>" literal. It does not cover
+// "UPDATE <table> SET" or "INSERT INTO <table>" literal, or a status set after
+// a subquery in the SET list (it reads the list up to the first FROM or
+// WHERE). It does not cover
 // request_id, which also moves a booking between waiting and lost
 // (BookingCannotConfirm writes it through changeBookings; the foreign key's ON
 // DELETE SET NULL is the database's). It does not judge which status a

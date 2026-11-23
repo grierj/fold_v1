@@ -3,6 +3,7 @@ package main
 import (
 	"errors"
 	"fmt"
+	"net/http"
 	"reflect"
 	"slices"
 	"testing"
@@ -191,8 +192,17 @@ func TestChangeBookingsCountsTheRowsItMoves(t *testing.T) {
 
 func TestRoomStatusWritersRefuseWhatTheRuleDoesNotHold(t *testing.T) {
 	f := newBookingFixture(t)
-	c := roomCombos(t, f)[0]
-	req := models.RoomRequest{EventID: c.ev.ID, RoomID: c.room.ID, Status: models.RoomRequestPending}
+	if code, body := f.book(t, f.leader, f.eventA, map[string]any{"roomId": f.hall.ID}); code != http.StatusOK {
+		t.Fatalf("book A: %d %s", code, body)
+	}
+	var c struct {
+		bookingID uint
+		status    string
+	}
+	if err := f.app.DB.Raw("SELECT id AS booking_id, status FROM room_bookings").Row().Scan(&c.bookingID, &c.status); err != nil {
+		t.Fatal(err)
+	}
+	req := models.RoomRequest{EventID: f.eventA.ID, RoomID: f.hall.ID, Status: models.RoomRequestPending}
 	if err := f.app.DB.Create(&req).Error; err != nil {
 		t.Fatal(err)
 	}

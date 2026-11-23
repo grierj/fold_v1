@@ -39,7 +39,6 @@ const (
 	RoomBookingRejected RoomBookingState = "rejected"
 )
 
-// RoomBookingStates is every state, in the order of the table above.
 func RoomBookingStates() []RoomBookingState {
 	return []RoomBookingState{RoomBookingConfirmed, RoomBookingDoubleBooked, RoomBookingWaiting, RoomBookingLost, RoomBookingRejected}
 }
@@ -174,19 +173,17 @@ func (m RoomBookingMove) Allows(s RoomBookingState) bool {
 	return slices.Contains(bookingRules[m].from, s)
 }
 
-// Creates: the move is the status a new row is inserted with.
 func (m RoomBookingMove) Creates() bool {
 	r, ok := bookingRules[m]
 	return ok && r.write == insertsBooking
 }
 
-// Updates: the move changes an existing booking row (changeBookings).
+// Updates: changeBookings writes the move.
 func (m RoomBookingMove) Updates() bool {
 	r, ok := bookingRules[m]
 	return ok && r.write == updatesBooking
 }
 
-// Removes: the move deletes the booking.
 func (m RoomBookingMove) Removes() bool {
 	r, ok := bookingRules[m]
 	return ok && r.write == deletesBooking
