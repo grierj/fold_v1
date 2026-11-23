@@ -158,9 +158,12 @@ section or decision; check it still exists.
   ids are the one block in `advisory_locks.go`.
 - A transaction that takes the contact gate (`lockContacts`) outside `contactMutation` begins with
   `contactGateTx` (Read Committed); the gate refuses any other level.
-- Account status changes only through `setAccountStatusIn` (`account_status.go`); a new one starts
-  in `newAccountStatus`. Profile fields are validated by `fields.go`. A pending item is decided
-  with `decidePendingIn`.
+- Account status changes only through `setAccountStatusIn` (`account_status.go`, DEC-159), which
+  ends the account's sessions; the caller writes the audit row. A guest becomes an account in
+  `upgradeGuestIn`; only the password replace (`invitedBecomesActive`) and the erasure
+  (`tombstoneUserIn`, the sweep's `scrubTombstoneRowIn`) set the status in their own statement
+  (`TestAccountStatusHasOneWriter`). A new account's status starts in `newAccountStatus`. Profile fields are validated by `fields.go`. A
+  pending item is decided with `decidePendingIn`.
 - "This session is still current" is `sessionCurrent(fresh, session)` (`session_state.go`) alone.
   A writer that rechecks its actor under a lock calls `lockActorIn(tx, me, mode)` (or
   `lockAdminIn`) with `actorRead`, `actorShare` or `actorNoKeyUpdate`; one holding the actor in a
