@@ -270,7 +270,7 @@ describe("SeriesEditor form layout (DEC-95)", () => {
     expect(Events.update).toHaveBeenLastCalledWith(7, expect.objectContaining({ reminderPush: false }));
   });
 
-  it("finishes after a save that leaves it open: no Saving… left, nothing to change and nothing more to send (#427)", async () => {
+  it("sends nothing more after a save its page has not closed it for yet: nothing to change, no Saving… left (#427)", async () => {
     vi.mocked(Events.update).mockReset().mockResolvedValue({ event: testEvent(7) });
     const onSaved = vi.fn();
     render(<SeriesEditor series={baseSeries} idPrefix="again" onSaved={onSaved} onClose={() => {}} />);
@@ -278,14 +278,10 @@ describe("SeriesEditor form layout (DEC-95)", () => {
     await userEvent.type(title, " night");
     await userEvent.click(screen.getByRole("button", { name: "Save series" }));
     await waitFor(() => expect(onSaved).toHaveBeenCalledOnce());
-    expect(screen.getByRole("status")).toHaveTextContent("Saved");
-    expect(screen.queryByRole("button", { name: /^Sav(e series|ing…)$/ })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Save series" })).toBeDisabled();
     expect(title).toBeDisabled();
     expect(title).toHaveValue("Supper night");
-    const close = screen.getByRole("button", { name: "Close" });
-    expect(close).toBeEnabled();
-    expect(close).toHaveFocus();
-    expect(close).toHaveAccessibleDescription("To change more, close this and open it again.");
+    expect(screen.getByRole("button", { name: "Close" })).toBeEnabled();
     fireEvent.submit(title.closest("form")!);
     expect(Events.update).toHaveBeenCalledOnce();
   });
@@ -293,16 +289,16 @@ describe("SeriesEditor form layout (DEC-95)", () => {
   it("keeps showing what it sent when the page's reload brings new values", async () => {
     vi.mocked(Events.update).mockReset().mockResolvedValue({ event: testEvent(7) });
     const series = { ...baseSeries, recurrenceRule: "FREQ=WEEKLY;COUNT=4" };
-    const view = render(<SeriesEditor series={series} idPrefix="flip" onSaved={() => {}} onClose={() => {}} />);
+    const onSaved = vi.fn();
+    const view = render(<SeriesEditor series={series} idPrefix="flip" onSaved={onSaved} onClose={() => {}} />);
     const rule = screen.getByRole("textbox", { name: "Recurrence rule" });
     await userEvent.clear(rule);
     await userEvent.type(rule, "FREQ=WEEKLY;BYDAY=WE,TH");
     await userEvent.click(screen.getByRole("button", { name: "Save series" }));
-    expect(await screen.findByText("Saved")).toBeInTheDocument();
-    view.rerender(<SeriesEditor series={{ ...series, recurrenceRule: "FREQ=WEEKLY;BYDAY=WE,TH", title: "Renamed" }} idPrefix="flip" onSaved={() => {}} onClose={() => {}} />);
+    await waitFor(() => expect(onSaved).toHaveBeenCalledOnce());
+    view.rerender(<SeriesEditor series={{ ...series, recurrenceRule: "FREQ=WEEKLY;BYDAY=WE,TH", title: "Renamed" }} idPrefix="flip" onSaved={onSaved} onClose={() => {}} />);
     expect(screen.getByRole("textbox", { name: "Recurrence rule" })).toHaveValue("FREQ=WEEKLY;BYDAY=WE,TH");
     expect(screen.getByRole("textbox", { name: "Title" })).toHaveValue("Supper");
-    expect(screen.getByText("Saved")).toBeInTheDocument();
   });
 
   it("leaves the Jitsi link as sent when a new one lands after the save began", async () => {
@@ -311,30 +307,32 @@ describe("SeriesEditor form layout (DEC-95)", () => {
     const put = deferred<{ event: ReturnType<typeof testEvent> }>();
     vi.mocked(Events.update).mockReset().mockReturnValueOnce(put.promise);
     const sent = "https://meet.jit.si/fold-old000link";
-    render(<SeriesEditor series={{ ...baseSeries, videoProvider: "jitsi", videoUrl: sent }} idPrefix="jitsi" onSaved={() => {}} onClose={() => {}} />);
+    const onSaved = vi.fn();
+    render(<SeriesEditor series={{ ...baseSeries, videoProvider: "jitsi", videoUrl: sent }} idPrefix="jitsi" onSaved={onSaved} onClose={() => {}} />);
     await userEvent.click(screen.getByRole("button", { name: "Generate a new Jitsi link" }));
     await userEvent.click(screen.getByRole("button", { name: "Save series" }));
     await act(async () => { jitsi.resolve({ url: "https://meet.jit.si/fold-new111link" }); await jitsi.promise; });
     const link = screen.getByRole("textbox", { name: /^Video link/ });
     expect(link).toHaveValue(sent);
     await act(async () => { put.resolve({ event: testEvent(7) }); await put.promise; });
-    expect(screen.getByText("Saved")).toBeInTheDocument();
+    expect(onSaved).toHaveBeenCalledOnce();
     expect(link).toHaveValue(sent);
   });
 
   it("asks nothing when leaving after a save of an edit", async () => {
     vi.mocked(Events.update).mockReset().mockResolvedValue({ event: testEvent(7) });
     const confirm = vi.spyOn(window, "confirm").mockReturnValue(false);
+    const onSaved = vi.fn();
 
     const router = createMemoryRouter([
-      { path: "/", element: <><UnsavedChangesBlocker /><SeriesEditor series={baseSeries} idPrefix="stay" onSaved={() => {}} onClose={() => {}} /></> },
+      { path: "/", element: <><UnsavedChangesBlocker /><SeriesEditor series={baseSeries} idPrefix="stay" onSaved={onSaved} onClose={() => {}} /></> },
       { path: "/elsewhere", element: <p>Elsewhere page</p> },
     ]);
 
     render(<RouterProvider router={router} />);
     await userEvent.type(screen.getByRole("textbox", { name: "Title" }), " night");
     await userEvent.click(screen.getByRole("button", { name: "Save series" }));
-    expect(await screen.findByText("Saved")).toBeInTheDocument();
+    await waitFor(() => expect(onSaved).toHaveBeenCalledOnce());
     const leaving = new Event("beforeunload", { cancelable: true });
     window.dispatchEvent(leaving);
     expect(leaving.defaultPrevented).toBe(false);
@@ -600,7 +598,7 @@ describe("SeriesEditor and kept dates", () => {
   });
 });
 
-describe("SeriesEditor once a save has finished it", () => {
+describe("SeriesEditor after a save", () => {
   const single = { eventId: 7, startsLocal: "2026-12-01T19:00", durationMinutes: 60, tzid: "UTC", title: "Supper", description: "", location: "Hall", recurrenceRule: "", capacity: null, waitlistEnabled: false, guestsAllowed: 0 };
 
   beforeEach(() => {
@@ -608,111 +606,18 @@ describe("SeriesEditor once a save has finished it", () => {
     vi.mocked(Events.update).mockReset().mockResolvedValue({ event: testEvent(7) });
   });
 
-  it("names no menu item, and keeps the room field it opened with when the reload makes the event a series", async () => {
+  it("keeps the room field it opened with when a read makes the event a series", async () => {
     vi.mocked(Site.get).mockResolvedValue({ name: "Fold", timezone: "UTC", selfSignup: "off", roomsEnabled: true, pushEnabled: true });
     vi.mocked(DateRooms.list).mockResolvedValue({ rooms: [], booking: null });
-    const view = render(<SeriesEditor series={single} roomDate="2026-12-01" idPrefix="weekly" onSaved={() => {}} onClose={() => {}} />);
+    const onSaved = vi.fn();
+    const view = render(<SeriesEditor series={single} roomDate="2026-12-01" idPrefix="weekly" onSaved={onSaved} onClose={() => {}} />);
     expect(await screen.findByRole("combobox", { name: /^Room/ })).toBeInTheDocument();
     await userEvent.click(screen.getByRole("button", { name: "Every week" }));
     await userEvent.click(screen.getByRole("button", { name: "Save series" }));
     expect(Events.update).toHaveBeenLastCalledWith(7, expect.objectContaining({ recurrenceRule: expect.stringMatching(/^FREQ=WEEKLY/) }));
-    expect(await screen.findByText("Saved")).toBeInTheDocument();
-    view.rerender(<SeriesEditor series={{ ...single, recurrenceRule: "FREQ=WEEKLY;BYDAY=TU" }} idPrefix="weekly" onSaved={() => {}} onClose={() => {}} />);
-    const close = screen.getByRole("button", { name: "Close" });
-    expect(close).toHaveAccessibleDescription("To change more, close this and open it again.");
+    await waitFor(() => expect(onSaved).toHaveBeenCalledOnce());
+    view.rerender(<SeriesEditor series={{ ...single, recurrenceRule: "FREQ=WEEKLY;BYDAY=TU" }} idPrefix="weekly" onSaved={onSaved} onClose={() => {}} />);
     expect(screen.getByRole("combobox", { name: /^Room/ })).toBeInTheDocument();
     expect(SeriesRooms.list).not.toHaveBeenCalled();
-  });
-
-  it("brings Close and Saved into view when focus moves to Close", async () => {
-    const scroll = vi.fn();
-    Element.prototype.scrollIntoView = scroll;
-    const focus = vi.spyOn(HTMLElement.prototype, "focus");
-    render(<SeriesEditor series={single} idPrefix="scroll" onSaved={() => {}} onClose={() => {}} />);
-    const title = screen.getByRole("textbox", { name: "Title" });
-    await userEvent.type(title, " night{Enter}");
-    const close = await screen.findByRole("button", { name: "Close" });
-    await waitFor(() => expect(close).toHaveFocus());
-    expect(scroll).toHaveBeenCalledWith({ block: "nearest" });
-    const scrolled = scroll.mock.contexts[scroll.mock.contexts.length - 1];
-    expect(scrolled instanceof HTMLElement && scrolled.contains(close)).toBe(true);
-    expect(scrolled instanceof HTMLElement && scrolled.contains(screen.getByText("Saved"))).toBe(true);
-    expect(focus.mock.contexts[focus.mock.contexts.length - 1]).toBe(close);
-    focus.mockRestore();
-  });
-
-  it("waits on the form, then goes to Close, when a read lands while another save in the panel keeps Close off", async () => {
-    const props = { series: single, idPrefix: "wait", onSaved: () => {}, onClose: () => {} };
-    const view = render(<SeriesEditor {...props} held />);
-    await userEvent.click(screen.getByRole("button", { name: "Save series" }));
-    const refresh = await screen.findByRole("button", { name: "Refresh" });
-    view.rerender(<SeriesEditor {...props} held locked />);
-    refresh.focus();
-    view.rerender(<SeriesEditor {...props} locked />);
-    expect(screen.queryByRole("button", { name: "Refresh" })).not.toBeInTheDocument();
-    const close = screen.getByRole("button", { name: "Close" });
-    expect(close).toBeDisabled();
-    expect(document.activeElement).toBe(close.closest("form"));
-    view.rerender(<SeriesEditor {...props} />);
-    expect(close).toHaveFocus();
-  });
-
-  it.each([
-    ["a key", (form: HTMLElement) => fireEvent.keyDown(form, { key: "PageUp" })],
-    ["a wheel scroll", (form: HTMLElement) => fireEvent.wheel(form)],
-    ["a press", (form: HTMLElement) => fireEvent.pointerDown(form)],
-  ])("leaves the form and the scroll alone once the person used %s while focus waited there for Close", async (_, use) => {
-    const scroll = vi.fn();
-    Element.prototype.scrollIntoView = scroll;
-    const props = { series: single, idPrefix: "place", onSaved: () => {}, onClose: () => {} };
-    const view = render(<SeriesEditor {...props} held />);
-    await userEvent.click(screen.getByRole("button", { name: "Save series" }));
-    const refresh = await screen.findByRole("button", { name: "Refresh" });
-    view.rerender(<SeriesEditor {...props} held locked />);
-    refresh.focus();
-    view.rerender(<SeriesEditor {...props} locked />);
-    const close = screen.getByRole("button", { name: "Close" });
-    const form = close.closest("form")!;
-    expect(document.activeElement).toBe(form);
-    use(form);
-    scroll.mockClear();
-    view.rerender(<SeriesEditor {...props} />);
-    expect(close).toBeEnabled();
-    expect(document.activeElement).toBe(form);
-    expect(scroll).not.toHaveBeenCalled();
-  });
-
-  it("leaves focus the person put on the form when another save in the panel ends", async () => {
-    const scroll = vi.fn();
-    Element.prototype.scrollIntoView = scroll;
-    const props = { series: single, idPrefix: "own", onSaved: () => {}, onClose: () => {} };
-    const view = render(<SeriesEditor {...props} />);
-    await userEvent.click(screen.getByRole("button", { name: "Save series" }));
-    const close = await screen.findByRole("button", { name: "Close" });
-    const form = close.closest("form")!;
-    view.rerender(<SeriesEditor {...props} locked />);
-    await userEvent.click(within(form).getByText(/This changes every future date/));
-    expect(document.activeElement).toBe(form);
-    scroll.mockClear();
-    view.rerender(<SeriesEditor {...props} />);
-    expect(close).toBeEnabled();
-    expect(document.activeElement).toBe(form);
-    expect(scroll).not.toHaveBeenCalled();
-  });
-
-  it("neither moves focus nor scrolls when focus left the form during the save", async () => {
-    const scroll = vi.fn();
-    Element.prototype.scrollIntoView = scroll;
-    const put = deferred<{ event: ReturnType<typeof testEvent> }>();
-    vi.mocked(Events.update).mockReturnValueOnce(put.promise);
-    render(<><button>Elsewhere</button><SeriesEditor series={single} idPrefix="away" onSaved={() => {}} onClose={() => {}} /></>);
-    screen.getByRole("button", { name: "Save series" }).focus();
-    await userEvent.keyboard("{Enter}");
-    const elsewhere = screen.getByRole("button", { name: "Elsewhere" });
-    elsewhere.focus();
-    await act(async () => { put.resolve({ event: testEvent(7) }); await put.promise; });
-    expect(await screen.findByText("Saved")).toBeInTheDocument();
-    expect(elsewhere).toHaveFocus();
-    expect(scroll).not.toHaveBeenCalled();
   });
 });

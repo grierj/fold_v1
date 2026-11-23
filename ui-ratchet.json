@@ -50,6 +50,7 @@
     "web/src/pages/MessageComposer.tsx": 1,
     "web/src/pages/Profile.tsx": 3
   },
+  "closeAndReopen": {},
   "danger": {
     "web/src/components/DeleteUserPanel.tsx": 3,
     "web/src/components/GroupVisibilityReview.tsx": 2,

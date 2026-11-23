@@ -637,6 +637,14 @@ var uiRules = []uiRule{
 			return strings.HasSuffix(path, "lib/useAction.ts")
 		},
 	},
+	{
+		name: "closeAndReopen",
+		fix:  "never tell a person to close and reopen something: when the UI no longer allows an action, it closes on its own (DEC-161)",
+		re:   regexp.MustCompile(`(?i)\bclose\b[^"'\x60<>{}]{0,40}?\b(re-?open|open (it|this|that) again)\b`),
+		skip: func(_, line string) bool {
+			return strings.HasPrefix(strings.TrimSpace(line), "//")
+		},
+	},
 }
 
 func uiRuleCounts(path, src string) map[string]int {
@@ -746,13 +754,16 @@ func TestUIRatchetsCatchPastMistakes(t *testing.T) {
 		// SeriesEditor.tsx before useAction: busy was cleared only on a failure (#427).
 		{"busyFlags", "web/src/components/SeriesEditor.tsx", `const [busy, setBusy] = useState(false);`},
 		{"busyFlags", "web/src/pages/GroupDetail.tsx", `const [reviewBusy, setReviewBusy] = useState(false);`},
+		// SeriesEditor.tsx's finished state before DEC-161.
+		{"closeAndReopen", "web/src/components/SeriesEditor.tsx", `<p id={againId} className="-mt-3 text-sm text-text-muted">To change more, close this and open it again.</p>`},
+		{"closeAndReopen", "web/src/pages/X.tsx", `<p>Close the panel and reopen it to see the change.</p>`},
 	}
 	for _, c := range cases {
 		if got := uiRatchetViolations(map[string]map[string]int{}, map[string]string{c.path: c.line}); len(got) == 0 || !strings.Contains(strings.Join(got, "\n"), c.rule) {
 			t.Errorf("%s not caught on %q: %v", c.rule, c.line, got)
 		}
 	}
-	ok := `<Chip selected={on}>tag</Chip> <img style={{ objectPosition: pos }} /> <p className="text-danger">{error} {/* danger-ok: form error */}</p> const action = useAction(); const busy = action.running; const [saved, setSaved] = useState(false);`
+	ok := `<Chip selected={on}>tag</Chip> <img style={{ objectPosition: pos }} /> <p className="text-danger">{error} {/* danger-ok: form error */}</p> const action = useAction(); const busy = action.running; const [saved, setSaved] = useState(false); <Button onClick={onClose}>Close</Button> <p>We couldn't load this date. Reload the page to try again.</p>`
 	if got := uiRatchetViolations(map[string]map[string]int{}, map[string]string{"web/src/pages/X.tsx": ok}); len(got) != 0 {
 		t.Errorf("false positives: %v", got)
 	}

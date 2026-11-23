@@ -17,6 +17,7 @@ import { dateKey, type EditBase } from "../lib/editBase";
 import { KeptDates } from "./KeptDates";
 import { useKeptRefusal } from "./keptRefusal";
 import { useFocusHome, useKeepFocusHome } from "../lib/focusHome";
+import { useUnsavedChanges } from "../lib/unsavedChanges";
 import { changeSentence, VISIBILITY_WORD } from "../lib/visibilityChange";
 import { count as plural } from "../lib/plural";
 import { reviewOutdated } from "../lib/visibilityConsent";
@@ -482,6 +483,9 @@ export function DateEditor({
   }
 
   const locked = busy || status !== "idle";
+  // Leaving the page with a change typed and not sent asks first (DEC-98), as the series editor does. A save on its
+  // way or in doubt is the session's attempts' to finish, here or on another page.
+  useUnsavedChanges(!locked && Object.keys(changesOf(draft, stored, base)).length > 0);
 
   return (<>
     <Form ref={root} tabIndex={-1} noValidate onSubmit={save} className="mt-3 space-y-3 border-t border-border pt-3">

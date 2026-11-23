@@ -1,6 +1,6 @@
 import { Form } from "./ui/Form";
 import { childcareBody, childcareFrom } from "./ChildcareField";
-import { useCallback, useLayoutEffect, useRef, useState } from "react";
+import { useLayoutEffect, useRef, useState } from "react";
 import { Events } from "../api/events";
 import { bydays, isSimpleWeekly, isWeekly, weekdayCode, weeklyRule } from "../lib/rrule";
 import { useDirty } from "../lib/useDirty";
@@ -21,7 +21,6 @@ import { errorText, keptDatesOf } from "../lib/errors";
 import { useAction, type Action } from "../lib/useAction";
 import { useFocusHome, useLockedFocus } from "../lib/focusHome";
 import { KeptDates } from "./KeptDates";
-import { SavedStatus } from "./admin/SettingSwitch";
 import { useKeptRefusal } from "./keptRefusal";
 import { optionFieldOfError, validateEventOptions, type EventOptionValues, type OptionErrors } from "./eventOptionValues";
 import type { EventInput, VideoProvider, VideoReveal } from "../types";
@@ -55,8 +54,7 @@ export interface SeriesFields {
   remoteCapacity?: number | null;
 }
 
-// SeriesEditor is the one "Edit series" / "Edit event" form, used on the
-// group page and the event page (consistency rule, AGENTS.md).
+// SeriesEditor is the one "Edit series" / "Edit event" form, on the event page (DEC-161).
 export function SeriesEditor({
   series,
   idPrefix,
@@ -66,8 +64,6 @@ export function SeriesEditor({
   onClose,
   onRoomChanged,
   onAuthorityLost,
-  onSending,
-  held = false,
   action: shared,
   locked = false,
 }: {
@@ -77,19 +73,12 @@ export function SeriesEditor({
   // The original date of a single-date event's one occurrence. It turns on the
   // one-date Room control (M2.1b); a series gets the whole-series one (M2.1c).
   roomDate?: string;
-  // Part of the save, which stays on its way until it settles: the page's read after the save, so an editor that
-  // stays open (the group page's) never closes onto data older than what it sent. A rejection says the read
-  // failed; the editor's Refresh calls it again.
-  onSaved: () => void | Promise<void>;
+  onSaved: () => void;
   onClose?: () => void;
   // The room was booked or released (its own action, not part of Save).
   onRoomChanged?: () => void;
   // The kept-dates panel's read was refused: this person may no longer manage the event.
   onAuthorityLost?: () => void;
-  // The series request is on its way: the page holds this event's editors shut until it knows the answer.
-  onSending?: (request: Promise<unknown>) => void;
-  // The page does not yet show this event as it is since this editor's save: Close stays shut and Refresh is offered.
-  held?: boolean;
   // The page's run for this editor, so it can lock what shares the panel (the visibility control) while it runs.
   action?: Action;
   // Another run in the same panel is on its way.
@@ -144,17 +133,11 @@ export function SeriesEditor({
   const [moreOpen, setMoreOpen] = useState(true);
   const own = useAction();
   const action = shared ?? own;
-  // A save that worked finishes this editor once the page's read after it ends: one that stays open (the group
-  // page's) shows what it sent until closed.
   const [saved, setSaved] = useState(false);
-  const finished = saved && !action.running;
-  // Saved, but the page's read after it failed: what the page would open next may be older than the save.
-  const stale = finished && held;
-  const refresh = useAction();
   // Nothing in the form changes while a save is on its way or after one worked: the save sends what was there when
   // it began, so a later edit would be lost without a word.
   const frozen = action.running || locked || saved;
-  // Read when an answer lands (a Jitsi link): one landing on a locked or finished form is dropped. Set in save()
+  // Read when an answer lands (a Jitsi link): one landing on a locked or saved form is dropped. Set in save()
   // too, before the first render that disables the fields.
   const frozenNow = useRef(frozen);
   frozenNow.current = frozen;
@@ -166,60 +149,10 @@ export function SeriesEditor({
   // A refused option is focused once the save ends and the fields can take focus again, if focus is still in the form.
   const focusInvalid = useRef(false);
   const submit = useRef<HTMLButtonElement>(null);
-  const close = useRef<HTMLButtonElement>(null);
-  const refreshButton = useRef<HTMLButtonElement | null>(null);
-  // Holds Close and the saved lines, brought into view when focus moves there.
-  const outcome = useRef<HTMLDivElement>(null);
-  // Focus this editor put on the form because Close was off, to hand to Close once it is on. A press, a key or a
-  // scroll in the form is the person's own place there, which is left alone.
-  const waitsForClose = useRef(false);
-
-  const ownPlace = () => { waitsForClose.current = false; };
-
-  // A read that lands removes the Refresh button, whoever asked for it (this editor's Refresh or the page's own
-  // Try again): focus that was on it as it left the page goes to Close.
-  const refocus = useRef(false);
-
-  const refreshRef = useCallback((el: HTMLButtonElement | null) => {
-    if (el === null && refreshButton.current !== null && document.activeElement === refreshButton.current) refocus.current = true;
-
-    refreshButton.current = el;
-  }, []);
-
-  const againId = `s-again-${idPrefix}`;
   const kept = useKeptRefusal({ initial: null, submit, onRefused: setError, onAuthorityLost });
 
   const dirty = useDirty({ date, time, duration, recurring, days, tzid, title, description, location, rule, until, options });
   const { guard, markSaved } = useUnsavedChanges(dirty);
-
-  // Close (Refresh, if the page's read failed) is what is left to press once a save has finished the editor: focus
-  // still in the form goes there, and the saved lines come into view with it. While another save in the panel keeps
-  // Close off, focus waits on the form, where a save keeps it, and goes to Close once it can be pressed.
-  const showOutcome = (target: HTMLButtonElement | null) => {
-    const able = target !== null && !target.disabled;
-    waitsForClose.current = !able;
-    (able ? target : root.current)?.focus({ preventScroll: true });
-    outcome.current?.scrollIntoView?.({ block: "nearest" });
-  };
-
-  const closeOff = action.running || locked || stale;
-
-  useLayoutEffect(() => {
-    if (finished && root.current?.contains(document.activeElement)) showOutcome(stale ? refreshButton.current : close.current);
-    // Only when the save finishes; a later change of `stale` is the next effect's.
-  }, [finished, root]);
-
-  useLayoutEffect(() => {
-    if (stale || !refocus.current) return;
-    refocus.current = false;
-    showOutcome(close.current);
-  }, [stale]);
-  useLayoutEffect(() => {
-    if (!finished || closeOff || !waitsForClose.current) return;
-    waitsForClose.current = false;
-
-    if (document.activeElement === root.current) showOutcome(close.current);
-  }, [finished, closeOff, root]);
 
   useLayoutEffect(() => {
     if (frozen || !focusInvalid.current) return;
@@ -301,12 +234,11 @@ export function SeriesEditor({
     frozenNow.current = true;
     await action.run(async () => {
       try {
-        const request = Events.update(instance.eventId, body);
-        onSending?.(request);
-        await request;
+        await Events.update(instance.eventId, body);
         markSaved();
         setSaved(true);
         kept.close();
+        onSaved();
       } catch (err) {
         const msg = errorText(err, "We couldn't update the series.");
         const field = optionFieldOfError(err);
@@ -327,16 +259,11 @@ export function SeriesEditor({
 
         return false;
       }
-    }, { followUp: async () => { await onSaved(); } });
-  }
-
-  function reread() {
-    void refresh.run(async () => { await onSaved(); });
+    });
   }
 
   return (<>
-    <Form ref={root} tabIndex={-1} noValidate onSubmit={save} onPointerDown={ownPlace} onKeyDown={ownPlace} onWheel={ownPlace}
-      className="mt-3 space-y-4 border-t border-border pt-3">
+    <Form ref={root} tabIndex={-1} noValidate onSubmit={save} className="mt-3 space-y-4 border-t border-border pt-3">
       <p className="text-sm text-text-muted">
         This changes every future date that has not been edited on its own. Customized dates stay as they are. Dates
         the new schedule drops are cancelled, and people who were going or maybe are told.
@@ -381,31 +308,16 @@ export function SeriesEditor({
           errors={optionErrors}
         />
       </fieldset>
-      <div ref={outcome} className="space-y-4">
-        <FormActions>
-          {!finished && (
-            <Button ref={submit} variant="primary" layout="w-full sm:w-auto" type="submit" disabled={frozen}>
-              {action.running ? "Saving…" : "Save series"}
-            </Button>
-          )}
-          {onClose && (
-            <Button ref={close} variant="secondary" layout="w-full sm:w-auto" disabled={closeOff}
-              aria-describedby={finished && !stale ? againId : undefined} onClick={onClose}>
-              Close
-            </Button>
-          )}
-        </FormActions>
-        <SavedStatus ok={finished} error={null} />
-        {stale && <>
-          <FormError>{refresh.state.status === "failed"
-            ? "Your changes are saved, but we still couldn't refresh this page. Refresh to try again."
-            : "Your changes are saved, but we couldn't refresh this page. Refresh to keep editing."}</FormError>
-          <Button ref={refreshRef} variant="secondary" layout="w-full sm:w-auto" onClick={reread}>{refresh.running ? "Refreshing…" : "Refresh"}</Button>
-        </>}
-        {finished && !stale && onClose && (
-          <p id={againId} className="-mt-3 text-sm text-text-muted">To change more, close this and open it again.</p>
+      <FormActions>
+        <Button ref={submit} variant="primary" layout="w-full sm:w-auto" type="submit" disabled={frozen}>
+          {action.running ? "Saving…" : "Save series"}
+        </Button>
+        {onClose && (
+          <Button variant="secondary" layout="w-full sm:w-auto" disabled={action.running || locked} onClick={onClose}>
+            Close
+          </Button>
         )}
-      </div>
+      </FormActions>
     </Form>
     {/* After the form, never inside it: the panel's roster has forms of its own. */}
     {kept.refusal && <KeptDates key={kept.refusal.seq} eventId={instance.eventId} keptDates={kept.refusal.dates} onRefused={kept.refused} onClose={kept.close} />}
