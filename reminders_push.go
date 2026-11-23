@@ -183,9 +183,9 @@ func writePushReminderPlans(db *gorm.DB, occ *models.EventOccurrence, plans []pu
 		rows := make([]models.MessageRecipient, 0, len(plans))
 		at := map[uint]time.Time{}
 		for _, p := range plans {
-			row := models.MessageRecipient{MessageID: id, UserID: p.UserID, Channel: models.DeliveryPush, Status: models.RecipientQueued}
+			row := models.MessageRecipient{MessageID: id, UserID: p.UserID, Channel: models.DeliveryPush, Status: policy.RecipientSnapshotQueued.To()}
 			if p.Skip {
-				row.Status, row.Reason = models.RecipientSuppressed, pushWhyQuietHours
+				row.Status, row.Reason = policy.RecipientSnapshotSkipped.To(), pushWhyQuietHours
 			} else {
 				at[p.UserID] = p.At
 			}
@@ -264,10 +264,9 @@ func enqueuePushReminderJobs(tx *gorm.DB, messageID uint, at map[uint]time.Time)
 	}
 	// A queued row whose devices are all gone by now, as for an
 	// announcement, says so at once rather than waiting for the reaper.
-	return tx.Exec(`UPDATE message_recipients r SET status = ?, reason = ?, updated_at = now()
-		WHERE r.message_id = ? AND r.channel = ? AND r.status = ? AND r.user_id IN ?
-		AND NOT EXISTS (SELECT 1 FROM push_subscriptions d WHERE d.user_id = r.user_id)`,
-		models.RecipientSuppressed, pushWhyGone, messageID, models.DeliveryPush, models.RecipientQueued, people).Error
+	_, err := moveRecipientsWhere(tx, policy.RecipientPushNoDevice, map[string]any{"reason": pushWhyGone, "updated_at": gorm.Expr("now()")},
+		"r.message_id = ? AND r.user_id IN ? AND NOT EXISTS (SELECT 1 FROM push_subscriptions d WHERE d.user_id = r.user_id)", messageID, people)
+	return err
 }
 
 // pushReminderRecorder records a push reminder row as an announcement's

@@ -11,6 +11,7 @@ import (
 
 	"fold/internal/content"
 	"fold/internal/jobs"
+	"fold/internal/policy"
 	"fold/internal/push"
 	"fold/models"
 
@@ -110,7 +111,7 @@ func (a *App) messagePushRows(db *gorm.DB, m *models.Message, facts []recipientF
 	rows := []models.MessageRecipient{}
 	for _, id := range ids {
 		if on[id] {
-			rows = append(rows, models.MessageRecipient{MessageID: m.ID, UserID: id, Channel: models.DeliveryPush, Status: models.RecipientQueued})
+			rows = append(rows, models.MessageRecipient{MessageID: m.ID, UserID: id, Channel: models.DeliveryPush, Status: policy.RecipientSnapshotQueued.To()})
 		}
 	}
 	return rows, nil
@@ -142,28 +143,35 @@ func enqueueMessagePushes(tx *gorm.DB, messageID uint) error {
 	if _, err := jobs.EnqueueMany(tx, specs); err != nil {
 		return err
 	}
-	return tx.Exec(`UPDATE message_recipients r SET status = ?, reason = ?, updated_at = now()
-		WHERE r.message_id = ? AND r.channel = ? AND r.status = ?
-		AND NOT EXISTS (SELECT 1 FROM push_subscriptions d WHERE d.user_id = r.user_id)`,
-		models.RecipientSuppressed, pushWhyGone, messageID, models.DeliveryPush, models.RecipientQueued).Error
+	_, err := moveRecipientsWhere(tx, policy.RecipientPushNoDevice, map[string]any{"reason": pushWhyGone, "updated_at": gorm.Expr("now()")},
+		"r.message_id = ? AND NOT EXISTS (SELECT 1 FROM push_subscriptions d WHERE d.user_id = r.user_id)", messageID)
+	return err
 }
 
 // messagePushRecorder writes an announcement push's outcome on its row,
 // as recordPushIn does for a notification: a sent row is final, and any
 // other first outcome stays unless a later device takes it, which makes
 // the row sent. Only another device's job going back to wait for quiet
-// hours moves one device's miss back to queued (pushWaitIn).
+// hours moves one device's miss back to queued (pushWaitIn). status is the
+// outcome as the push path shared with notification deliveries says it
+// (policy.RecipientPushOutcome).
 func messagePushRecorder(id uint) pushRecorder {
 	return func(db *gorm.DB, status, reason string, now time.Time) error {
-		updates := map[string]any{"status": status, "reason": reason, "updated_at": time.Now()}
-		q := db.Model(&models.MessageRecipient{}).Where("id = ? AND channel = ?", id, models.DeliveryPush)
-		if status == models.RecipientSent {
-			updates["sent_at"] = now.UTC()
-			q = q.Where("status <> ?", models.RecipientSent)
-		} else {
-			q = q.Where("status = ?", models.RecipientQueued)
+		move, ok := policy.RecipientPushOutcome(status)
+		if !ok {
+			return fmt.Errorf("push row %d: %q is not a push outcome", id, status)
 		}
-		return q.Updates(updates).Error
+		fields := map[string]any{"reason": reason, "updated_at": time.Now()}
+		if move.To() == models.RecipientSent {
+			fields["sent_at"] = now.UTC()
+		}
+		// db is a transaction after a device miss and the plain handle for a
+		// send's own outcome; the write is its own transaction there, as a
+		// gorm write is, so a failed COMMIT is this call's error.
+		return inDefaultTransaction(db, func(tx *gorm.DB) error {
+			_, err := moveRecipient(tx, id, move, fields, "")
+			return err
+		})
 	}
 }
 
@@ -366,11 +374,9 @@ func pushWaitIn(ctx context.Context, tx *gorm.DB, rowID uint, opens time.Time, l
 		Scan(&account).Error; err != nil {
 		return err
 	}
-	if err := tx.Exec(`UPDATE message_recipients r SET status = ?, reason = ?, updated_at = now()
-		WHERE r.id = ? AND r.channel = ? AND (r.status = ? OR (r.status IN (?, ?) AND r.reason IN ?
-			AND EXISTS (SELECT 1 FROM users u WHERE u.id = r.user_id AND u.status = ?)))`,
-		models.RecipientQueued, pushWaitReason(opens, loc), rowID, models.DeliveryPush, models.RecipientQueued,
-		models.RecipientSuppressed, models.RecipientFailed, pushDeviceMisses, models.UserActive).Error; err != nil {
+	if _, err := moveRecipient(tx, rowID, policy.RecipientPushWaits, map[string]any{"reason": pushWaitReason(opens, loc), "updated_at": gorm.Expr("now()")},
+		"r.status = ? OR (r.reason IN ? AND EXISTS (SELECT 1 FROM users u WHERE u.id = r.user_id AND u.status = ?))",
+		models.RecipientQueued, pushDeviceMisses, models.UserActive); err != nil {
 		return err
 	}
 	return jobs.LaterIn(ctx, tx, opens)
@@ -488,10 +494,8 @@ func messagePushText(m *models.Message, vals map[string]string) (title, body str
 // (its devices were added after the snapshot, or its job stopped) is
 // suppressed, so a history never waits forever.
 func reapMessagePushes(db *gorm.DB, now time.Time) (int64, error) {
-	res := db.Exec(`UPDATE message_recipients r SET status = ?, reason = ?, updated_at = ?
-		WHERE r.channel = 'push' AND r.status = 'queued' AND r.updated_at < ?
-		AND NOT EXISTS (SELECT 1 FROM jobs j WHERE j.kind = ? AND j.status IN ('queued', 'running', 'failed')
+	return moveRecipientsWhere(db, policy.RecipientPushReaped, map[string]any{"reason": pushWhyStopped, "updated_at": now},
+		`r.updated_at < ? AND NOT EXISTS (SELECT 1 FROM jobs j WHERE j.kind = ? AND j.status IN ('queued', 'running', 'failed')
 			AND (j.payload->>?)::bigint = r.id)`,
-		models.RecipientSuppressed, pushWhyStopped, now, now.Add(-time.Hour), kindPushDeliver, pushJobRecipientField)
-	return res.RowsAffected, res.Error
+		now.Add(-time.Hour), kindPushDeliver, pushJobRecipientField)
 }

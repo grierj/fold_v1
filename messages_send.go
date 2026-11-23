@@ -254,10 +254,10 @@ func (a *App) preparedRowsIn(tx *gorm.DB, m *models.Message, au *audienceJSON, i
 	direct := map[uint]bool{}
 	var teens []uint
 	for _, f := range facts {
-		row := models.MessageRecipient{MessageID: m.ID, UserID: f.User.ID, Channel: models.DeliveryEmail, Status: models.RecipientQueued}
+		row := models.MessageRecipient{MessageID: m.ID, UserID: f.User.ID, Channel: models.DeliveryEmail, Status: policy.RecipientSnapshotQueued.To()}
 		direct[f.User.ID] = true
 		if f.Skip != "" {
-			row.Status, row.Reason, row.AudienceAdmittedAt = models.RecipientSuppressed, f.Skip, admitted
+			row.Status, row.Reason, row.AudienceAdmittedAt = policy.RecipientSnapshotSkipped.To(), f.Skip, admitted
 		} else {
 			row.Address = strings.TrimSpace(f.User.Email)
 			if f.User.AccountType == models.AccountTeen {
@@ -318,7 +318,7 @@ func revalidateSnapshotRows(rows []models.MessageRecipient, live map[uint]bool) 
 			continue
 		}
 		if !live[r.UserID] {
-			r.Status, r.Reason, r.Address, r.AudienceAdmittedAt = models.RecipientSuppressed, skipNotActive, "", nil
+			r.Status, r.Reason, r.Address, r.AudienceAdmittedAt = policy.RecipientSnapshotSkipped.To(), skipNotActive, "", nil
 		}
 		out = append(out, r)
 	}
@@ -370,9 +370,9 @@ func guardianCopyRows(db *gorm.DB, messageID uint, teens []uint, direct map[uint
 			continue
 		}
 		teen := *l.TeenUserID
-		row := models.MessageRecipient{MessageID: messageID, UserID: l.GuardianUserID, CopyOfUserID: &teen, Channel: models.DeliveryEmail, Status: models.RecipientQueued}
+		row := models.MessageRecipient{MessageID: messageID, UserID: l.GuardianUserID, CopyOfUserID: &teen, Channel: models.DeliveryEmail, Status: policy.RecipientSnapshotQueued.To()}
 		if f.Skip != "" {
-			row.Status, row.Reason = models.RecipientSuppressed, f.Skip
+			row.Status, row.Reason = policy.RecipientSnapshotSkipped.To(), f.Skip
 		} else {
 			row.Address = strings.TrimSpace(f.User.Email)
 		}
@@ -426,7 +426,10 @@ func (a *App) settleMessage(tx *gorm.DB, id uint) error {
 	if by[models.RecipientQueued] > 0 {
 		return nil
 	}
-	reached := by[models.RecipientSent] + by[models.RecipientDelivered] + by[models.RecipientBounced] + by[models.RecipientComplained]
+	reached := 0
+	for _, s := range policy.RecipientReachedStatuses() {
+		reached += by[s]
+	}
 	move, why := policy.MessageSettleSent, ""
 	if by[models.RecipientFailed] > 0 {
 		var first models.MessageRecipient
@@ -477,8 +480,8 @@ func (a *App) deliverMessageBatch(ctx context.Context, p messageBatchJob) error 
 	db := a.DB.WithContext(context.WithoutCancel(ctx))
 	log.Printf("message %d: giving up on a batch after its last attempt: %s", p.MessageID, jobs.CleanError(err))
 	return db.Transaction(func(tx *gorm.DB) error {
-		if err := tx.Model(&models.MessageRecipient{}).Where("id IN ? AND status = ? AND channel = ?", p.RecipientIDs, models.RecipientQueued, models.DeliveryEmail).
-			Updates(map[string]any{"status": models.RecipientFailed, "error": jobs.CleanError(err), "updated_at": time.Now()}).Error; err != nil {
+		if _, err := moveRecipientsWhere(tx, policy.RecipientBatchGivenUp, map[string]any{"error": jobs.CleanError(err), "updated_at": time.Now()},
+			"r.id IN ?", p.RecipientIDs); err != nil {
 			return err
 		}
 		return a.settleMessage(tx, p.MessageID)
@@ -553,7 +556,7 @@ func (a *App) deliverMessageBatchOnce(ctx context.Context, p messageBatchJob) er
 				return err
 			}
 			if reader == nil || !(reader.Status == models.UserActive || reader.Status == models.UserGuest && guestMayGet(messageCategory(&m))) {
-				return markRecipient(tx, row.ID, models.RecipientSuppressed, skipNotActive, "", "", false)
+				return markRecipient(tx, row.ID, policy.RecipientEmailSkipped, skipNotActive, "", "", false)
 			}
 			// D11: check the actual destination after claiming each row, including
 			// guardian copies and rows re-queued by apiRetryMessage (Try again).
@@ -576,13 +579,13 @@ func (a *App) deliverMessageBatchOnce(ctx context.Context, p messageBatchJob) er
 				}
 			}
 			if d.skip == skipNotActive {
-				return markRecipient(tx, row.ID, models.RecipientSuppressed, skipNotActive, "", "", false)
+				return markRecipient(tx, row.ID, policy.RecipientEmailSkipped, skipNotActive, "", "", false)
 			}
 			if off.Off(row.UserID, row.Address, optOut) {
-				return markRecipient(tx, row.ID, models.RecipientSuppressed, skipOptedOutOf(messageCategory(&m)), "", "", d.admitted)
+				return markRecipient(tx, row.ID, policy.RecipientEmailSkipped, skipOptedOutOf(messageCategory(&m)), "", "", d.admitted)
 			}
 			if d.skip != "" {
-				return markRecipient(tx, row.ID, models.RecipientSuppressed, d.skip, "", "", false)
+				return markRecipient(tx, row.ID, policy.RecipientEmailSkipped, d.skip, "", "", false)
 			}
 			if !dated {
 				if d.values, err = a.rowValues(tx, row, readers, au, time.Now()); err != nil {
@@ -597,18 +600,18 @@ func (a *App) deliverMessageBatchOnce(ctx context.Context, p messageBatchJob) er
 			res := sendTracked(ctx, sender, msg, blocked[mail.NormalizeAddress(row.Address)])
 			switch {
 			case res.outcome == sendSent:
-				return markRecipient(tx, row.ID, models.RecipientSent, "", res.providerID, "", d.admitted)
+				return markRecipient(tx, row.ID, policy.RecipientEmailSent, "", res.providerID, "", d.admitted)
 			case res.outcome == sendSuppressed:
 				// The same words the snapshot uses for these people.
 				why := skipNotWorking
 				if s := (*mail.ErrSuppressed)(nil); errors.As(res.err, &s) && s.Reason == models.SuppressComplaint {
 					why = skipComplained
 				}
-				return markRecipient(tx, row.ID, models.RecipientSuppressed, why, "", "", d.admitted)
+				return markRecipient(tx, row.ID, policy.RecipientEmailSkipped, why, "", "", d.admitted)
 			case res.outcome == sendNotConfigured:
-				return markRecipient(tx, row.ID, models.RecipientFailed, "", "", whyNoSender, d.admitted)
+				return markRecipient(tx, row.ID, policy.RecipientEmailFailed, "", "", whyNoSender, d.admitted)
 			case res.outcome == sendPermanent, last:
-				return markRecipient(tx, row.ID, models.RecipientFailed, "", "", jobs.CleanError(res.err), d.admitted)
+				return markRecipient(tx, row.ID, policy.RecipientEmailFailed, "", "", jobs.CleanError(res.err), d.admitted)
 			default:
 				return errors.Join(errStopBatch, res.err)
 			}
@@ -712,18 +715,19 @@ func (a *App) datedRowDecision(facts *dateFacts, m *models.Message, au audienceJ
 	return d, nil
 }
 
-// markRecipient records a claimed email row's outcome. admitted also records,
-// once, that the row's direct recipient passed the event audience's date
-// check at this send (isMessageRecipientIn).
-func markRecipient(tx *gorm.DB, id uint, status, reason, providerID, errText string, admitted bool) error {
-	updates := map[string]any{"status": status, "reason": reason, "provider_message_id": providerID, "error": errText, "updated_at": time.Now()}
-	if status == models.RecipientSent {
-		updates["sent_at"] = time.Now()
+// markRecipient records a claimed email row's outcome by move. admitted also
+// records, once, that the row's direct recipient passed the event audience's
+// date check at this send (isMessageRecipientIn).
+func markRecipient(tx *gorm.DB, id uint, move policy.RecipientMove, reason, providerID, errText string, admitted bool) error {
+	fields := map[string]any{"reason": reason, "provider_message_id": providerID, "error": errText, "updated_at": time.Now()}
+	if move.To() == models.RecipientSent {
+		fields["sent_at"] = time.Now()
 	}
 	if admitted {
-		updates["audience_admitted_at"] = gorm.Expr("COALESCE(audience_admitted_at, now())")
+		fields["audience_admitted_at"] = gorm.Expr("COALESCE(audience_admitted_at, now())")
 	}
-	return tx.Model(&models.MessageRecipient{}).Where("id = ? AND status = ?", id, models.RecipientQueued).Updates(updates).Error
+	_, err := moveRecipient(tx, id, move, fields, "")
+	return err
 }
 
 // batchSuppressions are the open suppression reasons on the batch's
@@ -865,8 +869,7 @@ func (a *App) reapMessages(ctx context.Context, now time.Time) error {
 	}
 	for _, id := range sending {
 		if err := db.Transaction(func(tx *gorm.DB) error {
-			if err := tx.Model(&models.MessageRecipient{}).Where("message_id = ? AND status = ? AND channel = ?", id, models.RecipientQueued, models.DeliveryEmail).
-				Updates(map[string]any{"status": models.RecipientFailed, "error": whyStopped, "updated_at": now}).Error; err != nil {
+			if _, err := moveRecipientsWhere(tx, policy.RecipientSendReaped, map[string]any{"error": whyStopped, "updated_at": now}, "r.message_id = ?", id); err != nil {
 				return err
 			}
 			return a.settleMessage(tx, id)
