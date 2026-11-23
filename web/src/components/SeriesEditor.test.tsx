@@ -657,6 +657,31 @@ describe("SeriesEditor once a save has finished it", () => {
     expect(close).toHaveFocus();
   });
 
+  it.each([
+    ["a key", (form: HTMLElement) => fireEvent.keyDown(form, { key: "PageUp" })],
+    ["a wheel scroll", (form: HTMLElement) => fireEvent.wheel(form)],
+    ["a press", (form: HTMLElement) => fireEvent.pointerDown(form)],
+  ])("leaves the form and the scroll alone once the person used %s while focus waited there for Close", async (_, use) => {
+    const scroll = vi.fn();
+    Element.prototype.scrollIntoView = scroll;
+    const props = { series: single, idPrefix: "place", onSaved: () => {}, onClose: () => {} };
+    const view = render(<SeriesEditor {...props} held />);
+    await userEvent.click(screen.getByRole("button", { name: "Save series" }));
+    const refresh = await screen.findByRole("button", { name: "Refresh" });
+    view.rerender(<SeriesEditor {...props} held locked />);
+    refresh.focus();
+    view.rerender(<SeriesEditor {...props} locked />);
+    const close = screen.getByRole("button", { name: "Close" });
+    const form = close.closest("form")!;
+    expect(document.activeElement).toBe(form);
+    use(form);
+    scroll.mockClear();
+    view.rerender(<SeriesEditor {...props} />);
+    expect(close).toBeEnabled();
+    expect(document.activeElement).toBe(form);
+    expect(scroll).not.toHaveBeenCalled();
+  });
+
   it("leaves focus the person put on the form when another save in the panel ends", async () => {
     const scroll = vi.fn();
     Element.prototype.scrollIntoView = scroll;

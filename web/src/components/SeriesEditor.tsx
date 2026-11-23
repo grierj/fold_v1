@@ -170,9 +170,12 @@ export function SeriesEditor({
   const refreshButton = useRef<HTMLButtonElement | null>(null);
   // Holds Close and the saved lines, brought into view when focus moves there.
   const outcome = useRef<HTMLDivElement>(null);
-  // Focus this editor put on the form because Close was off, to hand to Close once it is on. A press in the form
-  // is the person's own focus there, which is left alone.
+  // Focus this editor put on the form because Close was off, to hand to Close once it is on. A press, a key or a
+  // scroll in the form is the person's own place there, which is left alone.
   const waitsForClose = useRef(false);
+
+  const ownPlace = () => { waitsForClose.current = false; };
+
   // A read that lands removes the Refresh button, whoever asked for it (this editor's Refresh or the page's own
   // Try again): focus that was on it as it left the page goes to Close.
   const refocus = useRef(false);
@@ -332,7 +335,7 @@ export function SeriesEditor({
   }
 
   return (<>
-    <Form ref={root} tabIndex={-1} noValidate onSubmit={save} onPointerDown={() => { waitsForClose.current = false; }}
+    <Form ref={root} tabIndex={-1} noValidate onSubmit={save} onPointerDown={ownPlace} onKeyDown={ownPlace} onWheel={ownPlace}
       className="mt-3 space-y-4 border-t border-border pt-3">
       <p className="text-sm text-text-muted">
         This changes every future date that has not been edited on its own. Customized dates stay as they are. Dates
