@@ -201,6 +201,9 @@ export function SeriesEditor({
     await action.run(async () => {
       try {
         await Events.update(instance.eventId, body);
+        markSaved();
+        kept.close();
+        onSaved();
       } catch (err) {
         const msg = errorText(err, "We couldn't update the series.");
         const field = optionFieldOfError(err);
@@ -221,10 +224,6 @@ export function SeriesEditor({
 
         return false;
       }
-
-      markSaved();
-      kept.close();
-      onSaved();
     });
   }
 

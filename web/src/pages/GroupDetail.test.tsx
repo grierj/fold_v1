@@ -1566,6 +1566,21 @@ describe("the group visibility review", () => {
     await act(async () => { again.resolve(impact("public", A)); await again.promise; });
   });
 
+  it("a failed save is not shown again after Cancel and Edit group", async () => {
+    vi.mocked(Groups.update).mockRejectedValueOnce(new ApiError(500, "private", { code: "server_error" }));
+    const dialog = await openReview();
+    vi.mocked(Groups.visibilityImpact).mockResolvedValue({ ...impact("public", A), tightened: [] });
+    await userEvent.click(within(dialog).getByRole("button", { name: "Cancel" }));
+    await userEvent.click(screen.getByRole("radio", { name: /^Private/ }));
+    await userEvent.click(screen.getByRole("button", { name: "Save group" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("We couldn't save your changes.");
+    await userEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    await userEvent.click(await screen.findByRole("button", { name: "More group actions" }));
+    await userEvent.click(screen.getByRole("menuitem", { name: "Edit group" }));
+    expect(await screen.findByLabelText("Group name")).toHaveValue("Family group");
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
   it("Cancel from the keyboard lands on Save group with the draft kept", async () => {
     const dialog = await openReview();
     expect(document.activeElement).toBe(within(dialog).getByRole("heading", { name: "Making the group invite-only changes some events" }));
