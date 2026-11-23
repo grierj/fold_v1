@@ -44,8 +44,8 @@ it("says nothing needs attention when no task failed, never in red", () => {
 it("shows each failed task in plain words, with the error folded away", () => {
   render(<Harness initial={[job(1), job(2, { kind: "message.send", label: "Sending a message", runsDaily: false, attempts: 1 })]} more />);
   expect(screen.getByRole("heading", { name: "Adding upcoming event dates" })).toBeInTheDocument();
-  expect(screen.getByText(/^Gave up .* after 5 tries\.$/)).toBeInTheDocument();
-  expect(screen.getByText(/^Gave up .* after 1 try\.$/)).toBeInTheDocument();
+  expect(screen.getByText(/^Stopped .*\. Attempts used: 5\.$/)).toBeInTheDocument();
+  expect(screen.getByText(/^Stopped .*\. Attempts used: 1\.$/)).toBeInTheDocument();
   // Only the daily one reassures that it runs again by itself.
   expect(screen.getAllByText(/runs again tomorrow by itself/)).toHaveLength(1);
   expect(screen.getByText(/^Retry now to try again, or dismiss it if you don.t need it\.$/)).toBeInTheDocument();

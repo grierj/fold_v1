@@ -1,7 +1,9 @@
 // Package jobs runs background work from the jobs table (M3.1, PLAN 5.5).
 // The worker lives in the same binary as the server. Workers claim due jobs
 // with FOR UPDATE SKIP LOCKED, so any number of app processes can share the
-// table and never run one job twice. A failed attempt retries with
+// table and no two claim a job at the same moment. A worker whose lease ran out
+// can still be running when another takes the job back, so a handler must be
+// safe to run twice (Kind). A failed attempt retries with
 // exponential backoff and jitter; after its kind's MaxAttempts the job is
 // dead and waits for an admin on the System page.
 package jobs
@@ -174,9 +176,10 @@ type Runner struct {
 	Lease time.Duration
 	// OnDead, when set, is called once after a job's move to dead lands (it
 	// ran out of attempts, its worker stopped while running it, or its kind
-	// went unknown past the grace). errText is the CleanError text the row
-	// keeps. It is not called for a retry, Later, Requeued or success, nor
-	// when this claim no longer held the job. It runs after the dead UPDATE has
+	// went unknown past the grace). attempts is the retry budget used
+	// (AttemptsUsed). errText is the CleanError text the row keeps. It is not
+	// called for a retry, Later, Requeued or success, nor when this claim no
+	// longer held the job. It runs after the dead UPDATE has
 	// committed, outside that transaction, so a process that dies in between
 	// loses the call: the job is still dead on the System list, so the hook
 	// is a notice, not the record. A panic in it is recovered and logged and
@@ -412,7 +415,7 @@ func (r *Runner) finish(job claimed, runErr error, final bool) error {
 	case final || job.Attempts >= job.MaxAttempts:
 		dead = true
 		msg = CleanError(runErr)
-		log.Printf("jobs: %s #%d is dead after %d attempts: %s", job.Kind, job.ID, job.Attempts, msg)
+		log.Printf("jobs: %s #%d is dead (attempts used: %d): %s", job.Kind, job.ID, AttemptsUsed(job.Attempts, job.MaxAttempts), msg)
 		updates = map[string]any{"status": models.JobDead, "locked_at": nil, "last_error": msg, "updated_at": time.Now()}
 	default:
 		msg = CleanError(runErr)
@@ -441,8 +444,13 @@ func (r *Runner) callOnDead(job claimed, msg string) {
 			log.Printf("jobs: the dead-job hook for %s #%d panicked: %v", job.Kind, job.ID, p)
 		}
 	}()
-	r.OnDead(job.ID, job.Kind, job.Attempts, msg)
+	r.OnDead(job.ID, job.Kind, AttemptsUsed(job.Attempts, job.MaxAttempts), msg)
 }
+
+// AttemptsUsed caps the claim count at the job's retry budget. A worker can
+// stop after claiming work but before starting its handler, and a recovery
+// claim past the budget can mark the job dead without spending another attempt.
+func AttemptsUsed(attempts, maxAttempts int) int { return min(attempts, maxAttempts) }
 
 var emailLike = regexp.MustCompile(`[^\s<>"'(),;:]+@[^\s<>"'(),;:]+`)
 

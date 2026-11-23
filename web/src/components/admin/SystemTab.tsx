@@ -10,8 +10,6 @@ import { EmptyState } from "../ui/EmptyState";
 import { FormError } from "../ui/Field";
 import { Skeleton } from "../ui/Skeleton";
 
-const tries = (n: number) => `${n} ${n === 1 ? "try" : "tries"}`;
-
 // One calm paragraph about email: counts only, never a recipient or error
 // text. Each sentence names its noun and says what happens next; the retry
 // hint points at a dead notify.deliver task only when one is listed.
@@ -92,7 +90,7 @@ function JobRow({ job, onDone }: { job: AdminJob; onDone: (id: number, message: 
   return (
     <li className="bg-surface rounded-lg border border-border p-6 space-y-3">
       <h3 className="font-bold wrap-anywhere">{job.label}</h3>
-      <p className="text-sm text-text-muted">Gave up {formatWhen(job.failedAt)} after {tries(job.attempts)}.</p>
+      <p className="text-sm text-text-muted">Stopped {lowerLead(formatWhen(job.failedAt))}. Attempts used: {job.attempts}.</p>
       <p className="text-sm">
         {job.runsDaily
           ? <>This runs again tomorrow by itself, so you don&rsquo;t have to do anything.</>
