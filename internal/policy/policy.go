@@ -134,7 +134,7 @@ const (
 // to. Only people who manage the group may send a status; the status it already
 // has is no move. Leaders may archive their own group; admins may also
 // approve, reject and reactivate. Nobody moves a group back to pending
-// (Grier, 2026-11-22). Permission is judged first, so a leader asking for
+// (DEC-160). Permission is judged first, so a leader asking for
 // pending is refused as forbidden, like any other move they may not make.
 func DecideGroupStatus(p *Person, r Rel, from, to string) GroupStatusDecision {
 	if !CanManageGroup(p, r) {
