@@ -224,10 +224,7 @@ function EventDetailContent() {
         </div>
         {canManage && (
           <div className="flex w-full gap-2 sm:w-auto sm:shrink-0">
-            <Button ref={editButton} variant="secondary" layout="flex-1 sm:flex-none" aria-expanded={editing} disabled={panelBusy} onClick={() => {
-              if (!editing) seriesAction.reset();
-              setEditing((v) => !v);
-            }}>
+            <Button ref={editButton} variant="secondary" layout="flex-1 sm:flex-none" aria-expanded={editing} disabled={panelBusy} onClick={() => setEditing((v) => !v)}>
               {event.recurrenceRule ? "Edit series" : "Edit event"}
             </Button>
             <Menu label="More event actions" items={[

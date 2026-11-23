@@ -174,10 +174,7 @@ function EventRow({
           // The event page opens its Manage sign-ups panel for this date (DEC-99).
           { label: "Manage sign-ups", onSelect: () => navigate(`/events/${instance.eventId}?manage=${instance.date}`) },
           ...(canCompose ? [{ label: EMAIL_GOING, onSelect: () => navigate(composePath({ occurrence: instance.id })) }] : []),
-          { label: instance.recurrenceRule ? "Edit series" : "Edit event", onSelect: () => {
-            if (editor !== "series") seriesAction.reset();
-            setEditor(editor === "series" ? null : "series");
-          }, disabled: panelBusy },
+          { label: instance.recurrenceRule ? "Edit series" : "Edit event", onSelect: () => setEditor(editor === "series" ? null : "series"), disabled: panelBusy },
           { label: cancelling ? "Cancelling…" : "Cancel this date", onSelect: () => void cancel(), danger: true, disabled: cancelling },
         ]}
       /></div>}

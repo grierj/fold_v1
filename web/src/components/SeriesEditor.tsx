@@ -157,13 +157,10 @@ export function SeriesEditor({
   const dirty = useDirty({ date, time, duration, recurring, days, tzid, title, description, location, rule, until, options });
   const { guard, markSaved } = useUnsavedChanges(dirty);
 
-  // Close is what is left to press once a save has finished the editor: focus still in the form (or lost) goes there.
+  // Close is what is left to press once a save has finished the editor: focus still in the form goes there.
   const settled = finished && !action.running;
   useLayoutEffect(() => {
-    if (!settled) return;
-    const active = document.activeElement;
-
-    if (!active || active === document.body || root.current?.contains(active)) close.current?.focus({ preventScroll: true });
+    if (settled && root.current?.contains(document.activeElement)) close.current?.focus({ preventScroll: true });
   }, [settled, root]);
 
   useLayoutEffect(() => {
