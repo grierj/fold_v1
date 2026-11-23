@@ -6,6 +6,7 @@
     "date": "D+7",
     "dateUrl": "/events/1/dates/D+7",
     "title": "Open Study",
+    "description": "Open Study description",
     "location": "Open Hall",
     "startsAt": "D+7T19:00:00Z",
     "endsAt": "D+7T20:00:00Z",
@@ -24,7 +25,47 @@
     "canBlock": false,
     "visibility": "public",
     "groupId": 1,
-    "groupName": "Open Group"
+    "groupName": "Open Group",
+    "groupHeader": {
+      "imageUrl": "",
+      "coverFocalX": 50,
+      "coverFocalY": 50,
+      "leaderName": "Lee Leader"
+    },
+    "attendance": {
+      "registrations": {
+        "going": 1,
+        "maybe": 1,
+        "waitlisted": 1
+      }
+    },
+    "seats": {
+      "inPerson": {
+        "capacity": 2,
+        "used": 2,
+        "left": 0
+      },
+      "waitlistEnabled": true,
+      "childcare": {
+        "full": false
+      }
+    },
+    "remoteRsvp": "none",
+    "series": {
+      "recurrenceRule": "FREQ=WEEKLY;COUNT=4",
+      "canAnswerSeries": false,
+      "usual": {
+        "startsLocal": "D+7T19:00",
+        "endsLocal": "D+7T20:00",
+        "durationMinutes": 60,
+        "location": "Open Hall",
+        "room": null,
+        "capacity": 2,
+        "remoteCapacity": null,
+        "visibility": "public"
+      },
+      "changes": []
+    }
   }
 }
 ### signed out GET /api/v1/events/1/dates/D+14 -> 404
@@ -45,6 +86,7 @@
     "date": "D+28",
     "dateUrl": "/events/1/dates/D+28",
     "title": "Renamed Study",
+    "description": "Open Study description",
     "location": "Back Room",
     "startsAt": "D+28T19:00:00Z",
     "endsAt": "D+28T20:30:00Z",
@@ -63,7 +105,50 @@
     "canBlock": false,
     "visibility": "public",
     "groupId": 1,
-    "groupName": "Open Group"
+    "groupName": "Open Group",
+    "groupHeader": {
+      "imageUrl": "",
+      "coverFocalX": 50,
+      "coverFocalY": 50,
+      "leaderName": "Lee Leader"
+    },
+    "attendance": {
+      "registrations": {
+        "going": 0,
+        "maybe": 0,
+        "waitlisted": 0
+      }
+    },
+    "seats": {
+      "inPerson": {
+        "capacity": 2,
+        "used": 0,
+        "left": 2
+      },
+      "waitlistEnabled": true,
+      "childcare": {
+        "full": false
+      }
+    },
+    "remoteRsvp": "none",
+    "series": {
+      "recurrenceRule": "FREQ=WEEKLY;COUNT=4",
+      "canAnswerSeries": false,
+      "usual": {
+        "startsLocal": "D+28T19:00",
+        "endsLocal": "D+28T20:00",
+        "durationMinutes": 60,
+        "location": "Open Hall",
+        "room": null,
+        "capacity": 2,
+        "remoteCapacity": null,
+        "visibility": "public"
+      },
+      "changes": [
+        "duration",
+        "place"
+      ]
+    }
   }
 }
 ### signed out GET /api/v1/events/2/dates/D+8 -> 200
@@ -74,6 +159,7 @@
     "date": "D+8",
     "dateUrl": "/events/2/dates/D+8",
     "title": "Opened Event",
+    "description": "Opened Event description",
     "location": "",
     "startsAt": "D+8T19:00:00Z",
     "endsAt": "D+8T20:00:00Z",
@@ -92,7 +178,28 @@
     "canDecline": false,
     "canBlock": false,
     "visibility": "public",
-    "hostedBy": "Fold"
+    "hostedBy": "Fold",
+    "attendance": {
+      "registrations": {
+        "going": 0,
+        "maybe": 0,
+        "waitlisted": 0
+      }
+    },
+    "seats": {
+      "inPerson": {
+        "capacity": null,
+        "used": 0,
+        "left": null
+      },
+      "waitlistEnabled": false
+    },
+    "remoteRsvp": "none",
+    "series": {
+      "recurrenceRule": "",
+      "canAnswerSeries": false,
+      "changes": []
+    }
   }
 }
 ### signed out GET /api/v1/events/2/dates/D+15 -> 200
@@ -103,6 +210,7 @@
     "date": "D+15",
     "dateUrl": "/events/2/dates/D+15",
     "title": "Opened Event",
+    "description": "Opened Event description",
     "location": "",
     "startsAt": "D+15T19:00:00Z",
     "endsAt": "D+15T20:00:00Z",
@@ -121,7 +229,28 @@
     "canDecline": false,
     "canBlock": false,
     "visibility": "public",
-    "hostedBy": "Fold"
+    "hostedBy": "Fold",
+    "attendance": {
+      "registrations": {
+        "going": 0,
+        "maybe": 0,
+        "waitlisted": 0
+      }
+    },
+    "seats": {
+      "inPerson": {
+        "capacity": null,
+        "used": 0,
+        "left": null
+      },
+      "waitlistEnabled": false
+    },
+    "remoteRsvp": "none",
+    "series": {
+      "recurrenceRule": "",
+      "canAnswerSeries": false,
+      "changes": []
+    }
   }
 }
 ### signed out GET /api/v1/events/3/dates/D+9 -> 404
@@ -155,7 +284,34 @@
     "canBlock": false,
     "visibility": "public",
     "groupId": 1,
-    "groupName": "Open Group"
+    "groupName": "Open Group",
+    "groupHeader": {
+      "imageUrl": "",
+      "coverFocalX": 50,
+      "coverFocalY": 50,
+      "leaderName": "Lee Leader"
+    },
+    "attendance": {
+      "registrations": {
+        "going": 1,
+        "maybe": 0,
+        "waitlisted": 0
+      }
+    },
+    "seats": {
+      "inPerson": {
+        "capacity": null,
+        "used": 1,
+        "left": null
+      },
+      "remote": {
+        "capacity": null,
+        "used": 0,
+        "left": null
+      },
+      "waitlistEnabled": false
+    },
+    "remoteRsvp": "offered"
   }
 }
 ### signed out GET /api/v1/events/4/dates/D+10 -> 200
@@ -166,6 +322,7 @@
     "date": "D+10",
     "dateUrl": "/events/4/dates/D+10",
     "title": "Church Potluck",
+    "description": "Church Potluck description",
     "location": "Fellowship Hall",
     "startsAt": "D+10T19:00:00Z",
     "endsAt": "D+10T20:00:00Z",
@@ -183,7 +340,33 @@
     "canDecline": false,
     "canBlock": false,
     "visibility": "public",
-    "hostedBy": "Fold"
+    "hostedBy": "Fold",
+    "attendance": {
+      "registrations": {
+        "going": 1,
+        "maybe": 1,
+        "waitlisted": 0
+      }
+    },
+    "seats": {
+      "inPerson": {
+        "capacity": null,
+        "used": 1,
+        "left": null
+      },
+      "remote": {
+        "capacity": null,
+        "used": 0,
+        "left": null
+      },
+      "waitlistEnabled": false
+    },
+    "remoteRsvp": "offered",
+    "series": {
+      "recurrenceRule": "",
+      "canAnswerSeries": false,
+      "changes": []
+    }
   }
 }
 ### signed out GET /api/v1/events/5/dates/D+11 -> 404
@@ -199,6 +382,7 @@
     "date": "D+7",
     "dateUrl": "/events/1/dates/D+7",
     "title": "Open Study",
+    "description": "Open Study description",
     "location": "Open Hall",
     "startsAt": "D+7T19:00:00Z",
     "endsAt": "D+7T20:00:00Z",
@@ -218,6 +402,7 @@
     "canBlock": false,
     "visibility": "public",
     "canRegister": true,
+    "canManage": true,
     "groupId": 1,
     "groupName": "Open Group",
     "reminders": {
@@ -227,6 +412,66 @@
       "push": true,
       "pushDueAt": "D+7T17:00:00Z",
       "messages": []
+    },
+    "groupHeader": {
+      "imageUrl": "",
+      "coverFocalX": 50,
+      "coverFocalY": 50,
+      "leaderName": "Lee Leader"
+    },
+    "attendance": {
+      "registrations": {
+        "declined": 1,
+        "going": 1,
+        "maybe": 1,
+        "waitlisted": 1
+      },
+      "attendees": [
+        {
+          "name": "Mia Member",
+          "status": "going",
+          "guestCount": 1
+        },
+        {
+          "name": "Ivy Invited",
+          "status": "maybe",
+          "guestCount": 0
+        }
+      ]
+    },
+    "seats": {
+      "inPerson": {
+        "capacity": 2,
+        "used": 2,
+        "left": 0
+      },
+      "waitlistEnabled": true,
+      "childcare": {
+        "full": false,
+        "totals": {
+          "capacity": null,
+          "used": 0,
+          "left": null
+        }
+      }
+    },
+    "remoteRsvp": "none",
+    "series": {
+      "recurrenceRule": "FREQ=WEEKLY;COUNT=4",
+      "upcomingDates": 3,
+      "coveredDates": 0,
+      "canAnswerSeries": true,
+      "usual": {
+        "startsLocal": "D+7T19:00",
+        "endsLocal": "D+7T20:00",
+        "durationMinutes": 60,
+        "location": "Open Hall",
+        "room": null,
+        "capacity": 2,
+        "remoteCapacity": null,
+        "visibility": "public"
+      },
+      "changes": []
     }
   }
 }
@@ -243,6 +488,7 @@
     "date": "D+21",
     "dateUrl": "/events/1/dates/D+21",
     "title": "Open Study",
+    "description": "Open Study description",
     "location": "Open Hall",
     "startsAt": "D+21T19:00:00Z",
     "endsAt": "D+21T20:00:00Z",
@@ -262,6 +508,7 @@
     "canBlock": false,
     "visibility": "invite_only",
     "canRegister": true,
+    "canManage": true,
     "groupId": 1,
     "groupName": "Open Group",
     "reminders": {
@@ -271,6 +518,63 @@
       "push": true,
       "pushDueAt": "D+21T17:00:00Z",
       "messages": []
+    },
+    "groupHeader": {
+      "imageUrl": "",
+      "coverFocalX": 50,
+      "coverFocalY": 50,
+      "leaderName": "Lee Leader"
+    },
+    "attendance": {
+      "registrations": {
+        "declined": 0,
+        "going": 1,
+        "maybe": 0,
+        "waitlisted": 0
+      },
+      "attendees": [
+        {
+          "name": "Ivy Invited",
+          "status": "going",
+          "guestCount": 0
+        }
+      ]
+    },
+    "seats": {
+      "inPerson": {
+        "capacity": 2,
+        "used": 1,
+        "left": 1
+      },
+      "waitlistEnabled": true,
+      "childcare": {
+        "full": false,
+        "totals": {
+          "capacity": null,
+          "used": 0,
+          "left": null
+        }
+      }
+    },
+    "remoteRsvp": "none",
+    "series": {
+      "recurrenceRule": "FREQ=WEEKLY;COUNT=4",
+      "upcomingDates": 3,
+      "coveredDates": 0,
+      "canAnswerSeries": true,
+      "usual": {
+        "startsLocal": "",
+        "endsLocal": "",
+        "durationMinutes": 60,
+        "location": "Open Hall",
+        "room": null,
+        "capacity": 2,
+        "remoteCapacity": null,
+        "visibility": "public"
+      },
+      "changes": [
+        "visibility"
+      ]
     }
   }
 }
@@ -282,6 +586,7 @@
     "date": "D+28",
     "dateUrl": "/events/1/dates/D+28",
     "title": "Renamed Study",
+    "description": "Open Study description",
     "location": "Back Room",
     "startsAt": "D+28T19:00:00Z",
     "endsAt": "D+28T20:30:00Z",
@@ -301,6 +606,7 @@
     "canBlock": false,
     "visibility": "public",
     "canRegister": true,
+    "canManage": true,
     "groupId": 1,
     "groupName": "Open Group",
     "reminders": {
@@ -310,6 +616,57 @@
       "push": true,
       "pushDueAt": "D+28T17:00:00Z",
       "messages": []
+    },
+    "groupHeader": {
+      "imageUrl": "",
+      "coverFocalX": 50,
+      "coverFocalY": 50,
+      "leaderName": "Lee Leader"
+    },
+    "attendance": {
+      "registrations": {
+        "declined": 0,
+        "going": 0,
+        "maybe": 0,
+        "waitlisted": 0
+      }
+    },
+    "seats": {
+      "inPerson": {
+        "capacity": 2,
+        "used": 0,
+        "left": 2
+      },
+      "waitlistEnabled": true,
+      "childcare": {
+        "full": false,
+        "totals": {
+          "capacity": null,
+          "used": 0,
+          "left": null
+        }
+      }
+    },
+    "remoteRsvp": "none",
+    "series": {
+      "recurrenceRule": "FREQ=WEEKLY;COUNT=4",
+      "upcomingDates": 3,
+      "coveredDates": 0,
+      "canAnswerSeries": true,
+      "usual": {
+        "startsLocal": "D+28T19:00",
+        "endsLocal": "D+28T20:00",
+        "durationMinutes": 60,
+        "location": "Open Hall",
+        "room": null,
+        "capacity": 2,
+        "remoteCapacity": null,
+        "visibility": "public"
+      },
+      "changes": [
+        "duration",
+        "place"
+      ]
     }
   }
 }
@@ -321,6 +678,7 @@
     "date": "D+8",
     "dateUrl": "/events/2/dates/D+8",
     "title": "Opened Event",
+    "description": "Opened Event description",
     "location": "Secret Room",
     "startsAt": "D+8T19:00:00Z",
     "endsAt": "D+8T20:00:00Z",
@@ -340,6 +698,7 @@
     "canBlock": false,
     "visibility": "public",
     "canRegister": true,
+    "canManage": true,
     "groupId": 2,
     "groupName": "Hidden Group",
     "reminders": {
@@ -349,6 +708,34 @@
       "push": true,
       "pushDueAt": "D+8T17:00:00Z",
       "messages": []
+    },
+    "groupHeader": {
+      "imageUrl": "",
+      "coverFocalX": 50,
+      "coverFocalY": 50,
+      "leaderName": "Lee Leader"
+    },
+    "attendance": {
+      "registrations": {
+        "declined": 0,
+        "going": 0,
+        "maybe": 0,
+        "waitlisted": 0
+      }
+    },
+    "seats": {
+      "inPerson": {
+        "capacity": null,
+        "used": 0,
+        "left": null
+      },
+      "waitlistEnabled": false
+    },
+    "remoteRsvp": "none",
+    "series": {
+      "recurrenceRule": "",
+      "canAnswerSeries": false,
+      "changes": []
     }
   }
 }
@@ -360,6 +747,7 @@
     "date": "D+15",
     "dateUrl": "/events/2/dates/D+15",
     "title": "Opened Event",
+    "description": "Opened Event description",
     "location": "Secret Room",
     "startsAt": "D+15T19:00:00Z",
     "endsAt": "D+15T20:00:00Z",
@@ -379,6 +767,7 @@
     "canBlock": false,
     "visibility": "public",
     "canRegister": true,
+    "canManage": true,
     "groupId": 2,
     "groupName": "Hidden Group",
     "reminders": {
@@ -388,6 +777,34 @@
       "push": true,
       "pushDueAt": "D+15T17:00:00Z",
       "messages": []
+    },
+    "groupHeader": {
+      "imageUrl": "",
+      "coverFocalX": 50,
+      "coverFocalY": 50,
+      "leaderName": "Lee Leader"
+    },
+    "attendance": {
+      "registrations": {
+        "declined": 0,
+        "going": 0,
+        "maybe": 0,
+        "waitlisted": 0
+      }
+    },
+    "seats": {
+      "inPerson": {
+        "capacity": null,
+        "used": 0,
+        "left": null
+      },
+      "waitlistEnabled": false
+    },
+    "remoteRsvp": "none",
+    "series": {
+      "recurrenceRule": "",
+      "canAnswerSeries": false,
+      "changes": []
     }
   }
 }
@@ -399,6 +816,7 @@
     "date": "D+9",
     "dateUrl": "/events/3/dates/D+9",
     "title": "Private Event",
+    "description": "Private Event description",
     "location": "Private Porch",
     "startsAt": "D+9T19:00:00Z",
     "endsAt": "D+9T20:00:00Z",
@@ -418,6 +836,7 @@
     "canBlock": false,
     "visibility": "private",
     "canRegister": true,
+    "canManage": true,
     "groupId": 1,
     "groupName": "Open Group",
     "reminders": {
@@ -427,6 +846,39 @@
       "push": true,
       "pushDueAt": "D+9T17:00:00Z",
       "messages": []
+    },
+    "groupHeader": {
+      "imageUrl": "",
+      "coverFocalX": 50,
+      "coverFocalY": 50,
+      "leaderName": "Lee Leader"
+    },
+    "attendance": {
+      "registrations": {
+        "declined": 0,
+        "going": 0,
+        "maybe": 0,
+        "waitlisted": 0
+      }
+    },
+    "seats": {
+      "inPerson": {
+        "capacity": null,
+        "used": 0,
+        "left": null
+      },
+      "remote": {
+        "capacity": null,
+        "used": 0,
+        "left": null
+      },
+      "waitlistEnabled": false
+    },
+    "remoteRsvp": "offered",
+    "series": {
+      "recurrenceRule": "",
+      "canAnswerSeries": false,
+      "changes": []
     }
   }
 }
@@ -438,6 +890,7 @@
     "date": "D+16",
     "dateUrl": "/events/3/dates/D+16",
     "title": "Private Event",
+    "description": "Private Event description",
     "location": "Private Porch",
     "startsAt": "D+16T19:00:00Z",
     "endsAt": "D+16T20:00:00Z",
@@ -457,6 +910,7 @@
     "canBlock": false,
     "visibility": "public",
     "canRegister": true,
+    "canManage": true,
     "groupId": 1,
     "groupName": "Open Group",
     "reminders": {
@@ -466,6 +920,46 @@
       "push": true,
       "pushDueAt": "D+16T17:00:00Z",
       "messages": []
+    },
+    "groupHeader": {
+      "imageUrl": "",
+      "coverFocalX": 50,
+      "coverFocalY": 50,
+      "leaderName": "Lee Leader"
+    },
+    "attendance": {
+      "registrations": {
+        "declined": 0,
+        "going": 1,
+        "maybe": 0,
+        "waitlisted": 0
+      },
+      "attendees": [
+        {
+          "name": "Sam Stranger",
+          "status": "going",
+          "guestCount": 0
+        }
+      ]
+    },
+    "seats": {
+      "inPerson": {
+        "capacity": null,
+        "used": 1,
+        "left": null
+      },
+      "remote": {
+        "capacity": null,
+        "used": 0,
+        "left": null
+      },
+      "waitlistEnabled": false
+    },
+    "remoteRsvp": "offered",
+    "series": {
+      "recurrenceRule": "",
+      "canAnswerSeries": false,
+      "changes": []
     }
   }
 }
@@ -477,6 +971,7 @@
     "date": "D+10",
     "dateUrl": "/events/4/dates/D+10",
     "title": "Church Potluck",
+    "description": "Church Potluck description",
     "location": "Fellowship Hall",
     "startsAt": "D+10T19:00:00Z",
     "endsAt": "D+10T20:00:00Z",
@@ -496,6 +991,7 @@
     "canBlock": false,
     "visibility": "public",
     "canRegister": true,
+    "canManage": true,
     "hostedBy": "Fold",
     "reminders": {
       "minutes": 1440,
@@ -504,6 +1000,45 @@
       "push": true,
       "pushDueAt": "D+10T17:00:00Z",
       "messages": []
+    },
+    "attendance": {
+      "registrations": {
+        "declined": 0,
+        "going": 1,
+        "maybe": 1,
+        "waitlisted": 0
+      },
+      "attendees": [
+        {
+          "name": "Hal Host",
+          "status": "going",
+          "guestCount": 0
+        },
+        {
+          "name": "Mia Member",
+          "status": "maybe",
+          "guestCount": 0
+        }
+      ]
+    },
+    "seats": {
+      "inPerson": {
+        "capacity": null,
+        "used": 1,
+        "left": null
+      },
+      "remote": {
+        "capacity": null,
+        "used": 0,
+        "left": null
+      },
+      "waitlistEnabled": false
+    },
+    "remoteRsvp": "offered",
+    "series": {
+      "recurrenceRule": "",
+      "canAnswerSeries": false,
+      "changes": []
     }
   }
 }
@@ -515,6 +1050,7 @@
     "date": "D+11",
     "dateUrl": "/events/5/dates/D+11",
     "title": "Staff Retreat",
+    "description": "Staff Retreat description",
     "location": "",
     "startsAt": "D+11T19:00:00Z",
     "endsAt": "D+11T20:00:00Z",
@@ -533,6 +1069,7 @@
     "canBlock": false,
     "visibility": "private",
     "canRegister": true,
+    "canManage": true,
     "hostedBy": "Fold",
     "reminders": {
       "minutes": 1440,
@@ -541,6 +1078,28 @@
       "push": true,
       "pushDueAt": "D+11T17:00:00Z",
       "messages": []
+    },
+    "attendance": {
+      "registrations": {
+        "declined": 0,
+        "going": 0,
+        "maybe": 0,
+        "waitlisted": 0
+      }
+    },
+    "seats": {
+      "inPerson": {
+        "capacity": null,
+        "used": 0,
+        "left": null
+      },
+      "waitlistEnabled": false
+    },
+    "remoteRsvp": "none",
+    "series": {
+      "recurrenceRule": "",
+      "canAnswerSeries": false,
+      "changes": []
     }
   }
 }
@@ -552,6 +1111,7 @@
     "date": "D+7",
     "dateUrl": "/events/1/dates/D+7",
     "title": "Open Study",
+    "description": "Open Study description",
     "location": "Open Hall",
     "startsAt": "D+7T19:00:00Z",
     "endsAt": "D+7T20:00:00Z",
@@ -571,6 +1131,7 @@
     "canBlock": false,
     "visibility": "public",
     "canRegister": true,
+    "canManage": true,
     "groupId": 1,
     "groupName": "Open Group",
     "reminders": {
@@ -580,6 +1141,66 @@
       "push": true,
       "pushDueAt": "D+7T17:00:00Z",
       "messages": []
+    },
+    "groupHeader": {
+      "imageUrl": "",
+      "coverFocalX": 50,
+      "coverFocalY": 50,
+      "leaderName": "Lee Leader"
+    },
+    "attendance": {
+      "registrations": {
+        "declined": 1,
+        "going": 1,
+        "maybe": 1,
+        "waitlisted": 1
+      },
+      "attendees": [
+        {
+          "name": "Mia Member",
+          "status": "going",
+          "guestCount": 1
+        },
+        {
+          "name": "Ivy Invited",
+          "status": "maybe",
+          "guestCount": 0
+        }
+      ]
+    },
+    "seats": {
+      "inPerson": {
+        "capacity": 2,
+        "used": 2,
+        "left": 0
+      },
+      "waitlistEnabled": true,
+      "childcare": {
+        "full": false,
+        "totals": {
+          "capacity": null,
+          "used": 0,
+          "left": null
+        }
+      }
+    },
+    "remoteRsvp": "none",
+    "series": {
+      "recurrenceRule": "FREQ=WEEKLY;COUNT=4",
+      "upcomingDates": 3,
+      "coveredDates": 0,
+      "canAnswerSeries": true,
+      "usual": {
+        "startsLocal": "D+7T19:00",
+        "endsLocal": "D+7T20:00",
+        "durationMinutes": 60,
+        "location": "Open Hall",
+        "room": null,
+        "capacity": 2,
+        "remoteCapacity": null,
+        "visibility": "public"
+      },
+      "changes": []
     }
   }
 }
@@ -596,6 +1217,7 @@
     "date": "D+21",
     "dateUrl": "/events/1/dates/D+21",
     "title": "Open Study",
+    "description": "Open Study description",
     "location": "Open Hall",
     "startsAt": "D+21T19:00:00Z",
     "endsAt": "D+21T20:00:00Z",
@@ -615,6 +1237,7 @@
     "canBlock": false,
     "visibility": "invite_only",
     "canRegister": true,
+    "canManage": true,
     "groupId": 1,
     "groupName": "Open Group",
     "reminders": {
@@ -624,6 +1247,63 @@
       "push": true,
       "pushDueAt": "D+21T17:00:00Z",
       "messages": []
+    },
+    "groupHeader": {
+      "imageUrl": "",
+      "coverFocalX": 50,
+      "coverFocalY": 50,
+      "leaderName": "Lee Leader"
+    },
+    "attendance": {
+      "registrations": {
+        "declined": 0,
+        "going": 1,
+        "maybe": 0,
+        "waitlisted": 0
+      },
+      "attendees": [
+        {
+          "name": "Ivy Invited",
+          "status": "going",
+          "guestCount": 0
+        }
+      ]
+    },
+    "seats": {
+      "inPerson": {
+        "capacity": 2,
+        "used": 1,
+        "left": 1
+      },
+      "waitlistEnabled": true,
+      "childcare": {
+        "full": false,
+        "totals": {
+          "capacity": null,
+          "used": 0,
+          "left": null
+        }
+      }
+    },
+    "remoteRsvp": "none",
+    "series": {
+      "recurrenceRule": "FREQ=WEEKLY;COUNT=4",
+      "upcomingDates": 3,
+      "coveredDates": 0,
+      "canAnswerSeries": true,
+      "usual": {
+        "startsLocal": "",
+        "endsLocal": "",
+        "durationMinutes": 60,
+        "location": "Open Hall",
+        "room": null,
+        "capacity": 2,
+        "remoteCapacity": null,
+        "visibility": "public"
+      },
+      "changes": [
+        "visibility"
+      ]
     }
   }
 }
@@ -635,6 +1315,7 @@
     "date": "D+28",
     "dateUrl": "/events/1/dates/D+28",
     "title": "Renamed Study",
+    "description": "Open Study description",
     "location": "Back Room",
     "startsAt": "D+28T19:00:00Z",
     "endsAt": "D+28T20:30:00Z",
@@ -654,6 +1335,7 @@
     "canBlock": false,
     "visibility": "public",
     "canRegister": true,
+    "canManage": true,
     "groupId": 1,
     "groupName": "Open Group",
     "reminders": {
@@ -663,6 +1345,57 @@
       "push": true,
       "pushDueAt": "D+28T17:00:00Z",
       "messages": []
+    },
+    "groupHeader": {
+      "imageUrl": "",
+      "coverFocalX": 50,
+      "coverFocalY": 50,
+      "leaderName": "Lee Leader"
+    },
+    "attendance": {
+      "registrations": {
+        "declined": 0,
+        "going": 0,
+        "maybe": 0,
+        "waitlisted": 0
+      }
+    },
+    "seats": {
+      "inPerson": {
+        "capacity": 2,
+        "used": 0,
+        "left": 2
+      },
+      "waitlistEnabled": true,
+      "childcare": {
+        "full": false,
+        "totals": {
+          "capacity": null,
+          "used": 0,
+          "left": null
+        }
+      }
+    },
+    "remoteRsvp": "none",
+    "series": {
+      "recurrenceRule": "FREQ=WEEKLY;COUNT=4",
+      "upcomingDates": 3,
+      "coveredDates": 0,
+      "canAnswerSeries": true,
+      "usual": {
+        "startsLocal": "D+28T19:00",
+        "endsLocal": "D+28T20:00",
+        "durationMinutes": 60,
+        "location": "Open Hall",
+        "room": null,
+        "capacity": 2,
+        "remoteCapacity": null,
+        "visibility": "public"
+      },
+      "changes": [
+        "duration",
+        "place"
+      ]
     }
   }
 }
@@ -674,6 +1407,7 @@
     "date": "D+8",
     "dateUrl": "/events/2/dates/D+8",
     "title": "Opened Event",
+    "description": "Opened Event description",
     "location": "Secret Room",
     "startsAt": "D+8T19:00:00Z",
     "endsAt": "D+8T20:00:00Z",
@@ -693,6 +1427,7 @@
     "canBlock": false,
     "visibility": "public",
     "canRegister": true,
+    "canManage": true,
     "groupId": 2,
     "groupName": "Hidden Group",
     "reminders": {
@@ -702,6 +1437,34 @@
       "push": true,
       "pushDueAt": "D+8T17:00:00Z",
       "messages": []
+    },
+    "groupHeader": {
+      "imageUrl": "",
+      "coverFocalX": 50,
+      "coverFocalY": 50,
+      "leaderName": "Lee Leader"
+    },
+    "attendance": {
+      "registrations": {
+        "declined": 0,
+        "going": 0,
+        "maybe": 0,
+        "waitlisted": 0
+      }
+    },
+    "seats": {
+      "inPerson": {
+        "capacity": null,
+        "used": 0,
+        "left": null
+      },
+      "waitlistEnabled": false
+    },
+    "remoteRsvp": "none",
+    "series": {
+      "recurrenceRule": "",
+      "canAnswerSeries": false,
+      "changes": []
     }
   }
 }
@@ -713,6 +1476,7 @@
     "date": "D+15",
     "dateUrl": "/events/2/dates/D+15",
     "title": "Opened Event",
+    "description": "Opened Event description",
     "location": "Secret Room",
     "startsAt": "D+15T19:00:00Z",
     "endsAt": "D+15T20:00:00Z",
@@ -732,6 +1496,7 @@
     "canBlock": false,
     "visibility": "public",
     "canRegister": true,
+    "canManage": true,
     "groupId": 2,
     "groupName": "Hidden Group",
     "reminders": {
@@ -741,6 +1506,34 @@
       "push": true,
       "pushDueAt": "D+15T17:00:00Z",
       "messages": []
+    },
+    "groupHeader": {
+      "imageUrl": "",
+      "coverFocalX": 50,
+      "coverFocalY": 50,
+      "leaderName": "Lee Leader"
+    },
+    "attendance": {
+      "registrations": {
+        "declined": 0,
+        "going": 0,
+        "maybe": 0,
+        "waitlisted": 0
+      }
+    },
+    "seats": {
+      "inPerson": {
+        "capacity": null,
+        "used": 0,
+        "left": null
+      },
+      "waitlistEnabled": false
+    },
+    "remoteRsvp": "none",
+    "series": {
+      "recurrenceRule": "",
+      "canAnswerSeries": false,
+      "changes": []
     }
   }
 }
@@ -752,6 +1545,7 @@
     "date": "D+9",
     "dateUrl": "/events/3/dates/D+9",
     "title": "Private Event",
+    "description": "Private Event description",
     "location": "Private Porch",
     "startsAt": "D+9T19:00:00Z",
     "endsAt": "D+9T20:00:00Z",
@@ -771,6 +1565,7 @@
     "canBlock": false,
     "visibility": "private",
     "canRegister": true,
+    "canManage": true,
     "groupId": 1,
     "groupName": "Open Group",
     "reminders": {
@@ -780,6 +1575,39 @@
       "push": true,
       "pushDueAt": "D+9T17:00:00Z",
       "messages": []
+    },
+    "groupHeader": {
+      "imageUrl": "",
+      "coverFocalX": 50,
+      "coverFocalY": 50,
+      "leaderName": "Lee Leader"
+    },
+    "attendance": {
+      "registrations": {
+        "declined": 0,
+        "going": 0,
+        "maybe": 0,
+        "waitlisted": 0
+      }
+    },
+    "seats": {
+      "inPerson": {
+        "capacity": null,
+        "used": 0,
+        "left": null
+      },
+      "remote": {
+        "capacity": null,
+        "used": 0,
+        "left": null
+      },
+      "waitlistEnabled": false
+    },
+    "remoteRsvp": "offered",
+    "series": {
+      "recurrenceRule": "",
+      "canAnswerSeries": false,
+      "changes": []
     }
   }
 }
@@ -791,6 +1619,7 @@
     "date": "D+16",
     "dateUrl": "/events/3/dates/D+16",
     "title": "Private Event",
+    "description": "Private Event description",
     "location": "Private Porch",
     "startsAt": "D+16T19:00:00Z",
     "endsAt": "D+16T20:00:00Z",
@@ -810,6 +1639,7 @@
     "canBlock": false,
     "visibility": "public",
     "canRegister": true,
+    "canManage": true,
     "groupId": 1,
     "groupName": "Open Group",
     "reminders": {
@@ -819,6 +1649,46 @@
       "push": true,
       "pushDueAt": "D+16T17:00:00Z",
       "messages": []
+    },
+    "groupHeader": {
+      "imageUrl": "",
+      "coverFocalX": 50,
+      "coverFocalY": 50,
+      "leaderName": "Lee Leader"
+    },
+    "attendance": {
+      "registrations": {
+        "declined": 0,
+        "going": 1,
+        "maybe": 0,
+        "waitlisted": 0
+      },
+      "attendees": [
+        {
+          "name": "Sam Stranger",
+          "status": "going",
+          "guestCount": 0
+        }
+      ]
+    },
+    "seats": {
+      "inPerson": {
+        "capacity": null,
+        "used": 1,
+        "left": null
+      },
+      "remote": {
+        "capacity": null,
+        "used": 0,
+        "left": null
+      },
+      "waitlistEnabled": false
+    },
+    "remoteRsvp": "offered",
+    "series": {
+      "recurrenceRule": "",
+      "canAnswerSeries": false,
+      "changes": []
     }
   }
 }
@@ -830,6 +1700,7 @@
     "date": "D+10",
     "dateUrl": "/events/4/dates/D+10",
     "title": "Church Potluck",
+    "description": "Church Potluck description",
     "location": "Fellowship Hall",
     "startsAt": "D+10T19:00:00Z",
     "endsAt": "D+10T20:00:00Z",
@@ -848,7 +1719,45 @@
     "canBlock": false,
     "visibility": "public",
     "canRegister": true,
-    "hostedBy": "Fold"
+    "hostedBy": "Fold",
+    "attendance": {
+      "registrations": {
+        "going": 1,
+        "maybe": 1,
+        "waitlisted": 0
+      },
+      "attendees": [
+        {
+          "name": "Hal Host",
+          "status": "going",
+          "guestCount": 0
+        },
+        {
+          "name": "Mia Member",
+          "status": "maybe",
+          "guestCount": 0
+        }
+      ]
+    },
+    "seats": {
+      "inPerson": {
+        "capacity": null,
+        "used": 1,
+        "left": null
+      },
+      "remote": {
+        "capacity": null,
+        "used": 0,
+        "left": null
+      },
+      "waitlistEnabled": false
+    },
+    "remoteRsvp": "offered",
+    "series": {
+      "recurrenceRule": "",
+      "canAnswerSeries": false,
+      "changes": []
+    }
   }
 }
 ### Lee Leader GET /api/v1/events/5/dates/D+11 -> 200
@@ -859,6 +1768,7 @@
     "date": "D+11",
     "dateUrl": "/events/5/dates/D+11",
     "title": "Staff Retreat",
+    "description": "Staff Retreat description",
     "location": "",
     "startsAt": "D+11T19:00:00Z",
     "endsAt": "D+11T20:00:00Z",
@@ -877,7 +1787,28 @@
     "canBlock": false,
     "visibility": "private",
     "canRegister": true,
-    "hostedBy": "Fold"
+    "hostedBy": "Fold",
+    "attendance": {
+      "registrations": {
+        "going": 0,
+        "maybe": 0,
+        "waitlisted": 0
+      }
+    },
+    "seats": {
+      "inPerson": {
+        "capacity": null,
+        "used": 0,
+        "left": null
+      },
+      "waitlistEnabled": false
+    },
+    "remoteRsvp": "none",
+    "series": {
+      "recurrenceRule": "",
+      "canAnswerSeries": false,
+      "changes": []
+    }
   }
 }
 ### Mia Member GET /api/v1/events/1/dates/D+7 -> 200
@@ -888,6 +1819,7 @@
     "date": "D+7",
     "dateUrl": "/events/1/dates/D+7",
     "title": "Open Study",
+    "description": "Open Study description",
     "location": "Open Hall",
     "startsAt": "D+7T19:00:00Z",
     "endsAt": "D+7T20:00:00Z",
@@ -910,13 +1842,70 @@
     "visibility": "public",
     "canRegister": true,
     "groupId": 1,
-    "groupName": "Open Group"
+    "groupName": "Open Group",
+    "groupHeader": {
+      "imageUrl": "",
+      "coverFocalX": 50,
+      "coverFocalY": 50,
+      "leaderName": "Lee Leader"
+    },
+    "attendance": {
+      "registrations": {
+        "going": 1,
+        "maybe": 1,
+        "waitlisted": 1
+      },
+      "attendees": [
+        {
+          "name": "Mia Member",
+          "status": "going",
+          "guestCount": 1
+        },
+        {
+          "name": "Ivy Invited",
+          "status": "maybe",
+          "guestCount": 0
+        }
+      ]
+    },
+    "seats": {
+      "inPerson": {
+        "capacity": 2,
+        "used": 2,
+        "left": 0
+      },
+      "waitlistEnabled": true,
+      "childcare": {
+        "full": false
+      }
+    },
+    "remoteRsvp": "none",
+    "series": {
+      "recurrenceRule": "FREQ=WEEKLY;COUNT=4",
+      "upcomingDates": 3,
+      "coveredDates": 1,
+      "canAnswerSeries": true,
+      "usual": {
+        "startsLocal": "D+7T19:00",
+        "endsLocal": "D+7T20:00",
+        "durationMinutes": 60,
+        "location": "Open Hall",
+        "room": null,
+        "capacity": 2,
+        "remoteCapacity": null,
+        "visibility": "public"
+      },
+      "changes": []
+    }
   }
 }
-### Mia Member GET /api/v1/events/1/dates/D+14 -> 404
+### Mia Member GET /api/v1/events/1/dates/D+14 -> 200
 {
-  "code": "not_found",
-  "error": "event not found"
+  "occurrence": {
+    "title": "Open Study",
+    "date": "D+14",
+    "cancelled": true
+  }
 }
 ### Mia Member GET /api/v1/events/1/dates/D+21 -> 200
 {
@@ -926,6 +1915,7 @@
     "date": "D+21",
     "dateUrl": "/events/1/dates/D+21",
     "title": "Open Study",
+    "description": "Open Study description",
     "location": "Open Hall",
     "startsAt": "D+21T19:00:00Z",
     "endsAt": "D+21T20:00:00Z",
@@ -945,7 +1935,58 @@
     "visibility": "invite_only",
     "canRegister": true,
     "groupId": 1,
-    "groupName": "Open Group"
+    "groupName": "Open Group",
+    "groupHeader": {
+      "imageUrl": "",
+      "coverFocalX": 50,
+      "coverFocalY": 50,
+      "leaderName": "Lee Leader"
+    },
+    "attendance": {
+      "registrations": {
+        "going": 1,
+        "maybe": 0,
+        "waitlisted": 0
+      },
+      "attendees": [
+        {
+          "name": "Ivy Invited",
+          "status": "going",
+          "guestCount": 0
+        }
+      ]
+    },
+    "seats": {
+      "inPerson": {
+        "capacity": 2,
+        "used": 1,
+        "left": 1
+      },
+      "waitlistEnabled": true,
+      "childcare": {
+        "full": false
+      }
+    },
+    "remoteRsvp": "none",
+    "series": {
+      "recurrenceRule": "FREQ=WEEKLY;COUNT=4",
+      "upcomingDates": 3,
+      "coveredDates": 1,
+      "canAnswerSeries": true,
+      "usual": {
+        "startsLocal": "",
+        "endsLocal": "",
+        "durationMinutes": 60,
+        "location": "Open Hall",
+        "room": null,
+        "capacity": 2,
+        "remoteCapacity": null,
+        "visibility": "public"
+      },
+      "changes": [
+        "visibility"
+      ]
+    }
   }
 }
 ### Mia Member GET /api/v1/events/1/dates/D+28 -> 200
@@ -956,6 +1997,7 @@
     "date": "D+28",
     "dateUrl": "/events/1/dates/D+28",
     "title": "Renamed Study",
+    "description": "Open Study description",
     "location": "Back Room",
     "startsAt": "D+28T19:00:00Z",
     "endsAt": "D+28T20:30:00Z",
@@ -975,7 +2017,52 @@
     "visibility": "public",
     "canRegister": true,
     "groupId": 1,
-    "groupName": "Open Group"
+    "groupName": "Open Group",
+    "groupHeader": {
+      "imageUrl": "",
+      "coverFocalX": 50,
+      "coverFocalY": 50,
+      "leaderName": "Lee Leader"
+    },
+    "attendance": {
+      "registrations": {
+        "going": 0,
+        "maybe": 0,
+        "waitlisted": 0
+      }
+    },
+    "seats": {
+      "inPerson": {
+        "capacity": 2,
+        "used": 0,
+        "left": 2
+      },
+      "waitlistEnabled": true,
+      "childcare": {
+        "full": false
+      }
+    },
+    "remoteRsvp": "none",
+    "series": {
+      "recurrenceRule": "FREQ=WEEKLY;COUNT=4",
+      "upcomingDates": 3,
+      "coveredDates": 1,
+      "canAnswerSeries": true,
+      "usual": {
+        "startsLocal": "D+28T19:00",
+        "endsLocal": "D+28T20:00",
+        "durationMinutes": 60,
+        "location": "Open Hall",
+        "room": null,
+        "capacity": 2,
+        "remoteCapacity": null,
+        "visibility": "public"
+      },
+      "changes": [
+        "duration",
+        "place"
+      ]
+    }
   }
 }
 ### Mia Member GET /api/v1/events/2/dates/D+8 -> 200
@@ -986,6 +2073,7 @@
     "date": "D+8",
     "dateUrl": "/events/2/dates/D+8",
     "title": "Opened Event",
+    "description": "Opened Event description",
     "location": "Secret Room",
     "startsAt": "D+8T19:00:00Z",
     "endsAt": "D+8T20:00:00Z",
@@ -1006,7 +2094,34 @@
     "visibility": "public",
     "canRegister": true,
     "groupId": 2,
-    "groupName": "Hidden Group"
+    "groupName": "Hidden Group",
+    "groupHeader": {
+      "imageUrl": "",
+      "coverFocalX": 50,
+      "coverFocalY": 50,
+      "leaderName": "Lee Leader"
+    },
+    "attendance": {
+      "registrations": {
+        "going": 0,
+        "maybe": 0,
+        "waitlisted": 0
+      }
+    },
+    "seats": {
+      "inPerson": {
+        "capacity": null,
+        "used": 0,
+        "left": null
+      },
+      "waitlistEnabled": false
+    },
+    "remoteRsvp": "none",
+    "series": {
+      "recurrenceRule": "",
+      "canAnswerSeries": false,
+      "changes": []
+    }
   }
 }
 ### Mia Member GET /api/v1/events/2/dates/D+15 -> 200
@@ -1017,6 +2132,7 @@
     "date": "D+15",
     "dateUrl": "/events/2/dates/D+15",
     "title": "Opened Event",
+    "description": "Opened Event description",
     "location": "Secret Room",
     "startsAt": "D+15T19:00:00Z",
     "endsAt": "D+15T20:00:00Z",
@@ -1037,7 +2153,34 @@
     "visibility": "public",
     "canRegister": true,
     "groupId": 2,
-    "groupName": "Hidden Group"
+    "groupName": "Hidden Group",
+    "groupHeader": {
+      "imageUrl": "",
+      "coverFocalX": 50,
+      "coverFocalY": 50,
+      "leaderName": "Lee Leader"
+    },
+    "attendance": {
+      "registrations": {
+        "going": 0,
+        "maybe": 0,
+        "waitlisted": 0
+      }
+    },
+    "seats": {
+      "inPerson": {
+        "capacity": null,
+        "used": 0,
+        "left": null
+      },
+      "waitlistEnabled": false
+    },
+    "remoteRsvp": "none",
+    "series": {
+      "recurrenceRule": "",
+      "canAnswerSeries": false,
+      "changes": []
+    }
   }
 }
 ### Mia Member GET /api/v1/events/3/dates/D+9 -> 200
@@ -1048,6 +2191,7 @@
     "date": "D+9",
     "dateUrl": "/events/3/dates/D+9",
     "title": "Private Event",
+    "description": "Private Event description",
     "location": "Private Porch",
     "startsAt": "D+9T19:00:00Z",
     "endsAt": "D+9T20:00:00Z",
@@ -1067,7 +2211,39 @@
     "visibility": "private",
     "canRegister": true,
     "groupId": 1,
-    "groupName": "Open Group"
+    "groupName": "Open Group",
+    "groupHeader": {
+      "imageUrl": "",
+      "coverFocalX": 50,
+      "coverFocalY": 50,
+      "leaderName": "Lee Leader"
+    },
+    "attendance": {
+      "registrations": {
+        "going": 0,
+        "maybe": 0,
+        "waitlisted": 0
+      }
+    },
+    "seats": {
+      "inPerson": {
+        "capacity": null,
+        "used": 0,
+        "left": null
+      },
+      "remote": {
+        "capacity": null,
+        "used": 0,
+        "left": null
+      },
+      "waitlistEnabled": false
+    },
+    "remoteRsvp": "offered",
+    "series": {
+      "recurrenceRule": "",
+      "canAnswerSeries": false,
+      "changes": []
+    }
   }
 }
 ### Mia Member GET /api/v1/events/3/dates/D+16 -> 200
@@ -1078,6 +2254,7 @@
     "date": "D+16",
     "dateUrl": "/events/3/dates/D+16",
     "title": "Private Event",
+    "description": "Private Event description",
     "location": "Private Porch",
     "startsAt": "D+16T19:00:00Z",
     "endsAt": "D+16T20:00:00Z",
@@ -1097,7 +2274,46 @@
     "visibility": "public",
     "canRegister": true,
     "groupId": 1,
-    "groupName": "Open Group"
+    "groupName": "Open Group",
+    "groupHeader": {
+      "imageUrl": "",
+      "coverFocalX": 50,
+      "coverFocalY": 50,
+      "leaderName": "Lee Leader"
+    },
+    "attendance": {
+      "registrations": {
+        "going": 1,
+        "maybe": 0,
+        "waitlisted": 0
+      },
+      "attendees": [
+        {
+          "name": "Sam Stranger",
+          "status": "going",
+          "guestCount": 0
+        }
+      ]
+    },
+    "seats": {
+      "inPerson": {
+        "capacity": null,
+        "used": 1,
+        "left": null
+      },
+      "remote": {
+        "capacity": null,
+        "used": 0,
+        "left": null
+      },
+      "waitlistEnabled": false
+    },
+    "remoteRsvp": "offered",
+    "series": {
+      "recurrenceRule": "",
+      "canAnswerSeries": false,
+      "changes": []
+    }
   }
 }
 ### Mia Member GET /api/v1/events/4/dates/D+10 -> 200
@@ -1108,6 +2324,7 @@
     "date": "D+10",
     "dateUrl": "/events/4/dates/D+10",
     "title": "Church Potluck",
+    "description": "Church Potluck description",
     "location": "Fellowship Hall",
     "startsAt": "D+10T19:00:00Z",
     "endsAt": "D+10T20:00:00Z",
@@ -1128,7 +2345,45 @@
     "canBlock": false,
     "visibility": "public",
     "canRegister": true,
-    "hostedBy": "Fold"
+    "hostedBy": "Fold",
+    "attendance": {
+      "registrations": {
+        "going": 1,
+        "maybe": 1,
+        "waitlisted": 0
+      },
+      "attendees": [
+        {
+          "name": "Hal Host",
+          "status": "going",
+          "guestCount": 0
+        },
+        {
+          "name": "Mia Member",
+          "status": "maybe",
+          "guestCount": 0
+        }
+      ]
+    },
+    "seats": {
+      "inPerson": {
+        "capacity": null,
+        "used": 1,
+        "left": null
+      },
+      "remote": {
+        "capacity": null,
+        "used": 0,
+        "left": null
+      },
+      "waitlistEnabled": false
+    },
+    "remoteRsvp": "offered",
+    "series": {
+      "recurrenceRule": "",
+      "canAnswerSeries": false,
+      "changes": []
+    }
   }
 }
 ### Mia Member GET /api/v1/events/5/dates/D+11 -> 200
@@ -1139,6 +2394,7 @@
     "date": "D+11",
     "dateUrl": "/events/5/dates/D+11",
     "title": "Staff Retreat",
+    "description": "Staff Retreat description",
     "location": "",
     "startsAt": "D+11T19:00:00Z",
     "endsAt": "D+11T20:00:00Z",
@@ -1157,7 +2413,28 @@
     "canBlock": false,
     "visibility": "private",
     "canRegister": true,
-    "hostedBy": "Fold"
+    "hostedBy": "Fold",
+    "attendance": {
+      "registrations": {
+        "going": 0,
+        "maybe": 0,
+        "waitlisted": 0
+      }
+    },
+    "seats": {
+      "inPerson": {
+        "capacity": null,
+        "used": 0,
+        "left": null
+      },
+      "waitlistEnabled": false
+    },
+    "remoteRsvp": "none",
+    "series": {
+      "recurrenceRule": "",
+      "canAnswerSeries": false,
+      "changes": []
+    }
   }
 }
 ### Ivy Invited GET /api/v1/events/1/dates/D+7 -> 200
@@ -1168,6 +2445,7 @@
     "date": "D+7",
     "dateUrl": "/events/1/dates/D+7",
     "title": "Open Study",
+    "description": "Open Study description",
     "location": "Open Hall",
     "startsAt": "D+7T19:00:00Z",
     "endsAt": "D+7T20:00:00Z",
@@ -1189,7 +2467,61 @@
     "visibility": "public",
     "canRegister": true,
     "groupId": 1,
-    "groupName": "Open Group"
+    "groupName": "Open Group",
+    "groupHeader": {
+      "imageUrl": "",
+      "coverFocalX": 50,
+      "coverFocalY": 50,
+      "leaderName": "Lee Leader"
+    },
+    "attendance": {
+      "registrations": {
+        "going": 1,
+        "maybe": 1,
+        "waitlisted": 1
+      },
+      "attendees": [
+        {
+          "name": "Mia Member",
+          "status": "going",
+          "guestCount": 1
+        },
+        {
+          "name": "Ivy Invited",
+          "status": "maybe",
+          "guestCount": 0
+        }
+      ]
+    },
+    "seats": {
+      "inPerson": {
+        "capacity": 2,
+        "used": 2,
+        "left": 0
+      },
+      "waitlistEnabled": true,
+      "childcare": {
+        "full": false
+      }
+    },
+    "remoteRsvp": "none",
+    "series": {
+      "recurrenceRule": "FREQ=WEEKLY;COUNT=4",
+      "upcomingDates": 2,
+      "coveredDates": 1,
+      "canAnswerSeries": true,
+      "usual": {
+        "startsLocal": "D+7T19:00",
+        "endsLocal": "D+7T20:00",
+        "durationMinutes": 60,
+        "location": "Open Hall",
+        "room": null,
+        "capacity": 2,
+        "remoteCapacity": null,
+        "visibility": "public"
+      },
+      "changes": []
+    }
   }
 }
 ### Ivy Invited GET /api/v1/events/1/dates/D+14 -> 404
@@ -1234,6 +2566,7 @@
     "date": "D+28",
     "dateUrl": "/events/1/dates/D+28",
     "title": "Renamed Study",
+    "description": "Open Study description",
     "location": "Back Room",
     "startsAt": "D+28T19:00:00Z",
     "endsAt": "D+28T20:30:00Z",
@@ -1253,7 +2586,52 @@
     "visibility": "public",
     "canRegister": true,
     "groupId": 1,
-    "groupName": "Open Group"
+    "groupName": "Open Group",
+    "groupHeader": {
+      "imageUrl": "",
+      "coverFocalX": 50,
+      "coverFocalY": 50,
+      "leaderName": "Lee Leader"
+    },
+    "attendance": {
+      "registrations": {
+        "going": 0,
+        "maybe": 0,
+        "waitlisted": 0
+      }
+    },
+    "seats": {
+      "inPerson": {
+        "capacity": 2,
+        "used": 0,
+        "left": 2
+      },
+      "waitlistEnabled": true,
+      "childcare": {
+        "full": false
+      }
+    },
+    "remoteRsvp": "none",
+    "series": {
+      "recurrenceRule": "FREQ=WEEKLY;COUNT=4",
+      "upcomingDates": 2,
+      "coveredDates": 1,
+      "canAnswerSeries": true,
+      "usual": {
+        "startsLocal": "D+28T19:00",
+        "endsLocal": "D+28T20:00",
+        "durationMinutes": 60,
+        "location": "Open Hall",
+        "room": null,
+        "capacity": 2,
+        "remoteCapacity": null,
+        "visibility": "public"
+      },
+      "changes": [
+        "duration",
+        "place"
+      ]
+    }
   }
 }
 ### Ivy Invited GET /api/v1/events/2/dates/D+8 -> 200
@@ -1264,6 +2642,7 @@
     "date": "D+8",
     "dateUrl": "/events/2/dates/D+8",
     "title": "Opened Event",
+    "description": "Opened Event description",
     "location": "",
     "startsAt": "D+8T19:00:00Z",
     "endsAt": "D+8T20:00:00Z",
@@ -1283,7 +2662,28 @@
     "canBlock": false,
     "visibility": "public",
     "canRegister": true,
-    "hostedBy": "Fold"
+    "hostedBy": "Fold",
+    "attendance": {
+      "registrations": {
+        "going": 0,
+        "maybe": 0,
+        "waitlisted": 0
+      }
+    },
+    "seats": {
+      "inPerson": {
+        "capacity": null,
+        "used": 0,
+        "left": null
+      },
+      "waitlistEnabled": false
+    },
+    "remoteRsvp": "none",
+    "series": {
+      "recurrenceRule": "",
+      "canAnswerSeries": false,
+      "changes": []
+    }
   }
 }
 ### Ivy Invited GET /api/v1/events/2/dates/D+15 -> 200
@@ -1294,6 +2694,7 @@
     "date": "D+15",
     "dateUrl": "/events/2/dates/D+15",
     "title": "Opened Event",
+    "description": "Opened Event description",
     "location": "",
     "startsAt": "D+15T19:00:00Z",
     "endsAt": "D+15T20:00:00Z",
@@ -1313,7 +2714,28 @@
     "canBlock": false,
     "visibility": "public",
     "canRegister": true,
-    "hostedBy": "Fold"
+    "hostedBy": "Fold",
+    "attendance": {
+      "registrations": {
+        "going": 0,
+        "maybe": 0,
+        "waitlisted": 0
+      }
+    },
+    "seats": {
+      "inPerson": {
+        "capacity": null,
+        "used": 0,
+        "left": null
+      },
+      "waitlistEnabled": false
+    },
+    "remoteRsvp": "none",
+    "series": {
+      "recurrenceRule": "",
+      "canAnswerSeries": false,
+      "changes": []
+    }
   }
 }
 ### Ivy Invited GET /api/v1/events/3/dates/D+9 -> 200
@@ -1324,6 +2746,7 @@
     "date": "D+9",
     "dateUrl": "/events/3/dates/D+9",
     "title": "Private Event",
+    "description": "Private Event description",
     "location": "Private Porch",
     "startsAt": "D+9T19:00:00Z",
     "endsAt": "D+9T20:00:00Z",
@@ -1343,7 +2766,39 @@
     "visibility": "private",
     "canRegister": true,
     "groupId": 1,
-    "groupName": "Open Group"
+    "groupName": "Open Group",
+    "groupHeader": {
+      "imageUrl": "",
+      "coverFocalX": 50,
+      "coverFocalY": 50,
+      "leaderName": "Lee Leader"
+    },
+    "attendance": {
+      "registrations": {
+        "going": 0,
+        "maybe": 0,
+        "waitlisted": 0
+      }
+    },
+    "seats": {
+      "inPerson": {
+        "capacity": null,
+        "used": 0,
+        "left": null
+      },
+      "remote": {
+        "capacity": null,
+        "used": 0,
+        "left": null
+      },
+      "waitlistEnabled": false
+    },
+    "remoteRsvp": "offered",
+    "series": {
+      "recurrenceRule": "",
+      "canAnswerSeries": false,
+      "changes": []
+    }
   }
 }
 ### Ivy Invited GET /api/v1/events/3/dates/D+16 -> 200
@@ -1354,6 +2809,7 @@
     "date": "D+16",
     "dateUrl": "/events/3/dates/D+16",
     "title": "Private Event",
+    "description": "Private Event description",
     "location": "Private Porch",
     "startsAt": "D+16T19:00:00Z",
     "endsAt": "D+16T20:00:00Z",
@@ -1373,7 +2829,46 @@
     "visibility": "public",
     "canRegister": true,
     "groupId": 1,
-    "groupName": "Open Group"
+    "groupName": "Open Group",
+    "groupHeader": {
+      "imageUrl": "",
+      "coverFocalX": 50,
+      "coverFocalY": 50,
+      "leaderName": "Lee Leader"
+    },
+    "attendance": {
+      "registrations": {
+        "going": 1,
+        "maybe": 0,
+        "waitlisted": 0
+      },
+      "attendees": [
+        {
+          "name": "Sam Stranger",
+          "status": "going",
+          "guestCount": 0
+        }
+      ]
+    },
+    "seats": {
+      "inPerson": {
+        "capacity": null,
+        "used": 1,
+        "left": null
+      },
+      "remote": {
+        "capacity": null,
+        "used": 0,
+        "left": null
+      },
+      "waitlistEnabled": false
+    },
+    "remoteRsvp": "offered",
+    "series": {
+      "recurrenceRule": "",
+      "canAnswerSeries": false,
+      "changes": []
+    }
   }
 }
 ### Ivy Invited GET /api/v1/events/4/dates/D+10 -> 200
@@ -1384,6 +2879,7 @@
     "date": "D+10",
     "dateUrl": "/events/4/dates/D+10",
     "title": "Church Potluck",
+    "description": "Church Potluck description",
     "location": "Fellowship Hall",
     "startsAt": "D+10T19:00:00Z",
     "endsAt": "D+10T20:00:00Z",
@@ -1402,7 +2898,45 @@
     "canBlock": false,
     "visibility": "public",
     "canRegister": true,
-    "hostedBy": "Fold"
+    "hostedBy": "Fold",
+    "attendance": {
+      "registrations": {
+        "going": 1,
+        "maybe": 1,
+        "waitlisted": 0
+      },
+      "attendees": [
+        {
+          "name": "Hal Host",
+          "status": "going",
+          "guestCount": 0
+        },
+        {
+          "name": "Mia Member",
+          "status": "maybe",
+          "guestCount": 0
+        }
+      ]
+    },
+    "seats": {
+      "inPerson": {
+        "capacity": null,
+        "used": 1,
+        "left": null
+      },
+      "remote": {
+        "capacity": null,
+        "used": 0,
+        "left": null
+      },
+      "waitlistEnabled": false
+    },
+    "remoteRsvp": "offered",
+    "series": {
+      "recurrenceRule": "",
+      "canAnswerSeries": false,
+      "changes": []
+    }
   }
 }
 ### Ivy Invited GET /api/v1/events/5/dates/D+11 -> 200
@@ -1413,6 +2947,7 @@
     "date": "D+11",
     "dateUrl": "/events/5/dates/D+11",
     "title": "Staff Retreat",
+    "description": "Staff Retreat description",
     "location": "",
     "startsAt": "D+11T19:00:00Z",
     "endsAt": "D+11T20:00:00Z",
@@ -1431,7 +2966,28 @@
     "canBlock": false,
     "visibility": "private",
     "canRegister": true,
-    "hostedBy": "Fold"
+    "hostedBy": "Fold",
+    "attendance": {
+      "registrations": {
+        "going": 0,
+        "maybe": 0,
+        "waitlisted": 0
+      }
+    },
+    "seats": {
+      "inPerson": {
+        "capacity": null,
+        "used": 0,
+        "left": null
+      },
+      "waitlistEnabled": false
+    },
+    "remoteRsvp": "none",
+    "series": {
+      "recurrenceRule": "",
+      "canAnswerSeries": false,
+      "changes": []
+    }
   }
 }
 ### Sam Stranger GET /api/v1/events/1/dates/D+7 -> 200
@@ -1442,6 +2998,7 @@
     "date": "D+7",
     "dateUrl": "/events/1/dates/D+7",
     "title": "Open Study",
+    "description": "Open Study description",
     "location": "Open Hall",
     "startsAt": "D+7T19:00:00Z",
     "endsAt": "D+7T20:00:00Z",
@@ -1463,7 +3020,61 @@
     "visibility": "public",
     "canRegister": true,
     "groupId": 1,
-    "groupName": "Open Group"
+    "groupName": "Open Group",
+    "groupHeader": {
+      "imageUrl": "",
+      "coverFocalX": 50,
+      "coverFocalY": 50,
+      "leaderName": "Lee Leader"
+    },
+    "attendance": {
+      "registrations": {
+        "going": 1,
+        "maybe": 1,
+        "waitlisted": 1
+      },
+      "attendees": [
+        {
+          "name": "Mia Member",
+          "status": "going",
+          "guestCount": 1
+        },
+        {
+          "name": "Ivy Invited",
+          "status": "maybe",
+          "guestCount": 0
+        }
+      ]
+    },
+    "seats": {
+      "inPerson": {
+        "capacity": 2,
+        "used": 2,
+        "left": 0
+      },
+      "waitlistEnabled": true,
+      "childcare": {
+        "full": false
+      }
+    },
+    "remoteRsvp": "none",
+    "series": {
+      "recurrenceRule": "FREQ=WEEKLY;COUNT=4",
+      "upcomingDates": 2,
+      "coveredDates": 0,
+      "canAnswerSeries": true,
+      "usual": {
+        "startsLocal": "D+7T19:00",
+        "endsLocal": "D+7T20:00",
+        "durationMinutes": 60,
+        "location": "Open Hall",
+        "room": null,
+        "capacity": 2,
+        "remoteCapacity": null,
+        "visibility": "public"
+      },
+      "changes": []
+    }
   }
 }
 ### Sam Stranger GET /api/v1/events/1/dates/D+14 -> 404
@@ -1484,6 +3095,7 @@
     "date": "D+28",
     "dateUrl": "/events/1/dates/D+28",
     "title": "Renamed Study",
+    "description": "Open Study description",
     "location": "Back Room",
     "startsAt": "D+28T19:00:00Z",
     "endsAt": "D+28T20:30:00Z",
@@ -1493,7 +3105,7 @@
     "durationMinutes": 90,
     "remoteAvailable": false,
     "guestsAllowed": 2,
-    "myRegistration": null,
+    "myRegistration": "cancelled",
     "videoProvider": "link",
     "videoHidden": true,
     "canSeeVideo": false,
@@ -1503,7 +3115,52 @@
     "visibility": "public",
     "canRegister": true,
     "groupId": 1,
-    "groupName": "Open Group"
+    "groupName": "Open Group",
+    "groupHeader": {
+      "imageUrl": "",
+      "coverFocalX": 50,
+      "coverFocalY": 50,
+      "leaderName": "Lee Leader"
+    },
+    "attendance": {
+      "registrations": {
+        "going": 0,
+        "maybe": 0,
+        "waitlisted": 0
+      }
+    },
+    "seats": {
+      "inPerson": {
+        "capacity": 2,
+        "used": 0,
+        "left": 2
+      },
+      "waitlistEnabled": true,
+      "childcare": {
+        "full": false
+      }
+    },
+    "remoteRsvp": "none",
+    "series": {
+      "recurrenceRule": "FREQ=WEEKLY;COUNT=4",
+      "upcomingDates": 2,
+      "coveredDates": 0,
+      "canAnswerSeries": true,
+      "usual": {
+        "startsLocal": "D+28T19:00",
+        "endsLocal": "D+28T20:00",
+        "durationMinutes": 60,
+        "location": "Open Hall",
+        "room": null,
+        "capacity": 2,
+        "remoteCapacity": null,
+        "visibility": "public"
+      },
+      "changes": [
+        "duration",
+        "place"
+      ]
+    }
   }
 }
 ### Sam Stranger GET /api/v1/events/2/dates/D+8 -> 200
@@ -1514,6 +3171,7 @@
     "date": "D+8",
     "dateUrl": "/events/2/dates/D+8",
     "title": "Opened Event",
+    "description": "Opened Event description",
     "location": "",
     "startsAt": "D+8T19:00:00Z",
     "endsAt": "D+8T20:00:00Z",
@@ -1533,7 +3191,28 @@
     "canBlock": false,
     "visibility": "public",
     "canRegister": true,
-    "hostedBy": "Fold"
+    "hostedBy": "Fold",
+    "attendance": {
+      "registrations": {
+        "going": 0,
+        "maybe": 0,
+        "waitlisted": 0
+      }
+    },
+    "seats": {
+      "inPerson": {
+        "capacity": null,
+        "used": 0,
+        "left": null
+      },
+      "waitlistEnabled": false
+    },
+    "remoteRsvp": "none",
+    "series": {
+      "recurrenceRule": "",
+      "canAnswerSeries": false,
+      "changes": []
+    }
   }
 }
 ### Sam Stranger GET /api/v1/events/2/dates/D+15 -> 200
@@ -1544,6 +3223,7 @@
     "date": "D+15",
     "dateUrl": "/events/2/dates/D+15",
     "title": "Opened Event",
+    "description": "Opened Event description",
     "location": "",
     "startsAt": "D+15T19:00:00Z",
     "endsAt": "D+15T20:00:00Z",
@@ -1563,7 +3243,28 @@
     "canBlock": false,
     "visibility": "public",
     "canRegister": true,
-    "hostedBy": "Fold"
+    "hostedBy": "Fold",
+    "attendance": {
+      "registrations": {
+        "going": 0,
+        "maybe": 0,
+        "waitlisted": 0
+      }
+    },
+    "seats": {
+      "inPerson": {
+        "capacity": null,
+        "used": 0,
+        "left": null
+      },
+      "waitlistEnabled": false
+    },
+    "remoteRsvp": "none",
+    "series": {
+      "recurrenceRule": "",
+      "canAnswerSeries": false,
+      "changes": []
+    }
   }
 }
 ### Sam Stranger GET /api/v1/events/3/dates/D+9 -> 200
@@ -1574,6 +3275,7 @@
     "date": "D+9",
     "dateUrl": "/events/3/dates/D+9",
     "title": "Private Event",
+    "description": "Private Event description",
     "location": "Private Porch",
     "startsAt": "D+9T19:00:00Z",
     "endsAt": "D+9T20:00:00Z",
@@ -1593,7 +3295,39 @@
     "visibility": "private",
     "canRegister": true,
     "groupId": 1,
-    "groupName": "Open Group"
+    "groupName": "Open Group",
+    "groupHeader": {
+      "imageUrl": "",
+      "coverFocalX": 50,
+      "coverFocalY": 50,
+      "leaderName": "Lee Leader"
+    },
+    "attendance": {
+      "registrations": {
+        "going": 0,
+        "maybe": 0,
+        "waitlisted": 0
+      }
+    },
+    "seats": {
+      "inPerson": {
+        "capacity": null,
+        "used": 0,
+        "left": null
+      },
+      "remote": {
+        "capacity": null,
+        "used": 0,
+        "left": null
+      },
+      "waitlistEnabled": false
+    },
+    "remoteRsvp": "offered",
+    "series": {
+      "recurrenceRule": "",
+      "canAnswerSeries": false,
+      "changes": []
+    }
   }
 }
 ### Sam Stranger GET /api/v1/events/3/dates/D+16 -> 200
@@ -1604,6 +3338,7 @@
     "date": "D+16",
     "dateUrl": "/events/3/dates/D+16",
     "title": "Private Event",
+    "description": "Private Event description",
     "location": "Private Porch",
     "startsAt": "D+16T19:00:00Z",
     "endsAt": "D+16T20:00:00Z",
@@ -1626,7 +3361,46 @@
     "visibility": "public",
     "canRegister": true,
     "groupId": 1,
-    "groupName": "Open Group"
+    "groupName": "Open Group",
+    "groupHeader": {
+      "imageUrl": "",
+      "coverFocalX": 50,
+      "coverFocalY": 50,
+      "leaderName": "Lee Leader"
+    },
+    "attendance": {
+      "registrations": {
+        "going": 1,
+        "maybe": 0,
+        "waitlisted": 0
+      },
+      "attendees": [
+        {
+          "name": "Sam Stranger",
+          "status": "going",
+          "guestCount": 0
+        }
+      ]
+    },
+    "seats": {
+      "inPerson": {
+        "capacity": null,
+        "used": 1,
+        "left": null
+      },
+      "remote": {
+        "capacity": null,
+        "used": 0,
+        "left": null
+      },
+      "waitlistEnabled": false
+    },
+    "remoteRsvp": "offered",
+    "series": {
+      "recurrenceRule": "",
+      "canAnswerSeries": false,
+      "changes": []
+    }
   }
 }
 ### Sam Stranger GET /api/v1/events/4/dates/D+10 -> 200
@@ -1637,6 +3411,7 @@
     "date": "D+10",
     "dateUrl": "/events/4/dates/D+10",
     "title": "Church Potluck",
+    "description": "Church Potluck description",
     "location": "Fellowship Hall",
     "startsAt": "D+10T19:00:00Z",
     "endsAt": "D+10T20:00:00Z",
@@ -1655,7 +3430,45 @@
     "canBlock": false,
     "visibility": "public",
     "canRegister": true,
-    "hostedBy": "Fold"
+    "hostedBy": "Fold",
+    "attendance": {
+      "registrations": {
+        "going": 1,
+        "maybe": 1,
+        "waitlisted": 0
+      },
+      "attendees": [
+        {
+          "name": "Hal Host",
+          "status": "going",
+          "guestCount": 0
+        },
+        {
+          "name": "Mia Member",
+          "status": "maybe",
+          "guestCount": 0
+        }
+      ]
+    },
+    "seats": {
+      "inPerson": {
+        "capacity": null,
+        "used": 1,
+        "left": null
+      },
+      "remote": {
+        "capacity": null,
+        "used": 0,
+        "left": null
+      },
+      "waitlistEnabled": false
+    },
+    "remoteRsvp": "offered",
+    "series": {
+      "recurrenceRule": "",
+      "canAnswerSeries": false,
+      "changes": []
+    }
   }
 }
 ### Sam Stranger GET /api/v1/events/5/dates/D+11 -> 200
@@ -1666,6 +3479,7 @@
     "date": "D+11",
     "dateUrl": "/events/5/dates/D+11",
     "title": "Staff Retreat",
+    "description": "Staff Retreat description",
     "location": "",
     "startsAt": "D+11T19:00:00Z",
     "endsAt": "D+11T20:00:00Z",
@@ -1684,7 +3498,28 @@
     "canBlock": false,
     "visibility": "private",
     "canRegister": true,
-    "hostedBy": "Fold"
+    "hostedBy": "Fold",
+    "attendance": {
+      "registrations": {
+        "going": 0,
+        "maybe": 0,
+        "waitlisted": 0
+      }
+    },
+    "seats": {
+      "inPerson": {
+        "capacity": null,
+        "used": 0,
+        "left": null
+      },
+      "waitlistEnabled": false
+    },
+    "remoteRsvp": "none",
+    "series": {
+      "recurrenceRule": "",
+      "canAnswerSeries": false,
+      "changes": []
+    }
   }
 }
 ### Hal Host GET /api/v1/events/1/dates/D+7 -> 200
@@ -1695,6 +3530,7 @@
     "date": "D+7",
     "dateUrl": "/events/1/dates/D+7",
     "title": "Open Study",
+    "description": "Open Study description",
     "location": "Open Hall",
     "startsAt": "D+7T19:00:00Z",
     "endsAt": "D+7T20:00:00Z",
@@ -1714,7 +3550,61 @@
     "visibility": "public",
     "canRegister": true,
     "groupId": 1,
-    "groupName": "Open Group"
+    "groupName": "Open Group",
+    "groupHeader": {
+      "imageUrl": "",
+      "coverFocalX": 50,
+      "coverFocalY": 50,
+      "leaderName": "Lee Leader"
+    },
+    "attendance": {
+      "registrations": {
+        "going": 1,
+        "maybe": 1,
+        "waitlisted": 1
+      },
+      "attendees": [
+        {
+          "name": "Mia Member",
+          "status": "going",
+          "guestCount": 1
+        },
+        {
+          "name": "Ivy Invited",
+          "status": "maybe",
+          "guestCount": 0
+        }
+      ]
+    },
+    "seats": {
+      "inPerson": {
+        "capacity": 2,
+        "used": 2,
+        "left": 0
+      },
+      "waitlistEnabled": true,
+      "childcare": {
+        "full": false
+      }
+    },
+    "remoteRsvp": "none",
+    "series": {
+      "recurrenceRule": "FREQ=WEEKLY;COUNT=4",
+      "upcomingDates": 2,
+      "coveredDates": 0,
+      "canAnswerSeries": true,
+      "usual": {
+        "startsLocal": "D+7T19:00",
+        "endsLocal": "D+7T20:00",
+        "durationMinutes": 60,
+        "location": "Open Hall",
+        "room": null,
+        "capacity": 2,
+        "remoteCapacity": null,
+        "visibility": "public"
+      },
+      "changes": []
+    }
   }
 }
 ### Hal Host GET /api/v1/events/1/dates/D+14 -> 404
@@ -1735,6 +3625,7 @@
     "date": "D+28",
     "dateUrl": "/events/1/dates/D+28",
     "title": "Renamed Study",
+    "description": "Open Study description",
     "location": "Back Room",
     "startsAt": "D+28T19:00:00Z",
     "endsAt": "D+28T20:30:00Z",
@@ -1754,7 +3645,52 @@
     "visibility": "public",
     "canRegister": true,
     "groupId": 1,
-    "groupName": "Open Group"
+    "groupName": "Open Group",
+    "groupHeader": {
+      "imageUrl": "",
+      "coverFocalX": 50,
+      "coverFocalY": 50,
+      "leaderName": "Lee Leader"
+    },
+    "attendance": {
+      "registrations": {
+        "going": 0,
+        "maybe": 0,
+        "waitlisted": 0
+      }
+    },
+    "seats": {
+      "inPerson": {
+        "capacity": 2,
+        "used": 0,
+        "left": 2
+      },
+      "waitlistEnabled": true,
+      "childcare": {
+        "full": false
+      }
+    },
+    "remoteRsvp": "none",
+    "series": {
+      "recurrenceRule": "FREQ=WEEKLY;COUNT=4",
+      "upcomingDates": 2,
+      "coveredDates": 0,
+      "canAnswerSeries": true,
+      "usual": {
+        "startsLocal": "D+28T19:00",
+        "endsLocal": "D+28T20:00",
+        "durationMinutes": 60,
+        "location": "Open Hall",
+        "room": null,
+        "capacity": 2,
+        "remoteCapacity": null,
+        "visibility": "public"
+      },
+      "changes": [
+        "duration",
+        "place"
+      ]
+    }
   }
 }
 ### Hal Host GET /api/v1/events/2/dates/D+8 -> 200
@@ -1765,6 +3701,7 @@
     "date": "D+8",
     "dateUrl": "/events/2/dates/D+8",
     "title": "Opened Event",
+    "description": "Opened Event description",
     "location": "",
     "startsAt": "D+8T19:00:00Z",
     "endsAt": "D+8T20:00:00Z",
@@ -1784,7 +3721,28 @@
     "canBlock": false,
     "visibility": "public",
     "canRegister": true,
-    "hostedBy": "Fold"
+    "hostedBy": "Fold",
+    "attendance": {
+      "registrations": {
+        "going": 0,
+        "maybe": 0,
+        "waitlisted": 0
+      }
+    },
+    "seats": {
+      "inPerson": {
+        "capacity": null,
+        "used": 0,
+        "left": null
+      },
+      "waitlistEnabled": false
+    },
+    "remoteRsvp": "none",
+    "series": {
+      "recurrenceRule": "",
+      "canAnswerSeries": false,
+      "changes": []
+    }
   }
 }
 ### Hal Host GET /api/v1/events/2/dates/D+15 -> 200
@@ -1795,6 +3753,7 @@
     "date": "D+15",
     "dateUrl": "/events/2/dates/D+15",
     "title": "Opened Event",
+    "description": "Opened Event description",
     "location": "",
     "startsAt": "D+15T19:00:00Z",
     "endsAt": "D+15T20:00:00Z",
@@ -1814,7 +3773,28 @@
     "canBlock": false,
     "visibility": "public",
     "canRegister": true,
-    "hostedBy": "Fold"
+    "hostedBy": "Fold",
+    "attendance": {
+      "registrations": {
+        "going": 0,
+        "maybe": 0,
+        "waitlisted": 0
+      }
+    },
+    "seats": {
+      "inPerson": {
+        "capacity": null,
+        "used": 0,
+        "left": null
+      },
+      "waitlistEnabled": false
+    },
+    "remoteRsvp": "none",
+    "series": {
+      "recurrenceRule": "",
+      "canAnswerSeries": false,
+      "changes": []
+    }
   }
 }
 ### Hal Host GET /api/v1/events/3/dates/D+9 -> 200
@@ -1825,6 +3805,7 @@
     "date": "D+9",
     "dateUrl": "/events/3/dates/D+9",
     "title": "Private Event",
+    "description": "Private Event description",
     "location": "Private Porch",
     "startsAt": "D+9T19:00:00Z",
     "endsAt": "D+9T20:00:00Z",
@@ -1844,7 +3825,39 @@
     "visibility": "private",
     "canRegister": true,
     "groupId": 1,
-    "groupName": "Open Group"
+    "groupName": "Open Group",
+    "groupHeader": {
+      "imageUrl": "",
+      "coverFocalX": 50,
+      "coverFocalY": 50,
+      "leaderName": "Lee Leader"
+    },
+    "attendance": {
+      "registrations": {
+        "going": 0,
+        "maybe": 0,
+        "waitlisted": 0
+      }
+    },
+    "seats": {
+      "inPerson": {
+        "capacity": null,
+        "used": 0,
+        "left": null
+      },
+      "remote": {
+        "capacity": null,
+        "used": 0,
+        "left": null
+      },
+      "waitlistEnabled": false
+    },
+    "remoteRsvp": "offered",
+    "series": {
+      "recurrenceRule": "",
+      "canAnswerSeries": false,
+      "changes": []
+    }
   }
 }
 ### Hal Host GET /api/v1/events/3/dates/D+16 -> 200
@@ -1855,6 +3868,7 @@
     "date": "D+16",
     "dateUrl": "/events/3/dates/D+16",
     "title": "Private Event",
+    "description": "Private Event description",
     "location": "Private Porch",
     "startsAt": "D+16T19:00:00Z",
     "endsAt": "D+16T20:00:00Z",
@@ -1874,7 +3888,46 @@
     "visibility": "public",
     "canRegister": true,
     "groupId": 1,
-    "groupName": "Open Group"
+    "groupName": "Open Group",
+    "groupHeader": {
+      "imageUrl": "",
+      "coverFocalX": 50,
+      "coverFocalY": 50,
+      "leaderName": "Lee Leader"
+    },
+    "attendance": {
+      "registrations": {
+        "going": 1,
+        "maybe": 0,
+        "waitlisted": 0
+      },
+      "attendees": [
+        {
+          "name": "Sam Stranger",
+          "status": "going",
+          "guestCount": 0
+        }
+      ]
+    },
+    "seats": {
+      "inPerson": {
+        "capacity": null,
+        "used": 1,
+        "left": null
+      },
+      "remote": {
+        "capacity": null,
+        "used": 0,
+        "left": null
+      },
+      "waitlistEnabled": false
+    },
+    "remoteRsvp": "offered",
+    "series": {
+      "recurrenceRule": "",
+      "canAnswerSeries": false,
+      "changes": []
+    }
   }
 }
 ### Hal Host GET /api/v1/events/4/dates/D+10 -> 200
@@ -1885,6 +3938,7 @@
     "date": "D+10",
     "dateUrl": "/events/4/dates/D+10",
     "title": "Church Potluck",
+    "description": "Church Potluck description",
     "location": "Fellowship Hall",
     "startsAt": "D+10T19:00:00Z",
     "endsAt": "D+10T20:00:00Z",
@@ -1906,6 +3960,7 @@
     "canBlock": false,
     "visibility": "public",
     "canRegister": true,
+    "canManage": true,
     "hostedBy": "Fold",
     "reminders": {
       "minutes": 1440,
@@ -1914,6 +3969,45 @@
       "push": true,
       "pushDueAt": "D+10T17:00:00Z",
       "messages": []
+    },
+    "attendance": {
+      "registrations": {
+        "declined": 0,
+        "going": 1,
+        "maybe": 1,
+        "waitlisted": 0
+      },
+      "attendees": [
+        {
+          "name": "Hal Host",
+          "status": "going",
+          "guestCount": 0
+        },
+        {
+          "name": "Mia Member",
+          "status": "maybe",
+          "guestCount": 0
+        }
+      ]
+    },
+    "seats": {
+      "inPerson": {
+        "capacity": null,
+        "used": 1,
+        "left": null
+      },
+      "remote": {
+        "capacity": null,
+        "used": 0,
+        "left": null
+      },
+      "waitlistEnabled": false
+    },
+    "remoteRsvp": "offered",
+    "series": {
+      "recurrenceRule": "",
+      "canAnswerSeries": false,
+      "changes": []
     }
   }
 }
@@ -1925,6 +4019,7 @@
     "date": "D+11",
     "dateUrl": "/events/5/dates/D+11",
     "title": "Staff Retreat",
+    "description": "Staff Retreat description",
     "location": "",
     "startsAt": "D+11T19:00:00Z",
     "endsAt": "D+11T20:00:00Z",
@@ -1943,6 +4038,7 @@
     "canBlock": false,
     "visibility": "private",
     "canRegister": true,
+    "canManage": true,
     "hostedBy": "Fold",
     "reminders": {
       "minutes": 1440,
@@ -1951,6 +4047,28 @@
       "push": true,
       "pushDueAt": "D+11T17:00:00Z",
       "messages": []
+    },
+    "attendance": {
+      "registrations": {
+        "declined": 0,
+        "going": 0,
+        "maybe": 0,
+        "waitlisted": 0
+      }
+    },
+    "seats": {
+      "inPerson": {
+        "capacity": null,
+        "used": 0,
+        "left": null
+      },
+      "waitlistEnabled": false
+    },
+    "remoteRsvp": "none",
+    "series": {
+      "recurrenceRule": "",
+      "canAnswerSeries": false,
+      "changes": []
     }
   }
 }
@@ -1962,6 +4080,7 @@
     "date": "D+7",
     "dateUrl": "/events/1/dates/D+7",
     "title": "Open Study",
+    "description": "Open Study description",
     "location": "Open Hall",
     "startsAt": "D+7T19:00:00Z",
     "endsAt": "D+7T20:00:00Z",
@@ -1983,7 +4102,62 @@
     "visibility": "public",
     "canRegister": true,
     "groupId": 1,
-    "groupName": "Open Group"
+    "groupName": "Open Group",
+    "groupHeader": {
+      "imageUrl": "",
+      "coverFocalX": 50,
+      "coverFocalY": 50,
+      "leaderName": "Lee Leader"
+    },
+    "attendance": {
+      "registrations": {
+        "going": 1,
+        "maybe": 1,
+        "waitlisted": 1
+      },
+      "attendees": [
+        {
+          "name": "Mia Member",
+          "status": "going",
+          "guestCount": 1
+        },
+        {
+          "name": "Ivy Invited",
+          "status": "maybe",
+          "guestCount": 0
+        }
+      ]
+    },
+    "seats": {
+      "inPerson": {
+        "capacity": 2,
+        "used": 2,
+        "left": 0
+      },
+      "waitlistEnabled": true,
+      "childcare": {
+        "full": false
+      }
+    },
+    "remoteRsvp": "none",
+    "myWaitlistPosition": 1,
+    "series": {
+      "recurrenceRule": "FREQ=WEEKLY;COUNT=4",
+      "upcomingDates": 3,
+      "coveredDates": 0,
+      "canAnswerSeries": true,
+      "usual": {
+        "startsLocal": "D+7T19:00",
+        "endsLocal": "D+7T20:00",
+        "durationMinutes": 60,
+        "location": "Open Hall",
+        "room": null,
+        "capacity": 2,
+        "remoteCapacity": null,
+        "visibility": "public"
+      },
+      "changes": []
+    }
   }
 }
 ### Tess Teen GET /api/v1/events/1/dates/D+14 -> 404
@@ -1999,6 +4173,7 @@
     "date": "D+21",
     "dateUrl": "/events/1/dates/D+21",
     "title": "Open Study",
+    "description": "Open Study description",
     "location": "Open Hall",
     "startsAt": "D+21T19:00:00Z",
     "endsAt": "D+21T20:00:00Z",
@@ -2018,7 +4193,58 @@
     "visibility": "invite_only",
     "canRegister": true,
     "groupId": 1,
-    "groupName": "Open Group"
+    "groupName": "Open Group",
+    "groupHeader": {
+      "imageUrl": "",
+      "coverFocalX": 50,
+      "coverFocalY": 50,
+      "leaderName": "Lee Leader"
+    },
+    "attendance": {
+      "registrations": {
+        "going": 1,
+        "maybe": 0,
+        "waitlisted": 0
+      },
+      "attendees": [
+        {
+          "name": "Ivy Invited",
+          "status": "going",
+          "guestCount": 0
+        }
+      ]
+    },
+    "seats": {
+      "inPerson": {
+        "capacity": 2,
+        "used": 1,
+        "left": 1
+      },
+      "waitlistEnabled": true,
+      "childcare": {
+        "full": false
+      }
+    },
+    "remoteRsvp": "none",
+    "series": {
+      "recurrenceRule": "FREQ=WEEKLY;COUNT=4",
+      "upcomingDates": 3,
+      "coveredDates": 0,
+      "canAnswerSeries": true,
+      "usual": {
+        "startsLocal": "",
+        "endsLocal": "",
+        "durationMinutes": 60,
+        "location": "Open Hall",
+        "room": null,
+        "capacity": 2,
+        "remoteCapacity": null,
+        "visibility": "public"
+      },
+      "changes": [
+        "visibility"
+      ]
+    }
   }
 }
 ### Tess Teen GET /api/v1/events/1/dates/D+28 -> 200
@@ -2029,6 +4255,7 @@
     "date": "D+28",
     "dateUrl": "/events/1/dates/D+28",
     "title": "Renamed Study",
+    "description": "Open Study description",
     "location": "Back Room",
     "startsAt": "D+28T19:00:00Z",
     "endsAt": "D+28T20:30:00Z",
@@ -2048,7 +4275,52 @@
     "visibility": "public",
     "canRegister": true,
     "groupId": 1,
-    "groupName": "Open Group"
+    "groupName": "Open Group",
+    "groupHeader": {
+      "imageUrl": "",
+      "coverFocalX": 50,
+      "coverFocalY": 50,
+      "leaderName": "Lee Leader"
+    },
+    "attendance": {
+      "registrations": {
+        "going": 0,
+        "maybe": 0,
+        "waitlisted": 0
+      }
+    },
+    "seats": {
+      "inPerson": {
+        "capacity": 2,
+        "used": 0,
+        "left": 2
+      },
+      "waitlistEnabled": true,
+      "childcare": {
+        "full": false
+      }
+    },
+    "remoteRsvp": "none",
+    "series": {
+      "recurrenceRule": "FREQ=WEEKLY;COUNT=4",
+      "upcomingDates": 3,
+      "coveredDates": 0,
+      "canAnswerSeries": true,
+      "usual": {
+        "startsLocal": "D+28T19:00",
+        "endsLocal": "D+28T20:00",
+        "durationMinutes": 60,
+        "location": "Open Hall",
+        "room": null,
+        "capacity": 2,
+        "remoteCapacity": null,
+        "visibility": "public"
+      },
+      "changes": [
+        "duration",
+        "place"
+      ]
+    }
   }
 }
 ### Tess Teen GET /api/v1/events/2/dates/D+8 -> 200
@@ -2059,6 +4331,7 @@
     "date": "D+8",
     "dateUrl": "/events/2/dates/D+8",
     "title": "Opened Event",
+    "description": "Opened Event description",
     "location": "",
     "startsAt": "D+8T19:00:00Z",
     "endsAt": "D+8T20:00:00Z",
@@ -2078,7 +4351,28 @@
     "canBlock": false,
     "visibility": "public",
     "canRegister": true,
-    "hostedBy": "Fold"
+    "hostedBy": "Fold",
+    "attendance": {
+      "registrations": {
+        "going": 0,
+        "maybe": 0,
+        "waitlisted": 0
+      }
+    },
+    "seats": {
+      "inPerson": {
+        "capacity": null,
+        "used": 0,
+        "left": null
+      },
+      "waitlistEnabled": false
+    },
+    "remoteRsvp": "none",
+    "series": {
+      "recurrenceRule": "",
+      "canAnswerSeries": false,
+      "changes": []
+    }
   }
 }
 ### Tess Teen GET /api/v1/events/2/dates/D+15 -> 200
@@ -2089,6 +4383,7 @@
     "date": "D+15",
     "dateUrl": "/events/2/dates/D+15",
     "title": "Opened Event",
+    "description": "Opened Event description",
     "location": "",
     "startsAt": "D+15T19:00:00Z",
     "endsAt": "D+15T20:00:00Z",
@@ -2108,7 +4403,28 @@
     "canBlock": false,
     "visibility": "public",
     "canRegister": true,
-    "hostedBy": "Fold"
+    "hostedBy": "Fold",
+    "attendance": {
+      "registrations": {
+        "going": 0,
+        "maybe": 0,
+        "waitlisted": 0
+      }
+    },
+    "seats": {
+      "inPerson": {
+        "capacity": null,
+        "used": 0,
+        "left": null
+      },
+      "waitlistEnabled": false
+    },
+    "remoteRsvp": "none",
+    "series": {
+      "recurrenceRule": "",
+      "canAnswerSeries": false,
+      "changes": []
+    }
   }
 }
 ### Tess Teen GET /api/v1/events/3/dates/D+9 -> 200
@@ -2119,6 +4435,7 @@
     "date": "D+9",
     "dateUrl": "/events/3/dates/D+9",
     "title": "Private Event",
+    "description": "Private Event description",
     "location": "Private Porch",
     "startsAt": "D+9T19:00:00Z",
     "endsAt": "D+9T20:00:00Z",
@@ -2138,7 +4455,39 @@
     "visibility": "private",
     "canRegister": true,
     "groupId": 1,
-    "groupName": "Open Group"
+    "groupName": "Open Group",
+    "groupHeader": {
+      "imageUrl": "",
+      "coverFocalX": 50,
+      "coverFocalY": 50,
+      "leaderName": "Lee Leader"
+    },
+    "attendance": {
+      "registrations": {
+        "going": 0,
+        "maybe": 0,
+        "waitlisted": 0
+      }
+    },
+    "seats": {
+      "inPerson": {
+        "capacity": null,
+        "used": 0,
+        "left": null
+      },
+      "remote": {
+        "capacity": null,
+        "used": 0,
+        "left": null
+      },
+      "waitlistEnabled": false
+    },
+    "remoteRsvp": "offered",
+    "series": {
+      "recurrenceRule": "",
+      "canAnswerSeries": false,
+      "changes": []
+    }
   }
 }
 ### Tess Teen GET /api/v1/events/3/dates/D+16 -> 200
@@ -2149,6 +4498,7 @@
     "date": "D+16",
     "dateUrl": "/events/3/dates/D+16",
     "title": "Private Event",
+    "description": "Private Event description",
     "location": "Private Porch",
     "startsAt": "D+16T19:00:00Z",
     "endsAt": "D+16T20:00:00Z",
@@ -2168,7 +4518,46 @@
     "visibility": "public",
     "canRegister": true,
     "groupId": 1,
-    "groupName": "Open Group"
+    "groupName": "Open Group",
+    "groupHeader": {
+      "imageUrl": "",
+      "coverFocalX": 50,
+      "coverFocalY": 50,
+      "leaderName": "Lee Leader"
+    },
+    "attendance": {
+      "registrations": {
+        "going": 1,
+        "maybe": 0,
+        "waitlisted": 0
+      },
+      "attendees": [
+        {
+          "name": "Sam Stranger",
+          "status": "going",
+          "guestCount": 0
+        }
+      ]
+    },
+    "seats": {
+      "inPerson": {
+        "capacity": null,
+        "used": 1,
+        "left": null
+      },
+      "remote": {
+        "capacity": null,
+        "used": 0,
+        "left": null
+      },
+      "waitlistEnabled": false
+    },
+    "remoteRsvp": "offered",
+    "series": {
+      "recurrenceRule": "",
+      "canAnswerSeries": false,
+      "changes": []
+    }
   }
 }
 ### Tess Teen GET /api/v1/events/4/dates/D+10 -> 200
@@ -2179,6 +4568,7 @@
     "date": "D+10",
     "dateUrl": "/events/4/dates/D+10",
     "title": "Church Potluck",
+    "description": "Church Potluck description",
     "location": "Fellowship Hall",
     "startsAt": "D+10T19:00:00Z",
     "endsAt": "D+10T20:00:00Z",
@@ -2197,7 +4587,45 @@
     "canBlock": false,
     "visibility": "public",
     "canRegister": true,
-    "hostedBy": "Fold"
+    "hostedBy": "Fold",
+    "attendance": {
+      "registrations": {
+        "going": 1,
+        "maybe": 1,
+        "waitlisted": 0
+      },
+      "attendees": [
+        {
+          "name": "Hal Host",
+          "status": "going",
+          "guestCount": 0
+        },
+        {
+          "name": "Mia Member",
+          "status": "maybe",
+          "guestCount": 0
+        }
+      ]
+    },
+    "seats": {
+      "inPerson": {
+        "capacity": null,
+        "used": 1,
+        "left": null
+      },
+      "remote": {
+        "capacity": null,
+        "used": 0,
+        "left": null
+      },
+      "waitlistEnabled": false
+    },
+    "remoteRsvp": "offered",
+    "series": {
+      "recurrenceRule": "",
+      "canAnswerSeries": false,
+      "changes": []
+    }
   }
 }
 ### Tess Teen GET /api/v1/events/5/dates/D+11 -> 200
@@ -2208,6 +4636,7 @@
     "date": "D+11",
     "dateUrl": "/events/5/dates/D+11",
     "title": "Staff Retreat",
+    "description": "Staff Retreat description",
     "location": "",
     "startsAt": "D+11T19:00:00Z",
     "endsAt": "D+11T20:00:00Z",
@@ -2226,6 +4655,27 @@
     "canBlock": false,
     "visibility": "private",
     "canRegister": true,
-    "hostedBy": "Fold"
+    "hostedBy": "Fold",
+    "attendance": {
+      "registrations": {
+        "going": 0,
+        "maybe": 0,
+        "waitlisted": 0
+      }
+    },
+    "seats": {
+      "inPerson": {
+        "capacity": null,
+        "used": 0,
+        "left": null
+      },
+      "waitlistEnabled": false
+    },
+    "remoteRsvp": "none",
+    "series": {
+      "recurrenceRule": "",
+      "canAnswerSeries": false,
+      "changes": []
+    }
   }
 }

@@ -376,6 +376,71 @@ func TestSupportedGuardCatches98f1a9a(t *testing.T) {
 	}
 }
 
+func TestVisibilityConsentDocsUseCurrentRequestFields(t *testing.T) {
+	api, err := os.ReadFile("docs/API.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for endpoint, body := range map[string]string{
+		"PUT  /api/v1/events/:id/visibility":              "body: {visibility, reason?, consent?, resetOverrides?}",
+		"PUT  /api/v1/events/:id/occurrences/:date ":      "edit payload: ignored after standard CSRF processing; writes nothing (see Cutover under Guarded date edit)",
+		"POST /api/v1/events/:id/occurrences/:date/edits": "body: {attempt, revision, changes: {startsLocal?, durationMinutes?, title?, location?, capacityOverride?, remoteCapacityOverride?, visibility?}, reason?, consent?}",
+	} {
+		found := false
+		lines := strings.Split(string(api), "\n")
+		for i, line := range lines {
+			if strings.HasPrefix(line, endpoint) && i+1 < len(lines) {
+				found = strings.TrimSpace(lines[i+1]) == body
+				break
+			}
+		}
+		if !found {
+			t.Errorf("docs/API.md: %s must have body %q", endpoint, body)
+		}
+	}
+	if got := staleVisibilityRequestFields(string(api)); len(got) != 0 {
+		t.Errorf("docs/API.md has removed visibility request fields: %v", got)
+	}
+	brief, err := os.ReadFile("docs/plan/briefs/m8-1-event-date.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(brief), "confirmCount") || !strings.Contains(string(brief), "`impact.consent`") {
+		t.Error("date-edit brief must describe retrying with impact.consent")
+	}
+}
+
+func staleVisibilityRequestFields(src string) []string {
+	endpoint := regexp.MustCompile(`^\s*(PUT\s+/api/v1/events/:id/visibility\b|PUT\s+/api/v1/events/:id/occurrences/:date\s|POST\s+/api/v1/events/:id/occurrences/:date/edits\b)`)
+	nextEndpoint := regexp.MustCompile(`^\s*(GET|POST|PUT|DELETE|PATCH)\s+/api/`)
+	removed := regexp.MustCompile(`\bconfirm(?:Count)?\??\s*[:,?}]`)
+	var out []string
+	active := false
+	for i, line := range strings.Split(src, "\n") {
+		if endpoint.MatchString(line) {
+			active = true
+		} else if nextEndpoint.MatchString(line) || strings.HasPrefix(line, "```") {
+			active = false
+		}
+		if active && removed.MatchString(line) {
+			out = append(out, strconv.Itoa(i+1)+": "+strings.TrimSpace(line))
+		}
+	}
+	return out
+}
+
+func TestVisibilityConsentDocsGuardCatchesOldFields(t *testing.T) {
+	for _, src := range []string{
+		"PUT /api/v1/events/:id/visibility body {visibility, consent}\nPUT /api/v1/events/:id/visibility body {visibility, confirm}",
+		"POST /api/v1/events/:id/occurrences/:date/edits\n {changes: {},\n confirmCount?: number}",
+		"PUT /api/v1/events/:id/occurrences/:date → 200\n body: {visibility, confirm?}",
+	} {
+		if len(staleVisibilityRequestFields(src)) != 1 {
+			t.Errorf("guard missed removed field in %q", src)
+		}
+	}
+}
+
 // --- One Node version (.nvmrc): CI, the Dockerfile and the docs follow it
 // instead of keeping their own copy ---
 

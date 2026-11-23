@@ -43,3 +43,15 @@ it("requires the adult affirmation before requesting a guest confirmation", asyn
     email: "synthetic@example.com",
   }));
 });
+
+it("lets a page hold the opener: it renders only while open, starts on its first field, and hands Never mind back", async () => {
+  const change = vi.fn();
+  const instance = { id: 51, eventId: 7, date: "2026-12-01" };
+  const view = render(<GuestRegistrationForm instance={instance} open={false} onOpenChange={change} />);
+  expect(view.container).toBeEmptyDOMElement();
+  view.rerender(<GuestRegistrationForm instance={instance} open onOpenChange={change} />);
+  expect(screen.queryByRole("button", { name: "Register as a guest" })).not.toBeInTheDocument();
+  expect(screen.getByRole("textbox", { name: "Full name" })).toHaveFocus();
+  await userEvent.click(screen.getByRole("button", { name: "Never mind" }));
+  expect(change).toHaveBeenCalledWith(false);
+});

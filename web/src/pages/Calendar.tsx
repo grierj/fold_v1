@@ -19,7 +19,7 @@ import { Skeleton } from "../components/ui/Skeleton";
 import { CalendarViewSwitch, useRoomCalendarShown } from "../components/calendar/CalendarViews";
 import { ErrorNotice } from "../components/ErrorNotice";
 import { ChevronLeftIcon, ChevronRightIcon } from "../components/icons";
-import { DaySection } from "../components/calendar/EventRow";
+import { DaySection, StartedEarlier } from "../components/calendar/EventRow";
 import { WeekView, weekCountText } from "../components/calendar/WeekView";
 import { MonthView } from "../components/calendar/MonthView";
 
@@ -138,7 +138,12 @@ export function CalendarPage() {
   const anyChildcare = occs.some((o) => o.childcareAvailable);
   const showRemote = remote || (loaded && anyRemote);
   const showChildcare = childcare || (loaded && anyChildcare);
-  const weekCount = weekDays.reduce((n, d) => n + (byDay.get(d)?.length ?? 0), 0);
+  // The grid's first day. A row that starts before it was carried in (DEC-157: an underway kept date that began
+  // before the first day shown); the list was asked in `zone`, so the day keys agree.
+  const first = view === "week" ? weekDays[0] : weeks[0][0];
+  const earlier = view === "agenda" ? [] : [...byDay].filter(([d]) => d < first);
+  const earlierCount = earlier.reduce((n, [, list]) => n + list.length, 0);
+  const weekCount = earlierCount + weekDays.reduce((n, d) => n + (byDay.get(d)?.length ?? 0), 0);
   const groupName = groups.find((g) => String(g.id) === group)?.name ?? "this group";
 
   const filterSummary = [
@@ -259,6 +264,8 @@ export function CalendarPage() {
           <>
             {!loading && view === "week" && <p className="mb-4 text-sm text-text-muted">{weekCountText(weekCount)}</p>}
             {!loading && view === "month" && occs.length === 0 && <p className="mb-4 text-sm text-text-muted">No events this month.</p>}
+            {/* While a new range loads, occs still holds the old one: every row would read as earlier. */}
+            {!loading && <StartedEarlier days={earlier} unit={unit} zone={zone} />}
             {view === "week" ? (
               <WeekView days={weekDays} byDay={byDay} today={today} selected={date} onSelect={(day) => go({ date: day })} />
             ) : (

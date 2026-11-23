@@ -123,7 +123,7 @@ func TestContactPrivacyRosterAndAttendees(t *testing.T) {
 		{"own leader", lc, true, false}, {"admin", ac, true, true}, {"unrelated leader", oc, false, false}, {"signed out", sc, false, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			w := tc.client.do("GET", "/api/v1/groups/"+itoa(g.ID), nil, false)
+			w := tc.client.do("GET", groupDetailPath(g.ID), nil, false)
 			if w.Code != http.StatusOK {
 				t.Fatalf("group: %d %s", w.Code, w.Body.String())
 			}
@@ -199,7 +199,7 @@ func TestContactPrivacyRosterAndAttendees(t *testing.T) {
 		if err := app.DB.Model(&link).Update("status", status).Error; err != nil {
 			t.Fatal(err)
 		}
-		for _, path := range []string{"/api/v1/groups/" + itoa(g.ID), "/api/v1/events/" + itoa(ev.ID)} {
+		for _, path := range []string{groupDetailPath(g.ID), "/api/v1/events/" + itoa(ev.ID)} {
 			w := lc.do("GET", path, nil, false)
 			visible := status == models.GuardianConfirmed
 			if w.Code != 200 || strings.Contains(w.Body.String(), teen.Email) != visible || strings.Contains(w.Body.String(), teen.Phone) != visible {

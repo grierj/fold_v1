@@ -6,6 +6,12 @@ import (
 	"time"
 )
 
+// expandWhens is the dates Expand stores.
+func expandWhens(spec Spec, horizonEnd time.Time) ([]When, error) {
+	x, err := Expand(spec, horizonEnd)
+	return x.Whens, err
+}
+
 // A weekly 7:00 pm event stays at 7:00 pm local on both sides of a
 // daylight-saving change (C2). America/Boise's 2026 fall-back is Nov 1 and
 // its 2027 spring-forward is Mar 14. Phoenix never changes. London's
@@ -25,7 +31,7 @@ func TestWeeklyLocalTimeAcrossDST(t *testing.T) {
 		{"Europe/London", []sample{{"2026-10-21", 18}, {"2026-10-28", 19}, {"2027-03-24", 19}, {"2027-03-31", 18}}},
 	}
 	for _, c := range cases {
-		got, err := Expand(Spec{
+		got, err := expandWhens(Spec{
 			StartsLocal: c.samples[0].date + "T19:00", DurationMinutes: 90,
 			TZID: c.tzid, RRule: "FREQ=WEEKLY",
 		}, time.Date(2027, 6, 1, 0, 0, 0, 0, time.UTC))
@@ -56,11 +62,11 @@ func TestWeeklyLocalTimeAcrossDST(t *testing.T) {
 }
 
 func TestOneTimeAndUntilAndBadZone(t *testing.T) {
-	got, err := Expand(Spec{StartsLocal: "2026-12-24T18:00", DurationMinutes: 60, TZID: "America/Boise"}, time.Now())
+	got, err := expandWhens(Spec{StartsLocal: "2026-12-24T18:00", DurationMinutes: 60, TZID: "America/Boise"}, time.Now())
 	if err != nil || len(got) != 1 || got[0].StartsLocal != "2026-12-24T18:00" {
 		t.Fatalf("one-time: %+v %v", got, err)
 	}
-	got, err = Expand(Spec{
+	got, err = expandWhens(Spec{
 		StartsLocal: "2026-10-07T19:00", DurationMinutes: 60,
 		TZID: "America/Boise", RRule: "FREQ=WEEKLY", Until: "2026-10-20",
 	}, time.Date(2027, 1, 1, 0, 0, 0, 0, time.UTC))
@@ -75,13 +81,13 @@ func TestOneTimeAndUntilAndBadZone(t *testing.T) {
 	if len(got) != 2 { // Oct 7 and Oct 14; Oct 21 is after until
 		t.Fatalf("until count: %d", len(got))
 	}
-	if _, err := Expand(Spec{StartsLocal: "2026-10-07T19:00", DurationMinutes: 60, TZID: "Not/AZone"}, time.Now()); err == nil {
+	if _, err := expandWhens(Spec{StartsLocal: "2026-10-07T19:00", DurationMinutes: 60, TZID: "Not/AZone"}, time.Now()); err == nil {
 		t.Fatal("bad zone accepted")
 	}
-	if _, err := Expand(Spec{StartsLocal: "2026-10-07T19:00Z", DurationMinutes: 60, TZID: "UTC"}, time.Now()); err == nil {
+	if _, err := expandWhens(Spec{StartsLocal: "2026-10-07T19:00Z", DurationMinutes: 60, TZID: "UTC"}, time.Now()); err == nil {
 		t.Fatal("offset accepted")
 	}
-	if _, err := Expand(Spec{StartsLocal: "2026-10-07T19:00", DurationMinutes: 60, TZID: "UTC", RRule: "NOPE"}, time.Now()); err == nil {
+	if _, err := expandWhens(Spec{StartsLocal: "2026-10-07T19:00", DurationMinutes: 60, TZID: "UTC", RRule: "NOPE"}, time.Now()); err == nil {
 		t.Fatal("bad rule accepted")
 	}
 }
@@ -90,7 +96,7 @@ func TestHorizonCoversEighteenMonths(t *testing.T) {
 	start := time.Date(2026, 10, 14, 19, 0, 0, 0, time.UTC)
 	now := time.Date(2026, 10, 10, 12, 0, 0, 0, time.UTC)
 	end := WindowEnd(start, now)
-	got, err := Expand(Spec{
+	got, err := expandWhens(Spec{
 		StartsLocal: "2026-10-14T19:00", DurationMinutes: 60,
 		TZID: "UTC", RRule: "FREQ=WEEKLY",
 	}, end)
@@ -120,7 +126,7 @@ func TestLoadZone(t *testing.T) {
 func TestExpandRefusesSubDailyRules(t *testing.T) {
 	horizon := time.Date(2027, 6, 1, 0, 0, 0, 0, time.UTC)
 	for _, rule := range []string{"FREQ=SECONDLY", "FREQ=MINUTELY;INTERVAL=5", "FREQ=HOURLY"} {
-		_, err := Expand(Spec{StartsLocal: "2026-11-01T09:00", DurationMinutes: 30, TZID: "UTC", RRule: rule}, horizon)
+		_, err := expandWhens(Spec{StartsLocal: "2026-11-01T09:00", DurationMinutes: 30, TZID: "UTC", RRule: rule}, horizon)
 		if !errors.Is(err, ErrTooFrequent) {
 			t.Fatalf("%s: %v", rule, err)
 		}
@@ -131,15 +137,15 @@ func TestExpandCapsTheNumberOfDates(t *testing.T) {
 	horizon := time.Date(2027, 6, 1, 0, 0, 0, 0, time.UTC)
 	// Daily with 24 hours is under the frequency rule but far over the cap.
 	rule := "FREQ=DAILY;BYHOUR=0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23"
-	if _, err := Expand(Spec{StartsLocal: "2026-11-01T00:00", DurationMinutes: 30, TZID: "UTC", RRule: rule}, horizon); !errors.Is(err, ErrTooManyDates) {
+	if _, err := expandWhens(Spec{StartsLocal: "2026-11-01T00:00", DurationMinutes: 30, TZID: "UTC", RRule: rule}, horizon); !errors.Is(err, ErrTooManyDates) {
 		t.Fatalf("byhour: %v", err)
 	}
 	// A long-running daily series is fine: the cap measures density, not age.
-	if got, err := Expand(Spec{StartsLocal: "2015-01-01T09:00", DurationMinutes: 30, TZID: "UTC", RRule: "FREQ=DAILY"}, horizon); err != nil || len(got) < 4000 {
+	if got, err := expandWhens(Spec{StartsLocal: "2015-01-01T09:00", DurationMinutes: 30, TZID: "UTC", RRule: "FREQ=DAILY"}, horizon); err != nil || len(got) < 4000 {
 		t.Fatalf("decade-old daily: %d dates, %v", len(got), err)
 	}
 	// An absurd start date stops at the step bound.
-	if _, err := Expand(Spec{StartsLocal: "1700-01-01T09:00", DurationMinutes: 30, TZID: "UTC", RRule: "FREQ=DAILY"}, horizon); !errors.Is(err, ErrTooManyDates) {
+	if _, err := expandWhens(Spec{StartsLocal: "1700-01-01T09:00", DurationMinutes: 30, TZID: "UTC", RRule: "FREQ=DAILY"}, horizon); !errors.Is(err, ErrTooManyDates) {
 		t.Fatalf("ancient daily: %v", err)
 	}
 }
@@ -147,16 +153,16 @@ func TestExpandCapsTheNumberOfDates(t *testing.T) {
 func TestExpandKeepsOrdinaryRulesAndHonoursUntil(t *testing.T) {
 	horizon := time.Date(2028, 6, 1, 0, 0, 0, 0, time.UTC)
 	for rule, min := range map[string]int{"FREQ=WEEKLY": 80, "FREQ=DAILY": 500, "FREQ=MONTHLY;BYMONTHDAY=1": 15} {
-		got, err := Expand(Spec{StartsLocal: "2026-11-01T09:00", DurationMinutes: 30, TZID: "UTC", RRule: rule}, horizon)
+		got, err := expandWhens(Spec{StartsLocal: "2026-11-01T09:00", DurationMinutes: 30, TZID: "UTC", RRule: rule}, horizon)
 		if err != nil || len(got) < min || len(got) > MaxOccurrences {
 			t.Fatalf("%s: %d dates, %v", rule, len(got), err)
 		}
 	}
-	got, err := Expand(Spec{StartsLocal: "2026-11-01T09:00", DurationMinutes: 30, TZID: "UTC", RRule: "FREQ=DAILY", Until: "2026-11-10"}, horizon)
+	got, err := expandWhens(Spec{StartsLocal: "2026-11-01T09:00", DurationMinutes: 30, TZID: "UTC", RRule: "FREQ=DAILY", Until: "2026-11-10"}, horizon)
 	if err != nil || len(got) != 10 || got[9].OriginalDate != "2026-11-10" {
 		t.Fatalf("until: %d %v", len(got), err)
 	}
-	one, err := Expand(Spec{StartsLocal: "2026-11-01T09:00", DurationMinutes: 30, TZID: "UTC"}, horizon)
+	one, err := expandWhens(Spec{StartsLocal: "2026-11-01T09:00", DurationMinutes: 30, TZID: "UTC"}, horizon)
 	if err != nil || len(one) != 1 {
 		t.Fatalf("single: %d %v", len(one), err)
 	}

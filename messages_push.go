@@ -93,8 +93,11 @@ func pushCandidates(facts []recipientFact) []uint {
 // date's push reminder is its own message, written by the sweep
 // (reminders_push.go).
 func (a *App) messagePushRows(db *gorm.DB, m *models.Message, facts []recipientFact) ([]models.MessageRecipient, error) {
-	if !m.PushAlert || m.Category != models.MessageCategoryAnnouncement || !a.pushEnabled() {
+	if !m.PushAlert || m.Category != models.MessageCategoryAnnouncement {
 		return nil, nil
+	}
+	if on, err := boolSettingErrIn(db, settingPushEnabled, true); err != nil || !on {
+		return nil, err
 	}
 	ids := pushCandidates(facts)
 	if len(ids) == 0 {
@@ -148,7 +151,8 @@ func enqueueMessagePushes(tx *gorm.DB, messageID uint) error {
 // messagePushRecorder writes an announcement push's outcome on its row,
 // as recordPushIn does for a notification: a sent row is final, and any
 // other first outcome stays unless a later device takes it, which makes
-// the row sent. A row is never moved back to queued.
+// the row sent. Only another device's job going back to wait for quiet
+// hours moves one device's miss back to queued (pushWaitIn).
 func messagePushRecorder(id uint) pushRecorder {
 	return func(db *gorm.DB, status, reason string, now time.Time) error {
 		updates := map[string]any{"status": status, "reason": reason, "updated_at": time.Now()}
@@ -162,6 +166,9 @@ func messagePushRecorder(id uint) pushRecorder {
 		return q.Updates(updates).Error
 	}
 }
+
+// messagePushColumns are the message columns a push decides and speaks from.
+var messagePushColumns = []string{"id", "status", "category", "subject", "body_text", "audience", "occurrence_id", "reminder_key", "scheduled_at"}
 
 // deliverMessagePush sends one announcement push row to one device. It
 // checks, in order: the church's switch, the account, the person's push
@@ -182,7 +189,7 @@ func (a *App) deliverMessagePush(ctx context.Context, rowID, deviceID uint, plan
 	if row.Channel != models.DeliveryPush || row.CopyOfUserID != nil {
 		return nil
 	}
-	t := pushTarget{rec: messagePushRecorder(row.ID)}
+	t := pushTarget{rec: messagePushRecorder(row.ID), row: pushRow{recipientID: row.ID}}
 	var u models.User
 	if err := db.Select("id", "name", "display_name", "status", "timezone").First(&u, row.UserID).Error; errors.Is(err, gorm.ErrRecordNotFound) {
 		return nil
@@ -190,49 +197,41 @@ func (a *App) deliverMessagePush(ctx context.Context, rowID, deviceID uint, plan
 		return err
 	}
 	var m models.Message
-	if err := db.Select("id", "status", "category", "subject", "body_text", "audience", "occurrence_id", "reminder_key").First(&m, row.MessageID).Error; errors.Is(err, gorm.ErrRecordNotFound) {
+	if err := db.Select(messagePushColumns).First(&m, row.MessageID).Error; errors.Is(err, gorm.ErrRecordNotFound) {
 		return nil
 	} else if err != nil {
 		return err
 	}
-	if why, err := a.pushHeld(db, &u, messageCategory(&m), false); err != nil {
+	// These checks only spare quiet hours and the hourly limit a push that
+	// can't go; the send's own snapshot reads them again.
+	if dest, err := a.pushDestinationIn(db, u.ID, deviceID, messageCategory(&m), false); err != nil {
 		return err
-	} else if why != "" {
-		return t.record(a, models.RecipientSuppressed, why)
+	} else if !dest.sends() {
+		return a.pushDestOutcome(db, t, dest, deviceID)
 	}
-	var dev models.PushSubscription
-	if err := db.First(&dev, deviceID).Error; err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
-		return err
-	}
-	if dev.ID == 0 || dev.UserID != u.ID {
-		// Turned off, gone, or changed hands since it was queued. Another
-		// device's job decides when the person still has one.
-		if left, err := pushDevicesLeft(db, u.ID); err != nil {
-			return err
-		} else if !left {
-			return t.record(a, models.RecipientSuppressed, pushWhyGone)
-		}
-		return nil
-	}
-	t.dev = dev
 	if m.Status != models.MessageSending && m.Status != models.MessageSent {
 		return t.record(a, models.RecipientSuppressed, pushWhyStale)
 	}
 	if m.Category == models.MessageCategoryReminder {
 		// The 2-hour push reminder (M3.13d3) has its own checks; the
 		// sweep timed it, so it neither waits nor meets the hourly limit.
-		return a.deliverReminderPush(ctx, t, &row, &u, &m, plannedAt)
+		return a.deliverReminderPush(ctx, t, &row, &u, &m, deviceID, plannedAt)
 	}
 	now := a.pushNow()
 	loc := userZoneIn(db, u.Timezone)
 	if opens, wait := a.pushOpensAt(now, loc); wait {
-		// The row stays queued and says when it goes, on the
-		// recipient's clock, for the history.
-		if err := db.Model(&models.MessageRecipient{}).Where("id = ? AND status = ?", row.ID, models.RecipientQueued).
-			Updates(map[string]any{"reason": pushWaitReason(opens, loc), "updated_at": time.Now()}).Error; err != nil {
+		if a.hooks.pushStep != nil {
+			a.hooks.pushStep("wait")
+		}
+		if err := db.Transaction(func(tx *gorm.DB) error {
+			return pushWaitIn(ctx, tx, row.ID, opens, loc)
+		}, pushSettleTx); err != nil {
 			return err
 		}
-		return jobs.Later(opens)
+		if a.hooks.pushStep != nil {
+			a.hooks.pushStep("waited")
+		}
+		return jobs.Requeued()
 	}
 	over, err := a.overHourlyLimit(ctx, pushItem{UserID: u.ID, RecipientID: row.ID}, now)
 	if err != nil {
@@ -241,10 +240,56 @@ func (a *App) deliverMessagePush(ctx context.Context, rowID, deviceID uint, plan
 	if over {
 		return t.record(a, models.RecipientSuppressed, pushWhyHourly)
 	}
-	vals, err := a.pushValues(db, &m, &u)
-	if err != nil {
+	var vals map[string]string
+	var skip string
+	var dest pushDest
+	// The destination, the final decision and the payload's event values
+	// come from one read-only snapshot, read after quiet hours and the
+	// hourly limit let it go, on the push's own clock; the provider is
+	// called after it ends, holding nothing.
+	if a.hooks.pushStep != nil {
+		a.hooks.pushStep("snapshot")
+	}
+	if err := db.Transaction(func(tx *gorm.DB) error {
+		var err error
+		if dest, err = a.pushDestinationIn(tx, u.ID, deviceID, messageCategory(&m), false); err != nil || !dest.sends() {
+			return err
+		}
+		if a.hooks.pushStep != nil {
+			a.hooks.pushStep("destination")
+		}
+		// The message again, in this snapshot: Try again moves an
+		// announcement's scheduled_at (its series cutoff) without touching
+		// its push rows, so the cutoff read before quiet hours or the
+		// hourly limit may be stale. Email and the read page count from the
+		// current one, and so does the push.
+		var cur models.Message
+		if err := tx.Select(messagePushColumns).Where("id = ?", row.MessageID).Limit(1).Find(&cur).Error; err != nil {
+			return err
+		}
+		if cur.ID == 0 || (cur.Status != models.MessageSending && cur.Status != models.MessageSent) {
+			skip = pushWhyStale
+			return nil
+		}
+		m = cur
+		skip, vals, err = a.announcementPushIn(tx, &m, &dest.user, a.pushNow().UTC())
+		return err
+	}, readSnapshot); err != nil {
 		return err
 	}
+	if !dest.sends() {
+		return a.pushDestOutcome(db, t, dest, deviceID)
+	}
+	if skip != "" {
+		return t.record(a, models.RecipientSuppressed, skip)
+	}
+	// The snapshot let the person through the event audience's date check:
+	// recorded before the provider call, apart from the row's status, so a
+	// later outcome on this or another device keeps it (isMessageRecipientIn).
+	if err := markPushAdmitted(db, &m, row.ID); err != nil {
+		return err
+	}
+	t.dev = dest.dev
 	title, text := messagePushText(&m, vals)
 	t.what = fmt.Sprintf("message %d recipient %d", m.ID, row.ID)
 	body, err := push.MarshalPayload(push.NewPayload(push.Notification{
@@ -256,12 +301,41 @@ func (a *App) deliverMessagePush(ctx context.Context, rowID, deviceID uint, plan
 	return a.sendPush(ctx, t, body, recipientPushOptions(row.ID, pushTTL), "")
 }
 
-// pushValues are u's merge values for m's push, read when the payload is
-// built. The lock screen never carries a link, so only the first name and the
-// event's title and time matter; the live access checks behind those run only
-// when the subject or text uses one, and fill only what u may see of the
-// event or date now (message_event_visibility.go).
-func (a *App) pushValues(db *gorm.DB, m *models.Message, u *models.User) (map[string]string, error) {
+// markPushAdmitted records, once, that an announcement push row's person
+// passed its event audience's date check (audience_admitted_at). Any other
+// audience has no such check, and its rows record nothing.
+func markPushAdmitted(db *gorm.DB, m *models.Message, rowID uint) error {
+	var au audienceJSON
+	if err := json.Unmarshal([]byte(m.Audience), &au); err != nil || !eventAudience(au.Type) {
+		return err
+	}
+	return db.Model(&models.MessageRecipient{}).Where("id = ? AND channel = ? AND audience_admitted_at IS NULL", rowID, models.DeliveryPush).
+		Update("audience_admitted_at", time.Now().UTC()).Error
+}
+
+// announcementPushIn decides, on tx (the push's snapshot), whether m's push
+// still goes to the user (why not, else "") and with which merge values. An
+// event audience's push goes only while a date the person may still see puts
+// them in it (audienceSkip), as the email send decides. The lock screen never carries a
+// link, so only the first name and the event's title and time matter; the
+// live access checks behind those run only when the subject or text uses one,
+// and fill only what the person may see of the event or date now
+// (message_event_visibility.go). live is the person as the same snapshot
+// read them (pushDestinationIn). An event audience's dates count from the
+// message's stored scheduled time (messageSince), as email and the read page
+// count them.
+func (a *App) announcementPushIn(tx *gorm.DB, m *models.Message, live *models.User, now time.Time) (string, map[string]string, error) {
+	var au audienceJSON
+	_ = json.Unmarshal([]byte(m.Audience), &au)
+	if eventAudience(au.Type) {
+		seers, err := a.audienceSeers(tx, au, []uint{live.ID}, messageSince(m, now), now)
+		if err != nil {
+			return "", nil, err
+		}
+		if why := audienceSkip(seers, live.ID); why != "" {
+			return why, nil, nil
+		}
+	}
 	needsEvent := false
 	for _, f := range content.FieldsIn(m.Subject + "\n" + m.BodyText) {
 		if f == content.FieldEventTitle || f == content.FieldEventTime {
@@ -269,11 +343,37 @@ func (a *App) pushValues(db *gorm.DB, m *models.Message, u *models.User) (map[st
 		}
 	}
 	if !needsEvent {
-		return map[string]string{content.FieldFirstName: firstName(u.PublicName())}, nil
+		return "", map[string]string{content.FieldFirstName: firstName(live.PublicName())}, nil
 	}
-	var au audienceJSON
-	_ = json.Unmarshal([]byte(m.Audience), &au)
-	return a.pushEventValues(db, u.ID, au, time.Now().UTC())
+	vals, err := a.readerEventValues(tx, live, au, now)
+	return "", vals, err
+}
+
+// pushWaitIn, on a pushSettleTx, says the row waits for quiet hours to end,
+// on the recipient's clock, for the history, and queues this device's job
+// again for then (jobs.LaterIn) in the same commit; when its claim is no
+// longer current, nothing commits. The account is locked first (FOR
+// SHARE, in the account-first order erasure and status changes take), so
+// the person's status is read after any erasure or status change that holds
+// it has committed. The row's lock then orders it with another device's
+// settlement (settlePushMissIn): one that settles after sees this job queued
+// and leaves the row waiting; one that settled first recorded a miss about
+// its own device alone (pushDeviceMisses), which goes back to waiting while
+// the person is still active. A sent row, and any other outcome, stays.
+func pushWaitIn(ctx context.Context, tx *gorm.DB, rowID uint, opens time.Time, loc *time.Location) error {
+	var account []uint
+	if err := tx.Raw(`SELECT u.id FROM users u JOIN message_recipients r ON r.user_id = u.id WHERE r.id = ? FOR SHARE OF u`, rowID).
+		Scan(&account).Error; err != nil {
+		return err
+	}
+	if err := tx.Exec(`UPDATE message_recipients r SET status = ?, reason = ?, updated_at = now()
+		WHERE r.id = ? AND r.channel = ? AND (r.status = ? OR (r.status IN (?, ?) AND r.reason IN ?
+			AND EXISTS (SELECT 1 FROM users u WHERE u.id = r.user_id AND u.status = ?)))`,
+		models.RecipientQueued, pushWaitReason(opens, loc), rowID, models.DeliveryPush, models.RecipientQueued,
+		models.RecipientSuppressed, models.RecipientFailed, pushDeviceMisses, models.UserActive).Error; err != nil {
+		return err
+	}
+	return jobs.LaterIn(ctx, tx, opens)
 }
 
 // pushWaitReason is a waiting push row's reason: when quiet hours end on the

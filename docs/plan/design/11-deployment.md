@@ -243,6 +243,10 @@ Today, on the DigitalOcean path (details in
 - If a migration fails, its transaction rolls back and the app **exits non-zero** with the error in
   the logs. Docker restarts it and `docker compose ps` shows it unhealthy. There is no read-only
   maintenance mode.
+- From recovery level 3 (exact visibility consent, DEC-158) no earlier release starts on a
+  database this release ran: `00015`'s start fence refuses its boot, after any number of
+  `fold migrate down-one` steps too, and `upgrade.sh --rollback` to an earlier release is
+  refused. After a failed upgrade, keep this release and restore with its `restore.sh --dump`.
 - Rollback is `upgrade.sh --rollback`. It hands off to `restore.sh`, which restores the recorded
   dump into a fresh database under the previous release and keeps the site closed while the
   operator deletes again anyone removed since the dump; it reopens by itself only when there is

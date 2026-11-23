@@ -7,7 +7,10 @@
 # e2e/shards.mjs balances the slices by the seconds in e2e/durations.json;
 # the page checks (a11y, layout) are split into parts to spread them.
 #
-#   E2E_SHARDS=n            number of shards (default: CPUs, 2..6)
+#   E2E_SHARDS=n            number of shards on this machine (default: CPUs, 2..6)
+#   E2E_RUNNER=i/n          CI: this is machine i of n. The plan covers n times
+#                           E2E_SHARDS shards and this machine runs its own
+#                           E2E_SHARDS of them; the dev shard runs on machine n.
 #
 # The shards run the fold server in production mode, where GET /dev/outbox is a
 # 404 and the e2e server has no email service (messages.spec.ts and system.spec.ts
@@ -16,7 +19,15 @@
 # APP_ENV=dev server of its own. Every spec that mentions /dev/outbox goes
 # there, with no list to keep: a new one is picked up by its first use.
 #   E2E_RECORD_DURATIONS=1  rewrite e2e/durations.json from this run
-#   extra arguments go to every shard, e.g. e2e/run.sh --grep waitlist
+#   extra arguments are Playwright options for every shard, e.g. e2e/run.sh --grep waitlist.
+#   The options that take a value are the ones named in the parser below; give the
+#   value as the next word, or after = on a long option (--global-timeout=120000).
+#   A short option with = is refused: Playwright would read -G=hosts as "=hosts".
+#   A filter may leave any shard with nothing to run; the run fails only if no
+#   test matched it on any shard of this machine. Spec files cannot be named:
+#   each shard runs its own planned files, so a file here would be added to
+#   every shard instead of narrowing the run. Select specs with --grep, which
+#   matches the file name too (--grep "hosts\.spec|series-rsvp").
 # Traces of failed tests land in test-results/shard-<n>/.
 set -euo pipefail
 : "${DATABASE_URL:?set DATABASE_URL (make e2e does)}"
@@ -25,6 +36,45 @@ cd "$(dirname "$0")/.."
 cpus=$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 2)
 default=$((cpus < 2 ? 2 : cpus > 6 ? 6 : cpus))
 shards=${E2E_SHARDS:-$default}
+runner=${E2E_RUNNER:-1/1}
+if ! [[ "$runner" =~ ^([1-9][0-9]*)/([1-9][0-9]*)$ ]] || ((BASH_REMATCH[1] > BASH_REMATCH[2])); then
+	echo "run.sh: E2E_RUNNER must be i/n with 1 <= i <= n, not $runner" >&2
+	exit 2
+fi
+machine=${BASH_REMATCH[1]} machines=${BASH_REMATCH[2]}
+first=$(((machine - 1) * shards))
+
+takes_value=0
+for arg in "$@"; do
+	if ((takes_value)); then takes_value=0; continue; fi
+	case "$arg" in
+	--)
+		echo "run.sh: the option terminator is not allowed in the sharded runner." >&2
+		exit 2
+		;;
+	--reporter | --reporter=*)
+		echo "run.sh: reporter overrides are not allowed; the runner needs JSON reports." >&2
+		exit 2
+		;;
+	--list | --list=*)
+		echo "run.sh: --list is not available through the sharded runner." >&2
+		exit 2
+		;;
+	-g=* | -G=* | -j=*)
+		echo "run.sh: '$arg': give a short option's value as the next word (${arg%%=*} value), or use the long option with =." >&2
+		exit 2
+		;;
+	-g | -G | --grep | --grep-invert | --project | --repeat-each | --retries | --workers | -j | --timeout | --global-timeout | --max-failures | --trace) takes_value=1 ;;
+	-*) ;;
+	*)
+		echo "run.sh: '$arg' is not a Playwright option. Spec files cannot be named here (each shard runs its own planned files); select tests with --grep." >&2
+		exit 2
+		;;
+	esac
+done
+filtered=$(($# > 0))
+empty_ok=()
+((filtered == 0)) || empty_ok=(--pass-with-no-tests)
 
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
@@ -34,45 +84,66 @@ export FOLD_E2E_BIN="$tmp/fold"
 rm -rf test-results
 
 started=$(date +%s)
-mapfile -t plan < <(node e2e/shards.mjs plan "$shards")
+plan_out=$(node e2e/shards.mjs plan $((shards * machines)))
+mapfile -t plan <<<"$plan_out"
 pids=()
 for ((s = 1; s <= shards; s++)); do
-	IFS='|' read -r parts files <<<"${plan[s - 1]}"
-	read -ra specs <<<"$files"
+	IFS='|' read -r parts files <<<"${plan[first + s - 1]}"
+	read -ra names <<<"$files"
+	# Playwright reads each file argument as a pattern over the path: "session.spec.ts" alone
+	# also runs reason-review-session.spec.ts. "e2e/<file>" matches only that file.
+	specs=("${names[@]/#/e2e/}")
+	# With no spec named, playwright would run the whole suite.
+	((${#specs[@]} > 0)) || { echo "run.sh: shard $((first + s)) has no specs; use fewer shards" >&2; exit 1; }
 	E2E_SHARD=$s E2E_PORT=$((18090 + s)) E2E_OUTPUT_DIR="test-results/shard-$s" E2E_PARTS="$parts" \
 		PLAYWRIGHT_JSON_OUTPUT_NAME="$tmp/shard$s.json" \
-		npx playwright test --reporter=list,json seed "${specs[@]}" "$@" >"$tmp/shard$s.log" 2>&1 &
+		npx playwright test --reporter=list,json "${empty_ok[@]}" seed "${specs[@]}" "$@" >"$tmp/shard$s.log" 2>&1 &
 	pids+=("$!")
 done
 
-# The dev shard: its own port, database ("<db>_e2e_dev") and seed, in dev mode. Left out of the
-# durations that E2E_RECORD_DURATIONS writes (its messages.spec.ts run is a second one).
-mapfile -t dev_specs < <(grep -l '/dev/outbox' e2e/*.spec.ts | xargs -n1 basename | sort)
-# With no spec named, playwright would run the whole suite in dev mode.
-if ((${#dev_specs[@]} == 0)); then echo "run.sh: no spec mentions /dev/outbox; the dev shard has nothing to run" >&2; exit 1; fi
-E2E_APP_ENV=dev E2E_SHARD=dev E2E_PORT=$((18090 + shards + 1)) E2E_OUTPUT_DIR="test-results/shard-dev" \
-	PLAYWRIGHT_JSON_OUTPUT_NAME="$tmp/dev.json" \
-	npx playwright test --reporter=list,json seed "${dev_specs[@]}" "$@" >"$tmp/dev.log" 2>&1 &
-dev_pid=$!
+# The dev shard: its own port, database ("<db>_e2e_dev") and seed, in dev mode, on the last
+# machine only. Left out of the durations that E2E_RECORD_DURATIONS writes (its messages.spec.ts
+# run is a second one).
+dev_pid=
+if ((machine == machines)); then
+	mapfile -t dev_specs < <(grep -l '/dev/outbox' e2e/*.spec.ts | sort)
+	# With no spec named, playwright would run the whole suite in dev mode.
+	if ((${#dev_specs[@]} == 0)); then echo "run.sh: no spec mentions /dev/outbox; the dev shard has nothing to run" >&2; exit 1; fi
+	E2E_APP_ENV=dev E2E_SHARD=dev E2E_PORT=$((18090 + shards + 1)) E2E_OUTPUT_DIR="test-results/shard-dev" \
+		PLAYWRIGHT_JSON_OUTPUT_NAME="$tmp/dev.json" \
+		npx playwright test --reporter=list,json "${empty_ok[@]}" seed "${dev_specs[@]}" "$@" >"$tmp/dev.log" 2>&1 &
+	dev_pid=$!
+fi
 
 status=0
 for ((s = 1; s <= shards; s++)); do
 	if wait "${pids[s - 1]}"; then
-		echo "shard $s/$shards: $(grep -E '^ +[0-9]+ (passed|skipped|flaky)' "$tmp/shard$s.log" | xargs)"
+		echo "shard $((first + s))/$((shards * machines)): $(grep -E '^ +[0-9]+ (passed|skipped|flaky)' "$tmp/shard$s.log" | xargs)"
 	else
 		status=1
-		echo "--- shard $s/$shards failed:"
+		echo "--- shard $((first + s))/$((shards * machines)) failed:"
 		cat "$tmp/shard$s.log"
 	fi
 done
-if wait "$dev_pid"; then
+if [ -z "$dev_pid" ]; then
+	:
+elif wait "$dev_pid"; then
 	echo "dev shard: $(grep -E '^ +[0-9]+ (passed|skipped|flaky)' "$tmp/dev.log" | xargs)"
 else
 	status=1
 	echo "--- dev shard failed:"
 	cat "$tmp/dev.log"
 fi
-echo "e2e: $shards shards in $(($(date +%s) - started))s"
+if ((status == 0 && filtered)); then
+	ran=$(node e2e/shards.mjs ran "$tmp"/*.json)
+	if ((ran == 0)); then
+		status=1
+		echo "run.sh: no test matched $* on any shard of this machine" >&2
+	else
+		echo "e2e: the filter selected $ran tests"
+	fi
+fi
+echo "e2e: machine $machine/$machines, $shards shards in $(($(date +%s) - started))s"
 if ((status == 0)) && [ -n "${E2E_RECORD_DURATIONS:-}" ]; then
 	node e2e/shards.mjs record "$tmp"/shard*.json
 	echo "e2e: updated e2e/durations.json"

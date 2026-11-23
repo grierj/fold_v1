@@ -1,11 +1,11 @@
-// The one fetch client for /api/v1. Cookie session auth; the CSRF token is
-// fetched from GET /api/v1/auth/csrf and sent as X-CSRF-Token on every unsafe
-// request. Every request, whatever it reads back (JSON, a file, a 304), goes
-// through send() so a 401, an unreadable body and the CSRF rules behave the
-// same everywhere.
-import { isJsonObject, isString, type JsonObject, type JsonValue } from "../lib/wireValues";
+// The one fetch client for /api/v1. Cookie session auth; the CSRF token comes
+// from the browser credential (GET /api/v1/auth/bootstrap, below) and is sent
+// as X-CSRF-Token on every unsafe request. Every request, whatever it reads
+// back (JSON, a file, a 304), goes through send() so a 401, an unreadable body
+// and the CSRF rules behave the same everywhere.
+import { isBoolean, isJsonObject, isNumber, isString, type JsonObject, type JsonValue } from "../lib/wireValues";
+import type { SessionBootstrapResponse, User } from "../types";
 
-let csrfToken: string | null = null;
 let onUnauthorized: (() => void) | null = null;
 
 // Called once before the first render (main.tsx), so no request can run
@@ -71,17 +71,218 @@ export class ApiError extends Error {
   }
 }
 
-export async function ensureCsrf(): Promise<string> {
-  if (csrfToken) return csrfToken;
-  const res = await fetch("/api/v1/auth/csrf", { credentials: "include" });
+// The browser credential (M8.1): the CSRF token T this tab holds, the marker M
+// the server derived from it, and the viewer it was judged to sign in. Its
+// lifetime is one object: a replacement (another account, a new T or M) is a
+// new object, so work captured under the old one can tell it no longer holds.
+export interface Credential {
+  readonly token: string;
+  readonly marker: string;
+  readonly viewer: number | null;
+  // The marker cookie this tab saw at adoption (null when it could not read
+  // one). Only a verified credential, whose cookie, body and acknowledgment
+  // agreed, may pin a participating request; plain requests need the token.
+  readonly seen: string | null;
+  readonly verified: boolean;
+}
 
-  if (!res.ok) throw new ApiError(res.status, "failed to fetch CSRF token");
-  const data: JsonValue = await res.json();
+export interface BootstrapSession {
+  credential: Credential;
+  user: User | null;
+  canCompose: boolean;
+}
 
-  if (!isJsonObject(data) || !isString(data.csrfToken) || !data.csrfToken) throw new ApiError(502, "unreadable CSRF token");
-  csrfToken = data.csrfToken;
+let current: Credential | null = null;
+let lastAdopted: Credential | null = null;
+let lastSession: BootstrapSession | null = null;
 
-  return csrfToken;
+// Each bootstrap request's order; an answer older than the one adopted is not shown.
+let asked = 0;
+let adoptedAt = 0;
+
+// Rises with every local invalidation; a bootstrap begun before one never adopts.
+let invalidations = 0;
+let flight: { at: number; promise: Promise<BootstrapSession> } | null = null;
+let rotation: Promise<void> | null = null;
+const listeners = new Set<(session: BootstrapSession | null) => void>();
+let channel: BroadcastChannel | null = null;
+
+const CHANNEL = "fold-credential";
+
+// The marker cookie as script sees it now: __Host-fold-credential when the
+// server marks cookies Secure (which a browser also allows on http://localhost),
+// fold-credential otherwise. null when there is none, or more than one: an
+// ambiguous jar is never trusted. A copy at another path shows only on the
+// pages under it, and neither script nor the server can tell it apart or
+// remove it, so those pages refuse participating requests until it goes.
+function liveMarker(): string | null {
+  const found = document.cookie.split(";").map((part) => part.trim()).filter((part) => part.startsWith("__Host-fold-credential=") || part.startsWith("fold-credential="));
+  const value = found.length === 1 ? found[0].slice(found[0].indexOf("=") + 1) : "";
+
+  return value || null;
+}
+
+/** @public The credential this tab holds now, or null while it is suspended or unknown; the lifetime a participating read pins. */
+export function currentCredential(): Credential | null {
+  return current;
+}
+
+// Whether a lifetime captured earlier is still this tab's, sampled now: the same
+// object and the marker cookie unchanged. Callers check after every await,
+// before publishing, and immediately before a fetch.
+export function credentialCurrent(credential: Credential | null): credential is Credential {
+  return credential !== null && credential === current && liveMarker() === credential.seen;
+}
+
+function notify(session: BootstrapSession | null) {
+  for (const listener of listeners) listener(session);
+}
+
+// Suspends the lifetime before a local credential change: nothing captured
+// under it is current any more, and nothing adopted before now can return,
+// even when the tab settles on the same token, marker and viewer (a refused or
+// lost rotation): only a routine recheck keeps the lifetime object.
+function invalidateCredential() {
+  invalidations++;
+  current = null;
+  lastAdopted = null;
+  lastSession = null;
+  notify(null);
+}
+
+class BootstrapRefused extends Error {}
+
+function readSession(data: JsonValue): SessionBootstrapResponse | null {
+  if (!isJsonObject(data) || !isString(data.csrfToken) || !data.csrfToken || !isString(data.credentialMarker) || !data.credentialMarker) return null;
+  const user = data.user;
+
+  if (user !== null && (!isJsonObject(user) || !isNumber(user.id))) return null;
+
+  return { user: user && serverPayload<User>(user), canCompose: isBoolean(data.canCompose) && data.canCompose, csrfToken: data.csrfToken, credentialMarker: data.credentialMarker };
+}
+
+async function runBootstrap(at: number): Promise<BootstrapSession> {
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const order = ++asked;
+    const res = await fetch("/api/v1/auth/bootstrap", { credentials: "include", headers: { Accept: "application/json" }, cache: "no-store" });
+
+    if (!res.ok) throw new ApiError(res.status, "could not read the session");
+    const read = readSession((await readBody(res)).data);
+
+    if (!read) throw new ApiError(502, "unreadable session", {}, true);
+
+    if (at !== invalidations) throw new BootstrapRefused();
+
+    if (order < adoptedAt && lastSession && current) return lastSession;
+    const viewer = read.user ? read.user.id : null;
+    const marker = read.credentialMarker;
+    const acked = res.headers.get("Fold-Session-Checked") === `v2 ${marker} ${viewer ?? "anon"}`;
+    const live = liveMarker();
+
+    // Another tab's first visit won the cookie: ask again for the pair it holds.
+    if (live !== null && live !== marker) continue;
+    const next: Credential = { token: read.csrfToken, marker, viewer, seen: live, verified: acked && live === marker };
+    const same = lastAdopted !== null && (["token", "marker", "viewer", "seen", "verified"] as const).every((k) => lastAdopted?.[k] === next[k]);
+    const credential = same && lastAdopted ? lastAdopted : next;
+    current = lastAdopted = credential;
+    adoptedAt = order;
+    const session = { credential, user: read.user, canCompose: !!read.user && read.canCompose };
+    lastSession = session;
+    notify(session);
+
+    return session;
+  }
+
+  throw new ApiError(409, "the session changed while it was read", { code: "session_expired" }, true);
+}
+
+// The one bootstrap owner: a cold token, a recheck and a refresh share one
+// request at a time. fresh starts a new one (a sign-in or a profile change
+// that the answer must reflect). A bootstrap that a local change overtook
+// tries again for the change's credential.
+export function bootstrapCredential(fresh = false): Promise<BootstrapSession> {
+  if (!fresh && flight && flight.at === invalidations) return flight.promise;
+  const at = invalidations;
+
+  const promise = runBootstrap(at).catch((cause: unknown) => {
+    if (cause instanceof BootstrapRefused) return bootstrapCredential();
+    throw cause;
+  });
+
+  const mine = { at, promise };
+  flight = mine;
+  void promise.finally(() => { if (flight === mine) flight = null; }).catch(() => {});
+
+  return promise;
+}
+
+function recheckCredential() {
+  void bootstrapCredential().catch(() => {});
+}
+
+// Thrown when a participating request's pinned credential is no longer this
+// tab's. Before dispatch nothing was sent; after it (unreadable) a write's
+// outcome is unknown.
+class CredentialLost extends ApiError {
+  constructor(dispatched: boolean) {
+    super(403, "the browser credential changed", { code: "session_expired" }, dispatched);
+  }
+}
+
+// A dispatched participating request whose answer is not this credential's:
+// its outcome is unknown, and the tab checks the credential it holds.
+function lostAfterDispatch(): never {
+  recheckCredential();
+  throw new CredentialLost(true);
+}
+
+function acknowledgment(credential: Credential): string {
+  return `v2 ${credential.marker} ${credential.viewer ?? "anon"}`;
+}
+
+// The token for a plain unsafe request. When another tab replaced the
+// credential, a new one for the same viewer is used; one for someone else is
+// the session_expired refusal the server would give.
+async function ensureCsrf(): Promise<string> {
+  while (rotation) await rotation;
+  const held = current;
+
+  if (held && liveMarker() === held.seen) return held.token;
+  const { credential } = await bootstrapCredential();
+
+  if (held && credential.viewer !== held.viewer) throw new CredentialLost(false);
+
+  return credential.token;
+}
+
+// Listens for credential changes (AuthProvider): every adopted bootstrap and
+// every suspension (null). Another tab's content-free hint and this tab's
+// return to view check the marker; correctness never depends on the hint.
+export function watchCredential(listener: (session: BootstrapSession | null) => void): () => void {
+  listeners.add(listener);
+
+  if (!channel && "BroadcastChannel" in globalThis) {
+    channel = new BroadcastChannel(CHANNEL);
+    channel.onmessage = recheckCredential;
+  }
+
+  const sample = () => {
+    if (document.visibilityState === "visible" && current && liveMarker() !== current.seen) recheckCredential();
+  };
+
+  window.addEventListener("focus", sample);
+  document.addEventListener("visibilitychange", sample);
+
+  return () => {
+    listeners.delete(listener);
+    window.removeEventListener("focus", sample);
+    document.removeEventListener("visibilitychange", sample);
+
+    if (!listeners.size && channel) {
+      channel.close();
+      channel = null;
+    }
+  };
 }
 
 interface RequestHeaders {
@@ -89,6 +290,7 @@ interface RequestHeaders {
   "Content-Type"?: string;
   "If-None-Match"?: string;
   "X-CSRF-Token"?: string;
+  "Fold-Session-Check"?: string;
 }
 
 interface SendOptions {
@@ -98,6 +300,10 @@ interface SendOptions {
   cache?: RequestCache;
   anonymousOK?: boolean;
   rotatesCsrf?: boolean;
+  pinned?: Credential | true | null;
+  permit?: () => boolean;
+  onDispatch?: () => void;
+  signal?: AbortSignal;
   // A 304 is an answer, not a failure (the badge's ETag poll).
   notModifiedOK?: boolean;
 }
@@ -125,65 +331,197 @@ async function readBody(res: Response): Promise<{ data: JsonValue; readable: boo
 async function send(url: string, opts: SendOptions = {}): Promise<Response> {
   const method = (opts.method ?? "GET").toUpperCase();
   const headers = { ...opts.headers };
+  const pin = opts.pinned === true ? current : opts.pinned;
 
-  if (method !== "GET" && method !== "HEAD") {
+  if (pin !== undefined) {
+    while (rotation && !opts.signal?.aborted) await untilEither(rotation, opts.signal);
+
+    if (opts.signal?.aborted) throw new NotSent();
+
+    if (!pin || !pin.verified || !credentialCurrent(pin)) throw new CredentialLost(false);
+    headers["Fold-Session-Check"] = "v2";
+    headers["X-CSRF-Token"] = pin.token;
+  } else if (method !== "GET" && method !== "HEAD") {
     headers["X-CSRF-Token"] = await ensureCsrf();
   }
 
-  const res = await fetch(`/api/v1${url}`, {
-    method,
-    headers,
-    body: opts.body,
-    credentials: "include",
-    cache: opts.cache,
-  });
+  const init: RequestInit = { method, headers, body: opts.body, credentials: "include", cache: opts.cache, signal: opts.signal };
+  let res: Response;
+  // Whether the lifetime that sent this request is still the tab's: asked once
+  // a 401's body is decoded, since its headers can arrive long before it.
+  let ownLifetime: () => boolean;
 
-  // The server rotates the CSRF token when a session starts or ends, so the
-  // next unsafe request fetches a fresh one (M7.2 slice b).
-  if (opts.rotatesCsrf) csrfToken = null;
+  if (opts.rotatesCsrf) {
+    // A rotation replaces the lifetime itself, so its 401 is this tab's own
+    // only while the jar still holds the marker it was sent with, and the tab
+    // settled on that marker: a credential another tab installed meanwhile is
+    // never signed out by it. An unreconciled tab (current null) with the jar
+    // unchanged is still signed out, as before.
+    const sent = await rotate(async () => {
+      const marker = liveMarker();
 
-  if (res.status === 401) {
-    if (onUnauthorized && !opts.anonymousOK) onUnauthorized();
-    const { data } = await readBody(res);
-    throw new ApiError(401, "unauthorized", { code: "signed_out", ...(isJsonObject(data) ? data : undefined) });
+      return { marker, res: await fetch(`/api/v1${url}`, init) };
+    });
+
+    res = sent.res;
+    const settledAt = invalidations;
+    ownLifetime = () => settledAt === invalidations && liveMarker() === sent.marker && (current === null || current.seen === sent.marker);
+  } else {
+    if (pin && !credentialCurrent(pin)) throw new CredentialLost(false);
+
+    // Asked after every await, so nothing can change between it and the fetch.
+    if (opts.permit && !opts.permit()) throw new NotSent();
+    const sentAt = invalidations;
+    const sentWith = current;
+    const sentMarker = liveMarker();
+    const sending = fetch(`/api/v1${url}`, init);
+    opts.onDispatch?.();
+    res = await sending;
+    ownLifetime = () => sentAt === invalidations && current === sentWith && liveMarker() === sentMarker;
   }
 
-  if (res.status === 304 && opts.notModifiedOK) return res;
+  if (res.status === 401) {
+    const { data, readable } = await readBody(res).catch(() => ({ data: {}, readable: false }));
+    const own = ownLifetime();
+
+    // Only the lifetime that sent a request may sign it out; a 401 that
+    // another tab's change overtook, also while it was decoded, only makes
+    // this tab check what it holds. A pinned request's overtaken 401 is the
+    // credential's loss, and an unreadable or lost body leaves a write uncertain.
+    if (!opts.anonymousOK) {
+      if (own) {
+        onUnauthorized?.();
+        invalidateCredential();
+      }
+
+      recheckCredential();
+    }
+
+    if (pin && !own) lostAfterDispatch();
+    throw new ApiError(401, "unauthorized", { code: "signed_out", ...(isJsonObject(data) ? data : undefined) }, !readable);
+  }
+
+  if (pin && !credentialCurrent(pin)) lostAfterDispatch();
+
+  if (!pin && res.status === 304 && opts.notModifiedOK) return res;
+  const acked = !!pin && res.headers.get("Fold-Session-Checked") === acknowledgment(pin);
 
   if (!res.ok) {
     const { data, readable } = await readBody(res);
     const body = isJsonObject(data) ? data : {};
     const message = isString(body.error) ? body.error : `request failed (${res.status})`;
+
+    // A participating answer is decoded before any of it is used, then judged
+    // on the credential as it is now. The server's refusal of the pinned token
+    // carries no acknowledgment; any other decision is usable only with this
+    // credential's acknowledgment and a readable body. A 5xx decided nothing
+    // to show: its status stays, its body does not.
+    if (pin) {
+      if ((res.status === 403 && body.code === "session_expired") || !credentialCurrent(pin)) lostAfterDispatch();
+
+      if (res.status >= 500) throw new ApiError(res.status, message, {}, true);
+
+      if (!acked) lostAfterDispatch();
+
+      if (!readable) throw new ApiError(res.status, message, {}, true);
+    }
+
     throw new ApiError(res.status, message, body, !readable);
   }
 
+  if (pin && !acked) lostAfterDispatch();
+
   return res;
+}
+
+// A request that replaces the browser credential (sign-in, sign-out, a token
+// that signs someone in, a password change, a verified email). The lifetime is
+// suspended before it is sent; when it settles, whatever the outcome, the tab
+// bootstraps the credential it actually holds, never replaying the change, and
+// tells other tabs to check theirs.
+async function rotate<T>(request: () => Promise<T>): Promise<T> {
+  let done = () => {};
+  const mine = new Promise<void>((resolve) => { done = resolve; });
+  rotation = mine;
+  invalidateCredential();
+
+  try {
+    return await request();
+  } finally {
+    invalidateCredential();
+    await bootstrapCredential().catch(() => {});
+    channel?.postMessage("recheck");
+
+    if (rotation === mine) rotation = null;
+    done();
+  }
+}
+
+// A request its permit withheld: nothing was sent.
+class NotSent extends Error {}
+
+// A rotation can hang on its own fetch; an aborted request must not wait for it holding its body.
+function untilEither(rotating: Promise<void>, signal: AbortSignal | undefined): Promise<void> {
+  if (!signal) return rotating;
+
+  return new Promise((resolve) => {
+    if (signal.aborted) return resolve();
+    signal.addEventListener("abort", () => resolve(), { once: true });
+    void rotating.then(resolve);
+  });
 }
 
 export interface RequestOptions {
   method?: string;
   body?: unknown;
+  // json: a body already serialized, sent byte for byte (a guarded date edit's frozen request). Only on a
+  // pinned request that rotates nothing.
+  json?: string;
+  // permit: asked once more immediately before the fetch, after every await (a credential change, the CSRF
+  // token); false sends nothing. onDispatch: told as the request is handed to fetch, so the caller knows it
+  // may have arrived.
+  permit?: () => boolean;
+  onDispatch?: () => void;
+  // signal: aborting it before the fetch sends nothing; after, the fetch is cancelled, which cannot recall what
+  // already reached the server.
+  signal?: AbortSignal;
   // anonymousOK: a 401 just means "not signed in" (the boot-time session
   // check), so don't send the visitor to /login; public pages stay public.
   anonymousOK?: boolean;
-  // rotatesCsrf: this request starts or ends a session (sign-in, sign-out,
-  // a token that signs someone in).
+  // rotatesCsrf: this request replaces the browser credential (sign-in,
+  // sign-out, a token that signs someone in, a password change, a verified
+  // email).
   rotatesCsrf?: boolean;
+  // pinned: a participating request (M8.1), checked against this credential
+  // (true: the current one) before it is sent, by the server against the
+  // cookie it carries, and on its acknowledgment and after its body is read.
+  pinned?: Credential | true;
 }
 
-// A JSON request. A success body that is not JSON reads as {}.
+// A JSON request. A plain success body that is not JSON reads as {}; a
+// participating one must be a JSON object, or its outcome is unknown.
 export async function api<T>(url: string, opts: RequestOptions = {}): Promise<T> {
   const headers: RequestHeaders = { Accept: "application/json" };
   let body: string | undefined;
 
-  if (opts.body !== undefined) {
+  if (opts.body !== undefined || opts.json !== undefined) {
     headers["Content-Type"] = "application/json";
-    body = JSON.stringify(opts.body);
+    body = opts.json ?? JSON.stringify(opts.body);
   }
 
-  const res = await send(url, { method: opts.method, headers, body, anonymousOK: opts.anonymousOK, rotatesCsrf: opts.rotatesCsrf });
+  const pin = opts.pinned === true ? current : opts.pinned;
 
-  return serverPayload<T>((await readBody(res)).data);
+  if ((opts.json !== undefined || opts.permit) && (!opts.pinned || opts.rotatesCsrf || opts.body !== undefined)) throw new NotSent();
+  const res = await send(url, { method: opts.method, headers, body, anonymousOK: opts.anonymousOK, rotatesCsrf: opts.rotatesCsrf, pinned: pin, permit: opts.permit, onDispatch: opts.onDispatch, signal: opts.signal });
+  const { data, readable } = await readBody(res);
+
+  if (pin !== undefined) {
+    if (!credentialCurrent(pin)) lostAfterDispatch();
+
+    if (!readable) throw new ApiError(502, "unreadable answer", {}, true);
+  }
+
+  return serverPayload<T>(data);
 }
 
 // Multipart upload: the browser sets Content-Type with the boundary.

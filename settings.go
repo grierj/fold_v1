@@ -27,6 +27,11 @@ const (
 	settingReplyTo        = "reply_to_address" // where replies to an announcement go (DEC-130); empty: none
 )
 
+// consentEpochKey is the settings row that holds the visibility consent epoch
+// (DEC-158): 00015 inserts it and bootRestoreFence rotates it, and nothing else
+// writes it (TestConsentEpochHasOneWriter). setSettingIn refuses it.
+const consentEpochKey = "visibility_consent_epoch"
+
 const defaultSiteName = "Fold"
 
 // settingIn reads one setting on the caller's connection. found is false when
@@ -45,7 +50,7 @@ func settingIn(tx *gorm.DB, key string) (value string, found bool, err error) {
 
 // setSettingIn writes key = value, creating the row when it is missing. It is
 // the one writer of the settings table through models.Setting, so it is the one
-// place that refuses the restore barrier's row (restore_fence.go); the census
+// place that refuses the boot step's rows (restore_fence.go); the census
 // in restore_fence_test.go keeps it so. An empty value is stored, not skipped.
 func setSettingIn(tx *gorm.DB, key, value string) error {
 	if err := refuseRestoreFenceKey(key); err != nil {
@@ -71,16 +76,21 @@ func boolSettingErrIn(tx *gorm.DB, key string, def bool) (bool, error) {
 	if err != nil {
 		return def, err
 	}
+	return boolSettingOf(v, found, def), nil
+}
+
+// boolSettingOf reads a stored switch: "true" or "false", else def.
+func boolSettingOf(v string, found, def bool) bool {
 	if !found {
-		return def, nil
+		return def
 	}
 	switch strings.TrimSpace(v) {
 	case "true":
-		return true, nil
+		return true
 	case "false":
-		return false, nil
+		return false
 	}
-	return def, nil
+	return def
 }
 
 // settingOnSQL is boolSettingIn(key, false) as a SQL condition with the key

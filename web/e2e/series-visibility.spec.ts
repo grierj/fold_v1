@@ -1,6 +1,6 @@
 import * as schema from "valibot";
 import { expect, test } from "@playwright/test";
-import { apiAs, signIn, fromMore } from "./helpers";
+import { apiAs, signIn, fromMore, groupDetailPath } from "./helpers";
 
 function futureDate(days: number): string {
   return new Date(Date.now() + days * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
@@ -46,7 +46,7 @@ test("visibility is chosen at creation and edited inside Edit series", async ({ 
   await schedule("Sectionals", 4);
   await expect(page.getByRole("group", { name: "Who can see this event" })).toHaveCount(0);
 
-  const evs = schema.parse(schema.looseObject({ upcomingEvents: schema.array(schema.looseObject({ title: schema.string(), visibility: schema.string(), leaderOpened: schema.boolean() })) }), (await admin("GET", `/groups/${group.id}`)));
+  const evs = schema.parse(schema.looseObject({ upcomingEvents: schema.array(schema.looseObject({ title: schema.string(), visibility: schema.string(), leaderOpened: schema.boolean() })) }), (await admin("GET", groupDetailPath(group.id))));
 
   for (const o of evs.upcomingEvents) {
     if (o.title === "Rehearsal") expect([o.visibility, o.leaderOpened]).toEqual(["public", true]);

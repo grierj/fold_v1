@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strconv"
 	"sync"
 	"sync/atomic"
 
@@ -51,13 +52,15 @@ import (
 
 // recoveryPolicyLevel is the recovery level this release reports (R4-RP):
 // 0 = no restore barrier, 1 = the restore barrier (T07B-1b), 2 = reason review
-// (T07B-2b). deploy/recovery-policy holds the same integer and
-// TestRecoveryPolicyFileMatchesConstant keeps them equal. R4-RP's tooling
-// refuses a scripted rollback, forward upgrade or deploy to a lower level, so a
-// release at level 2 cannot be rolled back to one without the review.
+// (T07B-2b), 3 = exact visibility consent (DEC-158). deploy/recovery-policy
+// holds the same integer and TestRecoveryPolicyFileMatchesConstant keeps them
+// equal. R4-RP's tooling refuses a scripted rollback, forward upgrade or deploy
+// to a lower level, and from level 3 the database refuses an earlier release's
+// start too: 00015's settings_recovery_floor refuses a restore_fence write
+// whose transaction did not declare level 3 or more (declareRecoveryLevelIn).
 // Never publish a release at level 1 or above before R4-6c-R's current-release
 // restore tooling and operator procedure land and are verified.
-const recoveryPolicyLevel = 2
+const recoveryPolicyLevel = 3
 
 // restoreUploadsLevel says this binary has `fold restore settle-uploads`
 // (restore_settle_uploads.go). The restore tooling refuses to bring uploads
@@ -78,19 +81,38 @@ const (
 	restoreFenceAdvanceSQL = "UPDATE settings SET value = (value::bigint + 1)::text WHERE key = ? RETURNING value::bigint"
 )
 
+// consentEpochRotateSQL gives the visibility consent epoch a new value, or
+// creates it if a hand repair deleted it (DEC-158). It is the boot step's last
+// statement: a checked confirmation holds the row FOR SHARE until it ends
+// (lockConsentEpochIn), and this ON CONFLICT DO UPDATE takes it FOR NO KEY
+// UPDATE, so a confirmation that validated the old epoch commits before the
+// boot does, and one behind the rotation waits for the COMMIT and reads the new
+// value. Nothing but COMMIT follows it, so a confirmation queued behind it
+// waits for nothing else.
+const consentEpochRotateSQL = "INSERT INTO settings (key, value) VALUES (?, gen_random_uuid()::text) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value"
+
+// declareRecoveryLevelIn declares this release's recovery level in tx, which
+// 00015's start fence requires before any write of the restore_fence row. It
+// is a declaration, not a secret: it keeps earlier releases off a database
+// this release ran, and proves nothing else.
+func declareRecoveryLevelIn(tx *gorm.DB) error {
+	return tx.Exec("SELECT set_config('fold.recovery_level', ?, true)", strconv.Itoa(recoveryPolicyLevel)).Error
+}
+
 // errRestoreDetected: the counter is at or below the floor, or its row is gone,
 // so the database was restored under the running process. The transaction
 // rolled back; nothing it was going to do happened.
 var errRestoreDetected = apiErr(http.StatusServiceUnavailable, "restore_detected", "the database was restored while Fold was running")
 
-// errRestoreFenceKey is returned to a settings writer that would write the
-// barrier's own row with a key it did not name in a literal.
+// errRestoreFenceKey is returned to a settings writer that would write one of
+// the boot step's own rows (the barrier's counter, the consent epoch) with a
+// key it did not name in a literal.
 var errRestoreFenceKey = errors.New("the restore barrier's settings key cannot be written through a general settings writer")
 
 // refuseRestoreFenceKey is the one check every settings writer with a key it
 // does not spell as a constant makes (the census in restore_fence_test.go).
 func refuseRestoreFenceKey(key string) error {
-	if key == restoreFenceKey {
+	if key == restoreFenceKey || key == consentEpochKey {
 		return errRestoreFenceKey
 	}
 	return nil
@@ -140,10 +162,18 @@ func (a *App) noteRestoreDetected() {
 // failure (an unacknowledged COMMIT and an unparsable value included) is
 // returned and serve exits non-zero. A new process has no floor to protect, so
 // the repair for an unparsable row is to delete it with the site closed.
+//
+// The same transaction declares the recovery level (00015's start fence) and,
+// last, rotates the visibility consent epoch (consentEpochRotateSQL), so no
+// process passes the boot step without invalidating every review minted
+// before it (DEC-158).
 func (a *App) bootRestoreFence() error {
 	var v int64
 	err := a.DB.Transaction(func(tx *gorm.DB) error {
 		if err := tx.Exec("SELECT pg_advisory_xact_lock(?)", migrations.LockID).Error; err != nil {
+			return err
+		}
+		if err := declareRecoveryLevelIn(tx); err != nil {
 			return err
 		}
 		if err := tx.Exec(restoreFenceCreateSQL, restoreFenceKey).Error; err != nil {
@@ -155,6 +185,14 @@ func (a *App) bootRestoreFence() error {
 		}
 		if res.RowsAffected != 1 {
 			return errors.New("the settings row is missing")
+		}
+		if err := tx.Exec(consentEpochRotateSQL, consentEpochKey).Error; err != nil {
+			return err
+		}
+		if h := a.hooks.bootRotated; h != nil {
+			if err := h(tx); err != nil {
+				return err
+			}
 		}
 		return nil
 	})
@@ -203,6 +241,10 @@ func (a *App) takeRestoreTicket(tx *gorm.DB) (restoreTicket, error) {
 		}
 	}
 	tk := restoreTicket{a: a, held: true}
+	if err := declareRecoveryLevelIn(tx); err != nil {
+		tk.release()
+		return restoreTicket{}, err
+	}
 	var v int64
 	res := tx.Raw(restoreFenceAdvanceSQL, restoreFenceKey).Scan(&v)
 	if res.Error != nil {

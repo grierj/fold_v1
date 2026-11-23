@@ -173,7 +173,7 @@ func gateStepIndex(steps []*contractGateStep, run, label string) (int, []string)
 // running in the test job: the first step must be a checkout with
 // fetch-depth 0, a later step must run exactly `bash scripts/contract-gate.sh`
 // with shell: bash and no `if:` or `continue-on-error:`, and it must come
-// before `make test`.
+// before `make go-test` (the Go tests and the schema drift check).
 func contractGateWorkflowProblems(workflow string) []string {
 	steps, problems, ok := testJobSteps(workflow)
 	if !ok {
@@ -189,15 +189,15 @@ func contractGateWorkflowProblems(workflow string) []string {
 	if gate >= 0 {
 		makeTest := -1
 		for i, s := range steps {
-			if s.keys["run"] == "make test" {
+			if s.keys["run"] == "make go-test" {
 				makeTest = i
 				break
 			}
 		}
 		if makeTest < 0 {
-			problems = append(problems, "the test job has no `make test` step to order the gate before")
+			problems = append(problems, "the test job has no `make go-test` step to order the gate before")
 		} else if gate > makeTest {
-			problems = append(problems, "the contract gate step must come before make test")
+			problems = append(problems, "the contract gate step must come before make go-test")
 		}
 	}
 	return problems
@@ -244,7 +244,7 @@ func TestCIRunsTheMergeRulesCheck(t *testing.T) {
 const (
 	contractGateCheckoutStep = "      - uses: actions/checkout@abc # v1\n        with:\n          fetch-depth: 0\n"
 	contractGateStepText     = "      # The gate.\n      - name: Contract migration gate\n        run: bash scripts/contract-gate.sh\n        shell: bash\n"
-	contractGateMakeTest     = "      - uses: actions/setup-go@def\n        with:\n          go-version-file: go.mod\n      - run: make test\n"
+	contractGateMakeTest     = "      - uses: actions/setup-go@def\n        with:\n          go-version-file: go.mod\n      - run: make go-test\n"
 )
 
 func contractGateWorkflow(testSteps, webSteps string) string {
@@ -273,7 +273,7 @@ func TestContractGateWorkflowGuardCatchesMistakes(t *testing.T) {
 		{"escaped job if", strings.Replace(contractGateWorkflow(contractGateCheckoutStep+contractGateStepText+contractGateMakeTest, webCheckout), "  test:\n", "  test:\n    \"i\\u0066\": ${{ false }}\n", 1), "unsupported test job mapping key"},
 		{"escaped job continue", strings.Replace(contractGateWorkflow(contractGateCheckoutStep+contractGateStepText+contractGateMakeTest, webCheckout), "  test:\n", "  test:\n    \"continue-on-erro\\u0072\": true\n", 1), "unsupported test job mapping key"},
 		{"fake job in workflow metadata", strings.Replace(strings.Replace(contractGateWorkflow(contractGateCheckoutStep+contractGateMakeTest, webCheckout), "name: test\n", "", 1), "  test:\n", "  \"test\":\n", 1) + "name: |\n  test:\n    steps:\n" + contractGateCheckoutStep + contractGateStepText + contractGateMakeTest, "no test job under jobs:"},
-		{"quoted skipped sibling job", strings.Replace(strings.Replace(contractGateWorkflow(contractGateCheckoutStep+"      - run: |\n          make test\n", webCheckout), "  test:\n", "  skip_gate:\n    if: ${{ false }}\n    runs-on: ubuntu-latest\n    steps:\n      - run: \"true\"\n  test:\n", 1), "  web:\n", "  \"gate_decoy\":\n    needs: skip_gate\n    runs-on: ubuntu-latest\n    steps:\n"+contractGateCheckoutStep+contractGateStepText+contractGateMakeTest+"  web:\n", 1), "no step whose run is exactly"},
+		{"quoted skipped sibling job", strings.Replace(strings.Replace(contractGateWorkflow(contractGateCheckoutStep+"      - run: |\n          make go-test\n", webCheckout), "  test:\n", "  skip_gate:\n    if: ${{ false }}\n    runs-on: ubuntu-latest\n    steps:\n      - run: \"true\"\n  test:\n", 1), "  web:\n", "  \"gate_decoy\":\n    needs: skip_gate\n    runs-on: ubuntu-latest\n    steps:\n"+contractGateCheckoutStep+contractGateStepText+contractGateMakeTest+"  web:\n", 1), "no step whose run is exactly"},
 		{"escaped if with extra dash spacing", contractGateWorkflow(contractGateCheckoutStep+"      -  run: bash scripts/contract-gate.sh\n         \"i\\u0066\": ${{ false }}\n"+contractGateMakeTest, webCheckout), "unsupported spacing after test step dash"},
 		{"escaped continue with extra dash spacing", contractGateWorkflow(contractGateCheckoutStep+"      -  run: bash scripts/contract-gate.sh\n         \"continue-on-erro\\u0072\": true\n"+contractGateMakeTest, webCheckout), "unsupported spacing after test step dash"},
 		{"or true", contractGateWorkflow(contractGateCheckoutStep+"      - name: Contract migration gate\n        run: bash scripts/contract-gate.sh || true\n"+contractGateMakeTest, webCheckout), "no step whose run is exactly"},
@@ -286,7 +286,7 @@ func TestContractGateWorkflowGuardCatchesMistakes(t *testing.T) {
 		{"no fetch-depth", contractGateWorkflow("      - uses: actions/checkout@abc\n"+contractGateStepText+contractGateMakeTest, webCheckout), "fetch-depth: 0"},
 		{"fetch-depth 1", contractGateWorkflow("      - uses: actions/checkout@abc\n        with:\n          fetch-depth: 1\n"+contractGateStepText+contractGateMakeTest, webCheckout), "fetch-depth: 0"},
 		{"gate before checkout", contractGateWorkflow(contractGateStepText+contractGateCheckoutStep+contractGateMakeTest, webCheckout), "must come after the checkout"},
-		{"gate after make test", contractGateWorkflow(contractGateCheckoutStep+contractGateMakeTest+contractGateStepText, webCheckout), "must come before make test"},
+		{"gate after make test", contractGateWorkflow(contractGateCheckoutStep+contractGateMakeTest+contractGateStepText, webCheckout), "must come before make go-test"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -434,6 +434,155 @@ func TestMergeRulesCheckScript(t *testing.T) {
 			t.Fatalf("got %v %q, want exit 2 with usage", err, out)
 		}
 	})
+}
+
+// TestE2ERunnerRefusesBadArguments runs web/e2e/run.sh with arguments that
+// would break a filtered run: a reporter replaces the JSON reports it counts,
+// a spec file name (or a word after an option the runner takes no value for)
+// is added to every shard's planned files, and a short option with = changes
+// the value Playwright reads. It must refuse
+// them before it builds or starts anything; a stand-in go and npx fail the
+// test fast if it ever gets that far.
+func TestE2ERunnerRefusesBadArguments(t *testing.T) {
+	if _, err := exec.LookPath("bash"); err != nil {
+		if os.Getenv("CI") != "" {
+			t.Fatalf("bash is required for the e2e runner tests: %v", err)
+		}
+		t.Skipf("bash is not installed; CI runs this test")
+	}
+	stubs := t.TempDir()
+	for _, tool := range []string{"go", "npx", "node"} {
+		if err := os.WriteFile(filepath.Join(stubs, tool), []byte("#!/bin/sh\necho \"run.sh started $0\" >&2\nexit 99\n"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cases := []struct {
+		name string
+		args []string
+		want string
+	}{
+		{"a reporter with =", []string{"--reporter=dot"}, "reporter overrides are not allowed"},
+		{"a reporter as its own word", []string{"--reporter", "dot"}, "reporter overrides are not allowed"},
+		{"a reporter after a filter", []string{"--grep", "hosts", "--reporter=json"}, "reporter overrides are not allowed"},
+		{"an option terminator", []string{"--", "--grep", "hosts"}, "option terminator is not allowed"},
+		{"a spec file", []string{"hosts.spec.ts"}, "is not a Playwright option"},
+		{"a spec file after a filter", []string{"--grep", "hosts", "e2e/hosts.spec.ts"}, "is not a Playwright option"},
+		{"a spec file after an inverted short filter", []string{"-G", "hosts", "hosts.spec.ts"}, "is not a Playwright option"},
+		{"list mode", []string{"--list"}, "--list is not available"},
+		{"list mode after a filter", []string{"--grep", "hosts", "--list"}, "--list is not available"},
+		{"a short filter with =", []string{"-G=hosts"}, "give a short option's value as the next word"},
+		{"short workers with =", []string{"-j=2"}, "give a short option's value as the next word"},
+		{"a value for an option the runner does not take values for", []string{"--output", "results"}, "'results' is not a Playwright option"},
+		{"a second project name", []string{"--project", "chromium", "firefox"}, "'firefox' is not a Playwright option"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			cmd := exec.Command("bash", append([]string{"web/e2e/run.sh"}, c.args...)...)
+			cmd.Env = append(os.Environ(),
+				"PATH="+stubs+string(os.PathListSeparator)+os.Getenv("PATH"),
+				"DATABASE_URL=postgres://unused.invalid/fold",
+				"E2E_RUNNER=1/1",
+				"E2E_SHARDS=1",
+			)
+			out, err := cmd.CombinedOutput()
+			var exit *exec.ExitError
+			if !errors.As(err, &exit) || exit.ExitCode() != 2 || !strings.Contains(string(out), c.want) {
+				t.Fatalf("run.sh %v: got %v, output %q; want exit 2 with %q", c.args, err, out, c.want)
+			}
+		})
+	}
+}
+
+// TestE2ERunnerForwardsFilters runs a copy of web/e2e/run.sh in a throwaway
+// tree whose go, node and npx are stand-ins, so nothing is built or started.
+// Every accepted filter form, the short aliases included, each option the
+// runner takes a value for, flags with no value, and an option value that looks
+// like a spec file or an option, must reach Playwright unchanged in every
+// shard, the dev shard too, after the shard's own spec files.
+func TestE2ERunnerForwardsFilters(t *testing.T) {
+	if _, err := exec.LookPath("bash"); err != nil {
+		if os.Getenv("CI") != "" {
+			t.Fatalf("bash is required for the e2e runner tests: %v", err)
+		}
+		t.Skipf("bash is not installed; CI runs this test")
+	}
+	runner, err := os.ReadFile(filepath.Join("web", "e2e", "run.sh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	stubs := map[string]string{
+		"go":   "#!/bin/sh\nexit 0\n",
+		"node": "#!/bin/sh\ncase \"$2\" in\nplan) echo '|hosts.spec.ts' ;;\nran) echo 1 ;;\n*) echo \"unexpected node $*\" >&2; exit 98 ;;\nesac\n",
+		"npx":  "#!/bin/sh\nprintf '%s\\n' \"$@\" >\"$RUNNER_ARGS/$E2E_SHARD.args\"\necho '  1 passed (1.0s)'\n",
+	}
+	cases := []struct {
+		name string
+		args []string
+	}{
+		{"short grep", []string{"-g", "hosts"}},
+		{"short grep-invert", []string{"-G", "hosts"}},
+		{"long grep", []string{"--grep", `hosts\.spec|series-rsvp`}},
+		{"long grep-invert", []string{"--grep-invert", "hosts"}},
+		{"grep with =", []string{"--grep=hosts"}},
+		{"grep-invert with =", []string{"--grep-invert=hosts"}},
+		{"a value that looks like a spec file", []string{"-G", "hosts.spec.ts"}},
+		{"several options", []string{"--grep", "hosts", "-G", "slow", "--project", "chromium", "--workers", "2", "--headed"}},
+		{"global timeout", []string{"--global-timeout", "120000"}},
+		{"global timeout with =", []string{"--global-timeout=120000"}},
+		{"test timeout and failure limit", []string{"--timeout", "5000", "--max-failures=1", "-x"}},
+		{"repeats and retries", []string{"--repeat-each", "2", "--retries", "1"}},
+		{"short workers and a trace mode", []string{"-j", "2", "--trace", "on"}},
+		{"a value that looks like an option", []string{"--grep", "-x", "--headed"}},
+		{"a value that looks like a spec file after a timeout", []string{"--timeout", "5000", "--grep", "hosts.spec.ts"}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			root := t.TempDir()
+			e2e := filepath.Join(root, "web", "e2e")
+			bin := filepath.Join(root, "bin")
+			recorded := filepath.Join(root, "args")
+			for _, dir := range []string{e2e, bin, recorded} {
+				if err := os.MkdirAll(dir, 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			files := map[string]string{
+				filepath.Join(e2e, "run.sh"):         string(runner),
+				filepath.Join(e2e, "outbox.spec.ts"): "// reads /dev/outbox\n",
+				filepath.Join(bin, "go"):             stubs["go"],
+				filepath.Join(bin, "node"):           stubs["node"],
+				filepath.Join(bin, "npx"):            stubs["npx"],
+			}
+			for path, body := range files {
+				if err := os.WriteFile(path, []byte(body), 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			cmd := exec.Command("bash", append([]string{filepath.Join(e2e, "run.sh")}, c.args...)...)
+			cmd.Env = append(os.Environ(),
+				"PATH="+bin+string(os.PathListSeparator)+os.Getenv("PATH"),
+				"DATABASE_URL=postgres://unused.invalid/fold",
+				"E2E_RUNNER=1/1",
+				"E2E_SHARDS=1",
+				"E2E_RECORD_DURATIONS=",
+				"RUNNER_ARGS="+recorded,
+			)
+			out, err := cmd.CombinedOutput()
+			if err != nil || !strings.Contains(string(out), "e2e: the filter selected 1 tests") {
+				t.Fatalf("run.sh %v: got %v, output %q; want a filtered run that passes", c.args, err, out)
+			}
+			for shard, spec := range map[string]string{"1": "e2e/hosts.spec.ts", "dev": "e2e/outbox.spec.ts"} {
+				got, err := os.ReadFile(filepath.Join(recorded, shard+".args"))
+				if err != nil {
+					t.Fatalf("shard %s never started Playwright: %v; output %q", shard, err, out)
+				}
+				want := append([]string{"playwright", "test", "--reporter=list,json", "--pass-with-no-tests", "seed", spec}, c.args...)
+				if lines := strings.Split(strings.TrimSuffix(string(got), "\n"), "\n"); strings.Join(lines, "\x00") != strings.Join(want, "\x00") {
+					t.Fatalf("shard %s ran npx %q, want %q", shard, lines, want)
+				}
+			}
+		})
+	}
 }
 
 // contractGateEnv is a git environment that reads nothing from the machine:

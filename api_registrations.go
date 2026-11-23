@@ -171,38 +171,15 @@ func noticeEnd(o *models.EventOccurrence) time.Time {
 // cannot see the group gets no group name, place, or group link. It reads
 // nothing; loadNoticeFacts did the reading once for every recipient.
 func eventNoticeVars(ev *models.Event, o *models.EventOccurrence, userID uint, facts *noticeFacts) (notify.Vars, string) {
-	var g *models.Group
-	if ev.GroupID != nil {
-		if row := facts.groups[*ev.GroupID]; row != nil && facts.canSeeGroup(userID, row) {
-			g = row
-		}
-	}
-	// The place resolves through the date's override (events.EffectivePlace,
-	// like occurrenceToJSON): a date with its own place keeps it even when
-	// the viewer may see the group; the group's place is for those who may.
-	groupPlace := ""
-	if g != nil {
-		groupPlace = g.Location // group-ok: g is set only when facts.canSeeGroup is true
-	}
+	g := facts.shownGroup(userID, ev)
 	vars := notify.Vars{Event: effectiveOccurrenceTitle(ev, o), When: formatWhen(o.StartsAt, facts.zone(userID)),
-		Place: effectiveOccurrencePlace(ev, o, groupPlace)}
+		Place: facts.datePlace(userID, ev, o, false)}
 	link := fmt.Sprintf("/events/%d", ev.ID)
 	if g != nil {
 		vars.Event = firstNonEmpty(effectiveOccurrenceTitle(ev, o), g.Name) // group-ok: g is set only when facts.canSeeGroup is true
 		link = fmt.Sprintf("/groups/%d", g.ID)
 	}
 	return vars, link
-}
-
-// eventNoticeVarsIn is eventNoticeVars for a single recipient: it loads
-// that one person's facts in tx, then builds the same Vars.
-func eventNoticeVarsIn(tx *gorm.DB, ev *models.Event, o *models.EventOccurrence, userID uint) (notify.Vars, string, error) {
-	facts, err := loadNoticeFacts(tx, eventGroupIDs(ev), []uint{userID})
-	if err != nil {
-		return notify.Vars{}, "", err
-	}
-	vars, link := eventNoticeVars(ev, o, userID, facts)
-	return vars, link, nil
 }
 
 // addPersonVar names the household person a registration notice is about and,
@@ -261,7 +238,10 @@ func runsEventOrAdmin(tx *gorm.DB, ev *models.Event, userID uint) (bool, error) 
 
 // notifyRegistrationPromoted tells one person they are in off the
 // waitlist. The email carries the rotated manage link with the one-click
-// "I can't come" cancel; the bell never shows the token.
+// "I can't come" cancel; the bell never shows the token. Eligibility judges
+// an invited or pending-consent holder as signed in, but such an account has
+// no view of the date, so a date only signed-in people may see is withheld
+// from it: the stored row would otherwise show it once the account is active.
 func notifyRegistrationPromoted(tx *gorm.DB, ev *models.Event, o *models.EventOccurrence,
 	reg models.Registration, manageURL string, actor *uint, now time.Time) error {
 	userID := registrationHolder(reg)
@@ -272,31 +252,27 @@ func notifyRegistrationPromoted(tx *gorm.DB, ev *models.Event, o *models.EventOc
 	if invitation, ok := accesses[o.ID][userID]; ok && reg.UserID != nil && invitation.ID == reg.ID {
 		return sendOccurrenceNotice(tx, invitation, o, notify.OccurrenceChanged, "promoted:"+strconv.FormatUint(uint64(invitation.ID), 10)+":"+now.UTC().Format(time.RFC3339Nano), nil)
 	}
-	vars, link, err := eventNoticeVarsIn(tx, ev, o, userID)
+	m, shown, err := registrationNotice(tx, notify.RegistrationPromoted, ev, o, reg, nil)
 	if err != nil {
-		return err
-	}
-	if err := addPersonVar(tx, &vars, ev, reg); err != nil {
 		return err
 	}
 	if actor != nil && *actor == userID {
 		actor = nil
 	}
-	vars.ManageURL = manageURL
-	// A promoted person is going now, so a video link set to
-	// registered_only may reach them (5.8, M1.8); the email carries it,
-	// the bell doesn't.
-	if video := videoLinkOf(ev); video != "" &&
-		policy.CanSeeVideoLink(videoRevealOf(ev), true, false) && (reg.HouseholdPersonID == nil || reg.AttendanceMode == models.AttendanceRemote) {
-		vars.VideoURL = video
+	m.Actor = actor
+	if shown {
+		m.Vars.ManageURL = manageURL
+		// A promoted person is going now, so a video link set to
+		// registered_only may reach them (5.8, M1.8); the email carries it,
+		// the bell doesn't.
+		if video := videoLinkOf(ev); video != "" &&
+			policy.CanSeeVideoLink(videoRevealOf(ev), true, false) && (reg.HouseholdPersonID == nil || reg.AttendanceMode == models.AttendanceRemote) {
+			m.Vars.VideoURL = video
+		}
+	} else {
+		m = withheldDate(m)
 	}
-	end := noticeEnd(o)
-	_, err = notify.Send(tx, notify.Msg{
-		Kind: notify.RegistrationPromoted, To: []uint{userID}, Actor: actor,
-		SubjectType: "occurrence", SubjectID: o.ID, Link: link, Vars: vars,
-		Data:      map[string]any{"eventId": ev.ID, "date": models.FormatCalendarDate(o.OriginalDate)},
-		ExpiresAt: &end,
-	})
+	_, err = notify.Send(tx, m)
 	return err
 }
 
@@ -340,6 +316,29 @@ func notifyWaitlistCutoff(tx *gorm.DB, ev *models.Event, o *models.EventOccurren
 // that its time or place changed. One item per person per occurrence per
 // change; the item is never batched.
 func notifyEventChanged(tx *gorm.DB, ev *models.Event, o *models.EventOccurrence, variant string, actor *uint) error {
+	return notifyEventChangedFor(tx, ev, o, func(uint, *noticeFacts, bool) string { return variant }, actor)
+}
+
+// notifyDateChanged is notifyEventChanged for one date that was before and is
+// o now: each recipient is told the place changed only when the place their
+// own view of the date shows changed (datePlace), since whether the group's
+// place shows depends on the recipient and on the date's visibility, which
+// the same save may have changed. before is the stored date ahead of the
+// edit, never o with fields put back. timeChanged is the same for everyone.
+func notifyDateChanged(tx *gorm.DB, ev *models.Event, before, o *models.EventOccurrence, timeChanged bool, actor *uint) error {
+	return notifyEventChangedFor(tx, ev, o, func(uid uint, facts *noticeFacts, invited bool) string {
+		placeChanged := facts.datePlace(uid, ev, before, invited) != facts.datePlace(uid, ev, o, invited)
+		if !timeChanged && !placeChanged {
+			return ""
+		}
+		return changeVariant(timeChanged, placeChanged)
+	}, actor)
+}
+
+// notifyEventChangedFor is notifyEventChanged with the variant decided per
+// recipient, given whether they hold a live exact-date grant; "" tells that
+// recipient nothing.
+func notifyEventChangedFor(tx *gorm.DB, ev *models.Event, o *models.EventOccurrence, variantFor func(uint, *noticeFacts, bool) string, actor *uint) error {
 	if o.Status != models.OccurrenceScheduled {
 		// No fan-out into a cancelled date: nobody is going, and the
 		// waitlist must not be mailed about a dead event.
@@ -365,10 +364,22 @@ func notifyEventChanged(tx *gorm.DB, ev *models.Event, o *models.EventOccurrence
 	// invited and the ordinary notices below, not one lock query per person.
 	return notify.WithRecipients(tx, userIDs, func(scope *notify.Scope) error {
 		for _, uid := range userIDs {
-			if invitation, ok := accesses[o.ID][uid]; ok {
+			invitation, invited := accesses[o.ID][uid]
+			variant := variantFor(uid, facts, invited)
+			if variant == "" {
+				continue
+			}
+			if invited {
 				if err := sendOccurrenceNotice(tx, invitation, o, notify.OccurrenceChanged, "", scope); err != nil {
 					return err
 				}
+				continue
+			}
+			// The new time, title and place reach only someone who may see
+			// the date now. A going row kept after its exact-date grant
+			// ended (even one that expired while this change waited for its
+			// locks) gets nothing here; the grant's end notice names nothing.
+			if !facts.canSeeDate(uid, ev, o) {
 				continue
 			}
 			vars, link := eventNoticeVars(ev, o, uid, facts)
@@ -389,7 +400,9 @@ func notifyEventChanged(tx *gorm.DB, ev *models.Event, o *models.EventOccurrence
 }
 
 // notifyRegistrationRemoved tells a pruned person they were removed. The
-// note reaches only them.
+// note reaches only them. A holder who may no longer see the date (a grant
+// that ended, a group archived since they signed up) still hears that they
+// were removed, with the note, but not the date's title, time or link.
 func notifyRegistrationRemoved(tx *gorm.DB, ev *models.Event, o *models.EventOccurrence,
 	reg models.Registration, note string, actor *uint) error {
 	userID := registrationHolder(reg)
@@ -397,43 +410,73 @@ func notifyRegistrationRemoved(tx *gorm.DB, ev *models.Event, o *models.EventOcc
 	if err != nil || u == nil || u.Status == models.UserDisabled {
 		return err
 	}
-	vars, link, err := eventNoticeVarsIn(tx, ev, o, userID)
+	m, err := registrationNoticeIn(tx, notify.RegistrationRemoved, ev, o, reg, nil)
 	if err != nil {
 		return err
 	}
-	if err := addPersonVar(tx, &vars, ev, reg); err != nil {
-		return err
-	}
-	vars.Note = note
-	end := noticeEnd(o)
-	_, err = notify.Send(tx, notify.Msg{
-		Kind: notify.RegistrationRemoved, To: []uint{userID}, Actor: actor,
-		SubjectType: "occurrence", SubjectID: o.ID, Link: link, Vars: vars,
-		Data:      map[string]any{"eventId": ev.ID, "date": models.FormatCalendarDate(o.OriginalDate)},
-		ExpiresAt: &end,
-	})
+	m.Vars.Note = note
+	m.Actor = actor
+	_, err = notify.Send(tx, m)
 	return err
 }
 
-// notifyRegistrationNotRestored tells a re-enabled person their
-// registration was dropped from a full occurrence (DEC-47).
-func notifyRegistrationNotRestored(tx *gorm.DB, ev *models.Event, o *models.EventOccurrence, reg models.Registration, actor *uint) error {
-	userID := registrationHolder(reg)
-	vars, link, err := eventNoticeVarsIn(tx, ev, o, userID)
+// Why a re-enabled person's registration was not restored: the date had no
+// seat left for them (the default copy), or they may not sign up for it now.
+const (
+	notRestoredFull        = ""
+	notRestoredUnavailable = "unavailable"
+)
+
+// notifyRegistrationNotRestored tells a re-enabled person their registration
+// was dropped (DEC-47) and to ask a leader or host. holder is their account
+// as it is being restored to, since the stored row still says disabled; the
+// date's details reach them only when that account may see the date.
+func notifyRegistrationNotRestored(tx *gorm.DB, ev *models.Event, o *models.EventOccurrence, reg models.Registration, holder *models.User, why string, actor *uint) error {
+	m, err := registrationNoticeIn(tx, notify.RegistrationNotRestored, ev, o, reg, holder)
 	if err != nil {
 		return err
 	}
+	m.Vars.Change = why
+	m.Actor = actor
+	_, err = notify.Send(tx, m)
+	return err
+}
+
+// registrationNoticeIn is the notice about reg's date to its holder: the date's
+// title, time, place and link, its subject and expiry, when the holder may see
+// the date, and withheldDate otherwise. as, when set, is the holder judged in
+// place of their stored row (a re-enable judges the status being restored).
+func registrationNoticeIn(tx *gorm.DB, kind string, ev *models.Event, o *models.EventOccurrence, reg models.Registration, as *models.User) (notify.Msg, error) {
+	m, shown, err := registrationNotice(tx, kind, ev, o, reg, as)
+	if err != nil || shown {
+		return m, err
+	}
+	return withheldDate(m), nil
+}
+
+// registrationNotice is registrationNoticeIn before withholding: the detailed
+// notice and whether its holder may see the date. A caller that adds Vars
+// only a viewer may get adds them when shown and withholds otherwise.
+func registrationNotice(tx *gorm.DB, kind string, ev *models.Event, o *models.EventOccurrence, reg models.Registration, as *models.User) (notify.Msg, bool, error) {
+	userID := registrationHolder(reg)
+	facts, err := loadNoticeFacts(tx, eventGroupIDs(ev), []uint{userID})
+	if err != nil {
+		return notify.Msg{}, false, err
+	}
+	if as != nil && as.ID == userID {
+		facts.judgeAs(as)
+	}
+	vars, link := eventNoticeVars(ev, o, userID, facts)
 	if err := addPersonVar(tx, &vars, ev, reg); err != nil {
-		return err
+		return notify.Msg{}, false, err
 	}
 	end := noticeEnd(o)
-	_, err = notify.Send(tx, notify.Msg{
-		Kind: notify.RegistrationNotRestored, To: []uint{userID}, Actor: actor,
-		SubjectType: "occurrence", SubjectID: o.ID, Link: link, Vars: vars,
+	m := notify.Msg{
+		Kind: kind, To: []uint{userID}, SubjectType: "occurrence", SubjectID: o.ID, Link: link, Vars: vars,
 		Data:      map[string]any{"eventId": ev.ID, "date": models.FormatCalendarDate(o.OriginalDate)},
 		ExpiresAt: &end,
-	})
-	return err
+	}
+	return m, facts.canSeeDate(userID, ev, o), nil
 }
 
 // promoteLocked promotes waitlisted registrations that fit, in line
@@ -914,6 +957,9 @@ func (a *App) apiRegister(c *gin.Context) {
 				holder = lockedHolder
 			}
 		}
+		if !sessionCurrent(&holder, u) {
+			return errSecuritySession
+		}
 		if holder.Status != models.UserActive {
 			return householdRegistrationError{code: "household_registration_holder_unavailable"}
 		}
@@ -927,11 +973,6 @@ func (a *App) apiRegister(c *gin.Context) {
 			return err
 		}
 		if locked.Status != models.OccurrenceScheduled {
-			return errOccurrenceNotFound
-		}
-		// A gated retry may have waited behind an invitation ending or a
-		// visibility/session change. Never fall back to preflight authority.
-		if gated && !sessionCurrent(&holder, u) {
 			return errOccurrenceNotFound
 		}
 		var today time.Time
@@ -1089,10 +1130,10 @@ func (a *App) apiRegister(c *gin.Context) {
 		}
 		return nil
 	}
-	err := a.DB.Transaction(mutate)
+	err := a.DB.Transaction(mutate, contactGateTx)
 	if errors.Is(err, errOccurrenceGateRetry) {
 		gated = true
-		err = a.DB.Transaction(mutate)
+		err = a.DB.Transaction(mutate, contactGateTx)
 	}
 	if answerStaleSession(c, err) {
 		return
@@ -1125,13 +1166,24 @@ func (a *App) canRegisterAnyDate(tx *gorm.DB, u *models.User, ev *models.Event) 
 	return false
 }
 
+// canRegisterIn is canRegisterErrIn where a failed read can only say no.
 func (a *App) canRegisterIn(tx *gorm.DB, u *models.User, ev *models.Event) bool {
-	// Host facts are irrelevant to visibility, and a failed read can only say no.
+	ok, _ := a.canRegisterErrIn(tx, u, ev)
+	return ok
+}
+
+// canRegisterErrIn is whether u may register for ev (canRegisterWith on facts
+// read on tx); a failed read is its error. Host facts are irrelevant to
+// visibility.
+func (a *App) canRegisterErrIn(tx *gorm.DB, u *models.User, ev *models.Event) (bool, error) {
 	f, err := eventFactsIn(tx, u, ev)
-	if err != nil || (ev.GroupID != nil && f.group == nil) {
-		return false
+	if err != nil {
+		return false, err
 	}
-	return canRegisterWith(u, viewOf(ev, false), asGroup(f.group), f.rel)
+	if ev.GroupID != nil && f.group == nil {
+		return false, nil
+	}
+	return canRegisterWith(u, viewOf(ev, false), asGroup(f.group), f.rel), nil
 }
 
 // canRegisterWith is the one registration authority once the facts are loaded:
@@ -1197,6 +1249,12 @@ func (a *App) apiRemoveRegistration(c *gin.Context) {
 		locked, err := lockOccurrence(tx, o.ID)
 		if err != nil {
 			return err
+		}
+		// The date may have been cancelled (and renamed) while this waited:
+		// the notice below judges ordinary visibility, which a cancelled date's
+		// tombstone rules do not follow.
+		if locked.Status != models.OccurrenceScheduled {
+			return errOccurrenceNotFound
 		}
 		var r models.Registration
 		if err := tx.Where("id = ? AND occurrence_id = ? AND status NOT IN ?",
@@ -1274,6 +1332,10 @@ func (a *App) apiRemoveRegistration(c *gin.Context) {
 		jsonError(c, http.StatusNotFound, "no registration to remove")
 		return
 	}
+	if errors.Is(err, errOccurrenceNotFound) {
+		fail(c, err)
+		return
+	}
 	if err != nil {
 		jsonError(c, http.StatusInternalServerError, "could not remove registration")
 		return
@@ -1327,6 +1389,10 @@ func (a *App) apiPromoteRegistration(c *gin.Context) {
 		if err != nil {
 			return err
 		}
+		// Nobody is promoted into a date cancelled while this waited.
+		if locked.Status != models.OccurrenceScheduled {
+			return errOccurrenceNotFound
+		}
 		var r models.Registration
 		if err := tx.Where("id = ? AND occurrence_id = ? AND status = ?",
 			body.RegistrationID, locked.ID, models.RegWaitlisted).First(&r).Error; err != nil {
@@ -1364,7 +1430,7 @@ func (a *App) apiPromoteRegistration(c *gin.Context) {
 			return err
 		}
 		return nil
-	})
+	}, contactGateTx)
 	switch {
 	case errors.Is(err, errRegNotFound):
 		jsonError(c, http.StatusNotFound, "no waitlisted registration for that person")
@@ -1575,7 +1641,7 @@ func (a *App) apiAddRegistration(c *gin.Context) {
 			}
 		}
 		return nil
-	})
+	}, contactGateTx)
 	if err != nil {
 		if auditErr := a.auditManagerDateRefusal(c); auditErr != nil {
 			jsonError(c, 500, "could not add registration")
@@ -1636,13 +1702,20 @@ func (a *App) promoteOnDisable(tx *gorm.DB, userID uint, notifyInsideCutoff bool
 // restoreRegistrations checks future answers in occurrence/registration ID
 // order while the holder is disabled. Accepted going rows accumulate usage
 // across both seat pools and care; ineligible or non-fitting rows are
-// audited and dropped. Eligible waiters retain their original place.
-func (a *App) restoreRegistrations(tx *gorm.DB, userID uint, intendedStatus string, actor *uint, ip string, now time.Time) error {
+// audited and dropped. Eligible waiters retain their original place. updates
+// holds the columns the change will write (setAccountStatusIn's).
+func (a *App) restoreRegistrations(tx *gorm.DB, userID uint, updates map[string]any, actor *uint, ip string, now time.Time) error {
 	var holder models.User
 	if err := tx.First(&holder, userID).Error; err != nil {
 		return err
 	}
-	holder.Status = intendedStatus
+	// The account is judged as the change leaves it, though its row is written
+	// only afterward: the status it comes back to, and the role when the same
+	// edit changes it (an admin re-enabled as a member keeps no admin reach).
+	holder.Status, _ = updates["status"].(string)
+	if role, ok := updates["role"].(string); ok {
+		holder.Role = role
+	}
 	var regs []models.Registration
 	if err := tx.Joins("JOIN event_occurrences ON event_occurrences.id = registrations.occurrence_id").Where("(registrations.user_id = ? OR registrations.registered_by = ?) AND registrations.status IN ? AND event_occurrences.status = ? AND event_occurrences.starts_at > ?", userID, userID, []string{models.RegGoing, models.RegWaitlisted}, models.OccurrenceScheduled, now).Order("registrations.occurrence_id, registrations.id").Find(&regs).Error; err != nil {
 		return err
@@ -1679,15 +1752,16 @@ func (a *App) restoreRegistrations(tx *gorm.DB, userID uint, intendedStatus stri
 			}
 			access = map[uint]bool{}
 		}
-		fits := true
+		eligible := true
 		if r.HouseholdPersonID != nil {
 			var err error
-			if fits, err = facts.eligible(a, tx, r, &ev, access, now); err != nil {
+			if eligible, err = facts.eligible(a, tx, r, &ev, access, now); err != nil {
 				return err
 			}
 		} else {
-			fits = a.canRegisterDate(tx, &holder, &ev, o)
+			eligible = a.canRegisterDate(tx, &holder, &ev, o)
 		}
+		fits := eligible
 		if r.Status == models.RegGoing {
 			fits = fits && tally.fits(r)
 		}
@@ -1714,7 +1788,11 @@ func (a *App) restoreRegistrations(tx *gorm.DB, userID uint, intendedStatus stri
 		if err := auditRegistration(tx, actor, audit.RegistrationNotRestored, ev.ID, r, r, ip); err != nil {
 			return err
 		}
-		if err := notifyRegistrationNotRestored(tx, &ev, o, r, actor); err != nil {
+		why := notRestoredFull
+		if !eligible {
+			why = notRestoredUnavailable
+		}
+		if err := notifyRegistrationNotRestored(tx, &ev, o, r, &holder, why, actor); err != nil {
 			return err
 		}
 	}
@@ -1869,7 +1947,7 @@ func (a *App) addHouseholdRegistration(c *gin.Context, ev *models.Event, date st
 			return err
 		}
 		return nil
-	})
+	}, contactGateTx)
 	if err != nil {
 		if auditErr := a.auditManagerDateRefusal(c); auditErr != nil {
 			jsonError(c, 500, "could not add registration")

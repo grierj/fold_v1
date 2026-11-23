@@ -1,72 +1,28 @@
-import { useEffect, useId, useRef } from "react";
-import { createPortal } from "react-dom";
+import { useId } from "react";
 import { Button } from "./ui/Button";
+import { Dialog } from "./ui/Dialog";
 
 export type SeriesRsvpScope = "just_this_date" | "this_and_following" | "all_future";
 
-export function SeriesRsvpDialog({ answer, disabled = false, onChoose, onCancel }: {
+// `justThisDate`, when given, says why this one date can't take the answer (it is full with no
+// waitlist): that choice is disabled and the wider scopes stay open, so other dates can still be answered.
+export function SeriesRsvpDialog({ answer, disabled = false, justThisDate, onChoose, onCancel }: {
   answer: string;
   disabled?: boolean;
+  justThisDate?: string;
   onChoose: (scope: SeriesRsvpScope) => void;
   onCancel: () => void;
 }) {
-  const titleId = useId();
-  const panel = useRef<HTMLDivElement>(null);
-  const overlay = useRef<HTMLDivElement>(null);
+  const note = useId();
 
-  // A modal: the overlay sits directly in <body>, and everything else is inert
-  // while it is open, so taps, focus, screen readers and target-size checks
-  // never reach the page behind it.
-  useEffect(() => {
-    const returnTo = document.activeElement instanceof HTMLElement ? document.activeElement : null;
-    const behind = Array.from(document.body.children).filter((el) => el !== overlay.current && !el.hasAttribute("inert"));
-    behind.forEach((el) => el.setAttribute("inert", ""));
-    panel.current?.querySelector<HTMLElement>("button")?.focus();
-
-    return () => {
-      behind.forEach((el) => el.removeAttribute("inert"));
-      returnTo?.focus();
-    };
-  }, []);
-
-  function keyDown(event: React.KeyboardEvent<HTMLDivElement>) {
-    if (event.key === "Escape") {
-      event.preventDefault();
-      onCancel();
-
-      return;
-    }
-
-    if (event.key !== "Tab") return;
-    const controls = Array.from(panel.current?.querySelectorAll<HTMLElement>('button:not([disabled])') ?? []);
-
-    if (!controls.length) return;
-    const firstControl = controls[0];
-    const lastControl = controls[controls.length - 1];
-
-    if (event.shiftKey && document.activeElement === firstControl) {
-      event.preventDefault();
-      lastControl.focus();
-    } else if (!event.shiftKey && document.activeElement === lastControl) {
-      event.preventDefault();
-      firstControl.focus();
-    }
-  }
-
-  return createPortal(<div ref={overlay} className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/40 p-0 sm:p-4" onMouseDown={(event) => {
-    if (event.target === event.currentTarget) onCancel();
-  }}>
-    <div ref={panel} role="dialog" aria-modal="true" aria-labelledby={titleId} onKeyDown={keyDown}
-      className="w-full sm:max-w-md rounded-t-2xl sm:rounded-2xl bg-surface border border-border p-5 shadow-xl space-y-3">
-      <h2 id={titleId} className="text-xl font-bold">How far should “{answer}” apply?</h2>
-      <p className="text-sm text-text-muted">Choose which dates in this series you want to answer.</p>
-      <div className="grid gap-2">
-        <Button variant="secondary" layout="w-full min-h-11 justify-start text-left" disabled={disabled} onClick={() => onChoose("just_this_date")}>Just this date</Button>
-        <Button variant="secondary" layout="w-full min-h-11 justify-start text-left" disabled={disabled} onClick={() => onChoose("this_and_following")}>This and following dates</Button>
-        <Button variant="secondary" layout="w-full min-h-11 justify-start text-left" disabled={disabled} onClick={() => onChoose("all_future")}>All future dates</Button>
-      </div>
-      <p className="text-sm text-text-muted">New dates added later won&apos;t be answered for you.</p>
-      <Button variant="secondary" layout="w-full" onClick={onCancel}>Cancel</Button>
+  return <Dialog title={<>How far should “{answer}” apply?</>} description="Choose which dates in this series you want to answer." onDismiss={onCancel}>
+    <div className="grid gap-2">
+      <Button variant="secondary" layout="w-full min-h-11 justify-start text-left" disabled={disabled || !!justThisDate} aria-describedby={justThisDate ? note : undefined} onClick={() => onChoose("just_this_date")}>Just this date</Button>
+      {justThisDate && <p id={note} className="text-sm text-text-muted">{justThisDate}</p>}
+      <Button variant="secondary" layout="w-full min-h-11 justify-start text-left" disabled={disabled} onClick={() => onChoose("this_and_following")}>This and following dates</Button>
+      <Button variant="secondary" layout="w-full min-h-11 justify-start text-left" disabled={disabled} onClick={() => onChoose("all_future")}>All future dates</Button>
     </div>
-  </div>, document.body);
+    <p className="text-sm text-text-muted">New dates added later won&apos;t be answered for you.</p>
+    <Button variant="secondary" layout="w-full" onClick={onCancel}>Cancel</Button>
+  </Dialog>;
 }

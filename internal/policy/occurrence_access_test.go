@@ -1,6 +1,8 @@
 package policy
 
 import (
+	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -260,7 +262,7 @@ func TestOccurrenceAccessCurrent(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			p, a, f, now := accessFixture()
 			tt.change(&p, &a, &f, &now)
-			if got := OccurrenceAccessCurrent(p, a, f, now); got != tt.want {
+			if got := OccurrenceAccessCurrent(p.OccurrenceActor(), a, f, now); got != tt.want {
 				t.Fatalf("got %v want %v", got, tt.want)
 			}
 		})
@@ -276,11 +278,11 @@ func TestOccurrenceAccessOriginsAndDepartureAuthorization(t *testing.T) {
 	removed.Origin, removed.DepartureActorID = OccurrenceOriginDepartureRemoval, 9
 	atEnd := now
 	atEnd = f.EndsAt
-	if OccurrenceAccessCurrent(p, self, f, atEnd) || OccurrenceAccessCurrent(p, removed, f, atEnd) {
+	if OccurrenceAccessCurrent(p.OccurrenceActor(), self, f, atEnd) || OccurrenceAccessCurrent(p.OccurrenceActor(), removed, f, atEnd) {
 		t.Fatal("departure access survived the exact occurrence end")
 	}
 	beforeEnd := f.EndsAt.Add(-time.Nanosecond)
-	if !OccurrenceAccessCurrent(p, self, f, beforeEnd) || !OccurrenceAccessCurrent(p, removed, f, beforeEnd) {
+	if !OccurrenceAccessCurrent(p.OccurrenceActor(), self, f, beforeEnd) || !OccurrenceAccessCurrent(p.OccurrenceActor(), removed, f, beforeEnd) {
 		t.Fatal("departure access ended before the occurrence boundary")
 	}
 	for _, tt := range []struct {
@@ -305,7 +307,7 @@ func TestOccurrenceAccessOriginsAndDepartureAuthorization(t *testing.T) {
 			if got := ValidOccurrenceAccessOrigin(tt.access); got != tt.want {
 				t.Fatalf("origin valid=%v want %v", got, tt.want)
 			}
-			if got := OccurrenceAccessCurrent(p, tt.access, f, now); got != tt.want {
+			if got := OccurrenceAccessCurrent(p.OccurrenceActor(), tt.access, f, now); got != tt.want {
 				t.Fatalf("current=%v want %v", got, tt.want)
 			}
 		})
@@ -347,20 +349,20 @@ func TestOccurrenceAccessOriginsAndDepartureAuthorization(t *testing.T) {
 func TestOccurrenceAccessBoundaries(t *testing.T) {
 	p, a, f, now := accessFixture()
 	ev, g := EventView{Visibility: InviteOnly}, Group{Status: GroupActive, Visibility: InviteOnly}
-	if !CanSeeOccurrence(p, false, a, f, now) {
+	if !CanSeeOccurrence(p.OccurrenceActor(), false, a, f, now) {
 		t.Fatal("exact invitation missing")
 	}
 	if CanSeeEvent(p.Person, ev, g, Rel{}) || CanSeeGroup(p.Person, g, Rel{}) || CanSeeRoster(p.Person, g, Rel{}) ||
 		CanManageEvent(p.Person, ev, Rel{}) || CanSeeContact(p.Person, false, Contact{Teen: true}) || CanSeeOccurrenceAttendees(false, true) {
 		t.Fatal("invitation widened group/series/roster/contact/management/attendee scope")
 	}
-	if !CanSeeOccurrence(p, true, OccurrenceAccess{}, OccurrenceFacts{}, now) {
+	if !CanSeeOccurrence(p.OccurrenceActor(), true, OccurrenceAccess{}, OccurrenceFacts{}, now) {
 		t.Fatal("ordinary series access changed")
 	}
 	for _, status := range []string{"going", "maybe", "waitlisted", "declined", "removed", ""} {
 		for _, reveal := range []string{VideoRevealAlways, VideoRevealRegisteredOnly} {
 			want := reveal == VideoRevealAlways || status == "going"
-			if got := CanSeeOccurrenceVideo(p, false, true, a, f, now, reveal, status); got != want {
+			if got := CanSeeOccurrenceVideo(p.OccurrenceActor(), false, true, a, f, now, reveal, status); got != want {
 				t.Fatalf("override video %s/%s = %v", reveal, status, got)
 			}
 		}
@@ -371,7 +373,7 @@ func TestOccurrenceAccessBoundaries(t *testing.T) {
 	af.Manager = false
 	af.Block = &ManagerAddBlock{2, f.Organizer}
 	r.SubjectDecision, r.AdminDecision = ContactApproved, ContactApproved
-	if CanFinalizeAddRequest(r, af) || !OccurrenceAccessCurrent(p, a, f, now) {
+	if CanFinalizeAddRequest(r, af) || !OccurrenceAccessCurrent(p.OccurrenceActor(), a, f, now) {
 		t.Fatal("pending and accepted issuer lifecycle conflated")
 	}
 }
@@ -389,14 +391,21 @@ func TestOccurrenceRecipientControls(t *testing.T) {
 		{"guardian no proxy shortcut", ContactAccount{Person: &Person{ID: 8}, Active: true}, false, false, false},
 		{"inactive subject", ContactAccount{Person: p.Person}, false, false, false},
 		{"teen manager", p, true, true, true}, // only own invitation
+		{"underage adult manager", func() ContactAccount {
+			age := 16
+			return ContactAccount{Person: &Person{ID: 9}, Active: true, AgeYears: &age}
+		}(), true, false, false},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			if CanEndOccurrenceAccess(tt.actor, tt.manager, a) != tt.end || CanBlockManagerAdds(tt.actor, a) != tt.block {
+			if CanEndOccurrenceAccess(tt.actor, tt.manager, a) != tt.end || CanBlockManagerAdds(tt.actor.OccurrenceActor(), a) != tt.block {
 				t.Fatal("incorrect removal/block right")
+			}
+			if CanEndOwnOccurrenceAccess(tt.actor.OccurrenceActor(), a) != CanEndOccurrenceAccess(tt.actor, false, a) {
+				t.Fatal("the recipient's own end right differs from CanEndOccurrenceAccess without a manager")
 			}
 			ended := a
 			ended.Status = OccurrenceAccessEnded
-			if CanEndOccurrenceAccess(tt.actor, tt.manager, ended) || CanBlockManagerAdds(tt.actor, ended) {
+			if CanEndOccurrenceAccess(tt.actor, tt.manager, ended) || CanBlockManagerAdds(tt.actor.OccurrenceActor(), ended) {
 				t.Fatal("replayed ended date")
 			}
 		})
@@ -468,5 +477,126 @@ func TestGroupAddIgnoresOccurrenceBlocks(t *testing.T) {
 	adultAdd(&f, &r)
 	if CanCreateAddRequest(r.AddScope, f, 0) {
 		t.Fatal("unrelated date history forced ordinary adult membership into an ask")
+	}
+}
+
+// cancelledFixture is an own, standing row with a manager-add grant ended by
+// this cancellation, on a cancelled date of a live context.
+func cancelledFixture() CancelledDateFacts {
+	p, a, f, now := accessFixture()
+	f.Scheduled = false
+	ended := now.Add(-time.Second)
+	a.Status, a.EndedAt, a.EndReason = OccurrenceAccessEnded, &ended, OccurrenceCancelled
+	return CancelledDateFacts{Viewer: p.OccurrenceActor(), Own: true, Standing: true, Access: a, Occurrence: f, Evidence: CancelEvidence{Snapshots: 1}, Now: now}
+}
+
+func TestCanSeeCancelledOccurrence(t *testing.T) {
+	live := func(f *CancelledDateFacts) {
+		f.Access.Status, f.Access.EndedAt, f.Access.EndReason = OccurrenceAccessActive, nil, ""
+	}
+	departure := func(f *CancelledDateFacts) {
+		f.Access.Origin, f.Access.IssuerID, f.Access.RequestID = OccurrenceOriginDepartureSelf, 0, 0
+		f.Access.DepartureMembershipID, f.Access.DepartureActorID = 9, f.Access.SubjectUserID
+	}
+	for _, tt := range []struct {
+		name   string
+		change func(*CancelledDateFacts)
+		want   bool
+	}{
+		{"grant ended by this cancellation", func(*CancelledDateFacts) {}, true},
+		{"ended grant outlives the date's end", func(f *CancelledDateFacts) { f.Now = f.Occurrence.EndsAt.Add(24 * time.Hour) }, true},
+		{"ended departure grant ignores a retimed end", func(f *CancelledDateFacts) {
+			departure(f)
+			f.Occurrence.EndsAt = f.Access.EndedAt.Add(-time.Hour)
+		}, true},
+		{"live manager add before cleanup", live, true},
+		{"live manager add after the date's end", func(f *CancelledDateFacts) { live(f); f.Now = f.Occurrence.EndsAt.Add(time.Hour) }, true},
+		{"live departure grant before the date's end", func(f *CancelledDateFacts) { live(f); departure(f) }, true},
+		{"live departure grant at the date's end", func(f *CancelledDateFacts) { live(f); departure(f); f.Now = f.Occurrence.EndsAt }, false},
+		{"standing row with ordinary access", func(f *CancelledDateFacts) { f.Access = OccurrenceAccess{}; f.Ordinary = true }, true},
+		{"scheduled date is not a tombstone", func(f *CancelledDateFacts) { f.Occurrence.Scheduled = true; f.Ordinary = true }, false},
+		{"deleted date", func(f *CancelledDateFacts) { f.Occurrence.ID = 0; f.Ordinary = true }, false},
+		{"ordinary access without an own row (a role alone)", func(f *CancelledDateFacts) {
+			f.Access, f.Own, f.Standing, f.Ordinary = OccurrenceAccess{}, false, false, true
+		}, false},
+		{"household person's row the viewer holds", func(f *CancelledDateFacts) { f.Own, f.Ordinary = false, true }, false},
+		{"cancelled own row with ordinary access", func(f *CancelledDateFacts) { f.Standing, f.Ordinary = false, true }, false},
+		{"declined own row keeps an ended grant", func(f *CancelledDateFacts) { f.Standing = false }, false},
+		{"signed out", func(f *CancelledDateFacts) { f.Viewer.Person = nil; f.Ordinary = true }, false},
+		{"disabled account on the ordinary path", func(f *CancelledDateFacts) { f.Viewer.Active = false; f.Ordinary = true }, false},
+		{"consent lost after the cancellation", func(f *CancelledDateFacts) { f.Viewer.Active = false }, false},
+		{"someone else's grant", func(f *CancelledDateFacts) { f.Viewer.Person.ID = 9 }, false},
+		{"context changed after the cancellation", func(f *CancelledDateFacts) { f.Occurrence.ContextActive = false }, false},
+		{"organizer changed", func(f *CancelledDateFacts) { f.Occurrence.Organizer.ID++ }, false},
+		{"sibling date", func(f *CancelledDateFacts) { f.Occurrence.ID++ }, false},
+		{"invalid provenance", func(f *CancelledDateFacts) { f.Access.IssuerID = 0 }, false},
+		{"independently declined grant", func(f *CancelledDateFacts) { f.Access.EndReason = OccurrenceDeclined }, false},
+		{"grant ended as context_changed", func(f *CancelledDateFacts) { f.Access.EndReason = OccurrenceContextChanged }, false},
+		{"grant that expired before the cancellation", func(f *CancelledDateFacts) { f.Access.EndReason = OccurrenceEnded }, false},
+		{"no matching end snapshot", func(f *CancelledDateFacts) { f.Evidence.Snapshots = 0 }, false},
+		{"two matching end snapshots", func(f *CancelledDateFacts) { f.Evidence.Snapshots = 2 }, false},
+		{"unreadable evidence", func(f *CancelledDateFacts) { f.Evidence.Unreadable = true }, false},
+		{"ended under an earlier cancellation a restore undid", func(f *CancelledDateFacts) { f.Evidence.RestoredAfter = true }, false},
+		{"end stamp before the grant", func(f *CancelledDateFacts) {
+			early := f.Access.GrantedAt.Add(-time.Second)
+			f.Access.EndedAt = &early
+		}, false},
+		{"end stamp without an ended grant", func(f *CancelledDateFacts) { f.Access.Status = OccurrenceAccessActive }, false},
+		{"no grant and no ordinary access", func(f *CancelledDateFacts) { f.Access = OccurrenceAccess{} }, false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			f := cancelledFixture()
+			tt.change(&f)
+			if got := CanSeeCancelledOccurrence(f); got != tt.want {
+				t.Fatalf("got %v want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+// An exact-date actor carries whose account it is and whether it is active,
+// nothing else: no age a missing value could turn into adult authority, and no
+// contact preference.
+func TestOccurrenceActorCarriesNoAgeOrContactFacts(t *testing.T) {
+	typ := reflect.TypeFor[OccurrenceActor]()
+	var got []string
+	for i := 0; i < typ.NumField(); i++ {
+		got = append(got, typ.Field(i).Name)
+	}
+	if !slices.Equal(got, []string{"Person", "Active"}) {
+		t.Fatalf("OccurrenceActor fields %v", got)
+	}
+	age := 15
+	full := ContactAccount{Person: &Person{ID: 2}, Active: true, AgeYears: &age, HideFromLeaders: true}
+	if full.OccurrenceActor() != (OccurrenceActor{Person: full.Person, Active: true}) {
+		t.Fatal("OccurrenceActor dropped whose account it is or whether it is active")
+	}
+}
+
+// TestAccessEndsWithDate: only a leader's add outlives its date (DEC-74), so
+// every other origin, an unknown one included, blocks a later end while live
+// (DEC-156), and unexpired agrees with it just past the end.
+func TestAccessEndsWithDate(t *testing.T) {
+	_, _, f, _ := accessFixture()
+	for _, tt := range []struct {
+		origin string
+		want   bool
+	}{
+		{OccurrenceOriginManagerAdd, false},
+		{OccurrenceOriginDepartureSelf, true},
+		{OccurrenceOriginDepartureRemoval, true},
+		{"", true},
+		{"some_future_origin", true},
+	} {
+		if got := AccessEndsWithDate(tt.origin); got != tt.want {
+			t.Errorf("AccessEndsWithDate(%q) = %v, want %v", tt.origin, got, tt.want)
+		}
+		a := OccurrenceAccess{Origin: tt.origin}
+		if unexpired(a, f, f.EndsAt.Add(-time.Nanosecond)) != true {
+			t.Errorf("%q expired before its date ended", tt.origin)
+		}
+		if got := unexpired(a, f, f.EndsAt.Add(time.Nanosecond)); got != !tt.want {
+			t.Errorf("unexpired(%q) just past the end = %v, want %v", tt.origin, got, !tt.want)
+		}
 	}
 }

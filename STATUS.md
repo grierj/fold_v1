@@ -65,7 +65,7 @@ narratives and follow-up lists, is kept in
 | M6.3 Attendance roll for leaders | Not started; brief R10, pulled ahead (DEC-145) | |
 | M6.4 QR / self check-in | Out (DEC-140) | |
 | M6.5 Prayer requests | Not started | |
-| M6.6 Group discussions | Not started | |
+| M6.6 Group discussions | Not started; absorbed into M8.6 (announcements vs discussion, Phase 8) — do not build as a separate board | |
 | M6.7 Households and teen accounts | Moved to M1.9 and M1.10 (DEC-8), done there | |
 | M6.8 Background-check status flags on slots | Not started | |
 | M6.9 Photo galleries | Not started | |
@@ -84,10 +84,18 @@ narratives and follow-up lists, is kept in
 | M7.6 Query ceilings and pool cap | Not started | |
 | M7.7 Baseline squash | Done | #258, #264–#267 |
 | M7.8 People and own-data export | Not started | |
-| M7.9 Frontend speed and discoverability | Not started | |
+| M7.9 Frontend speed and discoverability | In progress. R15-1's lazy routes and bundle budget are verified with M8.1. The other slices remain. | |
 | M7.10 Generated web types | Not started | |
-| M7.11 Contact locks inside the freeze | Not started | |
+| M7.11 Contact locks (freeze lifted by DEC-153) | Not started | |
 | M7.12 Cut execution and maintenance tax | In progress: the guard tiers and the UI ratchet down to zero remain | #316, #317, #326 |
+| M8.1 EventDate 3-second test (Phase 8 balance pass) | Implemented and verified locally. The six answers fit on the first phone-width screen, the RSVP bar stays in reach while scrolling, and attendee names expand in groups of 25. The retired date PUT returns 409 `date_page_outdated` without saving, and group detail requires `datePaging=2`. The Go suite, 3,444 web tests, and 214 Playwright checks passed. The running app passed 30 layout and accessibility checks at 390, 768, and 1280px. See the completion record in phase-8.md. The displayed-end discrepancy and explicit waitlist promotion confirmation remain follow-ups. Migrations 00009–00015 raise the recovery level to 3. Before release, run the level-3 restore and crossings drill on a droplet. The L1–L5 limits, real-phone check, and live-redeploy check remain in docs/DEPLOY-DIGITALOCEAN.md and docs/FIRST-CHURCH-CHECKS.md. | |
+| M8.2 Guest and token flows feel account-free (Phase 8) | Not started; closes the audit index's named token-page a11y/390px gap for /invite, /set-password, /guest/* | |
+| M8.3 Directory finder in 10 seconds (Phase 8) | Not started; the directory slice of M7.9 (R15-3, R15-5), pulled forward — M7.9's other slices keep their own place | |
+| M8.4 Attendance 30-second roll (Phase 8) | Not started; this is M6.3 sequenced here (brief R10); M6.2 sign-up sheets follow it immediately | |
+| M8.5 GroupDetail and Home pulse (Phase 8) | Not started; existing data only, brief needed | |
+| M8.6 Announcements vs discussion (Phase 8) | Not started; new surface — DEC-153 rescinded DEC-145, so the freeze no longer applies; needs a brief first; absorbs M6.6 | |
+| M8.7 Calendar subscribe surfacing (Phase 8) | Not started; feeds built in M1.7, this is visibility and revocation surfacing only | |
+| M8.8 Moats named in-product (Phase 8) | Not started; presentation only, no privacy, consent or room behaviour change | |
 | Simplicity: drop `pending_return` (DEC-47), event visibility on the event (DEC-48) | Done | #43 |
 | UI makeover and UI enforcement (DEC-57–DEC-67) | Done | #58, #60–#62, #64–#66, #71–#73 |
 | Security and correctness fixes, Oct 2026 | Done | #44, #45, #96–#100, #163, #182, #183 |

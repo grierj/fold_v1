@@ -4,10 +4,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"fold/internal/audit"
+	"fold/internal/notify"
 	"fold/internal/policy"
 	"fold/models"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -49,7 +51,11 @@ func TestGroupMorePrivateTightensAndCancels(t *testing.T) {
 	apiDo(t, memC, "GET", "/api/v1/groups/"+itoa(gid)+"/visibility-impact?visibility=invite_only", nil, http.StatusForbidden)
 
 	// Private -> invite-only: tightened, the outsider is cancelled and told.
-	apiDo(t, admin, "PUT", "/api/v1/groups/"+itoa(gid), map[string]any{"visibility": models.VisibilityInviteOnly}, http.StatusOK)
+	// A tightening that cancels someone is saved only with the preview's
+	// consent (DEC-158): without it the old tab's body is outdated.
+	groupPath := "/api/v1/groups/" + itoa(gid)
+	apiDo(t, admin, "PUT", groupPath, map[string]any{"visibility": models.VisibilityInviteOnly}, http.StatusConflict)
+	apiDo(t, admin, "PUT", groupPath, map[string]any{"visibility": models.VisibilityInviteOnly, "consent": impact.Consent}, http.StatusOK)
 	if e := eventRow(t, app, ev.ID); e.Visibility != models.VisibilityInviteOnly {
 		t.Fatalf("invite-only: %+v", e)
 	}
@@ -145,8 +151,8 @@ func TestLeaderOpenedEventsAskBeforeTightening(t *testing.T) {
 		t.Fatalf("bad decision: %d", c)
 	}
 
-	apiDo(t, lead, "PUT", "/api/v1/groups/"+itoa(gid), map[string]any{"visibility": models.VisibilityInviteOnly,
-		"openedEvents": map[string]string{itoa(kept.ID): "keep", itoa(tightened.ID): "tighten"}}, http.StatusOK)
+	apiDo(t, lead, "PUT", "/api/v1/groups/"+itoa(gid), confirmVisibility(t, lead, "/api/v1/groups/"+itoa(gid), map[string]any{"visibility": models.VisibilityInviteOnly,
+		"openedEvents": map[string]string{itoa(kept.ID): "keep", itoa(tightened.ID): "tighten"}}), http.StatusOK)
 	if e := eventRow(t, app, inherited.ID); e.Visibility != models.VisibilityInviteOnly {
 		t.Fatalf("inherited: %+v", e)
 	}
@@ -197,7 +203,7 @@ func TestVisibilityImpactCountsHouseholdSubjectsAcrossDates(t *testing.T) {
 	answer(models.FormatCalendarDate(o.OriginalDate))
 	var ev models.Event
 	app.DB.First(&ev, eventID)
-	impact, err := eventImpactOf(app.DB, &ev, models.VisibilityInviteOnly)
+	impact, err := eventImpactOf(app.DB, &ev, models.VisibilityInviteOnly, time.Now().UTC())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -205,7 +211,7 @@ func TestVisibilityImpactCountsHouseholdSubjectsAcrossDates(t *testing.T) {
 		t.Fatalf("subject impact %+v", impact)
 	}
 	apiDo(t, admin, "PUT", "/api/v1/admin/users/"+itoa(holder.ID), map[string]any{"status": "disabled"}, http.StatusOK)
-	apiDo(t, admin, "PUT", "/api/v1/events/"+itoa(eventID)+"/visibility", map[string]any{"visibility": "invite_only", "confirm": true}, http.StatusOK)
+	apiDo(t, admin, "PUT", "/api/v1/events/"+itoa(eventID)+"/visibility", confirmVisibility(t, admin, "/api/v1/events/"+itoa(eventID)+"/visibility", map[string]any{"visibility": "invite_only"}), http.StatusOK)
 	var n int64
 	app.DB.Model(&models.Registration{}).Where("(user_id = ? OR registered_by = ?) AND status <> ?", holder.ID, holder.ID, models.RegCancelled).Count(&n)
 	if n != 0 {
@@ -229,19 +235,19 @@ func TestOccurrenceInvitationVisibilityImpactAndCommitAgree(t *testing.T) {
 			if err := f.app.DB.First(&ev, f.event.ID).Error; err != nil {
 				t.Fatal(err)
 			}
-			impact, err := eventImpactOf(f.app.DB, &ev, models.VisibilityInviteOnly)
+			impact, err := eventImpactOf(f.app.DB, &ev, models.VisibilityInviteOnly, time.Now().UTC())
 			if err != nil || len(impact.Tightened) != 1 || impact.Tightened[0].Registrants != 0 {
 				t.Fatal("live exact invite counted as loser", impact, err)
 			}
 			apiDo(t, f.client, "PUT", "/api/v1/events/"+itoa(f.event.ID)+"/registrations", map[string]any{"date": models.FormatCalendarDate(f.dates[0].OriginalDate), "status": "going"}, 200)
-			impact, err = eventImpactOf(f.app.DB, &ev, models.VisibilityInviteOnly)
+			impact, err = eventImpactOf(f.app.DB, &ev, models.VisibilityInviteOnly, time.Now().UTC())
 			if err != nil || impact.Tightened[0].Registrants != 1 {
 				t.Fatal("sibling not counted", impact, err)
 			}
 			if throughGroup {
-				apiDo(t, f.admin, "PUT", "/api/v1/groups/"+itoa(f.group), map[string]any{"visibility": models.VisibilityInviteOnly, "confirm": true}, 200)
+				apiDo(t, f.admin, "PUT", "/api/v1/groups/"+itoa(f.group), confirmVisibility(t, f.admin, "/api/v1/groups/"+itoa(f.group), map[string]any{"visibility": models.VisibilityInviteOnly}), 200)
 			} else {
-				apiDo(t, f.admin, "PUT", "/api/v1/events/"+itoa(f.event.ID)+"/visibility", map[string]any{"visibility": models.VisibilityInviteOnly, "confirm": true}, 200)
+				apiDo(t, f.admin, "PUT", "/api/v1/events/"+itoa(f.event.ID)+"/visibility", confirmVisibility(t, f.admin, "/api/v1/events/"+itoa(f.event.ID)+"/visibility", map[string]any{"visibility": models.VisibilityInviteOnly}), 200)
 			}
 			if contactCount(t, f.app, &models.Registration{}, "user_id = ? AND occurrence_id = ? AND status <> ?", f.recipient.ID, f.dates[0].ID, models.RegCancelled) != 0 {
 				t.Fatal("ordinary sibling kept")
@@ -311,7 +317,7 @@ func TestVisibilityInvitationCollectionReadBudget(t *testing.T) {
 				if scope == "event" {
 					commitPath += "/visibility"
 				}
-				w = f.admin.do("PUT", commitPath, map[string]any{"visibility": models.VisibilityInviteOnly, "confirm": true}, true)
+				w = f.admin.do("PUT", commitPath, confirmVisibility(t, f.admin, commitPath, map[string]any{"visibility": models.VisibilityInviteOnly}), true)
 				if w.Code != 200 {
 					t.Fatal(w.Code, w.Body.String())
 				}
@@ -366,7 +372,7 @@ func TestVisibilityBatchExcludesEndedAndUnconsentedInvitations(t *testing.T) {
 				if scope == "event" {
 					root += "/visibility"
 				}
-				apiDo(t, f.admin, "PUT", root, map[string]any{"visibility": models.VisibilityInviteOnly, "confirm": true}, 200)
+				apiDo(t, f.admin, "PUT", root, confirmVisibility(t, f.admin, root, map[string]any{"visibility": models.VisibilityInviteOnly}), 200)
 				if contactCount(t, f.app, &models.Registration{}, "id = ? AND status <> ?", f.access.RegistrationID, models.RegCancelled) != 0 {
 					t.Fatal("stale invitation kept registration")
 				}
@@ -380,7 +386,7 @@ func TestUpdateGroupTighteningUsesLockedVisibilityAndDecisions(t *testing.T) {
 	app, admin, _, ev, dates := dateVisibilityFixture(t, models.VisibilityPrivate)
 	gid := *ev.GroupID
 	path := "/api/v1/groups/" + itoa(gid)
-	apiDo(t, admin, "PUT", fmt.Sprintf("/api/v1/events/%d/occurrences/%s", ev.ID, models.FormatCalendarDate(dates[0].OriginalDate)), map[string]any{"visibility": models.VisibilityPublic}, http.StatusOK)
+	saveDate(t, admin, ev.ID, models.FormatCalendarDate(dates[0].OriginalDate), map[string]any{"visibility": models.VisibilityPublic}, http.StatusOK, "")
 	opened := scheduleGroupEvent(t, admin, gid, "Opened series")
 	setVisibility(t, admin, opened.ID, models.VisibilityPublic, "", http.StatusOK)
 	gate := holdContactGate(t, app)
@@ -466,7 +472,8 @@ func TestUpdateGroupTighteningFailureRollsBackDependents(t *testing.T) {
 				t.Fatal(err)
 			}
 			t.Cleanup(func() { app.DB.Callback().Create().Remove(callback) })
-			apiDo(t, admin, "PUT", "/api/v1/groups/"+itoa(gid), map[string]any{"name": "Failed patch", "visibility": models.VisibilityInviteOnly}, http.StatusInternalServerError)
+			body := confirmVisibility(t, admin, "/api/v1/groups/"+itoa(gid), map[string]any{"name": "Failed patch", "visibility": models.VisibilityInviteOnly})
+			apiDo(t, admin, "PUT", "/api/v1/groups/"+itoa(gid), body, http.StatusInternalServerError)
 			var saved models.Group
 			if err := app.DB.First(&saved, gid).Error; err != nil {
 				t.Fatal(err)
@@ -487,6 +494,89 @@ func TestUpdateGroupTighteningFailureRollsBackDependents(t *testing.T) {
 // longer see this event", in step with policy.CanSeeEvent: a registrant loses
 // exactly when the event, made newVis, is no longer visible to them.
 func TestLosersMatchPolicy(t *testing.T) {
+	app, dates, people := newLosersFixture(t)
+	for _, event := range dates {
+		for _, vis := range []string{models.VisibilityPublic, models.VisibilityPrivate, models.VisibilityInviteOnly} {
+			var rows []models.Registration
+			if err := losersForDate(app.DB, event.ev, vis, time.Now().UTC(), seriesDates).Select("registrations.*").Scan(&rows).Error; err != nil {
+				t.Fatal(err)
+			}
+			lost := map[uint]bool{}
+			for _, r := range rows {
+				lost[*r.UserID] = true
+			}
+			for _, p := range people {
+				facts, err := eventFactsIn(app.DB, p, event.ev)
+				if err != nil {
+					t.Fatal(err)
+				}
+				// A guest is a signed-out visitor to policy.
+				var viewer *models.User = p
+				if p.Status == models.UserGuest {
+					viewer = nil
+				}
+				facts.view.Visibility = vis
+				want := !policy.CanSeeEvent(asPerson(viewer), facts.view, asGroup(facts.group), facts.rel)
+				if lost[p.ID] != want {
+					t.Errorf("event %d at %s, %s: loses %v, policy says %v", event.ev.ID, vis, p.Name, lost[p.ID], want)
+				}
+			}
+		}
+	}
+}
+
+// TestLosersAtMatchTheStoredForm: losersForDateAt on a date's stored start is
+// losersForDate for that date, for every TestLosersMatchPolicy fixture; a
+// start in the past loses nobody; and a future start on an ended date loses
+// exactly whom the stored form loses once that start is saved.
+func TestLosersAtMatchTheStoredForm(t *testing.T) {
+	app, dates, _ := newLosersFixture(t)
+	ids := func(q *gorm.DB) []uint {
+		t.Helper()
+		var out []uint
+		if err := q.Order("registrations.id").Pluck("registrations.id", &out).Error; err != nil {
+			t.Fatal(err)
+		}
+		return out
+	}
+	for _, d := range dates {
+		var occ models.EventOccurrence
+		gormMust(t, app.DB.First(&occ, d.date))
+		stored, storedEnd := occ.StartsAt, occ.EndsAt
+		for _, vis := range []string{models.VisibilityPublic, models.VisibilityPrivate, models.VisibilityInviteOnly} {
+			now := time.Now().UTC()
+			want := ids(losersForDate(app.DB, d.ev, vis, now, d.date))
+			if vis == models.VisibilityInviteOnly && len(want) == 0 {
+				t.Fatalf("fixture: nobody loses event %d at %s", d.ev.ID, vis)
+			}
+			if got := ids(losersForDateAt(app.DB, d.ev, vis, now, d.date, stored)); !slices.Equal(got, want) {
+				t.Errorf("event %d at %s, stored start: %v, want %v", d.ev.ID, vis, got, want)
+			}
+			if got := ids(losersForDateAt(app.DB, d.ev, vis, now, d.date, now.Add(-time.Hour))); len(got) != 0 {
+				t.Errorf("event %d at %s, a past start loses %v", d.ev.ID, vis, got)
+			}
+
+			ended := now.Add(-2 * time.Hour)
+			gormMust(t, app.DB.Model(&occ).Updates(map[string]any{"starts_at": ended, "ends_at": ended.Add(time.Hour)}))
+			prospective := ids(losersForDateAt(app.DB, d.ev, vis, now, d.date, stored))
+			gormMust(t, app.DB.Model(&occ).Updates(map[string]any{"starts_at": stored, "ends_at": storedEnd}))
+			if saved := ids(losersForDate(app.DB, d.ev, vis, now, d.date)); !slices.Equal(prospective, saved) {
+				t.Errorf("event %d at %s, an ended date moved ahead: %v, once saved %v", d.ev.ID, vis, prospective, saved)
+			}
+		}
+	}
+}
+
+type losersDate struct {
+	ev   *models.Event
+	date uint
+}
+
+// newLosersFixture is a group event's date and a church-wide event's date,
+// each with a registration for an admin, a disabled admin, a member, an
+// outsider and a guest.
+func newLosersFixture(t *testing.T) (*App, []losersDate, []*models.User) {
+	t.Helper()
 	app := testApp(t)
 	owner := newTestUser(t, app, "losers owner", "password1234", models.RoleMember)
 	g := models.Group{Name: "Losers", Status: models.GroupActive, Visibility: models.VisibilityPublic, LeaderID: owner.ID}
@@ -519,42 +609,68 @@ func TestLosersMatchPolicy(t *testing.T) {
 		t.Fatal(err)
 	}
 	people := []*models.User{admin, disabledAdmin, member, outsider, guest}
-
-	for _, event := range []struct {
-		ev   *models.Event
-		date uint
-	}{{&groupEvent, groupDate.ID}, {&churchEvent, churchDate.ID}} {
+	dates := []losersDate{{&groupEvent, groupDate.ID}, {&churchEvent, churchDate.ID}}
+	for _, event := range dates {
 		for _, p := range people {
 			reg := models.Registration{UserID: &p.ID, OccurrenceID: event.date, Status: models.RegGoing, Source: "web", AttendanceMode: models.AttendanceInPerson}
 			if err := app.DB.Create(&reg).Error; err != nil {
 				t.Fatal(err)
 			}
 		}
-		for _, vis := range []string{models.VisibilityPublic, models.VisibilityPrivate, models.VisibilityInviteOnly} {
-			var rows []models.Registration
-			if err := losersForDate(app.DB, event.ev, vis, time.Now().UTC(), seriesDates).Select("registrations.*").Scan(&rows).Error; err != nil {
-				t.Fatal(err)
-			}
-			lost := map[uint]bool{}
-			for _, r := range rows {
-				lost[*r.UserID] = true
-			}
-			for _, p := range people {
-				facts, err := eventFactsIn(app.DB, p, event.ev)
-				if err != nil {
-					t.Fatal(err)
-				}
-				// A guest is a signed-out visitor to policy.
-				var viewer *models.User = p
-				if p.Status == models.UserGuest {
-					viewer = nil
-				}
-				facts.view.Visibility = vis
-				want := !policy.CanSeeEvent(asPerson(viewer), facts.view, asGroup(facts.group), facts.rel)
-				if lost[p.ID] != want {
-					t.Errorf("event %d at %s, %s: loses %v, policy says %v", event.ev.ID, vis, p.Name, lost[p.ID], want)
-				}
-			}
-		}
 	}
+	return app, dates, people
+}
+
+// Tightening a series judges each date on its own: a holder who could see a
+// scheduled date is told its title, and not told the title a cancelled date
+// got after it was cancelled, which only the tombstone's readers saw; since
+// they are already told by name, they get no second, nameless notice. A
+// holder whose only row is a household person's on the cancelled date gets
+// the nameless one alone.
+func TestSeriesTighteningNamesOnlyDatesTheHolderSaw(t *testing.T) {
+	f := newDateEditFixture(t)
+	scheduled, cancelled := f.dates[1], f.dates[2]
+	gormMust(t, f.app.DB.Model(&models.Event{}).Where("id = ?", f.event.ID).Update("visibility", models.VisibilityPublic))
+	both, _, bothSpouse, _ := householdFamily(t, f.app, f.admin, "series both holder")
+	only, onlyClient, onlySpouse, _ := householdFamily(t, f.app, f.admin, "series cancelled holder")
+	for _, r := range []struct {
+		holder *models.User
+		person uint
+		occ    uint
+	}{{both, bothSpouse.ID, scheduled.ID}, {both, bothSpouse.ID, cancelled.ID}, {only, onlySpouse.ID, cancelled.ID}} {
+		gormMust(t, f.app.DB.Create(&models.Registration{HouseholdPersonID: &r.person, RegisteredBy: &r.holder.ID, OccurrenceID: r.occ, Status: models.RegGoing, AttendanceMode: models.AttendanceInPerson, Source: "web"}))
+	}
+	apiDo(t, f.admin, "POST", "/api/v1/events/"+itoa(f.event.ID)+"/cancel", map[string]any{"date": f.date(2)}, http.StatusOK)
+	base := editBaseOf(t, f.admin, f.event.ID, f.date(2))
+	wantDateEdit(t, f.admin, f.event.ID, f.date(2), dateEditBody(newDateAttempt(t), base.Revision, map[string]any{"title": "HIDDENTITLE"}), http.StatusOK, "")
+	mark := markNotices(t, f.app)
+
+	apiDo(t, f.admin, "PUT", "/api/v1/events/"+itoa(f.event.ID)+"/visibility", confirmVisibility(t, f.admin, "/api/v1/events/"+itoa(f.event.ID)+"/visibility", map[string]any{"visibility": models.VisibilityInviteOnly}), http.StatusOK)
+	var left int64
+	gormMust(t, f.app.DB.Model(&models.Registration{}).Where("registered_by IN ? AND status <> ?", []uint{both.ID, only.ID}, models.RegCancelled).Count(&left))
+	if left != 0 {
+		t.Fatalf("fixture: %d household rows survived the tightening", left)
+	}
+	got := noticesSince(t, f.app, both.ID, notify.RegistrationCancelled, mark.notice)
+	if len(got) != 1 || got[0].Title != "Registration cancelled: Supper" {
+		t.Fatalf("the holder of both dates: %+v", got)
+	}
+	noSecrets(t, f.app, "the holder of both dates", both.ID, both.Email, mark, []string{"HIDDENTITLE"})
+	got = noticesSince(t, f.app, only.ID, notify.RegistrationCancelled, mark.notice)
+	if len(got) != 1 || got[0].Title != "Registration cancelled: An event you registered for" {
+		t.Fatalf("the holder of the cancelled date alone: %+v", got)
+	}
+	wantWithheld(t, f.app, "the holder of the cancelled date alone", got[0], onlyClient, cancelled.ID)
+	noSecrets(t, f.app, "the holder of the cancelled date alone", only.ID, only.Email, mark, []string{"HIDDENTITLE", "Supper"})
+}
+
+// eventImpactOf is what setting one event to newVis would do, as its preview
+// counts it: the event is listed under tightened when newVis is more private,
+// with the registrants that would be cancelled.
+func eventImpactOf(tx *gorm.DB, ev *models.Event, newVis string, now time.Time) (visibilityImpactJSON, error) {
+	b, _, _, err := eventImpactIn(tx, previewSelector(tx, now), now, 0, ev, newVis, false, false)
+	if err != nil {
+		return visibilityImpactJSON{}, err
+	}
+	return b.impact, nil
 }

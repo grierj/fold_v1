@@ -42,10 +42,13 @@ func confirmedGuardianLinks(tx *gorm.DB, guardian uint, teens []uint) (map[uint]
 }
 
 // confirmedContactGuardians loads only confirmed links for this viewer and
-// these teens. Query failure yields no guardian authority.
-func (a *App) confirmedContactGuardians(viewer *models.User, users map[uint]*models.User) map[uint]bool {
+// these teens, on db. Query failure yields no guardian authority; inside a
+// transaction the read runs in a savepoint (lenientReadIn), so a failure
+// leaves the transaction usable.
+func confirmedContactGuardians(db *gorm.DB, viewer *models.User, users map[uint]*models.User) map[uint]bool {
+	out := map[uint]bool{}
 	if viewer == nil {
-		return map[uint]bool{}
+		return out
 	}
 	var ids []uint
 	for id, u := range users {
@@ -53,10 +56,11 @@ func (a *App) confirmedContactGuardians(viewer *models.User, users map[uint]*mod
 			ids = append(ids, id)
 		}
 	}
-	out, err := confirmedGuardianLinks(a.DB, viewer.ID, ids)
-	if err != nil {
-		return map[uint]bool{}
-	}
+	lenientReadIn(db, func(sp *gorm.DB) {
+		if links, err := confirmedGuardianLinks(sp, viewer.ID, ids); err == nil {
+			out = links
+		}
+	})
 	return out
 }
 

@@ -88,7 +88,9 @@ func conversionRelation(tx *gorm.DB, actor uint, household uint) policy.Househol
 // relation to the household, and people whose sign-ups have a disabled
 // or deleted holder (PR 111, Whittler).
 type conversionBatch struct {
-	actor   *models.User
+	actor *models.User
+	// now is the batch's clock; today is the church's date at it.
+	now     time.Time
 	today   time.Time
 	rel     policy.HouseholdRel
 	blocked map[uint]bool
@@ -126,13 +128,18 @@ func (a *App) householdPersonRow(tx *gorm.DB, person *models.HouseholdPerson, vi
 // loadConversionBatchFor takes a relation the caller already knows, so
 // GET /me/household doesn't read the viewer's account twice (Whittler, PR 111).
 func (a *App) loadConversionBatchFor(tx *gorm.DB, actor *models.User, rel policy.HouseholdRel, personIDs []uint, links map[uint][]models.GuardianLink) (*conversionBatch, error) {
+	return a.loadConversionBatchAt(tx, actor, rel, personIDs, links, time.Now().UTC())
+}
+
+// loadConversionBatchAt is loadConversionBatchFor on the caller's clock now.
+func (a *App) loadConversionBatchAt(tx *gorm.DB, actor *models.User, rel policy.HouseholdRel, personIDs []uint, links map[uint][]models.GuardianLink, now time.Time) (*conversionBatch, error) {
 	// Use the caller's transaction, including its context and connection. A
 	// mail job must not take another connection while holding an invitation.
-	today, err := churchClockIn(tx, time.Now().UTC())
+	today, err := churchClockIn(tx, now)
 	if err != nil {
 		return nil, err
 	}
-	b := &conversionBatch{links: links, actor: actor, today: today, blocked: map[uint]bool{}, rel: rel}
+	b := &conversionBatch{links: links, actor: actor, now: now, today: today, blocked: map[uint]bool{}, rel: rel}
 	if actor == nil || len(personIDs) == 0 {
 		return b, nil
 	}
