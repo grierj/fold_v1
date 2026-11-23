@@ -35,8 +35,11 @@ import (
 //
 // It does not see a message reached through a struct field, an interface or
 // a result of a function the scanned tree does not declare; a package that
-// imports models under another name; an upsert's DoUpdates; or SQL assembled
-// without the "UPDATE messages SET" or "INSERT INTO messages" literal.
+// imports models under another name; an upsert's DoUpdates; gorm calls in a
+// function literal at package level (there it reads only raw SQL); or SQL
+// assembled without the "UPDATE messages SET" or "INSERT INTO messages"
+// literal. It does not judge which status a creator inserts or which move a
+// caller passes: the policy table and moveMessage's refusals decide those.
 // ---------------------------------------------------------------------------
 
 // messageStatusWriterCensus is every write of messages.status the guard sees.

@@ -60,7 +60,6 @@ var messageRules = map[MessageMove]messageRule{
 	MessageRetrySending:       {from: []string{MessageSent, MessageFailed}, to: MessageSending},
 }
 
-// MessageMoves is every move in the table.
 func MessageMoves() []MessageMove {
 	out := make([]MessageMove, 0, len(messageRules))
 	for m := range messageRules {
@@ -78,7 +77,6 @@ func (m MessageMove) From() []string { return slices.Clone(messageRules[m].from)
 // from (an edit).
 func (m MessageMove) To() string { return messageRules[m].to }
 
-// Allows reports whether the move may start from status.
 func (m MessageMove) Allows(status string) bool { return slices.Contains(messageRules[m].from, status) }
 
 // MessageEditable: the message's author or an admin may still change it
