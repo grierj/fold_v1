@@ -42,16 +42,16 @@ VARIABLES
     \* each worker's claim, as RunOnce holds it in `claimed`
     pc, myAttempts, myRound, outcome, lost,
     \* bookkeeping for the rules (not in the code)
-    spent, deaths, onDeadCalls
+    spent, hookCredit
 
 rowVars   == <<status, attempts, due, leaseExpired>>
 envVars   == <<known, graceOver, crashes, slow, retries>>
 claimVars == <<holder, pc, myAttempts, myRound, outcome, lost>>
-ruleVars  == <<spent, deaths, onDeadCalls>>
+ruleVars  == <<spent, hookCredit>>
 vars      == <<rowVars, envVars, claimVars, ruleVars>>
 
 Statuses == {"queued", "running", "done", "failed", "dead", "dismissed", "gone"}
-InFlight == {"claimed", "handler", "requeued", "finishing"}
+InFlight == {"claimed", "handler", "requeued", "finishing", "beforeHook"}
 
 WorkerSymmetry == Permutations(Workers)
 
@@ -74,22 +74,31 @@ Land(w, st, dAttempts) ==
          /\ leaseExpired' = FALSE
     ELSE UNCHANGED rowVars
 
-(* The worker's RunOnce returns (or its process stops): it forgets its   *)
-(* claim, and its number is one nobody holds any more.                    *)
-Release(w) ==
+(* Once the claim is released, only a pending callback can remain. *)
+LeaveClaim(w, nextPC) ==
     /\ holder' = IF holder = w THEN NoOne ELSE holder
-    /\ pc' = [pc EXCEPT ![w] = "idle"]
+    /\ pc' = [pc EXCEPT ![w] = nextPC]
     /\ myAttempts' = [myAttempts EXCEPT ![w] = 0]
     /\ myRound' = [myRound EXCEPT ![w] = 0]
     /\ outcome' = [outcome EXCEPT ![w] = "none"]
     /\ lost' = [lost EXCEPT ![w] = FALSE]
 
-(* finish's dead branch, then OnDead when RowsAffected == 1. *)
+Release(w) == LeaveClaim(w, "idle")
+
+(* A committed death earns this worker one hook call. Retry can start a *)
+(* new round while the worker is still between the write and the call. *)
 Dies(w) ==
     /\ Land(w, "dead", 0)
-    /\ deaths' = deaths + (IF Held(w) THEN 1 ELSE 0)
-    /\ onDeadCalls' = onDeadCalls +
-           (IF Held(w) \/ Break = "on_dead_unchecked" THEN 1 ELSE 0)
+    /\ hookCredit' = [hookCredit EXCEPT ![w] = @ + (IF Held(w) THEN 1 ELSE 0)]
+    /\ IF Held(w) \/ Break = "on_dead_unchecked"
+       THEN LeaveClaim(w, "beforeHook")
+       ELSE Release(w)
+
+CallOnDead(w) ==
+    /\ pc[w] = "beforeHook"
+    /\ hookCredit' = [hookCredit EXCEPT ![w] = @ - 1]
+    /\ Release(w)
+    /\ UNCHANGED <<rowVars, envVars, spent>>
 
 -----------------------------------------------------------------------------
 (* Workers *)
@@ -119,7 +128,6 @@ DieOnClaim(w) ==
     /\ pc[w] = "claimed"
     /\ StoppedMidJob(w) \/ (~known[w] /\ graceOver)
     /\ Dies(w)
-    /\ Release(w)
     /\ UNCHANGED <<envVars, spent>>
 
 (* RunOnce: an unknown kind waits an hour for a build that knows it and *)
@@ -138,7 +146,7 @@ StartHandler(w) ==
     /\ pc' = [pc EXCEPT ![w] = "handler"]
     /\ spent' = spent + (IF ThisRound(w) THEN 1 ELSE 0)
     /\ UNCHANGED <<rowVars, envVars, holder, myAttempts, myRound, outcome, lost,
-                   deaths, onDeadCalls>>
+                   hookCredit>>
 
 (* The handler returns nil, an error, or Later(at). A wait is not an    *)
 (* attempt the job spent, whether or not its write lands.               *)
@@ -149,7 +157,7 @@ HandlerReturns(w) ==
          /\ spent' = spent - (IF r = "later" /\ ThisRound(w) THEN 1 ELSE 0)
     /\ pc' = [pc EXCEPT ![w] = "finishing"]
     /\ UNCHANGED <<rowVars, envVars, holder, myAttempts, myRound, lost,
-                   deaths, onDeadCalls>>
+                   hookCredit>>
 
 (* The handler's transaction calls LaterIn and commits with it; when the *)
 (* claim is lost, LaterIn returns ErrClaimLost and the transaction rolls *)
@@ -164,7 +172,7 @@ HandlerWaitsIn(w) ==
        ELSE /\ UNCHANGED rowVars
             /\ pc' = [pc EXCEPT ![w] = "finishing"]
             /\ outcome' = [outcome EXCEPT ![w] = "claimLost"]
-    /\ UNCHANGED <<envVars, holder, myAttempts, myRound, lost, deaths, onDeadCalls>>
+    /\ UNCHANGED <<envVars, holder, myAttempts, myRound, lost, hookCredit>>
 
 (* The handler returns Requeued(); finish writes nothing. *)
 ReturnRequeued(w) ==
@@ -172,34 +180,33 @@ ReturnRequeued(w) ==
     /\ Release(w)
     /\ UNCHANGED <<rowVars, envVars, ruleVars>>
 
-(* finish: one heldBy-guarded UPDATE for the outcome. *)
+FinishWith(w, st, dAttempts) ==
+    /\ Land(w, st, dAttempts)
+    /\ Release(w)
+    /\ UNCHANGED hookCredit
+
 Finish(w) ==
     /\ pc[w] = "finishing"
-    /\ CASE outcome[w] = "claimLost" ->
-              UNCHANGED <<rowVars, deaths, onDeadCalls>>
-         [] outcome[w] = "later" ->
-              Land(w, "queued", -1) /\ UNCHANGED <<deaths, onDeadCalls>>
-         [] outcome[w] = "ok" ->
-              Land(w, "done", 0) /\ UNCHANGED <<deaths, onDeadCalls>>
-         [] outcome[w] = "err" /\ myAttempts[w] >= MaxAttempts ->
-              Dies(w)
-         [] outcome[w] = "err" ->
-              Land(w, "failed", 0) /\ UNCHANGED <<deaths, onDeadCalls>>
-    /\ Release(w)
+    /\ CASE outcome[w] = "claimLost" -> Release(w) /\ UNCHANGED <<rowVars, hookCredit>>
+         [] outcome[w] = "later" -> FinishWith(w, "queued", -1)
+         [] outcome[w] = "ok" -> FinishWith(w, "done", 0)
+         [] outcome[w] = "err" -> IF myAttempts[w] >= MaxAttempts
+                                   THEN Dies(w)
+                                   ELSE FinishWith(w, "failed", 0)
     /\ UNCHANGED <<envVars, spent>>
 
-(* The worker's process stops anywhere between its claim and its last   *)
-(* write. A restarted process is a new idle worker.                     *)
+(* A crash after the dead write loses the pending callback. *)
 Crash(w) ==
     /\ pc[w] \in InFlight
     /\ crashes < MaxCrashes
     /\ crashes' = crashes + 1
     /\ Release(w)
-    /\ UNCHANGED <<rowVars, known, graceOver, slow, retries, ruleVars>>
+    /\ hookCredit' = [hookCredit EXCEPT ![w] = 0]
+    /\ UNCHANGED <<rowVars, known, graceOver, slow, retries, spent>>
 
 WorkerStep(w) ==
     \/ Claim(w) \/ DieOnClaim(w) \/ WaitForABuild(w) \/ StartHandler(w)
-    \/ HandlerReturns(w) \/ HandlerWaitsIn(w) \/ ReturnRequeued(w) \/ Finish(w)
+    \/ HandlerReturns(w) \/ HandlerWaitsIn(w) \/ ReturnRequeued(w) \/ Finish(w) \/ CallOnDead(w)
 
 -----------------------------------------------------------------------------
 (* Time and admins *)
@@ -237,8 +244,8 @@ AdminRetries ==
     /\ due' = TRUE
     /\ leaseExpired' = FALSE
     /\ retries' = retries + 1
-    /\ spent' = 0 /\ deaths' = 0 /\ onDeadCalls' = 0
-    /\ UNCHANGED <<known, graceOver, crashes, slow, claimVars>>
+    /\ spent' = 0
+    /\ UNCHANGED <<known, graceOver, crashes, slow, claimVars, hookCredit>>
 
 (* jobs.Dismiss via decideDead. *)
 AdminDismisses ==
@@ -270,7 +277,7 @@ Init ==
     /\ myRound = [w \in Workers |-> 0]
     /\ outcome = [w \in Workers |-> "none"]
     /\ lost = [w \in Workers |-> FALSE]
-    /\ spent = 0 /\ deaths = 0 /\ onDeadCalls = 0
+    /\ spent = 0 /\ hookCredit = [w \in Workers |-> 0]
 
 Next ==
     \/ \E w \in Workers : WorkerStep(w)
@@ -308,15 +315,13 @@ TwoRunsOnlyAfterALeaseRunsOut ==
     Cardinality({w \in Workers : pc[w] \in {"claimed", "handler", "finishing"}
                                    /\ ~lost[w]}) <= 1
 
-(* Between admin retries, a job's handler starts at most max_attempts   *)
-(* times, not counting runs that said "not yet" (Later, LaterIn).       *)
+(* Charge starts and refund waits in the round that issued the claim. *)
 AttemptBudget == spent <= MaxAttempts
 
-(* The admins hear about a death once (OnDead), and only for a death    *)
-(* that landed.                                                         *)
-OnDeadOncePerDeath == onDeadCalls = deaths /\ deaths <= 1
+(* A callback consumes the credit from its worker's committed death. *)
+OnDeadAtMostOncePerDeath == \A w \in Workers : hookCredit[w] \in 0..1
 
-(* A done or dismissed job never runs or waits again. *)
+(* A done or dismissed row stays terminal, including after pruning. *)
 Finished == {"done", "dismissed", "gone"}
 StaysFinished == status \in Finished => status' \in Finished
 FinishedStaysFinished == [][StaysFinished]_vars

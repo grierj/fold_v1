@@ -21,7 +21,9 @@ TLA_VERSION=1.7.4
 TLA_SHA256=936a262061c914694dfd669a543be24573c45d5aa0ff20a8b96b23d01e050e88
 TLA_URL="https://github.com/tlaplus/tlaplus/releases/download/v$TLA_VERSION/tla2tools.jar"
 cache=${XDG_CACHE_HOME:-$HOME/.cache}/fold
+[[ $cache = /* ]] || cache=$PWD/$cache
 jar=${FOLD_TLA_JAR:-$cache/tla2tools-$TLA_VERSION.jar}
+[[ $jar = /* ]] || jar=$PWD/$jar
 
 # The Go functions the model's actions stand for (SKILL.md maps each one).
 covered=(
@@ -31,6 +33,7 @@ covered=(
 	"./internal/jobs Runner.finish"
 	"./internal/jobs Runner.callOnDead"
 	"./internal/jobs heldBy"
+	"./internal/jobs WithClaim"
 	"./internal/jobs LaterIn"
 	"./internal/jobs laterUpdates"
 	"./internal/jobs Later"
@@ -59,12 +62,11 @@ manifest() {
 	# Every function in the package: a new state change belongs here (dead.go).
 	git grep --untracked -E '^func ' -- 'internal/jobs/*.go' ':!*_test.go' |
 		sed -E 's/[[:space:]]*\{$//; s/^/decl /' | LC_ALL=C sort
-	# Every file that writes the jobs table, with how many writes it has, and
-	# every migration that names the table.
+	# Line counts flag possible writers, including reads that use models.Job{}.
 	git grep -c --untracked -E 'UPDATE jobs|DELETE FROM jobs|INSERT INTO jobs|models\.Job\{' \
 		-- '*.go' '*.sql' ':!*_test.go' ':!.claude/' ':!.cursor/' ':!web/' | sed 's/^/writer /'
 	git grep -l --untracked -w jobs -- 'migrations/*.sql' | sed 's/^/migration /'
-	# Callers that wait inside a handler (the LaterIn then Requeued contract).
+	# File names flag possible LaterIn/Requeued callers.
 	git grep -l --untracked -E 'jobs\.LaterIn\(|jobs\.Requeued\(' \
 		-- '*.go' ':!*_test.go' ':!.claude/' ':!.cursor/' | sed 's/^/waiter /'
 }
@@ -73,7 +75,7 @@ drift() {
 	local now
 	now=$(manifest) || return 2
 	if diff -u --label coverage.txt --label "code now" "$coverage" <(echo "$now"); then
-		echo "drift: none; the model covers the code as it is."
+		echo "drift: none; the recorded hashes and scans match."
 		return 0
 	fi
 	cat >&2 <<-'EOF'
@@ -86,20 +88,33 @@ drift() {
 	return 1
 }
 
+verify_jar() {
+	if [[ $(sha256sum <"$1" | cut -d' ' -f1) != "$TLA_SHA256" ]]; then
+		echo "$1 differs from the pinned SHA-256 for tla2tools.jar $TLA_VERSION" >&2
+		return 2
+	fi
+}
+
+download_jar() (
+	mkdir -p "$(dirname "$jar")" || exit 2
+	local part
+	part=$(mktemp "$jar.part.XXXXXX") || exit 2
+	trap 'rm -f -- "$part"' EXIT
+	echo "downloading tla2tools.jar $TLA_VERSION" >&2
+	curl -fsSL -o "$part" "$TLA_URL" || exit 2
+	verify_jar "$part" || exit 2
+	mv -- "$part" "$jar"
+)
+
 ensure_jar() {
 	if [[ -n ${FOLD_TLA_JAR:-} && ! -f $jar ]]; then
 		echo "FOLD_TLA_JAR=$jar does not exist" >&2
 		exit 2
 	fi
-	if [[ ! -f $jar ]]; then
-		mkdir -p "$(dirname "$jar")"
-		echo "downloading tla2tools.jar $TLA_VERSION" >&2
-		curl -fsSL -o "$jar.part" "$TLA_URL"
-		mv "$jar.part" "$jar"
-	fi
-	if [[ $(sha256sum "$jar" | cut -d' ' -f1) != "$TLA_SHA256" ]]; then
-		echo "$jar is not tla2tools.jar $TLA_VERSION (checksum differs); delete it or point FOLD_TLA_JAR at that release" >&2
-		exit 2
+	if [[ -f $jar ]]; then
+		verify_jar "$jar" || exit 2
+	else
+		download_jar || exit 2
 	fi
 }
 
@@ -145,7 +160,7 @@ model() {
 breaks_list=(
 	"no_claim_seq:TwoRunsOnlyAfterALeaseRunsOut"
 	"no_stopped_check:AttemptBudget"
-	"on_dead_unchecked:OnDeadOncePerDeath"
+	"on_dead_unchecked:OnDeadAtMostOncePerDeath"
 	"retry_unchecked:FinishedStaysFinished"
 	"no_lease_recovery:RunningEnds"
 	"no_failed_claim:WaitingIsPickedUp"

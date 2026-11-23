@@ -4,6 +4,7 @@ func 8020144521d8002d ./internal/jobs safeRun
 func 68910b504300c1b5 ./internal/jobs Runner.finish
 func 822bf27d479ca346 ./internal/jobs Runner.callOnDead
 func 060442c3594bc23f ./internal/jobs heldBy
+func fe41a67905da497e ./internal/jobs WithClaim
 func ce314a6be558aa6a ./internal/jobs LaterIn
 func d19b2e74e9f16416 ./internal/jobs laterUpdates
 func 222dc2d406cf8c74 ./internal/jobs Later

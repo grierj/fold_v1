@@ -18,15 +18,15 @@ below.
 From anywhere in the repo:
 
 ```bash
-.cursor/skills/verify-job-queue/check          # drift, then the model (~45 s)
-.cursor/skills/verify-job-queue/check breaks   # each guard's break must fail (~10 s)
+.cursor/skills/verify-job-queue/check          # drift, then the model
+.cursor/skills/verify-job-queue/check breaks   # each guard's break must fail
 ```
 
 It needs Java 11 or later on PATH. On the first run it downloads
 `tla2tools.jar` 1.7.4 from the tlaplus GitHub release into `~/.cache/fold/`
-and refuses a file that doesn't match the pinned SHA-256 in `check`. Set
-`FOLD_TLA_JAR=/path/to/tla2tools.jar` to use a copy of that same release you
-already have (the checksum is still enforced). TLC runs in a scratch folder under
+and publishes the download only after its SHA-256 matches the pin in `check`.
+Set `FOLD_TLA_JAR` to an absolute path or a path relative to your working
+directory to use an existing copy. The same pin applies. TLC runs in a scratch folder under
 `~/.cache/fold/`, never in the repo or `/tmp`: liveness checking writes its
 graph to disk and can fill a tmpfs quota.
 
@@ -40,15 +40,16 @@ Run `check` when a change touches any of these:
 - a function listed in `coverage.txt` (the `func` lines);
 - the set of functions in `internal/jobs` (`decl` lines): a new state change
   there shows up even before anyone adds it to the model;
-- a file that writes the `jobs` table, with its count of writes (`writer`
-  lines). A new file, or a new write in a listed file, shows up as drift;
+- a file that writes the `jobs` table;
 - a migration that names `jobs` (`migration` lines);
-- a handler that waits with `jobs.LaterIn`/`jobs.Requeued` (`waiter` lines).
+- a handler that waits with `jobs.LaterIn` or returns `jobs.Requeued`.
 
-`check drift` fails exactly when one of those changed since the sync commit.
-It hashes each function's `go doc -u -src` text, comments included, and lists
-the files. A drift failure means *the model has not been confirmed against the
-new code*. It does not mean there is a bug.
+The drift check hashes each covered function's `go doc -u -src` text, including
+comments. The writer and waiter scans are heuristics. A `writer` line counts
+lines matching common SQL writes or a Go job literal. A read can match, and a
+write with a different spelling can pass unnoticed. A `waiter` line records a
+matching filename, so a second caller in the same file can pass unnoticed.
+Review changes to these paths even when the manifest matches.
 
 ## The rules
 
@@ -57,9 +58,9 @@ Each rule is an INVARIANT or PROPERTY in `JobQueue.tla`:
 | Rule | In plain words | Harm if broken |
 |---|---|---|
 | `TwoRunsOnlyAfterALeaseRunsOut` | A job's handler runs in two places at once only when the earlier run's lease ran out and another worker took the job back. | A notice or email goes out twice with no slow worker to blame: a stale worker's outcome reopened a job someone else still held. |
-| `AttemptBudget` | Between admin retries, a handler starts at most `max_attempts` times, not counting runs that said "not yet" (Later, LaterIn). | A failing job keeps retrying (and keeps sending) past its limit. |
-| `OnDeadOncePerDeath` | The admins' dead-job hook (`Runner.OnDead`) fires once per death, and only for a death that landed. | Duplicate or false "a task failed" alerts for admins. |
-| `FinishedStaysFinished` | A done or dismissed job never runs or waits again. | Work an admin set aside, or that already finished, happens again. |
+| `AttemptBudget` | Each retry round has a budget of `max_attempts`. A start counts against the round that issued its claim, and a wait refunds it. A stalled earlier claim can start during a later round. | A failing job keeps retrying (and keeps sending) past its limit. |
+| `OnDeadAtMostOncePerDeath` | Each committed death permits at most one `Runner.OnDead` call. A crash after the commit can lose the call. | Duplicate or false "a task failed" alerts for admins. |
+| `FinishedStaysFinished` | A done or dismissed row stays terminal until pruning deletes it. A worker with an earlier claim can still start its handler. | A terminal row becomes eligible for a new claim. |
 | `RunningEnds` (liveness) | No job stays `running` forever: a stopped worker's lease runs out and the job is taken back. | Notices silently never send. |
 | `WaitingIsPickedUp` (liveness) | A queued or failed job whose time comes is claimed. | Same as above. |
 
@@ -76,15 +77,16 @@ or merges one, the model must change to match.
 | Action in `JobQueue.tla` | Code |
 |---|---|
 | `Claim(w)` | `Runner.RunOnce`'s claim `UPDATE jobs ... WHERE id = (SELECT ... FOR UPDATE SKIP LOCKED)`. Queued/failed and due, or running with an expired lease. `attempts + 1`, new `claim_seq`. |
-| `Held(w)`, `Land` | `heldBy`: `id = ? AND status = 'running' AND claim_seq = ?`. Every runner write after the claim goes through it. `holder` stands for `claim_seq` (see the module header). |
+| `Held(w)`, `Land` | `heldBy`: `id = ? AND status = 'running' AND claim_seq = ?`. `WithClaim` passes the claim to the handler so `LaterIn` checks the same identity. `holder` stands for `claim_seq` (see the module header). |
 | `DieOnClaim(w)` | `RunOnce`'s `job.Attempts > job.MaxAttempts` case and its unknown-kind-past-grace case, both `finish(..., true)`. |
 | `WaitForABuild(w)` | `RunOnce`'s `!known` case: requeue an hour out, `attempts - 1`. |
 | `StartHandler(w)` | `safeRun` calling `Kind.Run`. |
 | `HandlerReturns(w)` | The handler returns nil, an error or `jobs.Later(at)`. |
 | `HandlerWaitsIn(w)` | The handler's transaction with `jobs.LaterIn` (`laterUpdates`), e.g. `pushWaitIn` from `App.deliverMessagePush`. On `ErrClaimLost` it rolls back. |
 | `ReturnRequeued(w)` | The handler returns `jobs.Requeued()` after that commit; `finish` writes nothing. |
-| `Finish(w)` | `Runner.finish`: done, failed (backoff), dead at `max_attempts`, Later, or nothing for `ErrClaimLost`. `Dies` adds `OnDead` (`callOnDead`) when `RowsAffected == 1`. |
-| `Crash(w)` | The worker's process stops between its claim and its last write. A restarted process is an idle worker again (`Runner.Start` keeps polling; `safeRun` turns a panic into an error). |
+| `Finish(w)` | `Runner.finish`: done, failed (backoff), dead at `max_attempts`, Later, or nothing for `ErrClaimLost`. |
+| `Dies(w)`, `CallOnDead(w)` | The dead update commits first. When it affected one row, the worker can then call `Runner.OnDead`. Retry or Dismiss may intervene. |
+| `Crash(w)` | The worker's process stops after its claim, including between the committed death and the hook. A restarted process is an idle worker again (`Runner.Start` keeps polling; `safeRun` turns a panic into an error). |
 | `LeaseRunsOut` | `locked_at < now() - Lease`. |
 | `RunAtArrives` | `run_at <= now()` (backoff, Later's time, an hour for an unknown kind). |
 | `GraceEnds` | An unknown kind's `created_at` falls a week behind (`unknownKindGrace`). |
@@ -94,10 +96,8 @@ or merges one, the model must change to match.
 ## Bounds and what is not covered
 
 `JobQueue.cfg` checks every rule, liveness included: 3 workers, `max_attempts`
-2, 1 admin retry, 1 crash, 2 leases running out under a live worker (about
-600,000 states). `JobQueueDeep.cfg` checks the safety rules with worker
-symmetry: `max_attempts` 3, 2 retries, 2 crashes, 3 slow-worker lease losses
-(about 3.9 million states). Each worker independently does or doesn't know the
+2, 1 admin retry, 1 crash, 2 leases running out under a live worker. `JobQueueDeep.cfg` checks the safety rules with worker
+symmetry: `max_attempts` 3, 2 retries, 2 crashes, 3 slow-worker lease losses. Each worker independently does or doesn't know the
 job's kind (`known[w]`), as when an upgrade is rolled back on some processes. A pass covers those bounds, not every size.
 
 Assumed, not checked:
@@ -166,9 +166,8 @@ When a change to covered code is intended:
    model describes the code at that commit. Never run `accept` just to clear
    drift.
 
-A new file that writes `jobs`, a new migration naming it, or a new `LaterIn`
-caller also shows as drift. Read it, decide whether it changes what the model
-assumes, and say so in your report.
+For a new writer, migration or waiting handler, check the model assumptions
+and update the covered function list when an action depends on its body.
 
 ## Breaks (each must fail)
 
@@ -176,7 +175,7 @@ assumes, and say so in your report.
 |---|---|---|
 | `no_claim_seq` | `claim_seq = ?` in `heldBy` | `TwoRunsOnlyAfterALeaseRunsOut` |
 | `no_stopped_check` | `job.Attempts > job.MaxAttempts` in `RunOnce` | `AttemptBudget` |
-| `on_dead_unchecked` | `res.RowsAffected == 1` before `callOnDead` in `finish` | `OnDeadOncePerDeath` |
+| `on_dead_unchecked` | `res.RowsAffected == 1` before `callOnDead` in `finish` | `OnDeadAtMostOncePerDeath` |
 | `retry_unchecked` | `status = 'dead'` in `decideDead` | `FinishedStaysFinished` |
 | `no_lease_recovery` | the expired-lease branch of the claim's `WHERE` | `RunningEnds` |
 | `no_failed_claim` | `failed` in the claim's `status IN (queued, failed)` | `WaitingIsPickedUp` |
