@@ -263,6 +263,11 @@ section or decision; check it still exists.
   phone number. Admin notices are stored notification rows written in the change's transaction.
 - Record sensitive actions with `audit.Write` (`internal/audit`) in the same transaction as the
   change.
+- A message's status moves only by a `policy.MessageMove`, the one table of what may follow
+  what (`internal/policy/message_lifecycle.go`), and only `moveMessage` writes it
+  (`moveMessagesWhere` for a set, `message_status.go`). A new message takes its first status from
+  its creating move. The predicates (`policy.MessageEditable`, `policy.MessageGoingOut`,
+  `Allows`) come from the same table.
 
 **Uploads**
 - Avatars and covers go through `storage.Store` (`App.Uploads`), never raw paths. Keys are
