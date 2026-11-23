@@ -386,3 +386,51 @@ func TestRoomFeedHidesEventsOfInactiveGroups(t *testing.T) {
 		}
 	}
 }
+
+// TestRoomFeedReadsItsLinkAndSwitchInOneSnapshot: the rooms switch, the link,
+// the room and the bookings are read in one snapshot. Right after the link is
+// judged, a new booking is made and then the link revoked (or rooms turned
+// off): the feed answers from the state it was judged in, with neither the
+// new booking nor any change to the anonymous projection (Event A described,
+// the invite-only group's booking still Reserved), and the next fetch is a
+// 404.
+func TestRoomFeedReadsItsLinkAndSwitchInOneSnapshot(t *testing.T) {
+	for _, change := range []string{"revoked", "rooms off"} {
+		t.Run(change, func(t *testing.T) {
+			f := newRoomCalendarFixture(t)
+			path := f.roomFeed(t, f.hall.ID)
+			const late = "Booked after the link ended"
+			day := f.startOn.AddDate(0, 0, 1)
+			ev := createFeedEvent(t, f.leader, f.group, late, day, "")
+			fired := atReaderSeam(f.app, "authorized", "room feed", func() {
+				if w := f.leader.do("PUT", "/api/v1/events/"+itoa(ev.ID)+"/dates/"+feedDate(day)+"/room", map[string]any{"roomId": f.hall.ID}, true); w.Code != http.StatusOK {
+					t.Errorf("the late booking: %d %s", w.Code, w.Body.String())
+				}
+				var w interface{ Result() *http.Response }
+				if change == "revoked" {
+					w = f.admin.do("DELETE", "/api/v1/admin/rooms/"+itoa(f.hall.ID)+"/feed", nil, true)
+				} else {
+					w = f.admin.do("PUT", "/api/v1/admin/settings/rooms", map[string]any{"enabled": false}, true)
+				}
+				if code := w.Result().StatusCode; code != http.StatusOK {
+					t.Errorf("%s: %d", change, code)
+				}
+			})
+			anon := newAPIClient(t, f.app)
+			w := fetchFeed(t, anon, path)
+			if !fired.Load() {
+				t.Fatal("the feed never reached its authorized step")
+			}
+			body := w.Body.String()
+			if w.Code != http.StatusOK || strings.Contains(body, late) || strings.Count(body, "UID:room-") != 2 {
+				t.Fatalf("the feed paired its link as judged with a later booking: %d\n%s", w.Code, body)
+			}
+			if !strings.Contains(body, "SUMMARY:Event A") || strings.Count(body, "SUMMARY:Reserved") != 1 || strings.Contains(body, "Quiet circle") {
+				t.Fatalf("the anonymous projection changed:\n%s", body)
+			}
+			if w := fetchFeed(t, anon, path); w.Code != http.StatusNotFound {
+				t.Fatalf("after %s: %d", change, w.Code)
+			}
+		})
+	}
+}

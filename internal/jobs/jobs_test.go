@@ -5,8 +5,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -248,8 +250,8 @@ func TestExpiredLeases(t *testing.T) {
 	enqueue(db, "work", nil, time.Now(), "a", 3)
 	enqueue(db, "work", nil, time.Now(), "b", 1)
 	stale := time.Now().Add(-2 * time.Minute)
-	db.Model(&models.Job{}).Where("unique_key = ?", "a").Updates(map[string]any{"status": models.JobRunning, "attempts": 1, "locked_at": stale, "locked_by": "gone"})
-	db.Model(&models.Job{}).Where("unique_key = ?", "b").Updates(map[string]any{"status": models.JobRunning, "attempts": 1, "locked_at": stale, "locked_by": "gone"})
+	goneA := holdByHand(t, db, "a", "gone", stale)
+	holdByHand(t, db, "b", "gone", stale)
 	r.RunOnce(context.Background(), "w")
 	r.RunOnce(context.Background(), "w")
 	var a, b models.Job
@@ -262,7 +264,7 @@ func TestExpiredLeases(t *testing.T) {
 		t.Fatalf("out of attempts: %+v", b)
 	}
 	// The old holder finishing late changes nothing.
-	if err := r.finish(claimed{ID: a.ID, Attempts: 1, MaxAttempts: 3}, "gone", errors.New("late"), false); err != nil {
+	if err := r.finish(claimed{ID: a.ID, ClaimSeq: goneA, Attempts: 1, MaxAttempts: 3}, errors.New("late"), false); err != nil {
 		t.Fatal(err)
 	}
 	db.First(&a, a.ID)
@@ -323,19 +325,21 @@ func TestOnDeadSkippedWhenLeaseLost(t *testing.T) {
 	r.OnDead = func(id uint, kind string, attempts int, errText string) {
 		calls = append(calls, deadCall{id, kind, attempts, errText})
 	}
-	enqueue(db, "work", nil, time.Now(), "", 1)
+	enqueue(db, "work", nil, time.Now(), "work:1", 1)
+	gone := holdByHand(t, db, "work:1", "gone", time.Now())
+	holder := holdByHand(t, db, "work:1", "holder", time.Now())
 	var j models.Job
 	db.First(&j)
-	db.Model(&j).Updates(map[string]any{"status": models.JobRunning, "attempts": 1, "locked_at": time.Now(), "locked_by": "holder"})
-	job := claimed{ID: j.ID, Kind: "work", Attempts: 1, MaxAttempts: 1}
-	if err := r.finish(job, "gone", errors.New("late"), false); err != nil {
+	job := claimed{ID: j.ID, ClaimSeq: gone, Kind: "work", Attempts: 1, MaxAttempts: 1}
+	if err := r.finish(job, errors.New("late"), false); err != nil {
 		t.Fatal(err)
 	}
 	db.First(&j, j.ID)
 	if len(calls) != 0 || j.Status != models.JobRunning {
 		t.Fatalf("a lost lease announced a death: %+v, %+v", calls, j)
 	}
-	if err := r.finish(job, "holder", errors.New("boom"), false); err != nil {
+	job.ClaimSeq = holder
+	if err := r.finish(job, errors.New("boom"), false); err != nil {
 		t.Fatal(err)
 	}
 	db.First(&j, j.ID)
@@ -498,5 +502,348 @@ func TestTypedNilPayloadIsAnEmptyObject(t *testing.T) {
 	db.First(&j)
 	if j.Payload != "{}" {
 		t.Fatalf("payload %q", j.Payload)
+	}
+}
+
+// holdByHand puts the job with key in the state a claim by worker leaves it,
+// locked at lockedAt on its first attempt, with a new claim number, which it
+// returns.
+func holdByHand(t *testing.T, db *gorm.DB, key, worker string, lockedAt time.Time) int64 {
+	t.Helper()
+	var seq int64
+	if err := db.Raw(`UPDATE jobs SET status = ?, attempts = 1, locked_at = ?, locked_by = ?, claim_seq = nextval('jobs_claim_seq')
+		WHERE unique_key = ? RETURNING claim_seq`, models.JobRunning, lockedAt, worker, key).Scan(&seq).Error; err != nil || seq == 0 {
+		t.Fatalf("holding %s: %d, %v", key, seq, err)
+	}
+	return seq
+}
+
+// logLines captures the log until the test ends and returns the lines so far
+// that contain what.
+func logLines(t *testing.T) func(what string) []string {
+	t.Helper()
+	var mu sync.Mutex
+	var buf strings.Builder
+	prev := log.Writer()
+	log.SetOutput(writerFunc(func(p []byte) (int, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		return buf.Write(p)
+	}))
+	t.Cleanup(func() { log.SetOutput(prev) })
+	return func(what string) []string {
+		mu.Lock()
+		defer mu.Unlock()
+		var out []string
+		for _, l := range strings.Split(buf.String(), "\n") {
+			if strings.Contains(l, what) {
+				out = append(out, l)
+			}
+		}
+		return out
+	}
+}
+
+type writerFunc func([]byte) (int, error)
+
+func (f writerFunc) Write(p []byte) (int, error) { return f(p) }
+
+const lostLease = "ran past its lease"
+
+// stepper hands each run of a test kind its own behavior, in claim order, and
+// lets the test hold a run at a point and let it go.
+type stepper struct {
+	mu    sync.Mutex
+	runs  []func(ctx context.Context) error
+	calls int
+}
+
+func (s *stepper) run(ctx context.Context, _ json.RawMessage) error {
+	s.mu.Lock()
+	i := s.calls
+	s.calls++
+	s.mu.Unlock()
+	if i >= len(s.runs) {
+		return fmt.Errorf("unexpected run %d", i+1)
+	}
+	return s.runs[i](ctx)
+}
+
+func (s *stepper) count() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.calls
+}
+
+// gate is one point a run stops at: reached closes when it gets there and the
+// run waits until release closes (the cleanup closes it).
+type gate struct{ reached, release chan struct{} }
+
+func newGate(t *testing.T) gate {
+	g := gate{reached: make(chan struct{}), release: make(chan struct{})}
+	t.Cleanup(func() {
+		select {
+		case <-g.release:
+		default:
+			close(g.release)
+		}
+	})
+	return g
+}
+
+func (g gate) stop() { close(g.reached); <-g.release }
+
+func (g gate) await(t *testing.T, what string) {
+	t.Helper()
+	select {
+	case <-g.reached:
+	case <-time.After(10 * time.Second):
+		t.Fatalf("timed out waiting for %s", what)
+	}
+}
+
+func runAsync(r *Runner, worker string) <-chan error {
+	done := make(chan error, 1)
+	go func() {
+		ran, err := r.RunOnce(context.Background(), worker)
+		if err == nil && !ran {
+			err = errors.New("found no job to claim")
+		}
+		done <- err
+	}()
+	return done
+}
+
+func jobByKey(t *testing.T, db *gorm.DB, key string) models.Job {
+	t.Helper()
+	var j models.Job
+	if err := db.Where("unique_key = ?", key).First(&j).Error; err != nil {
+		t.Fatal(err)
+	}
+	return j
+}
+
+// sameClaim fails unless the job is still exactly as claim left it.
+func sameClaim(t *testing.T, what string, claim, now models.Job) {
+	t.Helper()
+	if now.Status != models.JobRunning || now.ClaimSeq == nil || claim.ClaimSeq == nil || *now.ClaimSeq != *claim.ClaimSeq ||
+		now.LockedBy != claim.LockedBy || now.Attempts != claim.Attempts || !now.RunAt.Equal(claim.RunAt) ||
+		now.LockedAt == nil || !now.LockedAt.Equal(*claim.LockedAt) || now.LastError != claim.LastError || now.Payload != claim.Payload {
+		t.Fatalf("%s changed the current claim: was %+v (claim %v), now %+v (claim %v)", what, claim, deref(claim.ClaimSeq), now, deref(now.ClaimSeq))
+	}
+}
+
+func deref(p *int64) any {
+	if p == nil {
+		return nil
+	}
+	return *p
+}
+
+// waitIn writes a mark on the job and queues it again for at in one
+// transaction, as a handler that goes back to wait does (jobs.LaterIn).
+func waitIn(ctx context.Context, db *gorm.DB, key string, at time.Time) error {
+	return db.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Exec(`UPDATE jobs SET payload = '{"waited": true}' WHERE unique_key = ?`, key).Error; err != nil {
+			return err
+		}
+		return LaterIn(ctx, tx, at)
+	})
+}
+
+// LaterIn queues the handler's own claim again in the handler's transaction,
+// giving its attempt back; the handler then returns Requeued and the runner
+// writes and logs nothing. Outside a claimed job LaterIn refuses.
+func TestLaterInQueuesItsOwnClaim(t *testing.T) {
+	db := testdb.Shared(t)
+	lines := logLines(t)
+	at := time.Now().Add(time.Hour).UTC().Truncate(time.Microsecond)
+	r := runner(db, Kind{Type: Type{Name: "wait"}, Run: func(ctx context.Context, _ json.RawMessage) error {
+		if err := waitIn(ctx, db, "wait:1", at); err != nil {
+			return err
+		}
+		return Requeued()
+	}})
+	enqueue(db, "wait", nil, time.Now().Add(-time.Second), "wait:1", 2)
+	if ran, err := r.RunOnce(context.Background(), "w"); !ran || err != nil {
+		t.Fatalf("run: %v %v", ran, err)
+	}
+	j := jobByKey(t, db, "wait:1")
+	if j.Status != models.JobQueued || j.Attempts != 0 || !j.RunAt.Equal(at) || j.LockedAt != nil || j.Payload != `{"waited": true}` || j.LastError != "" {
+		t.Fatalf("after its own wait: %+v", j)
+	}
+	if got := lines("jobs:"); len(got) != 0 {
+		t.Fatalf("a committed wait logged %q", got)
+	}
+	if err := LaterIn(context.Background(), db, at); err == nil || errors.Is(err, ErrClaimLost) {
+		t.Fatalf("outside a claimed job: %v", err)
+	}
+}
+
+// A handler commits its wait for a time already due and is slow to return;
+// meanwhile a worker with the same label claims the job again, with the same
+// attempt count (the wait gave its attempt back), and is still running it
+// when the first handler returns. Whatever the first handler returns, its
+// finish lands nothing: the second claim keeps the job, its attempt and its
+// lease, no third claim can take it, and the job runs twice in all. Requeued,
+// the usual return, logs nothing; anything else is a lost claim and says so.
+func TestARequeuedHandlerNeverTouchesTheNextClaim(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		returns func() error
+		logs    bool
+	}{
+		{"Requeued", Requeued, false},
+		{"Later", func() error { return Later(time.Now().Add(time.Hour)) }, true},
+		{"success", func() error { return nil }, true},
+		{"failure", func() error { return errors.New("boom") }, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			db := testdb.Shared(t)
+			lines := logLines(t)
+			first, second := newGate(t), newGate(t)
+			steps := &stepper{runs: []func(ctx context.Context) error{
+				func(ctx context.Context) error {
+					if err := waitIn(ctx, db, "wait:1", time.Now().Add(-time.Second)); err != nil {
+						return err
+					}
+					first.stop()
+					return tc.returns()
+				},
+				func(context.Context) error { second.stop(); return nil },
+			}}
+			kind := Kind{Type: Type{Name: "wait"}, Run: steps.run}
+			enqueue(db, "wait", nil, time.Now().Add(-time.Second), "wait:1", 5)
+
+			firstDone := runAsync(runner(db, kind), "w")
+			first.await(t, "the first handler's wait to commit")
+			secondDone := runAsync(runner(db, kind), "w")
+			second.await(t, "the same worker label to claim the job again")
+			claim := jobByKey(t, db, "wait:1")
+			if claim.Status != models.JobRunning || claim.LockedBy != "w" || claim.Attempts != 1 {
+				t.Fatalf("the second claim: %+v", claim)
+			}
+
+			close(first.release)
+			if err := <-firstDone; err != nil {
+				t.Fatalf("the first worker: %v", err)
+			}
+			sameClaim(t, "the first handler's finish", claim, jobByKey(t, db, "wait:1"))
+			if ran, err := runner(db, kind).RunOnce(context.Background(), "w"); ran || err != nil {
+				t.Fatalf("a third claim while the second runs: ran %v, %v", ran, err)
+			}
+			if got := lines(lostLease); tc.logs != (len(got) == 1) || len(got) > 1 {
+				t.Fatalf("lost-claim log lines %q, want one: %v", got, tc.logs)
+			}
+
+			close(second.release)
+			if err := <-secondDone; err != nil {
+				t.Fatal(err)
+			}
+			if j := jobByKey(t, db, "wait:1"); j.Status != models.JobDone || j.Attempts != 1 || steps.count() != 2 {
+				t.Fatalf("after the second claim: %+v, %d runs", j, steps.count())
+			}
+		})
+	}
+}
+
+// A slow handler's lease runs out and the same worker label takes the job
+// back; that claim fails on the job's last attempt, an admin retries it and
+// the label claims it again on its first attempt, matching the slow handler's
+// worker and attempt count. When the slow handler reaches its wait, LaterIn
+// finds its claim gone, its transaction rolls back and its finish records
+// nothing; the current claim keeps the job.
+func TestAStaleClaimCannotWaitAfterAnAdminRetry(t *testing.T) {
+	db := testdb.Shared(t)
+	lines := logLines(t)
+	slow, current := newGate(t), newGate(t)
+	steps := &stepper{runs: []func(ctx context.Context) error{
+		func(ctx context.Context) error {
+			slow.stop()
+			if err := waitIn(ctx, db, "wait:1", time.Now().Add(time.Hour)); err != nil {
+				return err
+			}
+			return Requeued()
+		},
+		func(context.Context) error { return errors.New("boom") },
+		func(context.Context) error { current.stop(); return nil },
+	}}
+	kind := Kind{Type: Type{Name: "wait"}, Run: steps.run}
+	enqueue(db, "wait", nil, time.Now().Add(-time.Second), "wait:1", 2)
+
+	slowDone := runAsync(runner(db, kind), "w")
+	slow.await(t, "the slow handler to start")
+	takeBack := runner(db, kind)
+	takeBack.Lease = time.Nanosecond
+	if err := <-runAsync(takeBack, "w"); err != nil {
+		t.Fatal(err)
+	}
+	if j := jobByKey(t, db, "wait:1"); j.Status != models.JobDead || j.Attempts != 2 {
+		t.Fatalf("after the claim that took it back: %+v", j)
+	}
+	if ok, err := Retry(db, jobByKey(t, db, "wait:1").ID); !ok || err != nil {
+		t.Fatalf("retry: %v %v", ok, err)
+	}
+	currentDone := runAsync(runner(db, kind), "w")
+	current.await(t, "the retried job's claim")
+	claim := jobByKey(t, db, "wait:1")
+	if claim.Status != models.JobRunning || claim.LockedBy != "w" || claim.Attempts != 1 {
+		t.Fatalf("the retried claim: %+v", claim)
+	}
+
+	close(slow.release)
+	if err := <-slowDone; err != nil {
+		t.Fatalf("the slow worker: %v", err)
+	}
+	sameClaim(t, "the stale handler's wait", claim, jobByKey(t, db, "wait:1"))
+	if got := lines(lostLease); len(got) != 1 {
+		t.Fatalf("lost-claim log lines %q, want one", got)
+	}
+	close(current.release)
+	if err := <-currentDone; err != nil {
+		t.Fatal(err)
+	}
+	if j := jobByKey(t, db, "wait:1"); j.Status != models.JobDone || j.Attempts != 1 || j.Payload != "{}" || steps.count() != 3 {
+		t.Fatalf("after the current claim: %+v, %d runs", j, steps.count())
+	}
+}
+
+// A handler whose lease ran out while the same worker label took the job back
+// returns an ordinary Later (it waited without LaterIn). Its finish lands
+// nothing on the claim that holds the job, and the runner logs the lost lease
+// once.
+func TestALostLeaseLaterIsLoggedAndLandsNothing(t *testing.T) {
+	db := testdb.Shared(t)
+	lines := logLines(t)
+	slow, current := newGate(t), newGate(t)
+	steps := &stepper{runs: []func(ctx context.Context) error{
+		func(context.Context) error { slow.stop(); return Later(time.Now().Add(time.Hour)) },
+		func(context.Context) error { current.stop(); return nil },
+	}}
+	kind := Kind{Type: Type{Name: "wait"}, Run: steps.run}
+	enqueue(db, "wait", nil, time.Now().Add(-time.Second), "wait:1", 5)
+
+	slowDone := runAsync(runner(db, kind), "w")
+	slow.await(t, "the slow handler to start")
+	takeBack := runner(db, kind)
+	takeBack.Lease = time.Nanosecond
+	currentDone := runAsync(takeBack, "w")
+	current.await(t, "the same label to take the job back")
+	claim := jobByKey(t, db, "wait:1")
+
+	close(slow.release)
+	if err := <-slowDone; err != nil {
+		t.Fatal(err)
+	}
+	sameClaim(t, "the lost lease's Later", claim, jobByKey(t, db, "wait:1"))
+	if got := lines(lostLease); len(got) != 1 {
+		t.Fatalf("lost-claim log lines %q, want one", got)
+	}
+	close(current.release)
+	if err := <-currentDone; err != nil {
+		t.Fatal(err)
+	}
+	if j := jobByKey(t, db, "wait:1"); j.Status != models.JobDone || j.Attempts != 2 {
+		t.Fatalf("after the current claim: %+v", j)
 	}
 }

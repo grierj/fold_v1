@@ -151,51 +151,57 @@ func (a *App) apiAdminRevokeRoomFeed(c *gin.Context) {
 // isn't the server's is the same plain 404: rooms off, a wrong, revoked or
 // other room's token, or a room that was deactivated. Deactivating keeps
 // the link, so turning the room back on brings it back; an admin turns the
-// link off to end it.
+// link off to end it. The switch, the link, the room and the bookings are
+// read in one snapshot (serveFeedSnapshot), so a link revoked or rooms turned
+// off never admit bookings written after that.
 func (a *App) feedRoom(c *gin.Context) {
 	param := c.Param("token")
 	roomID, err := strconv.ParseUint(c.Param("roomId"), 10, 63)
-	if err != nil || !strings.HasSuffix(param, ".ics") || !a.roomsEnabled() {
+	if err != nil || !strings.HasSuffix(param, ".ics") {
 		feedNotFound(c)
 		return
 	}
-	var tok models.RoomFeedToken
-	if err := a.DB.Where("token_hash = ? AND revoked_at IS NULL", hashToken(strings.TrimSuffix(param, ".ics"))).First(&tok).Error; err != nil {
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			feedNotFound(c)
-		} else {
-			feedUnavailable(c, err)
+	hash := hashToken(strings.TrimSuffix(param, ".ics"))
+	a.serveFeedSnapshot(c, func(tx *gorm.DB, now time.Time) (events.Feed, error) {
+		if on, err := boolSettingErrIn(tx, settingRoomsEnabled, false); err != nil {
+			return events.Feed{}, err
+		} else if !on {
+			return events.Feed{}, errFeedNotFound
 		}
-		return
-	}
-	var room models.Room
-	if err := a.DB.First(&room, tok.RoomID).Error; err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
-		feedUnavailable(c, err)
-		return
-	}
-	if uint64(tok.RoomID) != roomID || room.ID == 0 || !room.Active {
-		feedNotFound(c)
-		return
-	}
-	feed, err := a.buildRoomFeed(&room, time.Now().UTC())
-	if err != nil {
-		feedUnavailable(c, err)
-		return
-	}
-	serveFeed(c, events.RenderFeed(feed))
+		var tok models.RoomFeedToken
+		if err := tx.Where("token_hash = ? AND revoked_at IS NULL", hash).Limit(1).Find(&tok).Error; err != nil {
+			return events.Feed{}, err
+		}
+		if tok.ID == 0 || uint64(tok.RoomID) != roomID {
+			return events.Feed{}, errFeedNotFound
+		}
+		var room models.Room
+		if err := tx.Where("id = ?", tok.RoomID).Limit(1).Find(&room).Error; err != nil {
+			return events.Feed{}, err
+		}
+		if room.ID == 0 || !room.Active {
+			return events.Feed{}, errFeedNotFound
+		}
+		if a.hooks.readerAuthorized != nil {
+			a.hooks.readerAuthorized("room feed")
+		}
+		return a.buildRoomFeedIn(tx, &room, now)
+	})
 }
 
-// buildRoomFeed lists the room's confirmed bookings whose date starts in
-// the feed window. Times are the event's, without setup and teardown.
-func (a *App) buildRoomFeed(room *models.Room, now time.Time) (events.Feed, error) {
+// buildRoomFeedIn lists, on db, the room's confirmed bookings whose date
+// starts in the feed window. Times are the event's, without setup and
+// teardown.
+func (a *App) buildRoomFeedIn(db *gorm.DB, room *models.Room, now time.Time) (events.Feed, error) {
 	windowStart, windowEnd := feedWindow(now)
 	roomLine := placeLine(&occurrenceRoomJSON{ID: room.ID, Name: room.Name, Building: room.Building}, "")
 	host := a.feedHost()
 	feed := events.Feed{Name: roomLine, Host: host, WindowStart: windowStart, WindowEnd: windowEnd, Singles: []events.FeedSingle{}}
-	tz := churchZoneOrUTC(a.DB).String()
+	tz := "UTC"
+	lenientReadIn(db, func(sp *gorm.DB) { tz = churchZoneOrUTC(sp).String() })
 
 	var bookings []models.RoomBooking
-	if err := a.DB.Joins("JOIN event_occurrences o ON o.id = room_bookings.occurrence_id").
+	if err := db.Joins("JOIN event_occurrences o ON o.id = room_bookings.occurrence_id").
 		Where("room_bookings.room_id = ? AND room_bookings.status = ? AND o.status = ? AND o.starts_at >= ? AND o.starts_at < ?",
 			room.ID, models.BookingConfirmed, models.OccurrenceScheduled, windowStart, windowEnd).
 		Order("room_bookings.starts_at, room_bookings.id").Find(&bookings).Error; err != nil {
@@ -213,7 +219,7 @@ func (a *App) buildRoomFeed(room *models.Room, now time.Time) (events.Feed, erro
 	groups := map[uint]*models.Group{}
 	if err := eachIDChunk(occIDs, func(chunk []uint) error {
 		var occs []models.EventOccurrence
-		if err := a.DB.Where("id IN ?", chunk).Find(&occs).Error; err != nil {
+		if err := db.Where("id IN ?", chunk).Find(&occs).Error; err != nil {
 			return err
 		}
 		evIDs, gIDs := []uint{}, []uint{}
@@ -226,7 +232,7 @@ func (a *App) buildRoomFeed(room *models.Room, now time.Time) (events.Feed, erro
 			}
 		}
 		var evs []models.Event
-		if err := a.DB.Where("id IN ?", evIDs).Find(&evs).Error; err != nil {
+		if err := db.Where("id IN ?", evIDs).Find(&evs).Error; err != nil {
 			return err
 		}
 		for i := range evs {
@@ -238,7 +244,7 @@ func (a *App) buildRoomFeed(room *models.Room, now time.Time) (events.Feed, erro
 		}
 		// Soft-deleted groups aren't loaded, so their dates are Reserved.
 		var gs []models.Group
-		if err := a.DB.Where("id IN ?", gIDs).Find(&gs).Error; err != nil {
+		if err := db.Where("id IN ?", gIDs).Find(&gs).Error; err != nil {
 			return err
 		}
 		for i := range gs {

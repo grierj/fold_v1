@@ -3,13 +3,14 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ErasureReasonItem, LegacyReasonDecision } from "../types";
 import { AdminUsers } from "./adminUsers";
 import { ApiError } from "./core";
+import { bootstrapAnswer } from "../test/credential";
 
 describe("AdminUsers attempt calls", () => {
   const ID = "0123456789abcdef".repeat(5);
-  const csrf = () => new Response(JSON.stringify({ csrfToken: "csrf" }), { status: 200 });
+  const csrf = () => bootstrapAnswer();
 
   const stub = (answer: () => Response) => {
-    const fetcher = vi.fn(async (url: RequestInfo | URL, _opts?: RequestInit) => (String(url).endsWith("/auth/csrf") ? csrf() : answer()));
+    const fetcher = vi.fn(async (url: RequestInfo | URL, _opts?: RequestInit) => (String(url).endsWith("/auth/bootstrap") ? csrf() : answer()));
     vi.stubGlobal("fetch", fetcher);
 
     return fetcher;
@@ -69,7 +70,7 @@ describe("AdminUsers attempt calls", () => {
 });
 
 describe("AdminUsers.erasureReasonsPage", () => {
-  const csrf = () => new Response(JSON.stringify({ csrfToken: "csrf" }), { status: 200 });
+  const csrf = () => bootstrapAnswer();
   afterEach(() => vi.unstubAllGlobals());
 
   it("posts the cursor in the body, null for the first page", async () => {
@@ -80,7 +81,7 @@ describe("AdminUsers.erasureReasonsPage", () => {
     };
 
     const page = { reviewRequired: true, items: [{ ...item }], next: "-9223372036854775808" };
-    const fetcher = vi.fn(async (url: RequestInfo | URL, _opts?: RequestInit) => (String(url).endsWith("/auth/csrf") ? csrf() : new Response(JSON.stringify(page), { status: 200 })));
+    const fetcher = vi.fn(async (url: RequestInfo | URL, _opts?: RequestInit) => (String(url).endsWith("/auth/bootstrap") ? csrf() : new Response(JSON.stringify(page), { status: 200 })));
     vi.stubGlobal("fetch", fetcher);
     await expect(AdminUsers.erasureReasonsPage(9, null)).resolves.toEqual(page);
     await AdminUsers.erasureReasonsPage(9, "-5");
@@ -93,17 +94,17 @@ describe("AdminUsers.erasureReasonsPage", () => {
 describe("AdminUsers legacy reason review", () => {
   const ID = "fedcba9876543210".repeat(5);
   const HASH = "a".repeat(64);
-  const csrf = () => new Response(JSON.stringify({ csrfToken: "csrf" }), { status: 200 });
+  const csrf = () => bootstrapAnswer();
 
   const stub = (answer: () => Response) => {
-    const fetcher = vi.fn(async (url: RequestInfo | URL, _opts?: RequestInit) => (String(url).endsWith("/auth/csrf") ? csrf() : answer()));
+    const fetcher = vi.fn(async (url: RequestInfo | URL, _opts?: RequestInit) => (String(url).endsWith("/auth/bootstrap") ? csrf() : answer()));
     vi.stubGlobal("fetch", fetcher);
 
     return fetcher;
   };
 
   const json = (body: JsonValue, status = 200) => () => new Response(JSON.stringify(body), { status });
-  const sent = (fetcher: ReturnType<typeof stub>) => fetcher.mock.calls.filter(([url]) => !String(url).endsWith("/auth/csrf"));
+  const sent = (fetcher: ReturnType<typeof stub>) => fetcher.mock.calls.filter(([url]) => !String(url).endsWith("/auth/bootstrap"));
   const bodyOf = (call: [RequestInfo | URL, RequestInit?]) => JSON.parse(String(call[1]?.body));
   afterEach(() => vi.unstubAllGlobals());
 
@@ -121,7 +122,7 @@ describe("AdminUsers legacy reason review", () => {
         ["/api/v1/admin/erasure-reasons/legacy?after=-5", "GET"],
       ]);
       // A read needs no CSRF token.
-      expect(fetcher.mock.calls.some(([url]) => String(url).endsWith("/auth/csrf"))).toBe(false);
+      expect(fetcher.mock.calls.some(([url]) => String(url).endsWith("/auth/bootstrap"))).toBe(false);
     });
 
     it("accepts the last unit, and an empty one that still has a next", async () => {

@@ -27,6 +27,17 @@ durations=scripts/go-test-durations.txt
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 
+# The real-binary tests (buildFold) use these builds instead of compiling in a
+# shard, where a full build starves the timing tests running beside it. A
+# release that cannot be built here is left to the test, which fails under CI
+# and skips locally.
+CGO_ENABLED=0 go build -o "$tmp/fold-current" .
+export FOLD_TEST_BUILD_CURRENT="$tmp/fold-current"
+if mkdir "$tmp/v0.1.0" && git archive v0.1.0 2>/dev/null | tar -x -C "$tmp/v0.1.0" &&
+	(cd "$tmp/v0.1.0" && CGO_ENABLED=0 go build -o "$tmp/fold-v0.1.0" .); then
+	export FOLD_TEST_BUILD_V0_1_0="$tmp/fold-v0.1.0"
+fi
+
 # Every package but the root one, as usual (packages already run in parallel).
 mapfile -t others < <(go list ./... | grep -vx fold)
 go test "${others[@]}" >"$tmp/others.log" 2>&1 &

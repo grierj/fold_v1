@@ -49,6 +49,19 @@ type ContactAccount struct {
 	HideFromLeaders bool
 }
 
+// OccurrenceActor is the whole of what exact-date authority reads of an
+// account: whose it is and whether it is Active as ContactAccount defines it.
+// It has no age and no contact preference, so nothing built from it can pass
+// for an adult (ContactAccount reads a missing age as adult) or widen contact.
+type OccurrenceActor struct {
+	Person *Person
+	Active bool
+}
+
+func (a ContactAccount) OccurrenceActor() OccurrenceActor {
+	return OccurrenceActor{Person: a.Person, Active: a.Active}
+}
+
 // CanSearchPeople allows only active adult managers; a historical host row on
 // a group event is not a host fact. Search never grants add/visibility rights.
 func CanSearchPeople(actor ContactAccount, leadsGroup, hostsEvent bool) bool {

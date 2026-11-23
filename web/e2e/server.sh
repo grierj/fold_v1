@@ -10,8 +10,12 @@ base="${DATABASE_URL%%\?*}"          # postgres://u:p@host:port/db
 query="${DATABASE_URL#"$base"}"      # ?sslmode=disable, or empty
 # E2E_SHARD (e2e/run.sh) gives each parallel shard its own database.
 db="${base##*/}_e2e${E2E_SHARD:+_$E2E_SHARD}"
+# Commits don't wait for the WAL flush, as in the Go tests (internal/testdb): the data is thrown
+# away, and the shards share one Postgres, so a slow flush on the host holds every shard's writes
+# at once, past the specs' 5s expect timeout.
 PGOPTIONS="-c client_min_messages=warning" psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -q \
-  -c "DROP DATABASE IF EXISTS \"$db\" WITH (FORCE)" -c "CREATE DATABASE \"$db\""
+  -c "DROP DATABASE IF EXISTS \"$db\" WITH (FORCE)" -c "CREATE DATABASE \"$db\"" \
+  -c "ALTER DATABASE \"$db\" SET synchronous_commit = off"
 
 work="${TMPDIR:-/tmp}/fold-e2e${E2E_SHARD:+-$E2E_SHARD}"
 rm -rf "$work" && mkdir -p "$work"

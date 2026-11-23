@@ -603,27 +603,39 @@ func placeLine(room *occurrenceRoomJSON, location string) string {
 	return line
 }
 
-// occurrenceRooms maps dates to their confirmed booking's room, for showing
-// the room as the place (9.2). Empty while rooms are off. One read: the
-// rooms switch is checked inside the same query, so a list of dates pays
-// exactly one read for rooms whether they are on or off. A page shows its
-// dates without rooms if the read fails; feeds use roomsFor and fail.
-func (a *App) occurrenceRooms(db *gorm.DB, occurrenceIDs []uint) map[uint]*occurrenceRoomJSON {
-	if len(occurrenceIDs) == 0 {
-		return map[uint]*occurrenceRoomJSON{}
-	}
-	out, _ := roomsFor(db, occurrenceIDs)
-	return out
-}
-
-// roomsFor is occurrenceRooms, reporting a failed read. A feed's dates come
-// in chunks of lookupChunk ids, so a list of dates under that pays one read.
+// roomsFor maps dates to their confirmed booking's room, for showing the room
+// as the place (9.2), and reports a failed read. Empty while rooms are off:
+// the rooms switch is checked inside the same query. A feed's dates come in
+// chunks of lookupChunk ids, so a list of dates under that pays one read.
 func roomsFor(db *gorm.DB, occurrenceIDs []uint) (map[uint]*occurrenceRoomJSON, error) {
 	out := map[uint]*occurrenceRoomJSON{}
 	err := eachChunk(occurrenceIDs, lookupChunk, func(chunk []uint) error {
 		return lookupChunkInto(db, chunk, out)
 	})
 	return out, err
+}
+
+// usualRoomIn is the series room (DefaultRoomID) the way roomsFor shows a
+// date's room, under the series writer's own approval rule (bookSeriesRoom):
+// while room booking is on, and, for a room still awaiting approval
+// (DefaultRoomPending), only while approval is off, when new dates confirm in
+// it directly; while approval is on they are only requested. A failed read
+// is an error.
+func usualRoomIn(db *gorm.DB, ev *models.Event) (*occurrenceRoomJSON, error) {
+	if ev.DefaultRoomID == nil {
+		return nil, nil
+	}
+	q := `SELECT r.id, r.name, r.building FROM rooms r WHERE r.id = ? AND ` + settingOnSQL
+	args := []any{*ev.DefaultRoomID, settingRoomsEnabled}
+	if ev.DefaultRoomPending {
+		q += ` AND NOT ` + settingOnSQL
+		args = append(args, settingRoomApproval)
+	}
+	var rows []occurrenceRoomJSON
+	if err := db.Raw(q, args...).Scan(&rows).Error; err != nil || len(rows) == 0 {
+		return nil, err
+	}
+	return &rows[0], nil
 }
 
 func lookupChunkInto(db *gorm.DB, occurrenceIDs []uint, out map[uint]*occurrenceRoomJSON) error {

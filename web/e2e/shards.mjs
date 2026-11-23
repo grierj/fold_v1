@@ -2,6 +2,7 @@
 //
 //   node e2e/shards.mjs plan <n>        one line per shard: "<E2E_PARTS>|<spec files>"
 //   node e2e/shards.mjs record <json>…  update durations.json from JSON reports
+//   node e2e/shards.mjs ran <json>…     how many spec tests (not the seed) ran, for a filtered run
 //
 // A unit is a spec file, or one part of a spec that runs in parts
 // ("a11y:2", "layout:0", "a11y:rest", "reason-review:390"; see partSelected
@@ -107,11 +108,32 @@ function record(reports) {
   writeFileSync(durationsFile, JSON.stringify(sorted, null, 2) + "\n");
 }
 
+// Tests in .spec.ts files with at least one result that was not a skip; seed.setup.ts runs in every shard and does not count.
+function ran(reports) {
+  let count = 0;
+
+  const walk = (suite, file) => {
+    file = suite.file ?? file;
+
+    for (const spec of suite.specs ?? []) {
+      if (!file.endsWith(".spec.ts")) continue;
+
+      for (const t of spec.tests) if (t.results.some((r) => r.status !== "skipped")) count++;
+    }
+
+    for (const child of suite.suites ?? []) walk(child, file);
+  };
+
+  for (const path of reports) for (const suite of JSON.parse(readFileSync(path, "utf8")).suites) walk(suite, "");
+  console.log(count);
+}
+
 const [cmd, ...args] = process.argv.slice(2);
 
 if (cmd === "plan") plan(Number(args[0]));
 else if (cmd === "record") record(args);
+else if (cmd === "ran") ran(args);
 else {
-  console.error("usage: node e2e/shards.mjs plan <n> | record <report.json>...");
+  console.error("usage: node e2e/shards.mjs plan <n> | record <report.json>... | ran <report.json>...");
   process.exit(2);
 }

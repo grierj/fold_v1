@@ -2,6 +2,7 @@ package main
 
 import (
 	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"reflect"
 	"strings"
@@ -11,7 +12,11 @@ import (
 	"fold/internal/audit"
 	"fold/internal/mail"
 	"fold/internal/notify"
+	"fold/internal/policy"
 	"fold/models"
+
+	"github.com/gin-gonic/gin"
+	"gorm.io/gorm"
 )
 
 type composeFixture struct {
@@ -602,5 +607,205 @@ func TestAudiencePreviewCountsPush(t *testing.T) {
 	f.app.DB.Create(&models.Setting{Key: settingPushEnabled, Value: "false"})
 	if s := preview(); s.Push != 0 {
 		t.Fatalf("church off: %+v", s)
+	}
+}
+
+// TestMessageListAndWriteRepliesReadOneSnapshot: the message list and the
+// reply to a write judge the session's user and read what they show in one
+// snapshot, as the message page does. At the seam, right after the viewer is
+// judged, the admin is demoted (role and session version, as the admin
+// screen does it) and, in the same commit, the leader writes a new message
+// or renames themselves. Before that commit the admin saw neither; after it
+// they see nothing. Each request runs on a one-connection pool, so a read
+// outside its snapshot fails it. A demotion committed after the session was
+// checked and before the snapshot began is a 401, never the earlier role.
+func TestMessageListAndWriteRepliesReadOneSnapshot(t *testing.T) {
+	const secret = "Written after the admin stepped down"
+	demoteAnd := func(f composeFixture, db *gorm.DB, then func(tx *gorm.DB) error) func() {
+		return func() {
+			if err := db.Transaction(func(tx *gorm.DB) error {
+				if err := tx.Model(&models.User{}).Where("name = ?", "admin").
+					Updates(map[string]any{"role": models.RoleMember, "session_version": sessionVersionBump()}).Error; err != nil {
+					return err
+				}
+				return then(tx)
+			}); err != nil {
+				panic(err)
+			}
+		}
+	}
+	draft := func(t *testing.T, f composeFixture) uint {
+		var out struct {
+			Message messageJSON `json:"message"`
+		}
+		w := f.leader.do("POST", "/api/v1/messages", map[string]any{"subject": "Leader news", "bodyHtml": "<p>Hello</p>",
+			"audience": map[string]any{"type": policy.AudienceGroup, "groupId": f.group.ID}}, true)
+		if w.Code != http.StatusCreated {
+			t.Fatalf("draft: %d %s", w.Code, w.Body.String())
+		}
+		decodeJSON(t, w, &out)
+		return out.Message.ID
+	}
+	type view struct {
+		surface string
+		// setup returns the admin's request, the change committed with the
+		// demotion, and the handler that builds the same answer.
+		setup func(t *testing.T, f composeFixture) (req func() *httptest.ResponseRecorder, change func(tx *gorm.DB) error, reply func(a *App, c *gin.Context))
+	}
+	for _, v := range []view{
+		{"message list", func(t *testing.T, f composeFixture) (func() *httptest.ResponseRecorder, func(tx *gorm.DB) error, func(*App, *gin.Context)) {
+			draft(t, f)
+			return func() *httptest.ResponseRecorder { return f.admin.do("GET", "/api/v1/messages", nil, false) },
+				func(tx *gorm.DB) error {
+					return tx.Create(&models.Message{AuthorID: &f.leaderUser.ID, Status: models.MessageDraft, Category: models.MessageCategoryAnnouncement,
+						Subject: secret, BodyHTML: "<p>" + secret + "</p>", BodyText: secret, Audience: `{"type":"group","groupId":1}`}).Error
+				},
+				func(a *App, c *gin.Context) { a.apiListMessages(c) }
+		}},
+		{"message reply", func(t *testing.T, f composeFixture) (func() *httptest.ResponseRecorder, func(tx *gorm.DB) error, func(*App, *gin.Context)) {
+			id := draft(t, f)
+			return func() *httptest.ResponseRecorder {
+					return f.admin.do("PUT", "/api/v1/messages/"+itoa(id), map[string]any{"subject": "Edited by the office", "bodyHtml": "<p>Hello</p>",
+						"audience": map[string]any{"type": policy.AudienceGroup, "groupId": f.group.ID}}, true)
+				},
+				func(tx *gorm.DB) error {
+					return tx.Model(&models.User{}).Where("id = ?", f.leaderUser.ID).Update("display_name", secret).Error
+				},
+				func(a *App, c *gin.Context) { a.respondMessage(c, http.StatusOK, &models.Message{ID: id}) }
+		}},
+	} {
+		t.Run(v.surface, func(t *testing.T) {
+			f := newComposeFixture(t)
+			req, change, _ := v.setup(t, f)
+			orig := f.app.DB
+			fired := atReaderSeam(f.app, "authorized", v.surface, demoteAnd(f, orig, change))
+			one := oneConnectionPool(t, f.app)
+			oneConnection(t, f.app, one)
+			w := req()
+			f.app.DB = orig
+			f.app.hooks.readerAuthorized = nil
+			if !fired.Load() {
+				t.Fatalf("%s never reached its seam", v.surface)
+			}
+			if w.Code != http.StatusOK || strings.Contains(w.Body.String(), secret) {
+				t.Fatalf("%s paired the old role with a later change: %d %s", v.surface, w.Code, w.Body.String())
+			}
+			if after := req(); after.Code != http.StatusUnauthorized || strings.Contains(after.Body.String(), secret) {
+				t.Fatalf("%s after the admin stepped down: %d %s", v.surface, after.Code, after.Body.String())
+			}
+		})
+		t.Run(v.surface+" demoted before the snapshot", func(t *testing.T) {
+			f := newComposeFixture(t)
+			_, _, reply := v.setup(t, f)
+			var checked models.User
+			gormMust(t, f.app.DB.Where("name = ?", "admin").First(&checked))
+			demoteAnd(f, f.app.DB, func(*gorm.DB) error { return nil })()
+			rec := httptest.NewRecorder()
+			c, _ := gin.CreateTestContext(rec)
+			c.Request = httptest.NewRequest("GET", "/x", nil)
+			c.Set("apiUser", &checked)
+			reply(f.app, c)
+			if rec.Code != http.StatusUnauthorized {
+				t.Fatalf("%s for a session demoted before its snapshot: %d %s", v.surface, rec.Code, rec.Body.String())
+			}
+		})
+	}
+}
+
+// TestWriteReplyAnswers404WhenTheViewerMayNotSeeTheMessage: a write's reply
+// is presented by the viewer's right as the snapshot reads it, so a current
+// session that may not see the message (not its author, not an admin) gets
+// 404, never the message.
+func TestWriteReplyAnswers404WhenTheViewerMayNotSeeTheMessage(t *testing.T) {
+	f := newComposeFixture(t)
+	m := models.Message{AuthorID: &f.leaderUser.ID, Status: models.MessageDraft, Category: models.MessageCategoryAnnouncement,
+		Subject: "Leader only", BodyHTML: "<p>Hello</p>", BodyText: "Hello", Audience: `{"type":"group","groupId":1}`}
+	gormMust(t, f.app.DB.Create(&m))
+	var member models.User
+	gormMust(t, f.app.DB.Where("name = ?", "member").First(&member))
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest("GET", "/x", nil)
+	c.Set("apiUser", &member)
+	f.app.respondMessage(c, http.StatusOK, &models.Message{ID: m.ID})
+	if rec.Code != http.StatusNotFound || strings.Contains(rec.Body.String(), "Leader only") {
+		t.Fatalf("a reply to someone who may not see the message: %d %s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestMessageViewsJudgeTheSessionInTheirSnapshot: a message's page, its
+// history, its preview (JSON and HTML), its test send and its read page decide
+// the session, whether the message is there and the right to it in one
+// snapshot, in that order. A session revoked after the middleware checked it
+// gets 401 for an existing announcement, an automatic reminder and an id that
+// isn't there alike, never a 404 or the reminder's 409 decided from the
+// earlier user. A current admin still gets 404 for a missing id and 409 for a
+// reminder's preview and test; a member who may not see the reminder's
+// history, or read a message not sent to them, gets 404, never the 409 that
+// would say it exists.
+func TestMessageViewsJudgeTheSessionInTheirSnapshot(t *testing.T) {
+	f := newComposeFixture(t)
+	var adminU, memberU models.User
+	gormMust(t, f.app.DB.Where("name = ?", "admin").First(&adminU))
+	gormMust(t, f.app.DB.Where("name = ?", "member").First(&memberU))
+	announcement := models.Message{AuthorID: &adminU.ID, Status: models.MessageDraft, Category: models.MessageCategoryAnnouncement,
+		Subject: "News", BodyHTML: "<p>Hello</p>", BodyText: "Hello", Audience: `{"type":"group","groupId":` + itoa(f.group.ID) + `}`}
+	gormMust(t, f.app.DB.Create(&announcement))
+	soon := time.Now().Add(time.Hour)
+	reminder := models.Message{Status: models.MessageScheduled, ScheduledAt: &soon, Category: models.MessageCategoryReminder, OccurrenceID: &f.groupOcc.ID,
+		Subject: "Reminder", BodyHTML: "<p>Soon</p>", BodyText: "Soon", Audience: `{"type":"occurrence","occurrenceId":` + itoa(f.groupOcc.ID) + `}`}
+	gormMust(t, f.app.DB.Create(&reminder))
+	missing := reminder.ID + 1000
+	surfaces := []struct {
+		name    string
+		method  string
+		suffix  string
+		handler func(*App, *gin.Context)
+		edits   bool
+	}{
+		{"message", "GET", "", (*App).apiGetMessage, false},
+		{"recipients", "GET", "/recipients", (*App).apiMessageRecipients, false},
+		{"preview", "GET", "/preview", (*App).apiPreviewMessage, true},
+		{"preview html", "GET", "/preview.html", (*App).apiPreviewMessageHTML, true},
+		{"test", "POST", "/test", (*App).apiTestMessage, true},
+		{"read", "GET", "/read", (*App).apiReadMessage, false},
+	}
+	call := func(s int, viewer *models.User, id uint) *httptest.ResponseRecorder {
+		rec := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(rec)
+		c.Request = httptest.NewRequest(surfaces[s].method, "/api/v1/messages/"+itoa(id)+surfaces[s].suffix, nil)
+		c.Params = gin.Params{{Key: "id", Value: itoa(id)}}
+		c.Set("apiUser", viewer)
+		surfaces[s].handler(f.app, c)
+		return rec
+	}
+	for s, surface := range surfaces {
+		t.Run(surface.name, func(t *testing.T) {
+			var admin, member models.User
+			gormMust(t, f.app.DB.First(&admin, adminU.ID))
+			gormMust(t, f.app.DB.First(&member, memberU.ID))
+			if w := call(s, &admin, missing); w.Code != http.StatusNotFound {
+				t.Fatalf("a current admin, missing id: %d %s", w.Code, w.Body.String())
+			}
+			want := http.StatusOK
+			if surface.edits {
+				want = http.StatusConflict
+			}
+			if w := call(s, &admin, reminder.ID); w.Code != want {
+				t.Fatalf("a current admin, the reminder: %d %s, want %d", w.Code, w.Body.String(), want)
+			}
+			for _, id := range []uint{announcement.ID, reminder.ID} {
+				if w := call(s, &member, id); w.Code != http.StatusNotFound {
+					t.Fatalf("a member who may not see message %d: %d %s", id, w.Code, w.Body.String())
+				}
+			}
+			// Revoked after the middleware passed this user.
+			gormMust(t, f.app.DB.Model(&models.User{}).Where("id = ?", admin.ID).Update("session_version", gorm.Expr("session_version + 1")))
+			for _, id := range []uint{announcement.ID, reminder.ID, missing} {
+				if w := call(s, &admin, id); w.Code != http.StatusUnauthorized {
+					t.Fatalf("a session revoked before the snapshot, message %d: %d %s", id, w.Code, w.Body.String())
+				}
+			}
+		})
 	}
 }

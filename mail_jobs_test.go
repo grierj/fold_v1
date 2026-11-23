@@ -2853,7 +2853,7 @@ func TestGuestVerifyMailSkipsSubjectsThatAreNoLongerAvailable(t *testing.T) {
 	setEvent := func(visibility string) tweak {
 		return func(t *testing.T, app *App, f heldGuestVerify) {
 			apiDo(t, f.admin, "PUT", fmt.Sprintf("/api/v1/events/%d/visibility", f.event.ID),
-				map[string]any{"visibility": visibility, "confirm": true}, http.StatusOK)
+				confirmVisibility(t, f.admin, fmt.Sprintf("/api/v1/events/%d/visibility", f.event.ID), map[string]any{"visibility": visibility}), http.StatusOK)
 		}
 	}
 	for _, tt := range []struct {
@@ -2883,8 +2883,7 @@ func TestGuestVerifyMailSkipsSubjectsThatAreNoLongerAvailable(t *testing.T) {
 		{"series made private", setEvent(models.VisibilityPrivate)},
 		{"series made invite-only", setEvent(models.VisibilityInviteOnly)},
 		{"date made private", func(t *testing.T, app *App, f heldGuestVerify) {
-			apiDo(t, f.admin, "PUT", fmt.Sprintf("/api/v1/events/%d/occurrences/%s", f.event.ID, guestDate),
-				map[string]any{"visibility": "private", "confirm": true}, http.StatusOK)
+			saveDate(t, f.admin, f.event.ID, guestDate, map[string]any{"visibility": "private"}, http.StatusOK, "")
 		}},
 		{"group archived", func(t *testing.T, app *App, f heldGuestVerify) {
 			if err := app.DB.Model(&models.Group{}).Where("id = ?", f.groupID).Update("status", models.GroupArchived).Error; err != nil {
@@ -2926,13 +2925,12 @@ func TestGuestVerifyMailFollowsTheDateOverrideBothWays(t *testing.T) {
 	app := testApp(t)
 	f := queueHeldGuestVerify(t, app, false)
 	sent := captureMail(app)
-	path := fmt.Sprintf("/api/v1/events/%d/occurrences/%s", f.event.ID, guestDate)
-	apiDo(t, f.admin, "PUT", path, map[string]any{"visibility": "private", "confirm": true}, http.StatusOK)
+	saveDate(t, f.admin, f.event.ID, guestDate, map[string]any{"visibility": "private"}, http.StatusOK, "")
 	job := guestVerifyMailJob{GuestSignupID: f.signup.ID}
 	if err := deliverMailJob(context.Background(), app, kindGuestVerifyMail, job); err != nil || len(sent(guestVerifySubject)) != 0 {
 		t.Fatalf("a private date must not mail event facts: %v %+v", err, sent(guestVerifySubject))
 	}
-	apiDo(t, f.admin, "PUT", path, map[string]any{"visibility": "public"}, http.StatusOK)
+	saveDate(t, f.admin, f.event.ID, guestDate, map[string]any{"visibility": "public"}, http.StatusOK, "")
 	if err := deliverMailJob(context.Background(), app, kindGuestVerifyMail, job); err != nil {
 		t.Fatal(err)
 	}

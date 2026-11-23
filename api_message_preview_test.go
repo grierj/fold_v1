@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"net/http"
 	"strings"
 	"sync/atomic"
@@ -8,7 +9,10 @@ import (
 
 	"fold/internal/audit"
 	"fold/internal/mail"
+	"fold/internal/policy"
 	"fold/models"
+
+	"gorm.io/gorm"
 )
 
 // Merge fields must be ones the composer offers, and event fields need a
@@ -315,5 +319,99 @@ func TestPreviewLoadsOnlyPicturesFromThisSite(t *testing.T) {
 	decodeJSON(t, f.leader.do("GET", "/api/v1/messages/"+itoa(id)+"/preview", nil, false), &out)
 	if !strings.Contains(out.Preview.Text, "[Image: Our picnic table]") {
 		t.Fatalf("preview text: %q", out.Preview.Text)
+	}
+}
+
+// TestRoleGatedMessageViewsReadOneSnapshot: the composer's preview, its
+// picker, and a reminder's page and recipient history each judge the viewer's role and
+// read what they show in one snapshot. Right after the judgment, the leader
+// loses the group (their membership becomes an ordinary one) and, in the same
+// commit, the event is retitled or a recipient renamed. Before the commit the
+// leader saw the old values; after it they see nothing. No committed state
+// shows them the new title or name. Each request also runs on a one-connection
+// pool, so a read outside its snapshot fails it.
+func TestRoleGatedMessageViewsReadOneSnapshot(t *testing.T) {
+	const secret = "Written after the leader stepped down"
+	demoteAnd := func(f composeFixture, db *gorm.DB, then func(tx *gorm.DB) error) func() {
+		return func() {
+			if err := db.Transaction(func(tx *gorm.DB) error {
+				if err := tx.Model(&models.Membership{}).Where("group_id = ? AND user_id = ?", f.group.ID, f.leaderUser.ID).
+					Update("role", models.MembershipMember).Error; err != nil {
+					return err
+				}
+				return then(tx)
+			}); err != nil {
+				panic(err)
+			}
+		}
+	}
+	retitle := func(f composeFixture) func(tx *gorm.DB) error {
+		return func(tx *gorm.DB) error {
+			return tx.Model(&models.Event{}).Where("id = ?", f.groupEvent.ID).Update("title", secret).Error
+		}
+	}
+	type view struct {
+		surface string
+		setup   func(t *testing.T, f composeFixture) (path string, change func(tx *gorm.DB) error)
+	}
+	for _, v := range []view{
+		{"message preview", func(t *testing.T, f composeFixture) (string, func(tx *gorm.DB) error) {
+			var out struct {
+				Message messageJSON `json:"message"`
+			}
+			w := f.leader.do("POST", "/api/v1/messages", map[string]any{"subject": "{{event_title}} news", "bodyHtml": "<p>Hello</p>",
+				"audience": map[string]any{"type": policy.AudienceOccurrence, "occurrenceId": f.groupOcc.ID}}, true)
+			if w.Code != http.StatusCreated {
+				t.Fatalf("draft: %d %s", w.Code, w.Body.String())
+			}
+			decodeJSON(t, w, &out)
+			return "/api/v1/messages/" + itoa(out.Message.ID) + "/preview", retitle(f)
+		}},
+		{"compose picker", func(t *testing.T, f composeFixture) (string, func(tx *gorm.DB) error) {
+			return "/api/v1/messages/compose", retitle(f)
+		}},
+		{"message", func(t *testing.T, f composeFixture) (string, func(tx *gorm.DB) error) {
+			raw, _ := json.Marshal(audienceJSON{Type: policy.AudienceOccurrence, OccurrenceID: f.groupOcc.ID, Statuses: []string{models.RegGoing}})
+			key := "email:" + itoa(f.groupOcc.ID)
+			m := models.Message{Status: models.MessageSent, Category: models.MessageCategoryReminder, Subject: "Reminder", BodyHTML: "<p>Soon</p>",
+				BodyText: "Soon", Audience: string(raw), OccurrenceID: &f.groupOcc.ID, ReminderKey: &key}
+			gormMust(t, f.app.DB.Create(&m))
+			return "/api/v1/messages/" + itoa(m.ID), retitle(f)
+		}},
+		{"message recipients", func(t *testing.T, f composeFixture) (string, func(tx *gorm.DB) error) {
+			raw, _ := json.Marshal(audienceJSON{Type: policy.AudienceOccurrence, OccurrenceID: f.groupOcc.ID, Statuses: []string{models.RegGoing}})
+			key := "email:" + itoa(f.groupOcc.ID)
+			m := models.Message{Status: models.MessageSent, Category: models.MessageCategoryReminder, Subject: "Reminder", BodyHTML: "<p>Soon</p>",
+				BodyText: "Soon", Audience: string(raw), OccurrenceID: &f.groupOcc.ID, ReminderKey: &key}
+			gormMust(t, f.app.DB.Create(&m))
+			gormMust(t, f.app.DB.Create(&models.MessageRecipient{MessageID: m.ID, UserID: f.opted.ID, Channel: models.DeliveryEmail, Status: models.RecipientSent, Address: f.opted.Email}))
+			return "/api/v1/messages/" + itoa(m.ID) + "/recipients", func(tx *gorm.DB) error {
+				return tx.Model(&models.User{}).Where("id = ?", f.opted.ID).Update("display_name", secret).Error
+			}
+		}},
+	} {
+		t.Run(v.surface, func(t *testing.T) {
+			f := newComposeFixture(t)
+			path, change := v.setup(t, f)
+			before := f.leader.do("GET", path, nil, false)
+			if before.Code != http.StatusOK || strings.Contains(before.Body.String(), secret) {
+				t.Fatalf("before any change: %d %s", before.Code, before.Body.String())
+			}
+			orig := f.app.DB
+			fired := atReaderSeam(f.app, "authorized", v.surface, demoteAnd(f, orig, change))
+			one := oneConnectionPool(t, f.app)
+			oneConnection(t, f.app, one)
+			w := f.leader.do("GET", path, nil, false)
+			f.app.DB = orig
+			if !fired.Load() {
+				t.Fatalf("%s never reached its seam", v.surface)
+			}
+			if w.Code != http.StatusOK || strings.Contains(w.Body.String(), secret) {
+				t.Fatalf("%s paired the old role with a later change: %d %s", v.surface, w.Code, w.Body.String())
+			}
+			if after := f.leader.do("GET", path, nil, false); strings.Contains(after.Body.String(), secret) {
+				t.Fatalf("%s after the leader stepped down: %d %s", v.surface, after.Code, after.Body.String())
+			}
+		})
 	}
 }

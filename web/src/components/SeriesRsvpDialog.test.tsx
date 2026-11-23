@@ -55,3 +55,14 @@ it("makes the page behind it inert while open, and only while open", () => {
   page.remove();
   alreadyInert.remove();
 });
+
+it("disables only Just this date when the date can't take the answer, says why, and starts on a scope that can", async () => {
+  const choose = vi.fn();
+  render(<SeriesRsvpDialog answer="Going" justThisDate="This date is full." onChoose={choose} onCancel={vi.fn()} />);
+  const just = screen.getByRole("button", { name: "Just this date" });
+  expect(just).toBeDisabled();
+  expect(just).toHaveAccessibleDescription("This date is full.");
+  expect(screen.getByRole("button", { name: "This and following dates" })).toHaveFocus();
+  await userEvent.click(screen.getByRole("button", { name: "All future dates" }));
+  expect(choose).toHaveBeenCalledWith("all_future");
+});

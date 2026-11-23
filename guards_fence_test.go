@@ -4,6 +4,10 @@ import (
 	"fmt"
 	"go/ast"
 	"go/token"
+	"io/fs"
+	"os"
+	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"testing"
@@ -597,5 +601,130 @@ func TestFencedTransactionsGuardCatchesBypasses(t *testing.T) {
 		if bad := fenceProblems(tc.sources); len(bad) == 0 {
 			t.Errorf("%s: the guard accepted it", tc.name)
 		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// The recovery floor (00015, DEC-158) stays on every database this release
+// ran: no Down removes it, and nothing in the repository drops or disables
+// its fences or the hold, except the test-only cleanup
+// (migrations/testhelpers_test.go) and the data-only restore fixture in
+// restore_fence_test.go, which stands in for an operator who bypasses the
+// fence. The guarantee is about this tree only: the settings are
+// declarations, not secrets, and a person with SQL can still drop a trigger
+// (L5); neither fence proves what a consent check compared.
+
+var (
+	floorDropRe    = regexp.MustCompile(`(?i)\bDROP\s+(VIEW|TRIGGER|FUNCTION)\s+(IF\s+EXISTS\s+)?(recovery_floor_hold|settings_recovery_floor|audit_logs_visibility_consent)\b`)
+	floorDisableRe = regexp.MustCompile(`(?i)\bDISABLE\s+TRIGGER\s+(settings_recovery_floor|audit_logs_visibility_consent|ALL)\b`)
+)
+
+// floorAllowed is each file allowed to match, and what it must hold.
+var floorAllowed = map[string]*regexp.Regexp{
+	"migrations/testhelpers_test.go": floorDropRe,
+	"restore_fence_test.go":          floorDisableRe,
+}
+
+// floorDropProblems is the guard's pure check over (path, text) pairs.
+func floorDropProblems(files map[string]string) []string {
+	var bad []string
+	paths := make([]string, 0, len(files))
+	for p := range files {
+		paths = append(paths, p)
+	}
+	sort.Strings(paths)
+	for _, p := range paths {
+		text := files[p]
+		for _, re := range []*regexp.Regexp{floorDropRe, floorDisableRe} {
+			for _, m := range re.FindAllString(text, -1) {
+				if floorAllowed[p] != re {
+					bad = append(bad, p+": "+m+" removes or bypasses the recovery floor outside the test cleanup")
+				}
+			}
+		}
+	}
+	for p, re := range floorAllowed {
+		if text, ok := files[p]; !ok || !re.MatchString(text) {
+			bad = append(bad, p+": the allowed file no longer holds its match; update floorAllowed")
+		}
+	}
+	return bad
+}
+
+// floorTree reads every file the guard covers: Go sources and tests,
+// migrations, deploy/, scripts/ and .github/.
+func floorTree(t *testing.T) map[string]string {
+	t.Helper()
+	files := map[string]string{}
+	err := filepath.WalkDir(".", func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		rel := filepath.ToSlash(p)
+		if d.IsDir() {
+			if rel != "." && (rel == "web" || d.Name() == "node_modules" || d.Name() == "vendor" || (strings.HasPrefix(d.Name(), ".") && rel != ".github")) {
+				return fs.SkipDir
+			}
+			return nil
+		}
+		top := strings.SplitN(rel, "/", 2)[0]
+		if !strings.HasSuffix(rel, ".go") && top != "migrations" && top != "deploy" && top != "scripts" && top != ".github" {
+			return nil
+		}
+		b, err := os.ReadFile(p)
+		if err != nil {
+			return err
+		}
+		files[rel] = string(b)
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return files
+}
+
+func TestRecoveryFloorIsDroppedOnlyByTheTestCleanup(t *testing.T) {
+	files := floorTree(t)
+	for _, want := range []string{"migrations/00015_visibility_consent.sql", "deploy/digitalocean/checks.sh", "migrations/testhelpers_test.go"} {
+		if _, ok := files[want]; !ok {
+			t.Fatalf("the guard did not read %s", want)
+		}
+	}
+	for _, v := range floorDropProblems(files) {
+		t.Error(v)
+	}
+	// Self-test: planted statements, built by concatenation so this file holds no match.
+	base := map[string]string{}
+	for p := range floorAllowed {
+		base[p] = files[p]
+	}
+	for name, planted := range map[string][2]string{
+		"a migration dropping the hold":     {"migrations/00016_x.sql", "DROP " + "VIEW recovery_floor_hold;"},
+		"a script dropping a trigger":       {"deploy/digitalocean/x.sh", "psql -c 'drop " + "trigger if exists settings_recovery_floor on settings'"},
+		"Go dropping a function":            {"cleanup.go", `db.Exec("DROP ` + `FUNCTION audit_logs_visibility_consent()")`},
+		"a workflow disabling all triggers": {".github/workflows/x.yml", "ALTER TABLE audit_logs DISABLE " + "TRIGGER ALL"},
+		"a test disabling the audit fence":  {"x_test.go", "DISABLE " + "TRIGGER audit_logs_visibility_consent"},
+	} {
+		mutated := map[string]string{planted[0]: planted[1]}
+		for p, v := range base {
+			mutated[p] = v
+		}
+		if len(floorDropProblems(mutated)) == 0 {
+			t.Errorf("%s: the guard missed it", name)
+		}
+	}
+	for p := range floorAllowed {
+		stale := map[string]string{}
+		for q, v := range base {
+			stale[q] = v
+		}
+		stale[p] = "nothing here"
+		if len(floorDropProblems(stale)) == 0 {
+			t.Errorf("an allowed file losing its match (%s): the guard missed it", p)
+		}
+	}
+	if bad := floorDropProblems(base); len(bad) != 0 {
+		t.Errorf("the guard refused its own allowed files: %v", bad)
 	}
 }
