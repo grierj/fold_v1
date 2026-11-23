@@ -154,6 +154,14 @@ func TestMoveMessageRefusesWhatTheRuleDoesNotHold(t *testing.T) {
 			_, err := moveMessage(app.DB, draft, policy.MessageEdit, map[string]any{"Status": models.MessageSent}, "")
 			return err
 		},
+		"the status as a quoted column": func() error {
+			_, err := moveMessage(app.DB, draft, policy.MessageEdit, map[string]any{`"status"`: models.MessageSent}, "")
+			return err
+		},
+		"a column no move writes": func() error {
+			_, err := moveMessage(app.DB, draft, policy.MessageEdit, map[string]any{"author_id": 0}, "")
+			return err
+		},
 		"an edit as a set": func() error {
 			_, err := moveMessagesWhere(app.DB, policy.MessageEdit, "author_id = ?", author.ID)
 			return err

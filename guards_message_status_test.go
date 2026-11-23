@@ -25,18 +25,21 @@ import (
 // range over a slice of them. A messages chain is a gorm call chain with
 // Model(<message value>) or Table("messages"), or a name assigned one. On a
 // messages chain the guard reports Update or UpdateColumn of "status" or of a
-// column it cannot read, and Updates or UpdateColumns of a map holding a
-// "status" key (a literal, or a local map given one), of a parameter's map,
-// of a map with a key that is not a string literal (in the call or in a local
-// map), or of a message struct. "Status", the field's name, counts as the
-// column, as gorm resolves it. Anywhere it reports a
+// column it cannot read, and every Updates or UpdateColumns except of a map
+// it can read whole: a map literal, or a local map the function makes, whose
+// keys are all string literals other than status. So a message struct, any
+// other struct, a parameter's map, a map with a computed key and a map built
+// elsewhere are all reported, whatever Select precedes them. "Status", the
+// field's name, counts as the column, as gorm resolves it. Anywhere it reports a
 // Create, CreateInBatches, FirstOrCreate or Save of a message value (an
 // insert writes the status, the column's default included), and raw SQL that
 // inserts into messages, or updates messages and sets status, or whose SET
 // list runs to the end of its literal (the rest is built at run time).
 //
 // It does not see a message reached through a struct field, an interface or
-// a result of a function the scanned tree does not declare; a package that
+// a result of a function the scanned tree does not declare; a map key that
+// is a string literal holding a quoted identifier (moveMessage refuses every
+// column but the ones it names, so the writer cannot be used for it); a package that
 // imports models under another name; an upsert's DoUpdates; gorm calls in a
 // function literal at package level (there it reads only raw SQL); or SQL
 // assembled without the "UPDATE messages SET" or "INSERT INTO messages"
@@ -89,6 +92,9 @@ func messageValue(e ast.Expr, names map[string]bool) bool {
 		return messageValue(v.X, names)
 	case *ast.Ident:
 		return names[v.Name]
+	case *ast.CallExpr:
+		fn, ok := v.Fun.(*ast.Ident)
+		return ok && fn.Name == "new" && len(v.Args) == 1 && messageTypeExpr(v.Args[0])
 	}
 	return false
 }
@@ -234,11 +240,29 @@ func messageMapLit(e ast.Expr) (status, computed bool) {
 	return status, computed
 }
 
+// messageMapMade: e makes a map the guard can read, a map literal or make.
+func messageMapMade(e ast.Expr) bool {
+	switch v := guardkit.Unparen(e).(type) {
+	case *ast.CompositeLit:
+		_, ok := v.Type.(*ast.MapType)
+		return ok
+	case *ast.CallExpr:
+		fn, ok := v.Fun.(*ast.Ident)
+		if !ok || fn.Name != "make" || len(v.Args) == 0 {
+			return false
+		}
+		_, ok = v.Args[0].(*ast.MapType)
+		return ok
+	}
+	return false
+}
+
 // messageLocalMaps is what fd does to each local map: given a "status" key
-// (in its literal or by assignment), or given a computed key; and every
-// parameter name of fd and its function literals.
-func messageLocalMaps(fd *ast.FuncDecl) (status, computed, params map[string]bool) {
-	status, computed, params = map[string]bool{}, map[string]bool{}, map[string]bool{}
+// (in its literal or by assignment), or given a computed key; every name it
+// binds to a map it makes itself; and every parameter name of fd and its
+// function literals.
+func messageLocalMaps(fd *ast.FuncDecl) (status, computed, made, params map[string]bool) {
+	status, computed, made, params = map[string]bool{}, map[string]bool{}, map[string]bool{}, map[string]bool{}
 	addParams := func(fl *ast.FieldList) {
 		if fl == nil {
 			return
@@ -260,6 +284,7 @@ func messageLocalMaps(fd *ast.FuncDecl) (status, computed, params map[string]boo
 					st, comp := messageMapLit(v.Values[i])
 					status[name.Name] = status[name.Name] || st
 					computed[name.Name] = computed[name.Name] || comp
+					made[name.Name] = made[name.Name] || messageMapMade(v.Values[i])
 				}
 			}
 		case *ast.AssignStmt:
@@ -270,6 +295,12 @@ func messageLocalMaps(fd *ast.FuncDecl) (status, computed, params map[string]boo
 						st, comp := messageMapLit(v.Rhs[i])
 						status[lv.Name] = status[lv.Name] || st
 						computed[lv.Name] = computed[lv.Name] || comp
+						if messageMapMade(v.Rhs[i]) {
+							made[lv.Name] = true
+						} else {
+							// Bound to something the guard did not see made.
+							computed[lv.Name] = true
+						}
 					}
 				case *ast.IndexExpr:
 					x, ok := guardkit.Unparen(lv.X).(*ast.Ident)
@@ -286,18 +317,23 @@ func messageLocalMaps(fd *ast.FuncDecl) (status, computed, params map[string]boo
 		}
 		return true
 	})
-	return status, computed, params
+	return status, computed, made, params
 }
 
-func messageMapShape(e ast.Expr, status, computed, params map[string]bool) string {
+// messageMapShape names what an Updates argument is, or "" when the guard can
+// read it and it leaves the status alone: a map literal, or a local map the
+// function made, whose keys are all string literals other than status.
+func messageMapShape(e ast.Expr, status, computed, made, params map[string]bool) string {
 	if st, comp := messageMapLit(e); st {
 		return `a map with "status"`
 	} else if comp {
 		return "a map with computed keys"
+	} else if messageMapMade(e) {
+		return ""
 	}
 	id, ok := guardkit.Unparen(e).(*ast.Ident)
 	if !ok {
-		return ""
+		return "a value it cannot read"
 	}
 	switch {
 	case status[id.Name]:
@@ -306,8 +342,10 @@ func messageMapShape(e ast.Expr, status, computed, params map[string]bool) strin
 		return "a parameter's map"
 	case computed[id.Name]:
 		return "a map with computed keys"
+	case made[id.Name]:
+		return ""
 	}
-	return ""
+	return "a value it cannot read"
 }
 
 // messageStatusWrites finds every write of messages.status in p.
@@ -353,7 +391,7 @@ func messageStatusWrites(p *guardkit.Parsed) []messageStatusWrite {
 			name := fd.Name.Name
 			rawSQL(fd.Body, name)
 			msgs, chains := messageNames(fd, funcs)
-			status, computed, params := messageLocalMaps(fd)
+			status, computed, made, params := messageLocalMaps(fd)
 			ast.Inspect(fd.Body, func(n ast.Node) bool {
 				call, ok := n.(*ast.CallExpr)
 				if !ok {
@@ -388,7 +426,7 @@ func messageStatusWrites(p *guardkit.Parsed) []messageStatusWrite {
 				case "Updates", "UpdateColumns":
 					if messageValue(arg, msgs) {
 						add(call, name, method+" of a message struct")
-					} else if shape := messageMapShape(arg, status, computed, params); shape != "" {
+					} else if shape := messageMapShape(arg, status, computed, made, params); shape != "" {
 						add(call, name, method+" of "+shape)
 					}
 				}
@@ -516,6 +554,20 @@ func (a *App) send(tx *gorm.DB, m *models.Message) error {
 func (a *App) send(tx *gorm.DB, m *models.Message) error {
 	return tx.Model(m).Update("Status", "sent").Error
 }`, `send: Update("status")`},
+		{"a message made with new", `package main
+func (a *App) send(tx *gorm.DB) error {
+	m := new(models.Message)
+	return tx.Model(m).Update("status", "sent").Error
+}`, `send: Update("status")`},
+		{"a selected field and a struct that is not a message", `package main
+func (a *App) send(tx *gorm.DB, m *models.Message) error {
+	return tx.Model(m).Select("Status").Updates(struct{ Status string }{"sent"}).Error
+}`, "send: Updates of a value it cannot read"},
+		{"a map built elsewhere", `package main
+func (a *App) send(tx *gorm.DB, m *models.Message) error {
+	cols := sentColumns()
+	return tx.Model(m).Updates(cols).Error
+}`, "send: Updates of a map with computed keys"},
 		{"a raw insert", `package main
 func (a *App) draft(tx *gorm.DB) error {
 	return tx.Exec("INSERT INTO messages (subject) VALUES ('Hi')").Error
@@ -530,6 +582,10 @@ func (a *App) mark(tx *gorm.DB, m *models.Membership, id uint) error {
 		{"another messages column", `package main
 func (a *App) count(tx *gorm.DB, m *models.Message) error {
 	tx.Exec("UPDATE messages SET recipient_count = 0 WHERE status = 'sending'")
+	cols := map[string]any{"error": ""}
+	cols["recipient_count"] = 0
+	tx.Model(m).Updates(cols)
+	tx.Model(m).Updates(map[string]any{"error": "", "recipient_count": 0})
 	return tx.Model(m).Where("status = ?", "sending").Update("recipient_count", 0).Error
 }`, ""},
 	} {

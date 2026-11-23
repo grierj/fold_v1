@@ -2,7 +2,6 @@ package main
 
 import (
 	"fmt"
-	"strings"
 
 	"gorm.io/gorm"
 
@@ -54,16 +53,24 @@ func moveMessagesWhere(tx *gorm.DB, move policy.MessageMove, where string, args 
 	return ids, err
 }
 
+// messageMoveColumns is every column a move may write beside the status.
+// Naming them, and refusing the rest, is what keeps the status out of a
+// caller's fields: gorm reaches a column by its name, its field's name or a
+// quoted identifier, so refusing spellings of "status" would not.
+var messageMoveColumns = map[string]bool{
+	"channel": true, "subject": true, "body_html": true, "body_text": true, "audience": true,
+	"push_alert": true, "recipient_count": true, "scheduled_at": true, "sent_at": true,
+	"error": true, "updated_at": true,
+}
+
 func messageMoveFrom(move policy.MessageMove, fields map[string]any) ([]string, error) {
 	from := move.From()
 	if len(from) == 0 {
 		return nil, fmt.Errorf("message move %q starts from no status: a row it makes is inserted by its creator", move)
 	}
 	for k := range fields {
-		// gorm resolves a map key by column name or by field name, so Status
-		// writes the column too.
-		if strings.EqualFold(k, "status") {
-			return nil, fmt.Errorf("message move %q: the move decides the status, not the caller's fields", move)
+		if !messageMoveColumns[k] {
+			return nil, fmt.Errorf("message move %q: %q is not a column a move writes; the move decides the status", move, k)
 		}
 	}
 	return from, nil
