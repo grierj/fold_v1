@@ -544,7 +544,8 @@ function DateDetail({ id, date }: { id: string; date: string }) {
           {occurrence && <DateComing occurrence={occurrence} namesOpen={namesOpen} onNamesOpenChange={setNamesOpen} />}
         </div>
         {occurrence && <div className="fold-section space-y-4">
-          {occurrence.description && <p className="text-text-muted whitespace-pre-wrap">{occurrence.description}</p>}
+          {occurrence.visibility && occurrence.series && occurrence.description &&
+            <p className="text-text-muted whitespace-pre-wrap">{occurrence.description}</p>}
           {guestDoor && <>
             <GuestRegistrationForm instance={occurrence} open={guestOpen} onOpenChange={(open) => { guestReturn.current = !open; setGuestOpen(open); }} />
             <p className="text-sm text-text-muted">Have an account? <Link to="/login" state={{ from: `/events/${id}/dates/${date}` }} className="text-link">Log in to answer</Link></p>

@@ -2884,11 +2884,11 @@ voluntary RSVP continues to use its existing authority.
 **The date page's own facts (M8.1 brief sections 4 and 6).** Only the ordinary
 JSON read carries these optional keys as `policy.DatePage` allows. An
 invitation-only read has none of them (its `remoteAvailable` and video fields
-are as above), and `calendar.ics` and the feeds never carry them. Every fact
-of the scheduled JSON read, and the authority that admits it, comes from one
-consistent database snapshot, with the session rechecked against the account
-row in that snapshot: a session already ended there (signed out, password
-changed, account disabled) reads as signed out. A session that ends after the
+are as above). Every fact of the scheduled JSON read, and the authority
+that admits it, comes from one consistent database snapshot. The session is
+rechecked against the account row in that snapshot. A session already ended
+there (signed out, password changed, account disabled) reads as signed out.
+A session that ends after the
 snapshot starts is not seen by this read; the next request is signed out. A failed room read leaves `room`
 out, as on the event pages and in `calendar.ics`, except where the series
 comparison below needs the room, which is then a 500. A failed read of the
@@ -2899,7 +2899,9 @@ church zone and returns an error if it cannot be read. Each key is absent when
 not allowed:
 
 - `description`: the series description, when it has text and the viewer may
-  see the series at its own visibility.
+  see the series at its own visibility. The one-date `calendar.ics` download
+  omits the description. Calendar feeds use their existing series visibility
+  rule for descriptions.
 - `groupHeader` `{imageUrl, coverFocalX, coverFocalY, leaderName}`: only with
   `groupId`, for a group the viewer may see. `imageUrl` is `""` for a group
   with no photo (the page uses its generated cover); the leader is the group's
