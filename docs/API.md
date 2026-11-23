@@ -604,9 +604,18 @@ anything else is rejected with 400. On update, omit it to leave it
 unchanged.
 
 Group updates patch only supplied fields onto the current locked row; omitted
-fields retain concurrent changes. `status` may also be supplied: leaders may
-archive, but only admins may approve or reactivate. An unrelated pending-group
-edit does not decide approval. The transaction rechecks the actor's session and
+fields retain concurrent changes. `status` may also be supplied, judged
+against the status read under the row lock (`policy.DecideGroupStatus`):
+leaders may archive, but only admins may approve or reactivate. Sending the
+status the group already has is no move and is allowed for anyone who manages
+the group. No group goes back to `pending` once it has left it: an admin
+asking for that answers 409 `group_back_to_pending` and saves nothing from the
+request (a leader asking for it gets the 403 of any move they may not make).
+Approving or archiving a pending group by editing it decides its approval
+task and writes `group.approved` or `group.rejected`; archiving an active
+group writes `group.archived`, and making an archived group active again
+writes `group.unarchived` (actor and IP, no meta, no notice). An unrelated
+pending-group edit does not decide approval. The transaction rechecks the actor's session and
 current group authority: revoked credentials return 401, a now-hidden/deleted
 group returns 404, and a visible group the actor can no longer manage returns
 403. Approval tasks, tightening, audits and notices commit or roll back together.
@@ -2248,7 +2257,7 @@ token contract above. Timezone coverage follows the window and emitted clocks,
 not the age of the series anchor. Calendar clients choose when to refresh and
 may retain old cached data; no immediate remote deletion is promised.
 
-The room feed lists the room's confirmed bookings (never ones waiting for approval, DEC-109) whose date starts in the window, at the event's own time without setup and teardown, in the church's time zone. It is titled with the room and its building. A booking is described only when a signed-out viewer could see that date, by the same rule as the public feed (`policy.CanSeeEvent` with no viewer): a church-wide event, or an event of an active, non-deleted group, and a public effective visibility (`policy.EffectiveVisibility`: the date's override, else the event's). Every other confirmed booking is `SUMMARY:Reserved` with only the room as its place, no description, link or event identity, and keeps its own `UID` and times. That includes a booking whose group was archived or set back to pending after it was made, or whose group was deleted. When the group's status changes, the booking's `DTSTAMP` and the feed's `ETag` move so calendars replace the old title; the details return when the group is active again. Deleting the group also hides its details and changes the feed's `ETag`. A described date has its title, its place (the room, then any typed location), its date link and, only when its series is public, its description. Video links, remote and childcare details are never in a room feed. Each entry's `UID` is `room-<roomId>-booking-<bookingId>@<host>`, so it names no event. A wrong, turned-off or other room's token, rooms being off, and a deactivated room all answer the same plain 404. A deactivated room keeps its link, which works again if the room is turned back on. The access log keeps the room id and never the token.
+The room feed lists the room's confirmed bookings (never ones waiting for approval, DEC-109) whose date starts in the window, at the event's own time without setup and teardown, in the church's time zone. It is titled with the room and its building. A booking is described only when a signed-out viewer could see that date, by the same rule as the public feed (`policy.CanSeeEvent` with no viewer): a church-wide event, or an event of an active, non-deleted group, and a public effective visibility (`policy.EffectiveVisibility`: the date's override, else the event's). Every other confirmed booking is `SUMMARY:Reserved` with only the room as its place, no description, link or event identity, and keeps its own `UID` and times. That includes a booking whose group was archived after it was made (or set back to pending by an earlier release), or whose group was deleted. When the group's status changes, the booking's `DTSTAMP` and the feed's `ETag` move so calendars replace the old title; the details return when the group is active again. Deleting the group also hides its details and changes the feed's `ETag`. A described date has its title, its place (the room, then any typed location), its date link and, only when its series is public, its description. Video links, remote and childcare details are never in a room feed. Each entry's `UID` is `room-<roomId>-booking-<bookingId>@<host>`, so it names no event. A wrong, turned-off or other room's token, rooms being off, and a deactivated room all answer the same plain 404. A deactivated room keeps its link, which works again if the room is turned back on. The access log keeps the room id and never the token.
 
 ### Email delivery reports (outside `/api/v1`, M3.2b)
 

@@ -232,8 +232,10 @@ func TestRoomLocationMatchingSkipsInactiveGroups(t *testing.T) {
 	live := create(active.ID, "Live series", start.AddDate(0, 0, 2), "FREQ=WEEKLY;COUNT=2")
 	waiting := create(pending.ID, "Waiting single", start.AddDate(0, 0, 3), "")
 	f.archiveGroup(t)
-	if w := f.admin.do("PUT", "/api/v1/groups/"+itoa(pending.ID), map[string]any{"status": models.GroupPending}, true); w.Code != http.StatusOK {
-		t.Fatalf("set pending: %d %s", w.Code, w.Body.String())
+	// The API refuses a move back to pending, but a group an earlier
+	// release sent there keeps the dates it had.
+	if err := f.app.DB.Model(&models.Group{}).Where("id = ?", pending.ID).Update("status", models.GroupPending).Error; err != nil {
+		t.Fatal(err)
 	}
 
 	var list struct {

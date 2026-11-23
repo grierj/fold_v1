@@ -11,7 +11,7 @@ import { Events } from "../api/events";
 import { Groups } from "../api/groups";
 import { Households } from "../api/households";
 import { People } from "../api/people";
-import type { GroupDetailResponse, Household, OccurrenceResponse, User } from "../types";
+import type { GroupDetailResponse, GroupSummary, Household, OccurrenceResponse, User } from "../types";
 import { occurrence } from "../test/occurrence";
 import { Site } from "../api/site";
 import { createRosterWrites, DateWritesProvider, type RosterWriteEnd, type RosterWrites } from "../lib/dateWrites";
@@ -885,7 +885,7 @@ it("shows a booked room as the place on a date card, and the typed location with
   expect(within(cards[1]).getByText(/ · Hall$/)).not.toHaveTextContent("Fellowship");
 });
 
-it.each([
+it.each<[GroupSummary["status"], string]>([
   ["pending", "You can schedule events once an admin approves this group."],
   ["archived", "This group is archived, so it can't schedule new events."],
 ])("offers a managing viewer of a %s group no Schedule event and says why (DEC-147)", async (status, sentence) => {
@@ -897,7 +897,7 @@ it.each([
   expect(screen.getByRole("button", { name: "More group actions" })).toBeInTheDocument();
 });
 
-it.each([
+it.each<[GroupSummary["status"], string]>([
   ["pending", "You can schedule events once an admin approves this group."],
   ["archived", "This group is archived, so it can't schedule new events."],
 ])("explains scheduling for a %s group with upcoming events", async (status, sentence) => {

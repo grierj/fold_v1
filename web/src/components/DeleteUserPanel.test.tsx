@@ -67,7 +67,7 @@ const easter = { id: 10, title: "Easter breakfast", nextStartsAt: "2027-04-04T14
 const picnic = { id: 11, title: "Church picnic" } satisfies SoleHostedEvent;
 
 const hosted = (events: SoleHostedEvent[], candidates: HandoffCandidate[]): SoleHostedEventsResponse => ({ events, candidates });
-const choir = { id: 5, name: "Choir", status: "approved", candidates: [ana, grier] } satisfies SoleLedGroup;
+const choir = { id: 5, name: "Choir", status: "active", candidates: [ana, grier] } satisfies SoleLedGroup;
 
 function open(action: "delete" | "disable" = "delete", onDone = vi.fn()) {
   render(<DeleteUserPanel reviewDeps={review} target={target} action={action} onDone={onDone} />);
@@ -260,7 +260,7 @@ describe("DeleteUserPanel replacement hosts", () => {
   });
 
   it("on a stale group list, updates the groups and preselects the admin for a new one", async () => {
-    const youth = { id: 6, name: "Youth", status: "approved", candidates: [ben, grier] } satisfies SoleLedGroup;
+    const youth = { id: 6, name: "Youth", status: "active", candidates: [ben, grier] } satisfies SoleLedGroup;
     vi.mocked(AdminUsers.soleLeaderGroups).mockResolvedValue({ groups: [choir] });
     vi.mocked(AdminUsers.remove).mockRejectedValueOnce(staleError({ groups: [{ ...choir, candidates: [ana, ben] }, youth] }, "needs_successor"));
     open();

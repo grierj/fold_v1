@@ -64,7 +64,7 @@ describe today's code, including the lifecycles that do not follow the rule belo
 
 | Lifecycle | States | Where a move is decided | Writers | Enforced by |
 |---|---|---|---|---|
-| `groups.status` (no CHECK) | `pending` `active` `archived` | New groups: `internal/policy/policy.go:NewGroupStatus`. Edits: `internal/policy/policy.go:CanSetGroupStatus` judges the target status only. The approval queue: `decide_pending.go:decidePendingIn` | `api_groups.go:apiCreateGroup`, `api_admin_groups.go:decideGroup`, `api_groups.go:apiUpdateGroup` | `TestCanSetGroupStatus`, `TestGroupApprovalFlow` |
+| `groups.status` | `pending` `active` `archived` | New groups: `internal/policy/policy.go:NewGroupStatus`. Edits: `internal/policy/policy.go:DecideGroupStatus` judges the move from the locked status (nothing goes back to pending). The approval queue: `decide_pending.go:decidePendingIn` (pending only, the approve and reject moves) | `api_groups.go:apiCreateGroup`, `api_admin_groups.go:decideGroup`, `api_groups.go:apiUpdateGroup` | `groups_status_check`, `TestDecideGroupStatus`, `TestUpdateGroupNeverReturnsToPending`, `TestUpdateGroupBackToPendingIsJudgedOnTheLockedStatus`, `TestUpdateGroupArchiveAndUnarchiveAreAudited`, `TestApprovalQueueAgreesWithDecideGroupStatus`, `TestGroupApprovalFlow` |
 | Group deletion request (`deletion_requested`, `deleted_at`) | not asked, asked, deleted | `internal/policy/policy.go:CanRequestDeletion` | `api_groups.go:apiRequestDeletion`, `api_groups.go:clearDeletionRequestIn`, `api_groups.go:deleteGroup` | `TestDeletionRequestTask` |
 | `memberships.status` | `active` `removed` `left` | `internal/policy/policy.go:CanJoinGroup`, `internal/policy/policy.go:CanLeaveGroup`, `internal/policy/policy.go:CanRemoveMember`; a disabled account's memberships stay `active` and are hidden by the join on `users.status` | `api_groups.go:changeRoleIn`, `api_departure.go:applyDeparture`, `api_handoff.go:handOffLeadership`, `api_handoff.go:restoreMemberships` | `memberships_status_check`, trigger `memberships_tenure_guard`, `TestMembershipTenureGuard` |
 | `memberships.role` | `leader` `member` | `internal/policy/policy.go:CanChangeRole` (a group keeps a leader), `internal/policy/policy.go:CanBeSuccessor` | `api_groups.go:changeRoleIn`, `api_departure.go:applyDeparture`, `api_handoff.go:handOffLeadership`, `api_handoff.go:demoteEverywhere`, `api_handoff.go:restoreMemberships` | `memberships_role_check`, `TestCanChangeRole`, `TestSoleLeaderHandoff` |
@@ -154,8 +154,8 @@ chosen when the row is made, or is a setting that may change to any value its ow
   `web/src/components/GroupVisibilityReview.tsx`. Each runs its Save (the preview included) and the
   review's confirm in one `useAction`, so neither starts while the other is on its way; the group
   page hands its run to `web/src/components/GroupForm.tsx` (`action`).
-- Server statuses are typed in `web/src/types.ts`, most as unions and a few (a group's status, a
-  guest registration's) as plain `string`; their words are in `web/src/lib/status.ts`
+- Server statuses are typed in `web/src/types.ts`, most as unions and a few (a guest
+  registration's) as plain `string`; their words are in `web/src/lib/status.ts`
   (`accountStatusLabel`, `groupStatusLabel`, `registrationStatusLabel`,
   `contactRequestStatusLabel`) and `web/src/lib/messages.ts` for messages.
 
