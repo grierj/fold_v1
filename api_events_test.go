@@ -3557,7 +3557,7 @@ func TestSeriesSaveNamesTheReadItWasMadeFrom(t *testing.T) {
 
 // The event's other writers raise the revision too, so a series editor open
 // across a visibility save or a series room change must read the event again;
-// the daily extender and the clock repair do not.
+// the daily extender and clearing the clock flag do not.
 func TestSeriesRevisionFollowsTheEventsOtherWriters(t *testing.T) {
 	f := newBookingFixture(t)
 	series := createFeedEvent(t, f.leader, f.group, "Weekly choir", feedStart(3), "FREQ=WEEKLY;COUNT=4")
@@ -3582,16 +3582,14 @@ func TestSeriesRevisionFollowsTheEventsOtherWriters(t *testing.T) {
 		}
 		stale(t, opened)
 	})
-	t.Run("extender and clock repair", func(t *testing.T) {
+	// The clock repair and a series save write the event only through ClearDirty.
+	t.Run("extender and the clock flag", func(t *testing.T) {
 		opened := seriesRevisionOf(t, f.leader, series.ID)
 		var last models.EventOccurrence
 		gormMust(t, f.app.DB.Where("event_id = ?", series.ID).Order("original_date DESC").First(&last))
 		gormMust(t, f.app.DB.Delete(&last))
 		gormMust(t, f.app.DB.Model(&models.Event{}).Where("id = ?", series.ID).UpdateColumn("series_clock_dirty", true))
 		if err := eventdates.Extend(f.app.DB, time.Now().UTC(), f.app.afterExtend()); err != nil {
-			t.Fatal(err)
-		}
-		if err := eventdates.RepairClocks(f.app.DB, time.Now().UTC()); err != nil {
 			t.Fatal(err)
 		}
 		if err := eventdates.ClearDirty(f.app.DB, series.ID); err != nil {

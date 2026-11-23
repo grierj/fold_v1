@@ -85,6 +85,8 @@ function EventDetailContent() {
   const editorRef = useRef<HTMLDivElement>(null);
   // Rooms changed (a series room, a date's room, a cancelled or moved date): ask for the dates that need one again.
   const [roomsRevision, setRoomsRevision] = useState(0);
+  // A visibility save replaces its control once the page's next read has ended, so it starts from what is stored.
+  const [visibilitySaves, setVisibilitySaves] = useState(0);
   // "Pick a room" asks one date's card to open its editor; seq makes a second ask count.
   const [pickRequest, setPickRequest] = useState<{ date: string; seq: number } | null>(null);
 
@@ -290,7 +292,7 @@ function EventDetailContent() {
           />
           {canSetVisibility && (
             <EventVisibilityControl
-              key={`${event.id}-${event.visibility}-${event.leaderOpened}`}
+              key={`${event.id}-${event.visibility}-${event.leaderOpened}-${visibilitySaves}`}
               eventId={event.id}
               churchWide={event.churchWide}
               groupName={event.groupName}
@@ -300,7 +302,7 @@ function EventDetailContent() {
               onSaved={() => {
                 parkFocus();
                 // Kept on screen: the series editor beside it keeps what was typed and takes the new revision.
-                void load.reload();
+                void load.reload().then(() => setVisibilitySaves((n) => n + 1));
               }}
               action={visibilityAction}
               locked={seriesAction.running}
