@@ -10,7 +10,6 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
-	"time"
 
 	"fold/internal/audit"
 	"fold/internal/jobs"
@@ -359,6 +358,7 @@ func (a *App) apiAdminUpdateUser(c *gin.Context) {
 	}
 	if len(updates) > 0 || body.Status != nil {
 		err := a.contactMutation(contactChange{UserID: u.ID}, func(tx *gorm.DB) error {
+			now := a.newTxClock()
 			actor, target, err := lockConsentUsers(tx, me.ID, u.ID)
 			if err != nil {
 				if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -448,7 +448,7 @@ func (a *App) apiAdminUpdateUser(c *gin.Context) {
 						return err
 					}
 				}
-				if err := a.setAccountStatusIn(tx, u, updates, me.ID, c.ClientIP(), a.now()); err != nil {
+				if err := a.setAccountStatusIn(tx, u, updates, me.ID, c.ClientIP(), now); err != nil {
 					return err
 				}
 				switch {
@@ -462,11 +462,11 @@ func (a *App) apiAdminUpdateUser(c *gin.Context) {
 					}
 				}
 			}
-			today, err := churchClockIn(tx, time.Now().UTC())
+			today, err := churchClockIn(tx, now.at())
 			if err != nil {
 				return err
 			}
-			return a.completeTeenConversionIfReady(tx, u, today, me.ID, c.ClientIP())
+			return a.completeTeenConversionIfReady(tx, u, today, c.ClientIP())
 		})
 		if err != nil {
 			if emailTaken(err) {

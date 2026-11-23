@@ -28,7 +28,8 @@ func newAccountStatus(accountType string, hasPassword bool) string {
 // teen's conversion waiting or completing, a teen turning 18). updates holds
 // the new "status" and any other columns the same edit writes; the caller holds
 // the contact gate and the user's lock. actor 0 is the system; now is the
-// instant that decides which future seats come back. The only other writers of
+// transaction's clock, which decides which future seats come back or are
+// freed. The only other writers of
 // the column are upgradeGuestIn, replacePasswordIn (invitedBecomesActive, in
 // the statement that sets the password) and the erasure (tombstoneUserIn and
 // the tombstone sweep's scrubTombstoneRowIn).
@@ -49,7 +50,7 @@ func newAccountStatus(accountType string, hasPassword bool) string {
 // before this call, because leaderCount counts listed users, and a teen never
 // leads (DEC-18), so account consent has nothing to hand off. Audit rows stay
 // with the caller, which knows why the status changed. u.Status is updated.
-func (a *App) setAccountStatusIn(tx *gorm.DB, u *models.User, updates map[string]any, actor uint, ip string, now time.Time) error {
+func (a *App) setAccountStatusIn(tx *gorm.DB, u *models.User, updates map[string]any, actor uint, ip string, now *txClock) error {
 	status, _ := updates["status"].(string)
 	changing := status != u.Status
 	wasDisabled := u.Status == models.UserDisabled
@@ -61,7 +62,7 @@ func (a *App) setAccountStatusIn(tx *gorm.DB, u *models.User, updates map[string
 		if actor != 0 {
 			actorID = &actor
 		}
-		if err := a.restoreRegistrations(tx, u.ID, updates, actorID, ip, now.UTC()); err != nil {
+		if err := a.restoreRegistrations(tx, u.ID, updates, actorID, ip, now.at().UTC()); err != nil {
 			return err
 		}
 	}
@@ -77,10 +78,32 @@ func (a *App) setAccountStatusIn(tx *gorm.DB, u *models.User, updates map[string
 			return err
 		}
 		if !wasDisabled {
-			return a.promoteOnDisable(tx, u.ID, true)
+			return a.promoteOnDisable(tx, u.ID, true, now.at())
 		}
 	}
 	return nil
+}
+
+// txClock is a transaction's one now (AGENTS.md: take now once per
+// transaction). The first step that needs it reads the clock, after the locks
+// taken before that step, where that step read the clock on its own before;
+// every later step judges the same instant.
+type txClock struct {
+	read func() time.Time
+	t    time.Time
+}
+
+// newTxClock reads a.now when a step first needs it.
+func (a *App) newTxClock() *txClock { return &txClock{read: a.now} }
+
+// fixedClock is a transaction clock already set (a job's instant).
+func fixedClock(now time.Time) *txClock { return &txClock{t: now} }
+
+func (c *txClock) at() time.Time {
+	if c.t.IsZero() {
+		c.t = c.read()
+	}
+	return c.t
 }
 
 // upgradeGuestIn turns a guest row into an account on the same row (C5), so

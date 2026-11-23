@@ -1433,9 +1433,9 @@ var auditWriterCensus = map[string]string{
 	"api_events.go:createEventIn":                                 "d8645e5290d8a9fdfc53c51a538e9f3c184657805c158c4d5d44beb3912de494",
 	"api_occurrence_mutations.go:writeOccurrenceRefusal":          "f7e046134daac6dcd2dbe3940f6563ff8cac02d7f1e1c89da8a11571a319f809",
 	"request_kinds.go:addAuditAction":                             "ea9a9c1e495429e447216252cea05dc7ac323e24fa12a30a4191429f7de7aaf8",
-	// The person whose change moved the status is the actor, with their request
-	// IP; the age job has neither. Meta: previousStatus, status, reason.
-	"api_teen_conversion.go:setConversionStatusIn": "19370204249713914f32761df777f4d2b8a0bc5b3f052695f57a50f6866f207e",
+	// No actor and no IP on any path (DEC-159, inventory option P5).
+	// Meta: previousStatus, status, reason.
+	"api_teen_conversion.go:setConversionStatusIn": "968d2c02bdb71122c89ff95ecc0aaae35552c32db2bf403eed391361fc83b344",
 }
 
 type auditSourceCensus struct {

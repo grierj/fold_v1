@@ -167,11 +167,11 @@ func (a *App) rolloverTeen(tx *gorm.DB, user *models.User, today, now time.Time)
 	}
 	// The turned-18 row below records this change.
 	if status != oldStatus {
-		if err := a.setAccountStatusIn(tx, user, map[string]any{"status": status}, 0, "", now); err != nil {
+		if err := a.setAccountStatusIn(tx, user, map[string]any{"status": status}, 0, "", fixedClock(now)); err != nil {
 			return false, err
 		}
 	}
-	if err := a.completeTeenConversionIfReady(tx, user, today, 0, ""); err != nil {
+	if err := a.completeTeenConversionIfReady(tx, user, today, ""); err != nil {
 		return false, err
 	}
 	if err := audit.Write(tx, audit.Entry{Action: audit.UserTurned18, TargetType: "user", TargetID: user.ID,

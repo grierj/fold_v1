@@ -127,6 +127,7 @@ func (a *App) changeTeenConsent(tx *gorm.DB, c *gin.Context, teen, actor *models
 			return errConsentEvidence
 		}
 	}
+	now := a.newTxClock()
 	row := models.TeenConsent{TeenUserID: teen.ID, Scope: change.Scope, Status: change.Status,
 		GrantedBy: actor.ID, GranterRole: role, EvidenceText: evidence}
 	if err := tx.Create(&row).Error; err != nil {
@@ -143,17 +144,17 @@ func (a *App) changeTeenConsent(tx *gorm.DB, c *gin.Context, teen, actor *models
 			// setAccountStatusIn ends old sessions (including legacy pending
 			// cookies) and does the seat work in its fixed order; a newly
 			// consented teen logs in afresh.
-			if err := a.setAccountStatusIn(tx, teen, map[string]any{"status": status}, actor.ID, c.ClientIP(), a.now()); err != nil {
+			if err := a.setAccountStatusIn(tx, teen, map[string]any{"status": status}, actor.ID, c.ClientIP(), now); err != nil {
 				return err
 			}
 		}
 	}
 	if change.Scope == models.TeenConsentAccount {
-		today, err := churchClockIn(tx, time.Now().UTC())
+		today, err := churchClockIn(tx, now.at())
 		if err != nil {
 			return err
 		}
-		if err := a.completeTeenConversionIfReady(tx, teen, today, actor.ID, c.ClientIP()); err != nil {
+		if err := a.completeTeenConversionIfReady(tx, teen, today, c.ClientIP()); err != nil {
 			return err
 		}
 	}

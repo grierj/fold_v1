@@ -124,8 +124,8 @@ func lockTeenLifecycleUsers(tx *gorm.DB, userID uint, extraIDs ...uint) (map[uin
 // completeTeenConversionIfReady is called with lockTeenLifecycleUsers held.
 // At eighteen the same operation completes after the age job makes the user an
 // adult. Consent and guardian requirements then end; an admin suspension does not.
-// actor is the person whose change prompted the check, 0 for the age job.
-func (a *App) completeTeenConversionIfReady(tx *gorm.DB, user *models.User, today time.Time, actor uint, ip string) error {
+// today is the transaction's instant on the church clock.
+func (a *App) completeTeenConversionIfReady(tx *gorm.DB, user *models.User, today time.Time, ip string) error {
 	// An erased account never completes: its staged person is anonymized and
 	// soft-deleted by the erasure (R4-3b-2), which would otherwise answer
 	// errConversionPerson below. Nothing is written for it.
@@ -171,7 +171,7 @@ func (a *App) completeTeenConversionIfReady(tx *gorm.DB, user *models.User, toda
 	}
 	if !ready {
 		if user.Status == models.UserActive {
-			return a.setConversionStatusIn(tx, user, models.UserPendingConsent, actor, ip, today)
+			return a.setConversionStatusIn(tx, user, models.UserPendingConsent, today)
 		}
 		return nil
 	}
@@ -189,7 +189,7 @@ func (a *App) completeTeenConversionIfReady(tx *gorm.DB, user *models.User, toda
 		locked[holders[i].ID] = &holders[i]
 	}
 	if user.Status != models.UserActive {
-		if err := a.setConversionStatusIn(tx, user, models.UserActive, actor, ip, today); err != nil {
+		if err := a.setConversionStatusIn(tx, user, models.UserActive, today); err != nil {
 			return err
 		}
 	}
@@ -197,16 +197,15 @@ func (a *App) completeTeenConversionIfReady(tx *gorm.DB, user *models.User, toda
 }
 
 // setConversionStatusIn moves a staged teen's account while its conversion
-// waits or completes, with the audit row the move needs.
-func (a *App) setConversionStatusIn(tx *gorm.DB, user *models.User, status string, actor uint, ip string, now time.Time) error {
+// waits or completes, with the audit row the move needs. The row names no actor
+// and no IP: who ran a completion step stays unstored until the owner decides
+// erasure inventory option P5 (DEC-159). The move never leaves disabled, so
+// setAccountStatusIn restores nothing and needs no actor.
+func (a *App) setConversionStatusIn(tx *gorm.DB, user *models.User, status string, today time.Time) error {
 	previous := user.Status
-	if err := a.setAccountStatusIn(tx, user, map[string]any{"status": status}, actor, ip, now); err != nil {
+	if err := a.setAccountStatusIn(tx, user, map[string]any{"status": status}, 0, "", fixedClock(today)); err != nil {
 		return err
 	}
-	var actorID *uint
-	if actor != 0 {
-		actorID = &actor
-	}
-	return audit.Write(tx, audit.Entry{Actor: actorID, Action: audit.UserStatusChanged, TargetType: "user", TargetID: user.ID,
-		Meta: map[string]any{"previousStatus": previous, "status": status, "reason": "household_conversion"}, IP: ip})
+	return audit.Write(tx, audit.Entry{Action: audit.UserStatusChanged, TargetType: "user", TargetID: user.ID,
+		Meta: map[string]any{"previousStatus": previous, "status": status, "reason": "household_conversion"}})
 }

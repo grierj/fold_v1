@@ -282,7 +282,7 @@ func (a *App) decideGuardianLink(c *gin.Context, confirm bool) {
 			if err != nil {
 				return err
 			}
-			if err := a.completeTeenConversionIfReady(tx, &teen, today, me.ID, c.ClientIP()); err != nil {
+			if err := a.completeTeenConversionIfReady(tx, &teen, today, c.ClientIP()); err != nil {
 				return err
 			}
 			if _, err := guardianConsentMailType.Enqueue(tx, guardianConsentMailJob{GuardianLinkID: link.ID}, time.Now(), ""); err != nil {

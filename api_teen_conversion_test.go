@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"net/http"
+	"net/http/httptest"
 	"reflect"
 	"strings"
 	"testing"
@@ -11,6 +12,8 @@ import (
 	"fold/internal/audit"
 	"fold/internal/testdb"
 	"fold/models"
+
+	"github.com/gin-gonic/gin"
 	"gorm.io/gorm"
 )
 
@@ -160,13 +163,12 @@ func TestTeenConversionApprovalConsentAndFreshLink(t *testing.T) {
 // A conversion's own status moves end every session and are audited, like any
 // other account status change (#428). Consent first: granting it activates the
 // account and the waiting conversion sends it back to pending_consent in the
-// same request; the link confirmation then completes it.
+// same request; the link confirmation then completes it. The rows name no actor
+// and no IP: who ran a completion step is not stored (DEC-159, inventory P5).
 func TestTeenConversionStatusMovesEndSessionsAndAreAudited(t *testing.T) {
 	app := testApp(t)
 	admin, gid := openGroup(t, app, "Conversion sessions")
 	f := pendingTeenConversion(t, app, admin, gid, "sessions", true)
-	var adminUser models.User
-	app.DB.Where("email = ?", testEmail("admin")).First(&adminUser)
 	load := func() models.User {
 		var u models.User
 		if err := app.DB.First(&u, f.user.ID).Error; err != nil {
@@ -179,8 +181,8 @@ func TestTeenConversionStatusMovesEndSessionsAndAreAudited(t *testing.T) {
 		app.DB.Where("action = ? AND target_type = 'user' AND target_id = ?", audit.UserStatusChanged, f.user.ID).Order("id").Find(&rows)
 		var metas []map[string]any
 		for _, r := range rows {
-			if r.ActorID == nil || *r.ActorID != adminUser.ID {
-				t.Fatalf("status row %d actor %v, want the admin %d", r.ID, r.ActorID, adminUser.ID)
+			if r.ActorID != nil || r.IP != "" {
+				t.Fatalf("status row %d has actor %v and IP %q, want neither", r.ID, r.ActorID, r.IP)
 			}
 			var m map[string]any
 			if err := json.Unmarshal([]byte(r.MetaJSON), &m); err != nil {
@@ -214,6 +216,67 @@ func TestTeenConversionStatusMovesEndSessionsAndAreAudited(t *testing.T) {
 	want = append(want, map[string]any{"previousStatus": models.UserPendingConsent, "status": models.UserActive, "reason": "household_conversion"})
 	if got := statusRows(); !reflect.DeepEqual(got, want) {
 		t.Fatalf("status rows after completion %v, want %v", got, want)
+	}
+}
+
+// A consent that enables a staged teen again restores their seats and decides
+// the conversion at one instant (AGENTS.md: take now once per transaction). The
+// clock steps a day after its first read: the restore reads it on the eve of the
+// teen's 18th birthday, when the conversion still completes; a second read
+// would find an adult, and a teen conversion at 18 waits.
+func TestTeenConsentRestoreAndConversionShareOneInstant(t *testing.T) {
+	app := testApp(t)
+	admin, gid := openGroup(t, app, "One instant")
+	f := pendingTeenConversion(t, app, admin, gid, "instant", true)
+	apiDo(t, admin, "POST", "/api/v1/admin/guardian-links/"+itoa(f.link.ID)+"/confirm", map[string]string{"checkNote": "Checked teen account relationship"}, 200)
+	apiDo(t, admin, "POST", consentPath(&f.user), map[string]string{"scope": "account", "status": "revoked"}, 200)
+	birthday := time.Now().UTC().Truncate(time.Second)
+	today, err := churchClockIn(app.DB, birthday)
+	if err != nil {
+		t.Fatal(err)
+	}
+	born := time.Date(today.Year()-18, today.Month(), today.Day(), 0, 0, 0, 0, time.UTC)
+	for _, row := range []struct {
+		model any
+		id    uint
+	}{{&models.User{}, f.user.ID}, {&models.AccountRequest{}, f.request.ID}, {&models.HouseholdPerson{}, f.person.ID}} {
+		if err := app.DB.Model(row.model).Where("id = ?", row.id).Update("birth_date", born).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+	var adminUser models.User
+	app.DB.Where("email = ?", testEmail("admin")).First(&adminUser)
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	c.Request = httptest.NewRequest("POST", "/", nil)
+	reads := 0
+	err = app.contactMutation(contactChange{UserID: f.user.ID}, func(tx *gorm.DB) error {
+		actor, teen, err := lockConsentUsers(tx, adminUser.ID, f.user.ID)
+		if err != nil {
+			return err
+		}
+		// The gate has read the clock already; count from here.
+		app.clock = func() time.Time {
+			reads++
+			if reads == 1 {
+				return birthday.Add(-24 * time.Hour)
+			}
+			return birthday
+		}
+		return app.changeTeenConsent(tx, c, teen, actor, teenConsentChange{Scope: models.TeenConsentAccount, Status: models.ConsentGranted, EvidenceText: "Signed paper consent"})
+	})
+	app.clock = nil
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reads == 0 {
+		t.Fatal("the consent never read the app clock")
+	}
+	var user models.User
+	app.DB.First(&user, f.user.ID)
+	var person models.HouseholdPerson
+	app.DB.First(&person, f.person.ID)
+	if user.Status != models.UserActive || person.ConvertedUserID == nil || *person.ConvertedUserID != user.ID {
+		t.Fatalf("status %s, person converted to %v; want active and converted to %d: the restore and the conversion judged different instants", user.Status, person.ConvertedUserID, user.ID)
 	}
 }
 

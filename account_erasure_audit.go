@@ -109,7 +109,7 @@ var auditIPAttribution = map[string][]auditIPRule{
 	audit.UserErasureSwept:              auditIPSystem,
 	audit.UserDisabled:                  auditIPOrdinary,
 	audit.UserEnabled:                   auditIPOrdinary,
-	audit.UserStatusChanged:             auditIPOrdinary,
+	audit.UserStatusChanged:             auditIPSystem,
 	audit.MemberRestored:                auditIPOrdinary,
 	audit.MemberNotRestored:             auditIPOrdinary,
 	audit.VisibilityOverride:            auditIPOrdinary,

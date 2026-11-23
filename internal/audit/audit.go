@@ -87,8 +87,9 @@ const (
 	// action names: a household teen's conversion waiting for consent and a
 	// guardian (active to pending_consent) or completing (to active). Target is
 	// the user; meta has previousStatus, status and reason
-	// ("household_conversion"). The actor is the person whose change prompted
-	// it, none for the age job.
+	// ("household_conversion"). It stores no actor and no IP: who ran a
+	// completion step is not kept until the owner decides erasure inventory
+	// option P5 (DEC-159).
 	UserStatusChanged = "user.status_changed"
 
 	// MemberRestored: a disabled account was enabled and one of its kept
