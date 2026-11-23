@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"net/http"
 	"reflect"
 	"strings"
@@ -153,6 +154,66 @@ func TestTeenConversionApprovalConsentAndFreshLink(t *testing.T) {
 				t.Fatal("retry transferred more than once")
 			}
 		})
+	}
+}
+
+// A conversion's own status moves end every session and are audited, like any
+// other account status change (#428). Consent first: granting it activates the
+// account and the waiting conversion sends it back to pending_consent in the
+// same request; the link confirmation then completes it.
+func TestTeenConversionStatusMovesEndSessionsAndAreAudited(t *testing.T) {
+	app := testApp(t)
+	admin, gid := openGroup(t, app, "Conversion sessions")
+	f := pendingTeenConversion(t, app, admin, gid, "sessions", true)
+	var adminUser models.User
+	app.DB.Where("email = ?", testEmail("admin")).First(&adminUser)
+	load := func() models.User {
+		var u models.User
+		if err := app.DB.First(&u, f.user.ID).Error; err != nil {
+			t.Fatal(err)
+		}
+		return u
+	}
+	statusRows := func() []map[string]any {
+		var rows []models.AuditLog
+		app.DB.Where("action = ? AND target_type = 'user' AND target_id = ?", audit.UserStatusChanged, f.user.ID).Order("id").Find(&rows)
+		var metas []map[string]any
+		for _, r := range rows {
+			if r.ActorID == nil || *r.ActorID != adminUser.ID {
+				t.Fatalf("status row %d actor %v, want the admin %d", r.ID, r.ActorID, adminUser.ID)
+			}
+			var m map[string]any
+			if err := json.Unmarshal([]byte(r.MetaJSON), &m); err != nil {
+				t.Fatal(err)
+			}
+			metas = append(metas, m)
+		}
+		return metas
+	}
+	start := load()
+
+	apiDo(t, admin, "POST", consentPath(&f.user), map[string]string{"scope": "account", "status": "granted", "evidenceText": "Signed paper consent"}, 200)
+	waiting := load()
+	// One bump for consent's activation, one for the conversion's wait.
+	if waiting.Status != models.UserPendingConsent || waiting.SessionVersion != start.SessionVersion+2 {
+		t.Fatalf("after consent: status %s, session version %d, want pending_consent and %d", waiting.Status, waiting.SessionVersion, start.SessionVersion+2)
+	}
+	want := []map[string]any{{"previousStatus": models.UserActive, "status": models.UserPendingConsent, "reason": "household_conversion"}}
+	if got := statusRows(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("status rows after consent %v, want %v", got, want)
+	}
+
+	apiDo(t, admin, "POST", "/api/v1/admin/guardian-links/"+itoa(f.link.ID)+"/confirm", map[string]string{"checkNote": "Checked teen account relationship"}, 200)
+	done := load()
+	if done.Status != models.UserActive || done.SessionVersion != waiting.SessionVersion+1 {
+		t.Fatalf("after completion: status %s, session version %d, want active and %d", done.Status, done.SessionVersion, waiting.SessionVersion+1)
+	}
+	if sessionCurrent(&done, &waiting) {
+		t.Fatal("a session from before the completion is still current")
+	}
+	want = append(want, map[string]any{"previousStatus": models.UserPendingConsent, "status": models.UserActive, "reason": "household_conversion"})
+	if got := statusRows(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("status rows after completion %v, want %v", got, want)
 	}
 }
 

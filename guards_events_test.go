@@ -373,23 +373,36 @@ type endsAtWrite struct {
 	stack         []ast.Node
 }
 
-// occurrenceValue reports whether e is a models.EventOccurrence value: a name
-// in occ, or a composite literal of that type, behind & or not.
-func occurrenceValue(e ast.Expr, occ map[string]bool) bool {
+// modelBindings is what a function binds to one GORM model, models.<model>:
+// names holding a value (the model or a pointer to it) and names holding a
+// collection (a slice or map of either). For functions it is those whose first
+// result is one.
+type modelBindings struct{ values, collections map[string]bool }
+
+// modelValue reports whether e is a models.<model> value: a name in b.values,
+// an element of a name in b.collections, or a composite literal of the type,
+// behind &, * or neither.
+func modelValue(e ast.Expr, model string, b modelBindings) bool {
 	e = guardkit.Unparen(e)
 	if u, ok := e.(*ast.UnaryExpr); ok {
 		e = guardkit.Unparen(u.X)
 	}
+	if s, ok := e.(*ast.StarExpr); ok {
+		e = guardkit.Unparen(s.X)
+	}
 	switch v := e.(type) {
 	case *ast.Ident:
-		return occ[v.Name]
+		return b.values[v.Name]
 	case *ast.CompositeLit:
-		return occurrenceType(v.Type)
+		return modelType(v.Type, model)
+	case *ast.IndexExpr:
+		x, ok := guardkit.Unparen(v.X).(*ast.Ident)
+		return ok && b.collections[x.Name]
 	}
 	return false
 }
 
-func occurrenceType(e ast.Expr) bool {
+func modelType(e ast.Expr, model string) bool {
 	if s, ok := e.(*ast.StarExpr); ok {
 		e = s.X
 	}
@@ -398,53 +411,80 @@ func occurrenceType(e ast.Expr) bool {
 		return false
 	}
 	x, ok := sel.X.(*ast.Ident)
-	return ok && x.Name == "models" && sel.Sel.Name == "EventOccurrence"
+	return ok && x.Name == "models" && sel.Sel.Name == model
 }
 
-func occurrenceSliceType(e ast.Expr) bool {
-	a, ok := e.(*ast.ArrayType)
-	return ok && occurrenceType(a.Elt)
+func modelCollectionType(e ast.Expr, model string) bool {
+	switch t := e.(type) {
+	case *ast.ArrayType:
+		return modelType(t.Elt, model)
+	case *ast.MapType:
+		return modelType(t.Value, model)
+	}
+	return false
 }
 
-// occurrenceNames is every name fd binds to a models.EventOccurrence: its
-// parameters, var declarations, := of a literal, of another such name, of a
-// call to one of occFuncs (functions whose first result is one), and range
-// values over a slice of them.
-func occurrenceNames(fd *ast.FuncDecl, occFuncs map[string]bool) map[string]bool {
-	occ, slices := map[string]bool{}, map[string]bool{}
+// modelFuncs is every declared function in p whose first result is a
+// models.<model> value or a collection of them.
+func modelFuncs(p *guardkit.Parsed, model string) modelBindings {
+	out := modelBindings{values: map[string]bool{}, collections: map[string]bool{}}
+	for _, f := range p.Files {
+		for _, d := range f.AST.Decls {
+			fd, ok := d.(*ast.FuncDecl)
+			if !ok || fd.Type.Results == nil || len(fd.Type.Results.List) == 0 {
+				continue
+			}
+			if first := fd.Type.Results.List[0].Type; modelType(first, model) {
+				out.values[fd.Name.Name] = true
+			} else if modelCollectionType(first, model) {
+				out.collections[fd.Name.Name] = true
+			}
+		}
+	}
+	return out
+}
+
+// modelNames is every name fd binds to a models.<model> value or collection:
+// its parameters and those of its function literals, var declarations, := of
+// a literal, of another such name or element, of a call to one of funcs, and
+// range values over a collection.
+func modelNames(fd *ast.FuncDecl, model string, funcs modelBindings) modelBindings {
+	b := modelBindings{values: map[string]bool{}, collections: map[string]bool{}}
+	changed := false
+	mark := func(set map[string]bool, name string) {
+		if name != "_" && !set[name] {
+			set[name] = true
+			changed = true
+		}
+	}
+	typed := func(name string, t ast.Expr) {
+		if modelType(t, model) {
+			mark(b.values, name)
+		} else if modelCollectionType(t, model) {
+			mark(b.collections, name)
+		}
+	}
 	params := func(fl *ast.FieldList) {
 		if fl == nil {
 			return
 		}
 		for _, field := range fl.List {
 			for _, n := range field.Names {
-				if occurrenceType(field.Type) {
-					occ[n.Name] = true
-				} else if occurrenceSliceType(field.Type) {
-					slices[n.Name] = true
-				}
+				typed(n.Name, field.Type)
 			}
 		}
 	}
 	params(fd.Type.Params)
-	for changed := true; changed; {
+	for changed = true; changed; {
 		changed = false
-		mark := func(set map[string]bool, name string) {
-			if name != "_" && !set[name] {
-				set[name] = true
-				changed = true
-			}
-		}
 		ast.Inspect(fd, func(n ast.Node) bool {
 			switch s := n.(type) {
 			case *ast.FuncLit:
 				params(s.Type.Params)
 			case *ast.ValueSpec:
 				for _, name := range s.Names {
-					if s.Type != nil && occurrenceType(s.Type) {
-						mark(occ, name.Name)
-					} else if s.Type != nil && occurrenceSliceType(s.Type) {
-						mark(slices, name.Name)
+					if s.Type != nil {
+						typed(name.Name, s.Type)
 					}
 				}
 			case *ast.AssignStmt:
@@ -456,22 +496,24 @@ func occurrenceNames(fd *ast.FuncDecl, occFuncs map[string]bool) map[string]bool
 					return true
 				}
 				rhs := guardkit.Unparen(s.Rhs[0])
-				if call, ok := rhs.(*ast.CallExpr); ok && occFuncs[guardkit.Callee(call)] {
-					mark(occ, id.Name)
-				} else if len(s.Lhs) == len(s.Rhs) && occurrenceValue(rhs, occ) {
-					mark(occ, id.Name)
+				if call, ok := rhs.(*ast.CallExpr); ok && funcs.values[guardkit.Callee(call)] {
+					mark(b.values, id.Name)
+				} else if ok && funcs.collections[guardkit.Callee(call)] {
+					mark(b.collections, id.Name)
+				} else if len(s.Lhs) == len(s.Rhs) && modelValue(rhs, model, b) {
+					mark(b.values, id.Name)
 				}
 			case *ast.RangeStmt:
-				if x, ok := guardkit.Unparen(s.X).(*ast.Ident); ok && slices[x.Name] {
+				if x, ok := guardkit.Unparen(s.X).(*ast.Ident); ok && b.collections[x.Name] {
 					if v, ok := s.Value.(*ast.Ident); ok {
-						mark(occ, v.Name)
+						mark(b.values, v.Name)
 					}
 				}
 			}
 			return true
 		})
 	}
-	return occ
+	return b
 }
 
 func stringLit(e ast.Expr) (string, bool) {
@@ -489,14 +531,7 @@ func stringLit(e ast.Expr) (string, bool) {
 // literal or map assignment keyed "ends_at", and raw SQL that sets ends_at on
 // event_occurrences.
 func endsAtWrites(p *guardkit.Parsed) []endsAtWrite {
-	occFuncs := map[string]bool{}
-	for _, f := range p.Files {
-		for _, d := range f.AST.Decls {
-			if fd, ok := d.(*ast.FuncDecl); ok && fd.Type.Results != nil && len(fd.Type.Results.List) > 0 && occurrenceType(fd.Type.Results.List[0].Type) {
-				occFuncs[fd.Name.Name] = true
-			}
-		}
-	}
+	occFuncs := modelFuncs(p, "EventOccurrence")
 	var out []endsAtWrite
 	for _, f := range p.Files {
 		for _, d := range f.AST.Decls {
@@ -504,14 +539,14 @@ func endsAtWrites(p *guardkit.Parsed) []endsAtWrite {
 			if !ok || fd.Body == nil {
 				continue
 			}
-			occ := occurrenceNames(fd, occFuncs)
+			occ := modelNames(fd, "EventOccurrence", occFuncs)
 			guardkit.InspectStack(fd, func(n ast.Node, stack []ast.Node) bool {
 				shape := ""
 				switch v := n.(type) {
 				case *ast.CallExpr:
 					switch guardkit.Callee(v) {
 					case "Save", "Updates", "UpdateColumns":
-						if len(v.Args) == 1 && occurrenceValue(v.Args[0], occ) {
+						if len(v.Args) == 1 && modelValue(v.Args[0], "EventOccurrence", occ) {
 							shape = guardkit.Callee(v) + " of a date"
 						}
 					case "Update", "UpdateColumn":

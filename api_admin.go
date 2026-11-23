@@ -448,7 +448,7 @@ func (a *App) apiAdminUpdateUser(c *gin.Context) {
 						return err
 					}
 				}
-				if err := a.setAccountStatusIn(tx, u, updates, me.ID, c.ClientIP()); err != nil {
+				if err := a.setAccountStatusIn(tx, u, updates, me.ID, c.ClientIP(), a.now()); err != nil {
 					return err
 				}
 				switch {
@@ -466,7 +466,7 @@ func (a *App) apiAdminUpdateUser(c *gin.Context) {
 			if err != nil {
 				return err
 			}
-			return a.completeTeenConversionIfReady(tx, u, today, c.ClientIP())
+			return a.completeTeenConversionIfReady(tx, u, today, me.ID, c.ClientIP())
 		})
 		if err != nil {
 			if emailTaken(err) {

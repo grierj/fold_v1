@@ -1436,7 +1436,7 @@ func TestErasureHouseholdStagedTeen(t *testing.T) {
 		t.Fatal(err)
 	}
 	err := db.Transaction(func(tx *gorm.DB) error {
-		return f.s.app.completeTeenConversionIfReady(tx, &teen, time.Now(), "")
+		return f.s.app.completeTeenConversionIfReady(tx, &teen, time.Now(), 0, "")
 	})
 	if err != nil {
 		t.Errorf("completeTeenConversionIfReady on the erased pair: %v, want nil (neither an error nor a revival)", err)

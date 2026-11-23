@@ -1,9 +1,12 @@
 package main
 
 import (
+	"time"
+
 	"fold/models"
 
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 // newAccountStatus is the status a new account starts in: a teen waits for
@@ -21,9 +24,14 @@ func newAccountStatus(accountType string, hasPassword bool) string {
 }
 
 // setAccountStatusIn is the one place an existing account's status changes
-// (an admin edit, a teen's account consent granted or revoked). updates holds
+// (an admin edit, a teen's account consent granted or revoked, a household
+// teen's conversion waiting or completing, a teen turning 18). updates holds
 // the new "status" and any other columns the same edit writes; the caller holds
-// the contact gate and the user's lock.
+// the contact gate and the user's lock. actor 0 is the system; now is the
+// instant that decides which future seats come back. The only other writers of
+// the column are upgradeGuestIn, replacePasswordIn (invitedBecomesActive, in
+// the statement that sets the password) and the erasure (tombstoneUserIn and
+// the tombstone sweep's scrubTombstoneRowIn).
 //
 // Order is fixed by what each step needs to see:
 //   - Enabling (disabled -> listed): memberships and registrations come back
@@ -41,7 +49,7 @@ func newAccountStatus(accountType string, hasPassword bool) string {
 // before this call, because leaderCount counts listed users, and a teen never
 // leads (DEC-18), so account consent has nothing to hand off. Audit rows stay
 // with the caller, which knows why the status changed. u.Status is updated.
-func (a *App) setAccountStatusIn(tx *gorm.DB, u *models.User, updates map[string]any, actor uint, ip string) error {
+func (a *App) setAccountStatusIn(tx *gorm.DB, u *models.User, updates map[string]any, actor uint, ip string, now time.Time) error {
 	status, _ := updates["status"].(string)
 	changing := status != u.Status
 	wasDisabled := u.Status == models.UserDisabled
@@ -49,7 +57,11 @@ func (a *App) setAccountStatusIn(tx *gorm.DB, u *models.User, updates map[string
 		if err := restoreMemberships(tx, u.ID, actor, ip); err != nil {
 			return err
 		}
-		if err := a.restoreRegistrations(tx, u.ID, updates, &actor, ip, a.now().UTC()); err != nil {
+		var actorID *uint
+		if actor != 0 {
+			actorID = &actor
+		}
+		if err := a.restoreRegistrations(tx, u.ID, updates, actorID, ip, now.UTC()); err != nil {
 			return err
 		}
 	}
@@ -80,4 +92,10 @@ func upgradeGuestIn(tx *gorm.DB, guest *models.User, cols ...string) error {
 		return err
 	}
 	return revokeAccountTokens(tx, guest.ID)
+}
+
+// invitedBecomesActive is the status a password replace writes in its own
+// UPDATE: an invited account becomes active, any other keeps its status.
+func invitedBecomesActive() clause.Expr {
+	return gorm.Expr("CASE WHEN status = ? THEN ? ELSE status END", models.UserInvited, models.UserActive)
 }

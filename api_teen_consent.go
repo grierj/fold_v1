@@ -143,7 +143,7 @@ func (a *App) changeTeenConsent(tx *gorm.DB, c *gin.Context, teen, actor *models
 			// setAccountStatusIn ends old sessions (including legacy pending
 			// cookies) and does the seat work in its fixed order; a newly
 			// consented teen logs in afresh.
-			if err := a.setAccountStatusIn(tx, teen, map[string]any{"status": status}, actor.ID, c.ClientIP()); err != nil {
+			if err := a.setAccountStatusIn(tx, teen, map[string]any{"status": status}, actor.ID, c.ClientIP(), a.now()); err != nil {
 				return err
 			}
 		}
@@ -153,7 +153,7 @@ func (a *App) changeTeenConsent(tx *gorm.DB, c *gin.Context, teen, actor *models
 		if err != nil {
 			return err
 		}
-		if err := a.completeTeenConversionIfReady(tx, teen, today, c.ClientIP()); err != nil {
+		if err := a.completeTeenConversionIfReady(tx, teen, today, actor.ID, c.ClientIP()); err != nil {
 			return err
 		}
 	}

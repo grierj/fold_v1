@@ -95,6 +95,48 @@ func TestAgeRolloverStatusesAndConsentHistory(t *testing.T) {
 	}
 }
 
+// Every status the rollover changes ends the account's sessions; an unchanged
+// status leaves them alone (#428).
+func TestAgeRolloverStatusChangesEndSessions(t *testing.T) {
+	app := testApp(t)
+	now := rolloverInstant(t, "2026-10-22T12:00:00Z")
+	cases := []struct {
+		name, status, want  string
+		suspended, password bool
+		bumps               int
+	}{
+		{"active", models.UserActive, models.UserActive, false, true, 0},
+		{"pending", models.UserPendingConsent, models.UserActive, false, true, 1},
+		{"no-password", models.UserPendingConsent, models.UserInvited, false, false, 1},
+		{"revoked", models.UserDisabled, models.UserActive, false, true, 1},
+		{"suspended", models.UserDisabled, models.UserDisabled, true, true, 0},
+	}
+	users := make([]*models.User, len(cases))
+	for i, tc := range cases {
+		users[i] = rolloverTeenUser(t, app, "bump-"+tc.name, "2008-10-22", tc.status, tc.suspended, tc.password)
+	}
+	if n, err := app.rolloverAges(now); err != nil || n != len(cases) {
+		t.Fatalf("rollover %d %v", n, err)
+	}
+	for i, tc := range cases {
+		var got models.User
+		app.DB.First(&got, users[i].ID)
+		if got.Status != tc.want || got.SessionVersion != users[i].SessionVersion+tc.bumps {
+			t.Errorf("%s: status %s, session version %d, want %s and %d", tc.name, got.Status, got.SessionVersion, tc.want, users[i].SessionVersion+tc.bumps)
+		}
+		if tc.bumps > 0 && sessionCurrent(&got, users[i]) {
+			t.Errorf("%s: a session from before the rollover is still current", tc.name)
+		}
+	}
+	// The turned-18 row records the change; nothing writes a second one.
+	if n := auditCount(t, app, audit.UserStatusChanged); n != 0 {
+		t.Errorf("%d user.status_changed rows, want none", n)
+	}
+	if n := auditCount(t, app, audit.UserTurned18); n != int64(len(cases)) {
+		t.Errorf("%d user.turned_18 rows, want %d", n, len(cases))
+	}
+}
+
 func TestAgeRolloverChurchMidnightAndLeapBirthday(t *testing.T) {
 	app := testApp(t)
 	if err := app.DB.Create(&models.Setting{Key: settingTimezone, Value: "America/Los_Angeles"}).Error; err != nil {
