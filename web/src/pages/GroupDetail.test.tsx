@@ -2345,6 +2345,45 @@ describe("a series save on the group page is not finished until the page shows i
     expect(fake.stored()).toMatchObject({ seriesTitle: "Supper night", seriesStartsLocal: "2026-12-01T20:15", videoReveal: "always" });
   });
 
+  it("finishes on a newer read of the page that replaced the save's own, without waiting for the replaced one", async () => {
+    const fake = server();
+    const other = occurrence({ id: 2, eventId: 8, date: "2026-12-08", title: "Plain night" });
+    vi.mocked(Groups.get).mockImplementation(async () => ({ ...page, canManage: true, upcomingEvents: [fake.stored(), other] }));
+    vi.mocked(Events.register).mockResolvedValue({ registration: null, people: [{ registrationId: 9, personId: 3, registeredBy: 2, status: "going", attendanceMode: "in_person", waitlistPosition: null, childcareRequested: false }] });
+    open();
+    const title = await openEditor();
+    await userEvent.type(title, " night");
+    const gate = deferred<void>();
+    vi.mocked(Groups.get).mockImplementationOnce(async () => {
+      await gate.promise;
+
+      return { ...page, canManage: true, upcomingEvents: [occurrence({ title: "Old answer" }), other] };
+    });
+    await userEvent.click(screen.getByRole("button", { name: "Save series" }));
+    await waitFor(() => expect(Groups.get).toHaveBeenCalledTimes(2));
+    expect(screen.getByRole("button", { name: "Close" })).toBeDisabled();
+    const newer = deferred<void>();
+    vi.mocked(Groups.get).mockImplementationOnce(async () => {
+      await newer.promise;
+
+      return { ...page, canManage: true, upcomingEvents: [fake.stored(), other] };
+    });
+    const forms = screen.getAllByRole("form", { name: "Household answers" });
+    const plain = forms[forms.length - 1];
+    await userEvent.click(within(plain).getByRole("checkbox", { name: "Mary" }));
+    await userEvent.click(within(plain).getByRole("button", { name: "Save answers" }));
+    await waitFor(() => expect(Groups.get).toHaveBeenCalledTimes(3));
+    // The save's read was replaced, and the newer one has not landed: still saving, nothing told as failed.
+    expect(screen.getByRole("button", { name: "Saving…" })).toBeDisabled();
+    expect(screen.queryByRole("button", { name: "Refresh" })).not.toBeInTheDocument();
+    await act(async () => { newer.resolve(); await newer.promise; });
+    expect(await screen.findByText("Saved")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Close" })).toBeEnabled();
+    expect(screen.queryByRole("button", { name: "Refresh" })).not.toBeInTheDocument();
+    await act(async () => { gate.resolve(); await gate.promise; });
+    expect(screen.queryByText(/Old answer/)).not.toBeInTheDocument();
+  });
+
   it("says the change is saved when the reload fails, and keeps Close and the opener shut until a refresh lands", async () => {
     server();
     open();
