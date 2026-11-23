@@ -1,10 +1,10 @@
 import { Form } from "./ui/Form";
 import { childcareBody, childcareFrom } from "./ChildcareField";
-import { useLayoutEffect, useRef, useState } from "react";
+import { useLayoutEffect, useRef, useState, type RefObject } from "react";
 import { Events } from "../api/events";
 import { bydays, isSimpleWeekly, isWeekly, weekdayCode, weeklyRule } from "../lib/rrule";
 import { useUnsavedChanges } from "../lib/unsavedChanges";
-import { useWhenState, type WhenInit } from "../lib/useWhenState";
+import { useWhenState } from "../lib/useWhenState";
 import { Field, FormError, Input, Textarea, focusFirstInvalid, showFieldErrors } from "./ui/Field";
 import { FormActions } from "./ui/FormActions";
 import { Button } from "./ui/Button";
@@ -55,18 +55,25 @@ export interface SeriesFields {
   revision?: string;
 }
 
-// What the form shows for a read of the event before anything is typed. Its keys are in the order of the draft's.
+const EDITING = "This event changed while you were editing. Check it before you save.";
+
+// Whether a rule repeats and on which weekdays, as the form opens it.
+function repeatOf(rule: string, date: string) {
+  const picked = bydays(rule);
+
+  return { recurring: rule !== "", days: picked.length > 0 ? picked : isWeekly(rule) ? [weekdayCode(date)] : [] };
+}
+
+// The rule the weekday chips save. With no day picked it is a plain weekly rule, which opens on the first date's weekday.
+function chipsRule(recurring: boolean, days: string[]) {
+  if (!recurring) return "";
+
+  return days.length > 0 ? weeklyRule(days) : "FREQ=WEEKLY";
+}
+
+// What the form shows for a read of the event before anything is typed. The repeat is one field, its rule: whether it
+// repeats, its weekdays and a custom rule are taken or kept together. Its keys are in the order of the draft's.
 function formOf(s: SeriesFields) {
-  const picked = bydays(s.recurrenceRule);
-
-  const when: WhenInit = {
-    date: s.startsLocal.slice(0, 10),
-    time: s.startsLocal.slice(11, 16) || "19:00",
-    duration: s.durationMinutes,
-    recurring: s.recurrenceRule !== "",
-    days: picked.length > 0 ? picked : isWeekly(s.recurrenceRule) ? [weekdayCode(s.startsLocal.slice(0, 10))] : [],
-  };
-
   const options: EventOptionValues = {
     seats: seatsFrom(s.capacity, s.waitlistEnabled, s.guestsAllowed),
     video: {
@@ -81,12 +88,28 @@ function formOf(s: SeriesFields) {
   };
 
   return {
-    ...when, tzid: s.tzid, title: s.title, description: s.description, location: s.location,
+    date: s.startsLocal.slice(0, 10), time: s.startsLocal.slice(11, 16) || "19:00", duration: s.durationMinutes,
+    tzid: s.tzid, title: s.title, description: s.description, location: s.location,
     rule: s.recurrenceRule, until: s.rruleUntil ?? "", options,
   };
 }
 
+type Draft = ReturnType<typeof formOf>;
+
 const same = <T,>(a: T, b: T) => JSON.stringify(a) === JSON.stringify(b);
+
+// Two drafts show the same thing when a weekly rule names the same days the chips show for it ("FREQ=WEEKLY" opens on
+// the first date's weekday, so an untouched form over it is unchanged).
+function shown(f: Draft): Draft {
+  const rule = f.rule.trim();
+
+  if (!isSimpleWeekly(rule)) return { ...f, rule };
+  const { recurring, days } = repeatOf(rule, f.date);
+
+  return { ...f, rule: chipsRule(recurring, days) };
+}
+
+const sameForm = (a: Draft, b: Draft) => same(shown(a), shown(b));
 
 // Each field the stored event changed since `was` takes the stored value; the others keep what was typed.
 function rebased<T extends object>(draft: T, was: T, now: T): T {
@@ -99,31 +122,20 @@ function rebased<T extends object>(draft: T, was: T, now: T): T {
   return out;
 }
 
-// The same for the options, field by field inside each group (a changed seat limit leaves typed guests alone).
-function rebasedOptions(draft: EventOptionValues, was: EventOptionValues, now: EventOptionValues): EventOptionValues {
-  return {
-    ...rebased(draft, was, now),
-    seats: rebased(draft.seats, was.seats, now.seats),
-    video: rebased(draft.video, was.video, now.video),
-    remote: rebased(draft.remote, was.remote, now.remote),
-    childcare: rebased(draft.childcare, was.childcare, now.childcare),
+// The options go field by field inside each group (a changed seat limit leaves typed guests alone).
+function rebasedDraft(draft: Draft, was: Draft, now: Draft): Draft {
+  const options = {
+    ...rebased(draft.options, was.options, now.options),
+    seats: rebased(draft.options.seats, was.options.seats, now.options.seats),
+    video: rebased(draft.options.video, was.options.video, now.options.video),
+    remote: rebased(draft.options.remote, was.options.remote, now.options.remote),
+    childcare: rebased(draft.options.childcare, was.options.childcare, now.options.childcare),
   };
+
+  return { ...rebased(draft, was, now), options };
 }
 
-// SeriesEditor is the one "Edit series" / "Edit event" form, on the event page (DEC-161).
-export function SeriesEditor({
-  series,
-  idPrefix,
-  locationHint,
-  roomDate,
-  onSaved,
-  onClose,
-  onStale,
-  onRoomChanged,
-  onAuthorityLost,
-  action: shared,
-  locked = false,
-}: {
+interface EditorProps {
   series: SeriesFields;
   idPrefix: string;
   locationHint?: string;
@@ -142,45 +154,125 @@ export function SeriesEditor({
   action?: Action;
   // Another run in the same panel is on its way.
   locked?: boolean;
-}) {
-  // The draft follows the newest read of the event, as the date editor does: the save sends what differs from it,
-  // with its revision, and the server refuses a save made from an older read (DEC-162).
+}
+
+// SeriesEditor is the one "Edit series" / "Edit event" form, on the event page (DEC-161). It follows the page's newest
+// read: the save sends what differs from it, with its revision, and the server refuses a save made from an older read
+// (DEC-162). A read that changes what the form shows starts the form again from the rebased draft, so nothing a field
+// worked out when it opened (the Other duration, a Jitsi link on its way) outlives the values it was worked out from.
+export function SeriesEditor({ series, roomDate, onStale, action: shared, locked = false, ...rest }: EditorProps) {
   const stored = formOf(series);
   const [seen, setSeen] = useState({ form: stored, revision: series.revision });
-  const base = seen.form;
+  const [mount, setMount] = useState({ key: 0, start: stored });
+  const draft = useRef(stored);
+  const [notice, setNotice] = useState<{ text: string } | null>(null);
+  const noticeRef = useRef<HTMLDivElement>(null);
   // A read that lands while this editor is open never adds or removes the room field under the person.
   const [openedRoom] = useState({ date: roomDate, series: series.recurrenceRule !== "" });
-  const simple = isSimpleWeekly(base.rule);
+  const own = useAction();
+  const action = shared ?? own;
+  const frozen = action.running || locked;
 
-  const when = useWhenState(stored);
-  const { date, time, duration, recurring, days } = when;
-  const [tzid, setTzid] = useState(stored.tzid);
-  const [title, setTitle] = useState(stored.title);
-  const [description, setDescription] = useState(stored.description);
-  const [location, setLocation] = useState(stored.location);
-  const [rule, setRule] = useState(stored.rule);
-  const [until, setUntil] = useState(stored.until);
-  const [options, setOptions] = useState(stored.options);
-  const draft = { date, time, duration, recurring, days, tzid, title, description, location, rule, until, options };
+  // Not while a save is on its way: its answer belongs to the form that sent it. The render after it catches up.
+  if (!frozen && (series.revision !== seen.revision || !same(stored, seen.form))) {
+    const next = rebasedDraft(draft.current, seen.form, stored);
 
-  if (series.revision !== seen.revision || !same(stored, base)) {
-    // A newer read: catch the draft up before this render shows it.
-    const next = rebased(draft, base, stored);
-    when.take({ date: next.date, time: next.time, duration: next.duration, recurring: next.recurring, days: next.days });
-    setTzid(next.tzid);
-    setTitle(next.title);
-    setDescription(next.description);
-    setLocation(next.location);
-    setRule(next.rule);
-    setUntil(next.until);
-    setOptions(rebasedOptions(options, base.options, stored.options));
+    if (!sameForm(next, draft.current)) {
+      setMount({ key: mount.key + 1, start: next });
+      setNotice({ text: notice?.text ?? EDITING });
+    }
+
     setSeen({ form: stored, revision: series.revision });
   }
 
+  // Each notice is brought into view, and takes focus when focus was in the form: a restart removes the focused field
+  // (focus is then nowhere), and after a refused save it is on Save.
+  useLayoutEffect(() => {
+    const el = noticeRef.current;
+
+    if (!notice || !el) return;
+    el.scrollIntoView?.({ block: "nearest" });
+    const active = document.activeElement;
+
+    if (!active || active === document.body || el.closest("form")?.contains(active)) el.focus({ preventScroll: true });
+  }, [notice]);
+
+  return (
+    <SeriesForm
+      key={mount.key}
+      {...rest}
+      eventId={series.eventId}
+      openedRoom={openedRoom}
+      start={mount.start}
+      base={seen.form}
+      revision={seen.revision}
+      draft={draft}
+      notice={notice?.text ?? null}
+      noticeRef={noticeRef}
+      onEdit={() => { if (notice) setNotice(null); }}
+      onChanged={(text) => {
+        setNotice({ text });
+        onStale?.();
+      }}
+      action={action}
+      locked={locked}
+    />
+  );
+}
+
+function SeriesForm({
+  eventId,
+  idPrefix,
+  locationHint,
+  openedRoom,
+  start,
+  base,
+  revision,
+  draft: reported,
+  notice,
+  noticeRef,
+  onEdit,
+  onChanged,
+  onSaved,
+  onClose,
+  onRoomChanged,
+  onAuthorityLost,
+  action,
+  locked,
+}: Omit<EditorProps, "series" | "roomDate" | "onStale" | "action" | "locked"> & {
+  eventId: number;
+  openedRoom: { date?: string; series: boolean };
+  // The draft this form opens with; `base` is the newest read, which the save compares with.
+  start: Draft;
+  base: Draft;
+  revision?: string;
+  // Written every render, so the editor rebases what is on screen.
+  draft: RefObject<Draft>;
+  notice: string | null;
+  noticeRef: RefObject<HTMLDivElement | null>;
+  // The person changed a field: the notice has done its job.
+  onEdit: () => void;
+  // The save was refused because the event changed (DEC-162).
+  onChanged: (message: string) => void;
+  action: Action;
+  locked: boolean;
+}) {
+  const simple = isSimpleWeekly(start.rule);
+  const when = useWhenState({ date: start.date, time: start.time, duration: start.duration, ...repeatOf(start.rule, start.date) });
+  const { date, time, duration, recurring, days } = when;
+  const [tzid, setTzid] = useState(start.tzid);
+  const [title, setTitle] = useState(start.title);
+  const [description, setDescription] = useState(start.description);
+  const [location, setLocation] = useState(start.location);
+  const [rule, setRule] = useState(start.rule);
+  const [until, setUntil] = useState(start.until);
+  const [options, setOptions] = useState(start.options);
+  const recurrenceRule = simple ? chipsRule(recurring, days) : rule.trim();
+  const current: Draft = { date, time, duration, tzid, title, description, location, rule: recurrenceRule, until, options };
+  reported.current = current;
+
   // Open on edit, so what is already set is in view (DEC-95).
   const [moreOpen, setMoreOpen] = useState(true);
-  const own = useAction();
-  const action = shared ?? own;
   // Nothing in the form changes while a save is on its way: the save sends what was there when it began, so a later
   // edit would be lost without a word.
   const frozen = action.running || locked;
@@ -198,7 +290,7 @@ export function SeriesEditor({
   const submit = useRef<HTMLButtonElement>(null);
   const kept = useKeptRefusal({ initial: null, submit, onRefused: setError, onAuthorityLost });
 
-  const { guard, markSaved } = useUnsavedChanges(!same(draft, base));
+  const { guard, markSaved } = useUnsavedChanges(!sameForm(current, base));
 
   useLayoutEffect(() => {
     if (frozen || !focusInvalid.current) return;
@@ -211,6 +303,7 @@ export function SeriesEditor({
     e.preventDefault();
 
     if (frozenNow.current) return;
+    onEdit();
 
     if (simple && recurring && days.length === 0) {
       setError("Pick at least one day to repeat weekly.");
@@ -232,7 +325,6 @@ export function SeriesEditor({
 
     setOptionErrors({});
     setError(null);
-    const recurrenceRule = simple ? (recurring ? weeklyRule(days) : "") : rule.trim();
     const { seats, video, childcare, remote, reminder, reminderPush } = options;
     const capTrimmed = seats.capacity.trim();
     const was = base.options;
@@ -246,7 +338,7 @@ export function SeriesEditor({
       location: location.trim(),
       recurrenceRule,
       rruleUntil: until,
-      revision: seen.revision,
+      revision,
     };
 
     if (!same(childcare, was.childcare)) Object.assign(body, childcareBody(childcare));
@@ -276,7 +368,7 @@ export function SeriesEditor({
     frozenNow.current = true;
     await action.run(async () => {
       try {
-        await Events.update(series.eventId, body);
+        await Events.update(eventId, body);
         markSaved();
         kept.close();
       } catch (err) {
@@ -289,8 +381,7 @@ export function SeriesEditor({
           kept.open(keptDates);
         } else if (errorCode(err) === "event_changed") {
           // The draft stays; the page's next read brings the new revision and the stored values it changed.
-          setError(msg);
-          onStale?.();
+          onChanged(msg);
         } else if (field) {
           lockFocus.forget();
           focusInvalid.current = true;
@@ -307,12 +398,13 @@ export function SeriesEditor({
   }
 
   return (<>
-    <Form ref={root} tabIndex={-1} noValidate onSubmit={save} className="mt-3 space-y-4 border-t border-border pt-3">
+    <Form ref={root} tabIndex={-1} noValidate onSubmit={save} onChange={onEdit} className="mt-3 space-y-4 border-t border-border pt-3">
       <p className="text-sm text-text-muted">
         This changes every future date that has not been edited on its own. Customized dates stay as they are. Dates
         the new schedule drops are cancelled, and people who were going or maybe are told.
       </p>
       {guard}
+      {notice && <div ref={noticeRef} tabIndex={-1}><FormError>{notice}</FormError></div>}
       {error && <FormError>{error}</FormError>}
       <fieldset disabled={frozen} className="min-w-0 space-y-4">
         <Field id={`s-title-${idPrefix}`} label="Title">
@@ -339,9 +431,9 @@ export function SeriesEditor({
         <Field id={`s-loc-${idPrefix}`} label="Location" optional hint={locationHint}>
           <Input value={location} onChange={(e) => setLocation(e.target.value)} />
         </Field>
-        {openedRoom.series && <SeriesRoomField eventId={series.eventId} idPrefix={idPrefix} onChanged={onRoomChanged} />}
+        {openedRoom.series && <SeriesRoomField eventId={eventId} idPrefix={idPrefix} onChanged={onRoomChanged} />}
         {openedRoom.date && !openedRoom.series && (
-          <RoomField eventId={series.eventId} date={openedRoom.date} idPrefix={idPrefix} onChanged={onRoomChanged} />
+          <RoomField eventId={eventId} date={openedRoom.date} idPrefix={idPrefix} onChanged={onRoomChanged} />
         )}
         <EventOptions
           idPrefix={idPrefix}
@@ -364,6 +456,6 @@ export function SeriesEditor({
       </FormActions>
     </Form>
     {/* After the form, never inside it: the panel's roster has forms of its own. */}
-    {kept.refusal && <KeptDates key={kept.refusal.seq} eventId={series.eventId} keptDates={kept.refusal.dates} onRefused={kept.refused} onClose={kept.close} />}
+    {kept.refusal && <KeptDates key={kept.refusal.seq} eventId={eventId} keptDates={kept.refusal.dates} onRefused={kept.refused} onClose={kept.close} />}
   </>);
 }
