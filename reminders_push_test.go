@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -630,5 +631,47 @@ func TestEventReminderPushSwitch(t *testing.T) {
 	decodeJSON(t, w, &out)
 	if w.Code != http.StatusOK || out.Event.ReminderPush || stored("Default") {
 		t.Fatalf("series edit: %d %s", w.Code, w.Body.String())
+	}
+}
+
+// TestPushReminderReadsItsClockInItsSnapshot: a reminder's job is due before
+// the date starts, but its snapshot reads the date only after the start has
+// passed (a worker that waited for a connection). The clock that judges the
+// start, the quiet-hours grace and the TTL is read in that snapshot, after
+// the destination: no provider call, and the row says the reminder is stale.
+// The control, whose clock never crosses the start, sends.
+func TestPushReminderReadsItsClockInItsSnapshot(t *testing.T) {
+	for _, crosses := range []bool{false, true} {
+		t.Run(map[bool]string{false: "control", true: "start passes at the seam"}[crosses], func(t *testing.T) {
+			f, fp, phone := pushReminderFixture(t)
+			due := f.groupOcc.StartsAt.Add(-2 * time.Hour)
+			sweepAt(t, f.app, due.Add(-30*time.Minute))
+			var at atomic.Int64
+			at.Store(due.UnixNano())
+			f.app.clock = func() time.Time { return time.Unix(0, at.Load()) }
+			var seamed atomic.Bool
+			f.app.hooks.pushStep = func(step string) {
+				if step == "destination" && seamed.CompareAndSwap(false, true) && crosses {
+					at.Store(f.groupOcc.StartsAt.Add(time.Minute).UnixNano())
+				}
+			}
+			makeDue(f.app)
+			runMessageJobs(t, f.app)
+			f.app.hooks.pushStep = nil
+			if !seamed.Load() {
+				t.Fatal("the reminder never reached its destination seam")
+			}
+			_, rows := pushReminderOf(t, f.app, f.groupOcc)
+			row := rows[f.teen.Email]
+			if !crosses {
+				if fp.count(phone.path) != 1 || row.Status != models.RecipientSent {
+					t.Fatalf("the control: pushes %v, row %+v", fp.sent, row)
+				}
+				return
+			}
+			if fp.total() != 0 || row.Status != models.RecipientSuppressed || row.Reason != pushWhyStale {
+				t.Fatalf("a reminder whose date started before its snapshot read it: pushes %v, row %+v", fp.sent, row)
+			}
+		})
 	}
 }

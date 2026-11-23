@@ -279,34 +279,40 @@ const skipCantSeeDate = "can't see this date anymore"
 // date (M1.13: the date's effective visibility, or a live exact-date
 // invitation), checked at send time. It returns the ids who may.
 func (a *App) reminderReaders(db *gorm.DB, occID uint, ids []uint, now time.Time) (map[uint]bool, error) {
-	var occ models.EventOccurrence
-	if err := db.First(&occ, occID).Error; errors.Is(err, gorm.ErrRecordNotFound) {
-		return nil, errAudienceGone
-	} else if err != nil {
+	return reminderReadersFrom(a.dbDates(db), occID, ids, now)
+}
+
+// reminderReadersFrom is reminderReaders on any fact source (dateFactSource).
+func reminderReadersFrom(src dateFactSource, occID uint, ids []uint, now time.Time) (map[uint]bool, error) {
+	occs, err := src.occurrences([]uint{occID})
+	if err != nil {
 		return nil, err
 	}
-	var users []models.User
-	if err := db.Where("id IN ?", ids).Find(&users).Error; err != nil {
+	occ := occs[occID]
+	if occ == nil {
+		return nil, errAudienceGone
+	}
+	users, err := src.liveUsers(ids)
+	if err != nil {
 		return nil, err
 	}
 	out := map[uint]bool{}
-	for i := range users {
-		u := &users[i]
+	for _, u := range users {
 		// A guest sees what a signed-out visitor sees, so only a public
 		// date, and holds no exact-date invitations (eventViewer).
-		viewer := eventViewer(u)
-		vs, err := dateCandidatesIn(db, viewer, db.Where("id = ?", occ.EventID))
+		viewer := src.viewer(u)
+		vs, err := src.candidates(viewer, occ.EventID)
 		if err != nil {
 			return nil, err
 		}
-		if ev := vs.ByID[occ.EventID]; ev != nil && vs.canSeeDate(viewer, ev, &occ) {
+		if ev := vs.ByID[occ.EventID]; ev != nil && vs.canSeeDate(viewer, ev, occ) {
 			out[u.ID] = true
 			continue
 		}
 		if viewer == nil {
 			continue
 		}
-		scoped, err := scopedOccurrenceReadsIn(db, u, db.Model(&models.EventOccurrence{}).Where("id = ?", occ.ID), now)
+		scoped, err := src.scoped(u, []uint{occ.ID}, false, now)
 		if err != nil {
 			return nil, err
 		}
@@ -315,29 +321,6 @@ func (a *App) reminderReaders(db *gorm.DB, occID uint, ids []uint, now time.Time
 		}
 	}
 	return out, nil
-}
-
-// reminderRowMaySee is whether the person a claimed reminder email row
-// shows the date to may still see it: the recipient, or for a guardian copy
-// the teen whose reminder it copies. It runs on the row's own transaction
-// and answers a failed read as an error, never as "may not". A date that is
-// gone, or a reminder with no date, shows nothing to anyone.
-func (a *App) reminderRowMaySee(tx *gorm.DB, m *models.Message, row models.MessageRecipient, now time.Time) (bool, error) {
-	if m.OccurrenceID == nil {
-		return false, nil
-	}
-	subject := row.UserID
-	if row.CopyOfUserID != nil {
-		subject = *row.CopyOfUserID
-	}
-	can, err := a.reminderReaders(tx, *m.OccurrenceID, []uint{subject}, now)
-	if errors.Is(err, errAudienceGone) {
-		return false, nil
-	}
-	if err != nil {
-		return false, err
-	}
-	return can[subject], nil
 }
 
 // messageCategory is the email settings kind a message follows: event
