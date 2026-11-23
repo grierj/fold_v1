@@ -612,6 +612,27 @@ describe("the date editor while other reads are held or fail", () => {
     expect(leaving()).toBe(false);
   });
 
+  it("asks nothing on leaving once Try again has stored a save that was in doubt, while the date is read again", async () => {
+    vi.mocked(Groups.get).mockResolvedValue(managing);
+    vi.mocked(Events.managedDate).mockResolvedValue(forGroup({ occurrence: occurrence({ revision: "r0" }) }));
+    const leaving = () => !window.dispatchEvent(new Event("beforeunload", { cancelable: true }));
+    renderInSession();
+    await openEditor();
+    await userEvent.type(await screen.findByLabelText("Title"), "!");
+    await waitFor(() => expect(screen.getByRole("button", { name: "Save this date" })).toBeEnabled());
+    edits.answer(new TypeError("Failed to fetch"));
+    await userEvent.click(screen.getByRole("button", { name: "Save this date" }));
+    const again = await screen.findByRole("button", { name: "Try again" });
+    await waitFor(() => expect(again).toBeEnabled());
+    expect(leaving()).toBe(false);
+    const reread = later<OccurrenceResponse>();
+    vi.mocked(Events.managedDate).mockReturnValue(reread.promise);
+    await userEvent.click(again);
+    await waitFor(() => expect(edits.sent).toHaveLength(2));
+    expect(await screen.findByText("Loading this date…")).toBeInTheDocument();
+    expect(leaving()).toBe(false);
+  });
+
   it("a household read that fails leaves the date's own read in charge of the editor, and puts no household detail in it", async () => {
     vi.mocked(Groups.get).mockResolvedValue(managing);
     vi.mocked(Households.mine).mockRejectedValue(new TypeError("Failed to fetch"));
