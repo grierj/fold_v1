@@ -945,7 +945,7 @@ POST /api/v1/groups/:id/events              → 201 {event} | 409 group_events_n
      again after the body arrives. The default uses the group's value then;
      a session that ended answers 401.
 PUT  /api/v1/events/:id                     → 200 {event} | 409 event_changed   (leader, host, or admin; series edit)
-     body: the create body's fields to change, and the required revision of the read the edit was made from (below)
+     body: the create body's fields to change (not visibility, visibilityReason or roomId, which have their own routes), and the required revision of the read the edit was made from (below)
 PUT  /api/v1/events/:id/visibility          → 200 {event}   (leader, host, or admin)
      body: {visibility, reason?, consent?, resetOverrides?}
 DELETE /api/v1/events/:id                   → 200 {}        (leader, host, or admin)
@@ -1038,16 +1038,20 @@ one registration.
 
 **The series revision (DEC-162).** A series edit names the read it was made
 from: its body's `revision` is the `revision` of the event as the editor last
-read it, `1.<generation>.<event id>.<event revision>`, opaque to the client. The
-server compares it, under the event's row lock and before judging anything
-else, with the token of the event as stored, and refuses any other value
-(missing, malformed, another event's, one from before the server restarted, or
-one read before any later change to the event) with 409 `event_changed`,
-writing nothing: no event or date change, notice, audit row or job. The event's
-revision rises with every change to a stored series field, its visibility and
-its series room, by anyone; a save that changes nothing leaves it, and the
-daily extender does not move it. The answer's `event.revision` is the new
-token. A client that is refused reads the event again and saves from that read.
+read it, `1.<generation>.<event id>.<event revision>`, opaque to the client. A
+body the server cannot read is answered first, whatever its revision: 400 for a
+`revision` that is not a string, and for a seat, guest or reminder number that
+is not valid on its own (`invalid_capacity` and the like). Then, under the
+event's row lock and before judging anything against the stored event, the
+server compares the revision with the token of the event as stored, and refuses
+any other value (missing, garbled, another event's, one from before the server
+restarted, or one read before any later change to the event) with 409
+`event_changed`, writing nothing: no event or date change, notice, audit row or
+job. The event's revision rises with every change to a stored series field, its
+visibility and its series room, by anyone; a save that changes nothing leaves
+it, and the daily extender does not move it. The answer's `event.revision` is
+the new token. A client that is refused reads the event again and saves from
+that read.
 
 Childcare (M1.8 slice 3): event create and series update accept
 `childcareAvailable` (default false), `childcareNotes` (up to 500
@@ -1324,8 +1328,15 @@ What each deployed client shows:
   so it says only the group leader or an admin can schedule events there,
   even to a leader. Reloading the page fixes it.
 
+- *"Edit series" / "Edit event" from the earlier release* sends no `revision`
+  (DEC-162), so its save answers 409 `event_changed`, which that page shows as
+  "We couldn't update the series." Nothing is saved. Reloading the page loads
+  the current SPA, which saves normally.
+
 The upgrade restarts the server, so any revision a tab already holds is
-refused once with `date_changed` (After any restart, above).
+refused once: a date's with `date_changed` (After any restart, above), and a
+series' with `event_changed`, after which the current editor reads the event
+again and the next Save goes through.
 
 ### Registration
 

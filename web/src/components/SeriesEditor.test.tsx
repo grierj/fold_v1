@@ -330,6 +330,34 @@ describe("SeriesEditor form layout (DEC-95)", () => {
     expect(vi.mocked(Events.update).mock.calls[1][1]).toMatchObject({ title: "Supper club", location: "Annex", revision: "r2" });
   });
 
+  it("shows the stored value in a field the person also typed in, on a newer read and after a refusal, so no save overwrites a value its sender never saw", async () => {
+    vi.mocked(Events.update).mockReset()
+      .mockRejectedValueOnce(new ApiError(409, "the event changed", { code: "event_changed" }))
+      .mockResolvedValue({ event: testEvent(7) });
+    const series = { ...baseSeries, revision: "r1" };
+    const props = { idPrefix: "same", onSaved: () => {}, onStale: () => {}, onClose: () => {} };
+    const view = render(<SeriesEditor series={series} {...props} />);
+    const description = () => screen.getByRole("textbox", { name: /^Description/ });
+    await userEvent.type(description(), "Mine");
+    await userEvent.clear(screen.getByRole("textbox", { name: /^Location/ }));
+    await userEvent.type(screen.getByRole("textbox", { name: /^Location/ }), "Annex");
+    // A plain newer read (the person's own room change): someone else's description is the one shown.
+    view.rerender(<SeriesEditor series={{ ...series, description: "Theirs", revision: "r2" }} {...props} />);
+    expect(description()).toHaveValue("Theirs");
+    expect(screen.getByRole("textbox", { name: /^Location/ })).toHaveValue("Annex");
+    await userEvent.clear(description());
+    await userEvent.type(description(), "Mine again");
+    await userEvent.click(screen.getByRole("button", { name: "Save series" }));
+    expect(await screen.findByText("This event changed while you were saving. Check it and save again.")).toBeInTheDocument();
+    // The read after the refusal: the same field changed again under what was typed.
+    view.rerender(<SeriesEditor series={{ ...series, description: "Theirs, later", revision: "r3" }} {...props} />);
+    expect(description()).toHaveValue("Theirs, later");
+    expect(screen.getByRole("textbox", { name: /^Location/ })).toHaveValue("Annex");
+    await userEvent.click(screen.getByRole("button", { name: "Save series" }));
+    await waitFor(() => expect(Events.update).toHaveBeenCalledTimes(2));
+    expect(vi.mocked(Events.update).mock.calls[1][1]).toMatchObject({ description: "Theirs, later", location: "Annex", revision: "r3" });
+  });
+
   it("does not call an untouched form changed after a newer read", () => {
     const series = { ...baseSeries, revision: "r1" };
     const view = render(<SeriesEditor series={series} idPrefix="clean" onSaved={() => {}} />);

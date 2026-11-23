@@ -74,8 +74,8 @@ function EventDetailContent() {
   const visibilityAction = useAction();
   const panelBusy = seriesAction.running || visibilityAction.running;
   const editButton = useRef<HTMLButtonElement>(null);
-  // A save in the panel reads the page again (a series save from nothing): focus still in the panel waits on the main
-  // region, and goes back to Edit series, the panel's opener, once the new read is shown.
+  // A save in the panel reads the page again from nothing: focus still in the panel waits on the main region, and
+  // focus the reload dropped goes back to Edit series, the panel's opener, once the page is shown.
   const returnToEdit = useRef(false);
   // Close took the focused control with the panel: focus goes back to Edit series, never the page body.
   const closedPanel = useRef(false);
@@ -85,8 +85,6 @@ function EventDetailContent() {
   const editorRef = useRef<HTMLDivElement>(null);
   // Rooms changed (a series room, a date's room, a cancelled or moved date): ask for the dates that need one again.
   const [roomsRevision, setRoomsRevision] = useState(0);
-  // A visibility save replaces its control once the page's next read has ended, so it starts from what is stored.
-  const [visibilitySaves, setVisibilitySaves] = useState(0);
   // "Pick a room" asks one date's card to open its editor; seq makes a second ask count.
   const [pickRequest, setPickRequest] = useState<{ date: string; seq: number } | null>(null);
 
@@ -292,7 +290,7 @@ function EventDetailContent() {
           />
           {canSetVisibility && (
             <EventVisibilityControl
-              key={`${event.id}-${event.visibility}-${event.leaderOpened}-${visibilitySaves}`}
+              key={`${event.id}-${event.visibility}-${event.leaderOpened}`}
               eventId={event.id}
               churchWide={event.churchWide}
               groupName={event.groupName}
@@ -301,8 +299,7 @@ function EventDetailContent() {
               leaderOpened={event.leaderOpened}
               onSaved={() => {
                 parkFocus();
-                // Kept on screen: the series editor beside it keeps what was typed and takes the new revision.
-                void load.reload().then(() => setVisibilitySaves((n) => n + 1));
+                void load.retry();
               }}
               action={visibilityAction}
               locked={seriesAction.running}

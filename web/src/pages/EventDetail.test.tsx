@@ -878,45 +878,6 @@ describe("EventDetail ?edit=series (DEC-161)", () => {
     await waitFor(() => expect(screen.getByRole("button", { name: "Edit event" })).toHaveAttribute("aria-expanded", "false"));
   });
 
-  it("saves the series on the first press after a visibility save, keeping what was typed", async () => {
-    vi.mocked(Events.get).mockResolvedValueOnce(at("r1")).mockResolvedValue(at("r2", { visibility: "invite_only" }));
-    vi.mocked(Events.visibilityImpact).mockResolvedValue({ visibility: "invite_only", currentVisibility: "public", tightened: [], leaderOpened: [] });
-    vi.mocked(Events.setVisibility).mockResolvedValue({ event: { ...groupEvent.event, visibility: "invite_only" } });
-    vi.mocked(Events.update).mockResolvedValue({ event: groupEvent.event });
-    renderPage(link);
-    await userEvent.type(await screen.findByLabelText("Title"), " night");
-    await userEvent.click(screen.getByRole("radio", { name: /^Invite only/ }));
-    await userEvent.click(screen.getByRole("button", { name: "Save visibility" }));
-    await waitFor(() => expect(Events.get).toHaveBeenCalledTimes(2));
-    await waitFor(() => expect(screen.getByRole("radio", { name: /^Invite only/ })).toBeChecked());
-    expect(screen.getByLabelText("Title")).toHaveValue("Hybrid study night");
-
-    await userEvent.click(screen.getByRole("button", { name: "Save series" }));
-    await waitFor(() => expect(Events.update).toHaveBeenCalledExactlyOnceWith(7, expect.objectContaining({ title: "Hybrid study night", revision: "r2" })));
-    await waitFor(() => expect(screen.getByRole("button", { name: "Edit event" })).toHaveAttribute("aria-expanded", "false"));
-  });
-
-  it("starts the visibility control afresh after each save, also when the visibility stays the same", async () => {
-    // Opened wider than its private group: the reason field shows, and saving the same value keeps the key.
-    const opened = { ...groupEvent, event: { ...groupEvent.event, groupVisibility: "private" as const, leaderOpened: true } };
-    vi.mocked(Events.get).mockResolvedValue(opened);
-    vi.mocked(Events.visibilityImpact).mockResolvedValue({ visibility: "public", currentVisibility: "public", tightened: [], leaderOpened: [] });
-    vi.mocked(Events.setVisibility).mockResolvedValue({ event: opened.event });
-    renderPage(link);
-    await screen.findByLabelText("Title");
-
-    for (const reason of ["first note", "second note"]) {
-      const before = vi.mocked(Events.get).mock.calls.length;
-      await userEvent.type(screen.getByRole("textbox", { name: /^Reason/ }), reason);
-      await userEvent.click(screen.getByRole("button", { name: "Save visibility" }));
-      await waitFor(() => expect(Events.get).toHaveBeenCalledTimes(before + 1));
-      await waitFor(() => expect(screen.getByRole("textbox", { name: /^Reason/ })).toHaveValue(""));
-      expect(Events.setVisibility).toHaveBeenLastCalledWith(7, expect.objectContaining({ visibility: "public", reason }));
-    }
-
-    expect(Events.setVisibility).toHaveBeenCalledTimes(2);
-  });
-
   it("saves the series on the first press after a series room change, keeping what was typed", async () => {
     const weekly: EventDetailResponse = { ...groupEvent, event: { ...groupEvent.event, recurrenceRule: "FREQ=WEEKLY" }, occurrences: [occurrence({ recurrenceRule: "FREQ=WEEKLY" })] };
     vi.mocked(Events.get).mockResolvedValueOnce(at("r1", {}, weekly)).mockResolvedValue(at("r2", { description: "Now in the hall" }, weekly));

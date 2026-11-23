@@ -3694,10 +3694,14 @@ func TestSeriesNullCapacityClearsTheLimit(t *testing.T) {
 		Event eventJSON `json:"event"`
 	}
 	start := time.Now().UTC().AddDate(0, 0, 40).Format("2006-01-02") + "T18:00"
-	decodeJSON(t, admin.do("POST", "/api/v1/groups/"+gid+"/events", map[string]any{
+	w := admin.do("POST", "/api/v1/groups/"+gid+"/events", map[string]any{
 		"title": "Open night", "startsLocal": start, "durationMinutes": 60, "tzid": "UTC", "capacity": nil, "guestsAllowed": nil,
-	}, true), &created)
-	if created.Event.Capacity != nil || created.Event.GuestsAllowed != 0 {
+	}, true)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("create with null: %d %s", w.Code, w.Body.String())
+	}
+	decodeJSON(t, w, &created)
+	if created.Event.ID == 0 || created.Event.Capacity != nil || created.Event.GuestsAllowed != 0 {
 		t.Fatalf("created with null: capacity %v guests %d", created.Event.Capacity, created.Event.GuestsAllowed)
 	}
 }
