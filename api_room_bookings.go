@@ -84,12 +84,12 @@ type placement struct {
 // the date's lock, then the room's.
 func placeBooking(tx *gorm.DB, occ *models.EventOccurrence, room *models.Room, setup, teardown int, p placement) (bookResult, error) {
 	by, reason, keepRequested := p.by, p.reason, p.keepRequested
-	insert := func(status string, overlap bool, why string) error {
+	insert := func(move policy.RoomBookingMove, why string) error {
 		return tx.Exec(`INSERT INTO room_bookings (occurrence_id, room_id, starts_at, ends_at, setup_minutes, teardown_minutes,
 			padded_range, status, allow_overlap, overlap_reason, created_by) VALUES (?, ?, ?, ?, ?, ?, `+paddedRangeSQL+`, ?, ?, ?, ?)`,
 			occ.ID, room.ID, occ.StartsAt, occ.EndsAt, setup, teardown,
 			occ.StartsAt, setup, occ.EndsAt, teardown,
-			status, overlap, why, by).Error
+			move.To().Status(), move.To() == policy.RoomBookingDoubleBooked, why, by).Error
 	}
 	held, err := heldByOverlap(tx, room.ID, occ.ID, occ.StartsAt, occ.EndsAt, setup, teardown)
 	if err != nil {
@@ -97,7 +97,7 @@ func placeBooking(tx *gorm.DB, occ *models.EventOccurrence, room *models.Room, s
 	}
 	if !held {
 		free, err := trySavepoint(tx, fmt.Sprintf("book%d", occ.ID), func() error {
-			return insert(models.BookingConfirmed, false, "")
+			return insert(policy.BookingPlace, "")
 		})
 		if err != nil {
 			return 0, err
@@ -109,8 +109,8 @@ func placeBooking(tx *gorm.DB, occ *models.EventOccurrence, room *models.Room, s
 			// covers confirmed rows only, so a requested insert never meets
 			// the conflict, and the other way to ask (a second held-by test)
 			// would be one more busy definition (rooms.HeldCondition).
-			return bookedPending, tx.Exec(`UPDATE room_bookings SET status = ?, request_id = ?, updated_at = now() WHERE occurrence_id = ?`,
-				models.BookingRequested, *p.requestID, occ.ID).Error
+			_, err := changeBookings(tx, policy.BookingAwaitApproval, "request_id = ?", []any{*p.requestID}, "occurrence_id = ?", occ.ID)
+			return bookedPending, err
 		}
 		if free {
 			return bookedFree, nil
@@ -118,9 +118,9 @@ func placeBooking(tx *gorm.DB, occ *models.EventOccurrence, room *models.Room, s
 	}
 	switch {
 	case reason != "":
-		return bookedOverlap, insert(models.BookingConfirmed, true, reason)
+		return bookedOverlap, insert(policy.BookingPlaceOverlap, reason)
 	case keepRequested:
-		return bookedRequested, insert(models.BookingRequested, false, "")
+		return bookedRequested, insert(policy.BookingPlaceBusy, "")
 	}
 	return notBooked, nil
 }
@@ -289,15 +289,18 @@ func (a *App) dateBooking(db *gorm.DB, occurrenceID uint, want int) (*roomBookin
 	if err := db.First(&r, b.RoomID).Error; err != nil {
 		return nil, err
 	}
-	pending := false
-	if b.RequestID != nil && b.Status == models.BookingRequested {
-		if err := db.Raw("SELECT EXISTS (SELECT 1 FROM room_requests WHERE id = ? AND status = ?)", *b.RequestID, models.RoomRequestPending).Scan(&pending).Error; err != nil {
+	requestPending := false
+	if b.RequestID != nil {
+		var status []string
+		if err := db.Model(&models.RoomRequest{}).Where("id = ?", *b.RequestID).Pluck("status", &status).Error; err != nil {
 			return nil, err
 		}
+		requestPending = len(status) == 1 && policy.RoomRequestUndecided(status[0])
 	}
+	state := policy.RoomBookingStateOf(b.Status, requestPending, b.AllowOverlap)
 	return &roomBookingJSON{RoomID: r.ID, RoomName: r.Name, Building: r.Building, Status: b.Status,
 		SetupMinutes: b.SetupMinutes, TeardownMinutes: b.TeardownMinutes, DoubleBooked: b.AllowOverlap,
-		TooSmall: tooSmall(r.Capacity, want), Pending: pending}, nil
+		TooSmall: tooSmall(r.Capacity, want), Pending: state == policy.RoomBookingWaiting}, nil
 }
 
 // apiSetDateRoom books, changes or releases a date's room. roomId null
@@ -526,9 +529,10 @@ func moveRoomBookings(tx *gorm.DB, occurrenceIDs []uint) ([]string, error) {
 		if occ.StartsAt.Equal(b.StartsAt) && occ.EndsAt.Equal(b.EndsAt) {
 			continue
 		}
-		move := func(status string) error {
-			return tx.Exec(`UPDATE room_bookings SET starts_at = ?, ends_at = ?, padded_range = `+paddedRangeSQL+`, status = ?, updated_at = now() WHERE id = ?`,
-				occ.StartsAt, occ.EndsAt, occ.StartsAt, b.SetupMinutes, occ.EndsAt, b.TeardownMinutes, status, b.ID).Error
+		move := func(m policy.RoomBookingMove) error {
+			_, err := changeBookings(tx, m, `starts_at = ?, ends_at = ?, padded_range = `+paddedRangeSQL,
+				[]any{occ.StartsAt, occ.EndsAt, occ.StartsAt, b.SetupMinutes, occ.EndsAt, b.TeardownMinutes}, "id = ?", b.ID)
+			return err
 		}
 		if _, err := lockRoom(tx, b.RoomID); err != nil {
 			return nil, err
@@ -547,12 +551,12 @@ func moveRoomBookings(tx *gorm.DB, occurrenceIDs []uint) ([]string, error) {
 		kept := false
 		if !held {
 			var err error
-			if kept, err = trySavepoint(tx, fmt.Sprintf("move%d", b.ID), func() error { return move(b.Status) }); err != nil {
+			if kept, err = trySavepoint(tx, fmt.Sprintf("move%d", b.ID), func() error { return move(policy.BookingDateMoved) }); err != nil {
 				return nil, err
 			}
 		}
 		if !kept {
-			if err := move(models.BookingRequested); err != nil {
+			if err := move(policy.BookingDateMovedBusy); err != nil {
 				return nil, err
 			}
 			lost = append(lost, models.FormatCalendarDate(occ.OriginalDate))
