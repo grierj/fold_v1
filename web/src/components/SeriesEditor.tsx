@@ -191,9 +191,6 @@ export function SeriesEditor({
     const capTrimmed = seats.capacity.trim();
     const capInitial = initial.seats.capacity;
 
-    // Only send capacity fields that changed: on the group page the
-    // initial capacity is the date's effective value, and an untouched
-    // field must not clobber a per-date override.
     const body: EventInput = {
       title: title.trim(),
       description: description.trim(),
@@ -217,8 +214,6 @@ export function SeriesEditor({
 
     if (reminderPush !== initial.reminderPush) body.reminderPush = reminderPush;
 
-    // Same only-when-changed rule as capacity: an untouched remote cap
-    // on the group page must not clobber a per-date override.
     if (remote.available !== initial.remote.available || remote.capacity.trim() !== initial.remote.capacity) {
       Object.assign(body, remoteBody(remote));
     }
@@ -238,7 +233,6 @@ export function SeriesEditor({
         markSaved();
         setSaved(true);
         kept.close();
-        onSaved();
       } catch (err) {
         const msg = errorText(err, "We couldn't update the series.");
         const field = optionFieldOfError(err);
@@ -259,7 +253,7 @@ export function SeriesEditor({
 
         return false;
       }
-    });
+    }, { followUp: async () => { onSaved(); } });
   }
 
   return (<>

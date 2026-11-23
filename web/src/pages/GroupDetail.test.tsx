@@ -781,6 +781,33 @@ it.each([["Edit event", ""], ["Edit series", "FREQ=WEEKLY"]])("sends %s from a d
   expect(Events.update).not.toHaveBeenCalled();
 });
 
+it("asks nothing when Edit event leaves a date edit whose save was stored, while the date is still being read again", async () => {
+  vi.mocked(Groups.get).mockResolvedValue({ ...page, canManage: true, upcomingEvents: [occurrence({ groupId: 1 })] });
+  const reread = deferred<OccurrenceResponse>();
+  vi.mocked(Events.managedDate).mockResolvedValueOnce(forGroup({ occurrence: { ...occurrence({}), revision: "r0" } })).mockReturnValue(reread.promise);
+  const confirm = vi.spyOn(window, "confirm").mockReturnValue(false);
+
+  const router = createMemoryRouter([
+    { path: "/groups/:id", element: <><UnsavedChangesBlocker /><DateWritesProvider credential={credential}><GroupDetail /></DateWritesProvider></> },
+    { path: "/events/:id", element: <Where /> },
+  ], { initialEntries: ["/groups/1"] });
+
+  render(<RouterProvider router={router} />);
+  const more = await screen.findByRole("button", { name: "More for Supper on 2026-12-01" });
+  await userEvent.click(more);
+  await userEvent.click(screen.getByRole("menuitem", { name: "Edit this date" }));
+  await userEvent.type(await screen.findByLabelText("Title"), "!");
+  await waitFor(() => expect(screen.getByRole("button", { name: "Save this date" })).toBeEnabled());
+  await userEvent.click(screen.getByRole("button", { name: "Save this date" }));
+  await waitFor(() => expect(edits.sent).toHaveLength(1));
+  await waitFor(() => expect(vi.mocked(Events.managedDate).mock.calls.length).toBeGreaterThan(1));
+  await userEvent.click(more);
+  await userEvent.click(screen.getByRole("menuitem", { name: "Edit event" }));
+  expect(await screen.findByText("At /events/7?edit=series")).toBeInTheDocument();
+  expect(confirm).not.toHaveBeenCalled();
+  confirm.mockRestore();
+});
+
 it("asks before Edit event leaves a date edit that has a change typed, and keeps the draft when told to stay", async () => {
   vi.mocked(Groups.get).mockResolvedValue({ ...page, canManage: true, upcomingEvents: [occurrence({ groupId: 1 })] });
   vi.mocked(Events.managedDate).mockImplementation(async () => forGroup({ occurrence: { ...occurrence({}), revision: "r0" } }));
