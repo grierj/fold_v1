@@ -1,14 +1,20 @@
 package main
 
 import (
+	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"fold/internal/notify"
+	"fold/internal/policy"
 	"fold/models"
+
+	"gorm.io/gorm"
 )
 
 // pushRowsOf is a message's push rows by the recipient's address.
@@ -495,5 +501,414 @@ func TestLockScreenSafeTakesOnlyPhoneNumbers(t *testing.T) {
 		if got := lockScreenSafe(in); got != want {
 			t.Errorf("%q became %q, want %q", in, got, want)
 		}
+	}
+}
+
+// seedDatePush is a sending announcement to the departure fixture's kept
+// date, whose plain text is a literal sentinel, with a queued push row and a
+// device for the departed person, who has push on.
+func seedDatePush(t *testing.T, f occurrenceReadFixture, text string) (models.MessageRecipient, testDevice, *fakePush) {
+	t.Helper()
+	fp := useFakePush(t, f.app)
+	pushConsentRow(t, f.app, f.recipient, "all", models.ConsentOptedIn)
+	dev := newPushDevice(t, f.app, f.recipient, "phone")
+	aud, _ := json.Marshal(audienceJSON{Type: policy.AudienceOccurrence, OccurrenceID: f.dates[1].ID})
+	now := time.Now().UTC()
+	m := models.Message{AuthorID: &f.issuer.ID, Status: models.MessageSending, Category: models.MessageCategoryAnnouncement,
+		Subject: "Date news", BodyHTML: "<p>" + text + "</p>", BodyText: text, Audience: string(aud), ScheduledAt: &now}
+	gormMust(t, f.app.DB.Create(&m))
+	row := models.MessageRecipient{MessageID: m.ID, UserID: f.recipient.ID, Channel: models.DeliveryPush, Status: models.RecipientQueued}
+	gormMust(t, f.app.DB.Create(&row))
+	return row, dev, fp
+}
+
+// TestAnnouncementPushNeverStraddlesAnEdit: an announcement push decides
+// whether it still goes, and fills its lock screen, in one snapshot. The
+// departed person's kept date reaches its old end and the real guarded edit
+// ends the grant and moves the date in one commit, at the "grants" seam of
+// that decision. Before the edit the grant had lapsed and after it the grant is
+// stamped, so in either committed state the push does not go: the author's
+// literal words never reach the lock screen. A decision read over separate
+// statements would pair the live grant with the moved date and push them.
+func TestAnnouncementPushNeverStraddlesAnEdit(t *testing.T) {
+	const sentinel = "Literal push sentinel"
+	f := newDepartureReadFixture(t, models.VisibilityInviteOnly, models.RegGoing, policy.OccurrenceOriginDepartureSelf)
+	target := f.dates[1]
+	date := models.FormatCalendarDate(target.OriginalDate)
+	row, dev, fp := seedDatePush(t, f, sentinel)
+	base := editBaseOf(t, f.admin, f.event.ID, date)
+	newMutableClock(f.app, target.EndsAt)
+	var fired atomic.Bool
+	f.app.hooks.invitationReadStep = func(step string) {
+		if step != "grants" || !fired.CompareAndSwap(false, true) {
+			return
+		}
+		w := postDateEdit(f.admin, f.event.ID, date, dateEditBody(newDateAttempt(t), base.Revision,
+			map[string]any{"startsLocal": target.StartsAt.Add(2 * time.Hour).UTC().Format("2006-01-02T15:04"), "title": "Moved secret title"}))
+		if w.Code != http.StatusOK {
+			t.Errorf("the edit at the seam: %d %s", w.Code, w.Body.String())
+		}
+	}
+	if err := f.app.deliverMessagePush(context.Background(), row.ID, dev.ID, 0); err != nil {
+		t.Fatal(err)
+	}
+	if !fired.Load() {
+		t.Fatal("the push never reached the grants step: no straddle was tried")
+	}
+	var got models.MessageRecipient
+	gormMust(t, f.app.DB.First(&got, row.ID))
+	if got.Status != models.RecipientSuppressed || got.Reason != skipCantSeeDate || fp.total() != 0 {
+		t.Fatalf("the push went, or was not skipped as hidden: %+v, pushes %v", got, fp.sent)
+	}
+}
+
+// TestPushesDecideInOneSnapshotAndSendAfter: the announcement push and the
+// push reminder read every fact of their decision and payload through their
+// one snapshot, and call the push service and record the row only after it
+// ends: on a one-connection pool any read outside the snapshot, or a send or
+// record inside it, would wait for the connection the snapshot holds.
+func TestPushesDecideInOneSnapshotAndSendAfter(t *testing.T) {
+	t.Run("announcement", func(t *testing.T) {
+		f := newDepartureReadFixture(t, models.VisibilityInviteOnly, models.RegGoing, policy.OccurrenceOriginDepartureSelf)
+		row, dev, fp := seedDatePush(t, f, "Hello from {{event_title}}")
+		gormMust(t, f.app.DB.Model(&models.Message{}).Where("id = ?", row.MessageID).Update("subject", "{{event_title}} news"))
+		one := oneConnectionPool(t, f.app)
+		ctx := oneConnection(t, f.app, one)
+		if err := f.app.deliverMessagePush(ctx, row.ID, dev.ID, 0); err != nil {
+			t.Fatalf("on one connection: %v", err)
+		}
+		f.app.DB = one
+		var got models.MessageRecipient
+		gormMust(t, f.app.DB.First(&got, row.ID))
+		if got.Status != models.RecipientSent || fp.count(dev.path) != 1 {
+			t.Fatalf("the push: %+v, pushes %v", got, fp.sent)
+		}
+		if note := pushPayload(t, fp, dev); note.Title != "Retained date title news" {
+			t.Fatalf("lock screen %q", note.Title)
+		}
+	})
+	t.Run("reminder", func(t *testing.T) {
+		f := newDepartureReadFixture(t, models.VisibilityInviteOnly, models.RegGoing, policy.OccurrenceOriginDepartureSelf)
+		row, dev, fp, planned := seedReminderPush(t, f)
+		one := oneConnectionPool(t, f.app)
+		ctx := oneConnection(t, f.app, one)
+		if err := f.app.deliverMessagePush(ctx, row.ID, dev.ID, planned); err != nil {
+			t.Fatalf("on one connection: %v", err)
+		}
+		f.app.DB = one
+		var got models.MessageRecipient
+		gormMust(t, f.app.DB.First(&got, row.ID))
+		if got.Status != models.RecipientSent || fp.count(dev.path) != 1 {
+			t.Fatalf("the push reminder: %+v, pushes %v", got, fp.sent)
+		}
+		if note := pushPayload(t, fp, dev); !strings.Contains(note.Title, "Retained date title") {
+			t.Fatalf("lock screen %q", note.Title)
+		}
+	})
+}
+
+// seedReminderPush is a queued 2-hour push reminder for the departure
+// fixture's kept date, with a device for the departed person, who has push
+// on, and the app's clock at the planned time it returns.
+func seedReminderPush(t *testing.T, f occurrenceReadFixture) (models.MessageRecipient, testDevice, *fakePush, int64) {
+	t.Helper()
+	fp := useFakePush(t, f.app)
+	pushConsentRow(t, f.app, f.recipient, "all", models.ConsentOptedIn)
+	dev := newPushDevice(t, f.app, f.recipient, "phone")
+	occ := f.dates[1]
+	key := pushReminderKey(occ.ID, occ.StartsAt)
+	aud, _ := json.Marshal(audienceJSON{Type: policy.AudienceOccurrence, OccurrenceID: occ.ID, Statuses: []string{models.RegGoing}})
+	now := time.Now().UTC()
+	m := models.Message{Channel: models.DeliveryPush, Status: models.MessageSending, Category: models.MessageCategoryReminder,
+		Subject: "Reminder", Audience: string(aud), ScheduledAt: &now, OccurrenceID: &occ.ID, ReminderKey: &key}
+	gormMust(t, f.app.DB.Create(&m))
+	row := models.MessageRecipient{MessageID: m.ID, UserID: f.recipient.ID, Channel: models.DeliveryPush, Status: models.RecipientQueued}
+	gormMust(t, f.app.DB.Create(&row))
+	planned := occ.StartsAt.Add(-2 * time.Hour)
+	f.app.clock = func() time.Time { return planned }
+	return row, dev, fp, planned.Unix()
+}
+
+// TestPushDestinationIsReadInThePayloadSnapshot: the device a push goes to,
+// its owner's account, the church's switch and consent are read in the
+// snapshot that builds the payload. A change committed after the early
+// checks and before that snapshot (pushStep "snapshot") stops the push: a shared
+// browser rebound to another account (same endpoint and keys) never gets the
+// first person's payload, and consent turned off or a church switch turned
+// off before the snapshot is honored. Checked for the announcement push and
+// the push reminder.
+func TestPushDestinationIsReadInThePayloadSnapshot(t *testing.T) {
+	type seeded struct {
+		f       occurrenceReadFixture
+		row     models.MessageRecipient
+		dev     testDevice
+		fp      *fakePush
+		planned int64
+	}
+	paths := map[string]func(t *testing.T) seeded{
+		"announcement": func(t *testing.T) seeded {
+			f := newDepartureReadFixture(t, models.VisibilityInviteOnly, models.RegGoing, policy.OccurrenceOriginDepartureSelf)
+			row, dev, fp := seedDatePush(t, f, "Literal push sentinel")
+			return seeded{f: f, row: row, dev: dev, fp: fp}
+		},
+		"reminder": func(t *testing.T) seeded {
+			f := newDepartureReadFixture(t, models.VisibilityInviteOnly, models.RegGoing, policy.OccurrenceOriginDepartureSelf)
+			row, dev, fp, planned := seedReminderPush(t, f)
+			return seeded{f: f, row: row, dev: dev, fp: fp, planned: planned}
+		},
+	}
+	changes := map[string]struct {
+		commit func(t *testing.T, s seeded)
+		reason string
+	}{
+		"device rebound": {func(t *testing.T, s seeded) {
+			other := newTestUser(t, s.f.app, "newholder", "password123456", models.RoleMember)
+			gormMust(t, s.f.app.DB.Model(&models.PushSubscription{}).Where("id = ?", s.dev.ID).Update("user_id", other.ID))
+		}, pushWhyGone},
+		"consent off": {func(t *testing.T, s seeded) {
+			pushConsentRow(t, s.f.app, s.f.recipient, "all", models.ConsentOptedOut)
+		}, pushWhyNotOn},
+		"church switch off": {func(t *testing.T, s seeded) {
+			if err := setSettingIn(s.f.app.DB, settingPushEnabled, "false"); err != nil {
+				t.Fatal(err)
+			}
+		}, pushWhyChurchOff},
+	}
+	for path, seed := range paths {
+		for name, ch := range changes {
+			t.Run(path+"/"+name, func(t *testing.T) {
+				s := seed(t)
+				var fired atomic.Bool
+				s.f.app.hooks.pushStep = func(step string) {
+					if step == "snapshot" && fired.CompareAndSwap(false, true) {
+						ch.commit(t, s)
+					}
+				}
+				if err := s.f.app.deliverMessagePush(context.Background(), s.row.ID, s.dev.ID, s.planned); err != nil {
+					t.Fatal(err)
+				}
+				if !fired.Load() {
+					t.Fatal("the push never reached its snapshot")
+				}
+				var got models.MessageRecipient
+				gormMust(t, s.f.app.DB.First(&got, s.row.ID))
+				if s.fp.total() != 0 || got.Status != models.RecipientSuppressed || got.Reason != ch.reason {
+					t.Fatalf("the push went or was recorded wrongly: %+v, pushes %v", got, s.fp.sent)
+				}
+			})
+		}
+	}
+}
+
+// TestDelayedSeriesPushCountsFromTheScheduledTime: a series announcement's
+// push that waits (quiet hours, a backlog) still goes when the reader's only
+// date they may see started while it waited, because a series audience
+// counts dates from the message's stored scheduled time, as the email send
+// and the read page count them. The reader's other date is hidden from them;
+// a second reader, the control, holds only that hidden date and gets no push,
+// no email and no read page. Push, email and the read page agree for both.
+func TestDelayedSeriesPushCountsFromTheScheduledTime(t *testing.T) {
+	f := newReadVisFixture(t, models.VisibilityPublic)
+	control := newTestUser(t, f.app, "control", "password1234", models.RoleMember)
+	controlC := loginAPI(t, f.app, "control", "password1234")
+	started, hidden := f.occs[0], f.occs[1]
+	now := time.Now().UTC()
+	f.setDate(t, started, "starts_at", now.Add(-30*time.Minute))
+	f.setDate(t, started, "ends_at", now.Add(30*time.Minute))
+	f.setDate(t, hidden, "visibility_override", models.VisibilityInviteOnly)
+	f.register(t, f.reader, started)
+	f.register(t, f.reader, hidden)
+	f.register(t, control, hidden)
+
+	fp := useFakePush(t, f.app)
+	id, emailRows := seedSending(t, f.app, f.leaderU, f.seriesAudience(), toRow(f.reader), toRow(control))
+	gormMust(t, f.app.DB.Model(&models.Message{}).Where("id = ?", id).Update("scheduled_at", now.Add(-2*time.Hour)))
+	devs := map[uint]testDevice{}
+	pushRows := map[uint]models.MessageRecipient{}
+	for _, u := range []*models.User{f.reader, control} {
+		pushConsentRow(t, f.app, u, "all", models.ConsentOptedIn)
+		devs[u.ID] = newPushDevice(t, f.app, u, u.Name)
+		row := models.MessageRecipient{MessageID: id, UserID: u.ID, Channel: models.DeliveryPush, Status: models.RecipientQueued}
+		gormMust(t, f.app.DB.Create(&row))
+		pushRows[u.ID] = row
+	}
+	for uid, row := range pushRows {
+		if err := f.app.deliverMessagePush(context.Background(), row.ID, devs[uid].ID, 0); err != nil {
+			t.Fatal(err)
+		}
+	}
+	readOf := func(c *apiClient) int {
+		return c.do("GET", "/api/v1/messages/"+itoa(id)+"/read", nil, false).Code
+	}
+	// The read page judges a queued email row live, before the send decides.
+	if code := readOf(f.readerC); code != http.StatusOK {
+		t.Fatalf("the reader's read page before the email: %d", code)
+	}
+	if code := readOf(controlC); code != http.StatusNotFound {
+		t.Fatalf("the control's read page before the email: %d", code)
+	}
+	s := &deliverySender{}
+	if err := deliverRows(f.app, s, id, emailRows); err != nil {
+		t.Fatal(err)
+	}
+	var reader, ctl models.MessageRecipient
+	gormMust(t, f.app.DB.First(&reader, pushRows[f.reader.ID].ID))
+	gormMust(t, f.app.DB.First(&ctl, pushRows[control.ID].ID))
+	if reader.Status != models.RecipientSent || fp.count(devs[f.reader.ID].path) != 1 {
+		t.Fatalf("the reader's delayed push: %+v, pushes %v", reader, fp.sent)
+	}
+	if ctl.Status != models.RecipientSuppressed || ctl.Reason != skipCantSeeDate || fp.count(devs[control.ID].path) != 0 {
+		t.Fatalf("the control's push: %+v, pushes %v", ctl, fp.sent)
+	}
+	var readerEmail, controlEmail models.MessageRecipient
+	gormMust(t, f.app.DB.First(&readerEmail, emailRows[0]))
+	gormMust(t, f.app.DB.First(&controlEmail, emailRows[1]))
+	if readerEmail.Status != models.RecipientSent || controlEmail.Status != models.RecipientSuppressed || controlEmail.Reason != skipCantSeeDate {
+		t.Fatalf("email disagrees with push: reader %+v, control %+v", readerEmail, controlEmail)
+	}
+	if code := readOf(f.readerC); code != http.StatusOK {
+		t.Fatalf("the reader's read page: %d", code)
+	}
+	if code := readOf(controlC); code != http.StatusNotFound {
+		t.Fatalf("the control's read page: %d", code)
+	}
+}
+
+// TestPushPayloadComesFromTheDestinationsSnapshot: an announcement push and a
+// push reminder read their device, its owner and what the payload says in one
+// Repeatable Read snapshot. Right after the device is read there ("destination"),
+// a shared browser is rebound to another account and the date retitled in one
+// commit. The push already chose its device in the earlier state, so it goes,
+// and it carries that state's title: it never pairs a device as it was with a
+// title written after the device changed hands.
+func TestPushPayloadComesFromTheDestinationsSnapshot(t *testing.T) {
+	const retitled = "Retitled after the device moved"
+	for _, path := range []string{"announcement", "reminder"} {
+		t.Run(path, func(t *testing.T) {
+			f := newDepartureReadFixture(t, models.VisibilityInviteOnly, models.RegGoing, policy.OccurrenceOriginDepartureSelf)
+			var row models.MessageRecipient
+			var dev testDevice
+			var fp *fakePush
+			var planned int64
+			if path == "announcement" {
+				row, dev, fp = seedDatePush(t, f, "Hello from {{event_title}}")
+				gormMust(t, f.app.DB.Model(&models.Message{}).Where("id = ?", row.MessageID).Update("subject", "{{event_title}} news"))
+			} else {
+				row, dev, fp, planned = seedReminderPush(t, f)
+			}
+			other := newTestUser(t, f.app, "next holder", "password1234", models.RoleMember)
+			var fired atomic.Bool
+			f.app.hooks.pushStep = func(step string) {
+				if step != "destination" || !fired.CompareAndSwap(false, true) {
+					return
+				}
+				if err := f.app.DB.Transaction(func(tx *gorm.DB) error {
+					if err := tx.Model(&models.PushSubscription{}).Where("id = ?", dev.ID).Update("user_id", other.ID).Error; err != nil {
+						return err
+					}
+					return tx.Model(&models.EventOccurrence{}).Where("id = ?", f.dates[1].ID).Update("title_override", retitled).Error
+				}); err != nil {
+					t.Error(err)
+				}
+			}
+			if err := f.app.deliverMessagePush(context.Background(), row.ID, dev.ID, planned); err != nil {
+				t.Fatal(err)
+			}
+			if !fired.Load() {
+				t.Fatal("the push never reached its destination step")
+			}
+			if fp.count(dev.path) != 1 {
+				t.Fatalf("the push chose its device before the commit and should go: %v", fp.sent)
+			}
+			if note := pushPayload(t, fp, dev); strings.Contains(note.Title, retitled) || !strings.Contains(note.Title, "Retained date title") {
+				t.Fatalf("the payload paired the device as read with a later title: %q", note.Title)
+			}
+		})
+	}
+}
+
+// TestQueuedSeriesPushCountsFromTheCutoffTryAgainSet: a series announcement's
+// push waits (here, until its job runs) while the author presses Try again for
+// a failed email. Try again moves the message's scheduled time, which is the
+// series cutoff, and never touches push rows. The push reads the message again
+// inside its snapshot, so, like the retried email and the read page, it counts
+// from the new cutoff: the reader's only date started before it, so the push
+// doesn't go and the read page closes. The control (no Try again) pushes from
+// the original cutoff, as TestDelayedSeriesPushCountsFromTheScheduledTime does.
+// In "between clocks" the date starts after the push read its clock for quiet
+// hours and the hourly limit and before Try again's cutoff: a cutoff later than
+// that stale clock would count from the clock and admit the date, so the push
+// must decide on a clock read in its snapshot.
+func TestQueuedSeriesPushCountsFromTheCutoffTryAgainSet(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		retry, fresh bool
+	}{{"control", false, false}, {"retry", true, false}, {"between clocks", true, true}} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newReadVisFixture(t, models.VisibilityPublic)
+			started := f.occs[0]
+			now := time.Now().UTC()
+			// The push's earlier clock, held until Try again is pressed.
+			preflight := now.Add(-10 * time.Minute)
+			startsAt := now.Add(-30 * time.Minute)
+			if tc.fresh {
+				startsAt = preflight.Add(5 * time.Minute)
+			}
+			f.setDate(t, started, "starts_at", startsAt)
+			f.setDate(t, started, "ends_at", now.Add(30*time.Minute))
+			f.register(t, f.reader, started)
+			fp := useFakePush(t, f.app)
+			id, emailRows := seedSending(t, f.app, f.leaderU, f.seriesAudience(), toRow(f.reader))
+			gormMust(t, f.app.DB.Model(&models.Message{}).Where("id = ?", id).Updates(map[string]any{"scheduled_at": now.Add(-2 * time.Hour), "status": models.MessageSent}))
+			gormMust(t, f.app.DB.Model(&models.MessageRecipient{}).Where("id = ?", emailRows[0]).Updates(map[string]any{"status": models.RecipientFailed, "error": whyProvider}))
+			pushConsentRow(t, f.app, f.reader, "all", models.ConsentOptedIn)
+			dev := newPushDevice(t, f.app, f.reader, "phone")
+			row := models.MessageRecipient{MessageID: id, UserID: f.reader.ID, Channel: models.DeliveryPush, Status: models.RecipientQueued}
+			gormMust(t, f.app.DB.Create(&row))
+			var pressed atomic.Bool
+			if tc.fresh {
+				f.app.clock = func() time.Time {
+					if pressed.Load() {
+						return time.Now()
+					}
+					return preflight
+				}
+			}
+			f.app.hooks.pushStep = func(step string) {
+				if !tc.retry || step != "snapshot" || !pressed.CompareAndSwap(false, true) {
+					return
+				}
+				if w := f.leader.do("POST", "/api/v1/messages/"+itoa(id)+"/retry", nil, true); w.Code != http.StatusOK {
+					t.Errorf("Try again at the seam: %d %s", w.Code, w.Body.String())
+				}
+			}
+			if err := f.app.deliverMessagePush(context.Background(), row.ID, dev.ID, 0); err != nil {
+				t.Fatal(err)
+			}
+			if tc.retry && !pressed.Load() {
+				t.Fatal("the push never reached its snapshot seam: no Try again was pressed")
+			}
+			gormMust(t, f.app.DB.First(&row, row.ID))
+			var email models.MessageRecipient
+			gormMust(t, f.app.DB.First(&email, emailRows[0]))
+			read := f.readerC.do("GET", "/api/v1/messages/"+itoa(id)+"/read", nil, false).Code
+			if !tc.retry {
+				if row.Status != models.RecipientSent || fp.count(dev.path) != 1 {
+					t.Fatalf("the control's push from the original cutoff: %+v, pushes %v", row, fp.sent)
+				}
+				return
+			}
+			var msg models.Message
+			gormMust(t, f.app.DB.First(&msg, id))
+			if msg.ScheduledAt == nil || !msg.ScheduledAt.After(startsAt) || (tc.fresh && !msg.ScheduledAt.After(preflight)) {
+				t.Fatalf("Try again's cutoff %v isn't after the date's start %v (preflight %v)", msg.ScheduledAt, startsAt, preflight)
+			}
+			if row.Status != models.RecipientSuppressed || fp.count(dev.path) != 0 {
+				t.Fatalf("the push after Try again moved the cutoff: %+v, pushes %v", row, fp.sent)
+			}
+			if email.Status != models.RecipientSuppressed || email.Reason != skipNoLongerOnList || read != http.StatusNotFound {
+				t.Fatalf("email and the read page after Try again: %+v, read %d", email, read)
+			}
+		})
 	}
 }

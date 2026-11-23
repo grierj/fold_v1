@@ -196,6 +196,8 @@ export interface GuestRegistration {
 /** @public Go JSON contract, checked by TestWebTypesMatchGoJSON. */
 export interface Attendee {
   addedByLeader?: boolean;
+  // A live grant that ends with the date: the person kept it after leaving (DEC-156). Managers only.
+  keptAfterLeaving?: boolean;
   email?: string;
   phone?: string;
   accountType?: "adult" | "teen";
@@ -216,6 +218,10 @@ export interface Attendee {
 // endsLocal are the wall clock in tzid.
 export interface EventOccurrence {
  dateUrl?: string;
+ // The date's edit token, only for its managers (the guarded date edit names it).
+ revision?: string;
+ // Set only on a manager's edit base, which also answers a cancelled date.
+ cancelled?: boolean;
  groupVisibility?: Visibility;
  visibilityOverride?: Visibility;
  seriesVisibility?: Visibility;
@@ -254,6 +260,9 @@ export interface EventOccurrence {
   attendees?: Attendee[];
   myHouseholdRegistrations: MyHouseholdRegistration[];
   removedRegistrations?: Attendee[];
+  // Live grants that end with the date (the 409 date_kept_after_leaving count).
+  // Only the manager's edit base carries it, beside its roster; never rendered.
+  keptCount?: number;
   // Capacity, waitlist, and guests (M1.5). capacity is the effective cap
   // for this date; null means unlimited. spotsLeft is null when
   // unlimited and never below 0. seatsUsed counts seats while
@@ -472,8 +481,22 @@ export interface VisibilityImpactEvent {
 export interface VisibilityImpact {
  futureOverrides?: number;
   visibility: Visibility;
+  // The scope's own visibility before the change (DEC-158).
+  currentVisibility: Visibility;
   tightened: VisibilityImpactEvent[];
   leaderOpened: VisibilityImpactEvent[];
+  // An event reset only: each date the reset changes.
+  resetDates?: ImpactResetDate[];
+  // The token that confirms exactly this impact; sent back as consent.
+  consent?: string;
+}
+
+/** @public Go JSON contract, checked by TestWebTypesMatchGoJSON; one date an event reset would change, with its own visibility before the reset. */
+export interface ImpactResetDate {
+  occurrenceId: number;
+  date: string;
+  title: string;
+  visibility: Visibility;
 }
 
 export type OpenedDecision = "keep" | "tighten";
@@ -821,6 +844,8 @@ export interface AddRequest {
 /** @public Exact-date read contract; does not authorize a mutation. */
 export interface EventDate {
  canRegister?: boolean;
+ // True only for someone who manages the event: the date page then offers its manager tools.
+ canManage?: boolean;
  visibility?: Visibility;
  hostedBy?: string;
  groupId?: number;
@@ -833,6 +858,7 @@ export interface EventDate {
   date: string;
   dateUrl: string;
   title: string;
+  description?: string;
   location: string;
   startsAt: string;
   endsAt: string;
@@ -852,6 +878,83 @@ export interface EventDate {
   canSeeAttendees: boolean;
   canDecline: boolean;
   canBlock: boolean;
+  // The date page's own facts (M8.1 brief 4, 6): only on an ordinary read, never for an invitation-only reader.
+  groupHeader?: EventDateGroupHeader;
+  attendance?: EventDateAttendance;
+  seats?: EventDateSeats;
+  remoteRsvp?: EventDateRemoteRsvp;
+  myWaitlistPosition?: number;
+  series?: EventDateSeries;
+}
+
+/** @public Whether a date takes remote answers: closed is remote on with this date's remote cap at 0; a full pool is still offered. */
+export type EventDateRemoteRsvp = "offered" | "closed" | "none";
+
+/** @public A shown group's cover and display-safe leader on its date page; imageUrl is "" without a photo (use coverSrc). */
+export interface EventDateGroupHeader {
+  imageUrl: string;
+  coverFocalX: number;
+  coverFocalY: number;
+  leaderName: string;
+}
+
+/** @public Row counts by answer (declined only for managers) and, when canSeeAttendees, the allowed Going and Maybe names. */
+export interface EventDateAttendance {
+  registrations: Record<string, number>;
+  attendees?: EventDateAttendee[];
+}
+
+/** @public One name in a date's attendance summary. */
+export interface EventDateAttendee {
+  name: string;
+  status: RegistrationStatus;
+  guestCount: number;
+}
+
+/** @public One pool of places; capacity and left are null when unlimited. */
+export interface EventDatePool {
+  capacity: number | null;
+  used: number;
+  left: number | null;
+}
+
+/** @public A date's pools, never merged: remote only when the event takes remote answers, childcare only when offered. */
+export interface EventDateSeats {
+  inPerson: EventDatePool;
+  remote?: EventDatePool;
+  waitlistEnabled: boolean;
+  childcare?: EventDateChildcare;
+}
+
+/** @public Childcare: whether a limited pool is full, and its exact totals only for the event's managers. */
+export interface EventDateChildcare {
+  full: boolean;
+  totals?: EventDatePool;
+}
+
+/** @public The series as this date's reader may see it; coverage counts and usual only for a repeating event, coverage only when signed in. */
+export interface EventDateSeries {
+  recurrenceRule: string;
+  upcomingDates?: number;
+  coveredDates?: number;
+  canAnswerSeries: boolean;
+  usual?: EventDateUsual;
+  changes: EventDateChange[];
+}
+
+/** @public What about a date differs from its series' usual values. */
+export type EventDateChange = "day" | "time" | "duration" | "place" | "room" | "capacity" | "remoteCapacity" | "visibility";
+
+/** @public The series' usual values on this date's original day; startsLocal and endsLocal are "" when the series clock is unknown. */
+export interface EventDateUsual {
+  startsLocal: string;
+  endsLocal: string;
+  durationMinutes: number;
+  location: string;
+  room: OccurrenceRoom | null;
+  capacity: number | null;
+  remoteCapacity: number | null;
+  visibility: Visibility;
 }
 
 /** @public Narrow administrative person picker, checked by TestWebTypesMatchGoJSON. */
@@ -1516,6 +1619,15 @@ export interface SessionResponse {
   canCompose?: boolean;
 }
 
+// GET /auth/bootstrap (M8.1): who this browser's cookie signs in (null when no
+// one), its CSRF token and the credential marker the token's cookie carries.
+export interface SessionBootstrapResponse {
+  user: User | null;
+  canCompose: boolean;
+  csrfToken: string;
+  credentialMarker: string;
+}
+
 // GET /site. pushEnabled is the church's switch for notifications on devices (DEC-124).
 export interface SiteInfo {
   name: string;
@@ -1833,9 +1945,49 @@ export interface OccurrenceResponse {
   occurrence: EventOccurrence;
 }
 
+// What a 409 date_needs_consent carries beside error and code.
+/** @public Go JSON contract, checked by TestWebTypesMatchGoJSON; the guarded date editor reads it once the cutover slice lands. */
+export interface DateNeedsConsentResponse {
+  impact: VisibilityImpact;
+}
+
+// What a 409 date_changed from the guarded date edit may carry: baseSuperseded only when the base sent is
+// proved older than the date, so an earlier send of it can never apply.
+/** @public Go JSON contract, checked by TestWebTypesMatchGoJSON; lib/dateWrites reads the key from the error's data. */
+export interface DateChangedResponse {
+  baseSuperseded?: boolean;
+}
+
+/** @public Go JSON contract, checked by TestWebTypesMatchGoJSON; the body of 409 date_kept_after_leaving (DEC-156). */
+export interface KeptDatesConflictResponse {
+  keptDates: KeptDateCount[];
+}
+
+/** @public Go JSON contract, checked by TestWebTypesMatchGoJSON. */
+export interface KeptDateCount {
+  date: string;
+  keptCount: number;
+}
+
+/** @public Go JSON contract, checked by TestWebTypesMatchGoJSON; read through EventDateRead. */
 export interface EventDateResponse {
   occurrence: EventDate;
 }
+
+/** A cancelled date as a qualified viewer sees it: these three facts and nothing else (M8.1 brief 2.2). */
+export interface CancelledEventDate {
+  title: string;
+  date: string;
+  cancelled: true;
+}
+
+/** @public Go JSON contract, checked by TestWebTypesMatchGoJSON; read through EventDateRead. */
+export interface EventDateCancelledResponse {
+  occurrence: CancelledEventDate;
+}
+
+/** The date page's read: a scheduled date, or a cancelled date's tombstone. Narrow with `"cancelled" in occurrence`. */
+export type EventDateRead = EventDateResponse | EventDateCancelledResponse;
 
 export interface RoomApprovalResponse {
   needApproval: boolean;

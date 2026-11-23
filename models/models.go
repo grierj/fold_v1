@@ -340,11 +340,21 @@ type Event struct {
 	// DefaultRoomPending: the series room still awaits an admin's approval
 	// (M2.1d), so its new dates go to a request instead of confirming.
 	DefaultRoomPending bool `gorm:"not null;default:false"`
-	CreatedBy          uint `gorm:"not null"`
-	Creator            User `gorm:"foreignKey:CreatedBy"`
-	CreatedAt          time.Time
-	UpdatedAt          time.Time
-	DeletedAt          gorm.DeletedAt `gorm:"index"`
+	// SeriesClockDirty: an UPDATE naming a rule column (starts_local, tzid,
+	// rrule, rrule_until) set it by trigger (migration 00009), so the dates'
+	// OccurrenceSeriesStart rows may be stale and read as unknown until the
+	// writer that set it, or the occurrences.extend repair, settles them.
+	// Clear it only with an UPDATE of this column alone (DEC-155).
+	SeriesClockDirty bool `gorm:"not null;default:false"`
+	// EditRevision counts changes to the event's tracked columns, kept by a
+	// trigger (migration 00010) so every writer advances it; GORM only reads
+	// it. A guarded date edit is refused when it moved (dateToken).
+	EditRevision int64 `gorm:"->;not null;default:1"`
+	CreatedBy    uint  `gorm:"not null"`
+	Creator      User  `gorm:"foreignKey:CreatedBy"`
+	CreatedAt    time.Time
+	UpdatedAt    time.Time
+	DeletedAt    gorm.DeletedAt `gorm:"index"`
 }
 
 // EventHost is an adult assigned to a church-wide event (DEC-7). Hosts get
@@ -390,8 +400,30 @@ type EventOccurrence struct {
 	// empty (scheduled, or cancelled before this was tracked, which is treated
 	// like manual). Cleared whenever the date goes back to scheduled.
 	CancelSource string `gorm:"type:text;not null;default:''"`
+	// EditRevision and EditReceipt belong to the guarded date edit (migration
+	// 00010). The revision counts changes to the date's tracked columns, kept
+	// by a trigger that also clears the receipt; the receipt is a keyed HMAC
+	// of the last guarded edit, written only by that edit's own UPDATE. GORM
+	// only reads them.
+	EditRevision int64  `gorm:"->;not null;default:1"`
+	EditReceipt  []byte `gorm:"->"`
 	CreatedAt    time.Time
 	UpdatedAt    time.Time
+}
+
+// OccurrenceSeriesStart is one instant the series writer generated for a
+// date's original day (DEC-155, migration 00009): every distinct one on a
+// multi-time day, IsFirst on the first in the writer's order. A kept date the
+// rule provably does not generate has one row, the series' written wall clock
+// on that day (WrittenLocal) and where it resolves. TZID is the zone the
+// instant was generated in. No rows means the date's usual clock is unknown.
+// Written only by internal/eventdates; read only by the date page.
+type OccurrenceSeriesStart struct {
+	OccurrenceID uint      `gorm:"primaryKey;autoIncrement:false;uniqueIndex:idx_occurrence_series_starts_first,where:is_first"`
+	StartsAt     time.Time `gorm:"primaryKey;autoIncrement:false"`
+	IsFirst      bool      `gorm:"not null;default:false"`
+	TZID         string    `gorm:"column:tzid;not null"`
+	WrittenLocal *string
 }
 
 // TimeFrozen reports a per-date clock override. A series edit does not
@@ -980,6 +1012,11 @@ type PushSubscription struct {
 	CreatedAt  time.Time `gorm:"not null;default:now()"`
 	LastUsedAt time.Time `gorm:"not null;default:now()"`
 	FailedAt   *time.Time
+	// BindingGeneration goes up by one on every change of owner or key, kept
+	// by a trigger (migration 00011) so every writer advances it; GORM only
+	// reads it. A push service's answer changes the device only while it
+	// still matches (dispatchedDevice).
+	BindingGeneration int64 `gorm:"->;not null;default:1"`
 }
 
 // ContactRequest stores contact/group_add/occurrence_add outcomes, not attempt
@@ -1062,7 +1099,7 @@ func All() []any {
 		&AccountRequest{}, &GuestSignup{}, &CalendarToken{},
 		&Household{}, &HouseholdAccount{}, &HouseholdPerson{}, &GuardianLink{}, &TeenConsent{},
 		&ContactRequest{}, &ContactGrant{}, &ManagerAddBlock{}, &Consent{}, &Room{}, &RoomBooking{}, &RoomRequest{}, &RoomFeedToken{}, &Job{}, &Suppression{}, &Message{}, &MessageRecipient{},
-		&PushSubscription{}, &EmailAddressOptOut{}, &AdminOperationAttempt{},
+		&PushSubscription{}, &EmailAddressOptOut{}, &AdminOperationAttempt{}, &OccurrenceSeriesStart{},
 	}
 }
 
@@ -1126,6 +1163,10 @@ type Job struct {
 	UniqueKey   *string   `gorm:"uniqueIndex"`
 	CreatedAt   time.Time `gorm:"not null;default:now()"`
 	UpdatedAt   time.Time `gorm:"not null;default:now()"`
+	// ClaimSeq is the current claim's number from jobs_claim_seq (migration
+	// 00012), written only by the runner's claim; it fences every outcome
+	// to that one claim (jobs.Claim).
+	ClaimSeq *int64 `gorm:"->"`
 }
 
 // Job statuses (M3.1). failed waits for its retry; dead waits for an admin.
@@ -1254,6 +1295,10 @@ type MessageRecipient struct {
 	SentAt            *time.Time
 	CreatedAt         time.Time `gorm:"not null;default:now()"`
 	UpdatedAt         time.Time `gorm:"not null;default:now()"`
+	// AudienceAdmittedAt is when a writer that had just let this direct
+	// recipient through an event audience's date check recorded the row's
+	// outcome (migration 00013, isMessageRecipientIn). Set once, never cleared.
+	AudienceAdmittedAt *time.Time
 }
 
 // Message recipient statuses (PLAN 5.3).

@@ -28,7 +28,7 @@ func TestEventMergeValuesAgreeAcrossSendPreviewAndReminder(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	preview, err := f.app.sampleValues(&m, f.leaderUser)
+	preview, err := f.app.sampleValuesIn(f.app.DB, &m, f.leaderUser, time.Now())
 	if err != nil {
 		t.Fatal(err)
 	}

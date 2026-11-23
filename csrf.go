@@ -1,16 +1,14 @@
 package main
 
 import (
-	"crypto/rand"
 	"crypto/subtle"
-	"encoding/base64"
+	"errors"
 	"fmt"
 	"html/template"
 	"net/http"
 	"strings"
 
 	"github.com/gin-gonic/gin"
-	"github.com/gorilla/sessions"
 )
 
 // This file implements CSRF protection via the synchronizer token pattern:
@@ -24,21 +22,8 @@ const csrfFormField = "csrf_token"
 const csrfHeader = "X-CSRF-Token"
 const csrfSessionKey = "csrfToken"
 
-// csrfToken returns the session's CSRF token, generating and persisting one
-// if needed. The caller must save the session afterwards when a new token
-// was created (csrfMiddleware does this).
-func csrfToken(s *sessions.Session) (string, bool) {
-	if t, ok := s.Values[csrfSessionKey].(string); ok && t != "" {
-		return t, false
-	}
-	b := make([]byte, 32)
-	if _, err := rand.Read(b); err != nil {
-		return "", false
-	}
-	t := base64.RawURLEncoding.EncodeToString(b)
-	s.Values[csrfSessionKey] = t
-	return t, true
-}
+// csrfContextKey holds the request's verified token for its handlers.
+const csrfContextKey = "csrfToken"
 
 func csrfField(token string) template.HTML {
 	return template.HTML(fmt.Sprintf(
@@ -50,24 +35,34 @@ func csrfField(token string) template.HTML {
 func (a *App) csrfMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		session, err := a.Store.Get(c.Request, sessionName)
+		// A participating request (M8.1) is judged on the cookie it carried,
+		// before any token is minted: a mismatch is the ordinary stale-session
+		// refusal, with no Set-Cookie and no replacement token.
+		if _, pinned := c.Request.Header[sessionCheckHeader]; pinned {
+			if err != nil || !pinnedCredentialMatches(c, session) {
+				a.csrfFail(c, errSessionExpired)
+				return
+			}
+			c.Set(sessionPinnedKey, true)
+		}
 		if err != nil {
 			a.csrfFail(c, errCSRFSession)
 			return
 		}
 
-		token, created := csrfToken(session)
+		token, _ := session.Values[csrfSessionKey].(string)
 		if token == "" {
-			a.csrfFail(c, errCSRFGenerate)
-			return
-		}
-		if created {
 			// Persist the new token so the cookie is set before any POST.
-			if err := session.Save(c.Request, c.Writer); err != nil {
-				a.csrfFail(c, errCSRFSession)
+			if token, err = a.issueAnonymousCredential(c, session); err != nil {
+				if errors.Is(err, errCredentialEntropy) {
+					a.csrfFail(c, errCSRFGenerate)
+				} else {
+					a.csrfFail(c, errCSRFSession)
+				}
 				return
 			}
 		}
-		c.Set("csrfToken", token)
+		c.Set(csrfContextKey, token)
 
 		if !isSafeMethod(c.Request.Method) {
 			submitted := c.PostForm(csrfFormField)

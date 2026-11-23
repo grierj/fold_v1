@@ -3,17 +3,25 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
+	"net/http/httptest"
 	"regexp"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"fold/internal/content"
+	"fold/internal/notify"
 	"fold/internal/policy"
+	"fold/internal/providers"
 	"fold/models"
+
+	"github.com/gin-gonic/gin"
+	"gorm.io/gorm"
 )
 
 // A recipient reads the announcement they got, as their email said it,
@@ -155,7 +163,14 @@ func readAs(t *testing.T, c *apiClient, id uint) messageReadJSON {
 
 // readWant is what one reader's page holds. An empty field is "nothing":
 // no title, no time, and a link that reads as its text.
-type readWant struct{ title, when, event, manage string }
+// readWant is what a reader is shown of each event field. notSent: an email or
+// push of an event audience does not go at all, because no date the person may
+// still see puts them in the audience (audienceSeers); offList: because no
+// registration of theirs is in it any more.
+type readWant struct {
+	title, when, event, manage string
+	notSent, offList           bool
+}
 
 // checkRead asserts each field on its own: the title (subject and body), the
 // time, and each link's href, with the link text always kept.
@@ -363,7 +378,7 @@ func TestReadPageEventTightenedToInviteOnlyBlanks(t *testing.T) {
 		seedAnnouncement(t, f.app, f.leaderU, f.seriesAudience(), f.reader),
 	}
 	apiDo(t, f.admin, "PUT", fmt.Sprintf("/api/v1/events/%d/visibility", f.ev.ID),
-		map[string]any{"visibility": models.VisibilityInviteOnly, "confirm": true}, http.StatusOK)
+		confirmVisibility(t, f.admin, fmt.Sprintf("/api/v1/events/%d/visibility", f.ev.ID), map[string]any{"visibility": models.VisibilityInviteOnly}), http.StatusOK)
 	f.rename(t, "Renamed night")
 	for _, id := range ids {
 		checkRead(t, "tightened", readAs(t, f.readerC, id), f.reader, readWant{})
@@ -487,7 +502,7 @@ func TestReadPageCancelledDate(t *testing.T) {
 	f.setDate(t, f.occs[0], "status", models.OccurrenceCancelled)
 	checkRead(t, "a series viewer", readAs(t, f.readerC, occ), f.reader, readWant{title: "Vis night", event: f.eventURL(), manage: f.eventURL()})
 	apiDo(t, f.admin, "PUT", fmt.Sprintf("/api/v1/events/%d/visibility", f.ev.ID),
-		map[string]any{"visibility": models.VisibilityInviteOnly, "confirm": true}, http.StatusOK)
+		confirmVisibility(t, f.admin, fmt.Sprintf("/api/v1/events/%d/visibility", f.ev.ID), map[string]any{"visibility": models.VisibilityInviteOnly}), http.StatusOK)
 	checkRead(t, "someone who cannot see the series", readAs(t, f.readerC, occ), f.reader, readWant{})
 }
 
@@ -674,4 +689,437 @@ func TestReadPageShowsOwnPictures(t *testing.T) {
 	if strings.Contains(out.Message.BodyHTML, "<img") {
 		t.Fatalf("read page body: %q", out.Message.BodyHTML)
 	}
+}
+
+// beforeFirstStatement runs fn once, before the next query or raw statement
+// on db, once armed: for a snapshot, after BEGIN and before the statement that
+// takes the snapshot. A change fn commits on another connection is in it.
+func beforeFirstStatement(t *testing.T, db *gorm.DB, fn func()) (arm func()) {
+	t.Helper()
+	var armed atomic.Bool
+	name := fmt.Sprintf("test:first_statement:%d", queryCounterSeq.Add(1))
+	run := func(*gorm.DB) {
+		if armed.CompareAndSwap(true, false) {
+			fn()
+		}
+	}
+	if err := db.Callback().Query().Before("gorm:query").Register(name, run); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Callback().Raw().Before("gorm:raw").Register(name, run); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = db.Callback().Query().Remove(name)
+		_ = db.Callback().Raw().Remove(name)
+	})
+	return func() { armed.Store(true) }
+}
+
+// TestReadPageCountsFromTheCutoffTryAgainSet: the read page's clock is read in
+// its snapshot, after the message. Try again commits a later cutoff after the
+// handler began but before its snapshot's first statement, while the app's
+// clock still reads an earlier time (a request that waited for a connection).
+// The reader's row is undecided (retried, then left off), and their only date
+// starts between that earlier clock and the cutoff, so they may not read it.
+// With the earlier clock the page would count from the clock and admit the
+// date. The control, with no Try again, reads from the original cutoff.
+func TestReadPageCountsFromTheCutoffTryAgainSet(t *testing.T) {
+	for _, retry := range []bool{false, true} {
+		t.Run(map[bool]string{false: "control", true: "between clocks"}[retry], func(t *testing.T) {
+			f := newReadVisFixture(t, models.VisibilityPublic)
+			date := f.occs[0]
+			now := time.Now().UTC()
+			early := now.Add(-10 * time.Minute)
+			startsAt := early.Add(5 * time.Minute)
+			f.setDate(t, date, "starts_at", startsAt)
+			f.setDate(t, date, "ends_at", now.Add(30*time.Minute))
+			f.register(t, f.reader, date)
+			id, emailRows := seedSending(t, f.app, f.leaderU, f.seriesAudience(), toRow(f.reader))
+			gormMust(t, f.app.DB.Model(&models.Message{}).Where("id = ?", id).Update("scheduled_at", now.Add(-2*time.Hour)))
+			if retry {
+				gormMust(t, f.app.DB.Model(&models.Message{}).Where("id = ?", id).Update("status", models.MessageSent))
+				gormMust(t, f.app.DB.Model(&models.MessageRecipient{}).Where("id = ?", emailRows[0]).
+					Updates(map[string]any{"status": models.RecipientFailed, "error": whyProvider}))
+			}
+			var pressed atomic.Bool
+			f.app.clock = func() time.Time {
+				if pressed.Load() {
+					return time.Now()
+				}
+				return early
+			}
+			arm := beforeFirstStatement(t, f.app.DB, func() {
+				if !retry {
+					return
+				}
+				pressed.Store(true)
+				if w := f.leader.do("POST", "/api/v1/messages/"+itoa(id)+"/retry", nil, true); w.Code != http.StatusOK {
+					t.Errorf("Try again before the read's snapshot: %d %s", w.Code, w.Body.String())
+				}
+			})
+			var reader models.User
+			gormMust(t, f.app.DB.First(&reader, f.reader.ID))
+			rec := httptest.NewRecorder()
+			c, _ := gin.CreateTestContext(rec)
+			c.Request = httptest.NewRequest("GET", "/api/v1/messages/"+itoa(id)+"/read", nil)
+			c.Params = gin.Params{{Key: "id", Value: itoa(id)}}
+			c.Set("apiUser", &reader)
+			arm()
+			f.app.apiReadMessage(c)
+			if !retry {
+				if rec.Code != http.StatusOK {
+					t.Fatalf("the control's read from the original cutoff: %d %s", rec.Code, rec.Body.String())
+				}
+				return
+			}
+			if !pressed.Load() {
+				t.Fatal("the read never reached its first statement: no Try again was pressed")
+			}
+			var msg models.Message
+			gormMust(t, f.app.DB.First(&msg, id))
+			var email models.MessageRecipient
+			gormMust(t, f.app.DB.First(&email, emailRows[0]))
+			if msg.ScheduledAt == nil || !msg.ScheduledAt.After(startsAt) ||
+				email.Status == models.RecipientSent || email.Status == models.RecipientFailed {
+				t.Fatalf("Try again's cutoff %v (date %v), email row %+v", msg.ScheduledAt, startsAt, email)
+			}
+			if rec.Code != http.StatusNotFound {
+				t.Fatalf("an undecided reader whose only date is before Try again's cutoff read it: %d %s", rec.Code, rec.Body.String())
+			}
+		})
+	}
+}
+
+// entitlementFixture is a reader Going to a public date and an announcement
+// to that date with a literal body, going out with the reader's email row
+// queued as preparation leaves it.
+type entitlementFixture struct {
+	readVisFixture
+	id    uint
+	email uint
+}
+
+const entitlementLiteral = "Only for the people this date let in"
+
+func newEntitlementFixture(t *testing.T) entitlementFixture {
+	t.Helper()
+	f := entitlementFixture{readVisFixture: newReadVisFixture(t, models.VisibilityPublic)}
+	f.register(t, f.reader, f.occs[0])
+	var ids []uint
+	f.id, ids = seedSending(t, f.app, f.leaderU, f.occAudience(f.occs[0]), toRow(f.reader))
+	f.email = ids[0]
+	gormMust(t, f.app.DB.Model(&models.Message{}).Where("id = ?", f.id).Updates(map[string]any{
+		"body_html": "<p>" + entitlementLiteral + "</p>", "body_text": entitlementLiteral}))
+	return f
+}
+
+// read is the reader's GET of the read page: its status, and whether the
+// literal body came back.
+func (f entitlementFixture) read(t *testing.T) (int, bool) {
+	t.Helper()
+	w := f.readerC.do("GET", "/api/v1/messages/"+itoa(f.id)+"/read", nil, false)
+	return w.Code, strings.Contains(w.Body.String(), entitlementLiteral)
+}
+
+func (f entitlementFixture) optOut(t *testing.T) {
+	t.Helper()
+	gormMust(t, f.app.DB.Create(&models.Consent{UserID: f.reader.ID, Channel: models.ConsentEmail, Scope: categoryScope(notify.CatMessages),
+		Status: models.ConsentOptedOut, Source: models.ConsentSourceWebForm}))
+}
+
+func (f entitlementFixture) decline(t *testing.T) {
+	t.Helper()
+	gormMust(t, f.app.DB.Model(&models.Registration{}).Where("user_id = ?", f.reader.ID).Update("status", models.RegDeclined))
+}
+
+func (f entitlementFixture) deliverEmail(t *testing.T) models.MessageRecipient {
+	t.Helper()
+	if err := deliverRows(f.app, &deliverySender{}, f.id, []uint{f.email}); err != nil {
+		t.Fatal(err)
+	}
+	var row models.MessageRecipient
+	gormMust(t, f.app.DB.First(&row, f.email))
+	return row
+}
+
+// wantRead asserts the read page's answer, and that a 200 carries the
+// literal body while a 404 carries none of it.
+func (f entitlementFixture) wantRead(t *testing.T, label string, want int) {
+	t.Helper()
+	code, literal := f.read(t)
+	if code != want || literal != (want == http.StatusOK) {
+		t.Fatalf("%s: read page %d (literal %v), want %d", label, code, literal, want)
+	}
+}
+
+// TestReadEntitlementNeedsProofTheCheckLetThemIn (DEC-135): for an event
+// audience a person may read an announcement for good only once a row shows
+// they were delivered it or a writer's date check let them in. Every row here
+// is written by the real writer. An eligible opt-out (at the send or at
+// preparation), a delivery, and an admitted push keep the message readable
+// after the reader declines; an opt-out after the reader lost the date, an
+// early push refusal beside an email that could not see the date, the
+// reaper's and the last attempt's failures, and a legacy skip or failure
+// prove nothing, so the reader reads only while the date still puts them in.
+// A legacy delivery stays readable.
+func TestReadEntitlementNeedsProofTheCheckLetThemIn(t *testing.T) {
+	t.Run("an eligible opt-out at the send", func(t *testing.T) {
+		f := newEntitlementFixture(t)
+		f.optOut(t)
+		if row := f.deliverEmail(t); row.Status != models.RecipientSuppressed || row.Reason != skipOptedOut || row.AudienceAdmittedAt == nil {
+			t.Fatalf("the row: %+v", row)
+		}
+		f.decline(t)
+		f.wantRead(t, "after declining", http.StatusOK)
+	})
+	t.Run("an opt-out after losing the date", func(t *testing.T) {
+		f := newEntitlementFixture(t)
+		f.optOut(t)
+		f.decline(t)
+		if row := f.deliverEmail(t); row.Status != models.RecipientSuppressed || row.Reason != skipOptedOut || row.AudienceAdmittedAt != nil {
+			t.Fatalf("the row: %+v", row)
+		}
+		f.wantRead(t, "after declining", http.StatusNotFound)
+	})
+	t.Run("a delivery", func(t *testing.T) {
+		f := newEntitlementFixture(t)
+		if row := f.deliverEmail(t); row.Status != models.RecipientSent || row.AudienceAdmittedAt == nil {
+			t.Fatalf("the row: %+v", row)
+		}
+		f.decline(t)
+		f.wantRead(t, "after declining", http.StatusOK)
+	})
+	t.Run("an eligible opt-out at preparation", func(t *testing.T) {
+		f := newEntitlementFixture(t)
+		f.optOut(t)
+		raw, _ := json.Marshal(f.occAudience(f.occs[0]))
+		at := time.Now().UTC().Add(-time.Second)
+		m := models.Message{AuthorID: &f.leaderU.ID, Status: models.MessageScheduled, Category: models.MessageCategoryAnnouncement,
+			Subject: "News", BodyHTML: "<p>" + entitlementLiteral + "</p>", BodyText: entitlementLiteral, Audience: string(raw), ScheduledAt: &at}
+		gormMust(t, f.app.DB.Create(&m))
+		if err := f.app.prepareMessageOnce(context.Background(), m.ID); err != nil {
+			t.Fatal(err)
+		}
+		var row models.MessageRecipient
+		gormMust(t, f.app.DB.Where("message_id = ? AND user_id = ? AND channel = ?", m.ID, f.reader.ID, models.DeliveryEmail).First(&row))
+		if row.Status != models.RecipientSuppressed || row.Reason != skipOptedOut || row.AudienceAdmittedAt == nil {
+			t.Fatalf("the prepared row: %+v", row)
+		}
+		f.id = m.ID
+		f.decline(t)
+		f.wantRead(t, "after declining", http.StatusOK)
+	})
+	t.Run("an early push refusal beside an email that could not see the date", func(t *testing.T) {
+		f := newEntitlementFixture(t)
+		useFakePush(t, f.app)
+		dev := newPushDevice(t, f.app, f.reader, "phone") // push consent never given
+		push := models.MessageRecipient{MessageID: f.id, UserID: f.reader.ID, Channel: models.DeliveryPush, Status: models.RecipientQueued}
+		gormMust(t, f.app.DB.Create(&push))
+		f.setDate(t, f.occs[0], "visibility_override", models.VisibilityInviteOnly)
+		if row := f.deliverEmail(t); row.Reason != skipCantSeeDate {
+			t.Fatalf("the email row: %+v", row)
+		}
+		if err := f.app.deliverMessagePush(context.Background(), push.ID, dev.ID, 0); err != nil {
+			t.Fatal(err)
+		}
+		gormMust(t, f.app.DB.First(&push, push.ID))
+		if push.Status != models.RecipientSuppressed || push.AudienceAdmittedAt != nil {
+			t.Fatalf("the push row: %+v", push)
+		}
+		f.wantRead(t, "the push refusal proves nothing", http.StatusNotFound)
+		f.setDate(t, f.occs[0], "visibility_override", nil)
+		f.wantRead(t, "read live once the date shows again", http.StatusOK)
+	})
+	t.Run("an admitted push", func(t *testing.T) {
+		f := newEntitlementFixture(t)
+		useFakePush(t, f.app)
+		pushConsentRow(t, f.app, f.reader, "all", models.ConsentOptedIn)
+		dev := newPushDevice(t, f.app, f.reader, "phone")
+		push := models.MessageRecipient{MessageID: f.id, UserID: f.reader.ID, Channel: models.DeliveryPush, Status: models.RecipientQueued}
+		gormMust(t, f.app.DB.Create(&push))
+		if err := f.app.deliverMessagePush(context.Background(), push.ID, dev.ID, 0); err != nil {
+			t.Fatal(err)
+		}
+		gormMust(t, f.app.DB.First(&push, push.ID))
+		if push.Status != models.RecipientSent || push.AudienceAdmittedAt == nil {
+			t.Fatalf("the push row: %+v", push)
+		}
+		// The email row is still queued: the push alone keeps it readable.
+		f.decline(t)
+		f.wantRead(t, "after declining", http.StatusOK)
+	})
+	// A row someone else was already sent keeps the message sent once the
+	// reader's row fails.
+	sentToOther := func(t *testing.T, f entitlementFixture) {
+		now := time.Now().UTC()
+		gormMust(t, f.app.DB.Create(&models.MessageRecipient{MessageID: f.id, UserID: f.leaderU.ID, Channel: models.DeliveryEmail,
+			Status: models.RecipientSent, Address: f.leaderU.Email, SentAt: &now}))
+	}
+	t.Run("the reaper's failure", func(t *testing.T) {
+		f := newEntitlementFixture(t)
+		sentToOther(t, f)
+		old := time.Now().UTC().Add(-2 * time.Hour)
+		gormMust(t, f.app.DB.Model(&models.Message{}).Where("id = ?", f.id).Update("updated_at", old))
+		if err := f.app.reapMessages(context.Background(), time.Now().UTC()); err != nil {
+			t.Fatal(err)
+		}
+		var row models.MessageRecipient
+		gormMust(t, f.app.DB.First(&row, f.email))
+		if row.Status != models.RecipientFailed || row.AudienceAdmittedAt != nil {
+			t.Fatalf("the reaped row: %+v", row)
+		}
+		f.wantRead(t, "while Going", http.StatusOK)
+		f.decline(t)
+		f.wantRead(t, "after declining", http.StatusNotFound)
+	})
+	t.Run("the last attempt's failure", func(t *testing.T) {
+		f := newEntitlementFixture(t)
+		sentToOther(t, f)
+		failDateFacts(t, f.app.DB)
+		f.app.Mailer = &deliverySender{}
+		if err := f.app.DB.Transaction(func(tx *gorm.DB) error { return enqueueBatches(tx, f.id, []uint{f.email}, "") }); err != nil {
+			t.Fatal(err)
+		}
+		runMessageJobs(t, f.app)
+		var row models.MessageRecipient
+		gormMust(t, f.app.DB.First(&row, f.email))
+		if row.Status != models.RecipientFailed || row.AudienceAdmittedAt != nil {
+			t.Fatalf("the failed row: %+v", row)
+		}
+		f.wantRead(t, "while Going", http.StatusOK)
+		f.decline(t)
+		f.wantRead(t, "after declining", http.StatusNotFound)
+	})
+	t.Run("legacy rows", func(t *testing.T) {
+		for _, status := range []string{models.RecipientSuppressed, models.RecipientFailed, models.RecipientSent, models.RecipientBounced} {
+			f := newEntitlementFixture(t)
+			gormMust(t, f.app.DB.Model(&models.MessageRecipient{}).Where("id = ?", f.email).Updates(map[string]any{"status": status, "reason": skipOptedOut}))
+			gormMust(t, f.app.DB.Model(&models.Message{}).Where("id = ?", f.id).Update("status", models.MessageSent))
+			f.decline(t)
+			want := http.StatusNotFound
+			if status == models.RecipientSent || status == models.RecipientBounced {
+				want = http.StatusOK
+			}
+			f.wantRead(t, "a legacy "+status+" row after declining", want)
+		}
+	})
+}
+
+// failAdmitted leaves f's email row failed after a send whose date check let
+// the reader in (the last attempt records the provider's failure after the
+// check), and the message failed, ready for Try again. It returns the mark.
+func (f entitlementFixture) failAdmitted(t *testing.T) time.Time {
+	t.Helper()
+	f.leader.holdNotices = true
+	if err := deliverRows(f.app, &deliverySender{fail: 1}, f.id, []uint{f.email}); !errors.Is(err, errStopBatch) {
+		t.Fatalf("the outage: %v", err)
+	}
+	gormMust(t, f.app.DB.Model(&models.MessageRecipient{}).Where("id = ?", f.email).Updates(map[string]any{"status": models.RecipientFailed, "error": whyProvider}))
+	gormMust(t, f.app.DB.Model(&models.Message{}).Where("id = ?", f.id).Update("status", models.MessageFailed))
+	var row models.MessageRecipient
+	gormMust(t, f.app.DB.First(&row, f.email))
+	if row.AudienceAdmittedAt != nil {
+		t.Fatalf("a stopped attempt recorded an outcome: %+v", row)
+	}
+	next := f.app.Mailer
+	f.app.Mailer = failingSender{}
+	gormMust(t, f.app.DB.Model(&models.MessageRecipient{}).Where("id = ?", f.email).Update("status", models.RecipientQueued))
+	gormMust(t, f.app.DB.Model(&models.Message{}).Where("id = ?", f.id).Update("status", models.MessageSending))
+	if err := f.app.DB.Transaction(func(tx *gorm.DB) error { return enqueueBatches(tx, f.id, []uint{f.email}, "") }); err != nil {
+		t.Fatal(err)
+	}
+	runMessageJobs(t, f.app)
+	f.app.Mailer = next
+	gormMust(t, f.app.DB.First(&row, f.email))
+	if row.Status != models.RecipientFailed || row.AudienceAdmittedAt == nil {
+		t.Fatalf("the failed row: %+v", row)
+	}
+	gormMust(t, f.app.DB.Model(&models.Message{}).Where("id = ?", f.id).Update("status", models.MessageFailed))
+	return *row.AudienceAdmittedAt
+}
+
+func (f entitlementFixture) tryAgain(t *testing.T) {
+	t.Helper()
+	if w := f.leader.do("POST", "/api/v1/messages/"+itoa(f.id)+"/retry", nil, true); w.Code != http.StatusOK {
+		t.Fatalf("Try again: %d %s", w.Code, w.Body.String())
+	}
+}
+
+// TestReadEntitlementEvidenceSurvivesLaterOutcomes: the mark a date check
+// left on a row is kept by everything that comes later. An email row let in
+// and then failed at the provider is queued again by Try again and, once the
+// reader has declined, skipped as no longer on the list: the reader still
+// reads. The same row skipped because the date was then made private, by the
+// batch after Try again or by Try again itself, keeps it too. A row let in,
+// sent and then reported bounced keeps it. A push let in and then refused by
+// the push service keeps it, and the reader still reads after declining with
+// that push row alone.
+func TestReadEntitlementEvidenceSurvivesLaterOutcomes(t *testing.T) {
+	t.Run("a failed email, Try again, then no longer on the list", func(t *testing.T) {
+		f := newEntitlementFixture(t)
+		mark := f.failAdmitted(t)
+		f.tryAgain(t)
+		f.decline(t)
+		row := f.deliverEmail(t)
+		if row.Status != models.RecipientSuppressed || row.Reason != skipNoLongerOnList || row.AudienceAdmittedAt == nil || !row.AudienceAdmittedAt.Equal(mark) {
+			t.Fatalf("after Try again: %+v", row)
+		}
+		f.wantRead(t, "after declining", http.StatusOK)
+	})
+	t.Run("a failed email, Try again, then the date made private", func(t *testing.T) {
+		f := newEntitlementFixture(t)
+		mark := f.failAdmitted(t)
+		f.tryAgain(t)
+		f.setDate(t, f.occs[0], "visibility_override", models.VisibilityInviteOnly)
+		row := f.deliverEmail(t)
+		if row.Status != models.RecipientSuppressed || row.Reason != skipCantSeeDate || row.AudienceAdmittedAt == nil || !row.AudienceAdmittedAt.Equal(mark) {
+			t.Fatalf("after Try again: %+v", row)
+		}
+		f.wantRead(t, "after the date was made private", http.StatusOK)
+	})
+	t.Run("a failed email whose date is made private before Try again", func(t *testing.T) {
+		f := newEntitlementFixture(t)
+		mark := f.failAdmitted(t)
+		f.setDate(t, f.occs[0], "visibility_override", models.VisibilityInviteOnly)
+		f.tryAgain(t)
+		var row models.MessageRecipient
+		gormMust(t, f.app.DB.First(&row, f.email))
+		if row.Status != models.RecipientSuppressed || row.Reason != skipCantSeeDate || row.AudienceAdmittedAt == nil || !row.AudienceAdmittedAt.Equal(mark) {
+			t.Fatalf("after Try again: %+v", row)
+		}
+		f.wantRead(t, "after the date was made private", http.StatusOK)
+	})
+	t.Run("a bounce report", func(t *testing.T) {
+		f := newEntitlementFixture(t)
+		row := f.deliverEmail(t)
+		if err := f.app.applyEmailEvent(context.Background(), newEmailEventJob(providers.Event{Kind: providers.EventBounced, MessageID: row.ProviderMessageID, At: time.Now()})); err != nil {
+			t.Fatal(err)
+		}
+		var after models.MessageRecipient
+		gormMust(t, f.app.DB.First(&after, f.email))
+		if after.Status != models.RecipientBounced || after.AudienceAdmittedAt == nil || !after.AudienceAdmittedAt.Equal(*row.AudienceAdmittedAt) {
+			t.Fatalf("after the bounce: %+v", after)
+		}
+	})
+	t.Run("a push refused by the push service", func(t *testing.T) {
+		f := newEntitlementFixture(t)
+		fp := useFakePush(t, f.app)
+		pushConsentRow(t, f.app, f.reader, "all", models.ConsentOptedIn)
+		dev := newPushDevice(t, f.app, f.reader, "phone")
+		fp.status[dev.path] = http.StatusBadRequest
+		push := models.MessageRecipient{MessageID: f.id, UserID: f.reader.ID, Channel: models.DeliveryPush, Status: models.RecipientQueued}
+		gormMust(t, f.app.DB.Create(&push))
+		_ = f.app.deliverMessagePush(context.Background(), push.ID, dev.ID, 0)
+		gormMust(t, f.app.DB.First(&push, push.ID))
+		if push.Status == models.RecipientSent || push.Status == models.RecipientQueued || push.AudienceAdmittedAt == nil {
+			t.Fatalf("the refused push row: %+v", push)
+		}
+		// The email row goes nowhere: the reader declines, and it is skipped.
+		f.decline(t)
+		if row := f.deliverEmail(t); row.Reason != skipNoLongerOnList {
+			t.Fatalf("the email row: %+v", row)
+		}
+		f.wantRead(t, "after declining, by the push's mark", http.StatusOK)
+	})
 }

@@ -8,8 +8,11 @@ import (
 	"fold/models"
 	"net/http"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
+
+	"gorm.io/gorm"
 )
 
 func TestEventMorePrivateCancelsShutOutRegistrants(t *testing.T) {
@@ -38,7 +41,7 @@ func TestEventMorePrivateCancelsShutOutRegistrants(t *testing.T) {
 	if e := eventRow(t, app, ev.ID); e.Visibility != models.VisibilityPublic || regCount(app, out, ev.ID) != 1 {
 		t.Fatalf("saved without confirm: %+v", e)
 	}
-	apiDo(t, admin, "PUT", fmt.Sprintf("/api/v1/events/%d/visibility", ev.ID), map[string]any{"visibility": models.VisibilityInviteOnly, "confirm": true}, http.StatusOK)
+	apiDo(t, admin, "PUT", fmt.Sprintf("/api/v1/events/%d/visibility", ev.ID), confirmVisibility(t, admin, fmt.Sprintf("/api/v1/events/%d/visibility", ev.ID), map[string]any{"visibility": models.VisibilityInviteOnly}), http.StatusOK)
 	if regCount(app, out, ev.ID) != 1 || regCount(app, mem, ev.ID) != 1 {
 		t.Fatalf("registrations: out %d, mem %d", regCount(app, out, ev.ID), regCount(app, mem, ev.ID))
 	}
@@ -375,11 +378,11 @@ func TestEventCandidatesSkipsDeletedGroups(t *testing.T) {
 	}
 	// The admin "show deleted events" switch lists the deleted group's event
 	// for an admin and for nobody else (DEC-68).
-	if withDeleted, err := app.deletedEventCandidates(admin, app.DB); err != nil || withDeleted.ByID[ev.ID] == nil {
+	if withDeleted, err := deletedEventCandidatesIn(app.DB, admin, app.DB); err != nil || withDeleted.ByID[ev.ID] == nil {
 		t.Fatalf("admin with the deleted switch should see the deleted group's event: %v %v", withDeleted.IDs, err)
 	}
 	member := newTestUser(t, app, "member", "password1234", models.RoleMember)
-	if other, err := app.deletedEventCandidates(member, app.DB); err != nil || other.ByID[ev.ID] != nil {
+	if other, err := deletedEventCandidatesIn(app.DB, member, app.DB); err != nil || other.ByID[ev.ID] != nil {
 		t.Fatalf("a non-admin must not get deleted groups' events: %v %v", other.IDs, err)
 	}
 }
@@ -404,15 +407,16 @@ func TestEventCandidatesSkipsDeletedGroups(t *testing.T) {
 // event tightened, the kept outsider told, no notice recorded for the victim)
 // but not the recipient lock inside Send, which the sender-first order and the
 // plain-entry tests exercise. Not covered: the group-level tightening
-// (apiUpdateGroup) and the per-date override (apiUpdateOccurrence), which reach
-// the same cancelLosers.
+// (apiUpdateGroup) and the guarded date edit (editDateIn), which reach the
+// same cancellation of the checked losers.
 func TestRegistrationCancelledNoticeSerializesWithRealAdminDelete(t *testing.T) {
 	runGatedErasureBarriers(t, 7402125, 7402126, func(t *testing.T) gatedErasureScene {
 		f := newRegistrantRace(t)
 		return gatedErasureScene{app: f.app, victim: f.victim, sends: []string{notify.RegistrationCancelled},
 			run: func() error {
-				return doExpect(f.admin, "PUT", "/api/v1/events/"+itoa(f.eventID)+"/visibility",
-					map[string]any{"visibility": models.VisibilityInviteOnly, "confirm": true}, http.StatusOK)
+				path := "/api/v1/events/" + itoa(f.eventID) + "/visibility"
+				return doExpect(f.admin, "PUT", path,
+					confirmVisibility(t, f.admin, path, map[string]any{"visibility": models.VisibilityInviteOnly}), http.StatusOK)
 			},
 			erase: eraseVia(f.eraser, f.victim),
 			told: func(t *testing.T) {
@@ -520,7 +524,7 @@ func TestEventVisibilityRechecksAfterHeldBody(t *testing.T) {
 				if noOp {
 					vis = models.VisibilityInviteOnly
 				}
-				held := f.actor.doHeld("PUT", path, map[string]any{"visibility": vis, "confirm": true})
+				held := f.actor.doHeld("PUT", path, map[string]any{"visibility": vis, "consent": ""})
 				f.revoke(t, change)
 				before := eventWriterState(t, f.app, f.event.ID)
 				held.release()
@@ -543,8 +547,9 @@ func TestEventVisibilityRechecksAfterHeldBody(t *testing.T) {
 func TestEventVisibilityUsesGroupAfterHeldBody(t *testing.T) {
 	f := newEventWriterRace(t, false)
 	path := "/api/v1/events/" + itoa(f.event.ID) + "/visibility"
-	held := f.actor.doHeld("PUT", path, map[string]any{"visibility": models.VisibilityPrivate, "confirm": true, "reason": "Welcome friends"})
-	apiDo(t, f.admin, "PUT", "/api/v1/groups/"+itoa(f.group.ID), map[string]any{"visibility": models.VisibilityInviteOnly, "confirm": true}, http.StatusOK)
+	held := f.actor.doHeld("PUT", path, map[string]any{"visibility": models.VisibilityPrivate, "consent": "", "reason": "Welcome friends"})
+	groupPath := "/api/v1/groups/" + itoa(f.group.ID)
+	apiDo(t, f.admin, "PUT", groupPath, confirmVisibility(t, f.admin, groupPath, map[string]any{"visibility": models.VisibilityInviteOnly}), http.StatusOK)
 	held.release()
 	w := held.wait(t)
 	if w.Code != http.StatusOK {
@@ -588,26 +593,33 @@ func TestEventVisibilityImpactIncludesHeldBodyRegistrants(t *testing.T) {
 				}
 			}
 			registerPerson(people[0])
-			held := f.actor.doHeld("PUT", "/api/v1/events/"+itoa(f.event.ID)+"/visibility",
-				map[string]any{"visibility": models.VisibilityInviteOnly, "confirm": confirm})
+			path := "/api/v1/events/" + itoa(f.event.ID) + "/visibility"
+			// confirm: the person reviewed the one registrant there was; a
+			// review is never stretched over the second (DEC-158).
+			body := map[string]any{"visibility": models.VisibilityInviteOnly, "consent": ""}
+			if confirm {
+				body = confirmVisibility(t, f.actor, path, body)
+			}
+			held := f.actor.doHeld("PUT", path, body)
 			registerPerson(people[1])
 			before := eventWriterState(t, f.app, f.event.ID)
 			held.release()
 			w := held.wait(t)
+			var answer struct {
+				NeedsDecision bool                 `json:"needsDecision"`
+				Impact        visibilityImpactJSON `json:"impact"`
+			}
+			decodeJSON(t, w, &answer)
+			if w.Code != http.StatusConflict || !answer.NeedsDecision || len(answer.Impact.Tightened) != 1 || answer.Impact.Tightened[0].Registrants != 2 || answer.Impact.Consent == "" {
+				t.Fatalf("the write missed a concurrent registrant: %d %s", w.Code, w.Body.String())
+			}
+			if after := eventWriterState(t, f.app, f.event.ID); before != after {
+				t.Fatal("an unreviewed tightening changed rows")
+			}
 			if !confirm {
-				var answer struct {
-					NeedsDecision bool                 `json:"needsDecision"`
-					Impact        visibilityImpactJSON `json:"impact"`
-				}
-				decodeJSON(t, w, &answer)
-				if w.Code != http.StatusConflict || !answer.NeedsDecision || len(answer.Impact.Tightened) != 1 || answer.Impact.Tightened[0].Registrants != 2 {
-					t.Fatalf("preview missed a concurrent registrant: %d %s", w.Code, w.Body.String())
-				}
-				if after := eventWriterState(t, f.app, f.event.ID); before != after {
-					t.Fatal("unconfirmed tightening changed rows")
-				}
 				return
 			}
+			w = f.actor.do("PUT", path, map[string]any{"visibility": models.VisibilityInviteOnly, "consent": answer.Impact.Consent}, true)
 			if w.Code != http.StatusOK {
 				t.Fatalf("confirmed tightening: %d %s", w.Code, w.Body.String())
 			}
@@ -636,7 +648,7 @@ func TestChurchEventVisibilityRechecksRemovedHostAfterHeldBody(t *testing.T) {
 	body := createEventBodyForTest()
 	body["hosts"] = []string{owner.Email, host.Email}
 	ev := requireCreatedEvent(t, app, admin.do("POST", "/api/v1/events", body, true))
-	held := client.doHeld("PUT", "/api/v1/events/"+itoa(ev.ID)+"/visibility", map[string]any{"visibility": models.VisibilityPrivate, "confirm": true})
+	held := client.doHeld("PUT", "/api/v1/events/"+itoa(ev.ID)+"/visibility", map[string]any{"visibility": models.VisibilityPrivate, "consent": ""})
 	apiDo(t, admin, "DELETE", "/api/v1/events/"+itoa(ev.ID)+"/hosts/"+itoa(host.ID), nil, http.StatusOK)
 	before := eventWriterState(t, app, ev.ID)
 	held.release()
@@ -647,4 +659,194 @@ func TestChurchEventVisibilityRechecksRemovedHostAfterHeldBody(t *testing.T) {
 	if after := eventWriterState(t, app, ev.ID); before != after {
 		t.Fatal("removed host changed event rows")
 	}
+}
+
+// TestEventPageReadsOneSnapshotAndAcknowledgesIt: the event page reads the
+// viewer, the event and its facts, its dates, the group label, the site name
+// and an admin's church-wide hosts in one read-only snapshot on one
+// connection, and a participating read (M8.1) is acknowledged for the viewer
+// that snapshot judged, with the body a plain read gets. A host removed
+// through the real route and a leader demoted after the judgment leave the
+// answer the snapshot's. A missing event answers exactly like a hidden one,
+// acknowledgment included; a session ended before the snapshot is answered
+// and acknowledged as the signed-out visitor it reads as; a failed read and a
+// failed COMMIT answer the generic 500 with no acknowledgment. A plain read
+// carries none.
+func TestEventPageReadsOneSnapshotAndAcknowledgesIt(t *testing.T) {
+	f := newGroupReadFixture(t, models.VisibilityInviteOnly)
+	hostUser := newTestUser(t, f.app, "page host", "password1234", models.RoleMember)
+	church := churchEvent(t, f.admin, "Snapshot church day", hostUser.Email)
+	churchPath := fmt.Sprintf("/api/v1/events/%d", church.ID)
+	groupPath := fmt.Sprintf("/api/v1/events/%d", f.event.ID)
+	admin, leader := pinnedAs(t, f.admin), pinnedAs(t, f.leader)
+	outsiderUser := newTestUser(t, f.app, "page outsider", "password1234", models.RoleMember)
+	outsider := pinnedAs(t, loginAPI(t, f.app, outsiderUser.Name, "password1234"))
+	anonPlain := newAPIClient(t, f.app)
+	anonPlain.fetchCSRF()
+	anon := pinnedAs(t, anonPlain)
+
+	t.Run("answers", func(t *testing.T) {
+		for _, c := range []struct {
+			name   string
+			plain  *apiClient
+			viewer *models.User
+			path   string
+			shows  []string
+		}{
+			{"admin, church-wide", f.admin, f.adminUser, churchPath, []string{hostUser.Email, `"hosts":[`}},
+			{"leader, group", f.leader, f.leaderUser, groupPath, []string{`"canManage":true`, f.memberUser.PublicName(), groupReadPlace}},
+			{"member, group", f.member, f.memberUser, groupPath, []string{`"canManage":false`, groupReadTitle}},
+			{"signed out, church-wide", anonPlain, nil, churchPath, []string{"Snapshot church day"}},
+		} {
+			plain := c.plain.do("GET", c.path, nil, false)
+			wantNoAck(t, "a plain read, "+c.name, plain)
+			p := pinnedAs(t, c.plain)
+			w := p.do("GET", c.path, nil, false)
+			if w.Code != http.StatusOK || w.Body.String() != plain.Body.String() {
+				t.Fatalf("%s: %d, the same body as a plain read %t: %s", c.name, w.Code, w.Body.String() == plain.Body.String(), w.Body.String())
+			}
+			wantIn(t, c.name, w.Body.String(), c.shows...)
+			wantAck(t, c.name, w, p, c.viewer)
+		}
+		wantOut(t, "a signed-out church page", anon.do("GET", churchPath, nil, false).Body.String(), hostUser.Email)
+	})
+
+	t.Run("refusals", func(t *testing.T) {
+		for _, c := range []struct {
+			name   string
+			client *apiClient
+			viewer *models.User
+		}{{"signed out", anon, nil}, {"an outsider", outsider, outsiderUser}} {
+			hidden := c.client.do("GET", groupPath, nil, false)
+			missing := c.client.do("GET", fmt.Sprintf("/api/v1/events/%d", church.ID+100000), nil, false)
+			if hidden.Code != http.StatusNotFound || missing.Code != hidden.Code || missing.Body.String() != hidden.Body.String() {
+				t.Fatalf("%s: hidden %d %s, missing %d %s", c.name, hidden.Code, hidden.Body.String(), missing.Code, missing.Body.String())
+			}
+			wantAck(t, c.name+", hidden", hidden, c.client, c.viewer)
+			wantAck(t, c.name+", missing", missing, c.client, c.viewer)
+		}
+	})
+
+	t.Run("a session ended before the snapshot", func(t *testing.T) {
+		ended := groupReadMember(t, f, "page ended")
+		c := pinnedAs(t, loginAPI(t, f.app, ended.Name, "password1234"))
+		for _, path := range []string{churchPath, groupPath} {
+			var fired atomic.Bool
+			f.app.hooks.readerBegin = func(surface string) {
+				if surface == "event detail" && fired.CompareAndSwap(false, true) {
+					gormMust(t, f.app.DB.Model(&models.User{}).Where("id = ?", ended.ID).Update("session_version", gorm.Expr("session_version + 1")))
+				}
+			}
+			w := c.do("GET", path, nil, false)
+			f.app.hooks.readerBegin = nil
+			signedOut := anonPlain.do("GET", path, nil, false)
+			if !fired.Load() || w.Code != signedOut.Code || w.Body.String() != signedOut.Body.String() {
+				t.Fatalf("%s for an ended session (fired %t): %d %s, signed out %d %s", path, fired.Load(), w.Code, w.Body.String(), signedOut.Code, signedOut.Body.String())
+			}
+			wantAck(t, path+" for an ended session", w, c, nil)
+			gormMust(t, f.app.DB.Model(&models.User{}).Where("id = ?", ended.ID).Update("session_version", gorm.Expr("session_version - 1")))
+		}
+	})
+
+	t.Run("changes after the judgment", func(t *testing.T) {
+		const retitled = "Retitled at the page seam"
+		before := apiDo(t, admin, "GET", churchPath, nil, http.StatusOK)
+		fired := atReaderSeam(f.app, "authorized", "event detail", func() {
+			apiDo(t, f.admin, "DELETE", fmt.Sprintf("%s/hosts/%d", churchPath, hostUser.ID), nil, http.StatusOK)
+			gormMust(t, f.app.DB.Model(&models.Event{}).Where("id = ?", church.ID).Update("title", retitled))
+		})
+		w := admin.do("GET", churchPath, nil, false)
+		f.app.hooks.readerAuthorized = nil
+		if !fired.Load() || w.Body.String() != before {
+			t.Fatalf("the page straddled the host removal (fired %t):\nbefore %s\ngot    %s", fired.Load(), before, w.Body.String())
+		}
+		wantAck(t, "the snapshot's church page", w, admin, f.adminUser)
+		after := apiDo(t, admin, "GET", churchPath, nil, http.StatusOK)
+		wantOut(t, "the next church page", after, hostUser.Email)
+		wantIn(t, "the next church page", after, retitled)
+
+		before = apiDo(t, leader, "GET", groupPath, nil, http.StatusOK)
+		fired = atReaderSeam(f.app, "authorized", "event detail", func() {
+			gormMust(t, f.app.DB.Model(&models.Membership{}).Where("user_id = ? AND group_id = ?", f.leaderUser.ID, f.group).Update("role", models.MembershipMember))
+		})
+		w = leader.do("GET", groupPath, nil, false)
+		f.app.hooks.readerAuthorized = nil
+		if !fired.Load() || w.Body.String() != before {
+			t.Fatalf("the page straddled the demotion (fired %t):\nbefore %s\ngot    %s", fired.Load(), before, w.Body.String())
+		}
+		wantAck(t, "the snapshot's group page", w, leader, f.leaderUser)
+		wantIn(t, "the demoted leader's next page", apiDo(t, leader, "GET", groupPath, nil, http.StatusOK), `"canManage":false`)
+		gormMust(t, f.app.DB.Model(&models.Membership{}).Where("user_id = ? AND group_id = ?", f.leaderUser.ID, f.group).Update("role", models.MembershipLeader))
+
+		going := groupReadMember(t, f, "page erasable attendee")
+		gormMust(t, f.app.DB.Create(&models.Registration{UserID: &going.ID, OccurrenceID: f.dates[0].ID, Status: models.RegGoing, AttendanceMode: models.AttendanceInPerson, Source: "web"}))
+		before = apiDo(t, leader, "GET", groupPath, nil, http.StatusOK)
+		wantIn(t, "the leader's page", before, going.PublicName())
+		fired = atReaderSeam(f.app, "authorized", "event detail", func() {
+			apiDo(t, f.admin, "DELETE", "/api/v1/admin/users/"+itoa(going.ID), nil, http.StatusOK)
+		})
+		w = leader.do("GET", groupPath, nil, false)
+		f.app.hooks.readerAuthorized = nil
+		if !fired.Load() || w.Body.String() != before {
+			t.Fatalf("the page straddled the erasure (fired %t):\nbefore %s\ngot    %s", fired.Load(), before, w.Body.String())
+		}
+		wantAck(t, "the snapshot's page before the erasure", w, leader, f.leaderUser)
+		after = apiDo(t, leader, "GET", groupPath, nil, http.StatusOK)
+		wantOut(t, "the page after the erasure", after, going.PublicName(), going.Email, fmt.Sprintf(`"userId":%d,`, going.ID))
+		wantIn(t, "the page after the erasure", after, f.memberUser.PublicName())
+	})
+
+	t.Run("failures", func(t *testing.T) {
+		second := newTestUser(t, f.app, "page second host", "password1234", models.RoleMember)
+		apiDo(t, f.admin, "POST", churchPath+"/hosts", map[string]any{"email": second.Email}, http.StatusOK)
+		n := failStatement(t, f.app, func(tx *gorm.DB) bool { return tx.Statement.Table == "event_hosts" })
+		w := admin.do("GET", churchPath, nil, false)
+		if n.Load() == 0 || w.Code != http.StatusInternalServerError || w.Body.String() != serverErrorBody {
+			t.Fatalf("a failed host read (failed %d): %d %s", n.Load(), w.Code, w.Body.String())
+		}
+		wantNoAck(t, "a failed host read", w)
+	})
+
+	t.Run("a failed commit", func(t *testing.T) {
+		var fired atomic.Bool
+		f.app.hooks.readerEnd = func(surface string, tx *gorm.DB) {
+			if surface == "event detail" && fired.CompareAndSwap(false, true) {
+				endBackend(t, f.app, tx)
+			}
+		}
+		w := leader.do("GET", groupPath, nil, false)
+		f.app.hooks.readerEnd = nil
+		if !fired.Load() || w.Code != http.StatusInternalServerError || w.Body.String() != serverErrorBody {
+			t.Fatalf("a failed commit (fired %t): %d %s", fired.Load(), w.Code, w.Body.String())
+		}
+		wantNoAck(t, "a failed commit", w)
+	})
+
+	t.Run("one connection", func(t *testing.T) {
+		second := newTestUser(t, f.app, "page connection host", "password1234", models.RoleMember)
+		apiDo(t, f.admin, "POST", churchPath+"/hosts", map[string]any{"email": second.Email}, http.StatusOK)
+		orig := f.app.DB
+		one := oneConnectionPool(t, f.app)
+		defer func() { f.app.DB = orig }()
+		for _, c := range []struct {
+			client *apiClient
+			path   string
+			status int
+			shows  []string
+		}{
+			{admin, churchPath, http.StatusOK, []string{second.Email, `"hosts":[`}},
+			{leader, groupPath, http.StatusOK, []string{`"canManage":true`, f.memberUser.PublicName(), "Snapshot circle", groupReadPlace}},
+			{outsider, groupPath, http.StatusNotFound, nil},
+		} {
+			oneConnection(t, f.app, one)
+			w := c.client.do("GET", c.path, nil, false)
+			if w.Code != c.status {
+				t.Fatalf("%s: %d %s (a read outside the snapshot waits for the one connection)", c.path, w.Code, w.Body.String())
+			}
+			wantIn(t, c.path, w.Body.String(), c.shows...)
+			if len(w.Header().Values(sessionCheckedHeader)) != 1 {
+				t.Fatalf("%s on one connection: no acknowledgment", c.path)
+			}
+		}
+	})
 }

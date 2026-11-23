@@ -154,7 +154,7 @@ func (a *App) apiAdminCreateHousehold(c *gin.Context) {
 		}
 		return audit.Write(tx, audit.Entry{Actor: &actor.ID, Action: audit.HouseholdCreated, TargetType: "household", TargetID: household.ID,
 			Meta: map[string]any{"holderUserId": holder.ID}, IP: c.ClientIP()})
-	})
+	}, contactGateTx)
 	if err != nil {
 		a.adminHouseholdError(c, err)
 		return
@@ -218,7 +218,7 @@ func (a *App) apiAdminAddHouseholdPerson(c *gin.Context) {
 			meta["guardianLinkId"], meta["guardianUserId"] = link.ID, guardian.ID
 		}
 		return audit.Write(tx, audit.Entry{Actor: &actor.ID, Action: audit.HouseholdPersonAdded, TargetType: "household", TargetID: account.HouseholdID, Meta: meta, IP: c.ClientIP()})
-	})
+	}, contactGateTx)
 	if err != nil {
 		a.adminHouseholdError(c, err)
 		return

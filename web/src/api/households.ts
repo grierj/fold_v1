@@ -5,7 +5,7 @@ import type {
   HouseholdResponse,
   MyHouseholdResponse,
 } from "../types";
-import { api, path, type Id } from "./core";
+import { api, path, type Credential, type Id } from "./core";
 
 export interface HouseholdPersonInput {
   firstName: string;
@@ -24,7 +24,8 @@ export const Households = {
   resendConversion: (id: Id) =>
     api<HouseholdConversionResponse>(path`/me/household/people/${id}/convert/resend`, { method: "POST" }),
   cancelConversion: (id: Id) => api<Record<string, never>>(path`/me/household/people/${id}/convert`, { method: "DELETE" }),
-  mine: () => api<MyHouseholdResponse>("/me/household"),
+  // pinned (M8.1): a participating read, answered only for this credential (api/core.ts).
+  mine: (pinned?: Credential) => api<MyHouseholdResponse>("/me/household", { pinned }),
   update: (data: { name?: string; address?: string }) => api<HouseholdResponse>("/me/household", { method: "PUT", body: data }),
   addPerson: (data: HouseholdPersonInput) => api<HouseholdPersonResponse>("/me/household/people", { method: "POST", body: data }),
   updatePerson: (id: Id, data: HouseholdPersonInput) =>

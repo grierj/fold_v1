@@ -22,10 +22,11 @@ export interface ProfileUpdate {
 export const Profile = {
   update: (data: ProfileUpdate) => api<ProfileUpdateResponse>("/me", { method: "PUT", body: data }),
   // Verified email change (M1.2): the token is the credential.
-  verifyEmail: (token: string) => api<UserResponse>("/me/email/verify", { method: "POST", body: { token } }),
+  // It replaces this browser's credential when the token is this account's.
+  verifyEmail: (token: string) => api<UserResponse>("/me/email/verify", { method: "POST", body: { token }, rotatesCsrf: true }),
   cancelEmailChange: (token: string) => api<EmailChangeCancelledResponse>("/me/email/cancel", { method: "POST", body: { token }, anonymousOK: true }),
   changePassword: (current: string, password: string) =>
-    api<Record<string, never>>("/me/password", { method: "POST", body: { current, password } }),
+    api<Record<string, never>>("/me/password", { method: "POST", body: { current, password }, rotatesCsrf: true }),
   uploadAvatar: (file: File) => apiUpload<AvatarUploadResponse>("/me/avatar", "avatar", file),
   deleteAvatar: () => api<Record<string, never>>("/me/avatar", { method: "DELETE" }),
 };

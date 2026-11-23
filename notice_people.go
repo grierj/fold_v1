@@ -136,6 +136,7 @@ func userCanSeeGroupIn(tx *gorm.DB, userID uint, g *models.Group) (bool, error) 
 type noticeFacts struct {
 	groups  map[uint]*models.Group
 	viewers map[uint]*models.User
+	guests  map[uint]bool
 	rels    map[[2]uint]policy.Rel // by {userID, groupID}
 	zones   map[uint]*time.Location
 	church  *time.Location
@@ -149,6 +150,7 @@ func loadNoticeFacts(tx *gorm.DB, groupIDs, userIDs []uint) (*noticeFacts, error
 	f := &noticeFacts{
 		groups:  map[uint]*models.Group{},
 		viewers: map[uint]*models.User{},
+		guests:  map[uint]bool{},
 		rels:    map[[2]uint]policy.Rel{},
 		zones:   map[uint]*time.Location{},
 		church:  time.UTC,
@@ -168,6 +170,7 @@ func loadNoticeFacts(tx *gorm.DB, groupIDs, userIDs []uint) (*noticeFacts, error
 		if users[i].Status == models.UserActive {
 			f.viewers[users[i].ID] = &users[i]
 		}
+		f.guests[users[i].ID] = users[i].Status == models.UserGuest
 		f.zones[users[i].ID] = userZone(users[i].Timezone, f.church)
 	}
 	if len(groupIDs) > 0 && len(userIDs) > 0 {
@@ -190,6 +193,69 @@ func (f *noticeFacts) canSeeGroup(userID uint, g *models.Group) bool {
 		return false
 	}
 	return policy.CanSeeGroup(asPerson(u), asGroup(g), f.rels[[2]uint{userID, g.ID}])
+}
+
+// shownGroup is ev's group when userID may see it, else nil.
+func (f *noticeFacts) shownGroup(userID uint, ev *models.Event) *models.Group {
+	if ev.GroupID == nil {
+		return nil
+	}
+	if g := f.groups[*ev.GroupID]; g != nil && f.canSeeGroup(userID, g) {
+		return g
+	}
+	return nil
+}
+
+// datePlace is o's place as userID's own view of the date shows it: the date's
+// override, else the event's place, else the group's (events.EffectivePlace,
+// like occurrenceToJSON). The group's place stands in only where that view
+// shows the group: for a recipient who may see it, and for a guest when a
+// signed-out visitor may (guestDisplayWith). invited says userID holds a live
+// exact-date grant; one who reaches the date only through it sees it without
+// its group (projectDate), so nothing stands in.
+func (f *noticeFacts) datePlace(userID uint, ev *models.Event, o *models.EventOccurrence, invited bool) string {
+	if invited && !f.canSeeDate(userID, ev, o) {
+		return effectiveOccurrencePlace(ev, o, "")
+	}
+	groupPlace := ""
+	if g := f.placeGroup(userID, ev); g != nil {
+		groupPlace = g.Location // group-ok: placeGroup returns only a group userID's view shows
+	}
+	return effectiveOccurrencePlace(ev, o, groupPlace)
+}
+
+// placeGroup is shownGroup, except that a guest, who has no account view, sees
+// what a signed-out visitor sees.
+func (f *noticeFacts) placeGroup(userID uint, ev *models.Event) *models.Group {
+	if !f.guests[userID] || ev.GroupID == nil {
+		return f.shownGroup(userID, ev)
+	}
+	if g := f.groups[*ev.GroupID]; g != nil && policy.CanSeeGroup(nil, asGroup(g), policy.Rel{}) {
+		return g
+	}
+	return nil
+}
+
+// canSeeDate is visibleSet.canSeeDate for one recipient against the preloaded
+// facts: ev and o must carry their stored visibility and override. A guest or
+// any account that is not active is judged as signed out.
+func (f *noticeFacts) canSeeDate(userID uint, ev *models.Event, o *models.EventOccurrence) bool {
+	rels := map[uint]policy.Rel{}
+	if ev.GroupID != nil {
+		rels[*ev.GroupID] = f.rels[[2]uint{userID, *ev.GroupID}]
+	}
+	return visibleSet{factSet: factSet{Groups: f.groups, Rels: rels}}.canSeeDate(f.viewers[userID], ev, o)
+}
+
+// judgeAs makes u, as given, the recipient judged for u.ID in place of the
+// stored row: a re-enable judges the account by the status it is being
+// restored to, which is written only after its registrations are checked.
+func (f *noticeFacts) judgeAs(u *models.User) {
+	delete(f.viewers, u.ID)
+	if u.Status == models.UserActive {
+		f.viewers[u.ID] = u
+	}
+	f.guests[u.ID] = u.Status == models.UserGuest
 }
 
 // zone is the preloaded recipientZone for userID: their own zone, else

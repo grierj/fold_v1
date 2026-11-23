@@ -487,7 +487,7 @@ func TestDisableKeepsMembershipsHiddenAndReenableRestoresMember(t *testing.T) {
 	}
 	look := func(g *models.Group) (d detail) {
 		t.Helper()
-		decodeJSON(t, other.do("GET", "/api/v1/groups/"+itoa(g.ID), nil, false), &d)
+		decodeJSON(t, other.do("GET", groupDetailPath(g.ID), nil, false), &d)
 		return d
 	}
 	listed := func(d detail) (role string) {

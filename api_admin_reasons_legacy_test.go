@@ -3302,8 +3302,10 @@ func TestLegacySaveOutcomes(t *testing.T) {
 			if r.app.restoreFenceFloor() != floor {
 				t.Error("an unknown commit raised the restore floor")
 			}
+			// A forwarded COMMIT may still be finishing on the server when the
+			// cut reply reaches the handler; judge the outcome once it has.
+			r.rig.awaitReleased(r.rig.pidOf("idle_in_transaction_session_timeout"), 10*time.Second)
 			if fault == testdb.CommitCloseUnforwarded {
-				r.rig.awaitReleased(r.rig.pidOf("idle_in_transaction_session_timeout"), 10*time.Second)
 				if r.reasonOf(int64(req.ID)) == "" || len(r.decisionRows()) != 0 {
 					t.Error("a commit that never arrived saved something")
 				}

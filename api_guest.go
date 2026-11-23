@@ -60,9 +60,9 @@ type guestRegistrationJSON struct {
 // guestDisplayWith builds the signed-out view of one registration. Group
 // details come only through groupShownTo for a nil viewer, so an opened
 // invite-only event keeps its group hidden. The church name comes from siteName,
-// called only when the event is the church's own; mail preparation passes a
-// value it already read in its transaction, so rendering opens no second
-// connection.
+// called only when the event is the church's own. Every caller reads it on its
+// own transaction (siteNameOnce on tx, or a value mail preparation already
+// read), so rendering under the contact gate opens no second connection.
 func (a *App) guestDisplayWith(siteName func() string, reg *models.Registration, occ *models.EventOccurrence,
 	ev *models.Event, grp *models.Group) guestRegistrationJSON {
 	shown := a.groupShownTo(nil, grp, policy.Rel{})
@@ -435,7 +435,7 @@ func (a *App) apiConfirmGuestRegistration(c *gin.Context) {
 				return err
 			}
 		}
-		display = a.guestDisplayWith(a.siteName, &reg, occ, &ev, grp)
+		display = a.guestDisplayWith((&siteNameOnce{a: a, db: tx}).get, &reg, occ, &ev, grp)
 		display.WaitlistPosition = waitlistPos
 		guestEmail = signup.Email
 		var zoneErr error
@@ -657,7 +657,7 @@ func (a *App) apiGetGuestRegistration(c *gin.Context) {
 			return err
 		}
 		reg, occ := m.Reg, m.Occ
-		display = a.guestDisplayWith(a.siteName, reg, occ, m.Ev, m.Grp)
+		display = a.guestDisplayWith((&siteNameOnce{a: a, db: tx}).get, reg, occ, m.Ev, m.Grp)
 		if reg.Status == models.RegWaitlisted {
 			pos, err := waitlistPosition(tx, occ.ID, reg.ID)
 			if err != nil {
@@ -666,7 +666,7 @@ func (a *App) apiGetGuestRegistration(c *gin.Context) {
 			display.WaitlistPosition = &pos
 		}
 		return nil
-	})
+	}, contactGateTx)
 	if err != nil {
 		jsonError(c, http.StatusNotFound, "registration not found")
 		return
@@ -697,7 +697,7 @@ func (a *App) apiCancelGuestRegistration(c *gin.Context) {
 		cancellable := before == models.RegGoing || before == models.RegMaybe ||
 			before == models.RegWaitlisted
 		if !cancellable {
-			display = a.guestDisplayWith(a.siteName, reg, occ, ev, grp)
+			display = a.guestDisplayWith((&siteNameOnce{a: a, db: tx}).get, reg, occ, ev, grp)
 			return nil
 		}
 		// authorizedTokenManage keeps the occurrence locked through the
@@ -733,7 +733,7 @@ func (a *App) apiCancelGuestRegistration(c *gin.Context) {
 				return err
 			}
 		}
-		display = a.guestDisplayWith(a.siteName, reg, occ, ev, grp)
+		display = a.guestDisplayWith((&siteNameOnce{a: a, db: tx}).get, reg, occ, ev, grp)
 		return nil
 	})
 	if err != nil {

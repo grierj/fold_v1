@@ -23,8 +23,10 @@ export interface Load<T> {
   // keeps it if this attempt fails (error is set so the caller can say so).
   // The previous error is cleared as the attempt starts. Resolves when the attempt ends.
   reload: () => Promise<LoadOutcome>;
-  // Replace the answer after a local change, without asking the server.
-  setData: (next: T | undefined | ((old: T | undefined) => T | undefined)) => void;
+  // Replace the answer after a local change, without asking the server. An
+  // updater also gets the dataEpoch of the answer it is applied to, so work
+  // begun from one answer can refuse to land on a newer one.
+  setData: (next: T | undefined | ((old: T | undefined, dataEpoch: number) => T | undefined)) => void;
   // Drop the answer and any request in flight, and stop loading: the thing is
   // known to be gone (a mutation answered 401, 403 or 404).
   close: () => void;
@@ -32,6 +34,10 @@ export interface Load<T> {
   // closed or the inputs change. A caller that works from `data` across an
   // await reads it first and drops its result if it moved.
   epoch: () => number;
+  // epoch() as it was when the request that brought `data` started (0 with no
+  // answer). setData keeps it: a local change is made from that answer. So
+  // `dataEpoch > n` says what is shown was asked for after epoch() read n.
+  dataEpoch: number;
 }
 
 interface State<T> {
@@ -40,6 +46,7 @@ interface State<T> {
   loading: boolean;
   // True after close(): nothing is wanted until the next ask or new inputs.
   closed: boolean;
+  dataEpoch: number;
 }
 
 interface Options {
@@ -56,7 +63,7 @@ interface Options {
 export function useLoad<T>(fn: () => Promise<T>, deps: DependencyList, options: Options = {}): Load<T> {
   const enabled = options.enabled !== false;
   const refreshOnFocus = options.refreshOnFocus === true;
-  const [state, setState] = useState<State<T>>({ data: undefined, error: null, loading: enabled, closed: false });
+  const [state, setState] = useState<State<T>>({ data: undefined, error: null, loading: enabled, closed: false, dataEpoch: 0 });
   const [tick, setTick] = useState(0);
   const quiet = useRef(false);
   const lastDeps = useRef<DependencyList | null>(null);
@@ -76,7 +83,7 @@ export function useLoad<T>(fn: () => Promise<T>, deps: DependencyList, options: 
     const run = ++generation.current;
 
     if (!enabled) {
-      setState((s) => (s.data === undefined && s.error === null && !s.loading ? s : { data: undefined, error: null, loading: false, closed: false }));
+      setState((s) => (s.data === undefined && s.error === null && !s.loading ? s : { data: undefined, error: null, loading: false, closed: false, dataEpoch: 0 }));
       settle("stale");
 
       return;
@@ -88,10 +95,10 @@ export function useLoad<T>(fn: () => Promise<T>, deps: DependencyList, options: 
     lastDeps.current = deps;
     const keep = quiet.current && sameDeps;
     quiet.current = false;
-    setState((s) => (keep ? (s.error === null && !s.closed ? s : { ...s, error: null, closed: false }) : { data: undefined, error: null, loading: true, closed: false }));
+    setState((s) => (keep ? (s.error === null && !s.closed ? s : { ...s, error: null, closed: false }) : { data: undefined, error: null, loading: true, closed: false, dataEpoch: 0 }));
     latest.current().then(
-      (data) => { if (generation.current === run) { setState({ data, error: null, loading: false, closed: false }); settle("loaded"); } },
-      (cause: unknown) => { if (generation.current === run) { setState((s) => ({ data: keep ? s.data : undefined, error: cause, loading: false, closed: false })); settle("failed"); } },
+      (data) => { if (generation.current === run) { setState({ data, error: null, loading: false, closed: false, dataEpoch: run }); settle("loaded"); } },
+      (cause: unknown) => { if (generation.current === run) { setState((s) => (keep ? { ...s, error: cause, loading: false, closed: false } : { data: undefined, error: cause, loading: false, closed: false, dataEpoch: 0 })); settle("failed"); } },
     );
 
     return () => { generation.current++; settle("stale"); };
@@ -105,7 +112,7 @@ export function useLoad<T>(fn: () => Promise<T>, deps: DependencyList, options: 
     generation.current++;
     quiet.current = keepData;
 
-    if (!keepData) setState({ data: undefined, error: null, loading: true, closed: false });
+    if (!keepData) setState({ data: undefined, error: null, loading: true, closed: false, dataEpoch: 0 });
     waiters.current.push(done);
     setTick((n) => n + 1);
   }), []);
@@ -113,12 +120,12 @@ export function useLoad<T>(fn: () => Promise<T>, deps: DependencyList, options: 
   const retry = useCallback(() => ask(false), [ask]);
   const reload = useCallback(() => ask(true), [ask]);
 
-  const setData = useCallback((next: T | undefined | ((old: T | undefined) => T | undefined)) => {
-    function isUpdater(value: typeof next): value is (old: T | undefined) => T | undefined {
+  const setData = useCallback((next: T | undefined | ((old: T | undefined, dataEpoch: number) => T | undefined)) => {
+    function isUpdater(value: typeof next): value is (old: T | undefined, dataEpoch: number) => T | undefined {
       return isCallable(value);
     }
 
-    setState((s) => ({ ...s, data: isUpdater(next) ? next(s.data) : next }));
+    setState((s) => ({ ...s, data: isUpdater(next) ? next(s.data, s.dataEpoch) : next }));
   }, []);
 
   const close = useCallback(() => {
@@ -126,7 +133,7 @@ export function useLoad<T>(fn: () => Promise<T>, deps: DependencyList, options: 
 
     // Nothing will answer the asks still waiting: they end stale now, not never.
     for (const done of [...waiters.current.splice(0), ...inflight.current.splice(0)]) done("stale");
-    setState({ data: undefined, error: null, loading: false, closed: true });
+    setState({ data: undefined, error: null, loading: false, closed: true, dataEpoch: 0 });
   }, []);
 
   const epoch = useCallback(() => generation.current, []);

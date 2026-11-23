@@ -77,7 +77,7 @@ export function Attendance({ instance, headingLevel = 4 }: { instance: EventOccu
 // five in-person seats left read "Only 3 seats left" in the warning tone
 // (DEC-99); the words carry the meaning, color only echoes it. Remote seats
 // keep the plain count.
-function seatsLeft(left: number, capacity: number, kind: "" | "remote "): ReactNode {
+export function seatsLeft(left: number, capacity: number, kind: "" | "remote "): ReactNode {
   if (left <= 0) return kind ? "Remote seats full" : "Seats full";
 
   if (!kind && left <= 5) return <span className="font-semibold text-warning-on-subtle">Only {left} {left === 1 ? "seat" : "seats"} left</span>;

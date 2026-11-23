@@ -384,7 +384,7 @@ func (a *App) apiRegisterSeries(c *gin.Context) {
 			}
 		}
 		return nil
-	})
+	}, contactGateTx)
 	if err != nil {
 		fail(c, err)
 		return
@@ -578,7 +578,7 @@ func (a *App) apiUndoSeriesRegistration(c *gin.Context) {
 		// Keep cleanup explicit and cheap; at most one live receipt per actor is
 		// created, and spent/expired receipts disappear on subsequent use.
 		return tx.Where("expires_at <= ?", a.seriesTime()).Delete(&models.SeriesUndoReceipt{}).Error
-	})
+	}, contactGateTx)
 	if err != nil {
 		fail(c, err)
 		return

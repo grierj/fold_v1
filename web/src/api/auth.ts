@@ -2,7 +2,6 @@ import type { NoticeResponse, SessionResponse, UserResponse } from "../types";
 import { api } from "./core";
 
 export const Auth = {
-  me: () => api<SessionResponse>("/auth/me", { anonymousOK: true }),
   // A wrong password answers 401 invalid_credentials. It is not a sign-out, so
   // it never goes to the global handler.
   login: (email: string, password: string) =>

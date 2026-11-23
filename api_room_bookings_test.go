@@ -207,9 +207,7 @@ func TestRoomBookingMovesWithItsDate(t *testing.T) {
 
 	// Move A an hour later: free, so it stays confirmed at the new time.
 	newStart := f.startOn.Add(time.Hour).Format("2006-01-02T15:04")
-	if w := f.leader.do("PUT", "/api/v1/events/"+itoa(f.eventA.ID)+"/occurrences/"+feedDate(f.startOn), map[string]any{"startsLocal": newStart}, true); w.Code != http.StatusOK {
-		t.Fatalf("move A: %d %s", w.Code, w.Body.String())
-	}
+	saveDate(t, f.leader, f.eventA.ID, feedDate(f.startOn), map[string]any{"startsLocal": newStart}, http.StatusOK, "")
 	var b models.RoomBooking
 	f.app.DB.Joins("JOIN event_occurrences o ON o.id = room_bookings.occurrence_id").Where("o.event_id = ?", f.eventA.ID).First(&b)
 	if b.Status != models.BookingConfirmed || !b.StartsAt.Equal(f.startOn.Add(time.Hour)) {
@@ -220,9 +218,7 @@ func TestRoomBookingMovesWithItsDate(t *testing.T) {
 	// requested and the leader hears about it (the person who moved it
 	// isn't notified of their own change).
 	clash := f.startOn.Add(4 * time.Hour).Format("2006-01-02T15:04")
-	if w := f.admin.do("PUT", "/api/v1/events/"+itoa(f.eventA.ID)+"/occurrences/"+feedDate(f.startOn), map[string]any{"startsLocal": clash}, true); w.Code != http.StatusOK {
-		t.Fatalf("move A onto Other: %d %s", w.Code, w.Body.String())
-	}
+	saveDate(t, f.admin, f.eventA.ID, feedDate(f.startOn), map[string]any{"startsLocal": clash}, http.StatusOK, "")
 	f.app.DB.First(&b, b.ID)
 	if b.Status != models.BookingRequested {
 		t.Fatalf("a booking moved into a conflict should be requested: %+v", b)
@@ -381,9 +377,7 @@ func TestRoomLostNoticeGoesToLiveChurchHosts(t *testing.T) {
 		}
 	}
 	clash := f.startOn.Add(4 * time.Hour).Format("2006-01-02T15:04")
-	if w := f.admin.do("PUT", "/api/v1/events/"+itoa(x.ID)+"/occurrences/"+feedDate(f.startOn), map[string]any{"startsLocal": clash}, true); w.Code != http.StatusOK {
-		t.Fatalf("move X onto Y: %d %s", w.Code, w.Body.String())
-	}
+	saveDate(t, f.admin, x.ID, feedDate(f.startOn), map[string]any{"startsLocal": clash}, http.StatusOK, "")
 	if n := contactCount(t, f.app, &models.Notification{}, "user_id = ? AND kind = ?", adminUser.ID, notify.RoomLost); n != 1 {
 		t.Fatalf("the live host has %d room-lost notices, want 1", n)
 	}
@@ -496,5 +490,50 @@ func TestDateRoomNeedsActiveGroup(t *testing.T) {
 	}
 	if contactCount(t, f.app, &models.AuditLog{}, "action = ?", audit.RoomBookingReleased) != 1 {
 		t.Fatal("the release should be audited")
+	}
+}
+
+// The date page's series room follows the room switch exactly as a date's
+// confirmed room does (roomsFor), so turning rooms off never reads as a
+// changed room, and the approval switch exactly as the series writer does.
+func TestUsualRoomFollowsTheRoomSwitch(t *testing.T) {
+	app := testApp(t)
+	room := models.Room{Name: "Fellowship Hall", Building: "North"}
+	if err := app.DB.Create(&room).Error; err != nil {
+		t.Fatal(err)
+	}
+	ev := &models.Event{DefaultRoomID: &room.ID}
+	for _, on := range []string{"true", "false"} {
+		if err := setSettingIn(app.DB, settingRoomsEnabled, on); err != nil {
+			t.Fatal(err)
+		}
+		got, err := usualRoomIn(app.DB, ev)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if want := on == "true"; (got != nil) != want || (got != nil && *got != (occurrenceRoomJSON{ID: room.ID, Name: "Fellowship Hall", Building: "North"})) {
+			t.Fatalf("rooms %s: %+v", on, got)
+		}
+	}
+	if got, err := usualRoomIn(app.DB, &models.Event{}); got != nil || err != nil {
+		t.Fatalf("no series room: %+v %v", got, err)
+	}
+	if err := setSettingIn(app.DB, settingRoomsEnabled, "true"); err != nil {
+		t.Fatal(err)
+	}
+	// A series room still flagged pending is the usual room exactly when the
+	// series writer would confirm a new date in it: approval off.
+	pending := &models.Event{DefaultRoomID: &room.ID, DefaultRoomPending: true}
+	for _, on := range []string{"true", "false"} {
+		if err := setSettingIn(app.DB, settingRoomApproval, on); err != nil {
+			t.Fatal(err)
+		}
+		got, err := usualRoomIn(app.DB, pending)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if want := on == "false"; (got != nil) != want || roomApprovalOn(app.DB) != (on == "true") {
+			t.Fatalf("a series room awaiting approval, approval %s: %+v", on, got)
+		}
 	}
 }
