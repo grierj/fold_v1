@@ -7,9 +7,13 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"sync"
 	"testing"
 
 	"fold/internal/guardkit"
+	"fold/models"
+
+	"gorm.io/gorm/schema"
 )
 
 // ---------------------------------------------------------------------------
@@ -21,23 +25,32 @@ import (
 // for the sweep).
 //
 // Parse-only, root package. A users value is a name a function binds to
-// models.User (modelNames), a models.User literal, or an element of a slice or
-// map of them. On a chain with Model(<users value>) or Table("users"), it
-// reports Update or UpdateColumn of "status" or of a column that is not a
-// string literal; Updates or UpdateColumns of a users struct, of a parameter,
-// or of a map[...]{...} literal, inline or a local name assigned one (:= or
-// var), that has a "status" key or any key that is not a string literal, or of
-// a local map given such a key by an indexed assignment (m["status"], m[k]).
-// It reports the same maps passed to endAllSessionsIn, whatever the chain;
-// Save of a users value; and raw SQL "UPDATE users SET" that sets status or
-// whose column list follows at run time.
+// models.User (modelNames: by declared type, initializer, new, a declared
+// function's result or a range), a models.User literal, or an element of a
+// slice or map of them; a users query is a chain with Model(<users value or
+// collection>) or Table("users"), or a local name assigned one. A key names
+// the status column when GORM's schema lookup resolves it there ("status",
+// "Status", "STATUS"; userStatusKey). On a users query it reports Update or
+// UpdateColumn of the status column or of a column that is not a string
+// literal; Updates or UpdateColumns of a users struct (whatever Select names),
+// of a literal of another type (a struct with a status field writes it), of a
+// parameter, or of a map[...]{...} literal, inline or a local name assigned
+// one (:= or var), that has a status key or any key that is not a string
+// literal, or of a local map given such a key by an indexed assignment
+// (m["status"], m[k]). It reports the same maps passed to endAllSessionsIn,
+// whatever the chain; Save of a users value or collection; and raw SQL
+// "UPDATE users SET" that sets status or whose column list follows at run
+// time. GORM refuses a named map type (gin.H) or a map[string]string as
+// Updates' argument, so those write nothing.
 //
-// It does not see a users value reached through a struct field, an interface
-// or a helper's result the root package does not declare; a map of a named map
-// type (gin.H, or a type declared elsewhere), a map built by a call (maps.Clone,
-// a helper), copied from another name, or held in a struct field; a write made
-// in another package; an upsert (clause.OnConflict) of a users row; or SQL
-// assembled without the "UPDATE users SET" literal.
+// It does not see a users value or query reached through a struct field, an
+// interface, a parameter (a *gorm.DB already scoped to users) or a helper's
+// result the root package does not declare; a map built by a call (maps.Clone,
+// a helper), copied from another name, or held in a struct field; a struct of
+// another type held in a name; a SET clause passed through Clauses; a write
+// made in another package; an upsert (clause.OnConflict) or an
+// Assign(...).FirstOrCreate of a users row; or SQL assembled without the
+// "UPDATE users SET" literal.
 // ---------------------------------------------------------------------------
 
 // accountStatusWriterCensus is every write of users.status the guard sees.
@@ -60,6 +73,22 @@ var (
 )
 
 type statusWrite struct{ at, fn, shape string }
+
+var userSchema = sync.OnceValues(func() (*schema.Schema, error) {
+	return schema.Parse(&models.User{}, &sync.Map{}, schema.NamingStrategy{})
+})
+
+// userStatusKey reports whether GORM resolves the map key or Update column k
+// to users.status, the way ConvertToAssignments does (LookUpField: the column
+// name, the field name, then the naming strategy's column for k).
+func userStatusKey(k string) bool {
+	s, err := userSchema()
+	if err != nil {
+		panic(err)
+	}
+	f := s.LookUpField(k)
+	return f != nil && f.DBName == "status"
+}
 
 // localMaps is what fd does to each local map name: given a literal "status"
 // key, or given a key that is not a string literal, in its map literal or by
@@ -89,7 +118,7 @@ func localMaps(fd ast.Node) (status, computed map[string]bool) {
 				}
 				if s, ok := stringLit(v.Index); !ok {
 					computed[x.Name] = true
-				} else if s == "status" {
+				} else if userStatusKey(s) {
 					status[x.Name] = true
 				}
 			}
@@ -109,7 +138,7 @@ func localMaps(fd ast.Node) (status, computed map[string]bool) {
 	return status, computed
 }
 
-// mapLitKeys reports whether e is a map[...]{...} literal with a "status" key,
+// mapLitKeys reports whether e is a map[...]{...} literal with a status key,
 // and whether it has a key that is not a string literal (a constant, a
 // variable, a call), which may name status.
 func mapLitKeys(e ast.Expr) (status, computed bool) {
@@ -123,7 +152,7 @@ func mapLitKeys(e ast.Expr) (status, computed bool) {
 	for _, el := range lit.Elts {
 		if kv, ok := el.(*ast.KeyValueExpr); ok {
 			s, lit := stringLit(kv.Key)
-			status = status || (lit && s == "status")
+			status = status || (lit && userStatusKey(s))
 			computed = computed || !lit
 		}
 	}
@@ -153,10 +182,28 @@ func paramNames(fd *ast.FuncDecl) map[string]bool {
 	return out
 }
 
+// usersRef reports whether e is a users value or, behind & or not, a name
+// holding a collection of them.
+func usersRef(e ast.Expr, users modelBindings) bool {
+	if modelValue(e, "User", users) {
+		return true
+	}
+	e = guardkit.Unparen(e)
+	if u, ok := e.(*ast.UnaryExpr); ok {
+		e = guardkit.Unparen(u.X)
+	}
+	id, ok := e.(*ast.Ident)
+	return ok && users.collections[id.Name]
+}
+
 // usersChain reports whether the receiver chain of a gorm call names the users
-// table: a Model of a users value or Table("users") somewhere before it.
-func usersChain(x ast.Expr, users modelBindings) bool {
+// table: a Model of a users value or collection, or Table("users"), somewhere
+// before it, or a name in queries (a local assigned such a chain).
+func usersChain(x ast.Expr, users modelBindings, queries map[string]bool) bool {
 	for {
+		if id, ok := guardkit.Unparen(x).(*ast.Ident); ok {
+			return queries[id.Name]
+		}
 		call, ok := guardkit.Unparen(x).(*ast.CallExpr)
 		if !ok {
 			return false
@@ -167,12 +214,12 @@ func usersChain(x ast.Expr, users modelBindings) bool {
 		}
 		switch sel.Sel.Name {
 		case "Model":
-			if len(call.Args) == 1 && modelValue(call.Args[0], "User", users) {
+			if len(call.Args) == 1 && usersRef(call.Args[0], users) {
 				return true
 			}
 		case "Table":
 			if len(call.Args) > 0 {
-				if s, ok := stringLit(call.Args[0]); ok && len(strings.Fields(s)) > 0 && strings.Fields(s)[0] == "users" {
+				if s, ok := stringLit(call.Args[0]); ok && len(strings.Fields(s)) > 0 && strings.Trim(strings.TrimPrefix(strings.Fields(s)[0], "public."), `"`) == "users" {
 					return true
 				}
 			}
@@ -181,7 +228,56 @@ func usersChain(x ast.Expr, users modelBindings) bool {
 	}
 }
 
-// mapShape is how a map argument carries "status", or "" when it does not.
+// usersQueries is every local name fd assigns a users query (:= or var),
+// directly or from another such name.
+func usersQueries(fd *ast.FuncDecl, users modelBindings) map[string]bool {
+	queries := map[string]bool{}
+	for changed := true; changed; {
+		changed = false
+		mark := func(name string, e ast.Expr) {
+			if name != "_" && !queries[name] && usersChain(e, users, queries) {
+				queries[name] = true
+				changed = true
+			}
+		}
+		ast.Inspect(fd, func(n ast.Node) bool {
+			switch s := n.(type) {
+			case *ast.AssignStmt:
+				for i, l := range s.Lhs {
+					if id, ok := l.(*ast.Ident); ok && len(s.Lhs) == len(s.Rhs) {
+						mark(id.Name, s.Rhs[i])
+					}
+				}
+			case *ast.ValueSpec:
+				for i, name := range s.Names {
+					if len(s.Names) == len(s.Values) {
+						mark(name.Name, s.Values[i])
+					}
+				}
+			}
+			return true
+		})
+	}
+	return queries
+}
+
+// otherLiteral reports whether e is a composite literal, behind & or not, of a
+// type that is neither models.User nor a map[...] literal type.
+func otherLiteral(e ast.Expr) bool {
+	e = guardkit.Unparen(e)
+	if u, ok := e.(*ast.UnaryExpr); ok {
+		e = guardkit.Unparen(u.X)
+	}
+	lit, ok := e.(*ast.CompositeLit)
+	if !ok || modelType(lit.Type, "User") {
+		return false
+	}
+	_, isMap := lit.Type.(*ast.MapType)
+	return !isMap
+}
+
+// mapShape is how a map argument carries the status column, or "" when it
+// does not.
 func mapShape(e ast.Expr, status, computed, params map[string]bool) string {
 	switch hasStatus, hasComputed := mapLitKeys(e); {
 	case hasStatus:
@@ -246,6 +342,7 @@ func accountStatusWrites(p *guardkit.Parsed) []statusWrite {
 			name := fd.Name.Name
 			rawSQL(fd.Body, name)
 			users := modelNames(fd, "User", funcs)
+			queries := usersQueries(fd, users)
 			status, computed := localMaps(fd)
 			params := paramNames(fd)
 			ast.Inspect(fd.Body, func(n ast.Node) bool {
@@ -264,10 +361,10 @@ func accountStatusWrites(p *guardkit.Parsed) []statusWrite {
 					return true
 				}
 				method, arg := sel.Sel.Name, call.Args[0]
-				onUsers := usersChain(sel.X, users)
+				onUsers := usersChain(sel.X, users, queries)
 				switch method {
 				case "Update", "UpdateColumn":
-					if s, lit := stringLit(arg); onUsers && lit && s == "status" {
+					if s, lit := stringLit(arg); onUsers && lit && userStatusKey(s) {
 						add(call, name, method+`("status")`)
 					} else if onUsers && !lit {
 						add(call, name, method+" of a computed column")
@@ -275,11 +372,13 @@ func accountStatusWrites(p *guardkit.Parsed) []statusWrite {
 				case "Updates", "UpdateColumns":
 					if modelValue(arg, "User", users) {
 						add(call, name, method+" of a users struct")
+					} else if onUsers && otherLiteral(arg) {
+						add(call, name, method+" of a literal of another type")
 					} else if shape := mapShape(arg, status, computed, params); shape != "" && onUsers {
 						add(call, name, method+" of "+shape)
 					}
 				case "Save":
-					if modelValue(arg, "User", users) {
+					if usersRef(arg, users) {
 						add(call, name, "Save of a users row")
 					}
 				}
@@ -318,6 +417,7 @@ func TestAccountStatusGuardCatchesBypasses(t *testing.T) {
 	const decls = `
 func lockUsersByID(tx *gorm.DB, ids []uint, all bool) (map[uint]*models.User, error) { return nil, nil }
 func loadUser(tx *gorm.DB, id uint) (*models.User, error) { return nil, nil }
+func lockConsentUsers(tx *gorm.DB, actorID, teenID uint) (*models.User, *models.User, error) { return nil, nil, nil }
 `
 	for _, c := range []struct{ name, src, want string }{
 		{"a bare Update, as the teen conversion did", `package main
@@ -413,6 +513,105 @@ func (a *App) roll(tx *gorm.DB, user *models.User, key string) error {
 func (a *App) roll(tx *gorm.DB, u *models.User, key string) error {
 	return endAllSessionsIn(tx, u, map[string]any{key: models.UserActive})
 }`, "roll: endAllSessionsIn with a map with computed keys"},
+		{"every way a function names a users value", `package main
+func inferred(tx *gorm.DB, id uint, key string, value any) error {
+	var u = models.User{ID: id}
+	return tx.Model(&u).Updates(map[string]any{key: value}).Error
+}
+func inferredPointer(tx *gorm.DB, id uint) error {
+	var u = &models.User{ID: id}
+	return tx.Model(u).Update("status", models.UserActive).Error
+}
+func built(tx *gorm.DB) error {
+	u := new(models.User)
+	var v = new(models.User)
+	tx.Model(v).Update("status", models.UserActive)
+	return tx.Model(u).UpdateColumn("status", models.UserActive).Error
+}
+func typed(tx *gorm.DB) error {
+	var u models.User
+	var v *models.User
+	tx.Model(v).Update("status", models.UserActive)
+	return tx.Model(&u).Update("status", models.UserActive).Error
+}
+func loaded(tx *gorm.DB, id uint) error {
+	var u, err = loadUser(tx, id)
+	if err != nil { return err }
+	return tx.Model(u).Update("status", models.UserActive).Error
+}
+func second(tx *gorm.DB, me, id uint) error {
+	actor, teen, err := lockConsentUsers(tx, me, id)
+	if err != nil || actor == nil { return err }
+	return tx.Model(teen).Update("status", models.UserActive).Error
+}
+func named(tx *gorm.DB) (u *models.User, err error) {
+	return u, tx.Model(u).Update("status", models.UserActive).Error
+}
+func asserted(tx *gorm.DB, v any) error {
+	u, ok := v.(*models.User)
+	if !ok { return nil }
+	return tx.Model(u).Update("status", models.UserActive).Error
+}` + decls, strings.Join([]string{
+			`asserted: Update("status")`, `built: Update("status")`, `built: UpdateColumn("status")`,
+			"inferred: Updates of a map with computed keys", `inferredPointer: Update("status")`,
+			`loaded: Update("status")`, `named: Update("status")`, `second: Update("status")`,
+			`typed: Update("status")`, `typed: Update("status")`}, "\n")},
+		{"collections of users", `package main
+func made(tx *gorm.DB) error {
+	var us = []models.User{}
+	vs := make([]models.User, 0)
+	for _, v := range vs { tx.Model(&v).Update("status", models.UserActive) }
+	for _, u := range us { tx.Model(&u).Update("status", models.UserActive) }
+	return nil
+}
+func batch(tx *gorm.DB, users []models.User) error {
+	tx.Save(&users)
+	return tx.Model(&users).Update("status", models.UserActive).Error
+}`, strings.Join([]string{`batch: Save of a users row`, `batch: Update("status")`, `made: Update("status")`, `made: Update("status")`}, "\n")},
+		{"a saved row from an inferred var", `package main
+func roll(tx *gorm.DB, id uint) error {
+	var u = models.User{ID: id}
+	u.Status = models.UserActive
+	return tx.Save(&u).Error
+}`, "roll: Save of a users row"},
+		{"the Go field name and every spelling GORM resolves", `package main
+func roll(tx *gorm.DB, u *models.User) error {
+	tx.Model(u).Updates(map[string]any{"Status": models.UserActive})
+	tx.Model(u).Update("Status", models.UserActive)
+	tx.Model(u).UpdateColumn("STATUS", models.UserActive)
+	cols := map[string]any{}
+	cols["Status"] = models.UserActive
+	return tx.Model(u).Updates(cols).Error
+}`, strings.Join([]string{`roll: Update("status")`, `roll: UpdateColumn("status")`, `roll: Updates of a map given "status"`, `roll: Updates of a map with "status"`}, "\n")},
+		{"a users struct, whatever Select names", `package main
+func roll(tx *gorm.DB, u *models.User) error {
+	tx.Model(u).Select("Status").Updates(u)
+	tx.Model(u).Select("status").Updates(models.User{Status: models.UserActive})
+	return tx.Model(&models.User{}).Where("id = ?", u.ID).Updates(&models.User{Status: models.UserActive}).Error
+}`, strings.Join([]string{"roll: Updates of a users struct", "roll: Updates of a users struct", "roll: Updates of a users struct"}, "\n")},
+		{"a struct of another type", `package main
+func roll(tx *gorm.DB, u *models.User) error {
+	return tx.Model(u).Updates(struct{ Status string }{models.UserActive}).Error
+}`, "roll: Updates of a literal of another type"},
+		{"a query held in a name", `package main
+func roll(tx *gorm.DB, id uint) error {
+	q := tx.Model(&models.User{}).Where("id = ?", id)
+	var r = q.Where("deleted_at IS NULL")
+	r.Update("status", models.UserActive)
+	return tx.Table("public.users").Where("id = ?", id).Update("status", models.UserActive).Error
+}`, strings.Join([]string{`roll: Update("status")`, `roll: Update("status")`}, "\n")},
+		{"names that do not hold a users row or write its status", `package main
+func photo(tx *gorm.DB, id uint) error {
+	var u = models.User{ID: id}
+	var g = models.Group{ID: id}
+	tx.Model(&g).Update("Status", models.GroupApproved)
+	q := tx.Model(&models.Membership{}).Where("user_id = ?", id)
+	q.Update("status", models.MembershipLeft)
+	var n int64
+	tx.Model(&models.User{}).Where("status = ?", models.UserActive).Count(&n)
+	tx.Model(&u).Updates(map[string]any{"statuses": "x", "status_note": "y", "sTatus": "z"})
+	return tx.Model(&u).Update("Statuses", "x").Error
+}`, ""},
 		{"literal keys that are not status", `package main
 func (a *App) photo(tx *gorm.DB, u *models.User) error {
 	cols := map[string]any{"avatar_key": ""}

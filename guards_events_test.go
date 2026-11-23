@@ -375,13 +375,25 @@ type endsAtWrite struct {
 
 // modelBindings is what a function binds to one GORM model, models.<model>:
 // names holding a value (the model or a pointer to it) and names holding a
-// collection (a slice or map of either). For functions it is those whose first
-// result is one.
+// collection (a slice or map of either).
 type modelBindings struct{ values, collections map[string]bool }
 
+// modelKind is what an expression, a declared type or a function result holds
+// of one model.
+type modelKind int
+
+const (
+	notModel modelKind = iota
+	modelOne
+	modelMany
+)
+
+// modelResults is the kind of each result of every function p declares.
+type modelResults map[string][]modelKind
+
 // modelValue reports whether e is a models.<model> value: a name in b.values,
-// an element of a name in b.collections, or a composite literal of the type,
-// behind &, * or neither.
+// an element of a name in b.collections, a composite literal of the type or
+// new(type), behind &, * or neither.
 func modelValue(e ast.Expr, model string, b modelBindings) bool {
 	e = guardkit.Unparen(e)
 	if u, ok := e.(*ast.UnaryExpr); ok {
@@ -398,6 +410,9 @@ func modelValue(e ast.Expr, model string, b modelBindings) bool {
 	case *ast.IndexExpr:
 		x, ok := guardkit.Unparen(v.X).(*ast.Ident)
 		return ok && b.collections[x.Name]
+	case *ast.CallExpr:
+		fn, ok := guardkit.Unparen(v.Fun).(*ast.Ident)
+		return ok && fn.Name == "new" && len(v.Args) == 1 && modelType(v.Args[0], model)
 	}
 	return false
 }
@@ -424,89 +439,151 @@ func modelCollectionType(e ast.Expr, model string) bool {
 	return false
 }
 
-// modelFuncs is every declared function in p whose first result is a
-// models.<model> value or a collection of them.
-func modelFuncs(p *guardkit.Parsed, model string) modelBindings {
-	out := modelBindings{values: map[string]bool{}, collections: map[string]bool{}}
+func typeKind(t ast.Expr, model string) modelKind {
+	switch {
+	case modelType(t, model):
+		return modelOne
+	case modelCollectionType(t, model):
+		return modelMany
+	}
+	return notModel
+}
+
+// modelFuncs is the kind of every result of every function p declares.
+func modelFuncs(p *guardkit.Parsed, model string) modelResults {
+	out := modelResults{}
 	for _, f := range p.Files {
 		for _, d := range f.AST.Decls {
 			fd, ok := d.(*ast.FuncDecl)
-			if !ok || fd.Type.Results == nil || len(fd.Type.Results.List) == 0 {
+			if !ok || fd.Type.Results == nil {
 				continue
 			}
-			if first := fd.Type.Results.List[0].Type; modelType(first, model) {
-				out.values[fd.Name.Name] = true
-			} else if modelCollectionType(first, model) {
-				out.collections[fd.Name.Name] = true
+			var kinds []modelKind
+			for _, field := range fd.Type.Results.List {
+				for range max(1, len(field.Names)) {
+					kinds = append(kinds, typeKind(field.Type, model))
+				}
 			}
+			out[fd.Name.Name] = kinds
 		}
 	}
 	return out
 }
 
+// exprKind is what e holds of the model: a value (modelValue), a type
+// assertion to it, or a call whose first result is one; a collection name, a
+// collection literal, make of a collection type, or a call whose first result
+// is one.
+func exprKind(e ast.Expr, model string, b modelBindings, funcs modelResults) modelKind {
+	e = guardkit.Unparen(e)
+	if modelValue(e, model, b) {
+		return modelOne
+	}
+	switch v := e.(type) {
+	case *ast.Ident:
+		if b.collections[v.Name] {
+			return modelMany
+		}
+	case *ast.CompositeLit:
+		return typeKind(v.Type, model)
+	case *ast.TypeAssertExpr:
+		if v.Type != nil {
+			return typeKind(v.Type, model)
+		}
+	case *ast.CallExpr:
+		if fn, ok := guardkit.Unparen(v.Fun).(*ast.Ident); ok && fn.Name == "make" && len(v.Args) > 0 {
+			return typeKind(v.Args[0], model)
+		}
+		if kinds := funcs[guardkit.Callee(v)]; len(kinds) > 0 {
+			return kinds[0]
+		}
+	}
+	return notModel
+}
+
 // modelNames is every name fd binds to a models.<model> value or collection:
-// its parameters and those of its function literals, var declarations, := of
-// a literal, of another such name or element, of a call to one of funcs, and
-// range values over a collection.
-func modelNames(fd *ast.FuncDecl, model string, funcs modelBindings) modelBindings {
+// its parameters and named results and those of its function literals, var
+// declarations by type or initializer, assignments (each result of a call to
+// a declared function by position), and range values over a collection.
+func modelNames(fd *ast.FuncDecl, model string, funcs modelResults) modelBindings {
 	b := modelBindings{values: map[string]bool{}, collections: map[string]bool{}}
 	changed := false
-	mark := func(set map[string]bool, name string) {
-		if name != "_" && !set[name] {
-			set[name] = true
-			changed = true
+	bind := func(name string, k modelKind) {
+		set := b.values
+		if k == modelMany {
+			set = b.collections
 		}
-	}
-	typed := func(name string, t ast.Expr) {
-		if modelType(t, model) {
-			mark(b.values, name)
-		} else if modelCollectionType(t, model) {
-			mark(b.collections, name)
+		if k == notModel || name == "" || name == "_" || set[name] {
+			return
 		}
+		set[name] = true
+		changed = true
 	}
-	params := func(fl *ast.FieldList) {
+	fields := func(fl *ast.FieldList) {
 		if fl == nil {
 			return
 		}
 		for _, field := range fl.List {
 			for _, n := range field.Names {
-				typed(n.Name, field.Type)
+				bind(n.Name, typeKind(field.Type, model))
 			}
 		}
 	}
-	params(fd.Type.Params)
+	// pairs binds names to rhs: one value each, or the results of one call
+	// (a comma-ok form binds its first name only).
+	pairs := func(names []string, rhs []ast.Expr) {
+		if len(names) == len(rhs) {
+			for i, e := range rhs {
+				bind(names[i], exprKind(e, model, b, funcs))
+			}
+			return
+		}
+		if len(rhs) != 1 {
+			return
+		}
+		if call, ok := guardkit.Unparen(rhs[0]).(*ast.CallExpr); ok {
+			for i, k := range funcs[guardkit.Callee(call)] {
+				if i < len(names) {
+					bind(names[i], k)
+				}
+			}
+			return
+		}
+		bind(names[0], exprKind(rhs[0], model, b, funcs))
+	}
+	fields(fd.Type.Params)
+	fields(fd.Type.Results)
 	for changed = true; changed; {
 		changed = false
 		ast.Inspect(fd, func(n ast.Node) bool {
 			switch s := n.(type) {
 			case *ast.FuncLit:
-				params(s.Type.Params)
+				fields(s.Type.Params)
+				fields(s.Type.Results)
 			case *ast.ValueSpec:
+				var names []string
 				for _, name := range s.Names {
 					if s.Type != nil {
-						typed(name.Name, s.Type)
+						bind(name.Name, typeKind(s.Type, model))
+					}
+					names = append(names, name.Name)
+				}
+				pairs(names, s.Values)
+			case *ast.AssignStmt:
+				var names []string
+				for _, l := range s.Lhs {
+					id, _ := l.(*ast.Ident)
+					if id == nil {
+						names = append(names, "")
+					} else {
+						names = append(names, id.Name)
 					}
 				}
-			case *ast.AssignStmt:
-				if len(s.Rhs) == 0 {
-					return true
-				}
-				id, ok := s.Lhs[0].(*ast.Ident)
-				if !ok {
-					return true
-				}
-				rhs := guardkit.Unparen(s.Rhs[0])
-				if call, ok := rhs.(*ast.CallExpr); ok && funcs.values[guardkit.Callee(call)] {
-					mark(b.values, id.Name)
-				} else if ok && funcs.collections[guardkit.Callee(call)] {
-					mark(b.collections, id.Name)
-				} else if len(s.Lhs) == len(s.Rhs) && modelValue(rhs, model, b) {
-					mark(b.values, id.Name)
-				}
+				pairs(names, s.Rhs)
 			case *ast.RangeStmt:
-				if x, ok := guardkit.Unparen(s.X).(*ast.Ident); ok && b.collections[x.Name] {
+				if exprKind(s.X, model, b, funcs) == modelMany {
 					if v, ok := s.Value.(*ast.Ident); ok {
-						mark(b.values, v.Name)
+						bind(v.Name, modelOne)
 					}
 				}
 			}
