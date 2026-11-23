@@ -1009,3 +1009,50 @@ func TestAccountRequestDoorAnswersStoreRejectionsUniformly(t *testing.T) {
 		t.Fatalf("hint outage answer: %s", got)
 	}
 }
+
+// A request that is still pending when the handler loads it, and past its
+// expiry when the decision is written, is refused as expired: the UPDATE
+// itself judges expiry, not the row read earlier (#432).
+func TestDecisionRefusesRequestThatExpiresBeforeTheWrite(t *testing.T) {
+	for _, decision := range []string{"approve", "reject"} {
+		t.Run(decision, func(t *testing.T) {
+			app := testApp(t)
+			newTestUser(t, app, "admin", "pw", models.RoleAdmin)
+			adminClient := loginAPI(t, app, "admin", "pw")
+			anon := anonClient(t, app, "10.8.1.1")
+			email := decision + "@example.com"
+			apiDo(t, anon, "POST", "/api/v1/account-requests",
+				signupBody("Late Lee", email, "adult", ""), http.StatusOK)
+			req := pendingRequest(t, app, email)
+			drainNotices(t, app)
+			mailsBefore := len(mailJobsOfKind(t, app, kindAccountRequestMail))
+
+			// The handler has loaded the row (pending, in date) and waits on its body.
+			held := adminClient.doHeld("POST", "/api/v1/admin/account-requests/"+itoa(req.ID)+"/"+decision,
+				map[string]any{"note": "ok"})
+			if err := app.DB.Model(&models.AccountRequest{}).Where("id = ?", req.ID).
+				Update("expires_at", time.Now().UTC().Add(-time.Minute)).Error; err != nil {
+				t.Fatal(err)
+			}
+			held.release()
+			w := held.wait(t)
+			if w.Code != http.StatusConflict || !strings.Contains(w.Body.String(), "request_expired") {
+				t.Fatalf("decision after expiry: %d %s", w.Code, w.Body.String())
+			}
+			var stored models.AccountRequest
+			app.DB.First(&stored, req.ID)
+			if stored.Status != models.RequestExpired || stored.DecidedBy != nil || stored.ApprovedUserID != nil {
+				t.Fatalf("row after refusal: status %q, decided_by %v, user %v", stored.Status, stored.DecidedBy, stored.ApprovedUserID)
+			}
+			var users int64
+			app.DB.Model(&models.User{}).Where("email = ?", email).Count(&users)
+			if users != 0 || len(mailJobsOfKind(t, app, kindAccountRequestMail)) != mailsBefore {
+				t.Fatalf("a refused decision left users %d or queued mail", users)
+			}
+			if auditCount(t, app, audit.AccountApproved)+auditCount(t, app, audit.AccountRejected) != 0 ||
+				auditCount(t, app, audit.AccountExpired) != 1 {
+				t.Fatal("audit must show the expiry and no decision")
+			}
+		})
+	}
+}

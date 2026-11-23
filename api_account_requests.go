@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -516,7 +517,7 @@ func (a *App) decideAccountRequest(c *gin.Context, req *models.AccountRequest, a
 		}
 		if err := decidePendingIn(tx, &models.AccountRequest{}, req.ID, models.RequestPending, map[string]any{
 			"status": status, "decided_by": me.ID, "decided_at": now, "decision_note": note, "password_hash": nil,
-		}); err != nil {
+		}, stillLive{cond: "expires_at > clock_timestamp()", refused: errRequestExpired}); err != nil {
 			return err
 		}
 		meta := map[string]any{"accountType": req.AccountType}
@@ -605,6 +606,14 @@ func (a *App) decideAccountRequest(c *gin.Context, req *models.AccountRequest, a
 		return audit.Write(tx, audit.Entry{Actor: &me.ID, Action: auditAction,
 			TargetType: "account_request", TargetID: req.ID, Meta: meta, IP: c.ClientIP()})
 	})
+	if errors.Is(err, errRequestExpired) {
+		// It lapsed between the early check and the write: stamp it, as that check does.
+		if _, serr := a.expirePendingRequests(); serr != nil {
+			log.Printf("account requests: expire: %v", serr)
+		}
+		fail(c, errRequestExpired)
+		return
+	}
 	if a.answerAlreadyHandled(c, err, notify.AccountRequested, req.ID) {
 		return
 	}
