@@ -297,7 +297,7 @@ func retryable(m *models.Message, c recipientCountsJSON) bool {
 	case c.failedRows > 0:
 		return true
 	}
-	return m.Status == models.MessageFailed && c.rows == 0 && neverPrepared(m.Error)
+	return policy.MessageRetryScheduled.Allows(m.Status) && c.rows == 0 && neverPrepared(m.Error)
 }
 
 // goingOut: m is sending, so a Try again has already been pressed (or its

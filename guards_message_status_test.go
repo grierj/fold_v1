@@ -27,11 +27,13 @@ import (
 // messages chain the guard reports Update or UpdateColumn of "status" or of a
 // column it cannot read, and Updates or UpdateColumns of a map holding a
 // "status" key (a literal, or a local map given one), of a parameter's map,
-// of a map with computed keys, or of a message struct. Anywhere it reports a
+// of a map with a key that is not a string literal (in the call or in a local
+// map), or of a message struct. "Status", the field's name, counts as the
+// column, as gorm resolves it. Anywhere it reports a
 // Create, CreateInBatches, FirstOrCreate or Save of a message value (an
 // insert writes the status, the column's default included), and raw SQL that
-// inserts into messages, or updates messages and sets status or builds its
-// column list at run time.
+// inserts into messages, or updates messages and sets status, or whose SET
+// list runs to the end of its literal (the rest is built at run time).
 //
 // It does not see a message reached through a struct field, an interface or
 // a result of a function the scanned tree does not declare; a package that
@@ -52,7 +54,7 @@ var messageStatusWriterCensus = []string{
 }
 
 var (
-	messageUpdateRe     = regexp.MustCompile(`(?is)\bUPDATE\s+(?:ONLY\s+)?(?:public\.)?"?messages"?(?:\s+(?:AS\s+)?\w+)?\s+SET\b(.*?)(?:\bWHERE\b|\bFROM\b|\bRETURNING\b|;|$)`)
+	messageUpdateRe     = regexp.MustCompile(`(?is)\bUPDATE\s+(?:ONLY\s+)?(?:public\.)?"?messages"?(?:\s+(?:AS\s+)?\w+)?\s+SET\b(.*?)(\bWHERE\b|\bFROM\b|\bRETURNING\b|;|$)`)
 	messageInsertRe     = regexp.MustCompile(`(?is)\bINSERT\s+INTO\s+(?:public\.)?"?messages"?(?:\s|\(|$)`)
 	messageSetsStatusRe = regexp.MustCompile(`(?i)(?:^|[\s,."])status"?\s*=`)
 )
@@ -204,22 +206,32 @@ func messageChain(x ast.Expr, msgs, chains map[string]bool) bool {
 	}
 }
 
-func messageMapHasStatus(e ast.Expr) bool {
+// messageStatusKey: gorm resolves a column by its name or by the field's, so
+// "Status" names the status column too.
+func messageStatusKey(s string) bool { return strings.EqualFold(s, "status") }
+
+// messageMapLit reads a map literal: whether it holds a status key, and
+// whether it holds a key that is not a string literal.
+func messageMapLit(e ast.Expr) (status, computed bool) {
 	lit, ok := guardkit.Unparen(e).(*ast.CompositeLit)
 	if !ok {
-		return false
+		return false, false
 	}
 	if _, ok := lit.Type.(*ast.MapType); !ok {
-		return false
+		return false, false
 	}
 	for _, el := range lit.Elts {
-		if kv, ok := el.(*ast.KeyValueExpr); ok {
-			if s, ok := stringLit(kv.Key); ok && s == "status" {
-				return true
-			}
+		kv, ok := el.(*ast.KeyValueExpr)
+		if !ok {
+			continue
+		}
+		if s, ok := stringLit(kv.Key); !ok {
+			computed = true
+		} else if messageStatusKey(s) {
+			status = true
 		}
 	}
-	return false
+	return status, computed
 }
 
 // messageLocalMaps is what fd does to each local map: given a "status" key
@@ -244,16 +256,20 @@ func messageLocalMaps(fd *ast.FuncDecl) (status, computed, params map[string]boo
 			addParams(v.Type.Params)
 		case *ast.ValueSpec:
 			for i, name := range v.Names {
-				if i < len(v.Values) && messageMapHasStatus(v.Values[i]) {
-					status[name.Name] = true
+				if i < len(v.Values) {
+					st, comp := messageMapLit(v.Values[i])
+					status[name.Name] = status[name.Name] || st
+					computed[name.Name] = computed[name.Name] || comp
 				}
 			}
 		case *ast.AssignStmt:
 			for i, l := range v.Lhs {
 				switch lv := l.(type) {
 				case *ast.Ident:
-					if i < len(v.Rhs) && messageMapHasStatus(v.Rhs[i]) {
-						status[lv.Name] = true
+					if i < len(v.Rhs) {
+						st, comp := messageMapLit(v.Rhs[i])
+						status[lv.Name] = status[lv.Name] || st
+						computed[lv.Name] = computed[lv.Name] || comp
 					}
 				case *ast.IndexExpr:
 					x, ok := guardkit.Unparen(lv.X).(*ast.Ident)
@@ -262,7 +278,7 @@ func messageLocalMaps(fd *ast.FuncDecl) (status, computed, params map[string]boo
 					}
 					if s, ok := stringLit(lv.Index); !ok {
 						computed[x.Name] = true
-					} else if s == "status" {
+					} else if messageStatusKey(s) {
 						status[x.Name] = true
 					}
 				}
@@ -274,8 +290,10 @@ func messageLocalMaps(fd *ast.FuncDecl) (status, computed, params map[string]boo
 }
 
 func messageMapShape(e ast.Expr, status, computed, params map[string]bool) string {
-	if messageMapHasStatus(e) {
+	if st, comp := messageMapLit(e); st {
 		return `a map with "status"`
+	} else if comp {
+		return "a map with computed keys"
 	}
 	id, ok := guardkit.Unparen(e).(*ast.Ident)
 	if !ok {
@@ -312,7 +330,7 @@ func messageStatusWrites(p *guardkit.Parsed) []messageStatusWrite {
 			for _, m := range messageUpdateRe.FindAllStringSubmatch(s, -1) {
 				if messageSetsStatusRe.MatchString(m[1]) {
 					add(n, fn, "raw UPDATE of messages.status")
-				} else if strings.TrimSpace(m[1]) == "" {
+				} else if m[2] == "" {
 					add(n, fn, "raw UPDATE messages with a column list built at run time")
 				}
 			}
@@ -362,7 +380,7 @@ func messageStatusWrites(p *guardkit.Parsed) []messageStatusWrite {
 				}
 				switch method {
 				case "Update", "UpdateColumn":
-					if s, lit := stringLit(arg); lit && s == "status" {
+					if s, lit := stringLit(arg); lit && messageStatusKey(s) {
 						add(call, name, method+`("status")`)
 					} else if !lit {
 						add(call, name, method+" of a computed column")
@@ -477,6 +495,27 @@ const failSQL = ` + "`UPDATE messages AS m SET \"status\" = 'failed' WHERE m.id 
 func (a *App) set(tx *gorm.DB, cols string) error {
 	return tx.Exec("UPDATE messages SET " + cols + " WHERE id = 1").Error
 }`, "set: raw UPDATE messages with a column list built at run time"},
+		{"raw SQL that names its status column at run time", `package main
+func (a *App) set(tx *gorm.DB, col string) error {
+	return tx.Exec("UPDATE messages SET error = '', " + col + " = 'sent' WHERE id = 1").Error
+}`, "set: raw UPDATE messages with a column list built at run time"},
+		{"a map whose key is computed", `package main
+func (a *App) set(tx *gorm.DB, m *models.Message, col string) error {
+	return tx.Model(m).Updates(map[string]any{col: "sent"}).Error
+}`, "set: Updates of a map with computed keys"},
+		{"a local map whose key is computed", `package main
+func (a *App) set(tx *gorm.DB, m *models.Message, col string) error {
+	cols := map[string]any{"error": "", col: "sent"}
+	return tx.Model(m).Updates(cols).Error
+}`, "set: Updates of a map with computed keys"},
+		{"the field's name as the key", `package main
+func (a *App) send(tx *gorm.DB, m *models.Message) error {
+	return tx.Model(m).Updates(map[string]any{"Status": "sent"}).Error
+}`, `send: Updates of a map with "status"`},
+		{"the field's name as the column", `package main
+func (a *App) send(tx *gorm.DB, m *models.Message) error {
+	return tx.Model(m).Update("Status", "sent").Error
+}`, `send: Update("status")`},
 		{"a raw insert", `package main
 func (a *App) draft(tx *gorm.DB) error {
 	return tx.Exec("INSERT INTO messages (subject) VALUES ('Hi')").Error

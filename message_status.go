@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"strings"
 
 	"gorm.io/gorm"
 
@@ -58,8 +59,12 @@ func messageMoveFrom(move policy.MessageMove, fields map[string]any) ([]string, 
 	if len(from) == 0 {
 		return nil, fmt.Errorf("message move %q starts from no status: a row it makes is inserted by its creator", move)
 	}
-	if _, ok := fields["status"]; ok {
-		return nil, fmt.Errorf("message move %q: the move decides the status, not the caller's fields", move)
+	for k := range fields {
+		// gorm resolves a map key by column name or by field name, so Status
+		// writes the column too.
+		if strings.EqualFold(k, "status") {
+			return nil, fmt.Errorf("message move %q: the move decides the status, not the caller's fields", move)
+		}
 	}
 	return from, nil
 }
