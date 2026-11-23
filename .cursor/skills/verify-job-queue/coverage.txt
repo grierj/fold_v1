@@ -1,8 +1,8 @@
 func 4c2de46cae22761d ./internal/jobs Runner.Start
 func e4f1c87e31c47549 ./internal/jobs Runner.RunOnce
 func 8020144521d8002d ./internal/jobs safeRun
-func 68910b504300c1b5 ./internal/jobs Runner.finish
-func 822bf27d479ca346 ./internal/jobs Runner.callOnDead
+func e0bd8a85681bb1b7 ./internal/jobs Runner.finish
+func 0633f82148cfce9f ./internal/jobs Runner.callOnDead
 func 060442c3594bc23f ./internal/jobs heldBy
 func fe41a67905da497e ./internal/jobs WithClaim
 func ce314a6be558aa6a ./internal/jobs LaterIn
@@ -28,6 +28,7 @@ decl internal/jobs/jobs.go:func (r *Runner) finish(job claimed, runErr error, fi
 decl internal/jobs/jobs.go:func (t Type) Attempts() int
 decl internal/jobs/jobs.go:func (t Type) Enqueue(db *gorm.DB, payload any, runAt time.Time, uniqueKey string) (bool, error)
 decl internal/jobs/jobs.go:func (t Type) Spec(payload any, runAt time.Time, uniqueKey string) Spec
+decl internal/jobs/jobs.go:func AttemptsUsed(attempts, maxAttempts int) int { return min(attempts, maxAttempts) }
 decl internal/jobs/jobs.go:func Backoff(attempt int, rnd func() float64) time.Duration
 decl internal/jobs/jobs.go:func CleanError(err error) string
 decl internal/jobs/jobs.go:func EnqueueMany(db *gorm.DB, specs []Spec) (int64, error)
