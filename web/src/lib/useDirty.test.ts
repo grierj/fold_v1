@@ -6,6 +6,7 @@ it("counts edits from the first ready snapshot, and from the snapshot a new save
   const { result, rerender } = renderHook(({ title, ready, savedAt }) => useDirty({ title }, ready, savedAt), {
     initialProps: { title: "", ready: false, savedAt: 0 },
   });
+
   expect(result.current).toBe(false);
   rerender({ title: "Supper", ready: true, savedAt: 0 });
   expect(result.current).toBe(false);

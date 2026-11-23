@@ -773,10 +773,12 @@ it("keeps the series editor open after a save, says Saved, keeps the visibility 
   vi.mocked(Groups.get).mockResolvedValue({ ...page, canManage: true });
   vi.mocked(Events.update).mockResolvedValue({ event: testEvent(7) });
   const confirm = vi.spyOn(window, "confirm").mockReturnValue(false);
+
   const router = createMemoryRouter([
     { path: "/groups/:id", element: <><UnsavedChangesBlocker /><Link to="/elsewhere">Elsewhere</Link><GroupDetail /></> },
     { path: "/elsewhere", element: <p>Elsewhere page</p> },
   ], { initialEntries: ["/groups/1"] });
+
   render(<RouterProvider router={router} />);
   await userEvent.click(await screen.findByRole("button", { name: "More for Supper on 2026-12-01" }));
   await userEvent.click(screen.getByRole("menuitem", { name: "Edit event" }));
@@ -794,12 +796,14 @@ it("keeps the series editor open after a save, says Saved, keeps the visibility 
   expect(title).toHaveValue("Supper night");
   expect(document.activeElement).toBe(save);
   expect(screen.getByRole("radio", { name: /^Invite only/ })).toBeChecked();
+
   const unload = () => {
     const leaving = new Event("beforeunload", { cancelable: true });
     window.dispatchEvent(leaving);
 
     return leaving.defaultPrevented;
   };
+
   expect(unload()).toBe(false);
 
   await userEvent.type(title, " and songs");

@@ -284,10 +284,12 @@ describe("SeriesEditor form layout (DEC-95)", () => {
   it("asks before leaving an edit made after a save that left it open, even a save with no edits", async () => {
     vi.mocked(Events.update).mockReset().mockResolvedValue({ event: testEvent(7) });
     const confirm = vi.spyOn(window, "confirm").mockReturnValue(false);
+
     const router = createMemoryRouter([
       { path: "/", element: <><UnsavedChangesBlocker /><SeriesEditor series={baseSeries} idPrefix="stay" onSaved={() => {}} /></> },
       { path: "/elsewhere", element: <p>Elsewhere page</p> },
     ]);
+
     render(<RouterProvider router={router} />);
     await userEvent.click(screen.getByRole("button", { name: "Save series" }));
     expect(await screen.findByText("Saved")).toBeInTheDocument();
