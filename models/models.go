@@ -1266,14 +1266,14 @@ const (
 	MessageCategoryReminder     = "reminder"
 )
 
-// Message statuses (PLAN 5.3). Only draft and scheduled can still change.
+// Message statuses: what may follow each is policy.MessageMove.
 const (
-	MessageDraft     = "draft"
-	MessageScheduled = "scheduled"
-	MessageSending   = "sending"
-	MessageSent      = "sent"
-	MessageCancelled = "cancelled"
-	MessageFailed    = "failed"
+	MessageDraft     = policy.MessageDraft
+	MessageScheduled = policy.MessageScheduled
+	MessageSending   = policy.MessageSending
+	MessageSent      = policy.MessageSent
+	MessageCancelled = policy.MessageCancelled
+	MessageFailed    = policy.MessageFailed
 )
 
 // MessageRecipient is one person a sent message reached or skipped (M3.5,

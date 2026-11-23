@@ -1,15 +1,21 @@
 package main
 
 import (
+	"encoding/json"
 	"net/http"
+	"net/http/httptest"
 	"reflect"
+	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"fold/internal/audit"
 	"fold/internal/testdb"
 	"fold/models"
+
+	"github.com/gin-gonic/gin"
 	"gorm.io/gorm"
 )
 
@@ -153,6 +159,192 @@ func TestTeenConversionApprovalConsentAndFreshLink(t *testing.T) {
 				t.Fatal("retry transferred more than once")
 			}
 		})
+	}
+}
+
+// A conversion's own status moves end every session and are audited, like any
+// other account status change (DEC-159). Consent first: granting it activates the
+// account and the waiting conversion sends it back to pending_consent in the
+// same request; the link confirmation then completes it. The rows name no actor
+// and no IP: who ran a completion step is not stored (DEC-159, inventory P5).
+func TestTeenConversionStatusMovesEndSessionsAndAreAudited(t *testing.T) {
+	app := testApp(t)
+	admin, gid := openGroup(t, app, "Conversion sessions")
+	f := pendingTeenConversion(t, app, admin, gid, "sessions", true)
+	load := func() models.User {
+		var u models.User
+		if err := app.DB.First(&u, f.user.ID).Error; err != nil {
+			t.Fatal(err)
+		}
+		return u
+	}
+	statusRows := func() []map[string]any {
+		var rows []models.AuditLog
+		app.DB.Where("action = ? AND target_type = 'user' AND target_id = ?", audit.UserStatusChanged, f.user.ID).Order("id").Find(&rows)
+		var metas []map[string]any
+		for _, r := range rows {
+			if r.ActorID != nil || r.IP != "" {
+				t.Fatalf("status row %d has actor %v and IP %q, want neither", r.ID, r.ActorID, r.IP)
+			}
+			var m map[string]any
+			if err := json.Unmarshal([]byte(r.MetaJSON), &m); err != nil {
+				t.Fatal(err)
+			}
+			metas = append(metas, m)
+		}
+		return metas
+	}
+	start := load()
+
+	apiDo(t, admin, "POST", consentPath(&f.user), map[string]string{"scope": "account", "status": "granted", "evidenceText": "Signed paper consent"}, 200)
+	waiting := load()
+	// One bump for consent's activation, one for the conversion's wait.
+	if waiting.Status != models.UserPendingConsent || waiting.SessionVersion != start.SessionVersion+2 {
+		t.Fatalf("after consent: status %s, session version %d, want pending_consent and %d", waiting.Status, waiting.SessionVersion, start.SessionVersion+2)
+	}
+	want := []map[string]any{{"previousStatus": models.UserActive, "status": models.UserPendingConsent, "reason": "household_conversion"}}
+	if got := statusRows(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("status rows after consent %v, want %v", got, want)
+	}
+
+	apiDo(t, admin, "POST", "/api/v1/admin/guardian-links/"+itoa(f.link.ID)+"/confirm", map[string]string{"checkNote": "Checked teen account relationship"}, 200)
+	done := load()
+	if done.Status != models.UserActive || done.SessionVersion != waiting.SessionVersion+1 {
+		t.Fatalf("after completion: status %s, session version %d, want active and %d", done.Status, done.SessionVersion, waiting.SessionVersion+1)
+	}
+	if sessionCurrent(&done, &waiting) {
+		t.Fatal("a session from before the completion is still current")
+	}
+	want = append(want, map[string]any{"previousStatus": models.UserPendingConsent, "status": models.UserActive, "reason": "household_conversion"})
+	if got := statusRows(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("status rows after completion %v, want %v", got, want)
+	}
+}
+
+// A consent that enables a staged teen again restores their seats and decides
+// the conversion at one instant, read after the membership restore's group
+// locks (AGENTS.md: take now once per transaction). Another session holds the
+// teen's group, and the clock moves on while the consent waits for it: T0
+// before the wait, T1 (an hour before the church midnight B of the teen's 18th
+// birthday, yesterday) at the first read after it, T2 (an hour after B) at
+// every later read; the wall clock is a day or more past B. A date starting
+// between T0 and T1 began while the consent waited, so the restore leaves it
+// alone; dates after T1 come back; a 17-year-old's conversion completes. A
+// read before the wait brings the started date back; the wall clock in the
+// restore skips the date between T2 and the wall clock; a second read, or the
+// wall clock, finds an adult, whose conversion waits.
+func TestTeenConsentRestoreAndConversionShareOneInstant(t *testing.T) {
+	app := testApp(t)
+	admin, gid := openGroup(t, app, "One instant")
+	f := pendingTeenConversion(t, app, admin, gid, "instant", true)
+	apiDo(t, admin, "POST", "/api/v1/admin/guardian-links/"+itoa(f.link.ID)+"/confirm", map[string]string{"checkNote": "Checked teen account relationship"}, 200)
+	loc, err := churchZoneIn(app.DB)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wall := time.Now().In(loc)
+	birthday := time.Date(wall.Year(), wall.Month(), wall.Day()-1, 0, 0, 0, 0, loc)
+	if birthday.Month() == time.February && birthday.Day() == 29 {
+		birthday = birthday.AddDate(0, 0, -1)
+	}
+	t0, started, t1, t2 := birthday.Add(-3*time.Hour), birthday.Add(-2*time.Hour), birthday.Add(-time.Hour), birthday.Add(time.Hour)
+	born := time.Date(birthday.Year()-18, birthday.Month(), birthday.Day(), 0, 0, 0, 0, time.UTC)
+	for _, row := range []struct {
+		model any
+		id    uint
+	}{{&models.User{}, f.user.ID}, {&models.AccountRequest{}, f.request.ID}, {&models.HouseholdPerson{}, f.person.ID}} {
+		gormMust(t, app.DB.Model(row.model).Where("id = ?", row.id).Update("birth_date", born))
+	}
+	groupID, err := strconv.ParseUint(gid, 10, 64)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gormMust(t, app.DB.Create(&models.Membership{UserID: f.user.ID, GroupID: uint(groupID), Role: models.MembershipMember, Status: models.MembershipActive}))
+	eventID, _ := seedCappedEvent(t, app, admin, gid, nil, false)
+	seats := map[string]uint{}
+	for name, at := range map[string]time.Time{"started": started, "before the wall clock": t2.Add(time.Hour), "ahead": birthday.AddDate(0, 0, 7)} {
+		at = at.UTC()
+		occurrence := models.EventOccurrence{EventID: eventID, OriginalDate: calDate(at.Format("2006-01-02")), StartsAt: at, EndsAt: at.Add(time.Hour), Status: models.OccurrenceScheduled}
+		gormMust(t, app.DB.Create(&occurrence))
+		row := models.Registration{OccurrenceID: occurrence.ID, UserID: &f.user.ID, Status: models.RegGoing, AttendanceMode: models.AttendanceInPerson, Source: "web"}
+		gormMust(t, app.DB.Create(&row))
+		seats[name] = row.ID
+	}
+	apiDo(t, admin, "POST", consentPath(&f.user), map[string]string{"scope": "account", "status": "revoked"}, 200)
+
+	holder := app.DB.Begin()
+	gormMust(t, holder)
+	t.Cleanup(func() { holder.Rollback() })
+	var holderPID int
+	gormMust(t, holder.Raw("SELECT pg_backend_pid()").Scan(&holderPID))
+	var held []uint
+	gormMust(t, holder.Raw("SELECT id FROM groups WHERE id = ? FOR UPDATE", groupID).Scan(&held))
+	var waited atomic.Bool
+	var after atomic.Int32
+	app.clock = func() time.Time {
+		if !waited.Load() {
+			return t0
+		}
+		if after.Add(1) == 1 {
+			return t1
+		}
+		return t2
+	}
+	var adminUser models.User
+	gormMust(t, app.DB.Where("email = ?", testEmail("admin")).First(&adminUser))
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	c.Request = httptest.NewRequest("POST", "/", nil)
+	done := make(chan error, 1)
+	go func() {
+		done <- app.contactMutation(contactChange{UserID: f.user.ID}, func(tx *gorm.DB) error {
+			actor, teen, err := lockConsentUsers(tx, adminUser.ID, f.user.ID)
+			if err != nil {
+				return err
+			}
+			return app.changeTeenConsent(tx, c, teen, actor, teenConsentChange{Scope: models.TeenConsentAccount, Status: models.ConsentGranted, EvidenceText: "Signed paper consent"})
+		})
+	}()
+	waiterBlockedBy(t, app.DB, holderPID, `"groups"`)
+	waited.Store(true)
+	holder.Rollback()
+	err = awaitDBResult(t, done)
+	app.clock = nil
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var user models.User
+	gormMust(t, app.DB.First(&user, f.user.ID))
+	var person models.HouseholdPerson
+	gormMust(t, app.DB.First(&person, f.person.ID))
+	if user.Status != models.UserActive || person.ConvertedUserID == nil || *person.ConvertedUserID != user.ID {
+		t.Errorf("status %s, person converted to %v; want active and converted to %d: the conversion judged a later instant than the restore", user.Status, person.ConvertedUserID, user.ID)
+	}
+	judged := map[uint]string{}
+	var rows []models.AuditLog
+	gormMust(t, app.DB.Where("action IN ?", []string{audit.RegistrationRestored, audit.RegistrationNotRestored}).Order("id").Find(&rows))
+	for _, r := range rows {
+		var m struct {
+			RegistrationID uint `json:"registrationId"`
+		}
+		if err := json.Unmarshal([]byte(r.MetaJSON), &m); err != nil {
+			t.Fatal(err)
+		}
+		judged[m.RegistrationID] = r.Action
+	}
+	if got := judged[seats["started"]]; got != "" {
+		t.Errorf("the date that started while the consent waited was judged (%s): the restore read the clock before the group lock, or not the transaction's clock", got)
+	}
+	for _, name := range []string{"before the wall clock", "ahead"} {
+		if got := judged[seats[name]]; got != audit.RegistrationRestored {
+			t.Errorf("the date %s was judged %q, want %s: the restore did not judge the transaction's instant", name, got, audit.RegistrationRestored)
+		}
+	}
+	for name, id := range seats {
+		var reg models.Registration
+		if err := app.DB.First(&reg, id).Error; err != nil || reg.Status != models.RegGoing {
+			t.Errorf("%s seat: %+v %v, want it kept as going", name, reg, err)
+		}
 	}
 }
 

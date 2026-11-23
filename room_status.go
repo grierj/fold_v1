@@ -15,7 +15,7 @@ import (
 // exist (docs/agents/lifecycles.md); placeBooking and openRoomRequest insert
 // a move's first status (TestRoomStatusHasOneWriter).
 
-var setsStatusRe = regexp.MustCompile(`(?i)(?:^|[\s,."])status"?\s*=`)
+var roomSetsStatusRe = regexp.MustCompile(`(?i)(?:^|[\s,."])status"?\s*=`)
 
 // changeBookings moves the bookings that match where by move, in one UPDATE
 // whose WHERE is the move's from-statuses (policy.RoomBookingMove) and where.
@@ -32,7 +32,7 @@ func changeBookings(tx *gorm.DB, move policy.RoomBookingMove, set string, setArg
 	if !move.Updates() {
 		return 0, fmt.Errorf("room booking move %q changes no booking row", move)
 	}
-	if setsStatusRe.MatchString(set) {
+	if roomSetsStatusRe.MatchString(set) {
 		return 0, fmt.Errorf("room booking move %q: the move decides the status, not the caller's columns", move)
 	}
 	var cols []string

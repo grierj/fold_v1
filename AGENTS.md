@@ -158,9 +158,12 @@ section or decision; check it still exists.
   ids are the one block in `advisory_locks.go`.
 - A transaction that takes the contact gate (`lockContacts`) outside `contactMutation` begins with
   `contactGateTx` (Read Committed); the gate refuses any other level.
-- Account status changes only through `setAccountStatusIn` (`account_status.go`); a new one starts
-  in `newAccountStatus`. Profile fields are validated by `fields.go`. A pending item is decided
-  with `decidePendingIn`.
+- Account status changes only through `setAccountStatusIn` (`account_status.go`, DEC-159), which
+  ends the account's sessions; the caller writes the audit row. A guest becomes an account in
+  `upgradeGuestIn`; only the password replace (`invitedBecomesActive`) and the erasure
+  (`tombstoneUserIn`, the sweep's `scrubTombstoneRowIn`) set the status in their own statement
+  (`TestAccountStatusHasOneWriter`). A new account's status starts in `newAccountStatus`. Profile fields are validated by `fields.go`. A
+  pending item is decided with `decidePendingIn`.
 - "This session is still current" is `sessionCurrent(fresh, session)` (`session_state.go`) alone.
   A writer that rechecks its actor under a lock calls `lockActorIn(tx, me, mode)` (or
   `lockAdminIn`) with `actorRead`, `actorShare` or `actorNoKeyUpdate`; one holding the actor in a
@@ -266,6 +269,11 @@ section or decision; check it still exists.
   phone number. Admin notices are stored notification rows written in the change's transaction.
 - Record sensitive actions with `audit.Write` (`internal/audit`) in the same transaction as the
   change.
+- A message's status moves only by a `policy.MessageMove`, the one table of what may follow
+  what (`internal/policy/message_lifecycle.go`), and only `moveMessage` writes it
+  (`moveMessagesWhere` for a set, `message_status.go`). A new message takes its first status from
+  its creating move. The predicates (`policy.MessageEditable`, `policy.MessageGoingOut`,
+  `Allows`) come from the same table.
 
 **Uploads**
 - Avatars and covers go through `storage.Store` (`App.Uploads`), never raw paths. Keys are
