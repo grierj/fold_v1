@@ -844,8 +844,14 @@ func (a *App) reapMessages(ctx context.Context, now time.Time) error {
 		return `NOT EXISTS (SELECT 1 FROM jobs j WHERE j.kind = '` + kind + `' AND j.status IN ('queued', 'running', 'failed')
 			AND (j.payload->>'` + messageJobIDField + `')::bigint = messages.id)`
 	}
+	// A reminder is written by its reminder.send job, which carries no
+	// message id; it is that job's while the job lives, and message.send's
+	// after a Try again.
+	reminderLive := `EXISTS (SELECT 1 FROM jobs j WHERE j.kind = '` + kindReminderSend + `' AND j.status IN ('queued', 'running', 'failed')
+		AND j.unique_key = ` + reminderJobKeySQL("messages.reminder_key") + `)`
 	var stuck []models.Message
-	if err := db.Select("id, author_id").Where("status = ? AND category <> ? AND scheduled_at < ? AND "+live(kindMessageSend), models.MessageScheduled, models.MessageCategoryReminder, now.Add(-time.Hour)).
+	if err := db.Select("id, author_id").Where("status = ? AND scheduled_at < ? AND "+live(kindMessageSend)+" AND NOT (category = ? AND "+reminderLive+")",
+		models.MessageScheduled, now.Add(-time.Hour), models.MessageCategoryReminder).
 		Find(&stuck).Error; err != nil {
 		return err
 	}
