@@ -1,7 +1,7 @@
 import { useId, useRef, useState, type Ref } from "react";
 import { flushSync } from "react-dom";
 import type { Visibility } from "../types";
-import { errorText } from "../lib/errors";
+import { useAction, type Action } from "../lib/useAction";
 import { coverSrc } from "../lib/covers";
 import { useUnsavedChanges } from "../lib/unsavedChanges";
 import { Form } from "./ui/Form";
@@ -29,6 +29,7 @@ export function GroupForm({
   onSaved,
   onCancel,
   saveRef,
+  action: shared,
 }: {
   initial: {
     name: string; description: string; location: string; tags: string[];
@@ -46,6 +47,8 @@ export function GroupForm({
   onCancel: () => void;
   // The submit button, for a review that hands focus back to it.
   saveRef?: Ref<HTMLButtonElement>;
+  // A run the page shares with another step of the same save (the review's confirm), so only one goes at a time.
+  action?: Action;
 }) {
   const [name, setName] = useState(initial.name);
   const [description, setDescription] = useState(initial.description);
@@ -61,8 +64,9 @@ export function GroupForm({
   const limitRef = useRef<HTMLInputElement>(null);
   const moreId = useId();
   const summaryId = useId();
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const own = useAction();
+  const action = shared ?? own;
+  const error = action.state.status === "failed" ? action.state.text : null;
 
   const dirty = name !== initial.name || description !== initial.description || location !== initial.location
     || tags !== initial.tags.join(", ") || visibility !== (initial.visibility ?? "public") || memberLimit !== initialLimit
@@ -87,12 +91,9 @@ export function GroupForm({
       onSubmitCapture={() => {
         if (!moreOpen && limitRef.current && !limitRef.current.validity.valid) flushSync(() => setMoreOpen(true));
       }}
-      onSubmit={async (e) => {
+      onSubmit={(e) => {
         e.preventDefault();
-        setBusy(true);
-        setError(null);
-
-        try {
+        void action.run(async () => {
           const saved = await onSaved({
             name,
             description,
@@ -108,12 +109,9 @@ export function GroupForm({
             memberLimit: memberLimit.trim() ? Number(memberLimit) : null,
           });
 
-          if (saved !== false) markSaved();
-        } catch (err) {
-          setError(errorText(err, "We couldn't save your changes."));
-        } finally {
-          setBusy(false);
-        }
+          if (saved === false) return false;
+          markSaved();
+        }, { fallback: "We couldn't save your changes." });
       }}
     >
       {guard}
@@ -189,8 +187,8 @@ export function GroupForm({
         </div>
       </section>
       <FormActions>
-        <Button ref={saveRef} variant="primary" layout="w-full sm:w-auto" type="submit" disabled={busy}>
-          {busy ? "Saving…" : saveLabel}
+        <Button ref={saveRef} variant="primary" layout="w-full sm:w-auto" type="submit" disabled={action.running}>
+          {action.running ? "Saving…" : saveLabel}
         </Button>
         <Button variant="secondary" layout="w-full sm:w-auto" onClick={onCancel}>
           Cancel

@@ -1539,6 +1539,33 @@ describe("the group visibility review", () => {
     await waitFor(() => expect(Groups.update).toHaveBeenLastCalledWith("1", expect.objectContaining({ consent: B })));
   });
 
+  it("refuses another Save group while the review's confirm is saving (#431)", async () => {
+    const saving = deferred<{ group: typeof page.group }>();
+    vi.mocked(Groups.update).mockReturnValueOnce(saving.promise);
+    const dialog = await openReview();
+    await userEvent.click(within(dialog).getByRole("button", { name: "Make the group invite-only" }));
+    await waitFor(() => expect(Groups.update).toHaveBeenCalledOnce());
+    const form = screen.getByLabelText("Group name").closest("form")!;
+    expect(within(form).getByRole("button", { name: /^(Save group|Saving…)$/ })).toBeDisabled();
+    fireEvent.submit(form);
+    expect(Groups.visibilityImpact).toHaveBeenCalledOnce();
+    expect(Groups.update).toHaveBeenCalledOnce();
+    await act(async () => { saving.resolve({ group: page.group }); await saving.promise; });
+  });
+
+  it("refuses the review's confirm while Save group is checking again", async () => {
+    const dialog = await openReview();
+    const again = deferred<ReturnType<typeof impact>>();
+    vi.mocked(Groups.visibilityImpact).mockReturnValueOnce(again.promise);
+    await userEvent.click(screen.getByRole("button", { name: "Save group" }));
+    expect(Groups.visibilityImpact).toHaveBeenCalledTimes(2);
+    const confirm = within(dialog).getByRole("button", { name: /^(Make the group invite-only|Saving…)$/ });
+    expect(confirm).toBeDisabled();
+    fireEvent.click(confirm);
+    expect(Groups.update).not.toHaveBeenCalled();
+    await act(async () => { again.resolve(impact("public", A)); await again.promise; });
+  });
+
   it("Cancel from the keyboard lands on Save group with the draft kept", async () => {
     const dialog = await openReview();
     expect(document.activeElement).toBe(within(dialog).getByRole("heading", { name: "Making the group invite-only changes some events" }));

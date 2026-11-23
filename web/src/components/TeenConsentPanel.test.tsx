@@ -74,3 +74,18 @@ it("explains independent suspension and keeps adult history read-only", async ()
   await userEvent.click(screen.getByText("Consent history (1)"));
   expect(screen.getByText("Signed parent form")).toBeVisible();
 });
+
+it("says a grant was saved when only the history reload after it fails (#430)", async () => {
+  const updated = vi.fn();
+  render(<TeenConsentPanel user={teen} onUpdated={updated} onClose={vi.fn()} />);
+  await userEvent.type(await screen.findByLabelText("Consent evidence"), "Signed parent form");
+  vi.mocked(AdminTeenConsents.list).mockRejectedValue(new Error("offline"));
+  await userEvent.click(screen.getByRole("button", { name: "Grant consent" }));
+  expect(AdminTeenConsents.change).toHaveBeenCalledOnce();
+  expect(await screen.findByRole("status")).toHaveTextContent("Account access consent granted.");
+  expect(screen.getByRole("alert")).toHaveTextContent("We couldn't refresh the consent history, so it may be out of date. Reload the page to see the latest.");
+  expect(screen.queryByText(/couldn't save/)).not.toBeInTheDocument();
+  expect(screen.getByLabelText("Consent evidence")).toHaveValue("");
+  expect(updated).toHaveBeenCalledOnce();
+  expect(screen.getByRole("button", { name: "Grant consent" })).toBeEnabled();
+});

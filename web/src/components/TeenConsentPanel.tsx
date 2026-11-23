@@ -4,6 +4,7 @@ import { AdminTeenConsents } from "../api/adminUsers";
 import type { TeenConsent, User } from "../types";
 import { errorText } from "../lib/errors";
 import { formatWhen } from "../lib/when";
+import { useAction } from "../lib/useAction";
 import { Button } from "./ui/Button";
 import { Choices, Field, FormError, Radio, showFieldErrors, Textarea } from "./ui/Field";
 
@@ -21,8 +22,8 @@ export default function TeenConsentPanel({ user, onUpdated, onClose }: { user: U
   const [evidence, setEvidence] = useState("");
   const [evidenceError, setEvidenceError] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
-  const [announcement, setAnnouncement] = useState("");
+  const action = useAction();
+  const busy = action.running;
   const ref = useRef<HTMLDivElement>(null);
 
   const load = useCallback(async () => {
@@ -44,21 +45,17 @@ export default function TeenConsentPanel({ user, onUpdated, onClose }: { user: U
     if (status === "revoked" && !confirm(scope === "account"
       ? `Revoke account consent for ${publicName(user)}? They will be signed out and can't sign in.`
       : `Revoke ${scope === "sms" ? "SMS" : "photo"} consent for ${publicName(user)}?`)) return;
-    setBusy(true);
-    setError(null);
     setEvidenceError(null);
-    setAnnouncement("");
-
-    try {
+    await action.run(async () => {
       await AdminTeenConsents.change(user.id, { scope, status, evidenceText: evidence.trim() });
-      await load();
       setEvidence("");
-      setAnnouncement(`${scopes.find((item) => item.value === scope)?.label} consent ${status}.`);
       onUpdated();
-    } catch (e) {
-      setError(errorText(e, "We couldn't save consent. Please try again."));
-    } finally { setBusy(false); }
+
+      return `${scopes.find((item) => item.value === scope)?.label} consent ${status}.`;
+    }, { fallback: "We couldn't save consent.", followUp: load });
   }
+
+  const { state } = action;
 
   return (
     <div ref={ref} className="mt-4 border-t border-border pt-4 space-y-4 whitespace-normal" aria-label={`Consent for ${publicName(user)}`}>
@@ -100,7 +97,9 @@ export default function TeenConsentPanel({ user, onUpdated, onClose }: { user: U
         </details>
       </>}
       {error && <FormError>{error}</FormError>}
-      <p role="status" className="text-success empty:hidden">{announcement}</p>
+      {state.status === "failed" && <FormError>{state.text}</FormError>}
+      {state.status === "done" && state.followUpFailed && <FormError>We couldn't refresh the consent history, so it may be out of date. Reload the page to see the latest.</FormError>}
+      <p role="status" className="text-success empty:hidden">{state.status === "done" ? state.text : ""}</p>
     </div>
   );
 }

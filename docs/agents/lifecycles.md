@@ -30,7 +30,8 @@ describe today's code, including the lifecycles that do not follow the rule belo
   allows today, odd moves included. Refusing one of them is a separate change (AGENTS.md, merge
   rule 3).
 - **Web:** one value per lifecycle, a union that cannot hold two states at once, over several
-  booleans. A page that loads one resource uses `web/src/lib/useLoad.ts`. A server status is
+  booleans. A page that loads one resource uses `web/src/lib/useLoad.ts`; a form or button that
+  changes something runs its submit through `web/src/lib/useAction.ts`. A server status is
   typed as a union in `web/src/types.ts` and gets its words from `web/src/lib/status.ts`.
 
 ## Accounts and identity
@@ -137,11 +138,16 @@ chosen when the row is made, or is a setting that may change to any value its ow
   `web/src/components/DeleteUserPanel.tsx` and `web/src/pages/ReasonReviewLegacy.tsx` (`Phase`, a
   delete and its review), `web/src/lib/pushState.ts` (`DeviceState`, `PushCardState`) and the
   `busy` union in `web/src/pages/MessageComposer.tsx`.
-- `web/src/components/ui/Form.tsx` validates and has no submit lifecycle, so each form keeps its
-  own `busy`, `error` and done values.
+- `web/src/components/ui/Form.tsx` validates; the submit lifecycle is `web/src/lib/useAction.ts`
+  (idle, running, failed, done). It refuses a second run while one is on its way, always leaves
+  running, words a throw with `errorText`, and keeps a follow-up step (a reload after the save)
+  apart from the save, so a failed reload is never told as a failed save. Most older forms still
+  keep their own `busy`, `error` and done values; the `busyFlags` ratchet only lets that count fall.
 - A making-more-private review is preview, review, confirm in two places with the same rule:
   `web/src/components/EventVisibility.tsx` and `web/src/pages/GroupDetail.tsx`, around
-  `web/src/components/GroupVisibilityReview.tsx`.
+  `web/src/components/GroupVisibilityReview.tsx`. Each runs its Save (the preview included) and the
+  review's confirm in one `useAction`, so neither starts while the other is on its way; the group
+  page hands its run to `web/src/components/GroupForm.tsx` (`action`).
 - Server statuses are typed in `web/src/types.ts`, most as unions and a few (a group's status, a
   guest registration's) as plain `string`; their words are in `web/src/lib/status.ts`
   (`accountStatusLabel`, `groupStatusLabel`, `registrationStatusLabel`,
@@ -151,4 +157,5 @@ chosen when the row is made, or is a setting that may change to any value its ow
 
 | Rule | Enforced by |
 |------|-------------|
+| A new hand-rolled busy flag (`useState` named `busy`, `saving`, `submitting`, `sending` or the like) in `web/src` | `TestUIRatchets` (`busyFlags` in `ui-ratchet.json`), `TestUIRatchetsCatchPastMistakes` |
 | Every column whose CHECK lists its values has a row here with exactly those values, or a line under "Enumerated columns that are not lifecycles"; every Go name written with its file, every Go test and every `web/` path this map names exists | `TestLifecycleMapMatchesSchemaAndSource`, `TestLifecycleMapGuardCatchesMistakes` |

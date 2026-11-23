@@ -92,3 +92,30 @@ test.each(["cancelled", "failed"])("%s consent revocation preserves the expanded
   expect(screen.getByRole("button", { name: "Revoke access" })).toBeInTheDocument();
   expect(Guardians.teens).toHaveBeenCalledTimes(1);
 });
+
+test("a consent change that saved but whose reload failed says it was saved and asks for a reload (#430)", async () => {
+  vi.mocked(Guardians.teens).mockResolvedValueOnce({ teens: [teen] }).mockRejectedValueOnce(new Error("offline"));
+  vi.mocked(Guardians.change).mockResolvedValue({});
+  render(<MemoryRouter><GuardianConsentCard /></MemoryRouter>);
+  await userEvent.click(await screen.findByRole("button", { name: "Revoke consent" }));
+  expect(await screen.findByText("Account consent revoked.")).toBeInTheDocument();
+  expect(screen.getByRole("alert")).toHaveTextContent("We couldn't refresh your teen's consent here, so this page may be out of date. Reload the page to see the latest.");
+  expect(Guardians.change).toHaveBeenCalledOnce();
+});
+
+test("a new guardian link request clears the last one's success line (#430)", async () => {
+  vi.mocked(Guardians.teens).mockResolvedValue({ teens: [] });
+  let refuse!: (cause: unknown) => void;
+  vi.mocked(Guardians.claim).mockResolvedValueOnce({ message: "Request sent." }).mockReturnValueOnce(new Promise((_, reject) => { refuse = reject; }));
+  render(<MemoryRouter><GuardianConsentCard /></MemoryRouter>);
+  const email = await screen.findByLabelText(/Teen's email/);
+  await userEvent.type(email, "sam@example.com");
+  await userEvent.click(screen.getByRole("button", { name: "Request guardian link" }));
+  expect(await screen.findByText("Request sent.")).toBeInTheDocument();
+  await userEvent.type(email, "other@example.com");
+  await userEvent.click(screen.getByRole("button", { name: "Request guardian link" }));
+  expect(screen.queryByText("Request sent.")).not.toBeInTheDocument();
+  await act(async () => { refuse(new ApiError(400, "private", { code: "invalid_guardian_email" })); });
+  expect(await screen.findByRole("alert")).toHaveTextContent("Enter a parent or guardian's email address");
+  expect(screen.queryByText("Request sent.")).not.toBeInTheDocument();
+});

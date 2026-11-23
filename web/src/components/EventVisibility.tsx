@@ -9,6 +9,7 @@ import { decisionImpact, reviewOutdated } from "../lib/visibilityConsent";
 import { ROSTER_STALE, ROSTER_WAITING, visibilityRank } from "../lib/visibilityChange";
 import { useRosterActivityOf } from "../lib/dateWrites";
 import { useFocusHome, useKeepFocusHome } from "../lib/focusHome";
+import { useAction } from "../lib/useAction";
 import { Checkbox, Choices, Field, FormError, Input, Radio } from "./ui/Field";
 import { Button } from "./ui/Button";
 
@@ -45,7 +46,9 @@ export function EventVisibilityControl({
 }) {
   const [value, setValue] = useState<Visibility>(visibility === "invite_only" && churchWide ? "public" : visibility);
   const [reason, setReason] = useState("");
-  const [busy, setBusy] = useState(false);
+  // One run covers the preview and the commit, from Save or from the review's confirm.
+  const action = useAction();
+  const busy = action.running;
   const [error, setError] = useState<string | null>(null);
   const [resetOverrides, setResetOverrides] = useState(false);
   const [futureOverrides, setFutureOverrides] = useState(0);
@@ -92,7 +95,7 @@ export function EventVisibilityControl({
   // A review is judged from its request's mark until a listener is armed: a write that began (and maybe ended)
   // after the request's last check, before this commit, is never shown and withdraws it. After that, a begin
   // withdraws it. A commit on its way decides from its own answer.
-  const reviewMoved = review !== null && !busy && !committing.current && moved(review.mark);
+  const reviewMoved = review !== null && !committing.current && moved(review.mark);
   useLayoutEffect(() => {
     if (!review) return;
 
@@ -113,10 +116,14 @@ export function EventVisibilityControl({
   // The server's preview decides, never the page's props: a reset always
   // shows what it changes unless nothing changes at all, and a more private
   // choice shows who it cancels (DEC-48).
-  async function save(e: React.FormEvent) {
+  function save(e: React.FormEvent) {
     e.preventDefault();
 
-    if (busy || activity.pendingFor([eventId]) > 0) return;
+    if (activity.pendingFor([eventId]) > 0) return;
+    void action.run(preview);
+  }
+
+  async function preview(): Promise<false | void> {
     setError(null);
 
     if (resetOverrides || visibilityRank(value) < visibilityRank(visibility)) {
@@ -128,13 +135,13 @@ export function EventVisibilityControl({
       } catch (err) {
         setError(errorText(err, "We couldn't check this event."));
 
-        return;
+        return false;
       }
 
       if (moved(mark)) {
         stale();
 
-        return;
+        return false;
       }
 
       setFutureOverrides(impact.futureOverrides ?? 0);
@@ -143,22 +150,19 @@ export function EventVisibilityControl({
       if (changes) {
         show(impact, mark);
 
-        return;
+        return false;
       }
 
-      await commit(impact.consent ?? "");
-
-      return;
+      return commit(impact.consent ?? "");
     }
 
-    await commit("");
+    return commit("");
   }
 
-  async function commit(consent: string) {
-    if (committing.current || activity.pendingFor([eventId]) > 0) return;
+  async function commit(consent: string): Promise<false | void> {
+    if (committing.current || activity.pendingFor([eventId]) > 0) return false;
     committing.current = true;
     const mark = activity.mark();
-    setBusy(true);
     setError(null);
 
     try {
@@ -171,7 +175,7 @@ export function EventVisibilityControl({
       if (fresh && moved(mark)) {
         stale();
 
-        return;
+        return false;
       }
 
       // Any other answer after a sign-up update withdraws the review too: the next Save previews again.
@@ -181,13 +185,14 @@ export function EventVisibilityControl({
         show(fresh, mark);
         setError("We checked again before saving. Please review the changes below.");
 
-        return;
+        return false;
       }
 
       setError(reviewOutdated(err) ?? errorText(err, "We couldn't change who can see this."));
+
+      return false;
     } finally {
       committing.current = false;
-      setBusy(false);
     }
   }
 
@@ -214,7 +219,7 @@ export function EventVisibilityControl({
           reset={resetOverrides}
           busy={busy}
           waiting={waiting}
-          onConfirm={() => void commit(review.impact.consent ?? "")}
+          onConfirm={() => void action.run(() => commit(review.impact.consent ?? ""))}
           onCancel={() => setReview(null)}
           returnFocus={saveButton}
         />

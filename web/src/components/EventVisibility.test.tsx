@@ -57,6 +57,24 @@ describe("event tightening", () => {
     expect(setVisibility).toHaveBeenCalledWith(8, { visibility: "public", reason: undefined, consent: "", resetOverrides: false });
   });
 
+  it("a second Save while the preview is on its way sends no second preview (#431)", async () => {
+    const tightening = { visibility: "invite_only" as const, currentVisibility: "public" as const, tightened: [{ id: 7, title: "Picnic", visibility: "public" as const, registrants: 1 }], leaderOpened: [], consent: A };
+    let answer!: (impact: VisibilityImpact) => void;
+    visibilityImpact.mockImplementation((_id: number, value: string) => (value === "invite_only" ? new Promise<VisibilityImpact>((resolve) => { answer = resolve; }) : Promise.resolve({ ...tightening, tightened: [] })));
+    render(<EventVisibilityControl eventId={7} groupVisibility="public" visibility="public" onSaved={() => {}} />);
+    await userEvent.click(screen.getByRole("radio", { name: /^Invite only/ }));
+    const save = screen.getByRole("button", { name: "Save visibility" });
+    await userEvent.click(save);
+    await userEvent.click(save);
+    fireEvent.submit(save.closest("form")!);
+    const previews = () => visibilityImpact.mock.calls.filter((call) => call[1] === "invite_only").length;
+    expect(previews()).toBe(1);
+    await act(async () => { answer(tightening); });
+    expect(await screen.findByText("Making this event invite-only")).toBeInTheDocument();
+    expect(previews()).toBe(1);
+    expect(setVisibility).not.toHaveBeenCalled();
+  });
+
   it("re-opens the review from a 409's own impact and confirms with its consent, never previewing again", async () => {
     const first = { visibility: "invite_only" as const, currentVisibility: "public" as const, tightened: [{ id: 7, title: "Picnic", visibility: "public" as const, registrants: 1 }], leaderOpened: [], consent: A };
     const fresh = { ...first, tightened: [{ ...first.tightened[0], registrants: 3 }], consent: B };

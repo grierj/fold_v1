@@ -43,6 +43,7 @@ import { focalPosition, prepareUpload } from "../lib/image";
 import { formatTime, formatWhen } from "../lib/when";
 import { errorText } from "../lib/errors";
 import { useLoad } from "../lib/useLoad";
+import { useAction } from "../lib/useAction";
 import { FormError, HiddenFileInput } from "../components/ui/Field";
 import { Button, ButtonLink } from "../components/ui/Button";
 import { applyActorRsvpResults, type ActorRsvpResult, type SeriesFeedbackSignal } from "../lib/rsvpFeedback";
@@ -317,7 +318,8 @@ function GroupDetailContent() {
   const [editing, setEditing] = useState(false);
   // `mark` is the session roster sequence the request behind the review was sent at.
   const [review, setReview] = useState<{ data: GroupFormData; impact: VisibilityImpact; mark: number } | null>(null);
-  const [reviewBusy, setReviewBusy] = useState(false);
+  // One run for Save group (its preview and save) and the review's confirm, so neither starts while the other runs.
+  const groupSaveAction = useAction();
   const [reviewError, setReviewError] = useState<string | null>(null);
   const groupSave = useRef<HTMLButtonElement>(null);
   // Holds the review and its lines while editing; keeps keyboard focus when a sign-up update withdraws a review.
@@ -386,7 +388,7 @@ function GroupDetailContent() {
   // after the request's last check, before this commit, is never shown and withdraws it. After that, a begin on
   // one of its events withdraws it. A commit on its way decides from its own answer.
   const reviewIds = review ? impactEventIds(review.impact) : null;
-  const reviewMoved = review !== null && !reviewBusy && !reviewCommitting.current && moved(review.mark, reviewIds ?? []);
+  const reviewMoved = review !== null && !reviewCommitting.current && moved(review.mark, reviewIds ?? []);
   useLayoutEffect(() => {
     if (!review) return;
     const ids = impactEventIds(review.impact);
@@ -626,16 +628,17 @@ function GroupDetailContent() {
     }
   }
 
-  async function confirmReview(decisions: Record<string, OpenedDecision>) {
-    if (!review || reviewCommitting.current || activity.pendingFor(impactEventIds(review.impact)) > 0) return;
+  async function confirmReview(decisions: Record<string, OpenedDecision>): Promise<false | void> {
+    if (!review || reviewCommitting.current || activity.pendingFor(impactEventIds(review.impact)) > 0) return false;
     reviewCommitting.current = true;
-    setReviewBusy(true);
     setReviewError(null);
     const at = { mark: activity.mark() };
 
     try {
       await commitEdit(review.data, decisions, review.impact.consent ?? "", at);
       setReview(null);
+
+      return;
     } catch (e) {
       const fresh = decisionImpact(e);
 
@@ -650,9 +653,10 @@ function GroupDetailContent() {
         if (moved(review.mark, impactEventIds(review.impact))) setReview(null);
         setReviewError(reviewOutdated(e) ?? errorText(e, "We couldn't save your changes."));
       }
+
+      return false;
     } finally {
       reviewCommitting.current = false;
-      setReviewBusy(false);
     }
   }
 
@@ -853,9 +857,9 @@ function GroupDetailContent() {
             {review && !reviewMoved && <GroupVisibilityReview
               key={JSON.stringify(review.impact)}
               impact={review.impact}
-              busy={reviewBusy}
+              busy={groupSaveAction.running}
               waiting={activity.pendingFor(reviewIds ?? []) > 0}
-              onConfirm={(d) => void confirmReview(d)}
+              onConfirm={(d) => void groupSaveAction.run(() => confirmReview(d))}
               onCancel={() => {
                 setReview(null);
                 setReviewError(null);
@@ -881,6 +885,7 @@ function GroupDetailContent() {
             }}
             saveLabel="Save group"
             saveRef={groupSave}
+            action={groupSaveAction}
             onSaved={saveEdit}
             onCancel={() => {
               setEditing(false);

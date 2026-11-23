@@ -18,6 +18,7 @@ import { seatsFrom } from "./SeatsField";
 import { videoBody } from "./VideoField";
 import { remoteBody, remoteFrom } from "./RemoteField";
 import { errorText, keptDatesOf } from "../lib/errors";
+import { useAction } from "../lib/useAction";
 import { KeptDates } from "./KeptDates";
 import { useKeptRefusal } from "./keptRefusal";
 import { optionFieldOfError, validateEventOptions, type EventOptionValues, type OptionErrors } from "./eventOptionValues";
@@ -119,7 +120,7 @@ export function SeriesEditor({
   const [options, setOptions] = useState(initial);
   // Open on edit, so what is already set is in view (DEC-95).
   const [moreOpen, setMoreOpen] = useState(true);
-  const [busy, setBusy] = useState(false);
+  const action = useAction();
   const [error, setError] = useState<string | null>(null);
   const [optionErrors, setOptionErrors] = useState<OptionErrors>({});
   const root = useRef<HTMLFormElement>(null);
@@ -151,7 +152,6 @@ export function SeriesEditor({
     }
 
     setOptionErrors({});
-    setBusy(true);
     setError(null);
     const recurrenceRule = simple ? (recurring ? weeklyRule(days) : "") : rule.trim();
     const { seats, video, childcare, remote, reminder, reminderPush } = options;
@@ -198,31 +198,34 @@ export function SeriesEditor({
       Object.assign(body, videoBody(video));
     }
 
-    try {
-      await Events.update(instance.eventId, body);
+    await action.run(async () => {
+      try {
+        await Events.update(instance.eventId, body);
+      } catch (err) {
+        const msg = errorText(err, "We couldn't update the series.");
+        const field = optionFieldOfError(err);
+        const keptDates = keptDatesOf(err);
+
+        // A refusal for kept dates is told by the panel (DEC-156); with no date to read, the error line says it alone.
+        if (keptDates && keptDates.length > 0) {
+          kept.open(keptDates);
+        } else if (field) {
+          showFieldErrors(root.current, () => {
+            setError(msg);
+            setOptionErrors({ [field]: msg });
+            setMoreOpen(true);
+          });
+        } else {
+          setError(msg);
+        }
+
+        return false;
+      }
+
       markSaved();
       kept.close();
       onSaved();
-    } catch (err) {
-      const msg = errorText(err, "We couldn't update the series.");
-      const field = optionFieldOfError(err);
-      const keptDates = keptDatesOf(err);
-
-      // A refusal for kept dates is told by the panel (DEC-156); with no date to read, the error line says it alone.
-      if (keptDates && keptDates.length > 0) {
-        kept.open(keptDates);
-      } else if (field) {
-        showFieldErrors(root.current, () => {
-          setError(msg);
-          setOptionErrors({ [field]: msg });
-          setMoreOpen(true);
-        });
-      } else {
-        setError(msg);
-      }
-
-      setBusy(false);
-    }
+    });
   }
 
   return (<>
@@ -270,8 +273,8 @@ export function SeriesEditor({
         errors={optionErrors}
       />
       <FormActions>
-        <Button ref={submit} variant="primary" layout="w-full sm:w-auto" type="submit" disabled={busy}>
-          {busy ? "Saving…" : "Save series"}
+        <Button ref={submit} variant="primary" layout="w-full sm:w-auto" type="submit" disabled={action.running}>
+          {action.running ? "Saving…" : "Save series"}
         </Button>
         {onClose && (
           <Button variant="secondary" layout="w-full sm:w-auto" onClick={onClose}>

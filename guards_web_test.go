@@ -629,6 +629,14 @@ var uiRules = []uiRule{
 			return strings.HasSuffix(path, "lib/when.ts")
 		},
 	},
+	{
+		name: "busyFlags",
+		fix:  "run the submit through useAction (web/src/lib/useAction.ts) instead of a busy flag beside an error and a done value (docs/agents/lifecycles.md, Web client)",
+		re:   regexp.MustCompile(`const \[(\w*[Bb]usy\w*|\w*[Ss]aving|\w*[Ss]ubmitting|\w*[Ss]ending)\s*,\s*set\w*\s*\]\s*=\s*useState\b`),
+		skip: func(path, _ string) bool {
+			return strings.HasSuffix(path, "lib/useAction.ts")
+		},
+	},
 }
 
 func uiRuleCounts(path, src string) map[string]int {
@@ -735,13 +743,16 @@ func TestUIRatchetsCatchPastMistakes(t *testing.T) {
 		{"styleLiterals", "web/src/pages/Home.tsx", `<div style={{ color: "#333", objectPosition: x }}>`},
 		// Notifications.tsx:79 before this change.
 		{"dateFormatting", "web/src/pages/Notifications.tsx", `{new Date(n.createdAt).toLocaleString()}`},
+		// SeriesEditor.tsx before useAction: busy was cleared only on a failure (#427).
+		{"busyFlags", "web/src/components/SeriesEditor.tsx", `const [busy, setBusy] = useState(false);`},
+		{"busyFlags", "web/src/pages/GroupDetail.tsx", `const [reviewBusy, setReviewBusy] = useState(false);`},
 	}
 	for _, c := range cases {
 		if got := uiRatchetViolations(map[string]map[string]int{}, map[string]string{c.path: c.line}); len(got) == 0 || !strings.Contains(strings.Join(got, "\n"), c.rule) {
 			t.Errorf("%s not caught on %q: %v", c.rule, c.line, got)
 		}
 	}
-	ok := `<Chip selected={on}>tag</Chip> <img style={{ objectPosition: pos }} /> <p className="text-danger">{error} {/* danger-ok: form error */}</p>`
+	ok := `<Chip selected={on}>tag</Chip> <img style={{ objectPosition: pos }} /> <p className="text-danger">{error} {/* danger-ok: form error */}</p> const action = useAction(); const busy = action.running; const [saved, setSaved] = useState(false);`
 	if got := uiRatchetViolations(map[string]map[string]int{}, map[string]string{"web/src/pages/X.tsx": ok}); len(got) != 0 {
 		t.Errorf("false positives: %v", got)
 	}

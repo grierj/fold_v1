@@ -210,6 +210,17 @@ describe("SeriesEditor form layout (DEC-95)", () => {
     expect(Events.update).toHaveBeenLastCalledWith(7, expect.objectContaining({ reminderPush: false }));
   });
 
+  it("is ready for the next change after a save that leaves it open (#427)", async () => {
+    vi.mocked(Events.update).mockReset().mockResolvedValue({ event: testEvent(7) });
+    const onSaved = vi.fn();
+    render(<SeriesEditor series={baseSeries} idPrefix="again" onSaved={onSaved} />);
+    await userEvent.click(screen.getByRole("button", { name: "Save series" }));
+    await waitFor(() => expect(onSaved).toHaveBeenCalledOnce());
+    expect(screen.getByRole("button", { name: "Save series" })).toBeEnabled();
+    await userEvent.click(screen.getByRole("button", { name: "Save series" }));
+    expect(Events.update).toHaveBeenCalledTimes(2);
+  });
+
   it("reads a missing reminder time as the default, 1 day before", () => {
     render(<SeriesEditor series={baseSeries} idPrefix="rem0" onSaved={() => {}} />);
     expect(screen.getByLabelText("Reminder email")).toHaveValue("1440");
