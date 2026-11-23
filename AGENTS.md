@@ -220,7 +220,10 @@ section or decision; check it still exists.
 - Rooms (`internal/rooms`): "the room is busy" is `rooms.HeldCondition` over `rooms.PaddedRange`;
   every busy count is `rooms.BusyCounts`. A date's place is `events.EffectivePlace` /
   `EffectivePlaceSQL`; group tags compare through `internal/grouptags`; a default-off switch read
-  in SQL is `settingOnSQL`. Each SQL form has a test that it agrees with its Go form.
+  in SQL is `settingOnSQL`. Each SQL form has a test that it agrees with its Go form. A booking's
+  state (waiting or lost, double-booked) is `policy.RoomBookingStateOf`, and the booking and request
+  moves are tables in `internal/policy/room_lifecycle.go`; a status changes only through
+  `changeBookings` or `moveRoomRequest`/`moveRoomRequestsWhere` (`room_status.go`).
 - Registrations: seat decisions go through `registration_seats.go` (`poolFits`, `seatChange`,
   `seatTally`; party size and childcare demand each have one SQL and one Go form,
   `TestSeatSQLMatchesGoRules`); rows are written only by `saveRegistration` and `promoteRegistration`
