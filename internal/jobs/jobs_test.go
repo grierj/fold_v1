@@ -230,12 +230,19 @@ func TestPanicsAndUnknownKinds(t *testing.T) {
 	if nobody.Status != models.JobQueued || nobody.Attempts != 0 || time.Until(nobody.RunAt) < 50*time.Minute {
 		t.Fatalf("an unknown kind waits for a build that knows it, without using an attempt: %+v", nobody)
 	}
-	// After a week it is dead.
+	// Once the grace period ends, the final claim uses an attempt even though
+	// this build has no handler to start.
+	reported := -1
+	r.OnDead = func(_ uint, kind string, attempts int, _ string) {
+		if kind == "nobody" {
+			reported = attempts
+		}
+	}
 	db.Model(&nobody).Updates(map[string]any{"created_at": time.Now().AddDate(0, 0, -8), "run_at": time.Now()})
 	r.RunOnce(context.Background(), "w")
 	db.First(&nobody, nobody.ID)
-	if nobody.Status != models.JobDead {
-		t.Fatalf("an unknown kind after a week: %+v", nobody)
+	if nobody.Status != models.JobDead || nobody.Attempts != 1 || reported != 1 {
+		t.Fatalf("unknown kind after grace: job %+v, hook reported %d attempts used", nobody, reported)
 	}
 }
 
@@ -316,10 +323,7 @@ func TestOnDeadFiresOnceWhenAJobDies(t *testing.T) {
 	}
 }
 
-// A job whose worker stopped during its last attempt dies on the next claim,
-// which counts one more attempt in the row but never runs; OnDead reports the
-// attempts that ran.
-func TestOnDeadCountsTheAttemptsThatRan(t *testing.T) {
+func TestOnDeadCapsAttemptsUsedAfterLeaseRecovery(t *testing.T) {
 	db := testdb.Shared(t)
 	var calls []deadCall
 	r := runner(db, Kind{Type: Type{Name: "stopped"}, Run: func(context.Context, json.RawMessage) error {

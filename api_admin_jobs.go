@@ -27,8 +27,7 @@ type adminJobJSON struct {
 	// Label says what the job does in plain words.
 	Label string `json:"label"`
 	// RunsDaily: tomorrow's run will try again by itself.
-	RunsDaily bool `json:"runsDaily"`
-	// Attempts counts the attempts that ran (jobs.AttemptsRun).
+	RunsDaily bool      `json:"runsDaily"`
 	Attempts  int       `json:"attempts"`
 	LastError string    `json:"lastError"`
 	FailedAt  time.Time `json:"failedAt"`
@@ -95,7 +94,7 @@ func (a *App) apiAdminDeadJobs(c *gin.Context) {
 			label = j.Kind
 		}
 		out = append(out, adminJobJSON{ID: j.ID, Kind: j.Kind, Label: label, RunsDaily: k.Daily,
-			Attempts: jobs.AttemptsRun(j.Attempts, j.MaxAttempts), LastError: j.LastError, FailedAt: j.UpdatedAt})
+			Attempts: jobs.AttemptsUsed(j.Attempts, j.MaxAttempts), LastError: j.LastError, FailedAt: j.UpdatedAt})
 	}
 	c.JSON(http.StatusOK, adminJobsJSON{Jobs: out, More: more, Deliveries: deliveries})
 }

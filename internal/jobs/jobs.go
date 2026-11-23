@@ -176,8 +176,8 @@ type Runner struct {
 	Lease time.Duration
 	// OnDead, when set, is called once after a job's move to dead lands (it
 	// ran out of attempts, its worker stopped while running it, or its kind
-	// went unknown past the grace). attempts counts the attempts that ran
-	// (AttemptsRun). errText is the CleanError text the row keeps. It is not
+	// went unknown past the grace). attempts is the retry budget used
+	// (AttemptsUsed). errText is the CleanError text the row keeps. It is not
 	// called for a retry, Later, Requeued or success, nor when this claim no
 	// longer held the job. It runs after the dead UPDATE has
 	// committed, outside that transaction, so a process that dies in between
@@ -415,7 +415,7 @@ func (r *Runner) finish(job claimed, runErr error, final bool) error {
 	case final || job.Attempts >= job.MaxAttempts:
 		dead = true
 		msg = CleanError(runErr)
-		log.Printf("jobs: %s #%d is dead after %d attempts: %s", job.Kind, job.ID, AttemptsRun(job.Attempts, job.MaxAttempts), msg)
+		log.Printf("jobs: %s #%d is dead (attempts used: %d): %s", job.Kind, job.ID, AttemptsUsed(job.Attempts, job.MaxAttempts), msg)
 		updates = map[string]any{"status": models.JobDead, "locked_at": nil, "last_error": msg, "updated_at": time.Now()}
 	default:
 		msg = CleanError(runErr)
@@ -444,14 +444,13 @@ func (r *Runner) callOnDead(job claimed, msg string) {
 			log.Printf("jobs: the dead-job hook for %s #%d panicked: %v", job.Kind, job.ID, p)
 		}
 	}()
-	r.OnDead(job.ID, job.Kind, AttemptsRun(job.Attempts, job.MaxAttempts), msg)
+	r.OnDead(job.ID, job.Kind, AttemptsUsed(job.Attempts, job.MaxAttempts), msg)
 }
 
-// AttemptsRun is how many of a job's attempts ran, for the System page and the
-// admins' alert. The row's attempts counts claims: when a worker stops during
-// the last attempt, the claim that takes it back adds one and marks the job
-// dead without running it, and stalled claimers can add more.
-func AttemptsRun(attempts, maxAttempts int) int { return min(attempts, maxAttempts) }
+// AttemptsUsed caps the claim count at the job's retry budget. A worker can
+// stop after claiming work but before starting its handler, and a recovery
+// claim past the budget can mark the job dead without spending another attempt.
+func AttemptsUsed(attempts, maxAttempts int) int { return min(attempts, maxAttempts) }
 
 var emailLike = regexp.MustCompile(`[^\s<>"'(),;:]+@[^\s<>"'(),;:]+`)
 

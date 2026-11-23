@@ -22,11 +22,11 @@ suppressions. The guards named here are parse-only; each test file states its ow
   on a UTF8 database (`TestSuppressionMatchingBasis`).
 - Notices are delivered by the `notify.deliver` job that `notify.Send` queues, never by their
   callers (`TestNoticesAreDeliveredBySendNotByCallers`).
-- Dismissing a dead `notify.deliver` job marks its email row suppressed (its `OnDismiss`). A run of
-  that job that outlived its lease (only a frozen process: the providers time out in seconds) can
-  still send that one email afterwards; the row stays suppressed, because `updateEmailDelivery`
-  changes only queued or deferred rows. This is accepted (Grier): closing it would need a claim
-  check inside the send.
+- A notice sender holds the email delivery row lock through the provider call and the ledger
+  update. If Dismiss commits first, it suppresses the queued or deferred row and a later sender
+  skips it. If the sender holds the lock first, Dismiss waits. Once a successful send commits,
+  the row stays sent. A provider can still accept mail before the sender's transaction fails,
+  leaving that acceptance unrecorded.
 
 ## Optional email choices
 
