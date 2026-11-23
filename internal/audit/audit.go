@@ -177,6 +177,13 @@ const (
 	GroupApproved = "group.approved"
 	GroupRejected = "group.rejected"
 
+	// GroupArchived / GroupUnarchived: an admin or leader archived an active
+	// group, or an admin made an archived group active again. Target is the
+	// group; no meta. A pending group's move writes GroupApproved or
+	// GroupRejected instead.
+	GroupArchived   = "group.archived"
+	GroupUnarchived = "group.unarchived"
+
 	// GroupDeleted: an admin deleted a group (and its events). Target is the
 	// group; meta has its name, since the row is gone.
 	GroupDeleted = "group.deleted"

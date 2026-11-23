@@ -36,6 +36,13 @@ func parseReminderKey(s string) (reminderKey, bool) {
 	return reminderKey{Kind: parts[0], Occ: uint(occ), Start: start, Minutes: minutes}, true
 }
 
+// reminderJobKeySQL is the SQL for the reminder.send job key of the message
+// whose reminder_key is the column col: the same key under the job's kind.
+// col is a program constant, never user input.
+func reminderJobKeySQL(col string) string {
+	return "'" + kindReminderSend + "' || substr(" + col + ", strpos(" + col + ", ':'))"
+}
+
 func reminderKeyLike(kind string) string { return kind + ":%" }
 
 // reminderKeySQL is the SQL that builds the key of kind and minutes for the

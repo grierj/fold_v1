@@ -1461,11 +1461,14 @@ func TestUpdateGroupRechecksAuthorityAtWrite(t *testing.T) {
 				}
 			}
 			client := loginAPI(t, app, actor.Email, "password1234")
-			g := newTestGroup(t, app, owner, "Original", models.GroupActive)
+			status := models.GroupActive
 			body := map[string]any{"name": "Unauthorized"}
 			if mutation == "status-admin" {
+				// Unarchiving is an admin's move; the demoted admin still leads.
+				status = models.GroupArchived
 				body["status"] = models.GroupActive
 			}
+			g := newTestGroup(t, app, owner, "Original", status)
 			gate := holdContactGate(t, app)
 			response := queueContact(func() *httptest.ResponseRecorder {
 				return client.do("PUT", "/api/v1/groups/"+itoa(g.ID), body, true)
@@ -1563,6 +1566,165 @@ func TestUpdateGroupPendingDecisionsUseLockedStatus(t *testing.T) {
 				t.Fatal("decision did not produce exactly one audit/task transition")
 			}
 		})
+	}
+}
+
+// groupStatusTrail is what a status edit can leave behind for one group:
+// the stored row and every audit row and notification about it.
+type groupStatusTrail struct {
+	group   models.Group
+	audits  []string
+	notices []string
+}
+
+func readGroupStatusTrail(t *testing.T, app *App, gid uint) groupStatusTrail {
+	t.Helper()
+	var trail groupStatusTrail
+	if err := app.DB.First(&trail.group, gid).Error; err != nil {
+		t.Fatal(err)
+	}
+	var audits []models.AuditLog
+	if err := app.DB.Where("target_type = 'group' AND target_id = ?", gid).Order("id").Find(&audits).Error; err != nil {
+		t.Fatal(err)
+	}
+	for _, r := range audits {
+		actor := "nobody"
+		if r.ActorID != nil {
+			actor = itoa(*r.ActorID)
+		}
+		trail.audits = append(trail.audits, r.Action+" by "+actor)
+	}
+	var notices []models.Notification
+	if err := app.DB.Where("subject_id = ? AND kind LIKE 'group.%'", gid).Order("id").Find(&notices).Error; err != nil {
+		t.Fatal(err)
+	}
+	for _, n := range notices {
+		trail.notices = append(trail.notices, fmt.Sprintf("%s to %d resolved %v", n.Kind, n.UserID, n.ResolvedAt != nil))
+	}
+	return trail
+}
+
+// No group goes back to pending: an admin asking for it on an active or
+// archived group is refused with group_back_to_pending, and nothing in the
+// request is saved. A leader asking for it is refused as forbidden, as before.
+func TestUpdateGroupNeverReturnsToPending(t *testing.T) {
+	for _, from := range []string{models.GroupActive, models.GroupArchived} {
+		t.Run(from, func(t *testing.T) {
+			app := testApp(t)
+			admin := newTestUser(t, app, "admin", "password1234", models.RoleAdmin)
+			leader := newTestUser(t, app, "leader", "password1234", models.RoleMember)
+			g := newTestGroup(t, app, leader, "Settled", from)
+			ac := loginAPI(t, app, admin.Email, "password1234")
+			lc := loginAPI(t, app, leader.Email, "password1234")
+			path := "/api/v1/groups/" + itoa(g.ID)
+			before := readGroupStatusTrail(t, app, g.ID)
+			wantCode(t, "admin back to pending", ac.do("PUT", path, map[string]any{"status": models.GroupPending, "name": "Renamed"}, true), http.StatusConflict, "group_back_to_pending")
+			wantCode(t, "leader back to pending", lc.do("PUT", path, map[string]any{"status": models.GroupPending, "name": "Renamed"}, true), http.StatusForbidden, "")
+			if after := readGroupStatusTrail(t, app, g.ID); !reflect.DeepEqual(after, before) {
+				t.Fatalf("a refused move changed something:\n%+v\n%+v", before, after)
+			}
+		})
+	}
+}
+
+// The status a move is judged from is the one read under the row lock: an
+// admin's "pending" queued behind an approval of the same pending group is a
+// move back to pending by the time it runs, and is refused.
+func TestUpdateGroupBackToPendingIsJudgedOnTheLockedStatus(t *testing.T) {
+	app := testApp(t)
+	admin := newTestUser(t, app, "admin", "password1234", models.RoleAdmin)
+	leader := newTestUser(t, app, "leader", "password1234", models.RoleMember)
+	lc := loginAPI(t, app, leader.Email, "password1234")
+	ac := loginAPI(t, app, admin.Email, "password1234")
+	gid := createGroupAs(t, lc, "Pending", models.VisibilityPrivate)
+	path := "/api/v1/groups/" + itoa(gid)
+	gate := holdContactGate(t, app)
+	approve := queueContact(func() *httptest.ResponseRecorder {
+		return ac.do("PUT", path, map[string]any{"status": models.GroupActive}, true)
+	})
+	waitContactWaiters(t, app, 1)
+	back := queueContact(func() *httptest.ResponseRecorder {
+		return ac.do("PUT", path, map[string]any{"status": models.GroupPending}, true)
+	})
+	waitContactWaiters(t, app, 2)
+	gate.Rollback()
+	if w := awaitContactResponse(t, approve); w.Code != http.StatusOK {
+		t.Fatalf("approve: %d %s", w.Code, w.Body.String())
+	}
+	wantCode(t, "pending behind the approval", awaitContactResponse(t, back), http.StatusConflict, "group_back_to_pending")
+	trail := readGroupStatusTrail(t, app, gid)
+	if trail.group.Status != models.GroupActive || !reflect.DeepEqual(trail.audits, []string{fmt.Sprintf("%s by %d", audit.GroupApproved, admin.ID)}) {
+		t.Fatalf("after the refused move: %+v", trail)
+	}
+}
+
+// Archiving an active group and making an archived group active again each
+// write one audit row naming who did it, and nothing else: no notice, no
+// task. Sending the status a group already has writes nothing, for a leader
+// too. A pending group's moves keep their one approval row.
+func TestUpdateGroupArchiveAndUnarchiveAreAudited(t *testing.T) {
+	app := testApp(t)
+	admin := newTestUser(t, app, "admin", "password1234", models.RoleAdmin)
+	leader := newTestUser(t, app, "leader", "password1234", models.RoleMember)
+	ac := loginAPI(t, app, admin.Email, "password1234")
+	lc := loginAPI(t, app, leader.Email, "password1234")
+	g := newTestGroup(t, app, leader, "Choir", models.GroupActive)
+	path := "/api/v1/groups/" + itoa(g.ID)
+	by := func(action string, actor *models.User) string { return fmt.Sprintf("%s by %d", action, actor.ID) }
+	want := func(label, status string, audits ...string) {
+		t.Helper()
+		trail := readGroupStatusTrail(t, app, g.ID)
+		if trail.group.Status != status || !reflect.DeepEqual(trail.audits, audits) || len(trail.notices) != 0 {
+			t.Fatalf("%s: %+v, want %s with audits %q and no notices", label, trail, status, audits)
+		}
+	}
+
+	apiDo(t, lc, "PUT", path, map[string]any{"status": models.GroupActive}, http.StatusOK)
+	want("leader keeps active", models.GroupActive)
+	apiDo(t, lc, "PUT", path, map[string]any{"status": models.GroupArchived}, http.StatusOK)
+	want("leader archives", models.GroupArchived, by(audit.GroupArchived, leader))
+	apiDo(t, lc, "PUT", path, map[string]any{"status": models.GroupArchived}, http.StatusOK)
+	want("leader archives again", models.GroupArchived, by(audit.GroupArchived, leader))
+	wantCode(t, "leader unarchives", lc.do("PUT", path, map[string]any{"status": models.GroupActive}, true), http.StatusForbidden, "")
+	want("refused unarchive", models.GroupArchived, by(audit.GroupArchived, leader))
+	apiDo(t, ac, "PUT", path, map[string]any{"status": models.GroupActive}, http.StatusOK)
+	want("admin unarchives", models.GroupActive, by(audit.GroupArchived, leader), by(audit.GroupUnarchived, admin))
+	apiDo(t, ac, "PUT", path, map[string]any{"status": models.GroupArchived}, http.StatusOK)
+	want("admin archives", models.GroupArchived, by(audit.GroupArchived, leader), by(audit.GroupUnarchived, admin), by(audit.GroupArchived, admin))
+
+	// A leader withdrawing their own pending group keeps its one rejected row.
+	withdrawn := createGroupAs(t, lc, "Withdrawn", models.VisibilityPrivate)
+	apiDo(t, lc, "PUT", "/api/v1/groups/"+itoa(withdrawn), map[string]any{"status": models.GroupArchived}, http.StatusOK)
+	if trail := readGroupStatusTrail(t, app, withdrawn); !reflect.DeepEqual(trail.audits, []string{by(audit.GroupRejected, leader)}) {
+		t.Fatalf("pending to archived by its leader: %+v", trail)
+	}
+}
+
+// The approval queue decides only a pending group, and only the moves
+// DecideGroupStatus names approve and reject; every other status is the
+// queue's 409, whatever the policy says about editing it.
+func TestApprovalQueueAgreesWithDecideGroupStatus(t *testing.T) {
+	for _, from := range []string{models.GroupPending, models.GroupActive, models.GroupArchived} {
+		for _, d := range []struct {
+			action, to string
+			move       policy.GroupStatusDecision
+		}{
+			{"approve", models.GroupActive, policy.GroupStatusApprove},
+			{"reject", models.GroupArchived, policy.GroupStatusReject},
+		} {
+			t.Run(from+"/"+d.action, func(t *testing.T) {
+				app := testApp(t)
+				admin := newTestUser(t, app, "admin", "password1234", models.RoleAdmin)
+				leader := newTestUser(t, app, "leader", "password1234", models.RoleMember)
+				g := newTestGroup(t, app, leader, "Queued", from)
+				ac := loginAPI(t, app, admin.Email, "password1234")
+				w := ac.do("POST", "/api/v1/admin/groups/"+itoa(g.ID)+"/"+d.action, map[string]any{}, true)
+				decided := policy.DecideGroupStatus(asPerson(admin), policy.Rel{}, from, d.to) == d.move
+				if decided != (w.Code == http.StatusOK) || (!decided && w.Code != http.StatusConflict) {
+					t.Fatalf("%s from %s: %d %s, policy names the move: %v", d.action, from, w.Code, w.Body.String(), decided)
+				}
+			})
+		}
 	}
 }
 

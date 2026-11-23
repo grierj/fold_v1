@@ -126,6 +126,8 @@ var auditIPAttribution = map[string][]auditIPRule{
 	audit.RegistrationNotRestored:       auditIPOrdinary,
 	audit.GroupApproved:                 auditIPOrdinary,
 	audit.GroupRejected:                 auditIPOrdinary,
+	audit.GroupArchived:                 auditIPOrdinary,
+	audit.GroupUnarchived:               auditIPOrdinary,
 	audit.GroupDeleted:                  auditIPOrdinary,
 	audit.InvitationCreated:             auditIPOrdinary,
 	audit.InvitationResent:              auditIPOrdinary,

@@ -5625,3 +5625,118 @@ func TestVisibilityConsentFenceInFlight(t *testing.T) {
 		wantPgError(t, "an insert after 00015 committed", err, "23514", auditFenceRefusal)
 	})
 }
+
+const groupStatusCheckVersion = 16
+
+// TestGroupStatusCheckMigration: 00016 lets groups.status hold only pending,
+// active or archived (and NULL, which it always allowed). Up and Down change
+// no row; a previous binary's insert, which names the three values or leaves
+// the default, keeps working; Down drops only the CHECK.
+func TestGroupStatusCheckMigration(t *testing.T) {
+	t.Parallel()
+	_, db, p := freshAt(t, groupStatusCheckVersion-1)
+	exec := func(q string, args ...any) error {
+		_, err := db.Exec(q, args...)
+		return err
+	}
+	must := func(q string, args ...any) {
+		t.Helper()
+		if err := exec(q, args...); err != nil {
+			t.Fatalf("%s: %v", q, err)
+		}
+	}
+	must(`INSERT INTO users(id,email) VALUES(1,'leader@example.com')`)
+	must(`INSERT INTO groups(id,name,leader_id,status) VALUES(1,'Pending',1,'pending'),(2,'Active',1,'active'),(3,'Archived',1,'archived'),(4,'No status',1,NULL)`)
+	rowsNow := `SELECT id, to_jsonb(g)::text FROM groups g`
+	before := snapshotRows[int64](t, db, rowsNow)
+	upTo(t, p, groupStatusCheckVersion)
+	if got := snapshotRows[int64](t, db, rowsNow); !reflect.DeepEqual(got, before) {
+		t.Fatalf("Up changed a row:\n%v\n%v", before, got)
+	}
+	// A previous binary's writes: an insert with the default, one naming a
+	// status, and an edit between the three.
+	must(`INSERT INTO groups(id,name,leader_id) VALUES(5,'Defaulted',1)`)
+	must(`INSERT INTO groups(id,name,leader_id,status) VALUES(6,'Named',1,'active')`)
+	must(`UPDATE groups SET status = 'archived' WHERE id = 2`)
+	must(`UPDATE groups SET status = 'active' WHERE id = 2`)
+	var defaulted string
+	if err := db.QueryRow(`SELECT status FROM groups WHERE id = 5`).Scan(&defaulted); err != nil || defaulted != "pending" {
+		t.Fatalf("default status = %q, %v", defaulted, err)
+	}
+	for _, bad := range []string{"deleted", "", "Active"} {
+		err := exec(`INSERT INTO groups(id,name,leader_id,status) VALUES(7,'Bad',1,$1)`, bad)
+		if pgErrorCode(err) != "23514" || pgConstraintName(err) != "groups_status_check" {
+			t.Fatalf("insert with status %q: %v, want 23514 naming groups_status_check", bad, err)
+		}
+		err = exec(`UPDATE groups SET status = $1 WHERE id = 1`, bad)
+		if pgErrorCode(err) != "23514" || pgConstraintName(err) != "groups_status_check" {
+			t.Fatalf("update to status %q: %v, want 23514 naming groups_status_check", bad, err)
+		}
+	}
+	before = snapshotRows[int64](t, db, rowsNow)
+	downTo(t, p, groupStatusCheckVersion-1)
+	if got := snapshotRows[int64](t, db, rowsNow); !reflect.DeepEqual(got, before) {
+		t.Fatalf("Down changed a row:\n%v\n%v", before, got)
+	}
+	must(`INSERT INTO groups(id,name,leader_id,status) VALUES(7,'Unchecked',1,'deleted')`)
+	must(`DELETE FROM groups WHERE id = 7`)
+	upTo(t, p, groupStatusCheckVersion)
+	if v, err := p.GetDBVersion(context.Background()); err != nil || v != groupStatusCheckVersion {
+		t.Fatalf("version = %d, %v", v, err)
+	}
+}
+
+// TestGroupStatusCheckRefusesAnUnknownStoredValue: a row holding a fourth
+// value fails Up, which rolls back whole: no CHECK, the row as it was, and
+// the version still at 15.
+func TestGroupStatusCheckRefusesAnUnknownStoredValue(t *testing.T) {
+	t.Parallel()
+	_, db, p := freshAt(t, groupStatusCheckVersion-1)
+	for _, q := range []string{
+		`INSERT INTO users(id,email) VALUES(1,'leader@example.com')`,
+		`INSERT INTO groups(id,name,leader_id,status) VALUES(1,'Odd',1,'deleted')`,
+	} {
+		if _, err := db.Exec(q); err != nil {
+			t.Fatalf("%s: %v", q, err)
+		}
+	}
+	_, err := p.UpTo(context.Background(), groupStatusCheckVersion)
+	if code := pgErrorCode(err); code != "23514" {
+		t.Fatalf("Up over a fourth value: %v (code %q), want 23514", err, code)
+	}
+	if v, err := p.GetDBVersion(context.Background()); err != nil || v != groupStatusCheckVersion-1 {
+		t.Fatalf("version after the refused Up = %d, %v", v, err)
+	}
+	if hasSchemaObject(t, db, `SELECT 1 FROM pg_constraint WHERE conname = 'groups_status_check'`) {
+		t.Fatal("a refused Up left the CHECK behind")
+	}
+	var status string
+	if err := db.QueryRow(`SELECT status FROM groups WHERE id = 1`).Scan(&status); err != nil || status != "deleted" {
+		t.Fatalf("the row after the refused Up: %q, %v", status, err)
+	}
+}
+
+// TestGroupStatusCheckWaitsAtMostFiveSeconds: behind an open writer on
+// groups, 00016 gives up at its lock_timeout and leaves nothing behind.
+func TestGroupStatusCheckWaitsAtMostFiveSeconds(t *testing.T) {
+	t.Parallel()
+	name, db, p := freshAt(t, groupStatusCheckVersion-1)
+	holder := holdLock(t, name, `LOCK groups IN ROW EXCLUSIVE MODE`)
+	elapsed, err := timedUpTo(p, groupStatusCheckVersion, time.Minute)
+	if code := pgErrorCode(err); code != "55P03" {
+		t.Fatalf("UpTo(%d) with groups held: %v (code %q), want lock_not_available 55P03", groupStatusCheckVersion, err, code)
+	}
+	if elapsed < 5*time.Second || elapsed > 30*time.Second {
+		t.Fatalf("00016 gave up after %s, want at least its 5s lock_timeout and well under 30s", elapsed)
+	}
+	if err := holder.Rollback(); err != nil {
+		t.Fatal(err)
+	}
+	if hasSchemaObject(t, db, `SELECT 1 FROM pg_constraint WHERE conname = 'groups_status_check'`) {
+		t.Fatal("a failed 00016 left the CHECK behind")
+	}
+	if v, err := p.GetDBVersion(context.Background()); err != nil || v != groupStatusCheckVersion-1 {
+		t.Fatalf("version after the failure = %d, %v", v, err)
+	}
+	upTo(t, p, groupStatusCheckVersion)
+}

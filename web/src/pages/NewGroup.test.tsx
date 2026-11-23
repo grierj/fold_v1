@@ -15,7 +15,7 @@ const render = renderWithAuth(() => ({ user: { id: 2 }, loading: false, isAdmin:
 
 stubService(Groups, () => ({ create: vi.fn(), update: vi.fn() }));
 
-const made = (status: string) => ({
+const made = (status: GroupSummary["status"]) => ({
   group: {
     id: 9, name: "Sam's study", description: "", tags: [], imageUrl: "", coverFocalX: 50, coverFocalY: 50,
     location: "", leaderName: "Sam", memberCount: 1, nextEventAt: null, status, leaderId: 2,

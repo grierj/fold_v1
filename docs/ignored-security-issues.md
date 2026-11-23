@@ -18,3 +18,16 @@ credentials, personal data, or exploit instructions.
 - Severity: **4/10**. Private text may remain in the same browser process, but the review found
   no publication or replay path. Product: **4**. The issue is intentionally not fixed.
 - Evidence: `web/src/lib/dateWrites.tsx`, `web/src/api/events.ts`, and `web/src/api/core.ts`.
+
+## A redundant group status is accepted from a leader
+
+- Date: 2026-11-22. Reviewed revision: `b2303a962528189bd66cea4fd0ea277d4336f6da`.
+- A leader who sends the status their group already has, along with other edits, gets 200.
+  Before DEC-160 any status a leader could not set answered 403, the current one included.
+  The edit already succeeded with the status left out, so the request gains nothing and reads
+  nothing new.
+- Likelihood: **1/10**. Only a hand-made request sends it; the web client sends no group status.
+- Severity: **1/10**. No capability or disclosure: the caller already manages the group.
+  Product: **1**. The issue is intentionally not fixed.
+- Evidence: `policy.DecideGroupStatus` in `internal/policy/policy.go` and `apiUpdateGroup` in
+  `api_groups.go`.

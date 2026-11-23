@@ -52,7 +52,7 @@ export interface GroupSummary {
   leaderName: string;
   memberCount: number;
   nextEventAt: string | null;
-  status: string;
+  status: "pending" | "active" | "archived";
   leaderId: number;
   visibility: Visibility;
   deletionRequested: boolean;
@@ -446,7 +446,7 @@ export interface HandoffCandidate {
 export interface SoleLedGroup {
   id: number;
   name: string;
-  status: string;
+  status: "pending" | "active" | "archived";
   candidates: HandoffCandidate[];
 }
 
