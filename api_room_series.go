@@ -255,6 +255,9 @@ func bookWholeSeries(tx *gorm.DB, ev *models.Event, roomID *uint, user *models.U
 	approved := ev.DefaultRoomID != nil && room != nil && *ev.DefaultRoomID == room.ID && !ev.DefaultRoomPending
 	needsApproval := room != nil && !approved && policy.BookingNeedsApproval(me, roomApprovalOn(tx))
 	if needsApproval {
+		if err := withdrawSeriesRequest(tx, ev.ID); err != nil {
+			return out, err
+		}
 		var err error
 		if req, err = openRoomRequest(tx, ev.ID, room.ID, &user.ID, true); err != nil {
 			return out, err

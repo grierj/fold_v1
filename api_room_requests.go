@@ -92,6 +92,24 @@ func closeEmptyRoomRequests(tx *gorm.DB) error {
 		models.RoomRequestWithdrawn, models.RoomRequestPending, models.BookingRequested).Scan(&ids).Error; err != nil {
 		return err
 	}
+	return resolveWithdrawn(tx, ids)
+}
+
+// withdrawSeriesRequest withdraws eventID's pending series request, so a new
+// pick can open the one the event may have (idx_room_requests_one_series).
+// The caller holds the event's lock, which every decision takes before the
+// request's (lockRequest), so this needs no SKIP LOCKED.
+func withdrawSeriesRequest(tx *gorm.DB, eventID uint) error {
+	var ids []uint
+	if err := tx.Raw(`UPDATE room_requests SET status = ?, updated_at = now()
+		WHERE event_id = ? AND series AND status = ? RETURNING id`,
+		models.RoomRequestWithdrawn, eventID, models.RoomRequestPending).Scan(&ids).Error; err != nil {
+		return err
+	}
+	return resolveWithdrawn(tx, ids)
+}
+
+func resolveWithdrawn(tx *gorm.DB, ids []uint) error {
 	for _, id := range ids {
 		if _, err := notify.Resolve(tx, notify.RoomRequested, id, nil, models.RoomRequestWithdrawn); err != nil {
 			return err

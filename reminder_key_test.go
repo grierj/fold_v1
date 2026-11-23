@@ -18,4 +18,14 @@ func TestReminderKeyRoundTripsAndMatchesItsSQL(t *testing.T) {
 	if err != nil || fromSQL != k.String() {
 		t.Fatalf("SQL builds %q (%v), Go builds %q", fromSQL, err, k.String())
 	}
+	job := reminderKey{Kind: kindReminderSend, Occ: 7, Start: 1700000000, Minutes: 1440}
+	for _, kind := range []string{reminderGoing, reminderWaitlist} {
+		message := reminderKey{Kind: kind, Occ: job.Occ, Start: job.Start, Minutes: job.Minutes}
+		var jobFromSQL string
+		err := testApp(t).DB.Raw("SELECT "+reminderJobKeySQL("m.reminder_key")+
+			" FROM (SELECT ?::text AS reminder_key) m", message.String()).Scan(&jobFromSQL).Error
+		if err != nil || jobFromSQL != job.String() {
+			t.Fatalf("%s: SQL builds job key %q (%v), Go builds %q", kind, jobFromSQL, err, job.String())
+		}
+	}
 }
