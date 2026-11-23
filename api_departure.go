@@ -657,11 +657,11 @@ func (a *App) applyDeparture(tx *gorm.DB, facts departureFacts, locked map[uint]
 		zero, empty := 0, ""
 		// Leaving cancels the answer; it is not an explicit Can't go RSVP.
 		// Unlike a manager removal, it must allow a later public self-RSVP.
-		status := models.RegCancelled
+		move, status := policy.RegLeaveGroup, models.RegCancelled
 		if facts.Origin == policy.OccurrenceOriginDepartureRemoval {
-			status = models.RegRemoved
+			move, status = policy.RegRemoveFromGroup, models.RegRemoved
 		}
-		change, err := prepareRegistration(reg, &o, userSubject(facts.Subject.ID), status, 0, reg.AttendanceMode,
+		change, err := prepareRegistration(move, reg, &o, userSubject(facts.Subject.ID), status, 0, reg.AttendanceMode,
 			childcareRequest{ChildcareCount: &zero, ChildcareAgesNote: &empty}, nil, now)
 		if err != nil {
 			return departureConfirmationJSON{}, err
