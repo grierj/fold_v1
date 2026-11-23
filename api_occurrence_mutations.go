@@ -364,7 +364,7 @@ func (a *App) mutateOwnOccurrence(c *gin.Context, operation string) {
 		if reason == "" && (count < 0 || count > policy.MaxAddChildcare || utf8.RuneCountInString(ages) > policy.MaxAddAgesNote || (input.ChildcareCount != nil && count > 0 && !ev.ChildcareAvailable)) {
 			return refuse()
 		}
-		change, err := prepareRegistration(reg, locked, userSubject(actor.ID), want, guests, mode, care, nil, now)
+		change, err := prepareRegistration(policy.RegAnswer, reg, locked, userSubject(actor.ID), want, guests, mode, care, nil, now)
 		if err != nil {
 			return err
 		}

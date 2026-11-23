@@ -252,7 +252,7 @@ func (a *App) reconcileHouseholdPerson(tx *gorm.DB, person *models.HouseholdPers
 		if r.Status == old.Status && r.ChildcareRequested == old.ChildcareRequested {
 			continue
 		}
-		if err := saveRegistration(tx, &r); err != nil {
+		if err := saveRegistration(tx, policy.RegHouseholdPersonChanged, old.Status, &r); err != nil {
 			return err
 		}
 		if err := auditRegistration(tx, actor, audit.RegistrationChanged, ev.ID, old, r, ip); err != nil {

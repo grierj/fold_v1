@@ -226,8 +226,13 @@ section or decision; check it still exists.
   `changeBookings` or `moveRoomRequest`/`moveRoomRequestsWhere` (`room_status.go`).
 - Registrations: seat decisions go through `registration_seats.go` (`poolFits`, `seatChange`,
   `seatTally`; party size and childcare demand each have one SQL and one Go form,
-  `TestSeatSQLMatchesGoRules`); rows are written only by `saveRegistration` and `promoteRegistration`
-  (`registration_rows.go`); the access columns stay with `registration_access.go`; lock order is
+  `TestSeatSQLMatchesGoRules`); the status changes only by a `policy.RegistrationMove`
+  (`internal/policy/registration_lifecycle.go`), written by `saveRegistration` (and
+  `saveRegistrationStep`, a batch's seat release), which refuses a move the rule does not hold, or by
+  `promoteRegistration` (`registration_rows.go`, `TestRegistrationStatusHasTwoWriters`). Besides
+  them, the access columns stay with `registration_access.go`; `transferHouseholdConversion`
+  (identity), `recordManagerOccurrenceAdd` (manage token) and the erasure (scrub) write other
+  columns; `restoreRegistrations`, the series undo and `deleteEventRows` delete rows. Lock order is
   in `registration_locks.go`. A household person's holder is judged by
   `subjectFacts.householdProblem` (`listedRegistrations` only pre-filters). Dropped-answer audit keys
   are the `meta*` constants in `api_registrations.go`.

@@ -9,3 +9,4 @@
 ^internal/images/imagetest/measure\.go:[0-9]+:[0-9]+: unreachable func: [A-Za-z][A-Za-z0-9_.$]*$
 ^internal/policy/room_lifecycle\.go:[0-9]+:[0-9]+: unreachable func: (RoomBookingMoves|RoomRequestMoves)$
 ^internal/policy/message_lifecycle\.go:[0-9]+:[0-9]+: unreachable func: MessageMoves$
+^internal/policy/registration_lifecycle\.go:[0-9]+:[0-9]+: unreachable func: RegistrationMoves$
