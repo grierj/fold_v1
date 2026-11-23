@@ -140,6 +140,20 @@ it("moves focus from the pressed button to Refresh consent when the refresh afte
   await waitFor(() => expect(refresh).toHaveFocus());
 });
 
+it("leaves focus where the person moved it while the change was on its way", async () => {
+  const change = held<Record<string, never>>();
+  vi.mocked(AdminTeenConsents.change).mockReturnValueOnce(change.promise);
+  render(<><button>Elsewhere</button><TeenConsentPanel user={teen} onUpdated={vi.fn()} onClose={vi.fn()} /></>);
+  await userEvent.type(await screen.findByLabelText("Consent evidence"), "Signed parent form");
+  vi.mocked(AdminTeenConsents.list).mockRejectedValueOnce(new Error("offline"));
+  await userEvent.click(screen.getByRole("button", { name: "Grant consent" }));
+  const elsewhere = screen.getByRole("button", { name: "Elsewhere" });
+  elsewhere.focus();
+  await act(async () => { change.resolve({}); await change.promise; });
+  expect(await screen.findByRole("button", { name: "Refresh consent" })).toBeInTheDocument();
+  expect(document.activeElement).toBe(elsewhere);
+});
+
 it("locks the scope and evidence while a change is on its way, so nothing typed then is cleared by its success", async () => {
   const change = held<Record<string, never>>();
   vi.mocked(AdminTeenConsents.change).mockReturnValueOnce(change.promise);

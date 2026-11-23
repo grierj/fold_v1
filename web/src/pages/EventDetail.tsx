@@ -70,8 +70,8 @@ function EventDetailContent() {
   const visibilityAction = useAction();
   const panelBusy = seriesAction.running || visibilityAction.running;
   const editButton = useRef<HTMLButtonElement>(null);
-  // A save in the panel reads the page again from nothing: focus waits on the main region and goes back to Edit
-  // series, the panel's opener, once the page is shown.
+  // A save in the panel reads the page again from nothing: focus still in the panel waits on the main region and
+  // goes back to Edit series, the panel's opener, once the page is shown.
   const returnToEdit = useRef(false);
   const [seriesFeedback, setSeriesFeedback] = useState<SeriesFeedbackSignal | null>(null);
   const seriesFeedbackRevision = useRef(0);
@@ -138,6 +138,7 @@ function EventDetailContent() {
   function handleRsvp() { void load.reload(); }
 
   function parkFocus() {
+    if (!editorRef.current?.contains(document.activeElement)) return;
     returnToEdit.current = true;
     document.getElementById("main")?.focus({ preventScroll: true });
   }
@@ -215,7 +216,10 @@ function EventDetailContent() {
         </div>
         {canManage && (
           <div className="flex w-full gap-2 sm:w-auto sm:shrink-0">
-            <Button ref={editButton} variant="secondary" layout="flex-1 sm:flex-none" aria-expanded={editing} disabled={panelBusy} onClick={() => setEditing((v) => !v)}>
+            <Button ref={editButton} variant="secondary" layout="flex-1 sm:flex-none" aria-expanded={editing} disabled={panelBusy} onClick={() => {
+              if (!editing) seriesAction.reset();
+              setEditing((v) => !v);
+            }}>
               {event.recurrenceRule ? "Edit series" : "Edit event"}
             </Button>
             <Menu label="More event actions" items={[

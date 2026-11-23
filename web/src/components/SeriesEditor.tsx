@@ -1,6 +1,6 @@
 import { Form } from "./ui/Form";
 import { childcareBody, childcareFrom } from "./ChildcareField";
-import { useLayoutEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { Events } from "../api/events";
 import { bydays, isSimpleWeekly, isWeekly, weekdayCode, weeklyRule } from "../lib/rrule";
 import { useDirty } from "../lib/useDirty";
@@ -21,6 +21,7 @@ import { errorText, keptDatesOf } from "../lib/errors";
 import { useAction, type Action } from "../lib/useAction";
 import { useFocusHome, useLockedFocus } from "../lib/focusHome";
 import { KeptDates } from "./KeptDates";
+import { SavedStatus } from "./admin/SettingSwitch";
 import { useKeptRefusal } from "./keptRefusal";
 import { optionFieldOfError, validateEventOptions, type EventOptionValues, type OptionErrors } from "./eventOptionValues";
 import type { EventInput, VideoProvider, VideoReveal } from "../types";
@@ -82,7 +83,7 @@ export function SeriesEditor({
   onAuthorityLost?: () => void;
   // The page's run for this editor, so it can lock what shares the panel (the visibility control) while it runs.
   action?: Action;
-  // Another run in the same panel is on its way: a save that closes the panel then would drop its answer.
+  // Another run in the same panel is on its way.
   locked?: boolean;
 }) {
   const simple = isSimpleWeekly(instance.recurrenceRule);
@@ -130,25 +131,31 @@ export function SeriesEditor({
   const own = useAction();
   const action = shared ?? own;
   // Nothing in the form changes while a save is on its way: the save sends what was there when it began, and a
-  // success closes the editor, so a later edit would be lost without a word.
+  // success closes the editor or makes what is shown the saved values, so a later edit would be lost without a word.
   const frozen = action.running || locked;
+  // Bumped by a save that worked: an editor that stays open (the group page's) counts edits from what it saved.
+  const [savedAt, setSavedAt] = useState(0);
   const [error, setError] = useState<string | null>(null);
   const [optionErrors, setOptionErrors] = useState<OptionErrors>({});
   const home = useFocusHome<HTMLFormElement>();
   const root = home.ref;
   const lockFocus = useLockedFocus(home, frozen);
-  // A refused option is focused once the save ends and the fields can take focus again.
+  // A refused option is focused once the save ends and the fields can take focus again, if focus is still in the form.
   const focusInvalid = useRef(false);
   const submit = useRef<HTMLButtonElement>(null);
   const kept = useKeptRefusal({ initial: null, submit, onRefused: setError, onAuthorityLost });
 
-  const dirty = useDirty({ date, time, duration, recurring, days, tzid, title, description, location, rule, until, options });
-  const { guard, markSaved } = useUnsavedChanges(dirty);
+  const dirty = useDirty({ date, time, duration, recurring, days, tzid, title, description, location, rule, until, options }, true, savedAt);
+  const { guard, markSaved, resume } = useUnsavedChanges(dirty);
+  // A save is marked saved for a page that leaves on it; an editor that stays open is guarded again once what it
+  // saved is its baseline, an edit made after the save included.
+  useEffect(() => { if (savedAt > 0) resume(); }, [savedAt]);
 
   useLayoutEffect(() => {
     if (frozen || !focusInvalid.current) return;
     focusInvalid.current = false;
-    focusFirstInvalid(root.current);
+
+    if (root.current?.contains(document.activeElement)) focusFirstInvalid(root.current);
   }, [frozen, root]);
 
   async function save(e: React.FormEvent) {
@@ -225,6 +232,7 @@ export function SeriesEditor({
       try {
         await Events.update(instance.eventId, body);
         markSaved();
+        setSavedAt((n) => n + 1);
         kept.close();
         onSaved();
       } catch (err) {
@@ -306,6 +314,7 @@ export function SeriesEditor({
           </Button>
         )}
       </FormActions>
+      <SavedStatus ok={action.state.status === "done" && !dirty} error={null} />
     </Form>
     {/* After the form, never inside it: the panel's roster has forms of its own. */}
     {kept.refusal && <KeptDates key={kept.refusal.seq} eventId={instance.eventId} keptDates={kept.refusal.dates} onRefused={kept.refused} onClose={kept.close} />}

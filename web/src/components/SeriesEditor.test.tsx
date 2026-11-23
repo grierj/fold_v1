@@ -176,6 +176,18 @@ describe("SeriesEditor while a save is on its way", () => {
     expect(seats).toBeEnabled();
   });
 
+  it("leaves focus where the person moved it when a refused save names a field", async () => {
+    const put = deferred<{ event: ReturnType<typeof testEvent> }>();
+    vi.mocked(Events.update).mockReset().mockReturnValueOnce(put.promise);
+    render(<><button>Elsewhere</button><SeriesEditor series={baseSeries} idPrefix="moved" onSaved={() => {}} /></>);
+    await userEvent.click(screen.getByRole("button", { name: "Save series" }));
+    const elsewhere = screen.getByRole("button", { name: "Elsewhere" });
+    elsewhere.focus();
+    await act(async () => { put.reject(new ApiError(400, "bad seats", { code: "invalid_capacity" })); await put.promise.catch(() => {}); });
+    expect(screen.getByLabelText(/^Seat limit/)).toBeEnabled();
+    expect(document.activeElement).toBe(elsewhere);
+  });
+
   it("is locked, with no save, while another run in its panel is on its way", async () => {
     vi.mocked(Events.update).mockReset();
     render(<SeriesEditor series={baseSeries} idPrefix="locked" onSaved={() => {}} onClose={() => {}} locked />);
@@ -267,6 +279,24 @@ describe("SeriesEditor form layout (DEC-95)", () => {
     expect(screen.getByRole("button", { name: "Save series" })).toBeEnabled();
     await userEvent.click(screen.getByRole("button", { name: "Save series" }));
     expect(Events.update).toHaveBeenCalledTimes(2);
+  });
+
+  it("asks before leaving an edit made after a save that left it open, even a save with no edits", async () => {
+    vi.mocked(Events.update).mockReset().mockResolvedValue({ event: testEvent(7) });
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(false);
+    const router = createMemoryRouter([
+      { path: "/", element: <><UnsavedChangesBlocker /><SeriesEditor series={baseSeries} idPrefix="stay" onSaved={() => {}} /></> },
+      { path: "/elsewhere", element: <p>Elsewhere page</p> },
+    ]);
+    render(<RouterProvider router={router} />);
+    await userEvent.click(screen.getByRole("button", { name: "Save series" }));
+    expect(await screen.findByText("Saved")).toBeInTheDocument();
+    await userEvent.type(screen.getByRole("textbox", { name: "Title" }), "!");
+    expect(screen.queryByText("Saved")).not.toBeInTheDocument();
+    void router.navigate("/elsewhere");
+    await waitFor(() => expect(confirm).toHaveBeenCalledWith("Leave without saving? Your changes will be lost."));
+    expect(screen.queryByText("Elsewhere page")).not.toBeInTheDocument();
+    confirm.mockRestore();
   });
 
   it("reads a missing reminder time as the default, 1 day before", () => {

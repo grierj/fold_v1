@@ -38,7 +38,7 @@ stubService(People, () => ({ search: vi.fn() }));
 
 stubService(Groups, () => ({ get: vi.fn(), update: vi.fn(), visibilityImpact: vi.fn(), addMember: vi.fn(), join: vi.fn(), departurePreview: vi.fn(), confirmDeparture: vi.fn(), memberDeparturePreview: vi.fn(), confirmMemberDeparture: vi.fn() }));
 
-stubService(Events, () => ({ register: vi.fn(), registerSeries: vi.fn(), undoSeriesRegistration: vi.fn(), dateVisibilityImpact: vi.fn(), managedDate: vi.fn(), removeRegistration: vi.fn(), addRegistration: vi.fn(), restoreRegistration: vi.fn(), update: vi.fn(), visibilityImpact: vi.fn(), setVisibility: vi.fn() }));
+stubService(Events, () => ({ register: vi.fn(), registerSeries: vi.fn(), undoSeriesRegistration: vi.fn(), dateVisibilityImpact: vi.fn(), managedDate: vi.fn(), removeRegistration: vi.fn(), addRegistration: vi.fn(), restoreRegistration: vi.fn(), update: vi.fn(), visibilityImpact: vi.fn(), setVisibility: vi.fn(), cancelOccurrence: vi.fn() }));
 
 stubService(Households, () => ({ mine: vi.fn() }));
 
@@ -769,16 +769,56 @@ it("adds Manage sign-ups to each date's More menu for leaders, opening that date
   expect(await screen.findByText("At /events/7?manage=2026-12-01")).toBeInTheDocument();
 });
 
-it("closes the series editor after a save, as the event page does, and lists the dates again (DEC-98)", async () => {
+it("keeps the series editor open after a save, says Saved, keeps the visibility choice, and guards and saves later edits (DEC-98)", async () => {
   vi.mocked(Groups.get).mockResolvedValue({ ...page, canManage: true });
   vi.mocked(Events.update).mockResolvedValue({ event: testEvent(7) });
-  open();
+  const confirm = vi.spyOn(window, "confirm").mockReturnValue(false);
+  const router = createMemoryRouter([
+    { path: "/groups/:id", element: <><UnsavedChangesBlocker /><Link to="/elsewhere">Elsewhere</Link><GroupDetail /></> },
+    { path: "/elsewhere", element: <p>Elsewhere page</p> },
+  ], { initialEntries: ["/groups/1"] });
+  render(<RouterProvider router={router} />);
   await userEvent.click(await screen.findByRole("button", { name: "More for Supper on 2026-12-01" }));
   await userEvent.click(screen.getByRole("menuitem", { name: "Edit event" }));
-  await userEvent.click(await screen.findByRole("button", { name: "Save series" }));
-  await waitFor(() => expect(screen.queryByRole("button", { name: /^(Save series|Saving…)$/ })).not.toBeInTheDocument());
-  expect(Events.update).toHaveBeenCalledOnce();
+  const title = await screen.findByRole("textbox", { name: "Title" });
+  await userEvent.click(screen.getByRole("radio", { name: /^Invite only/ }));
+  await userEvent.type(title, " night");
+  const save = screen.getByRole("button", { name: "Save series" });
+  save.focus();
+  await userEvent.keyboard("{Enter}");
+  await waitFor(() => expect(screen.getByText("Saved")).toBeInTheDocument());
+  expect(screen.getByText("Saved")).toHaveAttribute("role", "status");
+  expect(Events.update).toHaveBeenLastCalledWith(7, expect.objectContaining({ title: "Supper night" }));
   await waitFor(() => expect(Groups.get).toHaveBeenCalledTimes(2));
+  expect(title).toBeEnabled();
+  expect(title).toHaveValue("Supper night");
+  expect(document.activeElement).toBe(save);
+  expect(screen.getByRole("radio", { name: /^Invite only/ })).toBeChecked();
+  const unload = () => {
+    const leaving = new Event("beforeunload", { cancelable: true });
+    window.dispatchEvent(leaving);
+
+    return leaving.defaultPrevented;
+  };
+  expect(unload()).toBe(false);
+
+  await userEvent.type(title, " and songs");
+  expect(screen.queryByText("Saved")).not.toBeInTheDocument();
+  expect(unload()).toBe(true);
+  await userEvent.click(screen.getByRole("link", { name: "Elsewhere" }));
+  expect(confirm).toHaveBeenCalledWith("Leave without saving? Your changes will be lost.");
+  expect(screen.queryByText("Elsewhere page")).not.toBeInTheDocument();
+
+  await userEvent.click(screen.getByRole("button", { name: "Save series" }));
+  await waitFor(() => expect(Events.update).toHaveBeenCalledTimes(2));
+  expect(Events.update).toHaveBeenLastCalledWith(7, expect.objectContaining({ title: "Supper night and songs" }));
+  expect(await screen.findByText("Saved")).toBeInTheDocument();
+  expect(screen.getByRole("radio", { name: /^Invite only/ })).toBeChecked();
+  confirm.mockClear();
+  await userEvent.click(screen.getByRole("link", { name: "Elsewhere" }));
+  expect(await screen.findByText("Elsewhere page")).toBeInTheDocument();
+  expect(confirm).not.toHaveBeenCalled();
+  confirm.mockRestore();
 });
 
 describe("the series panel while a save is on its way", () => {
@@ -793,12 +833,13 @@ describe("the series panel while a save is on its way", () => {
     return screen.findByRole("textbox", { name: "Title" });
   }
 
-  it("locks the editor and the visibility control, keeps focus in the editor, and gives it to the row's menu after", async () => {
+  it("locks the editor and the visibility control, keeps focus in the editor, and gives it back to Save series after", async () => {
     const put = deferred<{ event: ReturnType<typeof testEvent> }>();
     vi.mocked(Events.update).mockReturnValueOnce(put.promise);
     const title = await openSeries();
     await userEvent.type(title, " night");
-    screen.getByRole("button", { name: "Save series" }).focus();
+    const save = screen.getByRole("button", { name: "Save series" });
+    save.focus();
     await userEvent.keyboard("{Enter}");
     expect(Events.update).toHaveBeenCalledWith(7, expect.objectContaining({ title: "Supper night" }));
     expect(document.activeElement).toBe(title.closest("form"));
@@ -808,11 +849,26 @@ describe("the series panel while a save is on its way", () => {
     await userEvent.type(title, " and songs");
     expect(title).toHaveValue("Supper night");
     await act(async () => { put.resolve({ event: testEvent(7) }); await put.promise; });
-    await waitFor(() => expect(screen.queryByRole("textbox", { name: "Title" })).not.toBeInTheDocument());
-    expect(Events.update).toHaveBeenCalledOnce();
-    expect(document.activeElement).toBe(screen.getByRole("button", { name: "More for Supper on 2026-12-01" }));
+    expect(document.activeElement).toBe(save);
     await waitFor(() => expect(Groups.get).toHaveBeenCalledTimes(2));
-    expect(document.activeElement).toBe(screen.getByRole("button", { name: "More for Supper on 2026-12-01" }));
+    expect(Events.update).toHaveBeenCalledOnce();
+    expect(document.activeElement).toBe(save);
+  });
+
+  it("leaves focus where the person moved it while the save was on its way", async () => {
+    vi.mocked(Groups.get).mockResolvedValue({ ...page, canManage: true, upcomingEvents: [occurrence({}), occurrence({ id: 2, eventId: 8, date: "2026-12-08", title: "Plain night" })] });
+    const put = deferred<{ event: ReturnType<typeof testEvent> }>();
+    vi.mocked(Events.update).mockReturnValueOnce(put.promise);
+    open();
+    await userEvent.click(await screen.findByRole("button", { name: "More for Supper on 2026-12-01" }));
+    await userEvent.click(screen.getByRole("menuitem", { name: "Edit event" }));
+    screen.getByRole("button", { name: "Save series" }).focus();
+    await userEvent.keyboard("{Enter}");
+    const elsewhere = screen.getByRole("button", { name: "More for Plain night on 2026-12-08" });
+    elsewhere.focus();
+    await act(async () => { put.resolve({ event: testEvent(7) }); await put.promise; });
+    await waitFor(() => expect(Groups.get).toHaveBeenCalledTimes(2));
+    expect(document.activeElement).toBe(elsewhere);
   });
 
   it("gives focus to the event's new row when the reload replaces the saved one", async () => {
@@ -824,6 +880,32 @@ describe("the series panel while a save is on its way", () => {
     await userEvent.keyboard("{Enter}");
     const next = await screen.findByRole("button", { name: "More for Supper on 2026-12-08" });
     await waitFor(() => expect(document.activeElement).toBe(next));
+  });
+
+  it("gives focus to the event's new row when the save's own reload replaces the row after another change to the page", async () => {
+    const other = occurrence({ id: 2, eventId: 8, date: "2026-12-08", title: "Plain night" });
+    vi.mocked(Groups.get).mockResolvedValue({ ...page, canManage: true, upcomingEvents: [occurrence({}), other] });
+    const cancelled = deferred<void>();
+    vi.mocked(Events.cancelOccurrence).mockReturnValueOnce(cancelled.promise);
+    vi.mocked(Events.update).mockResolvedValue({ event: testEvent(7) });
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
+    open();
+    await userEvent.click(await screen.findByRole("button", { name: "More for Plain night on 2026-12-08" }));
+    await userEvent.click(screen.getByRole("menuitem", { name: "Cancel this date" }));
+    await userEvent.click(screen.getByRole("button", { name: "More for Supper on 2026-12-01" }));
+    await userEvent.click(screen.getByRole("menuitem", { name: "Edit event" }));
+    const reload = deferred<GroupDetailResponse>();
+    vi.mocked(Groups.get).mockReturnValueOnce(reload.promise);
+    screen.getByRole("button", { name: "Save series" }).focus();
+    await userEvent.keyboard("{Enter}");
+    await waitFor(() => expect(Groups.get).toHaveBeenCalledTimes(2));
+    await act(async () => { cancelled.resolve(); await cancelled.promise; });
+    expect(screen.queryByRole("button", { name: "More for Plain night on 2026-12-08" })).not.toBeInTheDocument();
+    const moved = occurrence({ id: 3, date: "2026-12-15", startsAt: "2026-12-15T19:00:00Z", endsAt: "2026-12-15T20:00:00Z", startsLocal: "2026-12-15T19:00" });
+    await act(async () => { reload.resolve({ ...page, canManage: true, upcomingEvents: [moved] }); await reload.promise; });
+    const next = await screen.findByRole("button", { name: "More for Supper on 2026-12-15" });
+    expect(document.activeElement).toBe(next);
+    confirm.mockRestore();
   });
 
   it("keeps focus in the panel when a saved visibility replaces its control", async () => {
@@ -838,6 +920,23 @@ describe("the series panel while a save is on its way", () => {
     await waitFor(() => expect(Groups.get).toHaveBeenCalledTimes(2));
     await waitFor(() => expect(screen.getByRole("button", { name: "Save visibility" })).not.toBe(save));
     await waitFor(() => expect(document.activeElement).toBe(screen.getByRole("textbox", { name: "Title" }).closest("form")!.parentElement));
+  });
+
+  it("leaves focus where the person moved it when a saved visibility replaces its control", async () => {
+    vi.mocked(Events.visibilityImpact).mockImplementation((_, visibility) => Promise.resolve(unchanged(visibility)));
+    vi.mocked(Events.setVisibility).mockResolvedValue({ event: testEvent(7) });
+    await openSeries();
+    await userEvent.click(screen.getByRole("radio", { name: /^Private/ }));
+    const reload = deferred<GroupDetailResponse>();
+    vi.mocked(Groups.get).mockReturnValueOnce(reload.promise);
+    const save = screen.getByRole("button", { name: "Save visibility" });
+    await userEvent.click(save);
+    await waitFor(() => expect(Groups.get).toHaveBeenCalledTimes(2));
+    const elsewhere = screen.getByRole("button", { name: "More for Supper on 2026-12-01" });
+    elsewhere.focus();
+    await act(async () => { reload.resolve({ ...page, canManage: true, upcomingEvents: [occurrence({ visibility: "private", seriesVisibility: "private" })] }); await reload.promise; });
+    await waitFor(() => expect(screen.getByRole("button", { name: "Save visibility" })).not.toBe(save));
+    expect(document.activeElement).toBe(elsewhere);
   });
 
   it("locks the editor while the visibility control's save is on its way", async () => {
@@ -877,6 +976,23 @@ it("keeps the group form, its Cancel off, until a save on its way settles; its f
   await userEvent.click(screen.getByRole("menuitem", { name: "Edit group" }));
   expect(await screen.findByLabelText("Group name")).toHaveValue("Family group");
   expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+});
+
+it("leaves focus where the person moved it while Save group was on its way", async () => {
+  vi.mocked(Groups.get).mockResolvedValue({ ...page, canManage: true });
+  const saving = deferred<{ group: typeof page.group }>();
+  vi.mocked(Groups.update).mockReturnValueOnce(saving.promise);
+  render(<main id="main" tabIndex={-1}><button>Elsewhere</button><MemoryRouter initialEntries={["/groups/1"]}><Routes><Route path="/groups/:id" element={<GroupDetail />} /></Routes></MemoryRouter></main>);
+  await userEvent.click(await screen.findByRole("button", { name: "More group actions" }));
+  await userEvent.click(screen.getByRole("menuitem", { name: "Edit group" }));
+  await userEvent.click(await screen.findByRole("button", { name: "Save group" }));
+  const elsewhere = screen.getByRole("button", { name: "Elsewhere" });
+  elsewhere.focus();
+  await act(async () => { saving.resolve({ group: page.group }); await saving.promise; });
+  await waitFor(() => expect(screen.queryByLabelText("Group name")).not.toBeInTheDocument());
+  await waitFor(() => expect(Groups.get).toHaveBeenCalledTimes(2));
+  expect(await screen.findByRole("button", { name: "More group actions" })).toBeInTheDocument();
+  expect(document.activeElement).toBe(elsewhere);
 });
 
 it("keeps Manage sign-ups away from people who can't manage the group", async () => {
