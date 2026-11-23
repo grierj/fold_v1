@@ -1365,7 +1365,7 @@ var auditWriterCensus = map[string]string{
 	"api_feeds.go:revokeCalendarToken":                            "83f1472c1958c30af21ed73ce001befedb879dcb35d2c0fc3fbfb531140505e9",
 	"api_group_visibility.go:applyGroupTightening":                "bd332c610893d3e7016b90dbf3dc270ce352a0040b0e558eee8e8500235d6a42",
 	"api_group_visibility.go:cancelSelectedLosers":                "b559a56de6e1d185f9d67eb2c1b9bf40754de49713a0133ed067296b2f791bb9",
-	"api_groups.go:apiUpdateGroup":                                "066a15def11b07f00492ad420206068b7ff977b43f8d492b9be3f8f976c9192d",
+	"api_groups.go:apiUpdateGroup":                                "804c44cd221b21859b3d37972b5bc701650208a3bda98b0c9ae057a58a9c2b99",
 	"api_groups.go:auditAndNotifyLeadership":                      "10cc718888efbfe112b1f9d198a48a9a9c7e8c74ba90ec721ad35ba8d555316c",
 	"api_groups.go:changeRoleIn":                                  "2bbe7152fb27b6fdc394965e6b8047c5cec5f0a6c7e7bab0e140bb9821076855",
 	"api_groups.go:deleteGroup":                                   "fec7d685ed8b3700c060f747c0c0bc2a1b758fef582f539ec837dd198058edbd",
@@ -1694,8 +1694,8 @@ func TestAuditErasureWriterCensus(t *testing.T) {
 	if p := auditCensusProblems(c); len(p) > 0 {
 		t.Fatal(strings.Join(p, "\n"))
 	}
-	if len(c.Sites) != 112 {
-		t.Fatalf("audit.Write sites = %d, expected 112; review every changed site", len(c.Sites))
+	if len(c.Sites) != 113 {
+		t.Fatalf("audit.Write sites = %d, expected 113; review every changed site", len(c.Sites))
 	}
 	for _, site := range c.Sites {
 		t.Log(site)

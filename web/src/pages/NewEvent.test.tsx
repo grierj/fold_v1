@@ -11,6 +11,7 @@ import { SeriesRooms } from "../api/rooms";
 import { Site } from "../api/site";
 import { UnsavedChangesBlocker } from "../lib/unsavedChanges";
 import { NewEvent } from "./NewEvent";
+import type { GroupSummary } from "../types";
 
 const render = renderWithAuth(() => ({ user: { id: 2 }, loading: false, isAdmin: false }));
 
@@ -51,7 +52,7 @@ beforeEach(() => {
 });
 
 describe("NewEvent", () => {
-  it.each([
+  it.each<[GroupSummary["status"], RegExp]>([
     ["pending", /once an admin approves it/],
     ["archived", /is archived, so it can't schedule new events/],
   ])("explains instead of showing the form for a %s group (DEC-147)", async (status, sentence) => {

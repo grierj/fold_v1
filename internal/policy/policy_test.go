@@ -139,12 +139,6 @@ func TestCanManageGroup(t *testing.T) {
 			t.Errorf("%s: got %v, want %v", c.name, got, c.want)
 		}
 	}
-	if !CanSetGroupStatus(adult, leader, GroupArchived) || CanSetGroupStatus(adult, leader, GroupActive) {
-		t.Error("leaders archive but don't activate")
-	}
-	if !CanSetGroupStatus(admin, none, GroupActive) {
-		t.Error("admins activate")
-	}
 }
 
 // Section 6, "Make someone a group leader", plus the guard rails: a teen is
@@ -1083,30 +1077,53 @@ func TestIsAdmin(t *testing.T) {
 	}
 }
 
-func TestCanSetGroupStatus(t *testing.T) {
-	for _, tc := range []struct {
+// TestDecideGroupStatus covers every (from, to) pair for an admin, a leader,
+// a plain member, an outsider, a removed leader and a signed-out caller.
+func TestDecideGroupStatus(t *testing.T) {
+	statuses := []string{GroupPending, GroupActive, GroupArchived}
+	moves := map[[2]string]GroupStatusDecision{
+		{GroupPending, GroupActive}:    GroupStatusApprove,
+		{GroupPending, GroupArchived}:  GroupStatusReject,
+		{GroupActive, GroupArchived}:   GroupStatusArchive,
+		{GroupArchived, GroupActive}:   GroupStatusUnarchive,
+		{GroupActive, GroupPending}:    GroupStatusNoReturn,
+		{GroupArchived, GroupPending}:  GroupStatusNoReturn,
+		{GroupPending, GroupPending}:   GroupStatusKept,
+		{GroupActive, GroupActive}:     GroupStatusKept,
+		{GroupArchived, GroupArchived}: GroupStatusKept,
+	}
+	// A leader may keep a status and archive; every other move is forbidden.
+	leaderMay := map[GroupStatusDecision]bool{GroupStatusKept: true, GroupStatusReject: true, GroupStatusArchive: true}
+	for _, who := range []struct {
 		name   string
 		person *Person
 		rel    Rel
-		status string
-		want   bool
+		want   func(GroupStatusDecision) GroupStatusDecision
 	}{
-		{"admin approves", admin, none, GroupActive, true},
-		{"admin rejects", admin, none, GroupArchived, true},
-		{"admin makes pending", admin, none, GroupPending, true},
-		{"leader archives", adult, leader, GroupArchived, true},
-		{"leader cannot reactivate", adult, leader, GroupActive, false},
-		{"leader cannot make pending", adult, leader, GroupPending, false},
-		{"former leader cannot archive", adult, member, GroupArchived, false},
-		{"removed leader cannot archive", adult, Rel{Removed: true}, GroupArchived, false},
-		{"outsider cannot archive", adult, none, GroupArchived, false},
-		{"signed out cannot archive", nil, leader, GroupArchived, false},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			if got := CanSetGroupStatus(tc.person, tc.rel, tc.status); got != tc.want {
-				t.Fatalf("CanSetGroupStatus = %v, want %v", got, tc.want)
+		{"admin", admin, none, func(d GroupStatusDecision) GroupStatusDecision { return d }},
+		{"admin who leads", admin, leader, func(d GroupStatusDecision) GroupStatusDecision { return d }},
+		{"leader", adult, leader, func(d GroupStatusDecision) GroupStatusDecision {
+			if leaderMay[d] {
+				return d
 			}
-		})
+			return GroupStatusForbidden
+		}},
+		{"member", adult, member, func(GroupStatusDecision) GroupStatusDecision { return GroupStatusForbidden }},
+		{"outsider", adult, none, func(GroupStatusDecision) GroupStatusDecision { return GroupStatusForbidden }},
+		{"removed leader", adult, Rel{Removed: true}, func(GroupStatusDecision) GroupStatusDecision { return GroupStatusForbidden }},
+		{"signed out", guest, leader, func(GroupStatusDecision) GroupStatusDecision { return GroupStatusForbidden }},
+	} {
+		for _, from := range statuses {
+			for _, to := range statuses {
+				want := who.want(moves[[2]string{from, to}])
+				if got := DecideGroupStatus(who.person, who.rel, from, to); got != want {
+					t.Errorf("%s %s -> %s = %d, want %d", who.name, from, to, got, want)
+				}
+			}
+		}
+	}
+	if got := DecideGroupStatus(admin, none, GroupActive, "deleted"); got != GroupStatusForbidden {
+		t.Errorf("admin to an unknown status = %d, want forbidden", got)
 	}
 }
 

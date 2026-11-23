@@ -174,6 +174,13 @@ it is for.
   - `TestVisibilityConsentFenceMigration`, `TestVisibilityConsentFenceInFlight`,
     `TestRecoveryFloorSurvivesTheWholeChainDown` and the real-binary
     `TestPriorReleaseRefusesToStart` and `TestPriorProcessRunningAcrossTheUpgrade` prove it.
+- `00016` adds `groups_status_check`: `groups.status` is `pending`, `active` or `archived` (NULL stays
+  allowed). A plain `ADD CONSTRAINT` checks existing rows under the table lock it already holds; a
+  row with any other value fails Up, which rolls back whole at version 15. Every release writes only
+  these values, so a previous binary keeps working on the new schema. Down drops only the CHECK and
+  changes no row. Direct reuse with an earlier binary is still ruled out by `00015`.
+  `TestGroupStatusCheckMigration`, `TestGroupStatusCheckRefusesAnUnknownStoredValue` and
+  `TestGroupStatusCheckWaitsAtMostFiveSeconds` prove it.
 - A development database migrated by the pre-squash chain must be recreated before a new binary
   runs on it; there is no converter.
 - `scripts/baseline-proof.sh proof` re-proves a tree against the frozen pre-squash chain with a
