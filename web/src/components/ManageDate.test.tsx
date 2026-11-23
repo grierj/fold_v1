@@ -536,6 +536,27 @@ describe("ManageDate and the kept-dates panel (DEC-156)", () => {
     expect(screen.getByRole("spinbutton", { name: "Minutes" })).toHaveValue(150);
   });
 
+  it("asks before the tab closes while a typed change waits, off the screen, for the date to be read again; a date nobody changed does not ask", async () => {
+    vi.mocked(Events.managedDate).mockImplementation(() => Promise.resolve(keptRead(DATE)));
+    const { store } = mount();
+    const leaving = () => !window.dispatchEvent(new Event("beforeunload", { cancelable: true }));
+    const minutes = await openEditor();
+    expect(leaving()).toBe(false);
+    await userEvent.clear(minutes);
+    await userEvent.type(minutes, "150");
+    expect(leaving()).toBe(true);
+    const fresh = deferred<OccurrenceResponse>();
+    vi.mocked(Events.managedDate).mockReturnValueOnce(fresh.promise);
+    await act(async () => { store.begin(KEY)("stored"); });
+    expect(screen.queryByRole("spinbutton", { name: "Minutes" })).not.toBeInTheDocument();
+    expect(leaving()).toBe(true);
+    await act(async () => { fresh.resolve(keptRead(DATE)); await fresh.promise; });
+    expect(await screen.findByRole("spinbutton", { name: "Minutes" })).toHaveValue(150);
+    expect(leaving()).toBe(true);
+    await userEvent.click(screen.getByRole("button", { name: "Edit this date" }));
+    expect(leaving()).toBe(false);
+  });
+
   it("a panel refusal calls onGone once, and the editor comes back with the draft and no panel", async () => {
     vi.mocked(Events.managedDate).mockImplementation(() => Promise.resolve(keptRead(DATE)));
     edits.answer(kept409([{ date: DATE, keptCount: 1 }]));

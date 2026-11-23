@@ -591,6 +591,27 @@ describe("the date editor while other reads are held or fail", () => {
     expect(edits.sent[0]).toMatchObject({ revision: "r1", changes: { title: "Fresh title!" } });
   });
 
+  it("asks before the tab closes while a typed date change waits, off the screen, for its date to be read again", async () => {
+    vi.mocked(Groups.get).mockResolvedValue(managing);
+    vi.mocked(Events.managedDate).mockResolvedValueOnce(forGroup({ occurrence: occurrence({ revision: "r0" }) }));
+    const leaving = () => !window.dispatchEvent(new Event("beforeunload", { cancelable: true }));
+    const store = renderInSession();
+    await openEditor();
+    await userEvent.type(await screen.findByLabelText("Title"), "!");
+    expect(leaving()).toBe(true);
+    const reread = later<OccurrenceResponse>();
+    vi.mocked(Events.managedDate).mockReturnValue(reread.promise);
+    // A roster write on the date ends: the page is asked again, and the date with it.
+    act(() => store.begin("7:2026-12-01")("stored"));
+    expect(await screen.findByText("Loading this date…")).toBeInTheDocument();
+    expect(screen.queryByLabelText("Title")).not.toBeInTheDocument();
+    expect(leaving()).toBe(true);
+    await act(async () => { reread.resolve(forGroup({ occurrence: occurrence({ revision: "r0" }) })); await reread.promise; });
+    expect(await screen.findByLabelText("Title")).toHaveValue("Supper!");
+    await userEvent.click(screen.getByRole("button", { name: "Close" }));
+    expect(leaving()).toBe(false);
+  });
+
   it("a household read that fails leaves the date's own read in charge of the editor, and puts no household detail in it", async () => {
     vi.mocked(Groups.get).mockResolvedValue(managing);
     vi.mocked(Households.mine).mockRejectedValue(new TypeError("Failed to fetch"));

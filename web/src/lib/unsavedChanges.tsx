@@ -62,6 +62,30 @@ export function useUnsavedChanges(dirty: boolean) {
   return { guard: null, markSaved: () => { saved.current = true; }, resume: () => { saved.current = false; } };
 }
 
+// A draft a host keeps for an editor it has taken off the screen for a moment (the date editor's, while its date is
+// read again): `unsent` is read when the person leaves, since the host does not render when the draft changes.
+export function useKeptDraft(unsent: () => boolean, on: boolean) {
+  const latest = useRef(unsent);
+  latest.current = unsent;
+  useEffect(() => {
+    if (!on) return;
+
+    const unsaved = () => latest.current();
+
+    const onBeforeUnload = (e: BeforeUnloadEvent) => {
+      if (anyUnsaved()) e.preventDefault();
+    };
+
+    openForms.add(unsaved);
+    window.addEventListener("beforeunload", onBeforeUnload);
+
+    return () => {
+      openForms.delete(unsaved);
+      window.removeEventListener("beforeunload", onBeforeUnload);
+    };
+  }, [on]);
+}
+
 // The page dialog that asks before leaving, while its page is mounted; returns the unregister.
 export function askToLeaveWith(asker: () => Promise<boolean>): () => void {
   askToLeave = asker;
