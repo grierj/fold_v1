@@ -680,19 +680,81 @@ func TestReminderWaitlistCopyNearTheStart(t *testing.T) {
 	}
 }
 
-// The daily reaper leaves reminders to their own job.
+// The daily reaper leaves a reminder to its own job while that job lives
+// (its key, under the job's kind, is the job's unique key).
 func TestReapLeavesRemindersAlone(t *testing.T) {
 	f := newComposeFixture(t)
 	old := time.Now().Add(-2 * time.Hour)
-	key := "going:1:1:1440"
+	key := reminderKey{Kind: reminderGoing, Occ: 1, Start: 1, Minutes: 1440}.String()
 	r := models.Message{Status: models.MessageScheduled, Category: models.MessageCategoryReminder, Subject: "s", Audience: "{}", ScheduledAt: &old, ReminderKey: &key}
 	f.app.DB.Create(&r)
+	jobKey := reminderKey{Kind: kindReminderSend, Occ: 1, Start: 1, Minutes: 1440}.String()
+	if _, err := reminderSendType.Enqueue(f.app.DB, reminderJob{OccurrenceID: 1, StartsAt: 1, Minutes: 1440}, time.Now().Add(time.Hour), jobKey); err != nil {
+		t.Fatal(err)
+	}
 	if err := f.app.reapMessages(context.Background(), time.Now()); err != nil {
 		t.Fatal(err)
 	}
 	f.app.DB.First(&r, r.ID)
 	if r.Status != models.MessageScheduled {
 		t.Fatalf("reaped a reminder: %+v", r)
+	}
+}
+
+// A reminder whose reminder.send job stopped for good while preparing it
+// (here a panic on every attempt, so the last-attempt cleanup never runs)
+// is failed by the daily reaper with a reason, as an announcement is.
+func TestReapSettlesReminderWhoseJobDied(t *testing.T) {
+	f := newComposeFixture(t)
+	f.app.DB.Create(&models.Registration{OccurrenceID: f.groupOcc.ID, UserID: &f.teen.ID, Status: models.RegGoing})
+	var ev models.Event
+	f.app.DB.First(&ev, f.groupEvent.ID)
+	start := f.groupOcc.StartsAt.Unix()
+	key := reminderKey{Kind: kindReminderSend, Occ: f.groupOcc.ID, Start: start, Minutes: ev.ReminderEmailMinutes}.String()
+	if _, err := reminderSendType.Enqueue(f.app.DB, reminderJob{OccurrenceID: f.groupOcc.ID, StartsAt: start, Minutes: ev.ReminderEmailMinutes}, time.Now(), key); err != nil {
+		t.Fatal(err)
+	}
+	f.app.hooks.readerAuthorized = func(surface string) {
+		if surface == "preparation" {
+			panic("the worker stopped")
+		}
+	}
+	runMessageJobs(t, f.app)
+	f.app.hooks.readerAuthorized = nil
+	var job models.Job
+	if err := f.app.DB.Where("unique_key = ?", key).First(&job).Error; err != nil || job.Status != models.JobDead {
+		t.Fatalf("the reminder job should be dead: %v %+v", err, job)
+	}
+	var m models.Message
+	if err := f.app.DB.Where("occurrence_id = ? AND category = ?", f.groupOcc.ID, models.MessageCategoryReminder).First(&m).Error; err != nil || m.Status != models.MessageScheduled {
+		t.Fatalf("the reminder should be written and still scheduled: %v %+v", err, m)
+	}
+	listed := func() string {
+		var out messageListJSON
+		decodeJSON(t, f.admin.do("GET", "/api/v1/messages?category=reminder", nil, false), &out)
+		if len(out.Messages) != 1 || out.Messages[0].ID != m.ID {
+			t.Fatalf("admin's reminder list: %+v", out.Messages)
+		}
+		return out.Messages[0].Status
+	}
+	if got := listed(); got != models.MessageScheduled {
+		t.Fatalf("listed before the reap as %q", got)
+	}
+	if err := f.app.reapMessages(context.Background(), time.Now().Add(2*time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	f.app.DB.First(&m, m.ID)
+	if m.Status != models.MessageFailed || m.Error != whyNotPrepared || listed() != models.MessageFailed {
+		t.Fatalf("a reminder whose job died should fail with a reason: %+v", m)
+	}
+	if n := contactCount(t, f.app, &models.AuditLog{}, "action = ? AND target_id = ?", audit.MessageRefused, m.ID); n != 1 {
+		t.Fatalf("%d message.refused audit rows", n)
+	}
+	if err := f.app.reapMessages(context.Background(), time.Now().Add(2*time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if n := contactCount(t, f.app, &models.AuditLog{}, "action = ? AND target_id = ?", audit.MessageRefused, m.ID); n != 1 {
+		t.Fatalf("a second reap wrote %d message.refused audit rows", n)
 	}
 }
 

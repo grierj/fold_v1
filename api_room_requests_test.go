@@ -263,6 +263,60 @@ func TestRoomApprovalSeriesRoomStaysUnapproved(t *testing.T) {
 	}
 }
 
+// Re-picking the series room while its request waits replaces the request:
+// one pending series request per event, for the room picked last.
+func TestRoomApprovalSeriesRepickWhilePending(t *testing.T) {
+	f := newBookingFixture(t)
+	approvalOn(t, f)
+	var chapel struct {
+		Room roomJSON `json:"room"`
+	}
+	w := f.admin.do("POST", "/api/v1/admin/rooms", map[string]any{"name": "Chapel"}, true)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("room: %d %s", w.Code, w.Body.String())
+	}
+	decodeJSON(t, w, &chapel)
+	series := createFeedEvent(t, f.leader, f.group, "Weekly", f.startOn.AddDate(0, 0, 1), "FREQ=WEEKLY;COUNT=3")
+	if code, out := f.seriesRoom(t, f.leader, series, map[string]any{"roomId": f.hall.ID}); code != http.StatusOK || out.Pending != 3 {
+		t.Fatalf("first pick: %d %+v", code, out)
+	}
+	first := listRequests(t, f.admin)
+	if len(first) != 1 {
+		t.Fatalf("requests after the first pick: %+v", first)
+	}
+	if code, out := f.seriesRoom(t, f.leader, series, map[string]any{"roomId": chapel.Room.ID}); code != http.StatusOK || out.Pending != 3 {
+		t.Fatalf("re-pick while pending: %d %+v", code, out)
+	}
+	reqs := listRequests(t, f.admin)
+	if len(reqs) != 1 || reqs[0].RoomID != chapel.Room.ID || reqs[0].Dates != 3 || !reqs[0].Series {
+		t.Fatalf("one request for the room picked last: %+v", reqs)
+	}
+	var old models.RoomRequest
+	if err := f.app.DB.First(&old, first[0].ID).Error; err != nil || old.Status != models.RoomRequestWithdrawn {
+		t.Fatalf("the first request should be withdrawn: %v %+v", err, old)
+	}
+	if n := contactCount(t, f.app, &models.RoomBooking{}, "request_id = ?", old.ID); n != 0 {
+		t.Fatalf("%d bookings still name the withdrawn request", n)
+	}
+	if n := contactCount(t, f.app, &models.Notification{}, "kind = ? AND subject_id = ? AND waiting AND resolved_at IS NULL", notify.RoomRequested, old.ID); n != 0 {
+		t.Fatalf("%d admin tasks left open for the withdrawn request", n)
+	}
+	if n := contactCount(t, f.app, &models.Notification{}, "kind = ? AND subject_id = ? AND waiting AND resolved_at IS NULL", notify.RoomRequested, reqs[0].ID); n != 1 {
+		t.Fatalf("%d admin tasks open for the new request, want 1", n)
+	}
+	if w := f.admin.do("POST", "/api/v1/admin/room-requests/"+itoa(old.ID)+"/confirm", map[string]any{}, true); w.Code == http.StatusOK || w.Code >= 500 {
+		t.Fatalf("confirming the withdrawn request: %d %s", w.Code, w.Body.String())
+	}
+
+	// The same room again (to retry dates) also replaces the waiting request.
+	if code, out := f.seriesRoom(t, f.leader, series, map[string]any{"roomId": chapel.Room.ID}); code != http.StatusOK || out.Pending != 3 {
+		t.Fatalf("same room while pending: %d %+v", code, out)
+	}
+	if again := listRequests(t, f.admin); len(again) != 1 || again[0].RoomID != chapel.Room.ID || again[0].Dates != 3 || again[0].ID == reqs[0].ID {
+		t.Fatalf("one new request for the same room: %+v", again)
+	}
+}
+
 func TestRoomApprovalCreateDeleteAndGuards(t *testing.T) {
 	f := newBookingFixture(t)
 	approvalOn(t, f)
