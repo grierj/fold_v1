@@ -24,9 +24,9 @@ import (
 //     `TestName` is a Go test, and every `web/...` path is a file.
 //
 // Known limits: it reads the states of a lifecycle only when one column holds
-// them under such a CHECK. A lifecycle without one (groups.status, users.role,
-// nullable timestamps, counters, a state derived from other rows or the clock)
-// is held to the names check alone. It does not read transitions, and it
+// them under such a CHECK. A lifecycle without one (users.role, nullable
+// timestamps, counters, a state derived from other rows or the clock) is held
+// to the names check alone. It does not read transitions, and it
 // cannot tell whether a row's writer list is complete.
 const lifecycleMapPath = "docs/agents/lifecycles.md"
 

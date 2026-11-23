@@ -116,13 +116,49 @@ func CanManageGroup(p *Person, r Rel) bool {
 	return p != nil && (p.Admin || r.Leader)
 }
 
-// CanSetGroupStatus: leaders may archive their own group; only admins may
-// approve or reactivate.
-func CanSetGroupStatus(p *Person, r Rel, status string) bool {
-	if p != nil && p.Admin {
-		return true
+// GroupStatusDecision is what setting a group's status from one value to
+// another amounts to: a named move, no move at all, or a refusal.
+type GroupStatusDecision int
+
+const (
+	GroupStatusForbidden GroupStatusDecision = iota // this person may not make the move
+	GroupStatusKept                                 // the status it already has: not a move
+	GroupStatusApprove                              // pending to active
+	GroupStatusReject                               // pending to archived
+	GroupStatusArchive                              // active to archived
+	GroupStatusUnarchive                            // archived to active
+	GroupStatusNoReturn                             // back to pending, which nothing asks an admin to decide again
+)
+
+// DecideGroupStatus judges setting a group whose status is from to status
+// to. Only people who manage the group may send a status; the status it already
+// has is no move. Leaders may archive their own group; admins may also
+// approve, reject and reactivate. Nobody moves a group back to pending
+// (Grier, 2026-11-22). Permission is judged first, so a leader asking for
+// pending is refused as forbidden, like any other move they may not make.
+func DecideGroupStatus(p *Person, r Rel, from, to string) GroupStatusDecision {
+	if !CanManageGroup(p, r) {
+		return GroupStatusForbidden
 	}
-	return CanManageGroup(p, r) && status == GroupArchived
+	if from == to {
+		return GroupStatusKept
+	}
+	if !p.Admin && to != GroupArchived {
+		return GroupStatusForbidden
+	}
+	switch {
+	case from == GroupPending && to == GroupActive:
+		return GroupStatusApprove
+	case from == GroupPending && to == GroupArchived:
+		return GroupStatusReject
+	case from == GroupActive && to == GroupArchived:
+		return GroupStatusArchive
+	case from == GroupArchived && to == GroupActive:
+		return GroupStatusUnarchive
+	case to == GroupPending:
+		return GroupStatusNoReturn
+	}
+	return GroupStatusForbidden
 }
 
 // CanChangeRole decides making someone a leader or a member again.

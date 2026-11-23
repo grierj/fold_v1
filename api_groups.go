@@ -495,9 +495,15 @@ func (a *App) apiUpdateGroup(c *gin.Context) {
 		if !policy.CanSeeGroup(asPerson(actor), asGroup(&locked), rel) {
 			return errHidden
 		}
-		if !policy.CanManageGroup(asPerson(actor), rel) ||
-			(body.Status != nil && !policy.CanSetGroupStatus(asPerson(actor), rel, *body.Status)) {
+		move := policy.GroupStatusKept
+		if body.Status != nil {
+			move = policy.DecideGroupStatus(asPerson(actor), rel, locked.Status, *body.Status)
+		}
+		if !policy.CanManageGroup(asPerson(actor), rel) || move == policy.GroupStatusForbidden {
 			return errForbidden
+		}
+		if move == policy.GroupStatusNoReturn {
+			return errGroupBackToPending
 		}
 		// Downstream visibility/audit helpers use the same fresh actor.
 		*u = *actor
@@ -532,11 +538,20 @@ func (a *App) apiUpdateGroup(c *gin.Context) {
 				return err
 			}
 		}
-		// An admin activating or archiving a pending group by editing it
-		// decides the approval task too.
-		if locked.Status == models.GroupPending && g.Status != models.GroupPending {
+		switch move {
+		case policy.GroupStatusArchive, policy.GroupStatusUnarchive:
+			action := audit.GroupArchived
+			if move == policy.GroupStatusUnarchive {
+				action = audit.GroupUnarchived
+			}
+			if err := audit.Write(tx, audit.Entry{Actor: &u.ID, Action: action, TargetType: "group", TargetID: g.ID, IP: c.ClientIP()}); err != nil {
+				return err
+			}
+		case policy.GroupStatusApprove, policy.GroupStatusReject:
+			// Activating or archiving a pending group by editing it decides
+			// the approval task too.
 			outcome, action := "approved", audit.GroupApproved
-			if g.Status != models.GroupActive {
+			if move == policy.GroupStatusReject {
 				outcome, action = "rejected", audit.GroupRejected
 			}
 			if _, err := notify.Resolve(tx, notify.GroupPending, g.ID, &u.ID, outcome); err != nil {
@@ -577,7 +592,7 @@ func (a *App) apiUpdateGroup(c *gin.Context) {
 		})
 		return
 	}
-	if errors.Is(err, errVisibilityReviewOutdated) {
+	if errors.Is(err, errVisibilityReviewOutdated) || errors.Is(err, errGroupBackToPending) {
 		fail(c, err)
 		return
 	}
@@ -765,6 +780,10 @@ func (a *App) apiSetMemberRole(c *gin.Context) {
 
 // errRoleRefused means policy said no once the group row was locked.
 var errRoleRefused = apiErr(http.StatusForbidden, "", "forbidden")
+
+// errGroupBackToPending: nothing would ask an admin to decide a group again,
+// so no group goes back to pending once it has left it.
+var errGroupBackToPending = apiErr(http.StatusConflict, "group_back_to_pending", "a group that was approved or archived can't go back to waiting for approval")
 
 // errGroupNotApprovedForAdds: only admins add people to a pending or
 // archived group (policy.CanAddToGroup).

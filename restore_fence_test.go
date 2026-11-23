@@ -9,6 +9,7 @@ import (
 	"go/ast"
 	"go/token"
 	"io"
+	"io/fs"
 	"math/rand"
 	"net"
 	"net/http"
@@ -3118,6 +3119,17 @@ func wantRefusedStart(t *testing.T, p *foldProc, label string) {
 	}
 }
 
+// headVersion is the version the current binary migrates to: one per file,
+// since TestBaselineFileShape keeps the files numbered without gaps.
+func headVersion(t *testing.T) int64 {
+	t.Helper()
+	files, err := fs.Glob(migrations.Files, "*.sql")
+	if err != nil || len(files) == 0 {
+		t.Fatalf("migration files = %v (%v)", files, err)
+	}
+	return int64(len(files))
+}
+
 func goose(t *testing.T, db *gorm.DB) int64 {
 	t.Helper()
 	var v int64
@@ -3200,9 +3212,11 @@ func TestPriorReleaseRefusesToStart(t *testing.T) {
 			p.stop()
 		}
 		seedUsers(t, db)
-		priorStartRefused(t, prior, name, db, "v0.1.0 at 15 after setup", 15)
+		priorStartRefused(t, prior, name, db, "v0.1.0 at the head after setup", headVersion(t))
 		dump := fenceDump(t, db)
-		downOne(t, cur, name)
+		for goose(t, db) > 14 {
+			downOne(t, cur, name)
+		}
 		priorStartRefused(t, prior, name, db, "v0.1.0 after the live Down", 14)
 		if out, err := runFold(t, prior, name, "migrate", "down-one"); err == nil || goose(t, db) != 14 {
 			t.Fatalf("v0.1.0's own down-one above its files: %v, version %d: %s", err, goose(t, db), out)
@@ -3214,7 +3228,7 @@ func TestPriorReleaseRefusesToStart(t *testing.T) {
 		if fences != 2 {
 			t.Fatalf("the restored copy has %d of the two fences", fences)
 		}
-		priorStartRefused(t, prior, restored, rdb, "v0.1.0 after a restore", 15)
+		priorStartRefused(t, prior, restored, rdb, "v0.1.0 after a restore", headVersion(t))
 		if p := startFold(t, cur, restored); !p.healthy() {
 			t.Fatalf("the current binary on the restored copy:\n%s", p.out.String())
 		}
@@ -3235,7 +3249,7 @@ func TestPriorReleaseRefusesToStart(t *testing.T) {
 		} else {
 			p.stop()
 		}
-		priorStartRefused(t, prior, restored, rdb, "v0.1.0 once the current binary ran", 15)
+		priorStartRefused(t, prior, restored, rdb, "v0.1.0 once the current binary ran", headVersion(t))
 	})
 	t.Run("before first-run setup, walked down", func(t *testing.T) {
 		name, db := migrated(t, cur)
@@ -3253,8 +3267,10 @@ func TestPriorReleaseRefusesToStart(t *testing.T) {
 				t.Fatalf("%s: %d users before setup", label, n)
 			}
 		}
-		check("v0.1.0 at 15, before setup", 15)
-		downOne(t, cur, name)
+		check("v0.1.0 at the head, before setup", headVersion(t))
+		for goose(t, db) > 14 {
+			downOne(t, cur, name)
+		}
 		check("v0.1.0 at 14", 14)
 		if out, err := runFold(t, prior, name, "migrate", "down-one"); err == nil || goose(t, db) != 14 {
 			t.Fatalf("v0.1.0's own down-one above its files: %v, version %d: %s", err, goose(t, db), out)
@@ -3388,9 +3404,9 @@ func TestPriorProcessRunningAcrossTheUpgrade(t *testing.T) {
 	admin.want("POST", fmt.Sprintf("/api/v1/groups/%d/events", g3.Group.ID), map[string]any{"title": "E6", "startsLocal": day(6) + "T19:00", "durationMinutes": 60, "tzid": "UTC"}, http.StatusCreated, &e6)
 	member.want("PUT", fmt.Sprintf("/api/v1/events/%d/registrations", e5.Event.ID), map[string]any{"status": "going", "date": day(5)}, http.StatusOK, nil)
 
-	// The current binary starts beside it and applies 00015.
+	// The current binary starts beside it and applies 00015 and later.
 	next := startFold(t, cur, name)
-	if !next.healthy() || goose(t, db) != 15 {
+	if !next.healthy() || goose(t, db) != headVersion(t) {
 		t.Fatalf("the current binary beside v0.1.0: %d\n%s", goose(t, db), next.out.String())
 	}
 	curAdmin := next.session(t, "admin@example.com")

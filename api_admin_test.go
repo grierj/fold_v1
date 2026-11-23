@@ -1366,9 +1366,10 @@ func TestLeadersHearGroupDecisions(t *testing.T) {
 	}
 	notice("group.approved", edited)
 
-	// Set back to pending and approved again: a second decision is a second notice.
-	if w := admin.do("PUT", "/api/v1/groups/"+approved, map[string]any{"status": models.GroupPending}, true); w.Code != http.StatusOK {
-		t.Fatalf("back to pending: %d %s", w.Code, w.Body.String())
+	// A group an earlier release sent back to pending, approved again: a
+	// second decision is a second notice. No release does that move now.
+	if err := app.DB.Model(&models.Group{}).Where("id = ?", approved).Update("status", models.GroupPending).Error; err != nil {
+		t.Fatal(err)
 	}
 	if w := admin.do("POST", "/api/v1/admin/groups/"+approved+"/approve", map[string]any{}, true); w.Code != http.StatusOK {
 		t.Fatalf("approve again: %d %s", w.Code, w.Body.String())
