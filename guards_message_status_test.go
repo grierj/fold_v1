@@ -214,6 +214,11 @@ func (a *App) send(tx *gorm.DB, m *models.Message) error {
 func (a *App) draft(tx *gorm.DB) error {
 	return tx.Exec("INSERT INTO messages (subject) VALUES ('Hi')").Error
 }`, "draft: raw INSERT INTO messages"},
+		{"messages made with make", `package main
+func (a *App) drafts(tx *gorm.DB) error {
+	ms := make([]models.Message, 0, 2)
+	return tx.CreateInBatches(&ms, 50).Error
+}`, "drafts: Create of a message"},
 		{"another table's status", `package main
 func (a *App) mark(tx *gorm.DB, m *models.Membership, id uint) error {
 	tx.Model(&m).Updates(map[string]any{"status": "active"})

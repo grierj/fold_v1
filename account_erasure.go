@@ -373,11 +373,15 @@ func eraseMessagesIn(tx *gorm.DB, s erasureSubject, actor *uint, ip string) erro
 		}
 	}
 	return withStatementTimeout(tx, erasureRecipientWait, func() error {
+		// Not moveRecipientsWhere: one statement suppresses the queued rows of
+		// every channel and scrubs the person's other rows under the one
+		// timeout above.
+		from, to := policy.RecipientEraseRecipient.From(), policy.RecipientEraseRecipient.To()
 		return tx.Exec(`UPDATE message_recipients SET address = '', error = '',
-			status = CASE WHEN status = 'queued' THEN 'suppressed' ELSE status END,
-			reason = CASE WHEN status = 'queued' THEN ? ELSE reason END, updated_at = now()
-			WHERE user_id = ? AND (address <> '' OR error <> '' OR status = 'queued')`,
-			skipNotActive, s.ID).Error
+			status = CASE WHEN status IN ? THEN ? ELSE status END,
+			reason = CASE WHEN status IN ? THEN ? ELSE reason END, updated_at = now()
+			WHERE user_id = ? AND (address <> '' OR error <> '' OR status IN ?)`,
+			from, to, from, skipNotActive, s.ID, from).Error
 	})
 }
 

@@ -12,6 +12,7 @@ import (
 
 	"fold/internal/jobs"
 	"fold/internal/mail"
+	"fold/internal/policy"
 	"fold/internal/providers"
 	"fold/models"
 
@@ -127,35 +128,40 @@ func (a *App) applyEmailEvent(ctx context.Context, e emailEventJob) error {
 		// The report is about a notification's email or an announcement's
 		// (M3.5); each table moves its row forward the same way.
 		deliveries := tx.Model(&models.NotificationDelivery{}).Where("channel = ? AND provider_message_id = ?", models.DeliveryEmail, e.MessageID)
-		recipients := tx.Model(&models.MessageRecipient{}).Where("channel = ? AND provider_message_id = ?", models.DeliveryEmail, e.MessageID)
-		var res, mres *gorm.DB
+		const byProviderID = "r.provider_message_id = ?"
+		var res *gorm.DB
+		var moved int64
+		var merr error
 		switch e.Kind {
 		case providers.EventDelivered:
 			res = deliveries.Where("status = ?", models.DeliverySent).Update("status", models.DeliveryDelivered)
-			mres = recipients.Where("status = ?", models.RecipientSent).Updates(map[string]any{"status": models.RecipientDelivered, "updated_at": time.Now()})
+			if res.Error == nil {
+				moved, merr = moveRecipientsWhere(tx, policy.RecipientReportDelivered, map[string]any{"updated_at": time.Now()}, byProviderID, e.MessageID)
+			}
 		case providers.EventBounced, providers.EventComplained:
 			reason := models.BounceSoft
-			status := models.RecipientBounced
+			move := policy.RecipientReportBounced
 			switch {
 			case e.Kind == providers.EventComplained:
-				reason, status = models.BounceComplaint, models.RecipientComplained
+				reason, move = models.BounceComplaint, policy.RecipientReportComplained
 			case e.Permanent:
 				reason = models.BounceHard
 			}
 			res = deliveries.Where("status IN ?", []string{models.DeliverySent, models.DeliveryDelivered}).
 				Updates(map[string]any{"status": models.DeliveryBounced, "reason": reason})
-			mres = recipients.Where("status IN ?", []string{models.RecipientSent, models.RecipientDelivered}).
-				Updates(map[string]any{"status": status, "reason": reason, "updated_at": time.Now()})
+			if res.Error == nil {
+				moved, merr = moveRecipientsWhere(tx, move, map[string]any{"reason": reason, "updated_at": time.Now()}, byProviderID, e.MessageID)
+			}
 		default:
 			return nil
 		}
 		if res.Error != nil {
 			return res.Error
 		}
-		if mres.Error != nil {
-			return mres.Error
+		if merr != nil {
+			return merr
 		}
-		if res.RowsAffected+mres.RowsAffected == 0 && recent(e.At) {
+		if res.RowsAffected+moved == 0 && recent(e.At) {
 			var n, mn int64
 			if err := tx.Model(&models.NotificationDelivery{}).Where("channel = ? AND provider_message_id = ?", models.DeliveryEmail, e.MessageID).
 				Count(&n).Error; err != nil {

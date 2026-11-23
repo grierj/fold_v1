@@ -270,7 +270,10 @@ section or decision; check it still exists.
   what (`internal/policy/message_lifecycle.go`), and only `moveMessage` writes it
   (`moveMessagesWhere` for a set, `message_status.go`). A new message takes its first status from
   its creating move. The predicates (`policy.MessageEditable`, `policy.MessageGoingOut`,
-  `Allows`) come from the same table.
+  `Allows`) come from the same table. A message recipient's status likewise moves only by a
+  `policy.RecipientMove` (`internal/policy/recipient_lifecycle.go`, per channel), written by
+  `moveRecipient` (`moveRecipientsWhere` for a set, `recipient_status.go`); a push outcome becomes
+  its move through `policy.RecipientPushOutcome`.
 
 **Uploads**
 - Avatars and covers go through `storage.Store` (`App.Uploads`), never raw paths. Keys are

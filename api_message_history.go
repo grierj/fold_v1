@@ -206,7 +206,7 @@ func historyStatus(status, reason, errText string, admin bool) (string, string) 
 		return historySent, ""
 	case models.RecipientDelivered:
 		return historyDelivered, ""
-	case models.RecipientQueued, models.DeliveryDeferred:
+	case models.RecipientQueued, models.RecipientDeferred:
 		return historyWaiting, ""
 	}
 	if !admin {
@@ -572,18 +572,19 @@ func (a *App) apiRetryMessage(c *gin.Context) {
 			if err := claim(policy.MessageRetrySending, fields); err != nil {
 				return err
 			}
-			mark := func(list []uint, fields map[string]any) error {
+			mark := func(list []uint, move policy.RecipientMove, fields map[string]any) error {
 				return eachIDChunk(list, func(chunk []uint) error {
-					return tx.Model(&models.MessageRecipient{}).Where("id IN ? AND status = ?", chunk, models.RecipientFailed).Updates(fields).Error
+					_, err := moveRecipientsWhere(tx, move, fields, "r.id IN ?", chunk)
+					return err
 				})
 			}
 			for why, list := range decision.drop {
-				if err := mark(list, map[string]any{"status": models.RecipientSuppressed, "reason": why, "error": "", "updated_at": now}); err != nil {
+				if err := mark(list, policy.RecipientRetryDropped, map[string]any{"reason": why, "error": "", "updated_at": now}); err != nil {
 					return err
 				}
 			}
 			// Email only: a push is never sent again (M3.13d2).
-			if err := mark(ids, map[string]any{"status": models.RecipientQueued, "error": "", "updated_at": now}); err != nil {
+			if err := mark(ids, policy.RecipientRetryResend, map[string]any{"error": "", "updated_at": now}); err != nil {
 				return err
 			}
 			if len(ids) == 0 {
