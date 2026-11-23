@@ -190,7 +190,7 @@ export function GroupForm({
         <Button ref={saveRef} variant="primary" layout="w-full sm:w-auto" type="submit" disabled={action.running}>
           {action.running ? "Saving…" : saveLabel}
         </Button>
-        <Button variant="secondary" layout="w-full sm:w-auto" onClick={onCancel}>
+        <Button variant="secondary" layout="w-full sm:w-auto" disabled={action.running} onClick={onCancel}>
           Cancel
         </Button>
       </FormActions>

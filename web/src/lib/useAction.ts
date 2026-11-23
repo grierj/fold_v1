@@ -25,7 +25,8 @@ export interface Action {
   // to say it did, or to false when nothing was done and it has told the person itself (back to idle). A throw is
   // a failure, worded by errorText.
   run: (work: () => Promise<string | false | void>, options?: RunOptions) => Promise<void>;
-  // Clears a done or failed state; a run on its way is left alone.
+  // Clears a done or failed state. A run on its way stays running (its controls disabled, a second run refused)
+  // until it settles, and then lands as idle: its answer belongs to a draft that is gone, never to what comes next.
   reset: () => void;
 }
 
@@ -34,6 +35,8 @@ export function useAction(): Action {
   const [state, setState] = useState<ActionState>({ status: "idle" });
   const busy = useRef(false);
   const alive = useRef(false);
+  // Bumped by reset; a run started under an older generation settles as idle.
+  const generation = useRef(0);
 
   // Set in the body, not only at init: StrictMode's rehearsal unmount must not leave it false.
   useEffect(() => {
@@ -46,11 +49,12 @@ export function useAction(): Action {
     if (busy.current) return;
 
     busy.current = true;
+    const mine = generation.current;
 
     const settle = (next: ActionState) => {
       busy.current = false;
 
-      if (alive.current) setState(next);
+      if (alive.current) setState(mine === generation.current ? next : { status: "idle" });
     };
 
     if (alive.current) setState({ status: "running" });
@@ -84,7 +88,13 @@ export function useAction(): Action {
   }, []);
 
   const reset = useCallback(() => {
-    if (!busy.current) setState({ status: "idle" });
+    if (busy.current) {
+      generation.current++;
+
+      return;
+    }
+
+    if (alive.current) setState({ status: "idle" });
   }, []);
 
   return { state, running: state.status === "running", run, reset };

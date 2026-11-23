@@ -88,20 +88,42 @@ describe("useAction", () => {
     expect(result.current.state.status).toBe("failed");
   });
 
-  it("clears a done or failed state on a new attempt and on reset, never a run on its way", async () => {
+  it("clears a done or failed state on a new attempt and on reset", async () => {
     const { result } = renderHook(() => useAction());
-    const work = deferred<string>();
-    let run!: Promise<void>;
 
     await act(() => result.current.run(() => Promise.resolve("Sent.")));
-    act(() => { run = result.current.run(() => work.promise); });
-    expect(result.current.state).toEqual({ status: "running" });
+    expect(result.current.state.status).toBe("done");
     act(() => result.current.reset());
-    expect(result.current.state).toEqual({ status: "running" });
-    await act(async () => { work.resolve("Sent again."); await run; });
+    expect(result.current.state).toEqual({ status: "idle" });
+    await act(() => result.current.run(() => Promise.reject(new Error("offline"))));
+    expect(result.current.state.status).toBe("failed");
     act(() => result.current.reset());
     expect(result.current.state).toEqual({ status: "idle" });
   });
+
+  for (const ending of ["failed", "done"] as const) {
+    it(`a reset during a run stays running until it settles, then lands its ${ending} result as idle`, async () => {
+      const { result } = renderHook(() => useAction());
+      const work = deferred<string>();
+      let run!: Promise<void>;
+
+      act(() => { run = result.current.run(() => work.promise); });
+      act(() => result.current.reset());
+      expect(result.current.state).toEqual({ status: "running" });
+      let second = 0;
+      await act(() => result.current.run(async () => { second++; }));
+      expect(second).toBe(0);
+      await act(async () => {
+        if (ending === "failed") work.reject(new Error("offline"));
+        else work.resolve("Saved.");
+        await run;
+      });
+      expect(result.current.state).toEqual({ status: "idle" });
+      await act(() => result.current.run(() => Promise.resolve("Saved again.")));
+      expect(result.current.state).toEqual({ status: "done", text: "Saved again.", followUpFailed: false });
+    });
+  }
+
 
   it("still settles under StrictMode's rehearsal unmount", async () => {
     const { result } = renderHook(() => useAction(), { wrapper: StrictMode });

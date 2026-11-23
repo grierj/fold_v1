@@ -217,7 +217,7 @@ function EventRow({
               locationHint="Leave it blank to use the group's location."
               roomDate={instance.recurrenceRule ? undefined : instance.date}
               onRoomChanged={onChanged}
-              onSaved={onChanged}
+              onSaved={() => { setEditor(null); onChanged(); }}
               onClose={() => setEditor(null)}
             />
             <EventVisibilityControl
@@ -809,7 +809,7 @@ function GroupDetailContent() {
                   <Menu
                     label="More group actions"
                     items={[
-                      { label: "Edit group", onSelect: () => { groupSaveAction.reset(); setEditing(true); } },
+                      { label: "Edit group", onSelect: () => { if (!editing) groupSaveAction.reset(); setEditing(true); } },
                       ...(canCompose && group.status === "active" ? [{ label: EMAIL_MEMBERS, onSelect: () => navigate(composePath({ group: group.id })) }] : []),
                       { label: coverBusy ? "Uploading cover…" : "Change cover photo", onSelect: () => coverRef.current?.click(), disabled: coverBusy },
                       ...(isMember ? [{ label: "Leave group", onSelect: () => void toggleJoin(), disabled: !!departureTarget }] : []),

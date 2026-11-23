@@ -1,4 +1,4 @@
-import { testUser } from "../test/fixtures";
+import { testEvent, testUser } from "../test/fixtures";
 import { renderWithAuth } from "../test/auth";
 import { stubService } from "../test/service";
 import { act, cleanup, fireEvent, screen, waitFor, within } from "@testing-library/react";
@@ -767,6 +767,40 @@ it("adds Manage sign-ups to each date's More menu for leaders, opening that date
   expect(screen.getAllByRole("menuitem").map((i) => i.textContent)).toEqual(["Edit this date", "Manage sign-ups", "Edit event", "Cancel this date"]);
   await userEvent.click(screen.getByRole("menuitem", { name: "Manage sign-ups" }));
   expect(await screen.findByText("At /events/7?manage=2026-12-01")).toBeInTheDocument();
+});
+
+it("closes the series editor after a save, as the event page does, and lists the dates again (DEC-98)", async () => {
+  vi.mocked(Groups.get).mockResolvedValue({ ...page, canManage: true });
+  vi.mocked(Events.update).mockResolvedValue({ event: testEvent(7) });
+  open();
+  await userEvent.click(await screen.findByRole("button", { name: "More for Supper on 2026-12-01" }));
+  await userEvent.click(screen.getByRole("menuitem", { name: "Edit event" }));
+  await userEvent.click(await screen.findByRole("button", { name: "Save series" }));
+  await waitFor(() => expect(screen.queryByRole("button", { name: /^(Save series|Saving…)$/ })).not.toBeInTheDocument());
+  expect(Events.update).toHaveBeenCalledOnce();
+  await waitFor(() => expect(Groups.get).toHaveBeenCalledTimes(2));
+});
+
+it("keeps the group form, its Cancel off, until a save on its way settles; its failure shows there and not in the next edit", async () => {
+  vi.mocked(Groups.get).mockResolvedValue({ ...page, canManage: true });
+  const saving = deferred<{ group: typeof page.group }>();
+  vi.mocked(Groups.update).mockReturnValueOnce(saving.promise);
+  open();
+  await userEvent.click(await screen.findByRole("button", { name: "More group actions" }));
+  await userEvent.click(screen.getByRole("menuitem", { name: "Edit group" }));
+  await userEvent.click(await screen.findByRole("button", { name: "Save group" }));
+  const form = screen.getByLabelText("Group name").closest("form")!;
+  const cancel = within(form).getByRole("button", { name: "Cancel" });
+  expect(cancel).toBeDisabled();
+  fireEvent.click(cancel);
+  expect(screen.getByLabelText("Group name")).toBeInTheDocument();
+  await act(async () => { saving.reject(new ApiError(500, "private", { code: "server_error" })); await saving.promise.catch(() => {}); });
+  expect(await within(form).findByRole("alert")).toHaveTextContent("We couldn't save your changes.");
+  await userEvent.click(within(form).getByRole("button", { name: "Cancel" }));
+  await userEvent.click(await screen.findByRole("button", { name: "More group actions" }));
+  await userEvent.click(screen.getByRole("menuitem", { name: "Edit group" }));
+  expect(await screen.findByLabelText("Group name")).toHaveValue("Family group");
+  expect(screen.queryByRole("alert")).not.toBeInTheDocument();
 });
 
 it("keeps Manage sign-ups away from people who can't manage the group", async () => {
