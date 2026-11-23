@@ -446,7 +446,7 @@ func TestCalendarRemoteFilter(t *testing.T) {
 	}
 	decodeJSON(t, w, &hybrid)
 	closed := scheduleGroupEvent(t, admin, open, "Remote Closed This Date")
-	apiDo(t, admin, "PUT", fmt.Sprintf("/api/v1/events/%d", closed.ID), map[string]any{"remoteAvailable": true}, http.StatusOK)
+	apiDo(t, admin, "PUT", fmt.Sprintf("/api/v1/events/%d", closed.ID), seriesBody(t, admin, fmt.Sprintf("/api/v1/events/%d", closed.ID), map[string]any{"remoteAvailable": true}), http.StatusOK)
 	saveDate(t, admin, closed.ID, closed.StartsLocal[:10], map[string]any{"remoteCapacityOverride": 0}, http.StatusOK, "")
 	secret := createGroupAs(t, admin, "Secret Remote", models.VisibilityInviteOnly)
 	w = admin.do("POST", "/api/v1/groups/"+itoa(secret)+"/events", map[string]any{
@@ -498,10 +498,10 @@ func TestCalendarChildcareFilter(t *testing.T) {
 	open := createGroupAs(t, admin, "Open Nursery", models.VisibilityPublic)
 	plain := scheduleGroupEvent(t, admin, open, "No Childcare")
 	offered := scheduleGroupEvent(t, admin, open, "Family Night")
-	apiDo(t, admin, "PUT", "/api/v1/events/"+itoa(offered.ID), map[string]any{"childcareAvailable": true}, http.StatusOK)
+	apiDo(t, admin, "PUT", "/api/v1/events/"+itoa(offered.ID), seriesBody(t, admin, "/api/v1/events/"+itoa(offered.ID), map[string]any{"childcareAvailable": true}), http.StatusOK)
 	secret := createGroupAs(t, admin, "Secret Nursery", models.VisibilityInviteOnly)
 	hidden := scheduleGroupEvent(t, admin, secret, "Hidden Family Night")
-	apiDo(t, admin, "PUT", "/api/v1/events/"+itoa(hidden.ID), map[string]any{"childcareAvailable": true}, http.StatusOK)
+	apiDo(t, admin, "PUT", "/api/v1/events/"+itoa(hidden.ID), seriesBody(t, admin, "/api/v1/events/"+itoa(hidden.ID), map[string]any{"childcareAvailable": true}), http.StatusOK)
 	const window = "from=2026-11-30&to=2026-12-02&tz=UTC"
 	for _, who := range []*apiClient{admin, newAPIClient(t, app)} {
 		page, raw := getCalendar(t, who, window+"&childcare=1", http.StatusOK)

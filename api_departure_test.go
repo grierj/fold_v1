@@ -1649,8 +1649,8 @@ func newKeptRaceFixture(t *testing.T, replaced bool) keptRaceFixture {
 	f.occ = dates[4]
 	if replaced {
 		keepOnLeaving(t, f.subjectC, f.group.ID, f.ev.ID, f.occ)
-		apiDo(t, f.leaderC, "PUT", "/api/v1/events/"+itoa(f.ev.ID), map[string]any{"recurrenceRule": "FREQ=WEEKLY;COUNT=4"}, http.StatusOK)
-		apiDo(t, f.leaderC, "PUT", "/api/v1/events/"+itoa(f.ev.ID), map[string]any{"recurrenceRule": "FREQ=WEEKLY;COUNT=6"}, http.StatusOK)
+		apiDo(t, f.leaderC, "PUT", "/api/v1/events/"+itoa(f.ev.ID), seriesBody(t, f.leaderC, "/api/v1/events/"+itoa(f.ev.ID), map[string]any{"recurrenceRule": "FREQ=WEEKLY;COUNT=4"}), http.StatusOK)
+		apiDo(t, f.leaderC, "PUT", "/api/v1/events/"+itoa(f.ev.ID), seriesBody(t, f.leaderC, "/api/v1/events/"+itoa(f.ev.ID), map[string]any{"recurrenceRule": "FREQ=WEEKLY;COUNT=6"}), http.StatusOK)
 		apiDo(t, f.subjectC, "POST", "/api/v1/groups/"+itoa(f.group.ID)+"/join", nil, http.StatusOK)
 	} else if code, body := registerAs(f.subjectC, f.ev.ID, models.FormatCalendarDate(f.occ.OriginalDate), models.RegGoing, nil); code != http.StatusOK {
 		t.Fatalf("going: %d %s", code, body)

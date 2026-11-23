@@ -317,7 +317,7 @@ func TestVisibilityInvitationCollectionReadBudget(t *testing.T) {
 				if scope == "event" {
 					commitPath += "/visibility"
 				}
-				w = f.admin.do("PUT", commitPath, confirmVisibility(t, f.admin, commitPath, map[string]any{"visibility": models.VisibilityInviteOnly}), true)
+				w = f.admin.do("PUT", commitPath, seriesBody(t, f.admin, commitPath, confirmVisibility(t, f.admin, commitPath, map[string]any{"visibility": models.VisibilityInviteOnly})), true)
 				if w.Code != 200 {
 					t.Fatal(w.Code, w.Body.String())
 				}
@@ -372,7 +372,7 @@ func TestVisibilityBatchExcludesEndedAndUnconsentedInvitations(t *testing.T) {
 				if scope == "event" {
 					root += "/visibility"
 				}
-				apiDo(t, f.admin, "PUT", root, confirmVisibility(t, f.admin, root, map[string]any{"visibility": models.VisibilityInviteOnly}), 200)
+				apiDo(t, f.admin, "PUT", root, seriesBody(t, f.admin, root, confirmVisibility(t, f.admin, root, map[string]any{"visibility": models.VisibilityInviteOnly})), 200)
 				if contactCount(t, f.app, &models.Registration{}, "id = ? AND status <> ?", f.access.RegistrationID, models.RegCancelled) != 0 {
 					t.Fatal("stale invitation kept registration")
 				}

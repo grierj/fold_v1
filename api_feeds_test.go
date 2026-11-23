@@ -481,7 +481,7 @@ func TestPersonalFeedDateUIDSurvivesSeriesTimeEdit(t *testing.T) {
 	}
 	beforeUIDs := strings.Join(feedUIDs(before), "\n")
 
-	apiDo(t, admin, "PUT", fmt.Sprintf("/api/v1/events/%d", series.ID), map[string]any{"startsLocal": feedDate(start) + "T20:00"}, http.StatusOK)
+	apiDo(t, admin, "PUT", fmt.Sprintf("/api/v1/events/%d", series.ID), seriesBody(t, admin, fmt.Sprintf("/api/v1/events/%d", series.ID), map[string]any{"startsLocal": feedDate(start) + "T20:00"}), http.StatusOK)
 	after := unfoldFeed(feedBody(t, client, path))
 	afterBlock := feedEventWithUIDPrefix(after, uidPrefix)
 	if afterBlock == "" || !strings.Contains(afterBlock, "DTSTART;TZID=UTC:"+strings.ReplaceAll(models.FormatCalendarDate(target.OriginalDate), "-", "")+"T200000") || strings.Contains(after, "RECURRENCE-ID") {
@@ -929,7 +929,7 @@ func TestFeedMentionsChildcareAndAges(t *testing.T) {
 	gid := createFeedGroup(t, admin, "Family Feed", models.VisibilityPublic, "Hall")
 	offered := createFeedEvent(t, admin, gid, "Family Night", start, "")
 	createFeedEvent(t, admin, gid, "Adults Night", start.AddDate(0, 0, 1), "")
-	apiDo(t, admin, "PUT", "/api/v1/events/"+itoa(offered.ID), map[string]any{"childcareAvailable": true, "childcareAges": "Ages 2–5"}, http.StatusOK)
+	apiDo(t, admin, "PUT", "/api/v1/events/"+itoa(offered.ID), seriesBody(t, admin, "/api/v1/events/"+itoa(offered.ID), map[string]any{"childcareAvailable": true, "childcareAges": "Ages 2–5"}), http.StatusOK)
 	for _, path := range []string{"/cal/public.ics", "/cal/groups/" + itoa(gid) + ".ics"} {
 		body := unfoldFeed(feedBody(t, newAPIClient(t, app), path))
 		if strings.Count(body, "Childcare available (Ages 2–5)") != 1 {
@@ -1106,9 +1106,9 @@ func TestRecurringFeedsUseDateRemoteCapacityAndRefresh(t *testing.T) {
 		t.Fatal(err)
 	}
 	ev := createFeedEvent(t, admin, group.ID, "Hybrid dates", start, weeklyRule(start)+";COUNT=3")
-	apiDo(t, admin, "PUT", fmt.Sprintf("/api/v1/events/%d", ev.ID), map[string]any{
+	apiDo(t, admin, "PUT", fmt.Sprintf("/api/v1/events/%d", ev.ID), seriesBody(t, admin, fmt.Sprintf("/api/v1/events/%d", ev.ID), map[string]any{
 		"remoteAvailable": true, "remoteCapacity": 1, "videoProvider": "link", "videoUrl": "https://meet.example.org/date-feed", "videoReveal": "always",
-	}, http.StatusOK)
+	}), http.StatusOK)
 	_, member := mkUser(t, app, &group, "remote feed member")
 	personal := createFeedLink(t, member, models.CalendarFeedMine)
 	var dates []models.EventOccurrence
@@ -1162,7 +1162,7 @@ func TestRecurringFeedsUseDateRemoteCapacityAndRefresh(t *testing.T) {
 		t.Fatalf("capacity reset did not refresh feed: %d", w.Code)
 	}
 	assertDates(false)
-	apiDo(t, admin, "PUT", fmt.Sprintf("/api/v1/events/%d", ev.ID), map[string]any{"remoteCapacity": nil}, http.StatusOK)
+	apiDo(t, admin, "PUT", fmt.Sprintf("/api/v1/events/%d", ev.ID), seriesBody(t, admin, fmt.Sprintf("/api/v1/events/%d", ev.ID), map[string]any{"remoteCapacity": nil}), http.StatusOK)
 	assertDates(false)
 }
 

@@ -855,6 +855,66 @@ describe("EventDetail ?edit=series (DEC-161)", () => {
     expect(screen.queryByRole("textbox", { name: "Title" })).not.toBeInTheDocument();
     await waitFor(() => expect(edit).toHaveFocus());
   });
+
+  // DEC-162: the editor follows the page's newest read of the event and names its revision.
+  const at = (revision: string, over: Partial<EventDetailResponse["event"]> = {}, base: EventDetailResponse = groupEvent): EventDetailResponse =>
+    ({ ...base, event: { ...base.event, ...over, revision } });
+
+  it("keeps what was typed when the event changed while saving, reads it again and saves from the new read", async () => {
+    vi.mocked(Events.get).mockResolvedValueOnce(at("r1")).mockResolvedValue(at("r2", { description: "Bring a dish" }));
+    vi.mocked(Events.update).mockRejectedValueOnce(new ApiError(409, "x", { code: "event_changed" })).mockResolvedValueOnce({ event: groupEvent.event });
+    renderPage(link);
+    const title = await screen.findByLabelText("Title");
+    await userEvent.type(title, " night{Enter}");
+    expect(await screen.findByText(ERROR_COPY.event_changed)).toBeInTheDocument();
+    await waitFor(() => expect(Events.get).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(screen.getByRole("textbox", { name: /^Description/ })).toHaveValue("Bring a dish"));
+    expect(screen.getByLabelText("Title")).toHaveValue("Hybrid study night");
+    expect(Events.update).toHaveBeenLastCalledWith(7, expect.objectContaining({ revision: "r1" }));
+
+    await userEvent.click(screen.getByRole("button", { name: "Save series" }));
+    await waitFor(() => expect(Events.update).toHaveBeenCalledTimes(2));
+    expect(Events.update).toHaveBeenLastCalledWith(7, expect.objectContaining({ title: "Hybrid study night", description: "Bring a dish", revision: "r2" }));
+    await waitFor(() => expect(screen.getByRole("button", { name: "Edit event" })).toHaveAttribute("aria-expanded", "false"));
+  });
+
+  it("saves the series on the first press after a visibility save, keeping what was typed", async () => {
+    vi.mocked(Events.get).mockResolvedValueOnce(at("r1")).mockResolvedValue(at("r2", { visibility: "invite_only" }));
+    vi.mocked(Events.visibilityImpact).mockResolvedValue({ visibility: "invite_only", currentVisibility: "public", tightened: [], leaderOpened: [] });
+    vi.mocked(Events.setVisibility).mockResolvedValue({ event: { ...groupEvent.event, visibility: "invite_only" } });
+    vi.mocked(Events.update).mockResolvedValue({ event: groupEvent.event });
+    renderPage(link);
+    await userEvent.type(await screen.findByLabelText("Title"), " night");
+    await userEvent.click(screen.getByRole("radio", { name: /^Invite only/ }));
+    await userEvent.click(screen.getByRole("button", { name: "Save visibility" }));
+    await waitFor(() => expect(Events.get).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(screen.getByRole("radio", { name: /^Invite only/ })).toBeChecked());
+    expect(screen.getByLabelText("Title")).toHaveValue("Hybrid study night");
+
+    await userEvent.click(screen.getByRole("button", { name: "Save series" }));
+    await waitFor(() => expect(Events.update).toHaveBeenCalledExactlyOnceWith(7, expect.objectContaining({ title: "Hybrid study night", revision: "r2" })));
+    await waitFor(() => expect(screen.getByRole("button", { name: "Edit event" })).toHaveAttribute("aria-expanded", "false"));
+  });
+
+  it("saves the series on the first press after a series room change, keeping what was typed", async () => {
+    const weekly: EventDetailResponse = { ...groupEvent, event: { ...groupEvent.event, recurrenceRule: "FREQ=WEEKLY" }, occurrences: [occurrence({ recurrenceRule: "FREQ=WEEKLY" })] };
+    vi.mocked(Events.get).mockResolvedValueOnce(at("r1", {}, weekly)).mockResolvedValue(at("r2", { description: "Now in the hall" }, weekly));
+    vi.spyOn(Site, "get").mockResolvedValue({ name: "Fold", timezone: "UTC", selfSignup: "off", roomsEnabled: true, pushEnabled: true });
+    const hall = { id: 1, name: "Fellowship Hall", building: "Main", capacity: 80, features: "", restricted: false, busyDates: 0, tooSmall: false };
+    vi.spyOn(SeriesRooms, "list").mockResolvedValue({ rooms: [hall], dates: 2, defaultRoom: null, needsRoom: [], pending: 0 });
+    vi.spyOn(SeriesRooms, "set").mockResolvedValue({ defaultRoom: { id: 1, name: "Fellowship Hall", building: "Main" }, booked: 2, lost: [], kept: 0, pending: 0 });
+    vi.mocked(Events.update).mockResolvedValue({ event: weekly.event });
+    renderPage("/events/7?edit=series");
+    await userEvent.type(await screen.findByLabelText("Title"), " night");
+    await userEvent.selectOptions(await screen.findByRole("combobox", { name: /^Room for every date/ }), "1");
+    await userEvent.click(screen.getByRole("button", { name: "Book for every date" }));
+    await waitFor(() => expect(SeriesRooms.set).toHaveBeenCalledOnce());
+    await waitFor(() => expect(screen.getByRole("textbox", { name: /^Description/ })).toHaveValue("Now in the hall"));
+    expect(screen.getByLabelText("Title")).toHaveValue("Hybrid study night");
+
+    await userEvent.click(screen.getByRole("button", { name: "Save series" }));
+    await waitFor(() => expect(Events.update).toHaveBeenCalledExactlyOnceWith(7, expect.objectContaining({ title: "Hybrid study night", revision: "r2" })));
+  });
 });
 
 // VC2: the event's visibility control sits under the series editor, whose kept-dates panel can Add, Add back or

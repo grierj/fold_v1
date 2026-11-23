@@ -2268,8 +2268,8 @@ func TestVisibilityConsentLifecycleMatrix(t *testing.T) {
 			saveDate(t, f.admin, f.ev.ID, f.day(2), map[string]any{"title": "Harvest evening"}, http.StatusOK, "")
 		}},
 		{"15 the event is renamed", all, func(t *testing.T, f *vcFixture, p *lifecyclePeople) {
-			apiDo(t, f.admin, "PUT", fmt.Sprintf("/api/v1/events/%d", f.ev.ID), map[string]any{"title": "Renamed evening",
-				"startsLocal": models.FormatCalendarDate(f.dates[0].OriginalDate) + "T18:00", "durationMinutes": 60, "tzid": "UTC", "recurrenceRule": "FREQ=WEEKLY;COUNT=4"}, http.StatusOK)
+			apiDo(t, f.admin, "PUT", fmt.Sprintf("/api/v1/events/%d", f.ev.ID), seriesBody(t, f.admin, fmt.Sprintf("/api/v1/events/%d", f.ev.ID), map[string]any{"title": "Renamed evening",
+				"startsLocal": models.FormatCalendarDate(f.dates[0].OriginalDate) + "T18:00", "durationMinutes": 60, "tzid": "UTC", "recurrenceRule": "FREQ=WEEKLY;COUNT=4"}), http.StatusOK)
 		}},
 		{"17 another date gets its own visibility", only("event", "reset", "group"), func(t *testing.T, f *vcFixture, p *lifecyclePeople) {
 			saveDate(t, f.admin, f.ev.ID, f.day(2), map[string]any{"visibility": models.VisibilityPrivate}, http.StatusOK, "")

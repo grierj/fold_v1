@@ -35,7 +35,20 @@ export function useWhenState(init: WhenInit) {
     setDays((prev) => (prev.includes(v) ? prev.filter((d) => d !== v) : [...prev, v]));
   }
 
-  return { date, setDate, time, setTime, duration, setDuration, recurring, setRecurring, days, toggleDay };
+  // Stored values as they are, with none of a person's picks' side effects: an editor catching up on a newer read.
+  function take(next: Partial<WhenInit>) {
+    if (next.date !== undefined) setDateRaw(next.date);
+
+    if (next.time !== undefined) setTime(next.time);
+
+    if (next.duration !== undefined) setDuration(next.duration);
+
+    if (next.recurring !== undefined) setRecurringRaw(next.recurring);
+
+    if (next.days !== undefined) setDays(next.days);
+  }
+
+  return { date, setDate, time, setTime, duration, setDuration, recurring, setRecurring, days, toggleDay, take };
 }
 
 export type WhenState = ReturnType<typeof useWhenState>;

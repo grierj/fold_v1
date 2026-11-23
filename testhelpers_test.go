@@ -1567,3 +1567,23 @@ func confirmVisibility(t *testing.T, c *apiClient, path string, body map[string]
 	out["consent"] = impact.Consent
 	return out
 }
+
+// seriesBody is body for PUT /api/v1/events/:id at path with the revision a
+// series editor opened by c would hold: c reads the event page and its
+// revision goes with the save. A client that may not manage the event reads
+// none, and the server refuses it before judging the revision.
+func seriesBody(t *testing.T, c *apiClient, path string, body map[string]any) map[string]any {
+	t.Helper()
+	out := map[string]any{}
+	if w := c.do("GET", path, nil, false); w.Code == http.StatusOK {
+		var page struct {
+			Event eventJSON `json:"event"`
+		}
+		decodeJSON(t, w, &page)
+		out["revision"] = page.Event.Revision
+	}
+	for k, v := range body {
+		out[k] = v
+	}
+	return out
+}

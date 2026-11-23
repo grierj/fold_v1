@@ -315,13 +315,13 @@ func TestReminderKeptDepartureDateUsesExactDateFallback(t *testing.T) {
 func TestEventReminderTime(t *testing.T) {
 	f := newComposeFixture(t)
 	path := "/api/v1/events/" + itoa(f.groupEvent.ID)
-	if w := f.leader.do("PUT", path, map[string]any{"reminderEmailMinutes": 30}, true); w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), "event_reminder_time") {
+	if w := f.leader.do("PUT", path, seriesBody(t, f.leader, path, map[string]any{"reminderEmailMinutes": 30}), true); w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), "event_reminder_time") {
 		t.Fatalf("30 minutes: %d %s", w.Code, w.Body.String())
 	}
 	var out struct {
 		Event eventJSON `json:"event"`
 	}
-	w := f.leader.do("PUT", path, map[string]any{"reminderEmailMinutes": 2880}, true)
+	w := f.leader.do("PUT", path, seriesBody(t, f.leader, path, map[string]any{"reminderEmailMinutes": 2880}), true)
 	decodeJSON(t, w, &out)
 	if w.Code != http.StatusOK || out.Event.ReminderEmailMinutes != 2880 {
 		t.Fatalf("2 days: %d %s", w.Code, w.Body.String())

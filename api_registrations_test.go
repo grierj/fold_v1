@@ -516,7 +516,7 @@ func TestCapacityChangePromotesAndNeverRemoves(t *testing.T) {
 	}
 
 	// Raise to 3: the waitlist drains in line order.
-	w := admin.do("PUT", fmt.Sprintf("/api/v1/events/%d", eventID), map[string]any{"capacity": 3}, true)
+	w := admin.do("PUT", fmt.Sprintf("/api/v1/events/%d", eventID), seriesBody(t, admin, fmt.Sprintf("/api/v1/events/%d", eventID), map[string]any{"capacity": 3}), true)
 	if w.Code != http.StatusOK {
 		t.Fatalf("raise: %d %s", w.Code, w.Body.String())
 	}
@@ -527,7 +527,7 @@ func TestCapacityChangePromotesAndNeverRemoves(t *testing.T) {
 	}
 	// Lower to 1: nobody is removed; new going results are blocked.
 	u4, c4 := mk("r4")
-	w = admin.do("PUT", fmt.Sprintf("/api/v1/events/%d", eventID), map[string]any{"capacity": 1}, true)
+	w = admin.do("PUT", fmt.Sprintf("/api/v1/events/%d", eventID), seriesBody(t, admin, fmt.Sprintf("/api/v1/events/%d", eventID), map[string]any{"capacity": 1}), true)
 	if w.Code != http.StatusOK {
 		t.Fatalf("lower: %d %s", w.Code, w.Body.String())
 	}
@@ -1100,10 +1100,10 @@ func TestWaiterSwitchingModeJoinsBackOfNewPool(t *testing.T) {
 func seedChildcareEvent(t *testing.T, app *App, admin *apiClient, gid string, capacity, childcareCapacity *int, waitlist bool) (uint, string) {
 	t.Helper()
 	id, date := seedCappedEvent(t, app, admin, gid, capacity, waitlist)
-	apiDo(t, admin, "PUT", "/api/v1/events/"+itoa(id), map[string]any{
+	apiDo(t, admin, "PUT", "/api/v1/events/"+itoa(id), seriesBody(t, admin, "/api/v1/events/"+itoa(id), map[string]any{
 		"childcareAvailable": true, "childcareCapacity": childcareCapacity,
 		"childcareAges": "Ages 2–5", "childcareNotes": "Check in at the nursery.",
-	}, http.StatusOK)
+	}), http.StatusOK)
 	return id, date
 }
 
@@ -1157,7 +1157,7 @@ func TestChildcareCapacityAndStoredRequests(t *testing.T) {
 	childcareAs(t, parent, id, date, "going", 20, http.StatusConflict)
 	// Zero is always a way to come without childcare.
 	childcareAs(t, parent, id, date, "going", 0, http.StatusOK)
-	apiDo(t, admin, "PUT", "/api/v1/events/"+itoa(id), map[string]any{"childcareAvailable": false}, http.StatusOK)
+	apiDo(t, admin, "PUT", "/api/v1/events/"+itoa(id), seriesBody(t, admin, "/api/v1/events/"+itoa(id), map[string]any{"childcareAvailable": false}), http.StatusOK)
 	w := parent.do("PUT", "/api/v1/events/"+itoa(id)+"/registrations", map[string]any{"date": date, "status": "going", "childcareCount": 1}, true)
 	if w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), "this event doesn't offer childcare") {
 		t.Fatalf("off request: %d %s", w.Code, w.Body.String())
@@ -1195,7 +1195,7 @@ func TestChildcareRegistrationValidationAndManagerAdd(t *testing.T) {
 	if n != 0 {
 		t.Fatal("refused manager add created a row")
 	}
-	apiDo(t, admin, "PUT", "/api/v1/events/"+itoa(id), map[string]any{"childcareAvailable": false}, http.StatusOK)
+	apiDo(t, admin, "PUT", "/api/v1/events/"+itoa(id), seriesBody(t, admin, "/api/v1/events/"+itoa(id), map[string]any{"childcareAvailable": false}), http.StatusOK)
 	apiDo(t, admin, "POST", path+"/add", map[string]any{"date": date, "userId": other.ID, "childcareCount": 1}, http.StatusBadRequest)
 }
 
@@ -1205,7 +1205,7 @@ func TestChildcarePromotionSkipsUntilRequestFits(t *testing.T) {
 	id, date := seedChildcareEvent(t, app, admin, gid, intPtr(2), intPtr(2), true)
 	path := "/api/v1/events/" + itoa(id)
 	// A remote parent fills childcare without using any in-person seats.
-	apiDo(t, admin, "PUT", path, map[string]any{"remoteAvailable": true}, http.StatusOK)
+	apiDo(t, admin, "PUT", path, seriesBody(t, admin, path, map[string]any{"remoteAvailable": true}), http.StatusOK)
 	apiDo(t, admin, "PUT", path+"/registrations", map[string]any{
 		"date": date, "status": "going", "attendanceMode": "remote", "childcareCount": 2,
 	}, http.StatusOK)
@@ -1275,7 +1275,7 @@ func TestChildcareBatchPromotionsShareRemainingPlaces(t *testing.T) {
 			t.Fatal("expected waitlisted")
 		}
 	}
-	apiDo(t, admin, "PUT", "/api/v1/events/"+itoa(id), map[string]any{"capacity": 3}, http.StatusOK)
+	apiDo(t, admin, "PUT", "/api/v1/events/"+itoa(id), seriesBody(t, admin, "/api/v1/events/"+itoa(id), map[string]any{"capacity": 3}), http.StatusOK)
 	var occ models.EventOccurrence
 	if err := app.DB.First(&occ, "event_id = ?", id).Error; err != nil {
 		t.Fatal(err)
@@ -1306,7 +1306,7 @@ func TestChildcareFreedPromotesOnlyWithSeat(t *testing.T) {
 				admin, gid := openGroup(t, app, "FreeChildcare")
 				id, date := seedChildcareEvent(t, app, admin, gid, intPtr(1), intPtr(2), true)
 				path := "/api/v1/events/" + itoa(id)
-				apiDo(t, admin, "PUT", path, map[string]any{"remoteAvailable": true}, http.StatusOK)
+				apiDo(t, admin, "PUT", path, seriesBody(t, admin, path, map[string]any{"remoteAvailable": true}), http.StatusOK)
 				parent := newTestUser(t, app, "parent", "password1234", models.RoleMember)
 				waiter := newTestUser(t, app, "waiter", "password1234", models.RoleMember)
 				pc, wc := loginAPI(t, app, "parent", "password1234"), loginAPI(t, app, "waiter", "password1234")
@@ -1357,11 +1357,11 @@ func TestChildcareFreedPromotesOnlyWithSeat(t *testing.T) {
 					}
 					apiDo(t, anonClient(t, app, "10.4.0.10"), "POST", "/api/v1/guest-registrations/manage/"+raw+"/cancel", nil, http.StatusOK)
 				case "raise limit":
-					apiDo(t, admin, "PUT", path, map[string]any{"childcareCapacity": 4}, http.StatusOK)
+					apiDo(t, admin, "PUT", path, seriesBody(t, admin, path, map[string]any{"childcareCapacity": 4}), http.StatusOK)
 				case "remove limit":
-					apiDo(t, admin, "PUT", path, map[string]any{"childcareCapacity": nil}, http.StatusOK)
+					apiDo(t, admin, "PUT", path, seriesBody(t, admin, path, map[string]any{"childcareCapacity": nil}), http.StatusOK)
 				case "turn off childcare":
-					apiDo(t, admin, "PUT", path, map[string]any{"childcareAvailable": false}, http.StatusOK)
+					apiDo(t, admin, "PUT", path, seriesBody(t, admin, path, map[string]any{"childcareAvailable": false}), http.StatusOK)
 				}
 				var after models.Registration
 				if err := app.DB.First(&after, before.ID).Error; err != nil {
@@ -1385,7 +1385,7 @@ func TestManualChildcarePromotionRequiresRoom(t *testing.T) {
 	admin, gid := openGroup(t, app, "ManualChildcare")
 	id, date := seedChildcareEvent(t, app, admin, gid, intPtr(1), intPtr(2), true)
 	path := "/api/v1/events/" + itoa(id)
-	apiDo(t, admin, "PUT", path, map[string]any{"remoteAvailable": true}, http.StatusOK)
+	apiDo(t, admin, "PUT", path, seriesBody(t, admin, path, map[string]any{"remoteAvailable": true}), http.StatusOK)
 	apiDo(t, admin, "PUT", path+"/registrations", map[string]any{
 		"date": date, "status": "going", "attendanceMode": "remote", "childcareCount": 2,
 	}, http.StatusOK)
@@ -1515,7 +1515,7 @@ func TestHouseholdBatchAnswersAndStableHolder(t *testing.T) {
 	app := testApp(t)
 	admin, gid := openGroup(t, app, "Family")
 	eventID, date := seedChildcareEvent(t, app, admin, gid, intPtr(2), intPtr(1), true)
-	apiDo(t, admin, "PUT", "/api/v1/events/"+itoa(eventID), map[string]any{"remoteAvailable": true, "remoteCapacity": 1}, http.StatusOK)
+	apiDo(t, admin, "PUT", "/api/v1/events/"+itoa(eventID), seriesBody(t, admin, "/api/v1/events/"+itoa(eventID), map[string]any{"remoteAvailable": true, "remoteCapacity": 1}), http.StatusOK)
 	holder, c, spouse, child := householdFamily(t, app, admin, "family")
 	result := batchAnswer(t, c, eventID, date, map[string]any{"status": "going", "attendanceMode": "remote", "people": []map[string]any{{"personId": spouse.ID, "status": "going", "attendanceMode": "in_person"}, {"personId": child.ID, "status": "going", "attendanceMode": "in_person", "childcareRequested": true}}}, http.StatusOK)
 	if result.Registration == nil || len(result.People) != 2 {
@@ -2007,7 +2007,7 @@ func TestHouseholdPromotionDoesNotUseHoldersInvitation(t *testing.T) {
 				t.Fatal("household not waitlisted", answer)
 			}
 			if route == "automatic" {
-				apiDo(t, f.admin, "PUT", "/api/v1/events/"+itoa(f.event.ID), map[string]any{"capacity": 2}, 200)
+				apiDo(t, f.admin, "PUT", "/api/v1/events/"+itoa(f.event.ID), seriesBody(t, f.admin, "/api/v1/events/"+itoa(f.event.ID), map[string]any{"capacity": 2}), 200)
 			} else {
 				// Make room without invoking the automatic promotion owner.
 				if err := f.app.DB.Model(&models.Event{}).Where("id = ?", f.event.ID).Update("capacity", 2).Error; err != nil {
@@ -2094,7 +2094,7 @@ func TestManagerHouseholdModeSwitchPromotesWaitlist(t *testing.T) {
 			app := testApp(t)
 			admin, gid := openGroup(t, app, "ManagerHouseholdModeSwitch")
 			id, date := seedCappedEvent(t, app, admin, gid, intPtr(1), true)
-			apiDo(t, admin, "PUT", "/api/v1/events/"+itoa(id), map[string]any{"remoteAvailable": true, "remoteCapacity": 1}, http.StatusOK)
+			apiDo(t, admin, "PUT", "/api/v1/events/"+itoa(id), seriesBody(t, admin, "/api/v1/events/"+itoa(id), map[string]any{"remoteAvailable": true, "remoteCapacity": 1}), http.StatusOK)
 			holder, hc, spouse, _ := householdFamily(t, app, admin, "modeholder")
 			result := batchAnswer(t, hc, id, date, map[string]any{"people": []map[string]any{{"personId": spouse.ID, "status": "going", "attendanceMode": models.AttendanceInPerson}}}, http.StatusOK)
 			registrationID := result.People[0].RegistrationID
@@ -2152,7 +2152,7 @@ func TestRemoteCapacityNullPromotesWaitlist(t *testing.T) {
 			}
 			eventID, date := seedRemoteEvent(t, app, admin, gid, nil, capacity, true)
 			path, field := fmt.Sprintf("/api/v1/events/%d", eventID), "remoteCapacity"
-			save := func(body map[string]any, status int) { apiDo(t, admin, "PUT", path, body, status) }
+			save := func(body map[string]any, status int) { apiDo(t, admin, "PUT", path, seriesBody(t, admin, path, body), status) }
 			if scope == "date" {
 				field = "remoteCapacityOverride"
 				save = func(body map[string]any, status int) { saveDate(t, admin, eventID, date, body, status, "") }
@@ -2229,7 +2229,7 @@ func TestRemoteCapacityNullDoesNotPromoteDisabledPool(t *testing.T) {
 			eventID, date := seedRemoteEvent(t, app, admin, gid, nil, capacity, true)
 			eventPath := fmt.Sprintf("/api/v1/events/%d", eventID)
 			field := "remoteCapacity"
-			save := func(body map[string]any) { apiDo(t, admin, "PUT", eventPath, body, http.StatusOK) }
+			save := func(body map[string]any) { apiDo(t, admin, "PUT", eventPath, seriesBody(t, admin, eventPath, body), http.StatusOK) }
 			if scope == "date" {
 				field = "remoteCapacityOverride"
 				save = func(body map[string]any) { saveDate(t, admin, eventID, date, body, http.StatusOK, "") }
@@ -2250,7 +2250,7 @@ func TestRemoteCapacityNullDoesNotPromoteDisabledPool(t *testing.T) {
 			if scope == "event" {
 				body["remoteAvailable"] = false
 			} else {
-				apiDo(t, admin, "PUT", eventPath, map[string]any{"remoteAvailable": false}, http.StatusOK)
+				apiDo(t, admin, "PUT", eventPath, seriesBody(t, admin, eventPath, map[string]any{"remoteAvailable": false}), http.StatusOK)
 			}
 			save(body)
 			var occ models.EventOccurrence

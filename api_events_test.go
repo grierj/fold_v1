@@ -185,7 +185,7 @@ func TestRemoteSeatLimitValidation(t *testing.T) {
 	eventID, date := seedRemoteEvent(t, app, admin, gid, nil, intPtr(5), false)
 	path := fmt.Sprintf("/api/v1/events/%d", eventID)
 	for _, bad := range []any{0, -2, 1.5, "1e", 100001} {
-		w := admin.do("PUT", path, map[string]any{"remoteCapacity": bad}, true)
+		w := admin.do("PUT", path, seriesBody(t, admin, path, map[string]any{"remoteCapacity": bad}), true)
 		if w.Code != http.StatusBadRequest {
 			t.Fatalf("update remote limit %v: %d %s", bad, w.Code, w.Body.String())
 		}
@@ -219,14 +219,14 @@ func TestRemoteSeatLimitValidation(t *testing.T) {
 	if occ.RemoteCapacityOverride != nil {
 		t.Fatal("explicit null did not clear remoteCapacityOverride")
 	}
-	apiDo(t, admin, "PUT", path, map[string]any{"remoteCapacity": 1}, http.StatusOK)
-	apiDo(t, admin, "PUT", path, map[string]any{"title": "Same series remote limit"}, http.StatusOK)
+	apiDo(t, admin, "PUT", path, seriesBody(t, admin, path, map[string]any{"remoteCapacity": 1}), http.StatusOK)
+	apiDo(t, admin, "PUT", path, seriesBody(t, admin, path, map[string]any{"title": "Same series remote limit"}), http.StatusOK)
 	ev = models.Event{}
 	app.DB.First(&ev, eventID)
 	if ev.RemoteCapacity == nil || *ev.RemoteCapacity != 1 {
 		t.Fatal("omitted remoteCapacity changed the stored limit")
 	}
-	apiDo(t, admin, "PUT", path, map[string]any{"remoteCapacity": nil}, http.StatusOK)
+	apiDo(t, admin, "PUT", path, seriesBody(t, admin, path, map[string]any{"remoteCapacity": nil}), http.StatusOK)
 	ev = models.Event{}
 	app.DB.First(&ev, eventID)
 	if ev.RemoteCapacity != nil {
@@ -235,7 +235,7 @@ func TestRemoteSeatLimitValidation(t *testing.T) {
 	if raw := unfoldFeed(feedBody(t, newAPIClient(t, app), "/cal/public.ics")); !strings.Contains(raw, "Remote attendance available") {
 		t.Fatalf("cleared remote capacity did not advertise unlimited remote attendance: %s", raw)
 	}
-	apiDo(t, admin, "PUT", path, map[string]any{"remoteAvailable": false}, http.StatusOK)
+	apiDo(t, admin, "PUT", path, seriesBody(t, admin, path, map[string]any{"remoteAvailable": false}), http.StatusOK)
 }
 
 // A weekly 7:00 pm America/Boise event stays at 7:00 pm local on both sides
@@ -353,9 +353,9 @@ func TestSeriesEditKeepsRegistrationsAndOverrides(t *testing.T) {
 	}
 
 	// The series moves to 8:00 pm. Future plain dates follow; overrides do not.
-	w = admin.do("PUT", "/api/v1/events/"+eid, map[string]any{
+	w = admin.do("PUT", "/api/v1/events/"+eid, seriesBody(t, admin, "/api/v1/events/"+eid, map[string]any{
 		"startsLocal": start.Format("2006-01-02") + "T20:00",
-	}, true)
+	}), true)
 	if w.Code != http.StatusOK {
 		t.Fatalf("series edit: %d %s", w.Code, w.Body.String())
 	}
@@ -378,7 +378,7 @@ func TestSeriesEditKeepsRegistrationsAndOverrides(t *testing.T) {
 	}
 
 	// Ending the series on d1 drops d3. d2 and d4 are overrides, so they stay.
-	w = admin.do("PUT", "/api/v1/events/"+eid, map[string]any{"rruleUntil": d1}, true)
+	w = admin.do("PUT", "/api/v1/events/"+eid, seriesBody(t, admin, "/api/v1/events/"+eid, map[string]any{"rruleUntil": d1}), true)
 	if w.Code != http.StatusOK {
 		t.Fatalf("until: %d %s", w.Code, w.Body.String())
 	}
@@ -440,9 +440,9 @@ func TestPastOccurrenceStaysOnSeriesEdit(t *testing.T) {
 		Event eventJSON `json:"event"`
 	}
 	decodeJSON(t, w, &created)
-	w = admin.do("PUT", "/api/v1/events/"+itoa(created.Event.ID), map[string]any{
+	w = admin.do("PUT", "/api/v1/events/"+itoa(created.Event.ID), seriesBody(t, admin, "/api/v1/events/"+itoa(created.Event.ID), map[string]any{
 		"startsLocal": start.Format("2006-01-02") + "T20:00",
-	}, true)
+	}), true)
 	if w.Code != http.StatusOK {
 		t.Fatalf("edit: %d %s", w.Code, w.Body.String())
 	}
@@ -668,7 +668,7 @@ func TestChurchWideHosts(t *testing.T) {
 	if !page.CanManage || !page.CanSetVisibility {
 		t.Fatalf("host permissions: %+v", page)
 	}
-	apiDo(t, host, "PUT", fmt.Sprintf("/api/v1/events/%d", ev.ID), map[string]any{"title": "Christmas Potluck"}, http.StatusOK)
+	apiDo(t, host, "PUT", fmt.Sprintf("/api/v1/events/%d", ev.ID), seriesBody(t, host, fmt.Sprintf("/api/v1/events/%d", ev.ID), map[string]any{"title": "Christmas Potluck"}), http.StatusOK)
 	apiDo(t, host, "PUT", fmt.Sprintf("/api/v1/events/%d/visibility", ev.ID), map[string]any{
 		"visibility": "private", "source": "custom",
 	}, http.StatusOK)
@@ -681,11 +681,11 @@ func TestChurchWideHosts(t *testing.T) {
 	// A host of this event cannot manage another event or a group they can't see.
 	pub := createGroupAs(t, admin, "Public Choir", models.VisibilityPublic)
 	other := scheduleGroupEvent(t, admin, pub, "Rehearsal")
-	apiDo(t, host, "PUT", fmt.Sprintf("/api/v1/events/%d", other.ID), map[string]any{"title": "Taken"}, http.StatusForbidden)
+	apiDo(t, host, "PUT", fmt.Sprintf("/api/v1/events/%d", other.ID), seriesBody(t, host, fmt.Sprintf("/api/v1/events/%d", other.ID), map[string]any{"title": "Taken"}), http.StatusForbidden)
 	hidden := createGroupAs(t, admin, "Hidden Care", models.VisibilityInviteOnly)
 	secret := scheduleGroupEvent(t, admin, hidden, "Secret")
 	apiDo(t, host, "GET", fmt.Sprintf("/api/v1/events/%d", secret.ID), nil, http.StatusNotFound)
-	apiDo(t, host, "PUT", fmt.Sprintf("/api/v1/events/%d", secret.ID), map[string]any{"title": "Taken"}, http.StatusNotFound)
+	apiDo(t, host, "PUT", fmt.Sprintf("/api/v1/events/%d", secret.ID), seriesBody(t, host, fmt.Sprintf("/api/v1/events/%d", secret.ID), map[string]any{"title": "Taken"}), http.StatusNotFound)
 
 	// Switch back so a signed-in non-host can see registrants' names.
 	apiDo(t, host, "PUT", fmt.Sprintf("/api/v1/events/%d/visibility", ev.ID), map[string]any{
@@ -735,9 +735,9 @@ func TestEventDescription(t *testing.T) {
 		t.Fatalf("page: %+v occ %+v", page.Event.Description, page.Occurrences[0].Description)
 	}
 
-	apiDo(t, admin, "PUT", fmt.Sprintf("/api/v1/events/%d", created.Event.ID), map[string]any{
+	apiDo(t, admin, "PUT", fmt.Sprintf("/api/v1/events/%d", created.Event.ID), seriesBody(t, admin, fmt.Sprintf("/api/v1/events/%d", created.Event.ID), map[string]any{
 		"description": "Dessert too.",
-	}, http.StatusOK)
+	}), http.StatusOK)
 	page, _ = getEvent(t, admin, created.Event.ID, http.StatusOK)
 	if page.Event.Description != "Dessert too." || page.Event.Title != "Potluck" {
 		t.Fatalf("update: %+v", page.Event)
@@ -925,7 +925,7 @@ func TestChildcareEventValidationAndNullCapacity(t *testing.T) {
 		{"childcareCapacity": 0}, {"childcareCapacity": -1}, {"childcareCapacity": 1.5}, {"childcareCapacity": "3"}, {"childcareCapacity": 100001},
 		{"childcareNotes": strings.Repeat("x", 501)}, {"childcareAges": strings.Repeat("x", 101)},
 	} {
-		apiDo(t, admin, "PUT", path, fields, http.StatusBadRequest)
+		apiDo(t, admin, "PUT", path, seriesBody(t, admin, path, fields), http.StatusBadRequest)
 		fields["startsLocal"], fields["durationMinutes"], fields["tzid"] = videoEventStart().Format("2006-01-02T15:04"), 60, "UTC"
 		apiDo(t, admin, "POST", "/api/v1/groups/"+gid+"/events", fields, http.StatusBadRequest)
 		fields["title"] = "Church childcare"
@@ -936,11 +936,11 @@ func TestChildcareEventValidationAndNullCapacity(t *testing.T) {
 		t.Fatal("bad update changed capacity")
 	}
 	// An unrelated edit preserves the limit. Explicit null clears it.
-	apiDo(t, admin, "PUT", path, map[string]any{"title": "With childcare"}, http.StatusOK)
+	apiDo(t, admin, "PUT", path, seriesBody(t, admin, path, map[string]any{"title": "With childcare"}), http.StatusOK)
 	if ev = eventRow(t, app, id); ev.ChildcareCapacity == nil || *ev.ChildcareCapacity != 5 {
 		t.Fatal("omitted limit cleared it")
 	}
-	apiDo(t, admin, "PUT", path, map[string]any{"childcareCapacity": nil}, http.StatusOK)
+	apiDo(t, admin, "PUT", path, seriesBody(t, admin, path, map[string]any{"childcareCapacity": nil}), http.StatusOK)
 	if ev = eventRow(t, app, id); ev.ChildcareCapacity != nil {
 		t.Fatal("null did not clear limit")
 	}
@@ -1150,7 +1150,7 @@ func TestOccurrenceCountErrorsKeepDates(t *testing.T) {
 	app := testApp(t)
 	admin, gid := openGroup(t, app, "CountFallbacks")
 	id, date := seedChildcareEvent(t, app, admin, gid, nil, intPtr(2), false)
-	apiDo(t, admin, "PUT", "/api/v1/events/"+itoa(id), map[string]any{"remoteAvailable": true, "remoteCapacity": 3}, http.StatusOK)
+	apiDo(t, admin, "PUT", "/api/v1/events/"+itoa(id), seriesBody(t, admin, "/api/v1/events/"+itoa(id), map[string]any{"remoteAvailable": true, "remoteCapacity": 3}), http.StatusOK)
 	apiDo(t, admin, "PUT", "/api/v1/events/"+itoa(id)+"/registrations", map[string]any{
 		"date": date, "status": "going", "attendanceMode": "remote", "childcareCount": 2,
 	}, http.StatusOK)
@@ -1420,7 +1420,7 @@ func TestRepeatRuleLimitsAreRefused(t *testing.T) {
 		Event eventJSON `json:"event"`
 	}
 	decodeJSON(t, create(weeklyRule(start)), &created)
-	apiDo(t, admin, "PUT", fmt.Sprintf("/api/v1/events/%d", created.Event.ID), map[string]any{"recurrenceRule": "FREQ=SECONDLY"}, http.StatusBadRequest)
+	apiDo(t, admin, "PUT", fmt.Sprintf("/api/v1/events/%d", created.Event.ID), seriesBody(t, admin, fmt.Sprintf("/api/v1/events/%d", created.Event.ID), map[string]any{"recurrenceRule": "FREQ=SECONDLY"}), http.StatusBadRequest)
 }
 
 // Creating, deleting and changing the hosts of an event leave audit rows.
@@ -1508,12 +1508,12 @@ func TestExtendContinuesPastABadEvent(t *testing.T) {
 // video link stays hidden from someone who is not going.
 func TestHiddenSeriesListHidesDescriptionChildcareAndVideo(t *testing.T) {
 	app, admin, _, ev, dates := dateVisibilityFixture(t, models.VisibilityInviteOnly)
-	apiDo(t, admin, "PUT", fmt.Sprintf("/api/v1/events/%d", ev.ID), map[string]any{
+	apiDo(t, admin, "PUT", fmt.Sprintf("/api/v1/events/%d", ev.ID), seriesBody(t, admin, fmt.Sprintf("/api/v1/events/%d", ev.ID), map[string]any{
 		"description":        "SECRET-DESCRIPTION",
 		"childcareAvailable": true, "childcareNotes": "SECRET-CHILDCARE-NOTE", "childcareAges": "SECRET-AGES",
 		"childcareCapacity": 7,
 		"videoProvider":     "link", "videoUrl": "https://example.com/SECRET-VIDEO", "videoReveal": "registered_only",
-	}, http.StatusOK)
+	}), http.StatusOK)
 	saveDate(t, admin, ev.ID, models.FormatCalendarDate(dates[0].OriginalDate), map[string]any{"visibility": "public"}, http.StatusOK, "", "reason", "Open")
 
 	listed, err := app.occurrencesForEventsErr([]uint{ev.ID}, models.FormatCalendarDate(dates[0].OriginalDate), models.FormatCalendarDate(dates[3].OriginalDate), nil, nil)
@@ -1725,7 +1725,7 @@ func TestSeriesEditRestoresSeriesCancelledDates(t *testing.T) {
 	}
 
 	// Ending the series on d1 drops d2 and d3; d4 stays a manual cancellation.
-	if w := admin.do("PUT", "/api/v1/events/"+eid, map[string]any{"rruleUntil": d1}, true); w.Code != http.StatusOK {
+	if w := admin.do("PUT", "/api/v1/events/"+eid, seriesBody(t, admin, "/api/v1/events/"+eid, map[string]any{"rruleUntil": d1}), true); w.Code != http.StatusOK {
 		t.Fatalf("until: %d %s", w.Code, w.Body.String())
 	}
 	for _, d := range []string{d2, d3} {
@@ -1753,7 +1753,7 @@ func TestSeriesEditRestoresSeriesCancelledDates(t *testing.T) {
 	}
 
 	// Clearing the end date brings d2 and d3 back, not d4.
-	if w := admin.do("PUT", "/api/v1/events/"+eid, map[string]any{"rruleUntil": ""}, true); w.Code != http.StatusOK {
+	if w := admin.do("PUT", "/api/v1/events/"+eid, seriesBody(t, admin, "/api/v1/events/"+eid, map[string]any{"rruleUntil": ""}), true); w.Code != http.StatusOK {
 		t.Fatalf("clear until: %d %s", w.Code, w.Body.String())
 	}
 	for _, d := range []string{d2, d3} {
@@ -1826,7 +1826,7 @@ func TestSeriesEditRestoresSeriesCancelledDates(t *testing.T) {
 	}
 
 	// Cancelling again after a restore tells people again.
-	if w := admin.do("PUT", "/api/v1/events/"+eid, map[string]any{"rruleUntil": d1}, true); w.Code != http.StatusOK {
+	if w := admin.do("PUT", "/api/v1/events/"+eid, seriesBody(t, admin, "/api/v1/events/"+eid, map[string]any{"rruleUntil": d1}), true); w.Code != http.StatusOK {
 		t.Fatalf("until again: %d %s", w.Code, w.Body.String())
 	}
 	if got := count(sam, "Cancelled: Prayer"); got != 5 {
@@ -1867,9 +1867,9 @@ func TestImpossibleDatesKeepTheirAnswers(t *testing.T) {
 	if snapshot() != before {
 		t.Fatal("rejected year-zero creation changed events or occurrences")
 	}
-	apiDo(t, admin, "PUT", fmt.Sprintf("/api/v1/events/%d", eventID), map[string]any{
+	apiDo(t, admin, "PUT", fmt.Sprintf("/api/v1/events/%d", eventID), seriesBody(t, admin, fmt.Sprintf("/api/v1/events/%d", eventID), map[string]any{
 		"title": "Never updated", "startsLocal": "0000-01-01T09:00", "recurrenceRule": "", "rruleUntil": "",
-	}, http.StatusBadRequest)
+	}), http.StatusBadRequest)
 	if snapshot() != before {
 		t.Fatal("rejected year-zero update changed events or occurrences")
 	}
@@ -1928,7 +1928,7 @@ func TestEventStoresLeapUntilAndPaddedHour(t *testing.T) {
 		t.Fatalf("stored event: %+v", stored)
 	}
 	// Clearing the end date stores NULL, not an empty or zero date.
-	apiDo(t, admin, "PUT", fmt.Sprintf("/api/v1/events/%d", created.Event.ID), map[string]any{"rruleUntil": ""}, http.StatusOK)
+	apiDo(t, admin, "PUT", fmt.Sprintf("/api/v1/events/%d", created.Event.ID), seriesBody(t, admin, fmt.Sprintf("/api/v1/events/%d", created.Event.ID), map[string]any{"rruleUntil": ""}), http.StatusOK)
 	var cleared models.Event
 	if err := app.DB.First(&cleared, created.Event.ID).Error; err != nil {
 		t.Fatal(err)
@@ -2098,7 +2098,7 @@ func TestSeriesRestoreTellsAnEndedGrantOnlyThatItIsBack(t *testing.T) {
 	gormMust(t, f.app.DB.Create(&models.Registration{UserID: &member.ID, OccurrenceID: target.ID, Status: models.RegGoing, AttendanceMode: models.AttendanceInPerson, Source: "web"}))
 	eid := itoa(f.event.ID)
 
-	apiDo(t, f.admin, "PUT", "/api/v1/events/"+eid, map[string]any{"recurrenceRule": "FREQ=WEEKLY;COUNT=1"}, http.StatusOK)
+	apiDo(t, f.admin, "PUT", "/api/v1/events/"+eid, seriesBody(t, f.admin, "/api/v1/events/"+eid, map[string]any{"recurrenceRule": "FREQ=WEEKLY;COUNT=1"}), http.StatusOK)
 	if o := occurrenceRow(t, f.app, target.ID); o.Status != models.OccurrenceCancelled || o.CancelSource != models.CancelSourceSeries {
 		t.Fatalf("fixture: the date was not dropped: %+v", o)
 	}
@@ -2110,8 +2110,8 @@ func TestSeriesRestoreTellsAnEndedGrantOnlyThatItIsBack(t *testing.T) {
 	}
 	mark := markNotices(t, f.app)
 
-	apiDo(t, f.admin, "PUT", "/api/v1/events/"+eid, map[string]any{"recurrenceRule": "FREQ=WEEKLY;COUNT=3",
-		"title": "NEWSECRETTITLE", "location": "NEWSECRETPLACE"}, http.StatusOK)
+	apiDo(t, f.admin, "PUT", "/api/v1/events/"+eid, seriesBody(t, f.admin, "/api/v1/events/"+eid, map[string]any{"recurrenceRule": "FREQ=WEEKLY;COUNT=3",
+		"title": "NEWSECRETTITLE", "location": "NEWSECRETPLACE"}), http.StatusOK)
 	if o := occurrenceRow(t, f.app, target.ID); o.Status != models.OccurrenceScheduled {
 		t.Fatalf("the date did not come back: %+v", o)
 	}
@@ -2901,7 +2901,7 @@ func TestDateEditUsesZoneAfterHeldBody(t *testing.T) {
 			changes := map[string]any{"startsLocal": " " + wall + " ", "durationMinutes": 90}
 			base := editBaseOf(t, f.actor, f.event.ID, f.date)
 			held := f.actor.doHeld("POST", dateEditPath(f.event.ID, f.date), dateEditBody(newDateAttempt(t), base.Revision, changes))
-			apiDo(t, f.admin, "PUT", eventPath, map[string]any{"tzid": tc.zone}, http.StatusOK)
+			apiDo(t, f.admin, "PUT", eventPath, seriesBody(t, f.admin, eventPath, map[string]any{"tzid": tc.zone}), http.StatusOK)
 			var before models.EventOccurrence
 			if err := f.app.DB.Where("event_id = ? AND original_date = ?", f.event.ID, f.date).First(&before).Error; err != nil {
 				t.Fatal(err)
@@ -2954,7 +2954,7 @@ func TestDateEditInvalidStartAfterHeldBodyWritesNothing(t *testing.T) {
 	}
 	base := editBaseOf(t, f.actor, f.event.ID, f.date)
 	held := f.actor.doHeld("POST", dateEditPath(f.event.ID, f.date), dateEditBody(newDateAttempt(t), base.Revision, changes))
-	apiDo(t, f.admin, "PUT", eventPath, map[string]any{"tzid": "Asia/Tokyo"}, http.StatusOK)
+	apiDo(t, f.admin, "PUT", eventPath, seriesBody(t, f.admin, eventPath, map[string]any{"tzid": "Asia/Tokyo"}), http.StatusOK)
 	before := eventWriterState(t, f.app, f.event.ID)
 	held.release()
 	if w := held.wait(t); w.Code != http.StatusConflict || answerCode(t, w) != "date_changed" {
@@ -3087,6 +3087,8 @@ func TestEventWritersKeepEventFirstLockOrder(t *testing.T) {
 			}
 			method, path, body := "PUT", "/api/v1/events/"+itoa(f.event.ID), map[string]any{"title": "Changed title"}
 			switch writer {
+			case "series":
+				body = seriesBody(t, f.actor, path, body)
 			case "visibility":
 				path, body = path+"/visibility", map[string]any{"visibility": models.VisibilityPrivate}
 			case "delete":
@@ -3144,7 +3146,7 @@ func TestSeriesEditRecordsEvidenceForEveryUpcomingDate(t *testing.T) {
 
 	edit := func(body map[string]any) {
 		t.Helper()
-		apiDo(t, client, "PUT", "/api/v1/events/"+eid, body, http.StatusOK)
+		apiDo(t, client, "PUT", "/api/v1/events/"+eid, seriesBody(t, client, "/api/v1/events/"+eid, body), http.StatusOK)
 	}
 	wantEvidence := func(i int, hhmm, written string) {
 		t.Helper()
@@ -3267,7 +3269,7 @@ func TestSeriesZoneChangeKeepsAPastDatesComparison(t *testing.T) {
 	ev := created.Event
 	dates := seriesClockTestDates(t, app.DB, ev.ID)
 	past, upcoming := dates[0], dates[4]
-	apiDo(t, client, "PUT", "/api/v1/events/"+itoa(ev.ID), map[string]any{"tzid": "UTC"}, http.StatusOK)
+	apiDo(t, client, "PUT", "/api/v1/events/"+itoa(ev.ID), seriesBody(t, client, "/api/v1/events/"+itoa(ev.ID), map[string]any{"tzid": "UTC"}), http.StatusOK)
 	r := readSeriesDate(t, client, ev.ID, tombstoneDate(past))
 	if r.StartsLocal[:10] == tombstoneDate(past) {
 		t.Fatalf("fixture: the past date still shows on its own day in UTC: %s", r.StartsLocal)
@@ -3438,7 +3440,7 @@ func TestSeriesEditRefusesMovingAKeptDateLater(t *testing.T) {
 	path := "/api/v1/events/" + itoa(ev.ID)
 	later := map[string]any{"startsLocal": wallAt(dates[0].StartsAt.Add(time.Hour))}
 	state, clocks := eventWriterState(t, app, ev.ID), seriesClockState(t, app, ev.ID)
-	wantKeptDates(t, admin.do("PUT", path, later, true), keptDateCountJSON{Date: date, KeptCount: 1})
+	wantKeptDates(t, admin.do("PUT", path, seriesBody(t, admin, path, later), true), keptDateCountJSON{Date: date, KeptCount: 1})
 	if after := eventWriterState(t, app, ev.ID); after != state {
 		t.Fatalf("the refused series edit wrote:\n%s\n%s", state, after)
 	}
@@ -3450,7 +3452,7 @@ func TestSeriesEditRefusesMovingAKeptDateLater(t *testing.T) {
 		t.Fatalf("the refused series edit changed the clock evidence:\n%s\n%s", clocks, after)
 	}
 
-	apiDo(t, admin, "PUT", path, map[string]any{"startsLocal": wallAt(dates[0].StartsAt.Add(-time.Hour))}, http.StatusOK)
+	apiDo(t, admin, "PUT", path, seriesBody(t, admin, path, map[string]any{"startsLocal": wallAt(dates[0].StartsAt.Add(-time.Hour))}), http.StatusOK)
 	if o := occurrenceRow(t, app, kept.ID); !o.StartsAt.Equal(kept.StartsAt.Add(-time.Hour)) {
 		t.Fatalf("the earlier series edit did not move the kept date: %+v", o)
 	}
@@ -3460,8 +3462,244 @@ func TestSeriesEditRefusesMovingAKeptDateLater(t *testing.T) {
 
 	apiDo(t, admin, "POST", path+"/registrations/remove", map[string]any{"date": date, "registrationId": reg.ID}, http.StatusOK)
 	wantManagedKept(t, leader, ev.ID, date, 0)
-	apiDo(t, admin, "PUT", path, later, http.StatusOK)
+	apiDo(t, admin, "PUT", path, seriesBody(t, admin, path, later), http.StatusOK)
 	if o := occurrenceRow(t, app, kept.ID); !o.StartsAt.Equal(kept.StartsAt.Add(time.Hour)) {
 		t.Fatalf("the series edit after Remove did not move the date: %+v", o)
+	}
+}
+
+// seriesRevisionOf is the revision c's event page read carries, "" when it
+// carries none.
+func seriesRevisionOf(t *testing.T, c *apiClient, eventID uint) string {
+	t.Helper()
+	w := c.do("GET", "/api/v1/events/"+itoa(eventID), nil, false)
+	if w.Code != http.StatusOK {
+		t.Fatalf("event page: %d %s", w.Code, w.Body.String())
+	}
+	var page struct {
+		Event map[string]any `json:"event"`
+	}
+	decodeJSON(t, w, &page)
+	rev, _ := page.Event["revision"].(string)
+	return rev
+}
+
+// DEC-162: a series save names the read it was made from, and one made from
+// any other read is refused with nothing written.
+func TestSeriesSaveNamesTheReadItWasMadeFrom(t *testing.T) {
+	f := newBookingFixture(t)
+	series := createFeedEvent(t, f.leader, f.group, "Weekly supper", feedStart(3), "FREQ=WEEKLY;COUNT=4")
+	path := "/api/v1/events/" + itoa(series.ID)
+	member := newTestUser(t, f.app, "series member", "password1234", models.RoleMember)
+	gormMust(t, f.app.DB.Create(&models.Membership{UserID: member.ID, GroupID: f.group, Role: models.MembershipMember, Status: models.MembershipActive}))
+	memberC := loginAPI(t, f.app, member.Name, "password1234")
+
+	if rev := seriesRevisionOf(t, memberC, series.ID); rev != "" {
+		t.Fatalf("a member's read carries a revision: %q", rev)
+	}
+	opened := seriesRevisionOf(t, f.leader, series.ID)
+	if opened == "" || opened != seriesRevisionOf(t, f.admin, series.ID) {
+		t.Fatalf("managers' revisions: %q and %q", opened, seriesRevisionOf(t, f.admin, series.ID))
+	}
+
+	// A save from the current read saves, and its answer carries the new
+	// revision, the one the next read carries.
+	var saved eventSeriesResponseJSON
+	w := f.leader.do("PUT", path, map[string]any{"title": "Thursday supper", "revision": opened}, true)
+	if w.Code != http.StatusOK {
+		t.Fatalf("current save: %d %s", w.Code, w.Body.String())
+	}
+	decodeJSON(t, w, &saved)
+	current := seriesRevisionOf(t, f.leader, series.ID)
+	if saved.Event.Revision == opened || saved.Event.Revision != current {
+		t.Fatalf("revisions: opened %q, answer %q, next read %q", opened, saved.Event.Revision, current)
+	}
+
+	other := seriesRevisionOf(t, f.leader, f.eventA.ID)
+	gen := strings.Split(current, ".")
+	gen[1] = strings.Repeat("0", 16)
+	for name, body := range map[string]map[string]any{
+		"older read":       {"title": "Stale supper", "revision": opened},
+		"missing":          {"title": "Stale supper"},
+		"empty":            {"title": "Stale supper", "revision": ""},
+		"malformed":        {"title": "Stale supper", "revision": "not a token"},
+		"another event":    {"title": "Stale supper", "revision": other},
+		"other generation": {"title": "Stale supper", "revision": strings.Join(gen, ".")},
+		"a number":         {"title": "Stale supper", "revision": 7},
+	} {
+		t.Run(name, func(t *testing.T) {
+			before := eventWriterState(t, f.app, series.ID)
+			w := f.leader.do("PUT", path, body, true)
+			if name == "a number" {
+				if w.Code != http.StatusBadRequest {
+					t.Fatalf("a revision that is not a string: %d %s", w.Code, w.Body.String())
+				}
+			} else {
+				wantCode(t, "refused save", w, http.StatusConflict, "event_changed")
+			}
+			if after := eventWriterState(t, f.app, series.ID); after != before {
+				t.Fatalf("the refused save wrote:\n%s\n%s", before, after)
+			}
+		})
+	}
+
+	// A save that changes nothing leaves the revision (the trigger counts
+	// only a changed tracked column), so the same read can still save.
+	apiDo(t, f.leader, "PUT", path, map[string]any{"title": "Thursday supper", "revision": current}, http.StatusOK)
+	if got := seriesRevisionOf(t, f.leader, series.ID); got != current {
+		t.Fatalf("a save that changed nothing moved the revision: %q to %q", current, got)
+	}
+	apiDo(t, f.leader, "PUT", path, map[string]any{"title": "Friday supper", "revision": current}, http.StatusOK)
+
+	// A non-manager is refused as before, whatever revision it sends.
+	apiDo(t, memberC, "PUT", path, map[string]any{"title": "Taken", "revision": seriesRevisionOf(t, f.leader, series.ID)}, http.StatusForbidden)
+}
+
+// The event's other writers raise the revision too, so a series editor open
+// across a visibility save or a series room change must read the event again;
+// the daily extender and the clock repair do not.
+func TestSeriesRevisionFollowsTheEventsOtherWriters(t *testing.T) {
+	f := newBookingFixture(t)
+	series := createFeedEvent(t, f.leader, f.group, "Weekly choir", feedStart(3), "FREQ=WEEKLY;COUNT=4")
+	path := "/api/v1/events/" + itoa(series.ID)
+	stale := func(t *testing.T, opened string) {
+		t.Helper()
+		if now := seriesRevisionOf(t, f.leader, series.ID); now == opened {
+			t.Fatalf("the revision did not move: %q", now)
+		}
+		wantCode(t, "save from before the change", f.leader.do("PUT", path, map[string]any{"title": "Late", "revision": opened}, true), http.StatusConflict, "event_changed")
+	}
+
+	t.Run("visibility", func(t *testing.T) {
+		opened := seriesRevisionOf(t, f.leader, series.ID)
+		apiDo(t, f.leader, "PUT", path+"/visibility", map[string]any{"visibility": models.VisibilityInviteOnly}, http.StatusOK)
+		stale(t, opened)
+	})
+	t.Run("series room", func(t *testing.T) {
+		opened := seriesRevisionOf(t, f.leader, series.ID)
+		if code, _ := f.seriesRoom(t, f.leader, series, map[string]any{"roomId": f.hall.ID}); code != http.StatusOK {
+			t.Fatalf("series room: %d", code)
+		}
+		stale(t, opened)
+	})
+	t.Run("extender and clock repair", func(t *testing.T) {
+		opened := seriesRevisionOf(t, f.leader, series.ID)
+		var last models.EventOccurrence
+		gormMust(t, f.app.DB.Where("event_id = ?", series.ID).Order("original_date DESC").First(&last))
+		gormMust(t, f.app.DB.Delete(&last))
+		gormMust(t, f.app.DB.Model(&models.Event{}).Where("id = ?", series.ID).UpdateColumn("series_clock_dirty", true))
+		if err := eventdates.Extend(f.app.DB, time.Now().UTC(), f.app.afterExtend()); err != nil {
+			t.Fatal(err)
+		}
+		if err := eventdates.RepairClocks(f.app.DB, time.Now().UTC()); err != nil {
+			t.Fatal(err)
+		}
+		if err := eventdates.ClearDirty(f.app.DB, series.ID); err != nil {
+			t.Fatal(err)
+		}
+		if n := contactCount(t, f.app, &models.EventOccurrence{}, "event_id = ? AND original_date = ?", series.ID, last.OriginalDate); n != 1 {
+			t.Fatalf("fixture: the extender did not add the date back (%d)", n)
+		}
+		if now := seriesRevisionOf(t, f.leader, series.ID); now != opened {
+			t.Fatalf("background work moved the revision: %q to %q", opened, now)
+		}
+		apiDo(t, f.leader, "PUT", path, map[string]any{"title": "Weekly choir practice", "revision": opened}, http.StatusOK)
+	})
+}
+
+// Two saves from the same read: exactly one is stored, the other is refused.
+func TestConcurrentSeriesSavesFromOneReadExactlyOneWins(t *testing.T) {
+	f := newBookingFixture(t)
+	series := createFeedEvent(t, f.leader, f.group, "Weekly study", feedStart(3), "FREQ=WEEKLY;COUNT=4")
+	path := "/api/v1/events/" + itoa(series.ID)
+	opened := seriesRevisionOf(t, f.leader, series.ID)
+	type answer struct {
+		code  int
+		body  string
+		title string
+	}
+	answers := make(chan answer, 2)
+	start := make(chan struct{})
+	for _, save := range []struct {
+		c     *apiClient
+		title string
+	}{{f.leader, "Leader's title"}, {f.admin, "Admin's title"}} {
+		go func() {
+			<-start
+			w := save.c.do("PUT", path, map[string]any{"title": save.title, "revision": opened}, true)
+			answers <- answer{w.Code, w.Body.String(), save.title}
+		}()
+	}
+	close(start)
+	var won []string
+	for range 2 {
+		a := <-answers
+		switch {
+		case a.code == http.StatusOK:
+			won = append(won, a.title)
+		case a.code != http.StatusConflict || !strings.Contains(a.body, `"event_changed"`):
+			t.Fatalf("a save answered %d %s", a.code, a.body)
+		}
+	}
+	var ev models.Event
+	gormMust(t, f.app.DB.First(&ev, series.ID))
+	if len(won) != 1 || ev.Title != won[0] {
+		t.Fatalf("stored %q; saves that won: %v", ev.Title, won)
+	}
+}
+
+// #445: capacity null clears the series seat limit, and the waitlist moves up
+// as when the limit is raised; guestsAllowed null clears to 0.
+func TestSeriesNullCapacityClearsTheLimit(t *testing.T) {
+	app := testApp(t)
+	admin, gid := openGroup(t, app, "Unlimited")
+	eventID, date := seedCappedEvent(t, app, admin, gid, intPtr(1), true)
+	path := fmt.Sprintf("/api/v1/events/%d", eventID)
+	var g models.Group
+	gormMust(t, app.DB.First(&g, "id = ?", gid))
+	var waiter *models.User
+	for _, name := range []string{"first", "second"} {
+		u := newTestUser(t, app, name, "password1234", models.RoleMember)
+		addMember(t, app, u, &g, models.MembershipMember)
+		if code, body := registerAs(loginAPI(t, app, name, "password1234"), eventID, date, "going", nil); code != http.StatusOK {
+			t.Fatalf("register: %d %s", code, body)
+		}
+		waiter = u
+	}
+	var occ models.EventOccurrence
+	gormMust(t, app.DB.Where("event_id = ?", eventID).First(&occ))
+	if got := regStatus(t, app, waiter.ID, occ.ID); got != models.RegWaitlisted {
+		t.Fatalf("fixture: %q, want waitlisted", got)
+	}
+
+	var saved eventSeriesResponseJSON
+	decodeJSON(t, admin.do("PUT", path, seriesBody(t, admin, path, map[string]any{"capacity": nil, "guestsAllowed": nil}), true), &saved)
+	var ev models.Event
+	gormMust(t, app.DB.First(&ev, eventID))
+	if ev.Capacity != nil || saved.Event.Capacity != nil || ev.GuestsAllowed != 0 || saved.Event.GuestsAllowed != 0 {
+		t.Fatalf("stored capacity %v guests %d; answered capacity %v guests %d", ev.Capacity, ev.GuestsAllowed, saved.Event.Capacity, saved.Event.GuestsAllowed)
+	}
+	if got := regStatus(t, app, waiter.ID, occ.ID); got != models.RegGoing {
+		t.Fatalf("after clearing the limit: %q, want going", got)
+	}
+
+	// Absent leaves the stored values alone.
+	apiDo(t, admin, "PUT", path, seriesBody(t, admin, path, map[string]any{"capacity": 4, "guestsAllowed": 2}), http.StatusOK)
+	apiDo(t, admin, "PUT", path, seriesBody(t, admin, path, map[string]any{"title": "Still capped"}), http.StatusOK)
+	gormMust(t, app.DB.First(&ev, eventID))
+	if ev.Capacity == nil || *ev.Capacity != 4 || ev.GuestsAllowed != 2 {
+		t.Fatalf("an edit without capacity changed it: %v, guests %d", ev.Capacity, ev.GuestsAllowed)
+	}
+
+	// On create, null and absent both mean no limit.
+	var created struct {
+		Event eventJSON `json:"event"`
+	}
+	start := time.Now().UTC().AddDate(0, 0, 40).Format("2006-01-02") + "T18:00"
+	decodeJSON(t, admin.do("POST", "/api/v1/groups/"+gid+"/events", map[string]any{
+		"title": "Open night", "startsLocal": start, "durationMinutes": 60, "tzid": "UTC", "capacity": nil, "guestsAllowed": nil,
+	}, true), &created)
+	if created.Event.Capacity != nil || created.Event.GuestsAllowed != 0 {
+		t.Fatalf("created with null: capacity %v guests %d", created.Event.Capacity, created.Event.GuestsAllowed)
 	}
 }

@@ -74,8 +74,8 @@ function EventDetailContent() {
   const visibilityAction = useAction();
   const panelBusy = seriesAction.running || visibilityAction.running;
   const editButton = useRef<HTMLButtonElement>(null);
-  // A save in the panel reads the page again from nothing: focus still in the panel waits on the main region, and
-  // focus the reload dropped goes back to Edit series, the panel's opener, once the page is shown.
+  // A save in the panel reads the page again (a series save from nothing): focus still in the panel waits on the main
+  // region, and goes back to Edit series, the panel's opener, once the new read is shown.
   const returnToEdit = useRef(false);
   // Close took the focused control with the panel: focus goes back to Edit series, never the page body.
   const closedPanel = useRef(false);
@@ -284,6 +284,7 @@ function EventDetailContent() {
               closedPanel.current = true;
               setEditing(false);
             }}
+            onStale={() => void load.reload()}
             action={seriesAction}
             locked={visibilityAction.running}
           />
@@ -298,7 +299,8 @@ function EventDetailContent() {
               leaderOpened={event.leaderOpened}
               onSaved={() => {
                 parkFocus();
-                void load.retry();
+                // Kept on screen: the series editor beside it keeps what was typed and takes the new revision.
+                void load.reload();
               }}
               action={visibilityAction}
               locked={seriesAction.running}

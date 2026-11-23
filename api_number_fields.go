@@ -42,24 +42,10 @@ func (f numberField) parse(raw json.RawMessage, present bool) (n *int, set, ok b
 	return &v, true, true
 }
 
-// parseCapacity: null clears the capacity to unlimited, a positive whole number
-// sets it (DEC-39). raw is nil when the field is absent.
-func parseCapacity(raw *json.RawMessage) (cap *int, set bool, err error) {
-	if raw == nil {
-		return nil, false, nil
-	}
-	n, set, ok := seatLimitField.parse(*raw, true)
-	if !ok {
-		return nil, false, errInvalidCapacity
-	}
-	return n, set, nil
-}
-
-// parseDateCapacity is one date's in-person cap override: null clears it to the
-// event's capacity, a positive whole number sets it. raw is empty when absent.
-// The event's own parseCapacity is separate on purpose: its body binds a
-// pointer, and a null there has always read as absent.
-func parseDateCapacity(raw json.RawMessage) (cap *int, set bool, err error) {
+// parseCapacity: null clears the capacity, a positive whole number sets it
+// (DEC-39). For an event null means no limit; for one date's override it means
+// the event's own capacity. raw is empty when the field is absent.
+func parseCapacity(raw json.RawMessage) (cap *int, set bool, err error) {
 	n, set, ok := seatLimitField.parse(raw, len(raw) != 0)
 	if !ok {
 		return nil, false, errInvalidCapacity
@@ -84,12 +70,9 @@ func parseRemoteCapacity(raw json.RawMessage, allowZero bool) (cap *int, set boo
 }
 
 // parseGuestsAllowed: null clears it to 0 (no extra guests), a whole number up
-// to the maximum sets the per-registration guest cap. raw is nil when absent.
-func parseGuestsAllowed(raw *json.RawMessage) (n int, set bool, err error) {
-	if raw == nil {
-		return 0, false, nil
-	}
-	v, set, ok := guestsField.parse(*raw, true)
+// to the maximum sets the per-registration guest cap. raw is empty when absent.
+func parseGuestsAllowed(raw json.RawMessage) (n int, set bool, err error) {
+	v, set, ok := guestsField.parse(raw, len(raw) != 0)
 	if !ok {
 		return 0, false, errInvalidGuests
 	}

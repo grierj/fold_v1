@@ -436,7 +436,7 @@ func TestTighteningCancelsWaitlistedGuest(t *testing.T) {
 	gid := createGroupAs(t, admin, "Garden Club", models.VisibilityPublic)
 	ev := scheduleGroupEvent(t, admin, gid, "Picnic")
 	apiDo(t, admin, "PUT", fmt.Sprintf("/api/v1/events/%d", ev.ID),
-		map[string]any{"capacity": 1, "waitlistEnabled": true}, http.StatusOK)
+		seriesBody(t, admin, fmt.Sprintf("/api/v1/events/%d", ev.ID), map[string]any{"capacity": 1, "waitlistEnabled": true}), http.StatusOK)
 
 	// A group member takes the one seat.
 	mem := newTestUser(t, app, "mem", "password1234", models.RoleMember)
@@ -487,7 +487,7 @@ func TestPromotedGuestEmailHidesPrivateGroup(t *testing.T) {
 	// Open the event so guests can register, then cap it at one seat.
 	setVisibility(t, admin, ev.ID, models.VisibilityPublic, "", http.StatusOK)
 	apiDo(t, admin, "PUT", fmt.Sprintf("/api/v1/events/%d", ev.ID),
-		map[string]any{"capacity": 1, "waitlistEnabled": true}, http.StatusOK)
+		seriesBody(t, admin, fmt.Sprintf("/api/v1/events/%d", ev.ID), map[string]any{"capacity": 1, "waitlistEnabled": true}), http.StatusOK)
 
 	mem := newTestUser(t, app, "mem", "password1234", models.RoleMember)
 	addMemberEmail(t, admin, gid, mem.Email)
@@ -671,7 +671,7 @@ func TestGuestRedeemOnFullEventWaitlists(t *testing.T) {
 	gid := createGroupAs(t, admin, "Garden Club", models.VisibilityPublic)
 	ev := scheduleGroupEvent(t, admin, gid, "Picnic")
 	apiDo(t, admin, "PUT", fmt.Sprintf("/api/v1/events/%d", ev.ID),
-		map[string]any{"capacity": 1, "waitlistEnabled": true}, http.StatusOK)
+		seriesBody(t, admin, fmt.Sprintf("/api/v1/events/%d", ev.ID), map[string]any{"capacity": 1, "waitlistEnabled": true}), http.StatusOK)
 
 	// A member takes the one seat.
 	member := newTestUser(t, app, "member", "password1234", models.RoleMember)
@@ -724,7 +724,7 @@ func TestGuestRedeemOnFullEventWithoutWaitlistCreatesNothing(t *testing.T) {
 	gid := createGroupAs(t, admin, "Garden Club", models.VisibilityPublic)
 	ev := scheduleGroupEvent(t, admin, gid, "Picnic")
 	apiDo(t, admin, "PUT", fmt.Sprintf("/api/v1/events/%d", ev.ID),
-		map[string]any{"capacity": 1, "waitlistEnabled": false}, http.StatusOK)
+		seriesBody(t, admin, fmt.Sprintf("/api/v1/events/%d", ev.ID), map[string]any{"capacity": 1, "waitlistEnabled": false}), http.StatusOK)
 
 	member := newTestUser(t, app, "member", "password1234", models.RoleMember)
 	var g models.Group
@@ -770,7 +770,7 @@ func TestPromotedGuestGetsEmail(t *testing.T) {
 	gid := createGroupAs(t, admin, "Garden Club", models.VisibilityPublic)
 	ev := scheduleGroupEvent(t, admin, gid, "Picnic")
 	apiDo(t, admin, "PUT", fmt.Sprintf("/api/v1/events/%d", ev.ID),
-		map[string]any{"capacity": 1, "waitlistEnabled": true}, http.StatusOK)
+		seriesBody(t, admin, fmt.Sprintf("/api/v1/events/%d", ev.ID), map[string]any{"capacity": 1, "waitlistEnabled": true}), http.StatusOK)
 
 	member := newTestUser(t, app, "member", "password1234", models.RoleMember)
 	var g models.Group
@@ -1452,7 +1452,7 @@ func TestGuestReconfirmDoesNotCountOwnSeat(t *testing.T) {
 			gid := createGroupAs(t, admin, "Garden Club", models.VisibilityPublic)
 			ev := scheduleGroupEvent(t, admin, gid, "Picnic")
 			apiDo(t, admin, "PUT", fmt.Sprintf("/api/v1/events/%d", ev.ID),
-				map[string]any{"capacity": 1, "waitlistEnabled": tt.waitlist}, http.StatusOK)
+				seriesBody(t, admin, fmt.Sprintf("/api/v1/events/%d", ev.ID), map[string]any{"capacity": 1, "waitlistEnabled": tt.waitlist}), http.StatusOK)
 			var occ models.EventOccurrence
 			app.DB.Where("event_id = ?", ev.ID).First(&occ)
 
@@ -1524,7 +1524,7 @@ func TestGuestReconfirmUsesTheSeatLedger(t *testing.T) {
 		admin := loginAPI(t, app, "admin", "password1234")
 		gid := createGroupAs(t, admin, "Garden Club", models.VisibilityPublic)
 		ev := scheduleGroupEvent(t, admin, gid, "Picnic")
-		apiDo(t, admin, "PUT", fmt.Sprintf("/api/v1/events/%d", ev.ID), event, http.StatusOK)
+		apiDo(t, admin, "PUT", fmt.Sprintf("/api/v1/events/%d", ev.ID), seriesBody(t, admin, fmt.Sprintf("/api/v1/events/%d", ev.ID), event), http.StatusOK)
 		var occ models.EventOccurrence
 		app.DB.Where("event_id = ?", ev.ID).First(&occ)
 		anon := anonClient(t, app, ip)
@@ -1693,7 +1693,7 @@ func newGuestRaceFixture(t *testing.T, p1 bool) *guestRaceFixture {
 	f.guest = &models.User{Email: f.address, Name: "Old Guest Name", Role: models.RoleMember, Status: models.UserGuest, Timezone: "UTC"}
 	erasureMustCreate(t, s.app.DB, f.guest)
 	if p1 {
-		apiDo(t, s.ac, "PUT", fmt.Sprintf("/api/v1/events/%d", eventID), map[string]any{"capacity": 1, "waitlistEnabled": true}, http.StatusOK)
+		apiDo(t, s.ac, "PUT", fmt.Sprintf("/api/v1/events/%d", eventID), seriesBody(t, s.ac, fmt.Sprintf("/api/v1/events/%d", eventID), map[string]any{"capacity": 1, "waitlistEnabled": true}), http.StatusOK)
 		erasureMustCreate(t, s.app.DB, &models.Registration{UserID: &f.guest.ID, OccurrenceID: occ.ID, Status: models.RegGoing,
 			Source: models.RegSourceGuestForm, AttendanceMode: models.AttendanceInPerson})
 		f.waiter = newTestUser(t, s.app, "racing-waiter", erasurePW, models.RoleMember)

@@ -327,7 +327,7 @@ func parseDateEdit(raw []byte) (*dateEdit, error) {
 	if len(e.intent.reason) > 500 {
 		return nil, errReasonTooLong
 	}
-	if e.capacity, e.capacitySet, err = parseDateCapacity(ch.CapacityOverride); err != nil {
+	if e.capacity, e.capacitySet, err = parseCapacity(ch.CapacityOverride); err != nil {
 		return nil, err
 	}
 	if e.remote, e.remoteSet, err = parseRemoteCapacity(ch.RemoteCapacityOverride, true); err != nil {

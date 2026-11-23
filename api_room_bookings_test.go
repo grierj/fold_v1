@@ -323,7 +323,7 @@ func TestRoomBookingSeriesEdits(t *testing.T) {
 
 	// Move the series an hour later: the booking follows.
 	later := f.startOn.AddDate(0, 0, 1).Add(time.Hour)
-	if w := f.leader.do("PUT", "/api/v1/events/"+itoa(series.ID), map[string]any{"startsLocal": later.Format("2006-01-02T15:04")}, true); w.Code != http.StatusOK {
+	if w := f.leader.do("PUT", "/api/v1/events/"+itoa(series.ID), seriesBody(t, f.leader, "/api/v1/events/"+itoa(series.ID), map[string]any{"startsLocal": later.Format("2006-01-02T15:04")}), true); w.Code != http.StatusOK {
 		t.Fatalf("series edit: %d %s", w.Code, w.Body.String())
 	}
 	if b := booking(); b.Status != models.BookingConfirmed || !b.StartsAt.Equal(later.AddDate(0, 0, 7)) {
@@ -337,7 +337,7 @@ func TestRoomBookingSeriesEdits(t *testing.T) {
 		t.Fatalf("admin booking: %d %s", w.Code, w.Body.String())
 	}
 	onto := f.startOn.AddDate(0, 0, 1).Add(3 * time.Hour)
-	if w := f.leader.do("PUT", "/api/v1/events/"+itoa(series.ID), map[string]any{"startsLocal": onto.Format("2006-01-02T15:04")}, true); w.Code != http.StatusOK {
+	if w := f.leader.do("PUT", "/api/v1/events/"+itoa(series.ID), seriesBody(t, f.leader, "/api/v1/events/"+itoa(series.ID), map[string]any{"startsLocal": onto.Format("2006-01-02T15:04")}), true); w.Code != http.StatusOK {
 		t.Fatalf("series edit onto the double-booking: %d %s", w.Code, w.Body.String())
 	}
 	if b := booking(); b.Status != models.BookingRequested {
@@ -348,7 +348,7 @@ func TestRoomBookingSeriesEdits(t *testing.T) {
 	}
 
 	// Dropping the date from the series frees its booking.
-	if w := f.leader.do("PUT", "/api/v1/events/"+itoa(series.ID), map[string]any{"recurrenceRule": "FREQ=WEEKLY;COUNT=1"}, true); w.Code != http.StatusOK {
+	if w := f.leader.do("PUT", "/api/v1/events/"+itoa(series.ID), seriesBody(t, f.leader, "/api/v1/events/"+itoa(series.ID), map[string]any{"recurrenceRule": "FREQ=WEEKLY;COUNT=1"}), true); w.Code != http.StatusOK {
 		t.Fatalf("shorten series: %d %s", w.Code, w.Body.String())
 	}
 	if n := contactCount(t, f.app, &models.RoomBooking{}, "occurrence_id IN (SELECT id FROM event_occurrences WHERE event_id = ?)", series.ID); n != 0 {

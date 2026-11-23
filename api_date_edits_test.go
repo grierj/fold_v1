@@ -358,7 +358,7 @@ func TestDateEditRefusesStaleRevision(t *testing.T) {
 			gormMust(t, f.app.DB.Exec("UPDATE event_occurrences SET duration_override = 75 WHERE id = ?", f.dates[0].ID))
 		},
 		"series edit": func() {
-			apiDo(t, f.admin, "PUT", fmt.Sprintf("/api/v1/events/%d", f.event.ID), map[string]any{"title": "Supper renamed"}, http.StatusOK)
+			apiDo(t, f.admin, "PUT", fmt.Sprintf("/api/v1/events/%d", f.event.ID), seriesBody(t, f.admin, fmt.Sprintf("/api/v1/events/%d", f.event.ID), map[string]any{"title": "Supper renamed"}), http.StatusOK)
 		},
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -528,7 +528,7 @@ func TestDateEditReplayAfterSeriesEditConflicts(t *testing.T) {
 	base := editBaseOf(t, f.admin, f.event.ID, f.date(0))
 	body := dateEditBody(newDateAttempt(t), base.Revision, map[string]any{"title": "Moved"})
 	wantDateEdit(t, f.admin, f.event.ID, f.date(0), body, http.StatusOK, "")
-	apiDo(t, f.admin, "PUT", fmt.Sprintf("/api/v1/events/%d", f.event.ID), map[string]any{"description": "Bring a dish"}, http.StatusOK)
+	apiDo(t, f.admin, "PUT", fmt.Sprintf("/api/v1/events/%d", f.event.ID), seriesBody(t, f.admin, fmt.Sprintf("/api/v1/events/%d", f.event.ID), map[string]any{"description": "Bring a dish"}), http.StatusOK)
 	wantDateEdit(t, f.admin, f.event.ID, f.date(0), body, http.StatusConflict, "date_changed")
 }
 
@@ -1143,7 +1143,7 @@ func TestDateEditInheritedPlace(t *testing.T) {
 	apiDo(t, f.admin, "PUT", "/api/v1/groups/"+gid, map[string]any{"location": "Chapel"}, http.StatusOK)
 	wantDateEdit(t, f.admin, f.event.ID, f.date(0), dateEditBody(newDateAttempt(t), base.Revision, map[string]any{"title": "Chapel supper"}), http.StatusOK, "")
 
-	apiDo(t, f.admin, "PUT", fmt.Sprintf("/api/v1/events/%d", f.event.ID), map[string]any{"location": "Own room"}, http.StatusOK)
+	apiDo(t, f.admin, "PUT", fmt.Sprintf("/api/v1/events/%d", f.event.ID), seriesBody(t, f.admin, fmt.Sprintf("/api/v1/events/%d", f.event.ID), map[string]any{"location": "Own room"}), http.StatusOK)
 	own := editBaseOf(t, f.admin, f.event.ID, f.date(1))
 	if !strings.HasSuffix(own.Revision, ".-") {
 		t.Fatalf("an event place still tags the group: %s", own.Revision)
@@ -1501,7 +1501,7 @@ func TestDateEditHeldZoneChange(t *testing.T) {
 	base := editBaseOf(t, f.admin, f.event.ID, f.date(0))
 	wall := f.dates[0].StartsAt.Add(time.Hour).Format("2006-01-02T15:04")
 	held := f.admin.doHeld("POST", dateEditPath(f.event.ID, f.date(0)), dateEditBody(newDateAttempt(t), base.Revision, map[string]any{"startsLocal": wall}))
-	apiDo(t, f.admin, "PUT", fmt.Sprintf("/api/v1/events/%d", f.event.ID), map[string]any{"tzid": "America/Chicago"}, http.StatusOK)
+	apiDo(t, f.admin, "PUT", fmt.Sprintf("/api/v1/events/%d", f.event.ID), seriesBody(t, f.admin, fmt.Sprintf("/api/v1/events/%d", f.event.ID), map[string]any{"tzid": "America/Chicago"}), http.StatusOK)
 	held.release()
 	if w := held.wait(t); w.Code != http.StatusConflict || answerCode(t, w) != "date_changed" {
 		t.Fatalf("the held edit after a zone change: %d %s", w.Code, w.Body.String())
@@ -2900,7 +2900,7 @@ var keptWriters = []struct {
 	// The series moves only dates that have not started.
 	{"series", func(o models.EventOccurrence) time.Time { return o.StartsAt.Add(-time.Hour) },
 		func(t *testing.T, f occurrenceReadFixture, o models.EventOccurrence) *httptest.ResponseRecorder {
-			return f.admin.do("PUT", "/api/v1/events/"+itoa(f.event.ID), map[string]any{"startsLocal": wallAt(f.dates[0].StartsAt.Add(time.Hour))}, true)
+			return f.admin.do("PUT", "/api/v1/events/"+itoa(f.event.ID), seriesBody(t, f.admin, "/api/v1/events/"+itoa(f.event.ID), map[string]any{"startsLocal": wallAt(f.dates[0].StartsAt.Add(time.Hour))}), true)
 		}},
 }
 
@@ -3096,11 +3096,11 @@ func TestKeptDateRegrantPaths(t *testing.T) {
 		keepOnLeaving(t, f.subjectC, f.group.ID, ev.ID, occ)
 		var reg models.Registration
 		gormMust(t, f.app.DB.Where("occurrence_id = ? AND user_id = ?", occ.ID, f.subject.ID).First(&reg))
-		apiDo(t, f.leaderC, "PUT", "/api/v1/events/"+itoa(ev.ID), map[string]any{"recurrenceRule": "FREQ=WEEKLY;COUNT=4"}, http.StatusOK)
+		apiDo(t, f.leaderC, "PUT", "/api/v1/events/"+itoa(ev.ID), seriesBody(t, f.leaderC, "/api/v1/events/"+itoa(ev.ID), map[string]any{"recurrenceRule": "FREQ=WEEKLY;COUNT=4"}), http.StatusOK)
 		if row := loadAccessRow(t, f.app.DB, reg.ID); row.Status != policy.OccurrenceAccessEnded || row.EndReason != policy.OccurrenceCancelled {
 			t.Fatalf("the series cancel did not end the grant: %+v", row)
 		}
-		apiDo(t, f.leaderC, "PUT", "/api/v1/events/"+itoa(ev.ID), map[string]any{"recurrenceRule": "FREQ=WEEKLY;COUNT=6"}, http.StatusOK)
+		apiDo(t, f.leaderC, "PUT", "/api/v1/events/"+itoa(ev.ID), seriesBody(t, f.leaderC, "/api/v1/events/"+itoa(ev.ID), map[string]any{"recurrenceRule": "FREQ=WEEKLY;COUNT=6"}), http.StatusOK)
 		if o := occurrenceRow(t, f.app, occ.ID); o.Status != models.OccurrenceScheduled {
 			t.Fatalf("the series edit did not restore the date: %+v", o)
 		}
@@ -3231,7 +3231,7 @@ func TestKeptDateNonTimeSaveKeepsItsStoredEnd(t *testing.T) {
 			date := models.FormatCalendarDate(target.OriginalDate)
 			member := goingMember(t, f, target.ID)
 			span := target.EndsAt.Sub(target.StartsAt)
-			apiDo(t, f.admin, "PUT", "/api/v1/events/"+itoa(f.event.ID), map[string]any{"durationMinutes": int(span/time.Minute) + 30}, http.StatusOK)
+			apiDo(t, f.admin, "PUT", "/api/v1/events/"+itoa(f.event.ID), seriesBody(t, f.admin, "/api/v1/events/"+itoa(f.event.ID), map[string]any{"durationMinutes": int(span/time.Minute) + 30}), http.StatusOK)
 			if o := occurrenceRow(t, f.app, target.ID); !o.StartsAt.Equal(target.StartsAt) || !o.EndsAt.Equal(target.EndsAt) {
 				t.Fatalf("fixture: the series edit moved the customized date: %+v", o)
 			}
@@ -4253,7 +4253,7 @@ func TestDateEditSignalsASupersededBase(t *testing.T) {
 	})
 	t.Run("a series edit", func(t *testing.T) {
 		base := editBaseOf(t, admin, f.event.ID, date)
-		apiDo(t, f.admin, "PUT", fmt.Sprintf("/api/v1/events/%d", f.event.ID), map[string]any{"title": "Supper again"}, http.StatusOK)
+		apiDo(t, f.admin, "PUT", fmt.Sprintf("/api/v1/events/%d", f.event.ID), seriesBody(t, f.admin, fmt.Sprintf("/api/v1/events/%d", f.event.ID), map[string]any{"title": "Supper again"}), http.StatusOK)
 		wantSuperseded(t, "a stale series base", edit(base.Revision, map[string]any{"title": "Stale"}), true)
 	})
 	t.Run("a replay after a later edit", func(t *testing.T) {

@@ -270,35 +270,74 @@ describe("SeriesEditor form layout (DEC-95)", () => {
     expect(Events.update).toHaveBeenLastCalledWith(7, expect.objectContaining({ reminderPush: false }));
   });
 
-  it("sends nothing more after a save its page has not closed it for yet: nothing to change, no Saving… left (#427)", async () => {
+  it("can save again after a save its page has not closed it for yet, with the revision it follows (DEC-162)", async () => {
     vi.mocked(Events.update).mockReset().mockResolvedValue({ event: testEvent(7) });
     const onSaved = vi.fn();
-    render(<SeriesEditor series={baseSeries} idPrefix="again" onSaved={onSaved} onClose={() => {}} />);
+    render(<SeriesEditor series={{ ...baseSeries, revision: "r1" }} idPrefix="again" onSaved={onSaved} onClose={() => {}} />);
     const title = screen.getByRole("textbox", { name: "Title" });
     await userEvent.type(title, " night");
     await userEvent.click(screen.getByRole("button", { name: "Save series" }));
     await waitFor(() => expect(onSaved).toHaveBeenCalledOnce());
-    expect(screen.getByRole("button", { name: "Save series" })).toBeDisabled();
-    expect(title).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Save series" })).toBeEnabled();
     expect(title).toHaveValue("Supper night");
-    expect(screen.getByRole("button", { name: "Close" })).toBeEnabled();
     fireEvent.submit(title.closest("form")!);
-    expect(Events.update).toHaveBeenCalledOnce();
+    // The server refuses it once the event has changed since r1; the editor no longer counts saves.
+    await waitFor(() => expect(Events.update).toHaveBeenCalledTimes(2));
+    expect(vi.mocked(Events.update).mock.calls[1][1]).toMatchObject({ title: "Supper night", revision: "r1" });
   });
 
-  it("keeps showing what it sent when the page's reload brings new values", async () => {
+  it("follows the page's newer read: what was stored since takes the stored value, what was typed stays", async () => {
     vi.mocked(Events.update).mockReset().mockResolvedValue({ event: testEvent(7) });
-    const series = { ...baseSeries, recurrenceRule: "FREQ=WEEKLY;COUNT=4" };
+    const series = { ...baseSeries, revision: "r1" };
+    const view = render(<SeriesEditor series={series} idPrefix="flip" onSaved={() => {}} onClose={() => {}} />);
+    await userEvent.clear(screen.getByRole("textbox", { name: /^Location/ }));
+    await userEvent.type(screen.getByRole("textbox", { name: /^Location/ }), "Annex");
+    fireEvent.change(screen.getByLabelText(/^Guests allowed/), { target: { value: "2" } });
+    view.rerender(<SeriesEditor series={{ ...series, title: "Renamed", capacity: 10, revision: "r2" }} idPrefix="flip" onSaved={() => {}} onClose={() => {}} />);
+    expect(screen.getByRole("textbox", { name: "Title" })).toHaveValue("Renamed");
+    expect(screen.getByRole("textbox", { name: /^Location/ })).toHaveValue("Annex");
+    expect(screen.getByLabelText(/^Seat limit/)).toHaveValue(10);
+    expect(screen.getByLabelText(/^Guests allowed/)).toHaveValue(2);
+    await userEvent.click(screen.getByRole("button", { name: "Save series" }));
+    const body = vi.mocked(Events.update).mock.calls[0][1];
+    expect(body).toMatchObject({ title: "Renamed", location: "Annex", guestsAllowed: 2, revision: "r2" });
+    // Compared with the newest read, the seat limit is unchanged, so it is not sent.
+    expect(body).not.toHaveProperty("capacity");
+  });
+
+  it("keeps the draft when the event changed while saving, asks for a new read and saves from it", async () => {
+    vi.mocked(Events.update).mockReset()
+      .mockRejectedValueOnce(new ApiError(409, "the event changed", { code: "event_changed" }))
+      .mockResolvedValueOnce({ event: testEvent(7) });
+    const onStale = vi.fn();
     const onSaved = vi.fn();
-    const view = render(<SeriesEditor series={series} idPrefix="flip" onSaved={onSaved} onClose={() => {}} />);
-    const rule = screen.getByRole("textbox", { name: "Recurrence rule" });
-    await userEvent.clear(rule);
-    await userEvent.type(rule, "FREQ=WEEKLY;BYDAY=WE,TH");
+    const series = { ...baseSeries, revision: "r1" };
+    const view = render(<SeriesEditor series={series} idPrefix="stale" onSaved={onSaved} onStale={onStale} onClose={() => {}} />);
+    await userEvent.clear(screen.getByRole("textbox", { name: /^Location/ }));
+    await userEvent.type(screen.getByRole("textbox", { name: /^Location/ }), "Annex");
+    await userEvent.click(screen.getByRole("button", { name: "Save series" }));
+    expect(await screen.findByText("This event changed while you were saving. Check it and save again.")).toBeInTheDocument();
+    expect(onStale).toHaveBeenCalledOnce();
+    expect(onSaved).not.toHaveBeenCalled();
+    expect(screen.getByRole("textbox", { name: /^Location/ })).toHaveValue("Annex");
+    expect(screen.getByRole("textbox", { name: /^Location/ })).toBeEnabled();
+
+    view.rerender(<SeriesEditor series={{ ...series, title: "Supper club", revision: "r2" }} idPrefix="stale" onSaved={onSaved} onStale={onStale} onClose={() => {}} />);
+    expect(screen.getByRole("textbox", { name: "Title" })).toHaveValue("Supper club");
+    expect(screen.getByRole("textbox", { name: /^Location/ })).toHaveValue("Annex");
     await userEvent.click(screen.getByRole("button", { name: "Save series" }));
     await waitFor(() => expect(onSaved).toHaveBeenCalledOnce());
-    view.rerender(<SeriesEditor series={{ ...series, recurrenceRule: "FREQ=WEEKLY;BYDAY=WE,TH", title: "Renamed" }} idPrefix="flip" onSaved={onSaved} onClose={() => {}} />);
-    expect(screen.getByRole("textbox", { name: "Recurrence rule" })).toHaveValue("FREQ=WEEKLY;BYDAY=WE,TH");
-    expect(screen.getByRole("textbox", { name: "Title" })).toHaveValue("Supper");
+    expect(vi.mocked(Events.update).mock.calls[1][1]).toMatchObject({ title: "Supper club", location: "Annex", revision: "r2" });
+  });
+
+  it("does not call an untouched form changed after a newer read", () => {
+    const series = { ...baseSeries, revision: "r1" };
+    const view = render(<SeriesEditor series={series} idPrefix="clean" onSaved={() => {}} />);
+    view.rerender(<SeriesEditor series={{ ...series, title: "Renamed", capacity: 8, revision: "r2" }} idPrefix="clean" onSaved={() => {}} />);
+    expect(screen.getByRole("textbox", { name: "Title" })).toHaveValue("Renamed");
+    const leaving = new Event("beforeunload", { cancelable: true });
+    window.dispatchEvent(leaving);
+    expect(leaving.defaultPrevented).toBe(false);
   });
 
   it("leaves the Jitsi link as sent when a new one lands after the save began", async () => {

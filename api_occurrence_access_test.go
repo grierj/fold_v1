@@ -219,7 +219,7 @@ func TestOccurrenceDateReadExactAuthorityAndAllowlist(t *testing.T) {
 	for _, path := range []string{fmt.Sprintf("/api/v1/events/%d", f.event.ID), fmt.Sprintf("/api/v1/groups/%d", f.group), fmt.Sprintf("/api/v1/groups/%d/members", f.group), fmt.Sprintf("/api/v1/groups/%d/events", f.group)} {
 		apiDo(t, f.client, "GET", path, nil, 404)
 	}
-	apiDo(t, f.client, "PUT", fmt.Sprintf("/api/v1/events/%d", f.event.ID), map[string]any{"title": "No authority"}, 404)
+	apiDo(t, f.client, "PUT", fmt.Sprintf("/api/v1/events/%d", f.event.ID), seriesBody(t, f.client, fmt.Sprintf("/api/v1/events/%d", f.event.ID), map[string]any{"title": "No authority"}), 404)
 	apiDo(t, f.client, "POST", fmt.Sprintf("/api/v1/events/%d/registrations/add", f.event.ID), map[string]any{"date": models.FormatCalendarDate(f.dates[1].OriginalDate), "userId": f.other.ID}, 404)
 	// Rich lists remain ordinary-only, even when a caller guesses the parent ID.
 	if rows := f.app.occurrencesForEvents([]uint{f.event.ID}, models.FormatCalendarDate(f.dates[0].OriginalDate), models.FormatCalendarDate(f.dates[2].OriginalDate), nil, f.recipient); len(rows) != 0 {
@@ -1284,14 +1284,14 @@ func TestCancelledDateTombstoneFollowsTheCancellationThatEndedTheGrant(t *testin
 	regranted, again, againClient := f.invitee(t, "regranted invitee", target)
 	eventPath := fmt.Sprintf("/api/v1/events/%d", f.event.ID)
 	// The series edit cancels the date and stamps both grants.
-	apiDo(t, f.admin, "PUT", eventPath, map[string]any{"rruleUntil": tombstoneDate(f.dates[0])}, http.StatusOK)
+	apiDo(t, f.admin, "PUT", eventPath, seriesBody(t, f.admin, eventPath, map[string]any{"rruleUntil": tombstoneDate(f.dates[0])}), http.StatusOK)
 	if n := f.liveGrants(t, target); n != 0 {
 		t.Fatalf("the series cancel left %d live grants", n)
 	}
 	f.wantTombstone(t, firstClient, target, title)
 	f.wantTombstone(t, againClient, target, title)
 	// Another admin's real series restore writes event.dates_restored.
-	apiDo(t, restorer, "PUT", eventPath, map[string]any{"rruleUntil": ""}, http.StatusOK)
+	apiDo(t, restorer, "PUT", eventPath, seriesBody(t, restorer, eventPath, map[string]any{"rruleUntil": ""}), http.StatusOK)
 	var restore models.AuditLog
 	gormMust(t, f.app.DB.Where("action = ? AND target_type = 'event' AND target_id = ?", audit.EventDatesRestored, f.event.ID).First(&restore))
 	var back models.EventOccurrence
@@ -2342,7 +2342,7 @@ func TestDatePageTwoTimesOnOneDay(t *testing.T) {
 		}
 	}
 	unchanged("09:00")
-	apiDo(t, client, "PUT", "/api/v1/events/"+itoa(ev.ID), map[string]any{"title": "Morning Prayers"}, http.StatusOK)
+	apiDo(t, client, "PUT", "/api/v1/events/"+itoa(ev.ID), seriesBody(t, client, "/api/v1/events/"+itoa(ev.ID), map[string]any{"title": "Morning Prayers"}), http.StatusOK)
 	unchanged("10:00")
 }
 
@@ -2545,7 +2545,7 @@ func TestSeriesClockMultiTimeDayThroughTheAPI(t *testing.T) {
 		wantUsual(t, readSeriesDate(t, client, ev.ID, day), clock, changes...)
 	}
 	stable("09:00")
-	apiDo(t, client, "PUT", "/api/v1/events/"+itoa(ev.ID), map[string]any{"title": "Morning Prayers"}, http.StatusOK)
+	apiDo(t, client, "PUT", "/api/v1/events/"+itoa(ev.ID), seriesBody(t, client, "/api/v1/events/"+itoa(ev.ID), map[string]any{"title": "Morning Prayers"}), http.StatusOK)
 	if got := seriesClockTestDates(t, app.DB, ev.ID)[0].StartsAt.UTC().Format("15:04"); got != "10:00" {
 		t.Fatalf("fixture: the series edit put the date at %s", got)
 	}
@@ -2585,7 +2585,7 @@ func TestSeriesClockEditAddsAMultiTimeDayOnce(t *testing.T) {
 		return contactCount(t, app, &models.AuditLog{}, "action = ? AND target_id = ?", audit.EventDatesRestored, ev.ID)
 	}
 	lostBefore, changedBefore, restoredBefore := notices(notify.RoomLost), notices(notify.EventChanged), restored()
-	apiDo(t, client, "PUT", "/api/v1/events/"+itoa(ev.ID), map[string]any{"recurrenceRule": "FREQ=WEEKLY;BYHOUR=9,10;BYSECOND=30;COUNT=4"}, http.StatusOK)
+	apiDo(t, client, "PUT", "/api/v1/events/"+itoa(ev.ID), seriesBody(t, client, "/api/v1/events/"+itoa(ev.ID), map[string]any{"recurrenceRule": "FREQ=WEEKLY;BYHOUR=9,10;BYSECOND=30;COUNT=4"}), http.StatusOK)
 	occs := seriesClockTestDates(t, app.DB, ev.ID)
 	if len(occs) != 2 {
 		t.Fatalf("dates after the edit: %d", len(occs))
@@ -2639,7 +2639,7 @@ func TestSeriesClockOneTimeEditDropsTheOldSeriesEvidence(t *testing.T) {
 	if rows := clockRowsOf(t, app.DB, first.ID); len(rows) != 1 || rows[0].StartsAt.UTC().Format("15:04") != "19:00" {
 		t.Fatalf("fixture: evidence %+v", rows)
 	}
-	apiDo(t, client, "PUT", "/api/v1/events/"+itoa(ev.ID), map[string]any{"startsLocal": day + "T20:00", "recurrenceRule": ""}, http.StatusOK)
+	apiDo(t, client, "PUT", "/api/v1/events/"+itoa(ev.ID), seriesBody(t, client, "/api/v1/events/"+itoa(ev.ID), map[string]any{"startsLocal": day + "T20:00", "recurrenceRule": ""}), http.StatusOK)
 	occs := seriesClockTestDates(t, app.DB, ev.ID)
 	if got := occs[0].StartsAt.UTC().Format("15:04"); occs[0].ID != first.ID || got != "20:00" {
 		t.Fatalf("fixture: the one-time edit left the date at %s", got)
@@ -2652,7 +2652,7 @@ func TestSeriesClockOneTimeEditDropsTheOldSeriesEvidence(t *testing.T) {
 	// Two days on, the date is past, and the event repeats again from it.
 	aged := first.StartsAt.Add(48 * time.Hour)
 	app.clock = func() time.Time { return aged }
-	apiDo(t, client, "PUT", "/api/v1/events/"+itoa(ev.ID), map[string]any{"recurrenceRule": "FREQ=WEEKLY;COUNT=4"}, http.StatusOK)
+	apiDo(t, client, "PUT", "/api/v1/events/"+itoa(ev.ID), seriesBody(t, client, "/api/v1/events/"+itoa(ev.ID), map[string]any{"recurrenceRule": "FREQ=WEEKLY;COUNT=4"}), http.StatusOK)
 	app.clock = nil
 	if rows := clockRowsOf(t, app.DB, first.ID); len(rows) != 0 {
 		t.Fatalf("the past date has evidence %+v", rows)
@@ -2770,7 +2770,7 @@ func TestSeriesClockZeroStartThroughTheAPI(t *testing.T) {
 			runExtend(t, app)
 			wantUsual(t, readSeriesDate(t, client, ev.ID, tombstoneDate(second)), "")
 		}
-		apiDo(t, client, "PUT", "/api/v1/events/"+itoa(ev.ID), map[string]any{"title": "New Year Prayers"}, http.StatusOK)
+		apiDo(t, client, "PUT", "/api/v1/events/"+itoa(ev.ID), seriesBody(t, client, "/api/v1/events/"+itoa(ev.ID), map[string]any{"title": "New Year Prayers"}), http.StatusOK)
 		var now models.EventOccurrence
 		gormMust(t, app.DB.First(&now, second.ID))
 		wantUsual(t, readSeriesDate(t, client, ev.ID, tombstoneDate(second)), now.StartsAt.UTC().Format("15:04"))
@@ -2857,7 +2857,7 @@ func TestSeriesClockAfterAPreviousBinary(t *testing.T) {
 	wantUsual(t, readSeriesDate(t, client, ev.ID, extra.Format("2006-01-02")), "20:00")
 
 	// A new edit after the repair keeps every answer.
-	apiDo(t, client, "PUT", "/api/v1/events/"+itoa(ev.ID), map[string]any{"title": "Evening Prayer"}, http.StatusOK)
+	apiDo(t, client, "PUT", "/api/v1/events/"+itoa(ev.ID), seriesBody(t, client, "/api/v1/events/"+itoa(ev.ID), map[string]any{"title": "Evening Prayer"}), http.StatusOK)
 	wantUsual(t, readSeriesDate(t, client, ev.ID, tombstoneDate(moved)), "20:00")
 	wantUsual(t, readSeriesDate(t, client, ev.ID, tombstoneDate(frozen)), "20:00", changeTime)
 
