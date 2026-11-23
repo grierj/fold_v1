@@ -855,48 +855,6 @@ describe("EventDetail ?edit=series (DEC-161)", () => {
     expect(screen.queryByRole("textbox", { name: "Title" })).not.toBeInTheDocument();
     await waitFor(() => expect(edit).toHaveFocus());
   });
-
-  // DEC-162: the editor follows the page's newest read of the event and names its revision.
-  const at = (revision: string, over: Partial<EventDetailResponse["event"]> = {}, base: EventDetailResponse = groupEvent): EventDetailResponse =>
-    ({ ...base, event: { ...base.event, ...over, revision } });
-
-  it("keeps what was typed when the event changed while saving, reads it again and saves from the new read", async () => {
-    vi.mocked(Events.get).mockResolvedValueOnce(at("r1")).mockResolvedValue(at("r2", { description: "Bring a dish" }));
-    vi.mocked(Events.update).mockRejectedValueOnce(new ApiError(409, "x", { code: "event_changed" })).mockResolvedValueOnce({ event: groupEvent.event });
-    renderPage(link);
-    const title = await screen.findByLabelText("Title");
-    await userEvent.type(title, " night{Enter}");
-    expect(await screen.findByText(ERROR_COPY.event_changed)).toBeInTheDocument();
-    await waitFor(() => expect(Events.get).toHaveBeenCalledTimes(2));
-    await waitFor(() => expect(screen.getByRole("textbox", { name: /^Description/ })).toHaveValue("Bring a dish"));
-    expect(screen.getByLabelText("Title")).toHaveValue("Hybrid study night");
-    expect(Events.update).toHaveBeenLastCalledWith(7, expect.objectContaining({ revision: "r1" }));
-
-    await userEvent.click(screen.getByRole("button", { name: "Save series" }));
-    await waitFor(() => expect(Events.update).toHaveBeenCalledTimes(2));
-    expect(Events.update).toHaveBeenLastCalledWith(7, expect.objectContaining({ title: "Hybrid study night", description: "Bring a dish", revision: "r2" }));
-    await waitFor(() => expect(screen.getByRole("button", { name: "Edit event" })).toHaveAttribute("aria-expanded", "false"));
-  });
-
-  it("saves the series on the first press after a series room change, keeping what was typed", async () => {
-    const weekly: EventDetailResponse = { ...groupEvent, event: { ...groupEvent.event, recurrenceRule: "FREQ=WEEKLY" }, occurrences: [occurrence({ recurrenceRule: "FREQ=WEEKLY" })] };
-    vi.mocked(Events.get).mockResolvedValueOnce(at("r1", {}, weekly)).mockResolvedValue(at("r2", { description: "Now in the hall" }, weekly));
-    vi.spyOn(Site, "get").mockResolvedValue({ name: "Fold", timezone: "UTC", selfSignup: "off", roomsEnabled: true, pushEnabled: true });
-    const hall = { id: 1, name: "Fellowship Hall", building: "Main", capacity: 80, features: "", restricted: false, busyDates: 0, tooSmall: false };
-    vi.spyOn(SeriesRooms, "list").mockResolvedValue({ rooms: [hall], dates: 2, defaultRoom: null, needsRoom: [], pending: 0 });
-    vi.spyOn(SeriesRooms, "set").mockResolvedValue({ defaultRoom: { id: 1, name: "Fellowship Hall", building: "Main" }, booked: 2, lost: [], kept: 0, pending: 0 });
-    vi.mocked(Events.update).mockResolvedValue({ event: weekly.event });
-    renderPage("/events/7?edit=series");
-    await userEvent.type(await screen.findByLabelText("Title"), " night");
-    await userEvent.selectOptions(await screen.findByRole("combobox", { name: /^Room for every date/ }), "1");
-    await userEvent.click(screen.getByRole("button", { name: "Book for every date" }));
-    await waitFor(() => expect(SeriesRooms.set).toHaveBeenCalledOnce());
-    await waitFor(() => expect(screen.getByRole("textbox", { name: /^Description/ })).toHaveValue("Now in the hall"));
-    expect(screen.getByLabelText("Title")).toHaveValue("Hybrid study night");
-
-    await userEvent.click(screen.getByRole("button", { name: "Save series" }));
-    await waitFor(() => expect(Events.update).toHaveBeenCalledExactlyOnceWith(7, expect.objectContaining({ title: "Hybrid study night", revision: "r2" })));
-  });
 });
 
 // VC2: the event's visibility control sits under the series editor, whose kept-dates panel can Add, Add back or
@@ -2758,5 +2716,87 @@ describe("EventDetail: the date question is bound to what asked it", () => {
     expect(await screen.findByText(ERROR_COPY.visibility_review_outdated)).toBeInTheDocument();
     expect(asked()).not.toBeInTheDocument();
     expect(edits.sent).toHaveLength(1);
+  });
+});
+
+// DEC-162: a series save refused because someone else changed the event closes the editor on its own (DEC-161) and
+// reads the page from nothing, which then says the changes were not saved.
+describe("EventDetail when a series save meets someone else's change", () => {
+  const NOTICE = "Someone changed this event while you were editing, so your changes weren't saved. This is the event as it is now.";
+  const opened: EventDetailResponse = { ...page, canSetVisibility: true, event: { ...page.event, groupId: 3, groupName: "Family group", groupVisibility: "public", revision: "r1" } };
+  const theirs: EventDetailResponse = { ...opened, event: { ...opened.event, title: "Bible study", revision: "r2" } };
+  const changed = () => new ApiError(409, "changed", { code: "event_changed" });
+
+  beforeEach(() => {
+    vi.resetAllMocks();
+    guarded();
+    vi.mocked(Households.mine).mockResolvedValue({ household: null });
+    vi.mocked(Events.visibilityImpact).mockResolvedValue({ visibility: "public", currentVisibility: "public", tightened: [], leaderOpened: [] });
+  });
+
+  function renderInMain() {
+    render(<main id="main" tabIndex={-1}><MemoryRouter initialEntries={["/events/7"]}><DateWritesProvider credential={credential}><Routes><Route path="/events/:id" element={<EventDetail />} /></Routes></DateWritesProvider></MemoryRouter></main>);
+  }
+
+  // Opens the editor, types, and saves into a refusal whose read shows `editorRead`; the page's read after it is held.
+  async function saveIntoRefusal(editorRead: () => Promise<EventDetailResponse>) {
+    vi.mocked(Events.get).mockResolvedValueOnce(opened).mockImplementationOnce(editorRead);
+    vi.mocked(Events.update).mockRejectedValue(changed());
+    renderInMain();
+    await userEvent.click(await screen.findByRole("button", { name: "More for 2026-12-01" }));
+    await userEvent.click(screen.getByRole("menuitem", { name: "Manage sign-ups" }));
+    expect(within(await screen.findByRole("region", { name: "Manage sign-ups" })).getByText("Sam", { selector: "span:not(.sr-only)" })).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "Edit event" }));
+    expect(screen.getByRole("button", { name: "Save visibility" })).toBeInTheDocument();
+    const after = deferred<EventDetailResponse>();
+    vi.mocked(Events.get).mockReturnValueOnce(after.promise);
+    await userEvent.type(screen.getByLabelText("Title"), " night{Enter}");
+    await waitFor(() => expect(Events.get).toHaveBeenCalledTimes(3));
+
+    return after;
+  }
+
+  function showsNothingOfTheEvent() {
+    expect(screen.queryByRole("heading", { level: 1, name: "Hybrid study" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("region", { name: "Manage sign-ups" })).not.toBeInTheDocument();
+    expect(screen.queryByText("Sam")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Save visibility" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("textbox", { name: "Title" })).not.toBeInTheDocument();
+  }
+
+  it("closes the editor, reads the page from nothing, says so once it is shown and gives focus to Edit; opening the editor clears it", async () => {
+    const after = await saveIntoRefusal(async () => theirs);
+    expect(Events.update).toHaveBeenCalledExactlyOnceWith(7, expect.objectContaining({ title: "Hybrid study night", revision: "r1" }));
+    showsNothingOfTheEvent();
+    expect(screen.queryByText(NOTICE)).not.toBeInTheDocument();
+    await act(async () => { after.resolve(theirs); await after.promise; });
+    expect(await screen.findByRole("heading", { level: 1, name: "Bible study" })).toBeInTheDocument();
+    const notice = await screen.findByText(NOTICE);
+    expect(notice).toHaveAttribute("role", "status");
+    const edit = screen.getByRole("button", { name: "Edit event" });
+    expect(edit).toHaveAttribute("aria-expanded", "false");
+    await waitFor(() => expect(edit).toHaveFocus());
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    await userEvent.click(edit);
+    expect(screen.queryByText(NOTICE)).not.toBeInTheDocument();
+    expect(screen.getByLabelText("Title")).toHaveValue("Bible study");
+  });
+
+  it("shows the page's own error and Try again, and nothing of the event, when the read after the conflict fails", async () => {
+    const after = await saveIntoRefusal(async () => theirs);
+    await act(async () => { after.reject(new ApiError(500, "boom", { code: "server_error" })); await after.promise.catch(() => {}); });
+    expect(await screen.findByRole("heading", { level: 1, name: "Event unavailable" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Try again" })).toBeInTheDocument();
+    showsNothingOfTheEvent();
+    expect(screen.queryByRole("heading", { level: 1, name: "Bible study" })).not.toBeInTheDocument();
+    expect(screen.queryByText(NOTICE)).not.toBeInTheDocument();
+  });
+
+  it("closes the editor and reads the page from nothing with no notice when the event can no longer be managed or seen", async () => {
+    const after = await saveIntoRefusal(() => Promise.reject(new ApiError(404, "gone", { code: "not_found" })));
+    showsNothingOfTheEvent();
+    await act(async () => { after.reject(new ApiError(404, "gone", { code: "not_found" })); await after.promise.catch(() => {}); });
+    expect(await screen.findByText("Event not found")).toBeInTheDocument();
+    expect(screen.queryByText(NOTICE)).not.toBeInTheDocument();
   });
 });

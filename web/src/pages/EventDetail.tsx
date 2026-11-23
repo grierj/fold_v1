@@ -68,6 +68,10 @@ function EventDetailContent() {
   const [deleting, setDeleting] = useState(false);
   const deletingNow = useRef(false);
   const [editing, setEditing] = useState(false);
+  // A series save was refused because someone else changed the event (DEC-162). It is said once the page shows the
+  // event as it is now, into a status line already on screen so it is announced, until the editor opens again.
+  const changedPending = useRef(false);
+  const [changedUnderEdit, setChangedUnderEdit] = useState(false);
   // The series editor and the visibility control share a panel that a save closes: while either runs, the other
   // is locked and the panel stays open, so neither's answer is lost.
   const seriesAction = useAction();
@@ -136,6 +140,11 @@ function EventDetailContent() {
 
     if (!document.activeElement || document.activeElement === document.body) editButton.current?.focus();
   }, [editing]);
+  useEffect(() => {
+    if (!changedPending.current || loading || !page) return;
+    changedPending.current = false;
+    setChangedUnderEdit(true);
+  }, [loading, page]);
   const notFound = load.error instanceof ApiError && load.error.status === 404;
   const error = load.error && !notFound ? errorText(load.error, "We couldn't load this event.") : null;
   const setPage = load.setData;
@@ -234,7 +243,7 @@ function EventDetailContent() {
         </div>
         {canManage && (
           <div className="flex w-full gap-2 sm:w-auto sm:shrink-0">
-            <Button ref={editButton} variant="secondary" layout="flex-1 sm:flex-none" aria-expanded={editing} disabled={panelBusy} onClick={() => setEditing((v) => !v)}>
+            <Button ref={editButton} variant="secondary" layout="flex-1 sm:flex-none" aria-expanded={editing} disabled={panelBusy} onClick={() => { changedPending.current = false; setChangedUnderEdit(false); setEditing((v) => !v); }}>
               {event.recurrenceRule ? "Edit series" : "Edit event"}
             </Button>
             <Menu label="More event actions" items={[
@@ -244,6 +253,9 @@ function EventDetailContent() {
           </div>
         )}
       </div>
+      <p role="status" className="mb-4 rounded-lg border border-border bg-sunken px-4 py-3 text-sm empty:hidden">
+        {changedUnderEdit && "Someone changed this event while you were editing, so your changes weren't saved. This is the event as it is now."}
+      </p>
       <div className="grid gap-4 pb-4 sm:grid-cols-2 sm:gap-8">
         <div className="space-y-2">
           {line && <p className="font-semibold wrap-anywhere">{line}</p>}
@@ -280,11 +292,17 @@ function EventDetailContent() {
               setRoomsRevision((n) => n + 1);
               void load.retry();
             }}
+            onConflict={(why) => {
+              parkFocus();
+              setEditing(false);
+              changedPending.current = why === "changed";
+              setRoomsRevision((n) => n + 1);
+              void load.retry();
+            }}
             onClose={() => {
               closedPanel.current = true;
               setEditing(false);
             }}
-            onStale={() => void load.reload()}
             action={seriesAction}
             locked={visibilityAction.running}
           />
