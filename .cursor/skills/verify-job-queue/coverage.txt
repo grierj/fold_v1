@@ -15,7 +15,7 @@ func b7cdadddc2a5a935 ./internal/jobs decideDead
 func 58ad337f8f533045 ./internal/jobs PruneDone
 func b898345a523110fb . App.decideDeadJob
 func f1749755f14e4bca . App.deliverMessagePush
-func 4606e8acdba246fe . pushWaitIn
+func 3c04dfe57b4cf721 . pushWaitIn
 decl internal/jobs/dead.go:func Dismiss(tx *gorm.DB, id uint) (bool, error)
 decl internal/jobs/dead.go:func LockDead(tx *gorm.DB, id uint) (bool, error)
 decl internal/jobs/dead.go:func Retry(tx *gorm.DB, id uint) (bool, error)
