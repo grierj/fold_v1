@@ -5,6 +5,7 @@ import { outcomeOf, useDateAttempts, useEditBase, useRosterGate, type DateAttemp
 import { dateKey, editBaseOf, editReadRefused, useEditRefresh } from "../lib/editBase";
 import { useFocusHome, useKeepFocusHome } from "../lib/focusHome";
 import type { ManageAuthority } from "../lib/manageAuthority";
+import { useKeptDraft } from "../lib/unsavedChanges";
 import { useLoad } from "../lib/useLoad";
 import { isObject } from "../lib/wireValues";
 import { DateEditor, type DateDraftHold } from "./DateEditor";
@@ -96,6 +97,8 @@ function ManageDateTools({ eventId, date, occurrenceId, authority, onDateChanged
   if (held.current && !sameOwner(held.current.owner, owner)) held.current = null;
   held.current ??= { owner, hold: { current: null } };
   const hold = held.current.hold;
+  // While authority is checked or the date is read again the editor is off the screen and its draft is kept here.
+  useKeptDraft(() => hold.current?.unsent === true, editing);
 
   // Roster writes on this date in flight for the session: the one starter of the read after a write, the
   // kept-dates panel's inside the editor included, so the editor's questions never outlive the facts they asked under.

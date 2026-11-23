@@ -131,8 +131,10 @@ function proposedLines(changes: Readonly<DateEditChanges>, reason?: string): str
 // What a host holds for an editor it may unmount and mount again (while it checks that the manager still
 // manages the date, or reads the date again): the draft, the stored date as the editor last saw it, the reason,
 // the draft's identity and field versions, what the last send's answer said, and the dates its last save was
-// refused for because someone who left kept them (DEC-156), which a remount opens again.
+// refused for because someone who left kept them (DEC-156), which a remount opens again. `unsent` says the draft
+// holds a change no save has taken: the host asks before the page is left while the editor is off the screen.
 export interface DateDraftHold {
+  unsent: boolean;
   draft: Fields;
   seen: Fields;
   reason: string;
@@ -314,11 +316,18 @@ export function DateEditor({
     onAuthorityLost,
   });
 
+  const status = attempts.status(key);
+  const locked = busy || status !== "idle";
+  const changesNow = JSON.stringify(changesOf(draft, stored, base));
+  // What this editor's last stored save took, which the form still shows as changes until the date is read again.
+  const taken = useRef<string | null>(null);
+  // A save on its way or in doubt is the session's attempts' to finish, here or on another page.
+  const unsent = !locked && changesNow !== "{}" && changesNow !== taken.current;
+
   useLayoutEffect(() => {
-    if (hold) hold.current = { draft, seen, reason, draftId, versions: versions.current, notice: error, kept: kept.refusal?.dates ?? null };
+    if (hold) hold.current = { unsent, draft, seen, reason, draftId, versions: versions.current, notice: error, kept: kept.refusal?.dates ?? null };
   });
 
-  const status = attempts.status(key);
   const canSave = !!permit && attempts.canSave(permit);
   const recovery = permit ? attempts.recovery(permit) : null;
   const canReplay = !!permit && attempts.canReplay(permit);
@@ -380,6 +389,7 @@ export function DateEditor({
 
     switch (v.kind) {
       case "stored":
+        if (!replaying) taken.current = changesNow;
         kept.close();
         setBusy(false);
         setError(null);
@@ -482,10 +492,8 @@ export function DateEditor({
     await settle(await sending, action, true, at, permit);
   }
 
-  const locked = busy || status !== "idle";
-  // Leaving the page with a change typed and not sent asks first (DEC-98), as the series editor does. A save on its
-  // way or in doubt is the session's attempts' to finish, here or on another page.
-  useUnsavedChanges(!locked && Object.keys(changesOf(draft, stored, base)).length > 0);
+  // Leaving the page with a change typed and not sent asks first (DEC-98), as the series editor does.
+  useUnsavedChanges(unsent);
 
   return (<>
     <Form ref={root} tabIndex={-1} noValidate onSubmit={save} className="mt-3 space-y-3 border-t border-border pt-3">
