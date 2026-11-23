@@ -91,7 +91,7 @@ type Vars struct {
 	Visibility string // new visibility, in words
 	GroupVis   string // the group's visibility, in words
 	Note       string // a short reason the actor gave
-	Count      int    // how many events this row covers; Send sets it (to 1 for a new row) unless the caller gave one, as system.job_dead does for its tries
+	Count      int    // how many events this row covers; Send sets it (to 1 for a new row) unless the caller gave one, as system.job_dead does for its attempts used
 	KeptCount  int    // departure summary: exact dates retained
 	EndedCount int    // departure summary: upcoming registrations ended
 	// SubjectKind is who the notice is about when that person is a teen or a
@@ -775,12 +775,12 @@ func init() {
 		// on Admin, System. Bell only: the commonest cause is the mail or push
 		// service being down, so an alert that needed either would chain. It
 		// renders only from Change (what the task does, in words) and Count
-		// (the tries); a job's payload and error text can name people, so they
+		// (attempts used); a job's payload and error text can name people, so they
 		// never reach it.
 		Key: SystemJobDead, Category: CatAdmin, Waiting: true,
 		Render: func(v Vars) (string, string) {
 			return "A background task stopped: " + or(v.Change, "a task"),
-				fmt.Sprintf("It could not finish after %d tries. Open Admin, then System to try it again or set it aside.", v.Count)
+				fmt.Sprintf("Attempts used: %d. Open Admin, then System to try it again or set it aside.", v.Count)
 		},
 	})
 	register(Kind{
