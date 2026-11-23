@@ -135,9 +135,7 @@ func (a *App) applyEmailEvent(ctx context.Context, e emailEventJob) error {
 		switch e.Kind {
 		case providers.EventDelivered:
 			res = deliveries.Where("status = ?", models.DeliverySent).Update("status", models.DeliveryDelivered)
-			if res.Error == nil {
-				moved, merr = moveRecipientsWhere(tx, policy.RecipientReportDelivered, map[string]any{"updated_at": time.Now()}, byProviderID, e.MessageID)
-			}
+			moved, merr = moveRecipientsWhere(tx, policy.RecipientReportDelivered, map[string]any{"updated_at": time.Now()}, byProviderID, e.MessageID)
 		case providers.EventBounced, providers.EventComplained:
 			reason := models.BounceSoft
 			move := policy.RecipientReportBounced
@@ -149,9 +147,7 @@ func (a *App) applyEmailEvent(ctx context.Context, e emailEventJob) error {
 			}
 			res = deliveries.Where("status IN ?", []string{models.DeliverySent, models.DeliveryDelivered}).
 				Updates(map[string]any{"status": models.DeliveryBounced, "reason": reason})
-			if res.Error == nil {
-				moved, merr = moveRecipientsWhere(tx, move, map[string]any{"reason": reason, "updated_at": time.Now()}, byProviderID, e.MessageID)
-			}
+			moved, merr = moveRecipientsWhere(tx, move, map[string]any{"reason": reason, "updated_at": time.Now()}, byProviderID, e.MessageID)
 		default:
 			return nil
 		}
