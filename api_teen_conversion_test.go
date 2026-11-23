@@ -5,7 +5,9 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"reflect"
+	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -220,63 +222,126 @@ func TestTeenConversionStatusMovesEndSessionsAndAreAudited(t *testing.T) {
 }
 
 // A consent that enables a staged teen again restores their seats and decides
-// the conversion at one instant (AGENTS.md: take now once per transaction). The
-// clock steps a day after its first read: the restore reads it on the eve of the
-// teen's 18th birthday, when the conversion still completes; a second read
-// would find an adult, and a teen conversion at 18 waits.
+// the conversion at one instant, read after the membership restore's group
+// locks (AGENTS.md: take now once per transaction). Another session holds the
+// teen's group, and the clock moves on while the consent waits for it: T0
+// before the wait, T1 (an hour before the church midnight of the teen's 18th
+// birthday) at the first read after it, T2 (an hour after) at every later
+// read. A date starting between T0 and T1 began while the consent waited, so
+// the restore leaves it alone; a later date comes back; a 17-year-old's
+// conversion completes. A read before the wait, or the wall clock in the
+// restore, brings the started date back; a second read finds an adult, whose
+// conversion waits.
 func TestTeenConsentRestoreAndConversionShareOneInstant(t *testing.T) {
 	app := testApp(t)
 	admin, gid := openGroup(t, app, "One instant")
 	f := pendingTeenConversion(t, app, admin, gid, "instant", true)
 	apiDo(t, admin, "POST", "/api/v1/admin/guardian-links/"+itoa(f.link.ID)+"/confirm", map[string]string{"checkNote": "Checked teen account relationship"}, 200)
-	apiDo(t, admin, "POST", consentPath(&f.user), map[string]string{"scope": "account", "status": "revoked"}, 200)
-	birthday := time.Now().UTC().Truncate(time.Second)
-	today, err := churchClockIn(app.DB, birthday)
+	loc, err := churchZoneIn(app.DB)
 	if err != nil {
 		t.Fatal(err)
 	}
-	born := time.Date(today.Year()-18, today.Month(), today.Day(), 0, 0, 0, 0, time.UTC)
+	wall := time.Now().In(loc)
+	birthday := time.Date(wall.Year(), wall.Month(), wall.Day()+2, 0, 0, 0, 0, loc)
+	if birthday.Month() == time.February && birthday.Day() == 29 {
+		birthday = birthday.AddDate(0, 0, 1)
+	}
+	t0, started, t1, t2 := birthday.Add(-3*time.Hour), birthday.Add(-2*time.Hour), birthday.Add(-time.Hour), birthday.Add(time.Hour)
+	born := time.Date(birthday.Year()-18, birthday.Month(), birthday.Day(), 0, 0, 0, 0, time.UTC)
 	for _, row := range []struct {
 		model any
 		id    uint
 	}{{&models.User{}, f.user.ID}, {&models.AccountRequest{}, f.request.ID}, {&models.HouseholdPerson{}, f.person.ID}} {
-		if err := app.DB.Model(row.model).Where("id = ?", row.id).Update("birth_date", born).Error; err != nil {
-			t.Fatal(err)
+		gormMust(t, app.DB.Model(row.model).Where("id = ?", row.id).Update("birth_date", born))
+	}
+	groupID, err := strconv.ParseUint(gid, 10, 64)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gormMust(t, app.DB.Create(&models.Membership{UserID: f.user.ID, GroupID: uint(groupID), Role: models.MembershipMember, Status: models.MembershipActive}))
+	eventID, _ := seedCappedEvent(t, app, admin, gid, nil, false)
+	seats := map[string]uint{}
+	for name, at := range map[string]time.Time{"started": started, "ahead": birthday.AddDate(0, 0, 7)} {
+		at = at.UTC()
+		occurrence := models.EventOccurrence{EventID: eventID, OriginalDate: calDate(at.Format("2006-01-02")), StartsAt: at, EndsAt: at.Add(time.Hour), Status: models.OccurrenceScheduled}
+		gormMust(t, app.DB.Create(&occurrence))
+		row := models.Registration{OccurrenceID: occurrence.ID, UserID: &f.user.ID, Status: models.RegGoing, AttendanceMode: models.AttendanceInPerson, Source: "web"}
+		gormMust(t, app.DB.Create(&row))
+		seats[name] = row.ID
+	}
+	apiDo(t, admin, "POST", consentPath(&f.user), map[string]string{"scope": "account", "status": "revoked"}, 200)
+
+	holder := app.DB.Begin()
+	gormMust(t, holder)
+	t.Cleanup(func() { holder.Rollback() })
+	var holderPID int
+	gormMust(t, holder.Raw("SELECT pg_backend_pid()").Scan(&holderPID))
+	var held []uint
+	gormMust(t, holder.Raw("SELECT id FROM groups WHERE id = ? FOR UPDATE", groupID).Scan(&held))
+	var waited atomic.Bool
+	var after atomic.Int32
+	app.clock = func() time.Time {
+		if !waited.Load() {
+			return t0
 		}
+		if after.Add(1) == 1 {
+			return t1
+		}
+		return t2
 	}
 	var adminUser models.User
-	app.DB.Where("email = ?", testEmail("admin")).First(&adminUser)
+	gormMust(t, app.DB.Where("email = ?", testEmail("admin")).First(&adminUser))
 	c, _ := gin.CreateTestContext(httptest.NewRecorder())
 	c.Request = httptest.NewRequest("POST", "/", nil)
-	reads := 0
-	err = app.contactMutation(contactChange{UserID: f.user.ID}, func(tx *gorm.DB) error {
-		actor, teen, err := lockConsentUsers(tx, adminUser.ID, f.user.ID)
-		if err != nil {
-			return err
-		}
-		// The gate has read the clock already; count from here.
-		app.clock = func() time.Time {
-			reads++
-			if reads == 1 {
-				return birthday.Add(-24 * time.Hour)
+	done := make(chan error, 1)
+	go func() {
+		done <- app.contactMutation(contactChange{UserID: f.user.ID}, func(tx *gorm.DB) error {
+			actor, teen, err := lockConsentUsers(tx, adminUser.ID, f.user.ID)
+			if err != nil {
+				return err
 			}
-			return birthday
-		}
-		return app.changeTeenConsent(tx, c, teen, actor, teenConsentChange{Scope: models.TeenConsentAccount, Status: models.ConsentGranted, EvidenceText: "Signed paper consent"})
-	})
+			return app.changeTeenConsent(tx, c, teen, actor, teenConsentChange{Scope: models.TeenConsentAccount, Status: models.ConsentGranted, EvidenceText: "Signed paper consent"})
+		})
+	}()
+	waiterBlockedBy(t, app.DB, holderPID, `"groups"`)
+	waited.Store(true)
+	holder.Rollback()
+	err = awaitDBResult(t, done)
 	app.clock = nil
 	if err != nil {
 		t.Fatal(err)
 	}
-	if reads == 0 {
-		t.Fatal("the consent never read the app clock")
-	}
+
 	var user models.User
-	app.DB.First(&user, f.user.ID)
+	gormMust(t, app.DB.First(&user, f.user.ID))
 	var person models.HouseholdPerson
-	app.DB.First(&person, f.person.ID)
+	gormMust(t, app.DB.First(&person, f.person.ID))
 	if user.Status != models.UserActive || person.ConvertedUserID == nil || *person.ConvertedUserID != user.ID {
-		t.Fatalf("status %s, person converted to %v; want active and converted to %d: the restore and the conversion judged different instants", user.Status, person.ConvertedUserID, user.ID)
+		t.Errorf("status %s, person converted to %v; want active and converted to %d: the conversion judged an instant after the restore's", user.Status, person.ConvertedUserID, user.ID)
+	}
+	judged := map[uint]string{}
+	var rows []models.AuditLog
+	gormMust(t, app.DB.Where("action IN ?", []string{audit.RegistrationRestored, audit.RegistrationNotRestored}).Order("id").Find(&rows))
+	for _, r := range rows {
+		var m struct {
+			RegistrationID uint `json:"registrationId"`
+		}
+		if err := json.Unmarshal([]byte(r.MetaJSON), &m); err != nil {
+			t.Fatal(err)
+		}
+		judged[m.RegistrationID] = r.Action
+	}
+	if got := judged[seats["started"]]; got != "" {
+		t.Errorf("the date that started while the consent waited was judged (%s): the restore read the clock before the group lock, or not the transaction's clock", got)
+	}
+	if got := judged[seats["ahead"]]; got != audit.RegistrationRestored {
+		t.Errorf("the later date was judged %q, want %s", got, audit.RegistrationRestored)
+	}
+	for name, id := range seats {
+		var reg models.Registration
+		if err := app.DB.First(&reg, id).Error; err != nil || reg.Status != models.RegGoing {
+			t.Errorf("%s seat: %+v %v, want it kept as going", name, reg, err)
+		}
 	}
 }
 
