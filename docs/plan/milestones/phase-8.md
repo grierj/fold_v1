@@ -160,6 +160,26 @@ Further end-state criteria:
   language stays warm and plain. The series page and the per-date page
   are never collapsed into one.
 
+**M8.1 completion record.** In the running app at 390 × 844, the changed
+date answered all six questions before scrolling. The RSVP bar stayed above
+the navigation tabs while scrolling. The series remained reachable on its
+own page. The browser tests covered series RSVP and Undo, waitlist promotion,
+restricted invitations, cancelled-date access, and the in-app confirmation
+dialogs. Attendance shows counts first and reveals authorized names in batches
+of 25. Fold refuses saves through the retired date endpoint and group detail
+requests without the new paging marker. See [the API cutover](../../API.md#guarded-date-edit).
+
+Local verification passed the Go suite, 3,444 web tests and 214 Playwright
+checks. Running-app layout and accessibility checks passed at 390, 768 and
+1280px. The eager chunks totaled 142.4 kB gzip against a 145 kB budget.
+
+Explicit waitlist-promotion confirmation and its deadline remain unmet
+follow-ups. The displayed-end versus stored-end discrepancy remains open
+(brief section 9). The real-phone safe-area and live-redeploy checks are in
+[FIRST-CHURCH-CHECKS.md](../../FIRST-CHURCH-CHECKS.md). The level-3 droplet
+restore and crossings drill is a release check, with L1–L5 documented in
+[DEPLOY-DIGITALOCEAN.md](../../DEPLOY-DIGITALOCEAN.md).
+
 **M8.2 — The guest and token flows feel account-free (teardown P0; Partiful)**
 Existing surface. Closes the Audit 2026-11 index's named gap: token-page
 a11y/390px coverage for `/invite`, `/set-password`, `/guest/*`.
