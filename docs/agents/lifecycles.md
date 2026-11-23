@@ -73,7 +73,7 @@ describe today's code, including the lifecycles that do not follow the rule belo
 | `groups.visibility` | `public` `private` `invite_only` | Wider is free. Narrower previews, needs consent and cancels (`docs/agents/visibility.md`): `visibility_consent.go:checkConsentIn` | `api_groups.go:apiUpdateGroup` through `api_group_visibility.go:applyGroupTightening` | `groups_visibility_check`, `TestGroupMorePrivateTightensAndCancels` |
 | `events.visibility` | `public` `private` `invite_only` | the same, with `internal/policy/policy.go:CanSetEventVisibility` | `api_event_access.go:apiSetEventVisibility`, `api_group_visibility.go:applyGroupTightening` | `events_visibility_check`, `TestEveryEventVisibilityWriterDeclaresConsent` |
 | `event_occurrences.visibility_override` | `public` `private` `invite_only` | the same; null means the event's value (`internal/policy/policy.go:EffectiveVisibility`) | `api_occurrence_visibility.go:changeDateVisibilitySelected` | `event_occurrences_visibility_override_check`, `TestVisibilityConsentLifecycleMatrix` |
-| `events.leader_opened` (a flag beside visibility) | false, true: the event was opened wider than its group on purpose | set from `internal/policy/policy.go:MoreOpen` when the event is made or its visibility set; a group tightening asks before narrowing an opened event | `api_events.go:apiCreateEvent`, `api_event_access.go:apiSetEventVisibility`, `api_group_visibility.go:applyGroupTightening` | `events_churchwide_check`, `TestLeaderOpenedEventsAskBeforeTightening` |
+| `events.leader_opened` (a flag beside visibility) | false, true: the event was opened wider than its group on purpose | set from `internal/policy/policy.go:MoreOpen` when the event is made or its visibility set; a group tightening asks before narrowing an opened event | `api_events.go:apiCreateEvent`, `api_event_access.go:apiSetEventVisibility`, `api_group_visibility.go:applyGroupTightening` | `TestLeaderOpenedEventsAskBeforeTightening`; the CHECK `events_churchwide_check` forbids the flag on a church-wide event |
 | A visibility consent (a plan per transaction, `settings.visibility_consent_epoch`) | an entry untaken, taken; the plan done; the epoch replaced at each boot | `internal/consent/consent.go:Check`; `visibility_consent.go:checkConsentIn` runs once per write | `visibility_consent.go:checkConsentIn`; the epoch only by `restore_fence.go:bootRestoreFence` | trigger `audit_logs_visibility_consent`, `TestConsentEpochHasOneWriter`, `TestVisibilityCancellationsConsumeACheckedPlan` |
 | A date's phase (no column) | upcoming, underway, ended | each reader compares `starts_at` and `ends_at` with its own `now`; an end time cannot rise while someone keeps the date (`api_date_edits.go:refuseKeptDates`) | none; nothing stamps an ended date | trigger `event_occurrences_kept_date_end`, `TestEndsAtWritersCheckKeptDates` |
 | Edit revisions (`edit_revision`, `edit_receipt`) | a counter and a receipt | database triggers (migration 00010); `api_date_edits.go:baseSuperseded` compares | the triggers | `TestDateEditRevisionsMigration` |
@@ -114,7 +114,7 @@ describe today's code, including the lifecycles that do not follow the rule belo
 | Set-once and count-up columns | `jobs.claim_seq` (a new number per claim), `notifications.batch_count` (up on a merge), `message_recipients.audience_admitted_at` (set once) | each in its one writer | `internal/jobs/jobs.go:RunOnce`, `internal/notify/notify.go:merge`, `messages_send.go:markRecipient`, `messages_push.go:markPushAdmitted` | `TestJobClaimSeqMigration`, `TestMessageAudienceAdmittedMigration` |
 | `consents.status` | `opted_in` `opted_out` | Append only: the latest row per person, channel and scope is the state; with no row, the caller's default | `email_unsubscribe.go:setConsent` | `consents_status_check`, trigger `consents_append_only`, `TestConsentTriggerAllowsOnlyTheErasureScrub` |
 | An address's own opt-out and suppression | present or absent; open or cleared | `email_optouts.go:readEmailOff`; `docs/agents/mail.md` | `email_optouts.go:exportEmailOptOutsIn`, `email_optouts.go:clearOptOutOnTurnOn`, `api_email_webhooks.go:applyEmailEvent`, `api_admin_suppressions.go:apiAdminClearSuppression` | `TestEmailChoiceSQLStaysInOneHelper`, `TestSuppressionSQLStaysInItsHelpers` |
-| A reminder sent once | unwritten, written | unique keys from `reminder_key.go:reminderKey` | `reminders.go:writeReminder`, `reminders_push.go:writePushReminder` | `TestReminderSweepQueuesOncePerDate` |
+| A reminder sent once | unwritten, written | unique keys built by `reminder_key.go:reminderKeySQL` in SQL and by the `String` method of `reminder_key.go:reminderKey` in Go | `reminders.go:writeReminder`, `reminders_push.go:writePushReminder` | `TestReminderSweepQueuesOncePerDate` |
 | Backup status (derived from files) | unwatched, missing, unreadable, stale, ok | `backup_status.go:readBackupStatus` | none | `TestReadBackupStatusStates` |
 
 ## Enumerated columns that are not lifecycles
@@ -141,8 +141,14 @@ chosen when the row is made, or is a setting that may change to any value its ow
 - `web/src/components/ui/Form.tsx` validates; the submit lifecycle is `web/src/lib/useAction.ts`
   (idle, running, failed, done). It refuses a second run while one is on its way, always leaves
   running, words a throw with `errorText`, and keeps a follow-up step (a reload after the save)
-  apart from the save, so a failed reload is never told as a failed save. Most older forms still
-  keep their own `busy`, `error` and done values; the `busyFlags` ratchet only lets that count fall.
+  apart from the save, so a failed reload is never told as a failed save. A `reset` while a run is
+  on its way keeps it running and lands its answer as idle, so a cancelled draft's answer never
+  shows in the next one. A save that worked but whose reload failed offers nothing against the
+  stale data until a reload lands (`web/src/components/GuardianConsentCard.tsx`,
+  `web/src/components/TeenConsentPanel.tsx`). Most older forms still keep their own `busy`,
+  `error` and done values; the `busyFlags` ratchet only lets that count fall. It counts
+  single-line `useState` declarations by name, so a flag named otherwise (`pending`) or a
+  declaration split across lines is not counted.
 - A making-more-private review is preview, review, confirm in two places with the same rule:
   `web/src/components/EventVisibility.tsx` and `web/src/pages/GroupDetail.tsx`, around
   `web/src/components/GroupVisibilityReview.tsx`. Each runs its Save (the preview included) and the
