@@ -27,8 +27,9 @@ import (
 // messages chain the guard reports Update or UpdateColumn of "status" or of a
 // column it cannot read, and every Updates or UpdateColumns except of a map
 // it can read whole: a map literal, or a local map the function makes and
-// hands to no other call, whose keys are all plain column names in string
-// literals, none of them status. So a message struct, any
+// only sets, keys and passes to Updates (no other call, no second name for
+// it), whose keys are all plain column names in string literals, none of
+// them status. So a message struct, any
 // other struct, a parameter's map, a map with a computed key and a map built
 // elsewhere are all reported, whatever Select precedes them. "Status", the
 // field's name, counts as the column, as gorm resolves it. Anywhere it reports a
@@ -281,20 +282,6 @@ func messageLocalMaps(fd *ast.FuncDecl) (status, computed, made, params map[stri
 		switch v := n.(type) {
 		case *ast.FuncLit:
 			addParams(v.Type.Params)
-		case *ast.CallExpr:
-			// A map handed to another call (maps.Copy, a helper) may come back
-			// with keys the guard did not see.
-			if sel, ok := guardkit.Unparen(v.Fun).(*ast.SelectorExpr); ok && (sel.Sel.Name == "Updates" || sel.Sel.Name == "UpdateColumns") {
-				return true
-			}
-			for _, arg := range v.Args {
-				if u, ok := guardkit.Unparen(arg).(*ast.UnaryExpr); ok && u.Op == token.AND {
-					arg = u.X
-				}
-				if id, ok := guardkit.Unparen(arg).(*ast.Ident); ok {
-					computed[id.Name] = true
-				}
-			}
 		case *ast.ValueSpec:
 			for i, name := range v.Names {
 				if i < len(v.Values) {
@@ -334,6 +321,46 @@ func messageLocalMaps(fd *ast.FuncDecl) (status, computed, made, params map[stri
 				}
 			}
 		}
+		return true
+	})
+	// A made map stays readable only while its name is used in three ways: set
+	// (it is declared or assigned), given a key (m[k] = v) and passed to
+	// Updates. Any other use (another call such as maps.Copy, a second name
+	// for it, a range, a return) may add keys the guard does not see.
+	guardkit.InspectStack(fd.Body, func(n ast.Node, stack []ast.Node) bool {
+		id, ok := n.(*ast.Ident)
+		if !ok || !made[id.Name] || len(stack) < 2 {
+			return true
+		}
+		switch parent := stack[len(stack)-2].(type) {
+		case *ast.ValueSpec:
+			for _, name := range parent.Names {
+				if name == id {
+					return true
+				}
+			}
+		case *ast.AssignStmt:
+			for _, l := range parent.Lhs {
+				if l == ast.Expr(id) {
+					return true
+				}
+			}
+		case *ast.IndexExpr:
+			if parent.X == ast.Expr(id) && len(stack) >= 3 {
+				if as, ok := stack[len(stack)-3].(*ast.AssignStmt); ok {
+					for _, l := range as.Lhs {
+						if l == ast.Expr(parent) {
+							return true
+						}
+					}
+				}
+			}
+		case *ast.CallExpr:
+			if sel, ok := guardkit.Unparen(parent.Fun).(*ast.SelectorExpr); ok && (sel.Sel.Name == "Updates" || sel.Sel.Name == "UpdateColumns") {
+				return true
+			}
+		}
+		computed[id.Name] = true
 		return true
 	})
 	return status, computed, made, params
@@ -586,6 +613,13 @@ func (a *App) send(tx *gorm.DB, m *models.Message) error {
 func (a *App) send(tx *gorm.DB, m *models.Message, cols map[string]any) error {
 	fields := map[string]any{"error": ""}
 	maps.Copy(fields, cols)
+	return tx.Model(m).Updates(fields).Error
+}`, "send: Updates of a map with computed keys"},
+		{"a local map under a second name", `package main
+func (a *App) send(tx *gorm.DB, m *models.Message) error {
+	fields := map[string]any{"error": ""}
+	extra := fields
+	extra["status"] = "sent"
 	return tx.Model(m).Updates(fields).Error
 }`, "send: Updates of a map with computed keys"},
 		{"a quoted identifier as the key", `package main
