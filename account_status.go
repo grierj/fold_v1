@@ -24,15 +24,14 @@ func newAccountStatus(accountType string, hasPassword bool) string {
 }
 
 // setAccountStatusIn is the one place an existing account's status changes
-// (an admin edit, a teen's account consent granted or revoked, a household
-// teen's conversion waiting or completing, a teen turning 18). updates holds
-// the new "status" and any other columns the same edit writes; the caller holds
-// the contact gate and the user's lock. actor 0 is the system; now is the
-// transaction's clock, which decides which future seats come back or are
-// freed. The only other writers of
-// the column are upgradeGuestIn, replacePasswordIn (invitedBecomesActive, in
-// the statement that sets the password) and the erasure (tombstoneUserIn and
-// the tombstone sweep's scrubTombstoneRowIn).
+// (DEC-159): an admin edit, a teen's account consent granted or revoked, a
+// household teen's conversion waiting or completing, a teen turning 18. updates
+// holds the new "status" and any other columns the same edit writes; the caller
+// holds the contact gate and the user's lock. actor 0 is the system; now is the
+// transaction's clock, which decides which future seats come back or are freed.
+// The only other writers of the column are upgradeGuestIn, replacePasswordIn
+// (invitedBecomesActive, in the statement that sets the password) and the
+// erasure (tombstoneUserIn and the tombstone sweep's scrubTombstoneRowIn).
 //
 // Order is fixed by what each step needs to see:
 //   - Enabling (disabled -> listed): memberships and registrations come back

@@ -161,7 +161,7 @@ func TestTeenConversionApprovalConsentAndFreshLink(t *testing.T) {
 }
 
 // A conversion's own status moves end every session and are audited, like any
-// other account status change (#428). Consent first: granting it activates the
+// other account status change (DEC-159). Consent first: granting it activates the
 // account and the waiting conversion sends it back to pending_consent in the
 // same request; the link confirmation then completes it. The rows name no actor
 // and no IP: who ran a completion step is not stored (DEC-159, inventory P5).

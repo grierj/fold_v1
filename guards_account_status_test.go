@@ -14,7 +14,7 @@ import (
 
 // ---------------------------------------------------------------------------
 // users.status has one writer, setAccountStatusIn, which owns the move's
-// session bump, seat work and token revoke (#428, docs/agents/lifecycles.md).
+// session bump, seat work and token revoke (DEC-159, docs/agents/lifecycles.md).
 // upgradeGuestIn turns a guest row into an account, and two statements keep the
 // status in their own UPDATE: replacePasswordIn (with the password, through
 // endAllSessionsIn) and the erasure (tombstoneUserIn, and scrubTombstoneRowSQL

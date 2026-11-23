@@ -96,7 +96,7 @@ func TestAgeRolloverStatusesAndConsentHistory(t *testing.T) {
 }
 
 // Every status the rollover changes ends the account's sessions; an unchanged
-// status leaves them alone (#428).
+// status leaves them alone (DEC-159).
 func TestAgeRolloverStatusChangesEndSessions(t *testing.T) {
 	app := testApp(t)
 	now := rolloverInstant(t, "2026-10-22T12:00:00Z")
