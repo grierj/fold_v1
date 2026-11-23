@@ -3,6 +3,16 @@
 The everyday commands are in `AGENTS.md`. This file has the details you need when a test
 setup, a source guard or the e2e harness is what you are changing or debugging.
 
+## Scope and approval
+
+Follow the scope, fixture approval, and performance rules in `AGENTS.md` before using the
+instructions below. Preset data used in normal tests of actual behavior does not need human
+approval. An expansive fixture for a drill, experiment, lab, or other work outside normal feature
+testing does. For each such fixture, explain its purpose, its relation to the change, and its
+benefits, and wait for explicit approval. Normal mocks and stubs may support tests of real
+behavior; do not build fake implementations or endpoints just to test them. Run a performance
+experiment only when the requested change specifically calls for it.
+
 ## Go tests
 
 - `make test` runs `go test ./...` against `DATABASE_URL` (`make go-test`), plus the shell
@@ -20,6 +30,88 @@ setup, a source guard or the e2e harness is what you are changing or debugging.
   `synchronous_commit=off`.
 - Test seams: `a.now` is the one injected clock; the other seams are the `a.hooks` struct in
   `test_hooks.go`.
+- A surface that shows a date through an exact-date grant reads the grant and everything it
+  shows in one snapshot. Two different checks prove that, and a new surface needs both:
+  - **One committed state (isolation).** Commit the real guarded edit (stamp the lapsed grant,
+    move and retitle the date) at the `invitationReadStep` "grants" seam, one-shot since the
+    edit's notices read invitations too, and require one committed state
+    (`TestInvitationReadersNeverStraddleAnEdit`). A reader authorized by a link, a switch, a role
+    or a group filter also commits an authority change plus new data at `readerAuthorized` (its
+    surface name, right after the judgment) through `atReaderSeam`; a judgment read outside the
+    snapshot, or a Read Committed snapshot, shows the commit's data. The calendar's
+    kept-date fact and its carry-in (DEC-157) commit at `readerAuthorized("calendar kept dates")`,
+    after the dates in range are loaded: a demotion and a new kept grant
+    (`TestManagersReachKeptDatesOnTheirCalendar`). A push commits at `pushStep`
+    ("snapshot" before it opens, "destination" once the device is read). The manager's exact-date
+    read commits at `managedDateStep` ("authorized", once its manager authority is judged): a
+    demotion, a new sign-up and a new kept grant, or a church zone change
+    (`TestManagedDateRosterReadsAuthorityInItsSnapshot`,
+    `TestManagedDateHouseholdAgeFollowsTheSnapshotClock`). The group reads (`readGroup`: the
+    group page, its dates, its roster and a role change's roster reply) commit at
+    `readerAuthorized` ("group detail", "group events", "group members") a demotion, a new teen,
+    a sign-up, a retitled date and a moved group place, and require the answer byte for byte as
+    before (`TestGroupReadsJudgeAuthorityInTheirSnapshot`); each other authority change (removal
+    from an invite-only group, an admin demoted, a tightening, an unchanged role, a guardian link
+    revoked or confirmed) commits there with a sentinel title and member
+    (`TestGroupReadsJudgeEveryAuthorityChangeInTheirSnapshot`); a member or a co-leader with
+    recovery evidence is erased through the real pipeline (`TestGroupReadsShowAnErasureWhole`);
+    the clock moves across a care window or a date's start (`TestGroupReadsCrossTheCareWindowOnOneClock`).
+    At `groupReadBegin`, before the first statement, they end the caller's session each way
+    (`TestGroupReadsJudgeTheSessionInTheirSnapshot`) or the actor's standing between a role change
+    and its reply (`TestRoleChangeRepliesWithTheActorsCurrentRoster`). At `groupReadEnd`, once the
+    answer is built and before COMMIT, the backend is ended, so the commit fails and the answer is
+    the generic 500 (`TestGroupReadCommitFailureAnswersNothing`). The event page and the
+    household read do the same at `readerBegin`, `readerAuthorized` ("event detail": a host
+    removed through the real route, a demotion and a Going attendee erased through the real
+    pipeline; "my household": another adult erased through the real pipeline, a revoked link and
+    the reader's own seat removed) and `readerEnd` (`TestEventPageReadsOneSnapshotAndAcknowledgesIt`,
+    `TestMyHouseholdReadsOneSnapshotAndAcknowledgesIt`). A participating read (M8.1) is sent with
+    `apiClient.pinned` (`pinnedAs`) and checked with `wantAck`/`wantNoAck`: the acknowledgment
+    names the viewer the snapshot judged, so a session ended at a begin seam must be `anon`.
+    A refusal is acknowledged only once its ROLLBACK came back (`decidingSnapshot`): the
+    `internal/testdb` proxy loses that ROLLBACK, or its answer, on the reader's own connection
+    (`snapshotRollbackFault`), and the refusal is the generic 500 with no acknowledgment
+    (`TestSnapshotRefusalsNeedAConfirmedRollback`).
+  - **A default that survives a failure.** A read the page shows a default for runs in a savepoint
+    on a snapshot (`lenientReadIn`). Prove it with a real PostgreSQL error, not a GORM one:
+    `failStatement` swaps the statement for a division by zero, so a read outside its savepoint
+    aborts the transaction and every read after it fails (`TestGroupReadFailuresStayWhole`).
+  - **No second connection.** Add the reader to `TestInvitationReadersUseOneConnection`, or run it
+    on a one-connection pool (`oneConnectionPool`, `oneConnection`): a read on `app.DB` while its
+    transaction is open fails the request. This proves only that nothing reads beside the
+    transaction (and, for a sender, that the provider is called after it:
+    `TestPushesDecideInOneSnapshotAndSendAfter`, `TestGuardianCopyReadsInOneSnapshotAndSendsAfter`).
+    It passes at Read Committed, with unchanged data, and with an authority read moved before BEGIN.
+  - What each kind of test catches: a pre-BEGIN revocation test (`TestPushDestinationIsReadInThePayloadSnapshot`)
+    proves the decisive check is fresh, not that it shares a snapshot with the payload; the seam
+    tests (`TestPushPayloadComesFromTheDestinationsSnapshot`, `TestRoomCalendarReadsTheSwitchInItsSnapshot`,
+    `TestPreparationChoosesItsRowsInTheAudiencesSnapshot`, `TestRoleGatedMessageViewsReadOneSnapshot`,
+    `TestMessageListAndWriteRepliesReadOneSnapshot`)
+    prove the isolation boundary. Check each seam test fails with its transaction's `readSnapshot`
+    swapped for Read Committed, and, where the judgment could move, with it moved before BEGIN.
+- A Read Committed decision that must still be coherent (a claimed batch email row, Try again)
+  reads every protected fact in one statement (`loadDateFacts`) and decides with the shared
+  decisions over `memDates`. Prove it three ways: commit the real edit at `dateFactsRead` (after
+  the statement) and arm `invitationReadStep` too, so a split read would straddle; log the
+  transaction's reads after its choice or its locks and require the facts statement alone
+  (`wantOneFactsStatementPerRow`, `TestTryAgainNeverPairsALapsedGrantWithAMovedDate`); and keep
+  `TestDateFactsMatchTheQueries*` in step with any change to a `dbDates` query (each `memDates`
+  answer reimplements its filter over the loaded rows).
+- A contact-gated writer proves its Read Committed pin on `repeatableReadPool`, a second pool whose
+  sessions default to Repeatable Read: it waits for `holdContactGate` while the holder commits a
+  change it must honor (`TestGatedMutationsHonorWhatCommittedWhileTheyWaited`). To find unpinned
+  owners, run tests with `PGOPTIONS="-c default_transaction_isolation=repeatable\ read"`: the gate
+  refuses any other level (every form: exclusive, shared and the sweep's try-lock, all through
+  `takeContactGate`), so an owner without `contactGateTx` fails. A writer that never waits (the
+  sweep's try-lock) proves its pin by running on that pool
+  (`TestContactSweepRunsAtReadCommittedOnAnyDefault`).
+- A database trigger that guards against a writer outside the app is raced with raw SQL on its
+  own Read Committed connection, never by a test that takes the app's locks itself. A departure
+  parks at `departureStep` ("granted", right after `applyDeparture`, still holding the gate and
+  the kept dates' row locks; `newParkPoint`), the raw write is proved to wait on that backend
+  (`waiterBlockedBy`), and the departure is then let go (`TestKeptDateRaiseBehindTheIssuerIsRefused`).
+  Nothing gated may run while a departure is parked. "Fails without the trigger" is proved by
+  mutating the migration out of band, never by DDL on the shared test database.
 - Local concurrency tests can flake under load; rerun with `-count=8` before chasing them, and
   trust CI.
 
@@ -75,6 +167,26 @@ it, since the process peak could not be told from the fixtures' own.
   does not reproduce a 1 GB droplet's swap, the other services' memory or kernel pressure; that is a
   hand check in `docs/FIRST-CHURCH-CHECKS.md`, so the 1 GB floor is neither proven nor changed by these
   numbers.
+
+### Earlier releases (DEC-158)
+
+`TestPriorReleaseRefusesToStart`, `TestPriorProcessRunningAcrossTheUpgrade`,
+`TestRealServeRestartRotatesTheEpoch` and `TestRealServeBootWaitsForAnOpenConfirmation`
+(`restore_fence_test.go`) build and run real binaries: the current tree, and `v0.1.0` from its tag
+with `git archive` (`buildFold`, CGO off, `web/dist` holding only its README). `scripts/go-test.sh`
+builds both before its shards start and passes them in `FOLD_TEST_BUILD_CURRENT` and
+`FOLD_TEST_BUILD_V0_1_0`, so no shard compiles beside the timing tests; a direct `go test -run`
+builds them itself and removes the builds when the process ends. `TestPriorReleaseRefusesToStart`
+has three lanes: after setup, the live Down and a restore of that database (restore.sh's
+`pg_restore` flags, so it needs the restore tools below); a dump taken before the upgrade, on which
+`v0.1.0` still starts (L1); and the userless walk down to the baseline. They need the tag and
+full history (`fetch-depth: 0`) and a Go toolchain; without either they fail under `CI` and skip
+locally. They are the only tests that run an earlier release. Each runs `fold serve` as a
+subprocess on its own `testdb.Fresh` database (`APP_ENV=dev`, an explicit `SESSION_SECRET`, a
+temporary `UPLOAD_DIR`, a free `PORT`) and waits up to 60 s for `/healthz` or an exit. v0.1.0 is
+started on a schema already at `00014` before `00015` lands under it: a process that prepared its
+`SELECT *` statements before `00008`–`00014` changed columns fails them with 0A000 ("cached plan
+must not change result type") before it reaches the audit fence.
 
 ### Restore tests
 
@@ -637,12 +749,35 @@ without it; none is written before then.
 ## Frontend and e2e
 
 - `cd web && npm test` (Vitest).
+- Vitest runs files side by side in worker threads (`pool: "vmThreads"`), and Node's
+  `BroadcastChannel` reaches every thread of the process. `src/test/setup.ts` scopes every channel
+  name to its file, so a file's "other tab" channel still reaches core but never a tab in another
+  file (`src/test/setup.test.ts`).
 - `make lint-web` runs TypeScript, Knip, and Oxlint with the vendored rules. To run Oxlint on its
   own, use `cd web && npm run lint:anti-slop`.
 - `make e2e` runs Playwright against the real binary (first run:
   `cd web && npx playwright install chromium`). `web/e2e/run.sh` splits specs across shards
   (`E2E_SHARDS`), each with its own server, database and seed; never rely on another spec having
   run first. CI runs one plan over three machines (`E2E_RUNNER=i/3`, three shards each).
+- `web/e2e/server.sh` creates each shard database with `synchronous_commit = off`, like the Go
+  tests. All shards share one Postgres, so with commits waiting on the WAL flush, one slow
+  filesystem flush on the host (a multi-second btrfs commit was measured) holds every shard's
+  writes at once. Sign-ins and saves then outlast the 5s expect timeout while reads still answer.
+- To run some specs, pass a filter: `web/e2e/run.sh --grep "hosts\.spec|series-rsvp"` (the grep
+  matches file names too). Shards the filter leaves empty pass, and the run fails only when no test
+  matched on any shard. `run.sh` refuses a spec file name, which would be added to every shard's
+  planned files instead of narrowing them, and a `--reporter` option in either form, which would
+  replace the JSON reports it counts (`TestE2ERunnerRefusesBadArguments`). Use `-g` or `--grep`
+  to include a pattern and `-G` or `--grep-invert` to exclude one. The options that take a value
+  are the ones `run.sh` names: `-g`/`--grep`, `-G`/`--grep-invert`, `--project` (one name),
+  `--repeat-each`, `--retries`, `-j`/`--workers`, `--timeout`, `--global-timeout`,
+  `--max-failures` and `--trace`. Give the value as the next word (`-G hosts`,
+  `--global-timeout 120000`) or after `=` on the long option (`--grep-invert=hosts`); `run.sh`
+  refuses `-G=hosts`, which Playwright would read as the pattern `=hosts`. Flags without a value
+  (`--headed`, `-x`) pass as they are. Any other option's value given as its own word is refused
+  as a spec file name. Accepted options reach every shard, the dev shard too, unchanged
+  (`TestE2ERunnerForwardsFilters`). The sharded runner rejects `--list`; use Playwright directly to
+  list tests.
 - Shards are planned from `web/e2e/durations.json`, and a spec with no entry stops the plan: add an
   estimate when you add a spec, and refresh the file with `E2E_RECORD_DURATIONS=1 make e2e`
   (`E2E_SHARDS=9` is close to CI) when a spec's length changes a lot.
@@ -651,7 +786,11 @@ without it; none is written before then.
   `partSelected` guard. `UPDATE_UI_BASELINE=1` needs `E2E_SHARDS=1`.
 - Prefer `gotoSettled` to `waitForLoadState("networkidle")`. `signIn` and `signInTo` clear cookies
   first; `signInTo` leaves the app before its API login so no page swaps the CSRF cookie. Assert on
-  roles and visible text; accept `confirm()` with `page.on("dialog")`.
+  roles and visible text. EventDetail and EventDate ask in the app's dialog: check it with
+  `expectModalDialog` (`web/e2e/dialogs.ts`) and fail on any `page.on("dialog")`; elsewhere accept
+  `confirm()` with `page.on("dialog")`. With `SCREENS_DIR` set, `expectModalDialog` saves
+  `<name>-390.png` and `<name>-390x420.png` for each dialog it checks; open them to see the dialog at
+  phone width, as the axe and layout checks cannot judge how it looks.
 - Traces: `web/test-results/shard-<n>/`.
 - Golden files: `TestDateProjectorGoldens` rewrites `testdata/date_projector` with
   `UPDATE_GOLDEN=1`.

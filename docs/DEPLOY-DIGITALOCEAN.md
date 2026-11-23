@@ -298,7 +298,9 @@ SMS is not implemented yet; do not provision texting just to run this version.
 with `openssl rand -base64 48`. Store `.env` in the church password manager.
 Losing it signs everyone out and, later, loses encrypted provider secrets.
 Every app container on one database must share the same SESSION_SECRET;
-changing it turns off notifications on everyone's devices.
+changing it turns off notifications on everyone's devices. To change it, stop
+every app container, change it once, then start them: containers with
+different secrets reject each other's sign-ins and confirmations.
 
 The Compose network is `172.30.0.0/24`, which is the default
 `FOLD_TRUSTED_PROXIES`. Change the subnet and that variable together.
@@ -892,14 +894,15 @@ smoke.
 
 Every scripted deploy, forward upgrade and rollback refuses a target below
 the host's recovery level. Level 1 requires the restore barrier; level 2 also
-requires reason review. The scripts read integer `recoveryPolicy` from an
+requires reason review; level 3 also requires exact visibility consent
+(DEC-158), and a refused rollback names "exact visibility consent (level 3)". The scripts read integer `recoveryPolicy` from an
 image's `/fold version --json` output, or read the one-line
 `deploy/recovery-policy` file at a source commit. Missing release metadata means level 0;
 malformed metadata refuses. The host floor is the greater of `recovery-policy-floor`
 and the level of the image its current Compose pin names. There is no override.
 The floor file is recorded only after smoke passes and never decreases.
 
-This tree reports level 2 (`deploy/recovery-policy`). Never publish a release reporting `recoveryPolicy >= 1`
+This tree reports level 3 (`deploy/recovery-policy`). Never publish a release reporting `recoveryPolicy >= 1`
 before R4-6c-R's current-release restore tooling and operator procedure land
 and are verified. The local refusal drills do not verify that restore procedure
 or complete the [real-droplet checks](FIRST-CHURCH-CHECKS.md#live-install-m51-m53).
@@ -1064,22 +1067,93 @@ is different about a date without working the rule out again (DEC-155).
   of upcoming dates. Past dates written before the upgrade stay without a
   usual time, and so do dates of a series that repeats from
   `0001-01-01T00:00` UTC.
-- **Rolling back.** `upgrade.sh --rollback` hands the dump taken before the
-  upgrade and the previous image or commit to `restore.sh`, with the same
-  recovery-floor check and reopen rules as above. Starting the previous
-  release directly on the upgraded database, without a restore, is an option
-  only for a release that already holds `00008` and meets the recovery floor:
-  its migration runner treats the database as current, and its writes keep
-  working, while the trigger marks every series it edits. A rollback to
-  `v0.1.0` still needs its own dump, because `00008` removed the column that
-  release reads. When this release starts again it trusts nothing a marked
-  series holds: the page claims no time for it until the next edit or the
-  daily job settles it.
-- **`fold migrate down-one` loses the stored times.** It drops the table even
-  when it holds rows. Running Up again leaves it empty, and the daily job
-  rebuilds only upcoming dates; the past and `0001-01-01T00:00` times come
-  back only from a backup taken before the Down. The recovery level and the
-  deployment are unchanged.
+- **Recovery.** M8.1 also raises the recovery floor to 3. Follow
+  [the exact visibility consent recovery guidance](#upgrade-notes-exact-visibility-consent-m81)
+  below.
+- **Rolling down migration `00009` loses the stored times.** It drops the
+  table even when it holds rows. Reapplying the migration leaves it empty,
+  and the daily job rebuilds only upcoming dates. The past and
+  `0001-01-01T00:00` times come back only from a backup taken before the Down.
+  The recovery floor stays in place.
+
+### Upgrade notes: kept dates cannot end later (M8.1)
+
+The release that holds migration `00014` refuses to move a date later, or
+make it longer, while someone who left the group still holds that date
+(DEC-156).
+
+- **What changes.** A trigger on `event_occurrences` refuses a change that
+  makes a date end later while someone who left the group still holds that
+  date. The app asks the leader to remove them first. The migration stores
+  nothing, and it takes a brief lock on `event_occurrences`, bounded to 5
+  seconds, failing whole if the lock is not free, as in the notes above.
+- **Recovery.** Keep this release and follow
+  [the level-3 recovery guidance](#upgrade-notes-exact-visibility-consent-m81).
+  Rolling down `00014` removes the kept-date trigger, but the startup and
+  audit fences from `00015` remain. Starting this release again reinstalls
+  the kept-date trigger.
+
+### Upgrade notes: exact visibility consent (M8.1)
+
+The release that holds migration `00015` saves a visibility change that
+cancels anyone, and every reset of an event's dates, only with the consent of
+the exact change its reviewer was shown. The database refuses startup for
+earlier published releases (DEC-158). Upgrading needs no new step. The
+host's floor becomes 3 once smoke passes.
+
+- **Earlier published releases cannot start on this database.** After this
+  release has started once, changing the pin by hand and starting an earlier
+  published release produces "this database needs Fold at recovery level 3
+  or later (exact visibility consent, DEC-158)". The database still refuses
+  startup after `fold migrate down-one`, before or after first-run setup.
+  Compose will repeat the failed start until you restore the current pin.
+- **The baseline step of `fold migrate down-one`** now fails with "cannot drop
+  table audit_logs because other objects depend on it" on such a database,
+  with users or without. That is the recovery floor, not damage. To discard a
+  database, drop it.
+- **Scripted upgrade or rollback to a lower recovery level is refused.**
+  `upgrade.sh` checks the target before starting it, taking a backup, or changing
+  the checkout or pin. It reports "target recovery level 2 is below host level 3"
+  for the previous release and says it lacks "exact visibility consent
+  (level 3)". Restore data with the current release.
+- **An earlier release still running** while this release starts (two
+  containers on one database, which is not recommended) answers an error to
+  every change of who can see an event or a date, until it stops. Stop it.
+  Its other pages are not promised to keep working: a process that read the
+  schema before this release's column changes can fail them too.
+- **After a failed upgrade,** keep this release, inspect `smoke.sh`, then
+  repair it or run `restore.sh --dump <recorded dump>` with this release. A
+  restored database's first start migrates it and asks open reviews once more.
+- **L4: a source build from before the restore barrier** can start by hand
+  on an upgraded copy. The database still refuses its visibility writes
+  through the audit fence. The crossings drill checks this case.
+- **What this cannot refuse.** Neither the data nor the binary in these paths
+  holds anything from this release, and each brings back cancellations and
+  date resets without exact consent: a dump or Droplet snapshot taken before
+  the upgrade, restored by hand or on a fresh host and started under an
+  earlier release (on a fresh host, keep this release's tools with the
+  archives; that is recommended); a data-only restore into an earlier schema;
+  and SQL that drops a trigger or declares a marker by hand. The recommended path after an upgrade
+  is to keep this release and restore data only with its own
+  `restore.sh --dump`.
+
+### Upgrade notes: pages left open across the upgrade (M8.1)
+
+Date edits now go only through the guarded edit, and the group page asks for
+its dates in the new paging form. A browser tab opened before the upgrade
+still runs the earlier page and is refused, with nothing saved; reloading the
+tab fixes it. Tell leaders before you upgrade.
+
+- **A date editor** says "We couldn't update this date. Please try again in a
+  minute." Trying again gets the same answer. Copy what you typed, reload the
+  page, open the date again and make the change again.
+- **A group page** says "Those dates couldn't be loaded. Reload the group and
+  try again." when it refreshes or loads more dates. Reload the page.
+- **Schedule an event** for a group says only the group leader or an admin
+  can schedule events there, even to a leader. Reload the page.
+
+The exact answers are in `docs/API.md` (Cutover, under Guarded date edit).
+The recovery level and the deployment are unchanged by this.
 
 ## 7. Monitoring
 

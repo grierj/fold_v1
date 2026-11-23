@@ -265,9 +265,26 @@ each by its own authority:
         before the DEC-74 expiry too. The `ends_at` writers found at `15ab2d6b` are
         the series edit's move and restore and the per-date edit
         (`api_events.go`). Each runs in `contactMutation` with the event's
-        scope, so its "before" run would have stamped this grant. The slice
+        scope, so its "before" run would have stamped this grant (the
+        guarded edit, which replaced the per-date edit, runs a pass scoped
+        to the date it moves inside the callback, once the date and its grant rows are locked, on
+        a clock read after those locks and still before the move; a stored
+        end that passes later in the callback reruns the edit,
+        `contactChange.SingleDate`). The slice
         confirms there is no other writer and otherwise denies this
         case.
+      - **Writer census (DEC-156).** The only production writes to
+        `event_occurrences.ends_at` are the guarded edit's `Save`
+        (`editDateIn`) and the series edit's move and retimed restore
+        `Updates` (`apiUpdateEvent`); the retired per-date PUT
+        (`apiRetiredDatePut`) writes nothing. `internal/eventdates` only
+        inserts dates; its `occurrences.extend` repair writes
+        `occurrence_series_starts` only. Each of the three refuses a later
+        end, after its before pass, while the date has a live grant that
+        ends with it (`keptDatesIn`), so a move never carries a departure
+        grant past its old end. `TestEndsAtWritersCheckKeptDates` pins the
+        census, and migration `00014`'s trigger refuses the same raise in
+        the database while the grant is unstamped.
       - Once the date's end has passed, a departure grant that is still
         unstamped is **denied**. The records cannot tell whether it
         expired before the cancellation.
@@ -313,7 +330,7 @@ These are denied the existing unavailable response:
   account, consent or context check;
 - a viewer whose only link to the date is holding a household person's
   registration;
-- a row cancelled by a visibility loss (`cancelDateLosers`,
+- a row cancelled by a visibility loss (`cancelSelectedLosers`,
   `api_group_visibility.go`), which exists so a retained row never exposes a
   later private edit, and any other cancelled row;
 - ordinary public-date access, or a manager role, on its own;
@@ -392,12 +409,12 @@ deadline-free copy above, true to today's behaviour. Today's
 behaviour is the "automatic waitlist backfill without confirmation" that
 `phase-8.md`'s "Not promoted" table names as an anti-pattern.
 
-### 2.5 Custom confirms are confined to EventDate and EventDetail
+### 2.5 Date-edit confirmations use the app dialog
 
 M8.1's "no `window.confirm`/`alert`" criterion covers the
-`/events/:id/dates/:date` and `/events/:id` routes. Shared components keep
-their native confirmation on other routes. `GroupDetail`'s native confirms
-stay with R15-4.
+`/events/:id/dates/:date` and `/events/:id` routes. Grier also chose the
+in-app dialog for `GroupDetail` date edits so a stale question can close
+when its authority changes. Other native confirmations stay with R15-4.
 
 ## 3. Observed waitlist promotion (current behaviour, not a decision)
 
@@ -416,6 +433,9 @@ written from it must stay true if it is read on any date.
   - When the promoted row carries the recipient's live exact-date grant,
     they get the safe `OccurrenceChanged` date notice instead, with no
     manage link.
+  - An invited or pending-consent holder promoted into a date only
+    signed-in people may see gets the nameless "You're in: an event"
+    (`withheldDate`), with no manage or video link.
   `web/e2e/waitlist.spec.ts` asserts the ordinary promotion, and that test
   keeps its behavioural assertion. Page copy never names the notice, its
   wording or its channel, so it holds for both.
@@ -440,7 +460,7 @@ nothing about who may see what.
 | Viewer | Gets | Never gets |
 |---|---|---|
 | Ordinary member, series visible | All six answers, series standing and coverage, series scope choices, the difference sentence against series values | Declined counts, exact childcare usage unless `CanSeeChildcare`, others' contact details or care notes |
-| Manager (group leader, church-wide host, admin) | The member view plus manager-only declined data (`registrationCounts`) and childcare totals | Nothing a policy function doesn't already grant |
+| Manager (group leader, church-wide host, admin) | The member view plus manager-only declined data (`registrationCounts`) and childcare totals, and `canManage`: "Manage this date" (edit the date, manage its sign-ups) from the edit base, shown only while the page's latest answer grants it (`manageAuthority`), with a draft held, not shown, while authority is checked | Nothing a policy function doesn't already grant |
 | Ordinary reader of one opened date of a hidden series (DEC-46 override) | The ordinary date facts | Recurrence, series coverage, comparison with series values, series actions: all need `ShowsSeries()` |
 | Invitation-only reader (exact-date grant) | The existing invitation payload (its `remoteAvailable` and video fields as today), their own answer, Going/Maybe through `Dates.register`, decline/block through `Dates.end` | `HostedBy` or a church label, and any new organizer, cover, attendance, capacity, childcare, remote-state or series key |
 | Signed-out visitor on a public date | The public facts, public guest signup, names only as the existing attendee rules allow | A personal answer, manager data |
@@ -621,20 +641,108 @@ shared `components/ui` controls. Dates are formatted only in `lib/when.ts`.
 - **Unchanged**: `GET …/dates/:date/calendar.ics`, feeds and discovery.
   The date read never fetches a rich parent event to render an exact date.
   None of them reads the clock evidence; the JSON read picks one row of it
-  in three indexed probes, whatever the rule.
-- **Writes reused, none added**: `PUT /events/:id/dates/:date/registration`,
+  in three indexed probes, whatever the rule. What the feeds show is
+  unchanged: a manager's extra kept dates (DEC-157) reach the calendar only,
+  never the personal feed. The same PR keeps, by Grier's choice, a separate
+  change to how the personal feed, the room feed and the room calendar read:
+  each reads its link or switch and what it shows in one snapshot (the
+  AGENTS.md snapshot rule).
+- **Writes reused**: `PUT /events/:id/dates/:date/registration`,
   `POST /events/:id/dates/:date/decline` and `/block`,
   `PUT /events/:id/registrations`, `POST /events/:id/series-registrations`
   and `/undo`, and `POST /events/:id/guest-registrations`. No CSRF exemption
   is added.
+- **The guarded date edit** (added by the confirm-dialog fix to slice 5, in
+  three slices; `docs/API.md`, Guarded date edit):
+  - **A, server, shipped hidden:** migration `00010_date_edit_revisions.sql`
+    (trigger-kept revision counters on `events` and `event_occurrences`, and
+    the date's keyed receipt), the manager-only `revision` token on every
+    manager read, the edit base `GET /events/:id/occurrences/:date` (also for
+    a cancelled date, so the per-date editor can still retime one), and
+    `POST /events/:id/occurrences/:date/edits`. The edit base carries the
+    group label on a scheduled date, and the manager's roster (with
+    `keptAfterLeaving` and the date's `keptCount`, DEC-156) only on a
+    scheduled date that has not ended, read in its one snapshot on one
+    clock. A cancelled date's edit base is unchanged and carries no roster,
+    matching 2.2's tombstone: history is not shown to a current manager. The date page's
+    "Manage this date" (`ManageDate`, behind the authority gate) mounts the editor and
+    the roster on this edit base, so a manager reaches a date no list shows (DEC-157).
+    Tokens and receipts are bound
+    to the process, so a restart, restore or rollback refuses an older one.
+    Consent is counted on the date as saved, from one locked selection under
+    one clock. A replay or a no-op rolls everything back.
+  - **B, cutover, one head:** the guarded `DateEditor` (attempt ids, Try again,
+    the question asked after the server's 409), and the retired
+    `PUT /events/:id/occurrences/:date` (`apiRetiredDatePut`). It keeps CSRF
+    (403), then decides in one read-only snapshot, in the edit base's order:
+    401 signed out, 404 for a missing or hidden event, 403 for a viewer who
+    does not manage it, 400 `series_date_invalid`, 404 for a date not on the
+    event, and otherwise 409 `date_page_outdated` (only `error` and `code`).
+    Standard form or header CSRF processing still applies. The handler
+    ignores the edit payload and writes nothing (`TestRetiredDatePutRefusesAfterItsChecks`).
+    No release is tagged between A and B. An editor from the earlier release
+    does not know the new code and shows its own fallback, "We couldn't update
+    this date. Please try again in a minute."; the person reloads and redoes
+    the edit (`docs/API.md`, Cutover). What B relies on from A:
+    - The editor's base is the `revision` of the occurrence it shows (event
+      page, group page, `GET /groups/:id/events`); a date no list shows (a
+      cancelled or started one) takes its base from
+      `GET /events/:id/occurrences/:date`. The token is opaque and compared
+      only for equality.
+    - A Save sends `{attempt, revision, changes}` with only the changed
+      fields (a blank capacity is `null`); Try again resends the same bytes.
+      A 200 is an acknowledgment only when `occurrence.id` is the edited
+      date's and `occurrence.revision` is a non-empty string; an unreadable
+      2xx, a network error and a 5xx are unsure.
+    - 409 `date_needs_consent` carries `impact.tightened[0].registrants`
+      and `impact.consent` (`DateNeedsConsentResponse`); a yes resends the
+      same attempt with that `consent`, and a second 409 asks again. 409
+      `date_changed` means read the date again; nothing was written by that
+      request.
+    - Every Go test that calls the legacy PUT moves to the POST, taking its
+      token from a real HTTP read (the edit base for a cancelled or started
+      date), never one minted from rows (`editBaseOf`, `dateEditBody` and
+      `wantDateEdit` in `api_date_edits_test.go`). The legacy-route tests
+      send a valid anonymous CSRF token to reach the signed-out 401, and the
+      held-zone test expects `date_changed` and then saves from a fresh
+      token (`TestDateEditHeldZoneChange` already does this on the POST).
+    - `docs/FIRST-CHURCH-CHECKS.md` gains the live-redeploy check with an
+      open date editor, group page and Schedule an event page. It has no
+      rollback leg: from recovery level 3 a rollback to the earlier release is
+      refused (DEC-158).
+  - **C, independent:** the group read as one snapshot and the group page's
+    date paging. Grier chose to keep the growing **Load more dates** list;
+    an editor takes its authority and revision from a fresh exact-date
+    managed read rather than the accumulated list. Every visible date remains
+    reachable; the list has no 500-date browsing cutoff. `GET /groups/:id`
+    requires `datePaging=2` on every page, so a group page from the earlier
+    release gets 400 `group_upcoming_page` (after the visibility check;
+    hidden and missing groups keep their 404) and shows its existing "Reload
+    the group" copy; the earlier Schedule an event page treats the refusal as
+    "not a manager" until it is reloaded. `/groups/:id/events` and
+    `/groups/:id/members` are unchanged
+    (`TestGroupDetailRequiresTheDatePagingMarker`).
 - **Hidden groups**: event output never shows a hidden group's name, place or
   id (`a.groupShownTo`, `labelGroup`). A new error a person can act on
   follows DEC-61 (`apiErr` plus `ERROR_COPY`); everything else uses `fail`.
-- **One additive migration**, `00009_occurrence_series_starts.sql`
+- **Migrations `00009` through `00015`**. `00009_occurrence_series_starts.sql`
   (DEC-155): the clock evidence table and the events flag with its
   trigger. Up backfills nothing; Down drops the evidence, and the past and
-  zero-DTSTART values it held come back only from a matching backup. No new
-  Go or npm dependency, one embedded binary, the recovery level unchanged.
+  zero-DTSTART values it held come back only from a matching backup.
+  `00010_date_edit_revisions.sql`: the guarded edit's counters and receipt;
+  Down drops only that bookkeeping. `00014_kept_date_end.sql`: the trigger
+  that refuses a later end on a kept date (DEC-156). `00015_visibility_consent.sql`:
+  exact visibility consent and the fence that keeps every earlier release off
+  the database (DEC-158). The same PR keeps three delivery changes, by
+  Grier's choice: `00011_push_binding_generation.sql` (push subscription
+  binding), `00012_job_claim_seq.sql` (job claim ownership and guarded
+  requeue) and `00013_message_audience_admitted.sql` (message-audience
+  admission). No new Go or npm dependency, one embedded binary. The recovery
+  level rises to 3 (`deploy/recovery-policy`): once this release has run, a
+  rollback to an earlier release is refused and an earlier binary exits
+  (`docs/DEPLOY-DIGITALOCEAN.md`, Upgrade notes, which also state the paths
+  it cannot refuse). The level-3 restore and crossings drill on a droplet is
+  release work before a tag.
 
 ## 7. Slices (in order, each checked and reviewed on its own)
 
@@ -654,8 +762,8 @@ shared `components/ui` controls. Dates are formatted only in `lib/when.ts`.
 5. **Confirm dialogs on the two routes** (2.5). Extract the
    `SeriesRsvpDialog` modal shell into `Dialog` and `ConfirmDialog`, and
    cover every confirm reached from `EventDate` and `EventDetail`, including
-   the dirty-editor navigation block. Shared components keep native confirms
-   elsewhere.
+   the dirty-editor navigation block. `GroupDetail` date edits also use the
+   in-app dialog; other native confirms remain outside this slice.
 6. **First viewport** (sections 1, 4 and 5.1). The header, remote state,
    main status, attendance, separate capacity pools and the difference
    sentence.
@@ -711,7 +819,7 @@ shared `components/ui` controls. Dates are formatted only in `lib/when.ts`.
     row; a viewer whose only link is holding a household person's
     registration; a retained row whose only authority was a grant ended
     independently, with its RSVP status intact; a row cancelled by a
-    visibility loss (`cancelDateLosers`); and invalid, deleted and sibling
+    visibility loss (`cancelSelectedLosers`); and invalid, deleted and sibling
     dates.
   - Also denied: cancel, restore and cancel again with no new grant. The
     restore goes through the real series edit, so `event.dates_restored`
@@ -730,7 +838,8 @@ shared `components/ui` controls. Dates are formatted only in `lib/when.ts`.
     query answers the error, never the unavailable response.
   - Qualified after a retime: the real cancel stamps a departure grant,
     then the real per-date editor moves the cancelled date's end to
-    before that stamp. The grant still qualifies.
+    before that stamp, from the manager's edit base and through the guarded
+    edit. The grant still qualifies.
   - Clock boundary, with an injected `App.clock`: a cancellation whose
     lifecycle clock is just before a departure date's end stamps
     `occurrence_cancelled` and qualifies. Through the manual date cancel,
@@ -789,7 +898,8 @@ shared `components/ui` controls. Dates are formatted only in `lib/when.ts`.
   in-app navigation away from a dirty event editor (`unsavedChanges.tsx`),
   the over-capacity retry after an `event_full` conflict (`ManageRoster`),
   and the over-capacity approval prompt (`AddRequestForm`) where reachable.
-  `GroupDetail`'s existing native-confirm tests still pass unchanged.
+  `GroupDetail` date-edit tests exercise the in-app dialog; its other native
+  confirmation tests still pass unchanged.
   In-app navigation uses the app's dialog; the browser's own tab-close
   prompt (`beforeunload`) stays the browser's.
 - **Running app**: `web/e2e/run.sh` passes, including `smoke`, `deeplink`,
@@ -825,3 +935,26 @@ shared `components/ui` controls. Dates are formatted only in `lib/when.ts`.
 None open. One outstanding follow-up: explicit confirmation, and when it is
 due, before a waitlist promotion (2.4). It is tracked for M8.1's full completion and does
 not block this flow.
+
+A second outstanding follow-up: a date's shown end can
+differ from its stored end. The surfaces that render a date through
+`occurrenceToJSON` (the date page and its usual-clock comparison, the event
+and group lists, the calendar, the personal and date `.ics` feeds, the guest
+page and the editor's prefilled duration) show its start plus its own
+duration, else the event's. Rooms (the room feed and room calendar use the
+booking's times), exact-date access expiry, the registration window and
+departure use the stored end. The two part when a series edit changes the
+event's duration and leaves a date where it was: one with its own title,
+place or visibility, one with only its own start, and any date already past
+or underway. Showing the stored span instead would change past dates and the
+usual-clock difference. Grier chose to leave the current display and track
+the discrepancy as a follow-up. Since DEC-156's writers
+landed, a single-date save or preview with no start or duration keeps the
+stored end (`TestKeptDateNonTimeSaveKeepsItsStoredEnd`). Two edits still act
+on the shown duration rather than the stored span: a single-date start with
+no duration ends at that start plus the shown duration, so moving such a date
+even slightly earlier can end it later (refused while it is kept, and
+lengthening it after Remove); and a date whose only override was its
+visibility, once that is cleared, follows the series again, so the next
+series edit of any field moves it onto the event's duration (refused while
+it is kept, when that ends it later).
