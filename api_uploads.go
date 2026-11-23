@@ -302,7 +302,7 @@ func (a *App) apiUploadMessageImage(c *gin.Context) {
 			}
 			return err
 		}
-		if cur.Status != models.MessageDraft && cur.Status != models.MessageScheduled {
+		if !policy.MessageEditable(cur.Status) {
 			return errMessageLocked
 		}
 		if err := a.Uploads.Put(c.Request.Context(), key, tmp, st.Size(), mime); err != nil {

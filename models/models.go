@@ -952,19 +952,20 @@ type RoomFeedToken struct {
 	RevokedAt *time.Time
 }
 
-// Room request statuses.
+// Room request statuses. internal/policy owns the values and their moves.
 const (
-	RoomRequestPending   = "pending"
-	RoomRequestConfirmed = "confirmed"
-	RoomRequestRejected  = "rejected"
-	RoomRequestWithdrawn = "withdrawn"
+	RoomRequestPending   = policy.RoomRequestPending
+	RoomRequestConfirmed = policy.RoomRequestConfirmed
+	RoomRequestRejected  = policy.RoomRequestRejected
+	RoomRequestWithdrawn = policy.RoomRequestWithdrawn
 )
 
-// Room booking statuses (9.2). Only confirmed bookings hold a room.
+// Room booking statuses (9.2). internal/policy owns the values and names the
+// state each booking is in (policy.RoomBookingStateOf).
 const (
-	BookingConfirmed = "confirmed"
-	BookingRequested = "requested"
-	BookingRejected  = "rejected"
+	BookingConfirmed = policy.BookingConfirmed
+	BookingRequested = policy.BookingRequested
+	BookingRejected  = policy.BookingRejected
 )
 
 // Consent is one append-only consent record (5.3, 5.12). The latest row per
@@ -1263,14 +1264,14 @@ const (
 	MessageCategoryReminder     = "reminder"
 )
 
-// Message statuses (PLAN 5.3). Only draft and scheduled can still change.
+// Message statuses: what may follow each is policy.MessageMove.
 const (
-	MessageDraft     = "draft"
-	MessageScheduled = "scheduled"
-	MessageSending   = "sending"
-	MessageSent      = "sent"
-	MessageCancelled = "cancelled"
-	MessageFailed    = "failed"
+	MessageDraft     = policy.MessageDraft
+	MessageScheduled = policy.MessageScheduled
+	MessageSending   = policy.MessageSending
+	MessageSent      = policy.MessageSent
+	MessageCancelled = policy.MessageCancelled
+	MessageFailed    = policy.MessageFailed
 )
 
 // MessageRecipient is one person a sent message reached or skipped (M3.5,

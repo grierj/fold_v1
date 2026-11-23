@@ -216,7 +216,7 @@ func writePushReminder(tx *gorm.DB, occ *models.EventOccurrence) (uint, error) {
 	// What the history page shows of it: the lock screen's words, with
 	// the time on each person's own clock and never the place (DEC-136).
 	clean := content.SanitizeHTML("<p>Starts at {{event_time}}, on each person's own clock.</p>")
-	m := models.Message{Channel: models.DeliveryPush, Status: models.MessageSent, Category: models.MessageCategoryReminder,
+	m := models.Message{Channel: models.DeliveryPush, Status: policy.MessageWritePushReminder.To(), Category: models.MessageCategoryReminder,
 		Subject: "Reminder: {{event_title}}", BodyHTML: clean, BodyText: content.PlainText(clean), Audience: string(aud),
 		ScheduledAt: &due, OccurrenceID: &occ.ID, ReminderKey: &key}
 	res := tx.Clauses(clause.OnConflict{Columns: []clause.Column{{Name: "reminder_key"}}, TargetWhere: clause.Where{Exprs: []clause.Expression{clause.Expr{SQL: "reminder_key IS NOT NULL"}}}, DoNothing: true}).Create(&m)

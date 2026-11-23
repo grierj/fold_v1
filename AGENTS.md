@@ -220,7 +220,10 @@ section or decision; check it still exists.
 - Rooms (`internal/rooms`): "the room is busy" is `rooms.HeldCondition` over `rooms.PaddedRange`;
   every busy count is `rooms.BusyCounts`. A date's place is `events.EffectivePlace` /
   `EffectivePlaceSQL`; group tags compare through `internal/grouptags`; a default-off switch read
-  in SQL is `settingOnSQL`. Each SQL form has a test that it agrees with its Go form.
+  in SQL is `settingOnSQL`. Each SQL form has a test that it agrees with its Go form. A booking's
+  state (waiting or lost, double-booked) is `policy.RoomBookingStateOf`, and the booking and request
+  moves are tables in `internal/policy/room_lifecycle.go`; a status changes only through
+  `changeBookings` or `moveRoomRequest`/`moveRoomRequestsWhere` (`room_status.go`).
 - Registrations: seat decisions go through `registration_seats.go` (`poolFits`, `seatChange`,
   `seatTally`; party size and childcare demand each have one SQL and one Go form,
   `TestSeatSQLMatchesGoRules`); the status changes only by a `policy.RegistrationMove`
@@ -271,6 +274,11 @@ section or decision; check it still exists.
   phone number. Admin notices are stored notification rows written in the change's transaction.
 - Record sensitive actions with `audit.Write` (`internal/audit`) in the same transaction as the
   change.
+- A message's status moves only by a `policy.MessageMove`, the one table of what may follow
+  what (`internal/policy/message_lifecycle.go`), and only `moveMessage` writes it
+  (`moveMessagesWhere` for a set, `message_status.go`). A new message takes its first status from
+  its creating move. The predicates (`policy.MessageEditable`, `policy.MessageGoingOut`,
+  `Allows`) come from the same table.
 
 **Uploads**
 - Avatars and covers go through `storage.Store` (`App.Uploads`), never raw paths. Keys are

@@ -44,7 +44,7 @@ func (a *App) apiSetRoomApproval(c *gin.Context) {
 }
 
 func openRoomRequest(tx *gorm.DB, eventID, roomID uint, by *uint, series bool) (*models.RoomRequest, error) {
-	req := models.RoomRequest{EventID: eventID, RoomID: roomID, Series: series, RequestedBy: by, Status: models.RoomRequestPending}
+	req := models.RoomRequest{EventID: eventID, RoomID: roomID, Series: series, RequestedBy: by, Status: policy.RoomRequestOpen.To()}
 	return &req, tx.Create(&req).Error
 }
 
@@ -81,15 +81,15 @@ func askerName(tx *gorm.DB, id *uint) (string, error) {
 // closeEmptyRoomRequests withdraws pending requests none of whose dates
 // still wait (re-picked, released or cancelled), and closes their tasks.
 func closeEmptyRoomRequests(tx *gorm.DB) error {
-	var ids []uint
 	// SKIP LOCKED: a request an admin is deciding right now is locked by
 	// that decision, which settles it anyway; waiting on it here could
 	// deadlock against the decision waiting on this caller's dates.
-	if err := tx.Raw(`UPDATE room_requests SET status = ?, updated_at = now() WHERE id IN (
-			SELECT q.id FROM room_requests q WHERE q.status = ?
+	ids, err := moveRoomRequestsWhere(tx, policy.RoomRequestWithdrawEmpty, `id IN (
+			SELECT q.id FROM room_requests q WHERE q.status IN ?
 			AND NOT EXISTS (SELECT 1 FROM room_bookings b WHERE b.request_id = q.id AND b.status = ?)
-			FOR UPDATE SKIP LOCKED) RETURNING id`,
-		models.RoomRequestWithdrawn, models.RoomRequestPending, models.BookingRequested).Scan(&ids).Error; err != nil {
+			FOR UPDATE SKIP LOCKED)`,
+		policy.RoomRequestWithdrawEmpty.From(), policy.RoomBookingWaiting.Status())
+	if err != nil {
 		return err
 	}
 	return resolveWithdrawn(tx, ids)
@@ -100,10 +100,8 @@ func closeEmptyRoomRequests(tx *gorm.DB) error {
 // The caller holds the event's lock, which every decision takes before the
 // request's (lockRequest), so this needs no SKIP LOCKED.
 func withdrawSeriesRequest(tx *gorm.DB, eventID uint) error {
-	var ids []uint
-	if err := tx.Raw(`UPDATE room_requests SET status = ?, updated_at = now()
-		WHERE event_id = ? AND series AND status = ? RETURNING id`,
-		models.RoomRequestWithdrawn, eventID, models.RoomRequestPending).Scan(&ids).Error; err != nil {
+	ids, err := moveRoomRequestsWhere(tx, policy.RoomRequestWithdrawSeries, "event_id = ? AND series", eventID)
+	if err != nil {
 		return err
 	}
 	return resolveWithdrawn(tx, ids)
@@ -199,7 +197,7 @@ func lockRequest(tx *gorm.DB, id uint) (*models.RoomRequest, *models.Event, erro
 	if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&req, id).Error; err != nil {
 		return nil, nil, err
 	}
-	if req.Status != models.RoomRequestPending {
+	if !policy.RoomRequestUndecided(req.Status) {
 		return nil, nil, errRequestDecided
 	}
 	return &req, &ev, nil
@@ -287,7 +285,8 @@ func (a *App) apiConfirmRoomRequest(c *gin.Context) {
 			free := false
 			if !held {
 				if free, err = trySavepoint(tx, fmt.Sprintf("confirm%d", b.ID), func() error {
-					return tx.Exec(`UPDATE room_bookings SET status = ?, updated_at = now() WHERE id = ?`, models.BookingConfirmed, b.ID).Error
+					_, err := changeBookings(tx, policy.BookingConfirm, "", nil, "id = ?", b.ID)
+					return err
 				}); err != nil {
 					return err
 				}
@@ -296,14 +295,13 @@ func (a *App) apiConfirmRoomRequest(c *gin.Context) {
 			case free:
 				confirmed++
 			case reason != "":
-				if err := tx.Exec(`UPDATE room_bookings SET status = ?, allow_overlap = true, overlap_reason = ?, updated_at = now() WHERE id = ?`,
-					models.BookingConfirmed, reason, b.ID).Error; err != nil {
+				if _, err := changeBookings(tx, policy.BookingConfirmOverlap, "allow_overlap = true, overlap_reason = ?", []any{reason}, "id = ?", b.ID); err != nil {
 					return err
 				}
 				overlapped++
 			default:
 				// Busy and no reason: the date lost its room, the leader's to re-pick.
-				if err := tx.Exec(`UPDATE room_bookings SET request_id = NULL, updated_at = now() WHERE id = ?`, b.ID).Error; err != nil {
+				if _, err := changeBookings(tx, policy.BookingCannotConfirm, "request_id = NULL", nil, "id = ?", b.ID); err != nil {
 					return err
 				}
 				lost = append(lost, models.FormatCalendarDate(occ.OriginalDate))
@@ -316,7 +314,7 @@ func (a *App) apiConfirmRoomRequest(c *gin.Context) {
 			}
 		}
 		now := time.Now().UTC()
-		if err := tx.Model(req).Updates(map[string]any{"status": models.RoomRequestConfirmed, "decided_by": me.ID, "decided_at": now, "updated_at": now}).Error; err != nil {
+		if _, err := moveRoomRequest(tx, req, policy.RoomRequestConfirm, map[string]any{"decided_by": me.ID, "decided_at": now, "updated_at": now}); err != nil {
 			return err
 		}
 		meta := map[string]any{"eventId": ev.ID, "roomId": req.RoomID, "confirmed": confirmed, "overlapped": overlapped, "lost": lost}
@@ -377,10 +375,9 @@ func (a *App) apiRejectRoomRequest(c *gin.Context) {
 		if _, _, err := requestBookings(tx, req); err != nil {
 			return err
 		}
-		res := tx.Exec(`UPDATE room_bookings SET status = ?, updated_at = now() WHERE request_id = ? AND status = ?`,
-			models.BookingRejected, req.ID, models.BookingRequested)
-		if res.Error != nil {
-			return res.Error
+		rejected, err := changeBookings(tx, policy.BookingReject, "", nil, "request_id = ?", req.ID)
+		if err != nil {
+			return err
 		}
 		if req.Series && ev.DefaultRoomID != nil && *ev.DefaultRoomID == req.RoomID {
 			if err := tx.Model(ev).Updates(map[string]any{"default_room_id": nil, "default_room_pending": false}).Error; err != nil {
@@ -388,12 +385,12 @@ func (a *App) apiRejectRoomRequest(c *gin.Context) {
 			}
 		}
 		now := time.Now().UTC()
-		if err := tx.Model(req).Updates(map[string]any{"status": models.RoomRequestRejected, "decided_by": me.ID, "decided_at": now,
-			"reject_reason": reason, "updated_at": now}).Error; err != nil {
+		if _, err := moveRoomRequest(tx, req, policy.RoomRequestReject, map[string]any{"decided_by": me.ID, "decided_at": now,
+			"reject_reason": reason, "updated_at": now}); err != nil {
 			return err
 		}
 		if err := audit.Write(tx, audit.Entry{Actor: &me.ID, Action: audit.RoomRequestRejected, TargetType: "room_request", TargetID: req.ID,
-			Meta: map[string]any{"eventId": ev.ID, "roomId": req.RoomID, "dates": res.RowsAffected, "reason": reason}, IP: c.ClientIP()}); err != nil {
+			Meta: map[string]any{"eventId": ev.ID, "roomId": req.RoomID, "dates": rejected, "reason": reason}, IP: c.ClientIP()}); err != nil {
 			return err
 		}
 		var room models.Room
