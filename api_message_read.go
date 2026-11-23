@@ -84,7 +84,7 @@ func (a *App) isMessageRecipientIn(db *gorm.DB, m *models.Message, au audienceJS
 
 // deliveredStatuses are a recipient row's outcomes that mean it reached its
 // person (a bounce and a complaint come after delivery).
-var deliveredStatuses = []string{models.RecipientSent, models.RecipientDelivered, models.RecipientBounced, models.RecipientComplained}
+var deliveredStatuses = policy.RecipientReachedStatuses()
 
 // messageSince is when a message's series audience counts dates from: its
 // scheduled time once it is going out, else now.

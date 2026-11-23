@@ -1300,15 +1300,17 @@ type MessageRecipient struct {
 	AudienceAdmittedAt *time.Time
 }
 
-// Message recipient statuses (PLAN 5.3).
+// Message recipient statuses: what may follow each, per channel, is
+// policy.RecipientMove.
 const (
-	RecipientQueued     = "queued"
-	RecipientSuppressed = "suppressed"
-	RecipientSent       = "sent"
-	RecipientDelivered  = "delivered"
-	RecipientBounced    = "bounced"
-	RecipientComplained = "complained"
-	RecipientFailed     = "failed"
+	RecipientQueued     = policy.RecipientQueued
+	RecipientSuppressed = policy.RecipientSuppressed
+	RecipientDeferred   = policy.RecipientDeferred
+	RecipientSent       = policy.RecipientSent
+	RecipientDelivered  = policy.RecipientDelivered
+	RecipientBounced    = policy.RecipientBounced
+	RecipientComplained = policy.RecipientComplained
+	RecipientFailed     = policy.RecipientFailed
 )
 
 // CurrentRegStatuses is policy.CurrentRegStatuses: the statuses that still
