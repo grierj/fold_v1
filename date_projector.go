@@ -366,6 +366,7 @@ func (p *dateProjection) datePage(out *dateOccurrenceJSON, show policy.DatePageF
 		}
 	}
 	if show.Series {
+		out.Description = p.Event.Description
 		out.Series = p.dateSeries(show, d, out.Room)
 	}
 }

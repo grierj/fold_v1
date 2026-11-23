@@ -1590,6 +1590,7 @@ func newDatePageFixture(t *testing.T) *datePageFixture {
 	capacity, remote, care := 3, 2, 1
 	start := feedStart(7)
 	f.ev = models.Event{GroupID: &f.group.ID, Title: "Circle Night", Visibility: models.VisibilityPublic,
+		Description: "Bring a notebook.",
 		StartsLocal: start.Format(events.WallLayout), DurationMinutes: 60, TZID: "UTC", RRule: "FREQ=WEEKLY;COUNT=4", CreatedBy: f.admin.ID,
 		Capacity: &capacity, WaitlistEnabled: true, GuestsAllowed: 2, RemoteAvailable: true, RemoteCapacity: &remote,
 		ChildcareAvailable: true, ChildcareCapacity: &care, VideoProvider: models.VideoProviderLink,
@@ -1672,6 +1673,9 @@ func TestDatePageFactsForEachReader(t *testing.T) {
 
 	t.Run("ordinary member", func(t *testing.T) {
 		d, keys, raw := f.read(t, "Max Member", first)
+		if d.Description != f.ev.Description {
+			t.Fatalf("description = %q, want %q", d.Description, f.ev.Description)
+		}
 		if d.GroupHeader == nil || *d.GroupHeader != (dateGroupHeaderJSON{ImageURL: "", CoverFocalX: 30, CoverFocalY: 70, LeaderName: "Lou Leader"}) || d.GroupID == nil || d.HostedBy != "" {
 			t.Fatalf("a shown group's header: %+v %s", d.GroupHeader, raw)
 		}
@@ -1797,7 +1801,7 @@ func TestDatePageFactsForEachReader(t *testing.T) {
 
 	t.Run("the calendar download carries none of it", func(t *testing.T) {
 		raw := apiDo(t, f.as["Max Member"], "GET", dateReadPath(f.ev.ID, tombstoneDate(first))+"/calendar.ics", nil, http.StatusOK)
-		for _, forbidden := range []string{"Olive Outsider", "Lou Leader", "FREQ", "Rae Remote"} {
+		for _, forbidden := range []string{"Olive Outsider", "Lou Leader", "FREQ", "Rae Remote", f.ev.Description} {
 			if strings.Contains(raw, forbidden) {
 				t.Fatalf("calendar.ics carries %q: %s", forbidden, raw)
 			}
@@ -1820,6 +1824,7 @@ func TestDatePageHiddenGroupDates(t *testing.T) {
 	remote := 5
 	start := feedStart(7)
 	ev := models.Event{GroupID: &group.ID, Title: "Quiet Night", Visibility: models.VisibilityInviteOnly, StartsLocal: start.Format(events.WallLayout),
+		Description:     "Private rehearsal instructions.",
 		DurationMinutes: 60, TZID: "UTC", RRule: "FREQ=WEEKLY;COUNT=3", CreatedBy: admin.ID, RemoteAvailable: true, RemoteCapacity: &remote,
 		ChildcareAvailable: true, VideoProvider: models.VideoProviderLink, VideoURL: "https://example.com/quiet-call", VideoReveal: models.VideoRevealRegisteredOnly}
 	gormMust(t, app.DB.Create(&ev))
@@ -1834,7 +1839,7 @@ func TestDatePageHiddenGroupDates(t *testing.T) {
 	gormMust(t, app.DB.Model(&dates[1]).Update("remote_capacity_override", 0))
 	gormMust(t, app.DB.Create(&models.Registration{UserID: &member.ID, OccurrenceID: dates[0].ID, Status: models.RegGoing, Source: models.RegSourceWeb, AttendanceMode: models.AttendanceInPerson}))
 	seedReadInvitation(t, app, admin, invitee, eventJSON{ID: ev.ID}, dates[1])
-	secrets := []string{"Quiet Circle", "Secret Loft", "quiet.jpg", "Quiet Leader", "Quiet Member", "groupId", "groupHeader", "series", "recurrenceRule", "totals"}
+	secrets := []string{"Quiet Circle", "Secret Loft", "quiet.jpg", "Quiet Leader", "Quiet Member", "groupId", "groupHeader", "series", "recurrenceRule", "totals", "description"}
 
 	for _, viewer := range []string{"Open Reader", "signed out"} {
 		c := anonClient(t, app, "")

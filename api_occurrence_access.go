@@ -308,6 +308,7 @@ type dateOccurrenceJSON struct {
 	Date             string    `json:"date"`
 	DateURL          string    `json:"dateUrl"`
 	Title            string    `json:"title"`
+	Description      string    `json:"description,omitempty"`
 	Location         string    `json:"location"`
 	StartsAt         time.Time `json:"startsAt"`
 	EndsAt           time.Time `json:"endsAt"`

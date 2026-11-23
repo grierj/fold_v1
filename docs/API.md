@@ -2882,7 +2882,7 @@ describe current recipient invitation policy for the mutations below. Ordinary
 voluntary RSVP continues to use its existing authority.
 
 **The date page's own facts (M8.1 brief sections 4 and 6).** Only the ordinary
-JSON read carries the last six keys, each as `policy.DatePage` allows; an
+JSON read carries these optional keys as `policy.DatePage` allows. An
 invitation-only read has none of them (its `remoteAvailable` and video fields
 are as above), and `calendar.ics` and the feeds never carry them. Every fact
 of the scheduled JSON read, and the authority that admits it, comes from one
@@ -2898,6 +2898,8 @@ of the date still loads. Household attendee authorization requires a valid
 church zone and returns an error if it cannot be read. Each key is absent when
 not allowed:
 
+- `description`: the series description, when it has text and the viewer may
+  see the series at its own visibility.
 - `groupHeader` `{imageUrl, coverFocalX, coverFocalY, leaderName}`: only with
   `groupId`, for a group the viewer may see. `imageUrl` is `""` for a group
   with no photo (the page uses its generated cover); the leader is the group's

@@ -510,7 +510,7 @@ describe("the date's six answers", () => {
   }
 
   it("answers all six, in order, on a changed date of a shown photo-less group", async () => {
-    await show(changed());
+    await show(changed({ description: "Bring a notebook." }));
     expect([...document.querySelectorAll("[data-date-answer]")].map((e) => e.getAttribute("data-date-answer"))).toEqual(["identity", "when", "where", "standing", "attendance", "change"]);
     const identity = answer("identity")!;
     const cover = identity.querySelector("img")!;
@@ -525,6 +525,8 @@ describe("the date's six answers", () => {
     expect(answer("standing")).toHaveTextContent(/^You're in for this date only\.You've answered 2 of 4 upcoming dates\.Attending: In personGuests: 1$/);
     expect(answer("attendance")).toHaveTextContent(/^3 going, 2 maybeShow namesSome going names are private\.7 of 12 seats left\. 4 of 5 remote seats left\.$/);
     expect(answer("change")).toHaveTextContent(/^This date starts at 5:30 PM, a different time from usual\.$/);
+    const description = screen.getByText("Bring a notebook.");
+    expect(description.compareDocumentPosition(answer("change")!) & Node.DOCUMENT_POSITION_PRECEDING).toBeTruthy();
     // Seats taken count guests, so they can exceed the Going rows.
     expect(screen.getByText("Seats and answers").parentElement).toHaveTextContent("In person: 5 of 12 takenRemote: 1 of 5 taken");
   });

@@ -1139,18 +1139,19 @@ host's floor becomes 3 once smoke passes.
 
 ### Upgrade notes: pages left open across the upgrade (M8.1)
 
-Date edits now go only through the guarded edit, and the group page asks for
-its dates in the new paging form. A browser tab opened before the upgrade
-still runs the earlier page and is refused, with nothing saved; reloading the
-tab fixes it. Tell leaders before you upgrade.
+Date edits now go through the guarded editor, and group pages use the new
+paging request. Tabs left open across the upgrade still run the earlier
+client. Tell leaders before you upgrade.
 
-- **A date editor** says "We couldn't update this date. Please try again in a
-  minute." Trying again gets the same answer. Copy what you typed, reload the
-  page, open the date again and make the change again.
+- **A date editor** using the retired date PUT saves nothing and says "We
+  couldn't update this date. Please try again in a minute." Copy what you
+  typed, reload the page, open the date again and make the change again.
 - **A group page** says "Those dates couldn't be loaded. Reload the group and
   try again." when it refreshes or loads more dates. Reload the page.
 - **Schedule an event** for a group says only the group leader or an admin
-  can schedule events there, even to a leader. Reload the page.
+  can schedule events there when it makes the earlier group read. Reload
+  the page. A form that already loaded can still submit under the usual
+  scheduling permissions.
 
 The exact answers are in `docs/API.md` (Cutover, under Guarded date edit).
 The recovery level and the deployment are unchanged by this.

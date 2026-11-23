@@ -858,6 +858,7 @@ export interface EventDate {
   date: string;
   dateUrl: string;
   title: string;
+  description?: string;
   location: string;
   startsAt: string;
   endsAt: string;
