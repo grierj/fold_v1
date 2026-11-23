@@ -1670,8 +1670,8 @@ func (a *App) apiAddRegistration(c *gin.Context) {
 // another newly opened seat. Admin disable/delete keeps its usual notices.
 // Disabled and re-enabled accounts (DEC-38, DEC-47, M1.5).
 
-func (a *App) promoteOnDisable(tx *gorm.DB, userID uint, notifyInsideCutoff bool) error {
-	now := a.now().UTC()
+func (a *App) promoteOnDisable(tx *gorm.DB, userID uint, notifyInsideCutoff bool, at time.Time) error {
+	now := at.UTC()
 	var occIDs []uint
 	if err := tx.Model(&models.Registration{}).
 		Joins("JOIN event_occurrences ON event_occurrences.id = registrations.occurrence_id").

@@ -165,20 +165,9 @@ func (a *App) rolloverTeen(tx *gorm.DB, user *models.User, today, now time.Time)
 			return false, err
 		}
 	}
-	if oldStatus == models.UserDisabled && status != models.UserDisabled {
-		if err := restoreMemberships(tx, user.ID, 0, ""); err != nil {
-			return false, err
-		}
-		if err := a.restoreRegistrations(tx, user.ID, map[string]any{"status": status}, nil, "", now); err != nil {
-			return false, err
-		}
-	}
+	// The turned-18 row below records this change.
 	if status != oldStatus {
-		updates := map[string]any{"status": status}
-		if oldStatus == models.UserDisabled {
-			updates["session_version"] = sessionVersionBump()
-		}
-		if err := tx.Model(user).Updates(updates).Error; err != nil {
+		if err := a.setAccountStatusIn(tx, user, map[string]any{"status": status}, 0, "", fixedClock(now)); err != nil {
 			return false, err
 		}
 	}

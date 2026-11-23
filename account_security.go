@@ -43,7 +43,7 @@ func lockSessionCredentials(tx *gorm.DB, me *models.User) (*models.User, error) 
 func replacePasswordIn(tx *gorm.DB, user *models.User, hash string) error {
 	if err := endAllSessionsIn(tx, user, map[string]any{
 		"password_hash": hash,
-		"status":        gorm.Expr("CASE WHEN status = ? THEN ? ELSE status END", models.UserInvited, models.UserActive),
+		"status":        invitedBecomesActive(),
 	}); err != nil {
 		return err
 	}
