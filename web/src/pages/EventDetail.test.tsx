@@ -2771,8 +2771,8 @@ describe("EventDetail when a series save meets someone else's change", () => {
     expect(screen.queryByText(NOTICE)).not.toBeInTheDocument();
     await act(async () => { after.resolve(theirs); await after.promise; });
     expect(await screen.findByRole("heading", { level: 1, name: "Bible study" })).toBeInTheDocument();
-    const notice = await screen.findByText(NOTICE);
-    expect(notice).toHaveAttribute("role", "status");
+    // Into a status region that was already there, empty, so the text is announced when it arrives.
+    expect((await screen.findByText(NOTICE)).parentElement).toHaveAttribute("role", "status");
     const edit = screen.getByRole("button", { name: "Edit event" });
     expect(edit).toHaveAttribute("aria-expanded", "false");
     await waitFor(() => expect(edit).toHaveFocus());
@@ -2790,6 +2790,17 @@ describe("EventDetail when a series save meets someone else's change", () => {
     showsNothingOfTheEvent();
     expect(screen.queryByRole("heading", { level: 1, name: "Bible study" })).not.toBeInTheDocument();
     expect(screen.queryByText(NOTICE)).not.toBeInTheDocument();
+  });
+
+  it("says the changes weren't saved when the person can still see the event and no longer manage it", async () => {
+    const demoted: EventDetailResponse = { ...opened, canManage: false, canSetVisibility: false, event: { ...opened.event, revision: undefined } };
+    const after = await saveIntoRefusal(async () => demoted);
+    expect(Events.update).toHaveBeenCalledOnce();
+    showsNothingOfTheEvent();
+    await act(async () => { after.resolve(demoted); await after.promise; });
+    expect((await screen.findByText("You can no longer manage this event, so your changes weren't saved.")).parentElement).toHaveAttribute("role", "status");
+    expect(screen.queryByText(NOTICE)).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Edit event" })).not.toBeInTheDocument();
   });
 
   it("closes the editor and reads the page from nothing with no notice when the event can no longer be managed or seen", async () => {

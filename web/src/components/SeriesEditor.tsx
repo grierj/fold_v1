@@ -1,6 +1,6 @@
 import { Form } from "./ui/Form";
 import { childcareBody, childcareFrom } from "./ChildcareField";
-import { useLayoutEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { Events } from "../api/events";
 import { bydays, isSimpleWeekly, isWeekly, weekdayCode, weeklyRule } from "../lib/rrule";
 import { useDirty } from "../lib/useDirty";
@@ -18,7 +18,7 @@ import { seatsFrom } from "./SeatsField";
 import { videoBody } from "./VideoField";
 import { remoteBody, remoteFrom } from "./RemoteField";
 import { errorCode, errorText, keptDatesOf } from "../lib/errors";
-import { ApiError } from "../api/core";
+import { ApiError, credentialCurrent, currentCredential } from "../api/core";
 import { useAction, type Action } from "../lib/useAction";
 import { useFocusHome, useLockedFocus } from "../lib/focusHome";
 import { KeptDates } from "./KeptDates";
@@ -93,6 +93,8 @@ const MAX_SENDS = 3;
 
 // changed: the stored event differs from what the editor opened with. gone: this person may no longer manage it.
 type SeriesConflict = "changed" | "gone";
+
+const lostAuthority = (err: ApiError) => err.status === 403 || err.status === 404;
 
 // SeriesEditor is the one "Edit series" / "Edit event" form, on the event page (DEC-161).
 export function SeriesEditor({
@@ -177,6 +179,12 @@ export function SeriesEditor({
   const own = useAction();
   const action = shared ?? own;
   const [saved, setSaved] = useState(false);
+  const mounted = useRef(true);
+  useEffect(() => {
+    mounted.current = true;
+
+    return () => { mounted.current = false; };
+  }, []);
   // Nothing in the form changes while a save is on its way or after one worked: the save sends what was there when
   // it began, so a later edit would be lost without a word.
   const frozen = action.running || locked || saved;
@@ -281,6 +289,8 @@ export function SeriesEditor({
           return false;
         }
 
+        if (sent === "left") return false;
+
         if (sent !== "saved") {
           outcome = sent;
 
@@ -316,8 +326,12 @@ export function SeriesEditor({
   // The save names the read the editor opened with (DEC-162). On a refusal the event is read once: while nothing this
   // form can write has changed (the person's own room booking, a visibility change, a restart) the same save goes
   // again under the new revision; anything else is the page's to show. Repeated refusals alone are never a conflict.
-  async function send(body: EventInput): Promise<"saved" | "refused" | SeriesConflict> {
+  // Only the editor and the sign-in that pressed Save send again: an answer that lands after the person left the
+  // page, or after this tab took another account, sends nothing more.
+  async function send(body: EventInput): Promise<"saved" | "refused" | "left" | SeriesConflict> {
     const opened = JSON.stringify(savedFields(instance));
+    const credential = currentCredential();
+    const sameSignIn = () => (credential === null ? currentCredential() === null : credentialCurrent(credential));
     let revision = instance.revision;
 
     for (let sends = 1; ; sends++) {
@@ -326,19 +340,29 @@ export function SeriesEditor({
 
         return "saved";
       } catch (err) {
+        // The first save's refusal for lost authority is the form's error, as it always was; a save this editor
+        // sent again by itself was let through by a read that said the person still managed the event.
+        if (sends > 1 && err instanceof ApiError && lostAuthority(err)) return "gone";
+
         if (errorCode(err) !== "event_changed") throw err;
       }
+
+      if (!mounted.current) return "left";
+
+      if (!sameSignIn()) return "gone";
 
       let stored;
 
       try {
         stored = await Events.get(instance.eventId);
       } catch (err) {
-        if (err instanceof ApiError && (err.status === 403 || err.status === 404)) return "gone";
+        if (err instanceof ApiError && lostAuthority(err)) return "gone";
         throw err;
       }
 
-      if (!stored.canManage || !stored.event.revision) return "gone";
+      if (!mounted.current) return "left";
+
+      if (!sameSignIn() || !stored.canManage || !stored.event.revision) return "gone";
 
       if (JSON.stringify(savedFields(stored.event)) !== opened) return "changed";
 

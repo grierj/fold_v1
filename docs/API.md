@@ -945,7 +945,7 @@ POST /api/v1/groups/:id/events              → 201 {event} | 409 group_events_n
      again after the body arrives. The default uses the group's value then;
      a session that ended answers 401.
 PUT  /api/v1/events/:id                     → 200 {event} | 409 event_changed   (leader, host, or admin; series edit)
-     body: the create body's fields to change (not visibility, visibilityReason or roomId, which have their own routes), and the required revision of the read the edit was made from (below)
+     body: the create body's fields to change (not visibility, visibilityReason, roomId or hosts, which have their own routes), and the required revision of the read the edit was made from (below)
 PUT  /api/v1/events/:id/visibility          → 200 {event}   (leader, host, or admin)
      body: {visibility, reason?, consent?, resetOverrides?}
 DELETE /api/v1/events/:id                   → 200 {}        (leader, host, or admin)
@@ -1041,8 +1041,9 @@ from: its body's `revision` is the `revision` of the read the editor opened
 with, `1.<generation>.<event id>.<event revision>`, opaque to the client. A
 body the server cannot read is answered first, whatever its revision: 400 for a
 `revision` of any JSON type but a string (a JSON `null` is read as missing, so it
-answers 409 `event_changed` below), and for a seat, guest or reminder number that
-is not valid on its own (`invalid_capacity` and the like). Then, under the
+answers 409 `event_changed` below), and for a seat, guest or reminder number or
+a childcare text that is not valid on its own (`invalid_capacity` and the like).
+Then, under the
 event's row lock and before judging anything against the stored event, the
 server compares the revision with the token of the event as stored, and refuses
 any other value (missing, garbled, another event's, one from before the server
@@ -1051,12 +1052,18 @@ restarted, or one read before any later change to the event) with 409
 job. The event's revision rises with every change to a stored series field, its
 visibility and its series room, by anyone; a save that changes nothing leaves
 it, and the daily extender does not move it. The answer's `event.revision` is
-the new token. Refused, the web editor reads the event again: when nothing it
-can save differs from the read it opened with, it sends the same save with the
-new revision, up to three sends in all, and after a third refusal it shows its
+the new token. Refused, the web editor reads the event again, and what that read
+says decides: when nothing the editor can save differs from the read it opened
+with, it sends the same save with the new revision, up to three sends in all,
+and after a third refusal whose read still shows no difference it shows its
 ordinary save error and stays open; when something differs, it closes and the
-page shows the event as stored, saying nothing was saved. A read that fails
-leaves the editor open with its ordinary save error.
+page shows the event as stored, saying the changes were not saved; when the
+read (or a save the editor sent again) answers 403 or 404, or says the person no
+longer manages the event, it closes and the page shows what that person may
+now see, saying the changes were not saved where it still shows the event. Any
+other failure of the read leaves the editor open with its ordinary save error.
+The editor sends again only while it is still open under the sign-in that
+pressed Save.
 
 Childcare (M1.8 slice 3): event create and series update accept
 `childcareAvailable` (default false), `childcareNotes` (up to 500

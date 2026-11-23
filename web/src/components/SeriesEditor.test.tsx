@@ -14,6 +14,7 @@ import { savedFields, SeriesEditor } from "./SeriesEditor";
 import { UnsavedChangesBlocker } from "../lib/unsavedChanges";
 import { DateRooms, SeriesRooms } from "../api/rooms";
 import { Events } from "../api/events";
+import * as core from "../api/core";
 import { ApiError } from "../api/core";
 import { Site } from "../api/site";
 import { forgetSite } from "../lib/useSite";
@@ -756,5 +757,55 @@ describe("SeriesEditor and the read it opened with", () => {
     await waitFor(() => expect(onConflict).toHaveBeenCalledExactlyOnceWith("gone"));
     expect(Events.update).toHaveBeenCalledOnce();
     expect(onSaved).not.toHaveBeenCalled();
+  });
+  it("sends nothing more when the person has left the editor before the read after a refusal lands", async () => {
+    vi.mocked(Events.update).mockRejectedValueOnce(changed()).mockResolvedValue({ event: stored });
+    const read = deferred<EventDetailResponse>();
+    vi.mocked(Events.get).mockReturnValue(read.promise);
+    const onSaved = vi.fn();
+    const onConflict = vi.fn();
+    const view = render(<SeriesEditor series={opened} idPrefix="left" onSaved={onSaved} onConflict={onConflict} />);
+    await userEvent.click(saveButton());
+    await waitFor(() => expect(Events.get).toHaveBeenCalledOnce());
+    view.unmount();
+    await act(async () => { read.resolve(readOf(stored)); await read.promise; });
+    expect(Events.update).toHaveBeenCalledOnce();
+    expect(onSaved).not.toHaveBeenCalled();
+    expect(onConflict).not.toHaveBeenCalled();
+  });
+
+  it("sends nothing more, and hands the page the closing path, when the tab's sign-in changed before the read after a refusal lands", async () => {
+    const mine: core.Credential = { token: "t1", marker: "m1", viewer: 1, seen: "m1", verified: true };
+    const held = vi.spyOn(core, "currentCredential").mockReturnValue(mine);
+    const still = vi.spyOn(core, "credentialCurrent").mockReturnValue(true);
+    vi.mocked(Events.update).mockRejectedValueOnce(changed()).mockResolvedValue({ event: stored });
+    const read = deferred<EventDetailResponse>();
+    vi.mocked(Events.get).mockReturnValue(read.promise);
+    const onSaved = vi.fn();
+    const onConflict = vi.fn();
+    render(<SeriesEditor series={opened} idPrefix="other" onSaved={onSaved} onConflict={onConflict} />);
+    await userEvent.click(saveButton());
+    await waitFor(() => expect(Events.get).toHaveBeenCalledOnce());
+    still.mockReturnValue(false);
+    await act(async () => { read.resolve(readOf(stored)); await read.promise; });
+    await waitFor(() => expect(onConflict).toHaveBeenCalledExactlyOnceWith("gone"));
+    expect(still).toHaveBeenCalledWith(mine);
+    expect(Events.update).toHaveBeenCalledOnce();
+    expect(onSaved).not.toHaveBeenCalled();
+    held.mockRestore();
+    still.mockRestore();
+  });
+
+  it.each([403, 404])("hands the page the closing path when the save it sent again by itself answers %i", async (status) => {
+    vi.mocked(Events.update).mockRejectedValueOnce(changed()).mockRejectedValueOnce(new ApiError(status, "no", { code: status === 403 ? "forbidden" : "not_found" }));
+    vi.mocked(Events.get).mockResolvedValue(readOf(stored));
+    const onSaved = vi.fn();
+    const onConflict = vi.fn();
+    render(<SeriesEditor series={opened} idPrefix={`resent-${status}`} onSaved={onSaved} onConflict={onConflict} />);
+    await userEvent.click(saveButton());
+    await waitFor(() => expect(onConflict).toHaveBeenCalledExactlyOnceWith("gone"));
+    expect(Events.update).toHaveBeenCalledTimes(2);
+    expect(onSaved).not.toHaveBeenCalled();
+    expect(screen.queryByText(/couldn't/)).not.toBeInTheDocument();
   });
 });

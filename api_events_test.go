@@ -3582,7 +3582,7 @@ func TestSeriesRevisionFollowsTheEventsOtherWriters(t *testing.T) {
 		}
 		stale(t, opened)
 	})
-	// The clock repair and a series save write the event only through ClearDirty.
+	// Neither the extender nor the clock repair's flag clear moves the revision.
 	t.Run("extender and the clock flag", func(t *testing.T) {
 		opened := seriesRevisionOf(t, f.leader, series.ID)
 		var last models.EventOccurrence
