@@ -22,6 +22,11 @@ suppressions. The guards named here are parse-only; each test file states its ow
   on a UTF8 database (`TestSuppressionMatchingBasis`).
 - Notices are delivered by the `notify.deliver` job that `notify.Send` queues, never by their
   callers (`TestNoticesAreDeliveredBySendNotByCallers`).
+- A notice sender holds the email delivery row lock through the provider call and the ledger
+  update. If Dismiss commits first, it suppresses the queued or deferred row and a later sender
+  skips it. If the sender holds the lock first, Dismiss waits. Once a successful send commits,
+  the row stays sent. A provider can still accept mail before the sender's transaction fails,
+  leaving that acceptance unrecorded.
 
 ## Optional email choices
 

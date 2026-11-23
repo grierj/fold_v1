@@ -230,12 +230,19 @@ func TestPanicsAndUnknownKinds(t *testing.T) {
 	if nobody.Status != models.JobQueued || nobody.Attempts != 0 || time.Until(nobody.RunAt) < 50*time.Minute {
 		t.Fatalf("an unknown kind waits for a build that knows it, without using an attempt: %+v", nobody)
 	}
-	// After a week it is dead.
+	// Once the grace period ends, the final claim uses an attempt even though
+	// this build has no handler to start.
+	reported := -1
+	r.OnDead = func(_ uint, kind string, attempts int, _ string) {
+		if kind == "nobody" {
+			reported = attempts
+		}
+	}
 	db.Model(&nobody).Updates(map[string]any{"created_at": time.Now().AddDate(0, 0, -8), "run_at": time.Now()})
 	r.RunOnce(context.Background(), "w")
 	db.First(&nobody, nobody.ID)
-	if nobody.Status != models.JobDead {
-		t.Fatalf("an unknown kind after a week: %+v", nobody)
+	if nobody.Status != models.JobDead || nobody.Attempts != 1 || reported != 1 {
+		t.Fatalf("unknown kind after grace: job %+v, hook reported %d attempts used", nobody, reported)
 	}
 }
 
@@ -313,6 +320,33 @@ func TestOnDeadFiresOnceWhenAJobDies(t *testing.T) {
 	// Nothing is due now (one in backoff, one waiting), and a dead job is not run again.
 	if ran, _ := r.RunOnce(context.Background(), "w"); ran || len(calls) != 1 {
 		t.Fatalf("ran %v, hook calls %+v", ran, calls)
+	}
+}
+
+func TestOnDeadCapsAttemptsUsedAfterLeaseRecovery(t *testing.T) {
+	db := testdb.Shared(t)
+	var calls []deadCall
+	r := runner(db, Kind{Type: Type{Name: "stopped"}, Run: func(context.Context, json.RawMessage) error {
+		t.Error("a claim past the last attempt ran the handler")
+		return nil
+	}})
+	r.Lease = time.Minute
+	r.OnDead = func(id uint, kind string, attempts int, errText string) {
+		calls = append(calls, deadCall{id, kind, attempts, errText})
+	}
+	enqueue(db, "stopped", nil, time.Now(), "stopped", 1)
+	holdByHand(t, db, "stopped", "gone", time.Now().Add(-2*time.Minute))
+	if ran, err := r.RunOnce(context.Background(), "w"); !ran || err != nil {
+		t.Fatalf("run: %v %v", ran, err)
+	}
+	var j models.Job
+	db.Where("unique_key = ?", "stopped").First(&j)
+	if j.Status != models.JobDead || j.Attempts != 2 {
+		t.Fatalf("stopped job: %+v", j)
+	}
+	want := deadCall{j.ID, "stopped", 1, "the worker stopped while running it"}
+	if len(calls) != 1 || calls[0] != want {
+		t.Fatalf("hook calls %+v, want just %+v", calls, want)
 	}
 }
 
