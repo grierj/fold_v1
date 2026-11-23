@@ -412,13 +412,13 @@ func (a *App) apiConfirmGuestRegistration(c *gin.Context) {
 			return err
 		}
 		manageRaw = raw
-		if havePrior && prior.Status == models.RegRemoved {
+		if havePrior && !policy.RegConfirmGuest.StartsFrom(prior.Status) {
 			// A pruned guest can't re-enter through the public form;
 			// a leader or host adds them back (mirrors registerLocked).
 			return errRemovedBlocked
 		}
 		reg.UserID, reg.ManageTokenHash = &user.ID, hash
-		if err := saveRegistration(tx, &reg); err != nil {
+		if err := saveRegistration(tx, policy.RegConfirmGuest, prior.Status, &reg); err != nil {
 			return err
 		}
 		if full {
@@ -694,9 +694,7 @@ func (a *App) apiCancelGuestRegistration(c *gin.Context) {
 			return errTokenInvalid
 		}
 		before := reg.Status
-		cancellable := before == models.RegGoing || before == models.RegMaybe ||
-			before == models.RegWaitlisted
-		if !cancellable {
+		if !policy.RegCancelFromLink.StartsFrom(before) {
 			display = a.guestDisplayWith((&siteNameOnce{a: a, db: tx}).get, reg, occ, ev, grp)
 			return nil
 		}
@@ -710,7 +708,7 @@ func (a *App) apiCancelGuestRegistration(c *gin.Context) {
 		now := time.Now().UTC()
 		cancelled := *reg
 		cancelled.Status = models.RegCancelled
-		if err := saveRegistration(tx, &cancelled); err != nil {
+		if err := saveRegistration(tx, policy.RegCancelFromLink, before, &cancelled); err != nil {
 			return err
 		}
 		// Like declining, cancelling ends a live exact-date grant on the row.
