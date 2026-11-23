@@ -577,16 +577,20 @@ func (a *App) promoteRows(tx *gorm.DB, ev *models.Event, o *models.EventOccurren
 	return nil
 }
 
+// registrationChange is one row's move: old is the row as the caller judged it
+// (zero for none), next what the move writes.
 type registrationChange struct {
+	move        policy.RegistrationMove
 	old         models.Registration
 	next        models.Registration
 	found       bool
 	auditAction string
 }
 
-func prepareRegistration(old models.Registration, o *models.EventOccurrence, subject registrationSubject, want string, guests int, mode string, care childcareRequest, namedCare *bool, now time.Time) (registrationChange, error) {
-	ch := registrationChange{old: old, found: old.ID != 0}
-	if ch.found && ch.old.Status == models.RegRemoved {
+func prepareRegistration(move policy.RegistrationMove, old models.Registration, o *models.EventOccurrence, subject registrationSubject, want string, guests int, mode string, care childcareRequest, namedCare *bool, now time.Time) (registrationChange, error) {
+	ch := registrationChange{move: move, old: old, found: old.ID != 0}
+	// A removed person cannot answer; a leader or host adds them back.
+	if ch.found && !policy.RegAnswer.StartsFrom(ch.old.Status) {
 		return ch, errRemovedBlocked
 	}
 	ch.next = ch.old
@@ -628,7 +632,7 @@ func (a *App) registerLocked(tx *gorm.DB, ev *models.Event, o *models.EventOccur
 			return err
 		}
 	}
-	return saveRegistration(tx, r)
+	return saveRegistration(tx, ch.move, ch.old.Status, r)
 }
 
 // applyRegistrationBatch releases resources before filling new requests so
@@ -638,7 +642,7 @@ func (a *App) applyRegistrationBatch(tx *gorm.DB, ev *models.Event, o *models.Ev
 	for i := range changes {
 		ch := &changes[i]
 		if ch.old.Status == models.RegWaitlisted && ch.next.Status == models.RegWaitlisted {
-			if err := saveRegistration(tx, &ch.next); err != nil {
+			if err := saveRegistration(tx, ch.move, ch.old.Status, &ch.next); err != nil {
 				return err
 			}
 			editedWaiter = true
@@ -648,7 +652,7 @@ func (a *App) applyRegistrationBatch(tx *gorm.DB, ev *models.Event, o *models.Ev
 			if interim.Status == models.RegGoing {
 				interim.Status = models.RegDeclined
 			}
-			if err := saveRegistration(tx, &interim); err != nil {
+			if err := saveRegistrationStep(tx, ch.move, ch.old.Status, &interim); err != nil {
 				return err
 			}
 		}
@@ -675,7 +679,7 @@ func (a *App) applyRegistrationBatch(tx *gorm.DB, ev *models.Event, o *models.Ev
 			continue // registerLocked writes the final row below
 		}
 		released = true
-		if err := saveRegistration(tx, &interim); err != nil {
+		if err := saveRegistrationStep(tx, ch.move, ch.old.Status, &interim); err != nil {
 			return err
 		}
 	}
@@ -1031,7 +1035,7 @@ func (a *App) apiRegister(c *gin.Context) {
 		}
 		changes := []registrationChange{}
 		if body.Status != "" {
-			ch, err := prepareRegistration(ownRow, locked, userSubject(holder.ID), body.Status, guests, mode, care, nil, now)
+			ch, err := prepareRegistration(policy.RegAnswer, ownRow, locked, userSubject(holder.ID), body.Status, guests, mode, care, nil, now)
 			if err != nil {
 				return err
 			}
@@ -1060,7 +1064,7 @@ func (a *App) apiRegister(c *gin.Context) {
 			if err != nil {
 				return err
 			}
-			ch, err := prepareRegistration(personRows[person.ID], locked, subject, answer.Status, 0, answer.AttendanceMode, childcareRequest{}, answer.ChildcareRequested, now)
+			ch, err := prepareRegistration(policy.RegAnswer, personRows[person.ID], locked, subject, answer.Status, 0, answer.AttendanceMode, childcareRequest{}, answer.ChildcareRequested, now)
 			if err != nil {
 				return err
 			}
@@ -1257,8 +1261,8 @@ func (a *App) apiRemoveRegistration(c *gin.Context) {
 			return errOccurrenceNotFound
 		}
 		var r models.Registration
-		if err := tx.Where("id = ? AND occurrence_id = ? AND status NOT IN ?",
-			body.RegistrationID, locked.ID, []string{models.RegRemoved, models.RegCancelled}).First(&r).Error; err != nil {
+		if err := tx.Where("id = ? AND occurrence_id = ?", body.RegistrationID, locked.ID).
+			Where(registrationStartsFrom(policy.RegRemoveByManager)).First(&r).Error; err != nil {
 			return errRegNotFound
 		}
 		hadGrant, priorStatus := r.AccessLive(), r.Status
@@ -1277,7 +1281,7 @@ func (a *App) apiRemoveRegistration(c *gin.Context) {
 		}
 		removed := r
 		removed.Status, removed.RemovedBy, removed.RemovalNote = models.RegRemoved, &me.ID, note
-		if err := saveRegistration(tx, &removed); err != nil {
+		if err := saveRegistration(tx, policy.RegRemoveByManager, r.Status, &removed); err != nil {
 			return err
 		}
 		meta := registrationMeta(r)
@@ -1394,8 +1398,8 @@ func (a *App) apiPromoteRegistration(c *gin.Context) {
 			return errOccurrenceNotFound
 		}
 		var r models.Registration
-		if err := tx.Where("id = ? AND occurrence_id = ? AND status = ?",
-			body.RegistrationID, locked.ID, models.RegWaitlisted).First(&r).Error; err != nil {
+		if err := tx.Where("id = ? AND occurrence_id = ?", body.RegistrationID, locked.ID).
+			Where(registrationStartsFrom(policy.RegPromote)).First(&r).Error; err != nil {
 			return errRegNotFound
 		}
 		ok, err := a.eligibleRegistration(tx, r, ev, now)
@@ -1932,7 +1936,7 @@ func (a *App) addHouseholdRegistration(c *gin.Context, ev *models.Event, date st
 		if err := checkChildcare(tx, ev, o.ID, r.ID, effectiveChildcare(ev, r)); err != nil {
 			return err
 		}
-		if err := saveRegistration(tx, &r); err != nil {
+		if err := saveRegistration(tx, policy.RegAddByManager, old.Status, &r); err != nil {
 			return err
 		}
 		action := audit.RegistrationAdded
@@ -2038,7 +2042,7 @@ func (a *App) addAccountRegistrationLocked(tx *gorm.DB, ev *models.Event, locked
 	}
 	after.Status, after.GuestCount, after.AttendanceMode = models.RegGoing, options.guests, mode
 	after.ChildcareCount, after.ChildcareAgesNote = count, ages
-	if err := saveRegistration(tx, &after); err != nil {
+	if err := saveRegistration(tx, policy.RegAddByManager, before.Status, &after); err != nil {
 		return models.Registration{}, err
 	}
 	action := audit.RegistrationAdded

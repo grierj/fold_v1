@@ -498,7 +498,7 @@ func (a *App) cancelSelectedLosers(tx *gorm.DB, c consent.Checked[dateLosers], a
 		// Ordinary self-cancellation keeps its separate idempotent token path.
 		cancelled := r
 		cancelled.Status = models.RegCancelled
-		if err := saveRegistration(tx, &cancelled); err != nil {
+		if err := saveRegistration(tx, policy.RegMorePrivate, r.Status, &cancelled); err != nil {
 			return err
 		}
 		meta := registrationMeta(r)

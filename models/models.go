@@ -44,17 +44,15 @@ const (
 	VisibilityInviteOnly = policy.InviteOnly // members and admins only
 )
 
-// Registration statuses (renamed from RSVP, M1.1a). Cancelled arrives
-// with the guest manage link (M1.4): the person withdrew a registration
-// they had made, which is not the same answer as declining an event.
-// Waitlisted and removed arrive with capacity and pruning (M1.5, 5.4).
+// Registration statuses. internal/policy owns the values and the moves
+// between them (policy.RegistrationMove); models names them for rows.
 const (
-	RegGoing      = "going"
-	RegMaybe      = "maybe"
-	RegDeclined   = "declined"
-	RegCancelled  = "cancelled"
-	RegWaitlisted = "waitlisted"
-	RegRemoved    = "removed"
+	RegGoing      = policy.RegGoing
+	RegMaybe      = policy.RegMaybe
+	RegDeclined   = policy.RegDeclined
+	RegCancelled  = policy.RegCancelled
+	RegWaitlisted = policy.RegWaitlisted
+	RegRemoved    = policy.RegRemoved
 )
 
 // Where a registration came from (5.3). Guest form registrations are the
@@ -1312,7 +1310,6 @@ const (
 	RecipientFailed     = "failed"
 )
 
-// CurrentRegStatuses are the registration statuses that still stand: a seat
-// held, a maybe, or a place on the waitlist. Declined, cancelled and removed
-// rows are history. Read-only; pass it to a query as an IN list.
-var CurrentRegStatuses = []string{RegGoing, RegMaybe, RegWaitlisted}
+// CurrentRegStatuses is policy.CurrentRegStatuses: the statuses that still
+// stand. Read-only; pass it to a query as an IN list.
+var CurrentRegStatuses = policy.CurrentRegStatuses

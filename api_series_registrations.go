@@ -308,7 +308,7 @@ func (a *App) apiRegisterSeries(c *gin.Context) {
 				continue
 			}
 			old := prior[o.ID]
-			change, err := prepareRegistration(old, o, userSubject(actor.ID), body.Status, guests, mode, care, nil, dateNow)
+			change, err := prepareRegistration(policy.RegAnswer, old, o, userSubject(actor.ID), body.Status, guests, mode, care, nil, dateNow)
 			if err != nil {
 				if refusal, ok := seriesRefusal(o.ID, models.FormatCalendarDate(o.OriginalDate), err); ok {
 					response.Refusals = append(response.Refusals, refusal)
@@ -517,7 +517,7 @@ func (a *App) apiUndoSeriesRegistration(c *gin.Context) {
 			}
 			if !item.Before.Exists {
 				zero, empty := 0, ""
-				change, err := prepareRegistration(current, o, userSubject(actor.ID), models.RegDeclined, 0, current.AttendanceMode,
+				change, err := prepareRegistration(policy.RegUndoSeriesAnswer, current, o, userSubject(actor.ID), models.RegDeclined, 0, current.AttendanceMode,
 					childcareRequest{ChildcareCount: &zero, ChildcareAgesNote: &empty}, nil, dateNow)
 				if err == nil {
 					err = a.applyRegistrationBatch(tx, &ev, o, []registrationChange{change}, dateNow, &actor.ID, c.ClientIP())
@@ -543,7 +543,7 @@ func (a *App) apiUndoSeriesRegistration(c *gin.Context) {
 			next.Status, next.GuestCount, next.AttendanceMode = item.Before.Status, item.Before.GuestCount, item.Before.AttendanceMode
 			next.ChildcareCount, next.ChildcareAgesNote, next.ChildcareRequested = item.Before.ChildcareCount, item.Before.ChildcareAgesNote, item.Before.ChildcareRequested
 			next.Source, next.RegisteredBy, next.WaitlistedAt, next.PromotedAt = item.Before.Source, item.Before.RegisteredBy, item.Before.WaitlistedAt, item.Before.PromotedAt
-			change := registrationChange{old: current, next: next, found: true}
+			change := registrationChange{move: policy.RegUndoSeriesAnswer, old: current, next: next, found: true}
 			err := a.applyRegistrationBatch(tx, &ev, o, []registrationChange{change}, dateNow, &actor.ID, c.ClientIP())
 			if err != nil {
 				if refusal, ok := seriesRefusal(o.ID, item.Date, err); ok {
