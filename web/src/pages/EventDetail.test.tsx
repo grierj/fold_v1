@@ -693,6 +693,27 @@ describe("EventDetail header actions and ?manage (DEC-99)", () => {
     expect(screen.getByLabelText("Title")).toHaveFocus();
   });
 
+  it("keeps focus off the page body while a saved series reads the page again, then gives it to Edit event", async () => {
+    vi.mocked(Events.get).mockResolvedValue(page);
+    const put = deferred<{ event: typeof page.event }>();
+    vi.mocked(Events.update).mockReturnValueOnce(put.promise);
+    render(<main id="main" tabIndex={-1}><MemoryRouter initialEntries={["/events/7"]}><DateWritesProvider credential={credential}><Routes><Route path="/events/:id" element={<EventDetail />} /></Routes></DateWritesProvider></MemoryRouter></main>);
+    await userEvent.click(await screen.findByRole("button", { name: "Edit event" }));
+    const title = screen.getByLabelText("Title");
+    await userEvent.type(title, "{Enter}");
+    expect(title).toBeDisabled();
+    expect(document.activeElement).toBe(title.closest("form"));
+    expect(screen.getByRole("button", { name: "Edit event" })).toBeDisabled();
+    const again = deferred<typeof page>();
+    vi.mocked(Events.get).mockReturnValueOnce(again.promise);
+    await act(async () => { put.resolve({ event: page.event }); await put.promise; });
+    expect(document.activeElement).toBe(document.getElementById("main"));
+    await act(async () => { again.resolve(page); await again.promise; });
+    const edit = await screen.findByRole("button", { name: "Edit event" });
+    expect(edit).toHaveAttribute("aria-expanded", "false");
+    expect(document.activeElement).toBe(edit);
+  });
+
   it("puts Edit and More together in one row", async () => {
     vi.mocked(Events.get).mockResolvedValue(page);
     renderPage();

@@ -14,6 +14,7 @@ import { SeriesEditor } from "./SeriesEditor";
 import { UnsavedChangesBlocker } from "../lib/unsavedChanges";
 import { DateRooms, SeriesRooms } from "../api/rooms";
 import { Events } from "../api/events";
+import { ApiError } from "../api/core";
 import { Site } from "../api/site";
 import { forgetSite } from "../lib/useSite";
 
@@ -136,6 +137,53 @@ const baseSeries = {
   title: "Supper", description: "", location: "Hall", recurrenceRule: "FREQ=WEEKLY;BYDAY=WE",
   capacity: null, waitlistEnabled: false, guestsAllowed: 0,
 };
+
+describe("SeriesEditor while a save is on its way", () => {
+  it("locks every field and keeps focus in the form until the answer, then gives both back", async () => {
+    const put = deferred<{ event: ReturnType<typeof testEvent> }>();
+    vi.mocked(Events.update).mockReset().mockReturnValueOnce(put.promise);
+    const onSaved = vi.fn();
+    render(<SeriesEditor series={baseSeries} idPrefix="lock" onSaved={onSaved} onClose={() => {}} />);
+    const title = screen.getByRole("textbox", { name: "Title" });
+    await userEvent.type(title, " night{Enter}");
+    expect(Events.update).toHaveBeenCalledWith(7, expect.objectContaining({ title: "Supper night" }));
+    const form = title.closest("form")!;
+    expect(document.activeElement).toBe(form);
+
+    for (const control of [title, screen.getByRole("textbox", { name: /^Description/ }), screen.getByLabelText("First date"),
+      screen.getByLabelText("Reminder email"), screen.getByRole("checkbox", { name: /^Push reminder/ }), screen.getByLabelText(/^Seat limit/),
+      screen.getByRole("button", { name: "More options" }), screen.getByRole("button", { name: "Saving…" }), screen.getByRole("button", { name: "Close" })]) {
+      expect(control).toBeDisabled();
+    }
+
+    await userEvent.type(title, " and songs");
+    expect(title).toHaveValue("Supper night");
+    await act(async () => { put.reject(new Error("offline")); await put.promise.catch(() => {}); });
+    expect(onSaved).not.toHaveBeenCalled();
+    expect(title).toBeEnabled();
+    expect(title).toHaveValue("Supper night");
+    expect(document.activeElement).toBe(title);
+    await userEvent.type(title, " and songs");
+    expect(title).toHaveValue("Supper night and songs");
+  });
+
+  it("focuses the field a refused save names once the fields can take focus again", async () => {
+    vi.mocked(Events.update).mockReset().mockRejectedValueOnce(new ApiError(400, "bad seats", { code: "invalid_capacity" }));
+    render(<SeriesEditor series={baseSeries} idPrefix="refused" onSaved={() => {}} />);
+    await userEvent.click(screen.getByRole("button", { name: "Save series" }));
+    const seats = screen.getByLabelText(/^Seat limit/);
+    await waitFor(() => expect(seats).toHaveFocus());
+    expect(seats).toBeEnabled();
+  });
+
+  it("is locked, with no save, while another run in its panel is on its way", async () => {
+    vi.mocked(Events.update).mockReset();
+    render(<SeriesEditor series={baseSeries} idPrefix="locked" onSaved={() => {}} onClose={() => {}} locked />);
+    expect(screen.getByRole("textbox", { name: "Title" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Save series" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Close" })).toBeDisabled();
+  });
+});
 
 describe("SeriesEditor form layout (DEC-95)", () => {
   it("shares the create forms' order, names the event's zone and opens More options", () => {

@@ -2,7 +2,7 @@ import { canRegisterAsGuest } from "../lib/can";
 import { Form } from "../components/ui/Form";
 import { useHousehold } from "../lib/useHousehold";
 import { SeriesEditor } from "../components/SeriesEditor";
-import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
+import { lazy, Suspense, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { ApiError } from "../api/core";
 import { Events } from "../api/events";
@@ -28,6 +28,7 @@ import { dateLine, whenLine } from "../lib/repeat";
 import type { EventHostRow, EventOccurrence, HouseholdPerson } from "../types";
 import { errorText } from "../lib/errors";
 import { useLoad } from "../lib/useLoad";
+import { useAction } from "../lib/useAction";
 import { ErrorNotice } from "../components/ErrorNotice";
 import { Missing } from "../components/Missing";
 
@@ -63,6 +64,15 @@ function EventDetailContent() {
   const [deleting, setDeleting] = useState(false);
   const deletingNow = useRef(false);
   const [editing, setEditing] = useState(false);
+  // The series editor and the visibility control share a panel that a save closes: while either runs, the other
+  // is locked and the panel stays open, so neither's answer is lost.
+  const seriesAction = useAction();
+  const visibilityAction = useAction();
+  const panelBusy = seriesAction.running || visibilityAction.running;
+  const editButton = useRef<HTMLButtonElement>(null);
+  // A save in the panel reads the page again from nothing: focus waits on the main region and goes back to Edit
+  // series, the panel's opener, once the page is shown.
+  const returnToEdit = useRef(false);
   const [seriesFeedback, setSeriesFeedback] = useState<SeriesFeedbackSignal | null>(null);
   const seriesFeedbackRevision = useRef(0);
   const rsvpMutationGate = useRsvpMutationGate();
@@ -101,6 +111,13 @@ function EventDetailContent() {
 
   const page = load.data ?? null;
   const loading = load.loading;
+  useLayoutEffect(() => {
+    if (!returnToEdit.current || loading) return;
+    returnToEdit.current = false;
+    const active = document.activeElement;
+
+    if (!active || active === document.body || active.id === "main") editButton.current?.focus();
+  }, [loading, page]);
   const notFound = load.error instanceof ApiError && load.error.status === 404;
   const error = load.error && !notFound ? errorText(load.error, "We couldn't load this event.") : null;
   const setPage = load.setData;
@@ -119,6 +136,11 @@ function EventDetailContent() {
   useLeaveQuestion();
 
   function handleRsvp() { void load.reload(); }
+
+  function parkFocus() {
+    returnToEdit.current = true;
+    document.getElementById("main")?.focus({ preventScroll: true });
+  }
 
   function reportSeriesFeedback(eventId: number, date: string, actorResults: ActorRsvpResult[]) {
     const signal = { eventId, date, actorResults, revision: ++seriesFeedbackRevision.current };
@@ -193,7 +215,7 @@ function EventDetailContent() {
         </div>
         {canManage && (
           <div className="flex w-full gap-2 sm:w-auto sm:shrink-0">
-            <Button variant="secondary" layout="flex-1 sm:flex-none" aria-expanded={editing} onClick={() => setEditing((v) => !v)}>
+            <Button ref={editButton} variant="secondary" layout="flex-1 sm:flex-none" aria-expanded={editing} disabled={panelBusy} onClick={() => setEditing((v) => !v)}>
               {event.recurrenceRule ? "Edit series" : "Edit event"}
             </Button>
             <Menu label="More event actions" items={[
@@ -232,8 +254,15 @@ function EventDetailContent() {
             idPrefix={`ev${event.id}`}
             roomDate={single ? next.date : undefined}
             onRoomChanged={() => { setRoomsRevision((n) => n + 1); void load.reload(); }}
-            onSaved={() => { setEditing(false); setRoomsRevision((n) => n + 1); void load.retry(); }}
+            onSaved={() => {
+              parkFocus();
+              setEditing(false);
+              setRoomsRevision((n) => n + 1);
+              void load.retry();
+            }}
             onClose={() => setEditing(false)}
+            action={seriesAction}
+            locked={visibilityAction.running}
           />
           {canSetVisibility && (
             <EventVisibilityControl
@@ -244,7 +273,12 @@ function EventDetailContent() {
               groupVisibility={event.groupVisibility}
               visibility={event.visibility}
               leaderOpened={event.leaderOpened}
-              onSaved={() => void load.retry()}
+              onSaved={() => {
+                parkFocus();
+                void load.retry();
+              }}
+              action={visibilityAction}
+              locked={seriesAction.running}
             />
           )}
         </div>

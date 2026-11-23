@@ -2,7 +2,7 @@ import { act, render, screen } from "@testing-library/react";
 import { createRef, useState, type RefObject } from "react";
 import { afterEach, expect, it, vi } from "vitest";
 import { Dialog } from "../components/ui/Dialog";
-import { useFocusHome, useKeepFocusHome, type FocusHome } from "./focusHome";
+import { useFocusHome, useKeepFocusHome, useLockedFocus, type FocusHome } from "./focusHome";
 
 afterEach(() => { vi.useRealTimers(); });
 
@@ -105,4 +105,50 @@ it("never focuses a home that is gone", () => {
   expect(document.activeElement).toBe(document.body);
   act(() => { home?.rescue(); home?.moveHere(); });
   expect(document.activeElement).toBe(document.body);
+});
+
+function Locked({ locked }: { locked: boolean }) {
+  const home = useFocusHome<HTMLFormElement>();
+  useLockedFocus(home, locked);
+
+  return <form ref={home.ref} tabIndex={-1} aria-label="Locked form">
+    <fieldset disabled={locked}><input aria-label="Name" /></fieldset>
+    <button type="button">Elsewhere</button>
+  </form>;
+}
+
+it("a lock hands focus from the control it disables to the home, and back when it ends", () => {
+  const view = render(<Locked locked={false} />);
+  const name = screen.getByRole("textbox", { name: "Name" });
+  name.focus();
+  view.rerender(<Locked locked />);
+  expect(document.activeElement).toBe(screen.getByRole("form", { name: "Locked form" }));
+  view.rerender(<Locked locked={false} />);
+  expect(document.activeElement).toBe(name);
+});
+
+it("a lock finds the control a browser blurred as soon as its fieldset was disabled", () => {
+  const view = render(<Locked locked={false} />);
+  const name = screen.getByRole("textbox", { name: "Name" });
+  name.focus();
+  // Chromium drops a text field's focus to the body when its fieldset is disabled, before any effect runs.
+  name.blur();
+  view.rerender(<Locked locked />);
+  expect(document.activeElement).toBe(screen.getByRole("form", { name: "Locked form" }));
+  view.rerender(<Locked locked={false} />);
+  expect(document.activeElement).toBe(name);
+});
+
+it("a lock leaves focus alone when it is on a control the lock does not disable, or elsewhere", () => {
+  const view = render(<><Locked locked={false} /><button type="button">Outside</button></>);
+  screen.getByRole("textbox", { name: "Name" }).focus();
+  const outside = screen.getByRole("button", { name: "Outside" });
+  outside.focus();
+  view.rerender(<><Locked locked /><button type="button">Outside</button></>);
+  expect(document.activeElement).toBe(outside);
+  const elsewhere = screen.getByRole("button", { name: "Elsewhere" });
+  elsewhere.focus();
+  view.rerender(<><Locked locked={false} /><button type="button">Outside</button></>);
+  view.rerender(<><Locked locked /><button type="button">Outside</button></>);
+  expect(document.activeElement).toBe(elsewhere);
 });

@@ -1,12 +1,12 @@
 import { Form } from "./ui/Form";
 import { childcareBody, childcareFrom } from "./ChildcareField";
-import { useRef, useState } from "react";
+import { useLayoutEffect, useRef, useState } from "react";
 import { Events } from "../api/events";
 import { bydays, isSimpleWeekly, isWeekly, weekdayCode, weeklyRule } from "../lib/rrule";
 import { useDirty } from "../lib/useDirty";
 import { useUnsavedChanges } from "../lib/unsavedChanges";
 import { useWhenState } from "../lib/useWhenState";
-import { Field, FormError, Input, Textarea, showFieldErrors } from "./ui/Field";
+import { Field, FormError, Input, Textarea, focusFirstInvalid, showFieldErrors } from "./ui/Field";
 import { FormActions } from "./ui/FormActions";
 import { Button } from "./ui/Button";
 import { EventOptions } from "./EventOptions";
@@ -18,7 +18,8 @@ import { seatsFrom } from "./SeatsField";
 import { videoBody } from "./VideoField";
 import { remoteBody, remoteFrom } from "./RemoteField";
 import { errorText, keptDatesOf } from "../lib/errors";
-import { useAction } from "../lib/useAction";
+import { useAction, type Action } from "../lib/useAction";
+import { useFocusHome, useLockedFocus } from "../lib/focusHome";
 import { KeptDates } from "./KeptDates";
 import { useKeptRefusal } from "./keptRefusal";
 import { optionFieldOfError, validateEventOptions, type EventOptionValues, type OptionErrors } from "./eventOptionValues";
@@ -64,6 +65,8 @@ export function SeriesEditor({
   onClose,
   onRoomChanged,
   onAuthorityLost,
+  action: shared,
+  locked = false,
 }: {
   series: SeriesFields;
   idPrefix: string;
@@ -77,6 +80,10 @@ export function SeriesEditor({
   onRoomChanged?: () => void;
   // The kept-dates panel's read was refused: this person may no longer manage the event.
   onAuthorityLost?: () => void;
+  // The page's run for this editor, so it can lock what shares the panel (the visibility control) while it runs.
+  action?: Action;
+  // Another run in the same panel is on its way: a save that closes the panel then would drop its answer.
+  locked?: boolean;
 }) {
   const simple = isSimpleWeekly(instance.recurrenceRule);
 
@@ -120,18 +127,34 @@ export function SeriesEditor({
   const [options, setOptions] = useState(initial);
   // Open on edit, so what is already set is in view (DEC-95).
   const [moreOpen, setMoreOpen] = useState(true);
-  const action = useAction();
+  const own = useAction();
+  const action = shared ?? own;
+  // Nothing in the form changes while a save is on its way: the save sends what was there when it began, and a
+  // success closes the editor, so a later edit would be lost without a word.
+  const frozen = action.running || locked;
   const [error, setError] = useState<string | null>(null);
   const [optionErrors, setOptionErrors] = useState<OptionErrors>({});
-  const root = useRef<HTMLFormElement>(null);
+  const home = useFocusHome<HTMLFormElement>();
+  const root = home.ref;
+  const lockFocus = useLockedFocus(home, frozen);
+  // A refused option is focused once the save ends and the fields can take focus again.
+  const focusInvalid = useRef(false);
   const submit = useRef<HTMLButtonElement>(null);
   const kept = useKeptRefusal({ initial: null, submit, onRefused: setError, onAuthorityLost });
 
   const dirty = useDirty({ date, time, duration, recurring, days, tzid, title, description, location, rule, until, options });
   const { guard, markSaved } = useUnsavedChanges(dirty);
 
+  useLayoutEffect(() => {
+    if (frozen || !focusInvalid.current) return;
+    focusInvalid.current = false;
+    focusFirstInvalid(root.current);
+  }, [frozen, root]);
+
   async function save(e: React.FormEvent) {
     e.preventDefault();
+
+    if (frozen) return;
 
     if (simple && recurring && days.length === 0) {
       setError("Pick at least one day to repeat weekly.");
@@ -213,11 +236,11 @@ export function SeriesEditor({
         if (keptDates && keptDates.length > 0) {
           kept.open(keptDates);
         } else if (field) {
-          showFieldErrors(root.current, () => {
-            setError(msg);
-            setOptionErrors({ [field]: msg });
-            setMoreOpen(true);
-          });
+          lockFocus.forget();
+          focusInvalid.current = true;
+          setError(msg);
+          setOptionErrors({ [field]: msg });
+          setMoreOpen(true);
         } else {
           setError(msg);
         }
@@ -228,55 +251,57 @@ export function SeriesEditor({
   }
 
   return (<>
-    <Form ref={root} noValidate onSubmit={save} className="mt-3 space-y-4 border-t border-border pt-3">
+    <Form ref={root} tabIndex={-1} noValidate onSubmit={save} className="mt-3 space-y-4 border-t border-border pt-3">
       <p className="text-sm text-text-muted">
         This changes every future date that has not been edited on its own. Customized dates stay as they are. Dates
         the new schedule drops are cancelled, and people who were going or maybe are told.
       </p>
       {guard}
       {error && <FormError>{error}</FormError>}
-      <Field id={`s-title-${idPrefix}`} label="Title">
-        <Input value={title} onChange={(e) => setTitle(e.target.value)} />
-      </Field>
-      <Field id={`s-desc-${idPrefix}`} label="Description" optional>
-        <Textarea
-          rows={3}
-          maxLength={5000}
-          value={description}
-          onChange={(e) => setDescription(e.target.value)}
+      <fieldset disabled={frozen} className="min-w-0 space-y-4">
+        <Field id={`s-title-${idPrefix}`} label="Title">
+          <Input value={title} onChange={(e) => setTitle(e.target.value)} />
+        </Field>
+        <Field id={`s-desc-${idPrefix}`} label="Description" optional>
+          <Textarea
+            rows={3}
+            maxLength={5000}
+            value={description}
+            onChange={(e) => setDescription(e.target.value)}
+          />
+        </Field>
+        <WhenFields
+          idPrefix={`s-${idPrefix}`}
+          when={when}
+          tzid={tzid}
+          onTzid={setTzid}
+          zoneHint="The time zone the times above are in. The clock stays put across daylight saving."
+          dateLabel="First date"
+          customRule={simple ? undefined : { value: rule, onChange: setRule }}
+          until={{ value: until, onChange: setUntil }}
         />
-      </Field>
-      <WhenFields
-        idPrefix={`s-${idPrefix}`}
-        when={when}
-        tzid={tzid}
-        onTzid={setTzid}
-        zoneHint="The time zone the times above are in. The clock stays put across daylight saving."
-        dateLabel="First date"
-        customRule={simple ? undefined : { value: rule, onChange: setRule }}
-        until={{ value: until, onChange: setUntil }}
-      />
-      <Field id={`s-loc-${idPrefix}`} label="Location" optional hint={locationHint}>
-        <Input value={location} onChange={(e) => setLocation(e.target.value)} />
-      </Field>
-      {instance.recurrenceRule !== "" && <SeriesRoomField eventId={instance.eventId} idPrefix={idPrefix} onChanged={onRoomChanged} />}
-      {roomDate && instance.recurrenceRule === "" && (
-        <RoomField eventId={instance.eventId} date={roomDate} idPrefix={idPrefix} onChanged={onRoomChanged} />
-      )}
-      <EventOptions
-        idPrefix={idPrefix}
-        open={moreOpen}
-        onOpenChange={setMoreOpen}
-        values={options}
-        onChange={setOptions}
-        errors={optionErrors}
-      />
+        <Field id={`s-loc-${idPrefix}`} label="Location" optional hint={locationHint}>
+          <Input value={location} onChange={(e) => setLocation(e.target.value)} />
+        </Field>
+        {instance.recurrenceRule !== "" && <SeriesRoomField eventId={instance.eventId} idPrefix={idPrefix} onChanged={onRoomChanged} />}
+        {roomDate && instance.recurrenceRule === "" && (
+          <RoomField eventId={instance.eventId} date={roomDate} idPrefix={idPrefix} onChanged={onRoomChanged} />
+        )}
+        <EventOptions
+          idPrefix={idPrefix}
+          open={moreOpen}
+          onOpenChange={setMoreOpen}
+          values={options}
+          onChange={setOptions}
+          errors={optionErrors}
+        />
+      </fieldset>
       <FormActions>
-        <Button ref={submit} variant="primary" layout="w-full sm:w-auto" type="submit" disabled={action.running}>
+        <Button ref={submit} variant="primary" layout="w-full sm:w-auto" type="submit" disabled={frozen}>
           {action.running ? "Saving…" : "Save series"}
         </Button>
         {onClose && (
-          <Button variant="secondary" layout="w-full sm:w-auto" onClick={onClose}>
+          <Button variant="secondary" layout="w-full sm:w-auto" disabled={frozen} onClick={onClose}>
             Close
           </Button>
         )}

@@ -8,8 +8,8 @@ import { errorText } from "../lib/errors";
 import { decisionImpact, reviewOutdated } from "../lib/visibilityConsent";
 import { ROSTER_STALE, ROSTER_WAITING, visibilityRank } from "../lib/visibilityChange";
 import { useRosterActivityOf } from "../lib/dateWrites";
-import { useFocusHome, useKeepFocusHome } from "../lib/focusHome";
-import { useAction } from "../lib/useAction";
+import { useFocusHome, useKeepFocusHome, useLockedFocus } from "../lib/focusHome";
+import { useAction, type Action } from "../lib/useAction";
 import { Checkbox, Choices, Field, FormError, Input, Radio } from "./ui/Field";
 import { Button } from "./ui/Button";
 
@@ -35,6 +35,8 @@ export function EventVisibilityControl({
   leaderOpened,
   churchWide,
   onSaved,
+  action: shared,
+  locked = false,
 }: {
   eventId: number;
   groupName?: string;
@@ -43,12 +45,20 @@ export function EventVisibilityControl({
   leaderOpened?: boolean;
   churchWide?: boolean;
   onSaved: () => void;
+  // The page's run for this control, so it can lock what shares the panel (the series editor) while it runs.
+  action?: Action;
+  // Another run in the same panel is on its way.
+  locked?: boolean;
 }) {
   const [value, setValue] = useState<Visibility>(visibility === "invite_only" && churchWide ? "public" : visibility);
   const [reason, setReason] = useState("");
   // One run covers the preview and the commit, from Save or from the review's confirm.
-  const action = useAction();
+  const own = useAction();
+  const action = shared ?? own;
   const busy = action.running;
+  // Nothing here changes while a run is on its way: it decides from what was there when it began, and a success
+  // replaces this control, so a later choice would be lost without a word.
+  const frozen = busy || locked;
   const [error, setError] = useState<string | null>(null);
   const [resetOverrides, setResetOverrides] = useState(false);
   const [futureOverrides, setFutureOverrides] = useState(0);
@@ -60,22 +70,13 @@ export function EventVisibilityControl({
   const waiting = activity.pendingFor([eventId]) > 0;
   const committing = useRef(false);
   const waitingId = useId();
-  // Save disabled under the keyboard (a sign-up update began, or Save is on its way) hands focus to the form, never
-  // the page. A run that ends with focus still there gives it back to Save, unless a review opened (it takes focus)
-  // or a stale answer said why the form has it.
-  const handedOff = useRef(false);
+  // Save disabled under the keyboard (a sign-up update began) hands focus to the form, never the page. A run hands
+  // it over from whatever it disables and gives it back when it ends, unless a review opened (it takes focus) or
+  // a stale answer said why the form has it.
   useLayoutEffect(() => {
-    if ((waiting || busy) && document.activeElement === saveButton.current) {
-      home.moveHere();
-      handedOff.current = busy;
-    }
-  }, [waiting, busy, home]);
-  useLayoutEffect(() => {
-    if (busy || !handedOff.current) return;
-    handedOff.current = false;
-
-    if (!waiting && document.activeElement === home.ref.current) saveButton.current?.focus({ preventScroll: true });
-  }, [busy, waiting, home]);
+    if (waiting && document.activeElement === saveButton.current) home.moveHere();
+  }, [waiting, home]);
+  const lockFocus = useLockedFocus(home, frozen);
   useEffect(() => {
     let live = true;
     Promise.resolve(Events.visibilityImpact(eventId, visibility)).then((impact) => { if (live) setFutureOverrides(impact?.futureOverrides ?? 0); }).catch(() => {});
@@ -86,7 +87,7 @@ export function EventVisibilityControl({
   const [review, setReview] = useState<{ impact: VisibilityImpact; mark: number } | null>(null);
 
   function show(impact: VisibilityImpact, mark: number) {
-    handedOff.current = false;
+    lockFocus.forget();
     setFutureOverrides(impact.futureOverrides ?? 0);
     setReview({ impact, mark });
   }
@@ -101,7 +102,7 @@ export function EventVisibilityControl({
     const active = document.activeElement;
 
     if (!active || active === document.body || home.ref.current?.contains(active)) home.moveHere();
-    handedOff.current = false;
+    lockFocus.forget();
     setReview(null);
     setError(ROSTER_STALE.event);
   }
@@ -133,7 +134,7 @@ export function EventVisibilityControl({
   function save(e: React.FormEvent) {
     e.preventDefault();
 
-    if (activity.pendingFor([eventId]) > 0) return;
+    if (locked || activity.pendingFor([eventId]) > 0) return;
     void action.run(preview);
   }
 
@@ -213,33 +214,35 @@ export function EventVisibilityControl({
   return (
     <Form ref={home.ref} tabIndex={-1} noValidate onSubmit={save} className="mt-3 space-y-3 border-t border-border pt-3">
       {error && <FormError>{error}</FormError>}
-      <VisibilityField
-        id={`event-visibility-${eventId}`}
-        value={value}
-        onChange={setValue}
-        churchWide={churchWide}
-        groupName={groupName}
-        groupVisibility={groupVisibility}
-        leaderOpened={leaderOpened}
-        reason={reason}
-        onReason={setReason}
-      />
-      {futureOverrides > 0 && <div className="space-y-2"><p className="text-sm text-text-muted">{futureOverrides} {futureOverrides === 1 ? "date has its" : "dates have their"} own visibility and won't change.</p><Checkbox label="Also reset those dates to the series setting" checked={resetOverrides} onChange={(e) => setResetOverrides(e.target.checked)} /></div>}
-      {review && !reviewMoved && (
-        <GroupVisibilityReview
-          key={JSON.stringify(review.impact)}
-          impact={review.impact}
-          subject="event"
-          reset={resetOverrides}
-          busy={busy}
-          waiting={waiting}
-          onConfirm={() => void action.run(() => commit(review.impact.consent ?? ""))}
-          onCancel={() => setReview(null)}
-          returnFocus={saveButton}
+      <fieldset disabled={frozen} className="min-w-0 space-y-3">
+        <VisibilityField
+          id={`event-visibility-${eventId}`}
+          value={value}
+          onChange={setValue}
+          churchWide={churchWide}
+          groupName={groupName}
+          groupVisibility={groupVisibility}
+          leaderOpened={leaderOpened}
+          reason={reason}
+          onReason={setReason}
         />
-      )}
+        {futureOverrides > 0 && <div className="space-y-2"><p className="text-sm text-text-muted">{futureOverrides} {futureOverrides === 1 ? "date has its" : "dates have their"} own visibility and won't change.</p><Checkbox label="Also reset those dates to the series setting" checked={resetOverrides} onChange={(e) => setResetOverrides(e.target.checked)} /></div>}
+        {review && !reviewMoved && (
+          <GroupVisibilityReview
+            key={JSON.stringify(review.impact)}
+            impact={review.impact}
+            subject="event"
+            reset={resetOverrides}
+            busy={busy}
+            waiting={waiting}
+            onConfirm={() => void action.run(() => commit(review.impact.consent ?? ""))}
+            onCancel={() => setReview(null)}
+            returnFocus={saveButton}
+          />
+        )}
+      </fieldset>
       <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
-        <Button ref={saveButton} variant="secondary" type="submit" disabled={busy || waiting} aria-describedby={waiting && !busy ? waitingId : undefined}>
+        <Button ref={saveButton} variant="secondary" type="submit" disabled={frozen || waiting} aria-describedby={waiting && !busy ? waitingId : undefined}>
           {busy ? "Saving…" : "Save visibility"}
         </Button>
         <p id={waitingId} aria-live="polite" className="text-sm text-text-muted">{waiting && !busy && ROSTER_WAITING}</p>

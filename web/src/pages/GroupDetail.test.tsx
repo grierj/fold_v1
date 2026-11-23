@@ -11,7 +11,7 @@ import { Events } from "../api/events";
 import { Groups } from "../api/groups";
 import { Households } from "../api/households";
 import { People } from "../api/people";
-import type { GroupDetailResponse, GroupSummary, Household, OccurrenceResponse, User } from "../types";
+import type { GroupDetailResponse, GroupSummary, Household, OccurrenceResponse, User, Visibility, VisibilityImpact } from "../types";
 import { occurrence } from "../test/occurrence";
 import { Site } from "../api/site";
 import { createRosterWrites, DateWritesProvider, type RosterWriteEnd, type RosterWrites } from "../lib/dateWrites";
@@ -779,6 +779,82 @@ it("closes the series editor after a save, as the event page does, and lists the
   await waitFor(() => expect(screen.queryByRole("button", { name: /^(Save series|Saving…)$/ })).not.toBeInTheDocument());
   expect(Events.update).toHaveBeenCalledOnce();
   await waitFor(() => expect(Groups.get).toHaveBeenCalledTimes(2));
+});
+
+describe("the series panel while a save is on its way", () => {
+  const unchanged = (visibility: Visibility): VisibilityImpact => ({ visibility, currentVisibility: "public", tightened: [], leaderOpened: [], consent: "c", futureOverrides: 0 });
+
+  async function openSeries() {
+    vi.mocked(Groups.get).mockResolvedValue({ ...page, canManage: true });
+    open();
+    await userEvent.click(await screen.findByRole("button", { name: "More for Supper on 2026-12-01" }));
+    await userEvent.click(screen.getByRole("menuitem", { name: "Edit event" }));
+
+    return screen.findByRole("textbox", { name: "Title" });
+  }
+
+  it("locks the editor and the visibility control, keeps focus in the editor, and gives it to the row's menu after", async () => {
+    const put = deferred<{ event: ReturnType<typeof testEvent> }>();
+    vi.mocked(Events.update).mockReturnValueOnce(put.promise);
+    const title = await openSeries();
+    await userEvent.type(title, " night");
+    screen.getByRole("button", { name: "Save series" }).focus();
+    await userEvent.keyboard("{Enter}");
+    expect(Events.update).toHaveBeenCalledWith(7, expect.objectContaining({ title: "Supper night" }));
+    expect(document.activeElement).toBe(title.closest("form"));
+    expect(title).toBeDisabled();
+    expect(screen.getByRole("radio", { name: /^Private/ })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Save visibility" })).toBeDisabled();
+    await userEvent.type(title, " and songs");
+    expect(title).toHaveValue("Supper night");
+    await act(async () => { put.resolve({ event: testEvent(7) }); await put.promise; });
+    await waitFor(() => expect(screen.queryByRole("textbox", { name: "Title" })).not.toBeInTheDocument());
+    expect(Events.update).toHaveBeenCalledOnce();
+    expect(document.activeElement).toBe(screen.getByRole("button", { name: "More for Supper on 2026-12-01" }));
+    await waitFor(() => expect(Groups.get).toHaveBeenCalledTimes(2));
+    expect(document.activeElement).toBe(screen.getByRole("button", { name: "More for Supper on 2026-12-01" }));
+  });
+
+  it("gives focus to the event's new row when the reload replaces the saved one", async () => {
+    vi.mocked(Events.update).mockResolvedValue({ event: testEvent(7) });
+    await openSeries();
+    const moved = occurrence({ id: 2, date: "2026-12-08", startsAt: "2026-12-08T19:00:00Z", endsAt: "2026-12-08T20:00:00Z", startsLocal: "2026-12-08T19:00" });
+    vi.mocked(Groups.get).mockResolvedValue({ ...page, canManage: true, upcomingEvents: [moved] });
+    screen.getByRole("button", { name: "Save series" }).focus();
+    await userEvent.keyboard("{Enter}");
+    const next = await screen.findByRole("button", { name: "More for Supper on 2026-12-08" });
+    await waitFor(() => expect(document.activeElement).toBe(next));
+  });
+
+  it("keeps focus in the panel when a saved visibility replaces its control", async () => {
+    vi.mocked(Events.visibilityImpact).mockImplementation((_, visibility) => Promise.resolve(unchanged(visibility)));
+    vi.mocked(Events.setVisibility).mockResolvedValue({ event: testEvent(7) });
+    await openSeries();
+    await userEvent.click(screen.getByRole("radio", { name: /^Private/ }));
+    vi.mocked(Groups.get).mockResolvedValue({ ...page, canManage: true, upcomingEvents: [occurrence({ visibility: "private", seriesVisibility: "private" })] });
+    const save = screen.getByRole("button", { name: "Save visibility" });
+    save.focus();
+    await userEvent.keyboard("{Enter}");
+    await waitFor(() => expect(Groups.get).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(screen.getByRole("button", { name: "Save visibility" })).not.toBe(save));
+    await waitFor(() => expect(document.activeElement).toBe(screen.getByRole("textbox", { name: "Title" }).closest("form")!.parentElement));
+  });
+
+  it("locks the editor while the visibility control's save is on its way", async () => {
+    const preview = deferred<VisibilityImpact>();
+    vi.mocked(Events.visibilityImpact).mockImplementation((_, visibility) => (visibility === "private" ? preview.promise : Promise.resolve(unchanged(visibility))));
+    const title = await openSeries();
+    await userEvent.click(screen.getByRole("radio", { name: /^Private/ }));
+    await userEvent.click(screen.getByRole("button", { name: "Save visibility" }));
+    expect(title).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Save series" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Close" })).toBeDisabled();
+    await userEvent.click(screen.getByRole("button", { name: "More for Supper on 2026-12-01" }));
+    expect(screen.getByRole("menuitem", { name: "Edit event" })).toBeDisabled();
+    await userEvent.keyboard("{Escape}");
+    await act(async () => { preview.reject(new Error("offline")); await preview.promise.catch(() => {}); });
+    expect(title).toBeEnabled();
+  });
 });
 
 it("keeps the group form, its Cancel off, until a save on its way settles; its failure shows there and not in the next edit", async () => {
@@ -1587,6 +1663,19 @@ describe("the group visibility review", () => {
     await act(async () => { saving.resolve({ group: page.group }); await saving.promise; });
   });
 
+  it("keeps focus in the review while its confirm saves, and gives it back to confirm when the save fails", async () => {
+    const saving = deferred<{ group: typeof page.group }>();
+    vi.mocked(Groups.update).mockReturnValueOnce(saving.promise);
+    const dialog = await openReview();
+    const confirm = within(dialog).getByRole("button", { name: "Make the group invite-only" });
+    confirm.focus();
+    await userEvent.keyboard("{Enter}");
+    await waitFor(() => expect(Groups.update).toHaveBeenCalledOnce());
+    expect(document.activeElement).toBe(dialog.parentElement);
+    await act(async () => { saving.reject(new ApiError(500, "private", { code: "server_error" })); await saving.promise.catch(() => {}); });
+    expect(document.activeElement).toBe(confirm);
+  });
+
   it("refuses the review's confirm while Save group is checking again", async () => {
     const dialog = await openReview();
     const again = deferred<ReturnType<typeof impact>>();
@@ -1871,18 +1960,21 @@ describe("the group visibility review and sign-up updates", () => {
     });
   }
 
-  it("a write in the preview's seam while focus is in the form's fields leaves focus there", async () => {
+  it("a write in the preview's seam after Enter in a field gives focus back to that field", async () => {
     const store = createRosterWrites();
     const checks = watchChecks(store);
     const preview = deferred<ReturnType<typeof impact>>();
     vi.mocked(Groups.visibilityImpact).mockReturnValueOnce(preview.promise);
     await editGroup(store);
-    await userEvent.click(screen.getByRole("button", { name: "Save group" }));
     const name = screen.getByLabelText("Group name");
     name.focus();
+    await userEvent.keyboard("{Enter}");
+    expect(name).toBeDisabled();
+    expect(document.activeElement).toBe(name.closest("form"));
     await writeAfterTheCheck(checks, async () => { preview.resolve(impact(A)); await preview.promise; }, store, KEY, "answered");
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
     expect(screen.getByText(STALE)).toBeInTheDocument();
+    expect(name).toBeEnabled();
     expect(document.activeElement).toBe(name);
     expect(Groups.update).not.toHaveBeenCalled();
     expectDraft();
