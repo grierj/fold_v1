@@ -74,6 +74,9 @@ function EventRow({
   onCancelled,
   onChanged,
   onEditorReplaced,
+  seriesHeld,
+  onSeriesSending,
+  onSeriesSaved,
   writingDate,
   settlingDate,
   groupId,
@@ -102,6 +105,11 @@ function EventRow({
   onChanged: () => void;
   // A read replaced this row (a series save moved its first date) while focus was in its editor panel.
   onEditorReplaced: (eventId: number) => void;
+  // This event's series save is on its way, or the page has not shown it yet (GroupDetailContent's seriesHolds):
+  // no series editor opens or closes, so none opens from data older than the save.
+  seriesHeld: boolean;
+  onSeriesSending: (request: Promise<unknown>) => void;
+  onSeriesSaved: () => Promise<void>;
   // A roster write on this date is on its way, or answered and this page does not show it yet
   // (GroupDetailContent's dateWrites).
   writingDate: boolean;
@@ -170,11 +178,11 @@ function EventRow({
         tone="quiet"
         label={`More for ${name} on ${instance.date}`}
         items={[
-          { label: "Edit this date", onSelect: () => setEditor(editor === "date" ? null : "date"), disabled: writingDate || settlingDate || editStatus !== "idle" || panelBusy },
+          { label: "Edit this date", onSelect: () => setEditor(editor === "date" ? null : "date"), disabled: writingDate || settlingDate || editStatus !== "idle" || panelBusy || (editor === "series" && seriesHeld) },
           // The event page opens its Manage sign-ups panel for this date (DEC-99).
           { label: "Manage sign-ups", onSelect: () => navigate(`/events/${instance.eventId}?manage=${instance.date}`) },
           ...(canCompose ? [{ label: EMAIL_GOING, onSelect: () => navigate(composePath({ occurrence: instance.id })) }] : []),
-          { label: instance.recurrenceRule ? "Edit series" : "Edit event", onSelect: () => setEditor(editor === "series" ? null : "series"), disabled: panelBusy },
+          { label: instance.recurrenceRule ? "Edit series" : "Edit event", onSelect: () => setEditor(editor === "series" ? null : "series"), disabled: panelBusy || seriesHeld },
           { label: cancelling ? "Cancelling…" : "Cancel this date", onSelect: () => void cancel(), danger: true, disabled: cancelling },
         ]}
       /></div>}
@@ -241,7 +249,9 @@ function EventRow({
               locationHint="Leave it blank to use the group's location."
               roomDate={instance.recurrenceRule ? undefined : instance.date}
               onRoomChanged={onChanged}
-              onSaved={onChanged}
+              onSending={onSeriesSending}
+              onSaved={onSeriesSaved}
+              held={seriesHeld}
               onClose={() => {
                 closedPanel.current = true;
                 setEditor(null);
@@ -434,6 +444,37 @@ function GroupDetailContent() {
 
     (opener ?? eventsHeading.current)?.focus();
   }, [detail, load.loading]);
+  // A series save holds its event's editors shut from its request until the page shows an answer asked for after
+  // it worked: an editor copies the page's values when it opens, so one opened earlier would save older values back.
+  // The hold is the epoch() read when the save worked (Infinity while it is on its way); it lives here, not in the
+  // row, so a row that goes and comes back (a tab switch) is still held.
+  const [seriesHolds, setSeriesHolds] = useState<ReadonlyMap<number, number>>(() => new Map());
+
+  const seriesHeld = (eventId: number) => {
+    const at = seriesHolds.get(eventId);
+
+    return at !== undefined && !(load.dataEpoch > at);
+  };
+
+  const holdSeries = (eventId: number, at: number) => setSeriesHolds((holds) => new Map(holds).set(eventId, at));
+
+  function seriesSending(eventId: number, request: Promise<unknown>) {
+    holdSeries(eventId, Infinity);
+    request.catch(() => setSeriesHolds((holds) => {
+      if (holds.get(eventId) !== Infinity) return holds;
+      const next = new Map(holds);
+      next.delete(eventId);
+
+      return next;
+    }));
+  }
+
+  async function seriesSaved(eventId: number) {
+    holdSeries(eventId, load.epoch());
+
+    if (await load.reloadCurrent() !== "loaded") throw new Error("The page was not read again.");
+  }
+
   // A guarded edit settled (from here or the event page): the page is asked for again. Any date may be one this
   // group lists, as a read on its way may hold it, so this is decided from the address, never from what is loaded.
   useEditRefresh(() => true, () => void load.reload());
@@ -1037,6 +1078,9 @@ function GroupDetailContent() {
                     onCancelled={handleCancelled}
                     onChanged={() => void refresh()}
                     onEditorReplaced={(eventId) => { returnTo.current = { eventId }; }}
+                    seriesHeld={seriesHeld(m.eventId)}
+                    onSeriesSending={(request) => seriesSending(m.eventId, request)}
+                    onSeriesSaved={() => seriesSaved(m.eventId)}
                     writingDate={dateWrites.writing(m.eventId, m.date)}
                     settlingDate={dateWrites.settling(m.eventId, m.date)}
                     groupId={group.id}

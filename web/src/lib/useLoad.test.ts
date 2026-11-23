@@ -94,6 +94,36 @@ it("an ask that something newer replaced ends stale", async () => {
   expect(result.current.data).toBe(3);
 });
 
+it("reloadCurrent ends with the newest request a newer ask replaced it with, never with an older answer", async () => {
+  const asks: Array<{ ok: (v: number) => void; fail: (e: Error) => void }> = [];
+  const { result, unmount } = renderHook(() => useLoad(() => new Promise<number>((ok, fail) => { asks.push({ ok, fail }); }), []));
+  await waitFor(() => expect(asks).toHaveLength(1));
+  let current: Promise<unknown> = Promise.resolve();
+  act(() => { current = result.current.reloadCurrent(); });
+  await waitFor(() => expect(asks).toHaveLength(2));
+  act(() => { void result.current.reload(); });
+  await waitFor(() => expect(asks).toHaveLength(3));
+  let settled = false;
+  void current.then(() => { settled = true; });
+  // The mount's answer and the replaced ask's answer are older than this ask: neither ends it.
+  await act(async () => { asks[0].ok(1); asks[1].ok(2); });
+  expect(settled).toBe(false);
+  await act(async () => { asks[2].ok(3); });
+  expect(await current).toBe("loaded");
+  expect(result.current.data).toBe(3);
+
+  act(() => { current = result.current.reloadCurrent(); });
+  await waitFor(() => expect(asks).toHaveLength(4));
+  act(() => { void result.current.retry(); });
+  await waitFor(() => expect(asks).toHaveLength(5));
+  await act(async () => { asks[4].fail(new Error("down")); });
+  expect(await current).toBe("failed");
+
+  act(() => { current = result.current.reloadCurrent(); });
+  unmount();
+  expect(await current).toBe("stale");
+});
+
 it("the epoch moves with every ask, close and change of inputs", async () => {
   const { result, rerender } = renderHook(({ key }) => useLoad(async () => key, [key]), { initialProps: { key: "a" } });
   await waitFor(() => expect(result.current.data).toBe("a"));

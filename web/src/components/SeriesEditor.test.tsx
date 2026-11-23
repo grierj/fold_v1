@@ -285,7 +285,7 @@ describe("SeriesEditor form layout (DEC-95)", () => {
     const close = screen.getByRole("button", { name: "Close" });
     expect(close).toBeEnabled();
     expect(close).toHaveFocus();
-    expect(close).toHaveAccessibleDescription("To change more, close and open Edit series again.");
+    expect(close).toHaveAccessibleDescription("To change more, close this and open it again.");
     fireEvent.submit(title.closest("form")!);
     expect(Events.update).toHaveBeenCalledOnce();
   });
@@ -597,5 +597,63 @@ describe("SeriesEditor and kept dates", () => {
     expect(screen.getByText("Third Name")).toBeInTheDocument();
     expect(within(home()).getByRole("alert")).toHaveTextContent(ERROR_COPY.date_kept_after_leaving);
     draftKept();
+  });
+});
+
+describe("SeriesEditor once a save has finished it", () => {
+  const single = { eventId: 7, startsLocal: "2026-12-01T19:00", durationMinutes: 60, tzid: "UTC", title: "Supper", description: "", location: "Hall", recurrenceRule: "", capacity: null, waitlistEnabled: false, guestsAllowed: 0 };
+
+  beforeEach(() => {
+    forgetSite();
+    vi.mocked(Events.update).mockReset().mockResolvedValue({ event: testEvent(7) });
+  });
+
+  it("names no menu item, and keeps the room field it opened with when the reload makes the event a series", async () => {
+    vi.mocked(Site.get).mockResolvedValue({ name: "Fold", timezone: "UTC", selfSignup: "off", roomsEnabled: true, pushEnabled: true });
+    vi.mocked(DateRooms.list).mockResolvedValue({ rooms: [], booking: null });
+    const view = render(<SeriesEditor series={single} roomDate="2026-12-01" idPrefix="weekly" onSaved={() => {}} onClose={() => {}} />);
+    expect(await screen.findByRole("combobox", { name: /^Room/ })).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "Every week" }));
+    await userEvent.click(screen.getByRole("button", { name: "Save series" }));
+    expect(Events.update).toHaveBeenLastCalledWith(7, expect.objectContaining({ recurrenceRule: expect.stringMatching(/^FREQ=WEEKLY/) }));
+    expect(await screen.findByText("Saved")).toBeInTheDocument();
+    view.rerender(<SeriesEditor series={{ ...single, recurrenceRule: "FREQ=WEEKLY;BYDAY=TU" }} idPrefix="weekly" onSaved={() => {}} onClose={() => {}} />);
+    const close = screen.getByRole("button", { name: "Close" });
+    expect(close).toHaveAccessibleDescription("To change more, close this and open it again.");
+    expect(screen.getByRole("combobox", { name: /^Room/ })).toBeInTheDocument();
+    expect(SeriesRooms.list).not.toHaveBeenCalled();
+  });
+
+  it("brings Close and Saved into view when focus moves to Close", async () => {
+    const scroll = vi.fn();
+    Element.prototype.scrollIntoView = scroll;
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    render(<SeriesEditor series={single} idPrefix="scroll" onSaved={() => {}} onClose={() => {}} />);
+    const title = screen.getByRole("textbox", { name: "Title" });
+    await userEvent.type(title, " night{Enter}");
+    const close = await screen.findByRole("button", { name: "Close" });
+    await waitFor(() => expect(close).toHaveFocus());
+    expect(scroll).toHaveBeenCalledWith({ block: "nearest" });
+    const scrolled = scroll.mock.contexts[scroll.mock.contexts.length - 1];
+    expect(scrolled instanceof HTMLElement && scrolled.contains(close)).toBe(true);
+    expect(scrolled instanceof HTMLElement && scrolled.contains(screen.getByText("Saved"))).toBe(true);
+    expect(focus.mock.contexts[focus.mock.contexts.length - 1]).toBe(close);
+    focus.mockRestore();
+  });
+
+  it("neither moves focus nor scrolls when focus left the form during the save", async () => {
+    const scroll = vi.fn();
+    Element.prototype.scrollIntoView = scroll;
+    const put = deferred<{ event: ReturnType<typeof testEvent> }>();
+    vi.mocked(Events.update).mockReturnValueOnce(put.promise);
+    render(<><button>Elsewhere</button><SeriesEditor series={single} idPrefix="away" onSaved={() => {}} onClose={() => {}} /></>);
+    screen.getByRole("button", { name: "Save series" }).focus();
+    await userEvent.keyboard("{Enter}");
+    const elsewhere = screen.getByRole("button", { name: "Elsewhere" });
+    elsewhere.focus();
+    await act(async () => { put.resolve({ event: testEvent(7) }); await put.promise; });
+    expect(await screen.findByText("Saved")).toBeInTheDocument();
+    expect(elsewhere).toHaveFocus();
+    expect(scroll).not.toHaveBeenCalled();
   });
 });

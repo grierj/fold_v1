@@ -2242,3 +2242,146 @@ describe("GroupDetail: the event visibility review and the series editor's panel
     });
   }
 });
+
+describe("a series save on the group page is not finished until the page shows it", () => {
+  // A fake server: a series PUT changes what the next group read returns.
+  function server() {
+    let stored = occurrence({ videoProvider: "link", videoUrl: "https://meet.example/supper", videoReveal: "registered_only" });
+    vi.mocked(Events.update).mockImplementation(async (_id, body) => {
+      stored = {
+        ...stored,
+        title: body.title ?? stored.title,
+        seriesTitle: body.title ?? stored.seriesTitle,
+        seriesStartsLocal: body.startsLocal ?? stored.seriesStartsLocal,
+        startsLocal: body.startsLocal ?? stored.startsLocal,
+      };
+
+      if (body.videoReveal) stored = { ...stored, videoReveal: body.videoReveal };
+
+      return { event: testEvent(7) };
+    });
+    const read = () => ({ ...page, canManage: true, upcomingEvents: [stored] });
+    vi.mocked(Groups.get).mockImplementation(async () => read());
+
+    return {
+      stored: () => stored,
+      // The next group read waits until released, then answers with what the server holds by then.
+      holdNextRead: () => {
+        const gate = deferred<void>();
+        vi.mocked(Groups.get).mockImplementationOnce(async () => {
+          await gate.promise;
+
+          return read();
+        });
+
+        return gate;
+      },
+    };
+  }
+
+  async function openEditor() {
+    await userEvent.click(await screen.findByRole("button", { name: "More for Supper on 2026-12-01" }));
+    await userEvent.click(screen.getByRole("menuitem", { name: "Edit event" }));
+
+    return screen.findByRole("textbox", { name: "Title" });
+  }
+
+  async function menuOffersEditor(title = "Supper") {
+    await userEvent.click(screen.getByRole("button", { name: `More for ${title} on 2026-12-01` }));
+    const item = screen.getByRole("menuitem", { name: "Edit event" });
+    const offered = item.getAttribute("aria-disabled") !== "true" && !item.hasAttribute("disabled");
+    await userEvent.keyboard("{Escape}");
+
+    return offered;
+  }
+
+  it("stays Saving… with Close and the row's opener shut until the save's reload lands", async () => {
+    const fake = server();
+    open();
+    const title = await openEditor();
+    await userEvent.type(title, " night");
+    const gate = fake.holdNextRead();
+    await userEvent.click(screen.getByRole("button", { name: "Save series" }));
+    await waitFor(() => expect(Groups.get).toHaveBeenCalledTimes(2));
+    expect(screen.getByRole("button", { name: "Saving…" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Close" })).toBeDisabled();
+    expect(screen.queryByText("Saved")).not.toBeInTheDocument();
+    expect(await menuOffersEditor()).toBe(false);
+    await act(async () => { gate.resolve(); await gate.promise; });
+    expect(await screen.findByText("Saved")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Close" })).toBeEnabled();
+    expect(screen.queryByRole("button", { name: "Saving…" })).not.toBeInTheDocument();
+  });
+
+  it("reopens from the saved values only: a later title-only save leaves the time and the video setting alone", async () => {
+    const fake = server();
+    open();
+    await openEditor();
+    const time = screen.getByLabelText("Start time");
+    fireEvent.change(time, { target: { value: "20:15" } });
+    await userEvent.selectOptions(screen.getByLabelText(/^Who sees the link/), "always");
+    const gate = fake.holdNextRead();
+    await userEvent.click(screen.getByRole("button", { name: "Save series" }));
+    await waitFor(() => expect(Events.update).toHaveBeenCalledOnce());
+    expect(Events.update).toHaveBeenLastCalledWith(7, expect.objectContaining({ startsLocal: "2026-12-01T20:15", videoReveal: "always" }));
+    // Nothing closes the editor or opens another one while the read is held.
+    const close = screen.getByRole("button", { name: "Close" });
+    expect(close).toBeDisabled();
+    await userEvent.click(close);
+    expect(screen.getByRole("textbox", { name: "Title" })).toBeInTheDocument();
+    expect(await menuOffersEditor()).toBe(false);
+    await act(async () => { gate.resolve(); await gate.promise; });
+    await userEvent.click(await screen.findByRole("button", { name: "Close" }));
+    expect(screen.queryByRole("textbox", { name: "Title" })).not.toBeInTheDocument();
+    const title = await openEditor();
+    expect(screen.getByLabelText("Start time")).toHaveValue("20:15");
+    expect(screen.getByLabelText(/^Who sees the link/)).toHaveValue("always");
+    await userEvent.type(title, " night");
+    await userEvent.click(screen.getByRole("button", { name: "Save series" }));
+    await waitFor(() => expect(Events.update).toHaveBeenCalledTimes(2));
+    const second = vi.mocked(Events.update).mock.calls[1][1];
+    expect(second).toMatchObject({ title: "Supper night", startsLocal: "2026-12-01T20:15" });
+    expect(second).not.toHaveProperty("videoReveal");
+    expect(fake.stored()).toMatchObject({ seriesTitle: "Supper night", seriesStartsLocal: "2026-12-01T20:15", videoReveal: "always" });
+  });
+
+  it("says the change is saved when the reload fails, and keeps Close and the opener shut until a refresh lands", async () => {
+    server();
+    open();
+    const title = await openEditor();
+    await userEvent.type(title, " night");
+    vi.mocked(Groups.get).mockRejectedValueOnce(new ApiError(500, "down", { code: "server_error" }));
+    title.focus();
+    await userEvent.keyboard("{Enter}");
+    expect(await screen.findByText("Saved")).toBeInTheDocument();
+    expect(within(title.closest("form")!).getByRole("alert")).toHaveTextContent("Your changes are saved, but we couldn't refresh this page. Refresh to keep editing.");
+    const refresh = screen.getByRole("button", { name: "Refresh" });
+    expect(document.activeElement).toBe(refresh);
+    expect(screen.getByRole("button", { name: "Close" })).toBeDisabled();
+    expect(await menuOffersEditor()).toBe(false);
+    vi.mocked(Groups.get).mockRejectedValueOnce(new ApiError(500, "down", { code: "server_error" }));
+    refresh.focus();
+    await userEvent.keyboard("{Enter}");
+    expect(await screen.findByText(/we still couldn't refresh this page/)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Close" })).toBeDisabled();
+    await userEvent.keyboard("{Enter}");
+    await waitFor(() => expect(screen.getByRole("button", { name: "Close" })).toBeEnabled());
+    expect(screen.queryByRole("button", { name: "Refresh" })).not.toBeInTheDocument();
+    expect(document.activeElement).toBe(screen.getByRole("button", { name: "Close" }));
+    expect(screen.getByText("Saved")).toBeInTheDocument();
+    expect(await menuOffersEditor("Supper night")).toBe(true);
+  });
+
+  it("keeps the event's opener shut across a tab switch while the reload has failed", async () => {
+    server();
+    open();
+    const title = await openEditor();
+    await userEvent.type(title, " night");
+    vi.mocked(Groups.get).mockRejectedValueOnce(new ApiError(500, "down", { code: "server_error" }));
+    await userEvent.click(screen.getByRole("button", { name: "Save series" }));
+    expect(await screen.findByRole("button", { name: "Refresh" })).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("tab", { name: /About/ }));
+    await userEvent.click(screen.getByRole("tab", { name: "Upcoming events" }));
+    expect(await menuOffersEditor()).toBe(false);
+  });
+});

@@ -23,6 +23,10 @@ export interface Load<T> {
   // keeps it if this attempt fails (error is set so the caller can say so).
   // The previous error is cleared as the attempt starts. Resolves when the attempt ends.
   reload: () => Promise<LoadOutcome>;
+  // reload for a caller that must know the page holds an answer asked for after this call (a save's own refresh):
+  // a newer ask that replaces it answers it too, so it ends "loaded" or "failed" with the newest request, and
+  // "stale" only on close, `enabled: false` or unmount.
+  reloadCurrent: () => Promise<LoadOutcome>;
   // Replace the answer after a local change, without asking the server. An
   // updater also gets the dataEpoch of the answer it is applied to, so work
   // begun from one answer can refuse to land on a newer one.
@@ -73,6 +77,9 @@ export function useLoad<T>(fn: () => Promise<T>, deps: DependencyList, options: 
   const waiters = useRef<Array<(outcome: LoadOutcome) => void>>([]);
   // The asks the request now in flight answers (taken from `waiters` when it started).
   const inflight = useRef<Array<(outcome: LoadOutcome) => void>>([]);
+  // reloadCurrent's asks: answered by whichever request lands next, never by one that is replaced.
+  const followers = useRef<Array<(outcome: LoadOutcome) => void>>([]);
+  const answerFollowers = (outcome: LoadOutcome) => { for (const done of followers.current.splice(0)) done(outcome); };
 
   useEffect(() => {
     // The asks that triggered this run are answered by it.
@@ -85,6 +92,7 @@ export function useLoad<T>(fn: () => Promise<T>, deps: DependencyList, options: 
     if (!enabled) {
       setState((s) => (s.data === undefined && s.error === null && !s.loading ? s : { data: undefined, error: null, loading: false, closed: false, dataEpoch: 0 }));
       settle("stale");
+      answerFollowers("stale");
 
       return;
     }
@@ -97,8 +105,8 @@ export function useLoad<T>(fn: () => Promise<T>, deps: DependencyList, options: 
     quiet.current = false;
     setState((s) => (keep ? (s.error === null && !s.closed ? s : { ...s, error: null, closed: false }) : { data: undefined, error: null, loading: true, closed: false, dataEpoch: 0 }));
     latest.current().then(
-      (data) => { if (generation.current === run) { setState({ data, error: null, loading: false, closed: false, dataEpoch: run }); settle("loaded"); } },
-      (cause: unknown) => { if (generation.current === run) { setState((s) => (keep ? { ...s, error: cause, loading: false, closed: false } : { data: undefined, error: cause, loading: false, closed: false, dataEpoch: 0 })); settle("failed"); } },
+      (data) => { if (generation.current === run) { setState({ data, error: null, loading: false, closed: false, dataEpoch: run }); settle("loaded"); answerFollowers("loaded"); } },
+      (cause: unknown) => { if (generation.current === run) { setState((s) => (keep ? { ...s, error: cause, loading: false, closed: false } : { data: undefined, error: cause, loading: false, closed: false, dataEpoch: 0 })); settle("failed"); answerFollowers("failed"); } },
     );
 
     return () => { generation.current++; settle("stale"); };
@@ -106,7 +114,7 @@ export function useLoad<T>(fn: () => Promise<T>, deps: DependencyList, options: 
   }, [...deps, enabled, tick]);
 
   // Asks still waiting for an effect run when the component goes away.
-  useEffect(() => () => { for (const done of waiters.current.splice(0)) done("stale"); }, []);
+  useEffect(() => () => { for (const done of [...waiters.current.splice(0), ...followers.current.splice(0)]) done("stale"); }, []);
 
   const ask = useCallback((keepData: boolean) => new Promise<LoadOutcome>((done) => {
     generation.current++;
@@ -120,6 +128,11 @@ export function useLoad<T>(fn: () => Promise<T>, deps: DependencyList, options: 
   const retry = useCallback(() => ask(false), [ask]);
   const reload = useCallback(() => ask(true), [ask]);
 
+  const reloadCurrent = useCallback(() => new Promise<LoadOutcome>((done) => {
+    followers.current.push(done);
+    void ask(true);
+  }), [ask]);
+
   const setData = useCallback((next: T | undefined | ((old: T | undefined, dataEpoch: number) => T | undefined)) => {
     function isUpdater(value: typeof next): value is (old: T | undefined, dataEpoch: number) => T | undefined {
       return isCallable(value);
@@ -132,7 +145,7 @@ export function useLoad<T>(fn: () => Promise<T>, deps: DependencyList, options: 
     generation.current++;
 
     // Nothing will answer the asks still waiting: they end stale now, not never.
-    for (const done of [...waiters.current.splice(0), ...inflight.current.splice(0)]) done("stale");
+    for (const done of [...waiters.current.splice(0), ...inflight.current.splice(0), ...followers.current.splice(0)]) done("stale");
     setState({ data: undefined, error: null, loading: false, closed: true, dataEpoch: 0 });
   }, []);
 
@@ -151,5 +164,5 @@ export function useLoad<T>(fn: () => Promise<T>, deps: DependencyList, options: 
   const { closed, ...answer } = state;
   const loading = state.loading || (enabled && !closed && state.data === undefined && state.error === null);
 
-  return { ...answer, loading, retry, reload, setData, close, epoch };
+  return { ...answer, loading, retry, reload, reloadCurrent, setData, close, epoch };
 }

@@ -66,6 +66,8 @@ export function SeriesEditor({
   onClose,
   onRoomChanged,
   onAuthorityLost,
+  onSending,
+  held = false,
   action: shared,
   locked = false,
 }: {
@@ -75,12 +77,19 @@ export function SeriesEditor({
   // The original date of a single-date event's one occurrence. It turns on the
   // one-date Room control (M2.1b); a series gets the whole-series one (M2.1c).
   roomDate?: string;
-  onSaved: () => void;
+  // Part of the save, which stays on its way until it settles: the page's read after the save, so an editor that
+  // stays open (the group page's) never closes onto data older than what it sent. A rejection says the read
+  // failed; the editor's Refresh calls it again.
+  onSaved: () => void | Promise<void>;
   onClose?: () => void;
   // The room was booked or released (its own action, not part of Save).
   onRoomChanged?: () => void;
   // The kept-dates panel's read was refused: this person may no longer manage the event.
   onAuthorityLost?: () => void;
+  // The series request is on its way: the page holds this event's editors shut until it knows the answer.
+  onSending?: (request: Promise<unknown>) => void;
+  // The page does not yet show this event as it is since this editor's save: Close stays shut and Refresh is offered.
+  held?: boolean;
   // The page's run for this editor, so it can lock what shares the panel (the visibility control) while it runs.
   action?: Action;
   // Another run in the same panel is on its way.
@@ -89,6 +98,8 @@ export function SeriesEditor({
   // The save sends the difference from what the editor opened with, so that stays its baseline through any reload:
   // one save per mount (a second one would diff against values it did not show), and a locked editor never changes.
   const [instance] = useState(series);
+  // Like `series`: a read that lands while this editor is open never adds or removes a field.
+  const [openedRoomDate] = useState(roomDate);
   const simple = isSimpleWeekly(instance.recurrenceRule);
 
   const when = useWhenState({
@@ -133,11 +144,16 @@ export function SeriesEditor({
   const [moreOpen, setMoreOpen] = useState(true);
   const own = useAction();
   const action = shared ?? own;
-  // A save that worked finishes this editor: one that stays open (the group page's) shows what it sent until closed.
-  const [finished, setFinished] = useState(false);
+  // A save that worked finishes this editor once the page's read after it ends: one that stays open (the group
+  // page's) shows what it sent until closed.
+  const [saved, setSaved] = useState(false);
+  const finished = saved && !action.running;
+  // Saved, but the page's read after it failed: what the page would open next may be older than the save.
+  const stale = finished && held;
+  const refresh = useAction();
   // Nothing in the form changes while a save is on its way or after one worked: the save sends what was there when
   // it began, so a later edit would be lost without a word.
-  const frozen = action.running || locked || finished;
+  const frozen = action.running || locked || saved;
   // Read when an answer lands (a Jitsi link): one landing on a locked or finished form is dropped. Set in save()
   // too, before the first render that disables the fields.
   const frozenNow = useRef(frozen);
@@ -151,17 +167,33 @@ export function SeriesEditor({
   const focusInvalid = useRef(false);
   const submit = useRef<HTMLButtonElement>(null);
   const close = useRef<HTMLButtonElement>(null);
+  const refreshButton = useRef<HTMLButtonElement>(null);
+  // Holds Close and the saved lines, brought into view when focus moves there.
+  const outcome = useRef<HTMLDivElement>(null);
+  // A landed refresh removes its button: focus that was on it goes to Close.
+  const refocus = useRef(false);
   const againId = `s-again-${idPrefix}`;
   const kept = useKeptRefusal({ initial: null, submit, onRefused: setError, onAuthorityLost });
 
   const dirty = useDirty({ date, time, duration, recurring, days, tzid, title, description, location, rule, until, options });
   const { guard, markSaved } = useUnsavedChanges(dirty);
 
-  // Close is what is left to press once a save has finished the editor: focus still in the form goes there.
-  const settled = finished && !action.running;
+  // Close (Refresh, if the page's read failed) is what is left to press once a save has finished the editor: focus
+  // still in the form goes there, and the saved lines come into view with it.
+  const showOutcome = (target: HTMLButtonElement | null) => {
+    target?.focus({ preventScroll: true });
+    outcome.current?.scrollIntoView?.({ block: "nearest" });
+  };
+
   useLayoutEffect(() => {
-    if (settled && root.current?.contains(document.activeElement)) close.current?.focus({ preventScroll: true });
-  }, [settled, root]);
+    if (finished && root.current?.contains(document.activeElement)) showOutcome(stale ? refreshButton.current : close.current);
+    // Only when the save finishes; a later change of `stale` is the next effect's.
+  }, [finished, root]);
+  useLayoutEffect(() => {
+    if (stale || !refocus.current) return;
+    refocus.current = false;
+    showOutcome(close.current);
+  }, [stale]);
 
   useLayoutEffect(() => {
     if (frozen || !focusInvalid.current) return;
@@ -243,11 +275,12 @@ export function SeriesEditor({
     frozenNow.current = true;
     await action.run(async () => {
       try {
-        await Events.update(instance.eventId, body);
+        const request = Events.update(instance.eventId, body);
+        onSending?.(request);
+        await request;
         markSaved();
-        setFinished(true);
+        setSaved(true);
         kept.close();
-        onSaved();
       } catch (err) {
         const msg = errorText(err, "We couldn't update the series.");
         const field = optionFieldOfError(err);
@@ -268,6 +301,13 @@ export function SeriesEditor({
 
         return false;
       }
+    }, { followUp: async () => { await onSaved(); } });
+  }
+
+  function reread() {
+    void refresh.run(async () => {
+      await onSaved();
+      refocus.current = document.activeElement === refreshButton.current;
     });
   }
 
@@ -305,8 +345,8 @@ export function SeriesEditor({
           <Input value={location} onChange={(e) => setLocation(e.target.value)} />
         </Field>
         {instance.recurrenceRule !== "" && <SeriesRoomField eventId={instance.eventId} idPrefix={idPrefix} onChanged={onRoomChanged} />}
-        {roomDate && instance.recurrenceRule === "" && (
-          <RoomField eventId={instance.eventId} date={roomDate} idPrefix={idPrefix} onChanged={onRoomChanged} />
+        {openedRoomDate && instance.recurrenceRule === "" && (
+          <RoomField eventId={instance.eventId} date={openedRoomDate} idPrefix={idPrefix} onChanged={onRoomChanged} />
         )}
         <EventOptions
           idPrefix={idPrefix}
@@ -317,25 +357,31 @@ export function SeriesEditor({
           errors={optionErrors}
         />
       </fieldset>
-      <FormActions>
-        {!finished && (
-          <Button ref={submit} variant="primary" layout="w-full sm:w-auto" type="submit" disabled={frozen}>
-            {action.running ? "Saving…" : "Save series"}
-          </Button>
+      <div ref={outcome} className="space-y-4">
+        <FormActions>
+          {!finished && (
+            <Button ref={submit} variant="primary" layout="w-full sm:w-auto" type="submit" disabled={frozen}>
+              {action.running ? "Saving…" : "Save series"}
+            </Button>
+          )}
+          {onClose && (
+            <Button ref={close} variant="secondary" layout="w-full sm:w-auto" disabled={action.running || locked || stale}
+              aria-describedby={finished && !stale ? againId : undefined} onClick={onClose}>
+              Close
+            </Button>
+          )}
+        </FormActions>
+        <SavedStatus ok={finished} error={null} />
+        {stale && <>
+          <FormError>{refresh.state.status === "failed"
+            ? "Your changes are saved, but we still couldn't refresh this page. Refresh to try again."
+            : "Your changes are saved, but we couldn't refresh this page. Refresh to keep editing."}</FormError>
+          <Button ref={refreshButton} variant="secondary" layout="w-full sm:w-auto" onClick={reread}>{refresh.running ? "Refreshing…" : "Refresh"}</Button>
+        </>}
+        {finished && !stale && onClose && (
+          <p id={againId} className="-mt-3 text-sm text-text-muted">To change more, close this and open it again.</p>
         )}
-        {onClose && (
-          <Button ref={close} variant="secondary" layout="w-full sm:w-auto" disabled={action.running || locked}
-            aria-describedby={finished ? againId : undefined} onClick={onClose}>
-            Close
-          </Button>
-        )}
-      </FormActions>
-      <SavedStatus ok={finished} error={null} />
-      {finished && onClose && (
-        <p id={againId} className="-mt-3 text-sm text-text-muted">
-          To change more, close and open {instance.recurrenceRule ? "Edit series" : "Edit event"} again.
-        </p>
-      )}
+      </div>
     </Form>
     {/* After the form, never inside it: the panel's roster has forms of its own. */}
     {kept.refusal && <KeptDates key={kept.refusal.seq} eventId={instance.eventId} keptDates={kept.refusal.dates} onRefused={kept.refused} onClose={kept.close} />}
