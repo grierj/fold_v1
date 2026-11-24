@@ -1,6 +1,6 @@
 import { Form } from "./ui/Form";
 import { childcareBody, childcareFrom } from "./ChildcareField";
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useLayoutEffect, useRef, useState } from "react";
 import { Events } from "../api/events";
 import { bydays, isSimpleWeekly, isWeekly, weekdayCode, weeklyRule } from "../lib/rrule";
 import { useDirty } from "../lib/useDirty";
@@ -17,9 +17,9 @@ import { SeriesRoomField } from "./SeriesRoomField";
 import { seatsFrom } from "./SeatsField";
 import { videoBody } from "./VideoField";
 import { remoteBody, remoteFrom } from "./RemoteField";
-import { errorCode, errorText, keptDatesOf } from "../lib/errors";
-import { ApiError, credentialCurrent, currentCredential } from "../api/core";
+import { errorText, keptDatesOf } from "../lib/errors";
 import { useAction, type Action } from "../lib/useAction";
+import { useRevisionSave, type RevisionConflict } from "../lib/useRevisionSave";
 import { useFocusHome, useLockedFocus } from "../lib/focusHome";
 import { KeptDates } from "./KeptDates";
 import { useKeptRefusal } from "./keptRefusal";
@@ -88,14 +88,6 @@ export function savedFields(s: Omit<SeriesFields, "eventId" | "revision">) {
   };
 }
 
-// A refused save is sent again at most this many times in all, while the stored event still matches the form.
-const MAX_SENDS = 3;
-
-// changed: the stored event differs from what the editor opened with. gone: this person may no longer manage it.
-type SeriesConflict = "changed" | "gone";
-
-const lostAuthority = (err: ApiError) => err.status === 403 || err.status === 404;
-
 // SeriesEditor is the one "Edit series" / "Edit event" form, on the event page (DEC-161).
 export function SeriesEditor({
   series,
@@ -123,7 +115,7 @@ export function SeriesEditor({
   // The kept-dates panel's read was refused: this person may no longer manage the event.
   onAuthorityLost?: () => void;
   // The save was refused and not sent again: the page shows the event as it is now (DEC-161, DEC-162).
-  onConflict?: (why: SeriesConflict) => void;
+  onConflict?: (why: RevisionConflict) => void;
   // The page's run for this editor, so it can lock what shares the panel (the visibility control) while it runs.
   action?: Action;
   // Another run in the same panel is on its way.
@@ -179,12 +171,18 @@ export function SeriesEditor({
   const own = useAction();
   const action = shared ?? own;
   const [saved, setSaved] = useState(false);
-  const mounted = useRef(true);
-  useEffect(() => {
-    mounted.current = true;
+  // The save names the read the editor opened with (DEC-162); a refusal is the shared protocol's (DEC-163).
+  const send = useRevisionSave({
+    opened: instance,
+    revision: instance.revision,
+    read: async () => {
+      const stored = await Events.get(instance.eventId);
 
-    return () => { mounted.current = false; };
-  }, []);
+      return { allowed: stored.canManage, revision: stored.event.revision, value: stored.event };
+    },
+    fields: savedFields,
+    onConflict,
+  });
   // Nothing in the form changes while a save is on its way or after one worked: the save sends what was there when
   // it began, so a later edit would be lost without a word.
   const frozen = action.running || locked || saved;
@@ -278,10 +276,9 @@ export function SeriesEditor({
     }
 
     frozenNow.current = true;
-    let outcome: "saved" | SeriesConflict = "saved";
     await action.run(async () => {
       try {
-        const sent = await send(body);
+        const sent = await send((revision) => Events.update(instance.eventId, { ...body, revision }));
 
         if (sent === "refused") {
           setError("We couldn't update the series. Please try again.");
@@ -289,13 +286,7 @@ export function SeriesEditor({
           return false;
         }
 
-        if (sent === "left") return false;
-
-        if (sent !== "saved") {
-          outcome = sent;
-
-          return;
-        }
+        if (sent !== "saved") return false;
 
         markSaved();
         setSaved(true);
@@ -320,55 +311,7 @@ export function SeriesEditor({
 
         return false;
       }
-    }, { followUp: async () => { if (outcome === "saved") onSaved(); else onConflict?.(outcome); } });
-  }
-
-  // The save names the read the editor opened with (DEC-162). On a refusal the event is read once: while nothing this
-  // form can write has changed (the person's own room booking, a visibility change, a restart) the same save goes
-  // again under the new revision; anything else is the page's to show. Repeated refusals alone are never a conflict.
-  // Only the editor and the sign-in that pressed Save send again: an answer that lands after the person left the
-  // page, or after this tab took another account, sends nothing more.
-  async function send(body: EventInput): Promise<"saved" | "refused" | "left" | SeriesConflict> {
-    const opened = JSON.stringify(savedFields(instance));
-    const credential = currentCredential();
-    const sameSignIn = () => (credential === null ? currentCredential() === null : credentialCurrent(credential));
-    let revision = instance.revision;
-
-    for (let sends = 1; ; sends++) {
-      try {
-        await Events.update(instance.eventId, { ...body, revision });
-
-        return "saved";
-      } catch (err) {
-        // The first save's refusal for lost authority is the form's error, as it always was; a save this editor
-        // sent again by itself was let through by a read that said the person still managed the event.
-        if (sends > 1 && err instanceof ApiError && lostAuthority(err)) return "gone";
-
-        if (errorCode(err) !== "event_changed") throw err;
-      }
-
-      if (!mounted.current) return "left";
-
-      if (!sameSignIn()) return "gone";
-
-      let stored;
-
-      try {
-        stored = await Events.get(instance.eventId);
-      } catch (err) {
-        if (err instanceof ApiError && lostAuthority(err)) return "gone";
-        throw err;
-      }
-
-      if (!mounted.current) return "left";
-
-      if (!sameSignIn() || !stored.canManage || !stored.event.revision) return "gone";
-
-      if (JSON.stringify(savedFields(stored.event)) !== opened) return "changed";
-
-      if (sends === MAX_SENDS) return "refused";
-      revision = stored.event.revision;
-    }
+    }, { followUp: async () => onSaved() });
   }
 
   return (<>

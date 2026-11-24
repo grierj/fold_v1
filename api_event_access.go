@@ -248,7 +248,7 @@ func (a *App) apiGetEvent(c *gin.Context) {
 			return err
 		}
 		if f.canManage(me) {
-			event.Revision = a.seriesToken(&ev)
+			event.Revision = a.eventRevision(&ev)
 		}
 		out = gin.H{
 			"event":            event,
