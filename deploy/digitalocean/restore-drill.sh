@@ -86,8 +86,9 @@ fi
 # Docker's containerd image store reads: refused now, not hours in at the first crossing.
 [[ "$(docker info --format '{{json .DriverStatus}}')" == *io.containerd.snapshotter* ]] \
   || { echo 'restore-drill.sh: Docker must use the containerd image store: the crossing sites pull the drill-built backup images through a registry mirror' >&2; exit 1; }
-# FOLD_BACKUP_VERSION would make a stock Compose file ask for another backup image than the one the drill built and proved.
-unset COMPOSE_FILE COMPOSE_PROJECT_NAME COMPOSE_PROFILES FOLD_BACKUP_VERSION RESTORE_DRILL_FAULT RESTORE_DRILL_PAUSE RESTORE_DRILL_FORCE_TWO_STEP
+# An inherited FOLD_VERSION or FOLD_BACKUP_VERSION wins over a site's .env, so a stock Compose file would ask for another
+# backup image than the one the drill built and proved.
+unset COMPOSE_FILE COMPOSE_PROJECT_NAME COMPOSE_PROFILES FOLD_VERSION FOLD_BACKUP_VERSION RESTORE_DRILL_FAULT RESTORE_DRILL_PAUSE RESTORE_DRILL_FORCE_TWO_STEP
 if [[ -z "$WORK" ]]; then
   WORK="$(mktemp -d /tmp/fold-restore-drill.XXXXXX)"; rmdir "$WORK"
 fi

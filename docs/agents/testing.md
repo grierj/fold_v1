@@ -353,12 +353,9 @@ on the machine the script is started on, which has to be a disposable host: a dr
 the run, declared with `FOLD_DRILL_ISOLATED_DAEMON=1`. Run them behind a firewall that restricts inbound
 access to the operator: crossings bind ports 80 and 443 and use an internal health check, not the standard
 public HTTPS smoke check. `ufw` alone does not restrict those ports, because Docker forwards published
-ports before ufw's rules see them: use a DigitalOcean cloud firewall, which covers IPv4 and IPv6.
-Only on a droplet with no IPv6 address (`ip -6 addr show scope global` prints nothing),
-`iptables -I DOCKER-USER -i eth0 -m conntrack --ctstate NEW -j DROP` on the droplet does the same
-(`eth0` is DigitalOcean's public interface): it drops new outside IPv4 connections to every container and
-leaves SSH alone. That rule does not cover IPv6, so a droplet with an IPv6 address needs the cloud
-firewall. Both tools refuse before they create anything
+ports before ufw's rules see them: use a DigitalOcean cloud firewall, which covers IPv4, IPv6 and the
+droplet's VPC interface. A host `iptables` rule on one interface or one address family leaves the
+others open. Both tools refuse before they create anything
 when it is not declared, when `DOCKER_HOST` or `DOCKER_CONTEXT` points away from the local default
 daemon, when the daemon is not named for this host, or when it already holds a container (the QC-1
 harness alone accepts a busy daemon, and only with `--shared-daemon`, which makes the run not

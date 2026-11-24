@@ -267,8 +267,8 @@ the backup images they build from each release's own `deploy/backup` and passes 
 ghcr.io. That needs Docker's containerd image store (a new install's default), which the drill
 checks before it creates anything; the crossings prove the mirror by digest before any site runs,
 refuse when the candidate's backup image was not built, and remove the file when the drill ends,
-`--keep` or not. The drill clears `FOLD_BACKUP_VERSION`, which would make a stock Compose file ask
-for another backup image than the one proved.
+`--keep` or not. The drill clears an inherited `FOLD_VERSION` and `FOLD_BACKUP_VERSION`, either of
+which would make a stock Compose file ask for another backup image than the one proved.
 
 Two rules keep a drill's checks honest on Docker's containerd image store, where a container's
 `.Image` is a config digest and an image's id is an index. Whether a container runs an image is
