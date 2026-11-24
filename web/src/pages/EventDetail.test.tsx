@@ -1469,6 +1469,9 @@ describe("EventDetail asks every question in the app's dialog", () => {
     // Another address read the date afresh, without the draft; the save on its way belongs to the editor that went away.
     expect(await screen.findByRole("button", { name: "Save this date" })).toBeInTheDocument();
     expect(screen.getByRole("radio", { name: "Same as series (private)" })).not.toBeChecked();
+    // The earlier save's answer could close this editor, so nothing can change until it lands.
+    await waitFor(() => expect(screen.getByRole("radio", { name: "Same as series (private)" })).toBeDisabled());
+    expect(screen.getByRole("button", { name: "Save this date" })).toBeDisabled();
     await act(async () => { answer.reject(challenge(2)); await answer.promise.catch(() => {}); });
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
     expect(edits.sent).toHaveLength(1);
