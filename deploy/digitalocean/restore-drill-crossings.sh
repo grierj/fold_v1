@@ -1744,7 +1744,8 @@ real_current_release_restore() {
   old_id="$(jq -er .attemptId "$cdir/panel-$t3.json")"
   status="$(crossing_api_status DELETE "/admin/users/$t3" "$(crossing_panel_body "$cdir/panel-$t3.json" "$old_id")" "$out")"
   crossing_answer_is "$status" 503 "$out" '.code == "restore_detected"' \
-    || { echo "crossing: the press after a live restore answered $status: $(cat "$out")" >&2; return 1; }
+    || { dc logs --no-color --timestamps --since 10m app >"$cdir/current-release-live-app.log" 2>&1 || true
+         echo "crossing: the press after a live restore answered $status: $(cat "$out") (app log: $cdir/current-release-live-app.log)" >&2; return 1; }
   live_answer=restore_detected
   [[ "$(pg fold -c "SELECT count(*) FROM contact_requests WHERE reason = '' AND (requester_id=$t3 OR subject_user_id=$t3)")" == 0 ]]
   [[ "$(pg fold -c "SELECT deleted_at IS NULL FROM users WHERE id=$t3")" == t ]]
