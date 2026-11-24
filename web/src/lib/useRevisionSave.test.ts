@@ -260,6 +260,15 @@ describe("useRevisionSave", () => {
       expect(date(null)).toBe(false);
       expect(date("ok")).toBe(false);
     });
+
+    it("names a group by its id", () => {
+      const group = answerNames("group", 3);
+      expect(group({ group: { id: 3, revision: "1.a.g3.2" } })).toBe(true);
+      expect(group({ group: { id: 3, revision: "" } })).toBe(false);
+      expect(group({ group: { id: 4, revision: "1.a.g4.2" } })).toBe(false);
+      expect(group({ event: { id: 3, revision: "1.a" } })).toBe(false);
+      expect(group({ group: { id: 3 } })).toBe(false);
+    });
   });
 
   // #455: once a send got no answer it may have been stored, so the form never sends again under a newer revision.

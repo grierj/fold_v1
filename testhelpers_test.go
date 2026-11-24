@@ -655,7 +655,7 @@ func tryLogin(t *testing.T, app *App, ip, email, password string) (int, string) 
 
 func setLimit(t *testing.T, c *apiClient, g *models.Group, limit any) {
 	t.Helper()
-	if w := c.do("PUT", "/api/v1/groups/"+itoa(g.ID), map[string]any{"memberLimit": limit}, true); w.Code != http.StatusOK {
+	if w := c.do("PUT", "/api/v1/groups/"+itoa(g.ID), groupBody(t, c, "/api/v1/groups/"+itoa(g.ID), map[string]any{"memberLimit": limit}), true); w.Code != http.StatusOK {
 		t.Fatalf("set limit %v: %d %s", limit, w.Code, w.Body.String())
 	}
 }
@@ -1296,8 +1296,18 @@ func tinyPNG(t *testing.T) []byte {
 }
 
 func (c *apiClient) doMultipart(method, path, field, filename string, data []byte) *httptest.ResponseRecorder {
+	return c.doMultipartWith(method, path, field, filename, data, nil)
+}
+
+// doMultipartWith sends text fields beside the file.
+func (c *apiClient) doMultipartWith(method, path, field, filename string, data []byte, fields map[string]string) *httptest.ResponseRecorder {
 	var b bytes.Buffer
 	w := multipart.NewWriter(&b)
+	for name, value := range fields {
+		if err := w.WriteField(name, value); err != nil {
+			c.t.Fatalf("write form field: %v", err)
+		}
+	}
 	fw, err := w.CreateFormFile(field, filename)
 	if err != nil {
 		c.t.Fatalf("create form file: %v", err)
@@ -1569,17 +1579,48 @@ func confirmVisibility(t *testing.T, c *apiClient, path string, body map[string]
 	if eventVisibilityPath.MatchString(path) {
 		return visibilityBody(t, c, path, out)
 	}
+	if groupPutPath.MatchString(path) {
+		return groupBody(t, c, path, out)
+	}
+	return out
+}
+
+// groupBody is body for PUT /api/v1/groups/:id at path with the revision the
+// group form opened by c would hold (DEC-166): c reads the group page and its
+// revision goes with the save. A client that may not manage the group reads
+// none, and the server refuses it before judging the revision. A body that
+// already names a revision keeps it.
+func groupBody(t *testing.T, c *apiClient, path string, body map[string]any) map[string]any {
+	t.Helper()
+	if !groupPutPath.MatchString(path) {
+		t.Fatalf("%s is not a group save", path)
+	}
+	out := map[string]any{}
+	if w := c.do("GET", path+"?datePaging="+groupDetailDatePaging, nil, false); w.Code == http.StatusOK {
+		var page struct {
+			Group groupSummaryJSON `json:"group"`
+		}
+		decodeJSON(t, w, &page)
+		out["revision"] = page.Group.Revision
+	}
+	for k, v := range body {
+		out[k] = v
+	}
 	return out
 }
 
 // visibilityBody is body for PUT /api/v1/events/:id/visibility at path with
 // the revision the event page's visibility control would send, read by c just
-// before (DEC-163). A client that may not manage the event reads none, and the
-// server refuses it before judging the revision. A body that already names a
-// revision keeps it. Another route's body is returned as it is, so a test over
-// several routes sends each body through it.
+// before (DEC-163), and for PUT /api/v1/groups/:id the group form's
+// (groupBody, DEC-166). A client that may not manage the event reads none, and
+// the server refuses it before judging the revision. A body that already names
+// a revision keeps it. Another route's body is returned as it is, so a test
+// over several routes sends each body through it.
 func visibilityBody(t *testing.T, c *apiClient, path string, body map[string]any) map[string]any {
 	t.Helper()
+	if groupPutPath.MatchString(path) {
+		return groupBody(t, c, path, body)
+	}
 	m := eventVisibilityPath.FindStringSubmatch(path)
 	if m == nil {
 		return body

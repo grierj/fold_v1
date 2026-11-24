@@ -130,13 +130,13 @@ func TestGroupTighteningRequiresDateDecision(t *testing.T) {
 	if got, want := impact.LeaderOpened[0].Date, dates[0].StartsAt.UTC().Format("2006-01-02"); got != want {
 		t.Fatalf("date review names %q, want %q", got, want)
 	}
-	apiDo(t, admin, "PUT", groupPath, map[string]any{"visibility": "invite_only"}, 409)
+	apiDo(t, admin, "PUT", groupPath, groupBody(t, admin, groupPath, map[string]any{"visibility": "invite_only"}), 409)
 	var group models.Group
 	app.DB.First(&group, *ev.GroupID)
 	if group.Visibility != models.VisibilityPrivate {
 		t.Fatal("missing decision did not roll back")
 	}
-	apiDo(t, admin, "PUT", groupPath, map[string]any{"visibility": "invite_only", "openedEvents": map[string]string{dateDecisionKey(dates[0].ID): "tighten"}}, 200)
+	apiDo(t, admin, "PUT", groupPath, groupBody(t, admin, groupPath, map[string]any{"visibility": "invite_only", "openedEvents": map[string]string{dateDecisionKey(dates[0].ID): "tighten"}}), 200)
 	apiDo(t, anon, "GET", fmt.Sprintf("/api/v1/events/%d/dates/%s", ev.ID, models.FormatCalendarDate(dates[0].OriginalDate)), nil, 404)
 }
 

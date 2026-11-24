@@ -577,7 +577,7 @@ func TestEventKeepsItsOwnVisibility(t *testing.T) {
 	}
 
 	// More open group: events don't move.
-	apiDo(t, admin, "PUT", "/api/v1/groups/"+itoa(gid), map[string]any{"visibility": models.VisibilityPublic}, http.StatusOK)
+	apiDo(t, admin, "PUT", "/api/v1/groups/"+itoa(gid), groupBody(t, admin, "/api/v1/groups/"+itoa(gid), map[string]any{"visibility": models.VisibilityPublic}), http.StatusOK)
 	page, _ := getEvent(t, admin, rehearsal.ID, http.StatusOK)
 	if page.Event.Visibility != models.VisibilityPrivate {
 		t.Fatalf("opening the group changed the event: %+v", page.Event)
@@ -598,7 +598,7 @@ func TestEventKeepsItsOwnVisibility(t *testing.T) {
 	}
 
 	// More private group: inherited events tighten, no decision needed.
-	apiDo(t, admin, "PUT", "/api/v1/groups/"+itoa(gid), map[string]any{"visibility": models.VisibilityInviteOnly}, http.StatusOK)
+	apiDo(t, admin, "PUT", "/api/v1/groups/"+itoa(gid), groupBody(t, admin, "/api/v1/groups/"+itoa(gid), map[string]any{"visibility": models.VisibilityInviteOnly}), http.StatusOK)
 	for _, id := range []uint{rehearsal.ID, concert.ID} {
 		page, _ = getEvent(t, admin, id, http.StatusOK)
 		if page.Event.Visibility != models.VisibilityInviteOnly || page.Event.LeaderOpened {
@@ -2556,7 +2556,7 @@ func TestCreateEventRechecksAfterHeldBody(t *testing.T) {
 				apiDo(t, admin, "PUT", "/api/v1/admin/users/"+itoa(actor.ID), map[string]any{"status": models.UserDisabled}, http.StatusOK)
 				want = http.StatusUnauthorized
 			case "archived group":
-				apiDo(t, admin, "PUT", "/api/v1/groups/"+itoa(g.ID), map[string]any{"status": models.GroupArchived}, http.StatusOK)
+				apiDo(t, admin, "PUT", "/api/v1/groups/"+itoa(g.ID), groupBody(t, admin, "/api/v1/groups/"+itoa(g.ID), map[string]any{"status": models.GroupArchived}), http.StatusOK)
 				want, code = http.StatusConflict, "group_events_not_approved"
 			case "deleted group":
 				if err := app.DB.Delete(g).Error; err != nil {

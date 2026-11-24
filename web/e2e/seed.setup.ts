@@ -1,6 +1,6 @@
 import AxeBuilder from "@axe-core/playwright";
 import { expect, test as setup } from "@playwright/test";
-import { apiAs, email, LONG_GROUP_NAME, PASSWORD } from "./helpers";
+import { apiAs, email, LONG_GROUP_NAME, PASSWORD, saveGroup } from "./helpers";
 
 // Runs once per `make e2e`, on the fresh database e2e/server.sh made.
 // Members-only circle (private) and Invite-only circle (Sam is a member).
@@ -104,7 +104,7 @@ setup("first-run setup and seed data", async ({ page, request }) => {
   }
 
   await admin("POST", `/admin/groups/${group.id}/members`, { userId: ids.sam, role: "member" });
-  await admin("PUT", `/groups/${group.id}`, { memberLimit: 3 });
+  await saveGroup(admin, group.id, { memberLimit: 3 });
 
   for (const name of ["pat", "quinn"]) await admin("PUT", `/admin/users/${ids[name]}`, { status: "active" });
 

@@ -314,7 +314,7 @@ func TestRoomFeedHidesEventsOfInactiveGroups(t *testing.T) {
 	}
 	reservedBefore := strings.Count(before, "SUMMARY:Reserved")
 
-	if w := f.leader.do("PUT", "/api/v1/groups/"+itoa(archived.ID), map[string]any{"status": models.GroupArchived}, true); w.Code != http.StatusOK {
+	if w := f.leader.do("PUT", "/api/v1/groups/"+itoa(archived.ID), groupBody(t, f.leader, "/api/v1/groups/"+itoa(archived.ID), map[string]any{"status": models.GroupArchived}), true); w.Code != http.StatusOK {
 		t.Fatalf("archive: %d %s", w.Code, w.Body.String())
 	}
 	// The API refuses a move back to pending, but a group an earlier
@@ -362,7 +362,7 @@ func TestRoomFeedHidesEventsOfInactiveGroups(t *testing.T) {
 	}
 
 	// Approving or reactivating the groups brings the details back.
-	if w := f.admin.do("PUT", "/api/v1/groups/"+itoa(archived.ID), map[string]any{"status": models.GroupActive}, true); w.Code != http.StatusOK {
+	if w := f.admin.do("PUT", "/api/v1/groups/"+itoa(archived.ID), groupBody(t, f.admin, "/api/v1/groups/"+itoa(archived.ID), map[string]any{"status": models.GroupActive}), true); w.Code != http.StatusOK {
 		t.Fatalf("reactivate: %d %s", w.Code, w.Body.String())
 	}
 	if err := f.app.DB.Model(&models.Group{}).Where("id = ?", pending.ID).UpdateColumn("updated_at", old).Error; err != nil {

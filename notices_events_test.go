@@ -203,7 +203,7 @@ func TestManualCancelWithholdsAnArchivedGroupsDate(t *testing.T) {
 		gormMust(t, f.app.DB.Create(&models.Registration{UserID: &u.ID, OccurrenceID: target.ID, Status: models.RegGoing, AttendanceMode: models.AttendanceInPerson, Source: "web"}))
 	}
 
-	apiDo(t, f.admin, "PUT", "/api/v1/groups/"+itoa(f.group), map[string]any{"status": models.GroupArchived}, http.StatusOK)
+	apiDo(t, f.admin, "PUT", "/api/v1/groups/"+itoa(f.group), groupBody(t, f.admin, "/api/v1/groups/"+itoa(f.group), map[string]any{"status": models.GroupArchived}), http.StatusOK)
 	base := editBaseOf(t, f.admin, f.event.ID, f.date(1))
 	wantDateEdit(t, f.admin, f.event.ID, f.date(1), dateEditBody(base.Revision,
 		map[string]any{"title": "HIDDENTITLE", "location": "HIDDENPLACE"}), http.StatusOK, "")
@@ -333,7 +333,7 @@ func TestReenableWithholdsAHiddenDate(t *testing.T) {
 	}
 
 	// While the second is away the group is archived and the date renamed.
-	apiDo(t, f.admin, "PUT", "/api/v1/groups/"+itoa(f.group), map[string]any{"status": models.GroupArchived}, http.StatusOK)
+	apiDo(t, f.admin, "PUT", "/api/v1/groups/"+itoa(f.group), groupBody(t, f.admin, "/api/v1/groups/"+itoa(f.group), map[string]any{"status": models.GroupArchived}), http.StatusOK)
 	base := editBaseOf(t, f.admin, f.event.ID, f.date(2))
 	wantDateEdit(t, f.admin, f.event.ID, f.date(2), dateEditBody(base.Revision,
 		map[string]any{"title": "HIDDENTITLE", "location": "HIDDENPLACE"}), http.StatusOK, "")
@@ -540,7 +540,7 @@ func TestReenableAsMemberJudgesTheRoleItComesBackTo(t *testing.T) {
 	// While both are away the member takes the full date's only seat, the
 	// group is archived and both dates are renamed.
 	gormMust(t, f.app.DB.Create(&models.Registration{UserID: &f.memberUser.ID, OccurrenceID: full.ID, Status: models.RegGoing, AttendanceMode: models.AttendanceInPerson, Source: "web"}))
-	apiDo(t, f.admin, "PUT", "/api/v1/groups/"+itoa(f.group), map[string]any{"status": models.GroupArchived}, http.StatusOK)
+	apiDo(t, f.admin, "PUT", "/api/v1/groups/"+itoa(f.group), groupBody(t, f.admin, "/api/v1/groups/"+itoa(f.group), map[string]any{"status": models.GroupArchived}), http.StatusOK)
 	for i, title := range map[int]string{2: "ROOMYSECRET", 3: "FULLSECRET"} {
 		base := editBaseOf(t, f.admin, f.event.ID, f.date(i))
 		wantDateEdit(t, f.admin, f.event.ID, f.date(i), dateEditBody(base.Revision,

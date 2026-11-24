@@ -489,9 +489,13 @@ export async function api<T>(url: string, opts: RequestOptions = {}): Promise<T>
 }
 
 // Multipart upload: the browser sets Content-Type with the boundary.
-export async function apiUpload<T>(url: string, field: string, file: File): Promise<T> {
+// `fields` are sent beside the file, as text.
+export async function apiUpload<T>(url: string, field: string, file: File, fields: Record<string, string> = {}): Promise<T> {
   const form = new FormData();
   form.append(field, file);
+
+  for (const [name, value] of Object.entries(fields)) form.append(name, value);
+
   const res = await send(url, { method: "POST", headers: { Accept: "application/json" }, body: form });
 
   return serverPayload<T>((await readBody(res)).data);

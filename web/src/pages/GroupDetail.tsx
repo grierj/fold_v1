@@ -13,7 +13,7 @@ import { Link, useNavigate, useParams } from "react-router-dom";
 import { ApiError } from "../api/core";
 import { Events } from "../api/events";
 import { GroupCover, Groups } from "../api/groups";
-import type { DepartureConfirmation, EventOccurrence, GroupDetailResponse, OpenedDecision, HouseholdPerson, VisibilityImpact } from "../types";
+import type { DepartureConfirmation, EventOccurrence, GroupDetailResponse, HouseholdPerson } from "../types";
 import { useAuth } from "../auth";
 import { OccurrenceCard } from "../components/OccurrenceCard";
 import { PeopleList } from "../components/PeopleList";
@@ -22,10 +22,6 @@ import { Attendance } from "../components/Attendance";
 import { Menu } from "../components/ui/Menu";
 import { composePath, EMAIL_GOING, EMAIL_MEMBERS } from "../components/messages/composeLinks";
 import { placeLine } from "../lib/place";
-import { ROSTER_STALE, visibilityRank } from "../lib/visibilityChange";
-import { useFocusHome, useKeepFocusHome, useLockedFocus } from "../lib/focusHome";
-import { decisionImpact, reviewOutdated } from "../lib/visibilityConsent";
-import { GroupVisibilityReview } from "../components/GroupVisibilityReview";
 import { GroupDepartureDialog } from "../components/GroupDepartureDialog";
 import { RsvpButtons } from "../components/RsvpButtons";
 import { GuestRegistrationForm } from "../components/GuestRegistrationForm";
@@ -34,7 +30,7 @@ import { coverSrc } from "../lib/covers";
 import { CalendarIcon } from "../components/icons";
 import { ErrorNotice } from "../components/ErrorNotice";
 import { Missing } from "../components/Missing";
-import { GroupForm, type GroupFormData } from "../components/GroupForm";
+import { GroupEditor, type CoverStep } from "../components/GroupEditor";
 import { EmptyState } from "../components/ui/EmptyState";
 import { Illustration } from "../components/ui/Illustration";
 import { Skeleton } from "../components/ui/Skeleton";
@@ -247,9 +243,6 @@ async function fetchGroup(id: string, loaded: number): Promise<GroupDetailRespon
   return { ...next, upcomingEvents: dates };
 }
 
-// The events a group review lists, whose sign-up updates withdraw it.
-const impactEventIds = (impact: VisibilityImpact) => [...impact.tightened, ...impact.leaderOpened].map((e) => e.id);
-
 function GroupDetailContent() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
@@ -258,20 +251,12 @@ function GroupDetailContent() {
   const [tab, setTab] = useState<Tab>("events");
   const sectionsRef = useRef<HTMLDivElement>(null);
   const [editing, setEditing] = useState(false);
-  // `mark` is the session roster sequence the request behind the review was sent at.
-  const [review, setReview] = useState<{ data: GroupFormData; impact: VisibilityImpact; mark: number } | null>(null);
   // One run for Save group (its preview and save) and the review's confirm, so neither starts while the other runs.
+  // While it runs nothing on the page that reads the page again starts: that read would take the editor away mid-save.
   const groupSaveAction = useAction();
-  const [reviewError, setReviewError] = useState<string | null>(null);
-  const groupSave = useRef<HTMLButtonElement>(null);
-  // Holds the review and its lines while editing; keeps keyboard focus when a sign-up update withdraws a review.
-  const reviewHome = useFocusHome<HTMLDivElement>();
-  useKeepFocusHome(reviewHome);
-  useLockedFocus(reviewHome, groupSaveAction.running);
-  const activity = useRosterActivityOf();
-  const reviewCommitting = useRef(false);
+  // The page's one cover change: Change cover photo, and the cover step after a saved edit.
+  const coverAction = useAction();
   const [joinBusy, setJoinBusy] = useState(false);
-  const [coverBusy, setCoverBusy] = useState(false);
   const [memberBusy, setMemberBusy] = useState(false);
   const [memberError, setMemberError] = useState<string | null>(null);
   const [departureTarget, setDepartureTarget] = useState<{ subjectId?: number; allowNote: boolean } | null>(null);
@@ -289,6 +274,9 @@ function GroupDetailContent() {
   // A "Load more" is on its way: a refresh meanwhile reads its page too, from fresh cursors.
   const continuing = useRef(false);
   const rsvpMutationGate = useRsvpMutationGate();
+  // The page renders again at every roster begin and end in the session: a date editor's open question closes on a
+  // sign-in change only when it renders again.
+  useRosterActivityOf();
 
   // `reload` keeps ordinary RSVP drafts mounted; `retry` (also what a
   // terminal refresh calls) drops the page at once, so stale authority cannot
@@ -302,6 +290,8 @@ function GroupDetailContent() {
   // A date's save refused and not sent again (DEC-164): which date, for the line above the dates.
   const dateRefused = useRefusedSave(load);
   const [refusedDate, setRefusedDate] = useState<{ eventId: number; date: string } | null>(null);
+  // The group form's save refused and not sent again (DEC-166).
+  const groupRefused = useRefusedSave(load);
 
   const detail = load.data ?? null;
   useEffect(() => { if (detail) loadedDates.current = detail.upcomingEvents.length; }, [detail]);
@@ -320,46 +310,6 @@ function GroupDetailContent() {
 
     (groupMenu.current?.querySelector("button") ?? eventsHeading.current)?.focus();
   }, [detail, load.loading]);
-
-  // A sign-up update on one of these events began, ended or is in flight since `mark`: a review's counts may
-  // no longer be who is signed up. A write on any other event leaves the review alone.
-  const moved = (mark: number, ids: number[]) => activity.changedSince(mark, ids) || activity.pendingFor(ids) > 0;
-
-  // Withdraws the review (or never opens one) and says so; focus on Save, on the form (which holds it while a save
-  // is on its way) or on the review goes to the review's home, so a keyboard user hears the line and Save group is
-  // the next stop.
-  function staleReview() {
-    const active = document.activeElement;
-    const home = reviewHome.ref.current;
-    const save = groupSave.current;
-
-    if (!active || active === document.body || home?.contains(active) || active === save || active === save?.form) reviewHome.moveHere();
-    setReview(null);
-    setReviewError(ROSTER_STALE.group);
-  }
-
-  // A review is judged from its request's mark until a listener is armed: a write that began (and maybe ended)
-  // after the request's last check, before this commit, is never shown and withdraws it. After that, a begin on
-  // one of its events withdraws it. A commit on its way decides from its own answer.
-  const reviewIds = review ? impactEventIds(review.impact) : null;
-  const reviewMoved = review !== null && !reviewCommitting.current && moved(review.mark, reviewIds ?? []);
-  useLayoutEffect(() => {
-    if (!review) return;
-    const ids = impactEventIds(review.impact);
-
-    if (!reviewCommitting.current && moved(review.mark, ids)) {
-      staleReview();
-
-      return;
-    }
-
-    return activity.subscribe((event) => {
-      if (event.end === undefined && ids.includes(event.eventId) && !reviewCommitting.current) {
-        setReview(null);
-        setReviewError(ROSTER_STALE.group);
-      }
-    });
-  }, [activity, review]);
 
   const loading = load.loading;
   const notFound = load.error instanceof ApiError && load.error.status === 404;
@@ -418,7 +368,10 @@ function GroupDetailContent() {
       <Missing
         title="Group not found"
         body="It may have been removed, or it may be private. If someone invited you, ask them for the link again."
-        notice={refusedDate && <RefusedSaveLine save={dateRefused} noun="date" about={formatDayFull(refusedDate.date)} />}
+        notice={<>
+          <RefusedSaveLine save={groupRefused} noun="group" />
+          {refusedDate && <RefusedSaveLine save={dateRefused} noun="date" about={formatDayFull(refusedDate.date)} />}
+        </>}
       />
     );
   }
@@ -427,6 +380,7 @@ function GroupDetailContent() {
     return (
       <div className="fold-page-narrow">
         <h1 className="text-3xl font-bold mb-6">Group unavailable</h1>
+        <RefusedSaveLine save={groupRefused} noun="group" />
         {refusedDate && <RefusedSaveLine save={dateRefused} noun="date" about={formatDayFull(refusedDate.date)} />}
         <ErrorNotice message={error ?? "We couldn't load this group."} onRetry={() => void load.retry()} />
       </div>
@@ -533,118 +487,23 @@ function GroupDetailContent() {
     );
   }
 
-  async function saveEdit(data: GroupFormData): Promise<void | false> {
-    // Making the group more private can change its events (DEC-48): show
-    // the leader the list and get a decision before anything is saved. The
-    // save carries the preview's consent, so a change since the preview is
-    // shown again from the server's own answer (DEC-158). A sign-up update on
-    // one of the listed events while either was asked withdraws it.
-    let impact: VisibilityImpact | null = null;
-    setReviewError(null);
-
-    if (visibilityRank(data.visibility) < visibilityRank(group.visibility)) {
-      const mark = activity.mark();
-      impact = await Groups.visibilityImpact(id!, data.visibility);
-
-      if (moved(mark, impactEventIds(impact))) {
-        staleReview();
-
-        return false;
-      }
-
-      if (impact.tightened.length > 0 || impact.leaderOpened.length > 0) {
-        setReview({ data, impact, mark });
-
-        return false;
-      }
-    }
-
-    const at = { mark: activity.mark() };
-
-    try {
-      await commitEdit(data, undefined, impact?.consent ?? "", at);
-    } catch (e) {
-      const fresh = decisionImpact(e);
-
-      // A refusal this page cannot review again shows the outdated copy.
-      if (!fresh && reviewOutdated(e)) throw new ApiError(409, "visibility review outdated", { code: "visibility_review_outdated" });
-
-      if (!fresh) throw e;
-
-      if (moved(at.mark, impactEventIds(fresh))) {
-        staleReview();
-
-        return false;
-      }
-
-      setReview({ data, impact: fresh, mark: at.mark });
-      setReviewError("We checked again before saving. Please review the group's events again.");
-
-      return false;
-    }
-  }
-
-  async function confirmReview(decisions: Record<string, OpenedDecision>): Promise<false | void> {
-    if (!review || reviewCommitting.current || activity.pendingFor(impactEventIds(review.impact)) > 0) return false;
-    reviewCommitting.current = true;
-    setReviewError(null);
-    const at = { mark: activity.mark() };
-
-    try {
-      await commitEdit(review.data, decisions, review.impact.consent ?? "", at);
-      setReview(null);
-
-      return;
-    } catch (e) {
-      const fresh = decisionImpact(e);
-
-      if (fresh && moved(at.mark, [...impactEventIds(fresh), ...impactEventIds(review.impact)])) {
-        staleReview();
-      } else if (fresh) {
-        setReview({ data: review.data, impact: fresh, mark: at.mark });
-        setReviewError("We checked again before saving. Please review the group's events again.");
-      } else {
-        // After a sign-up update on its events since the review's own request (a cover upload's await included)
-        // the review is withdrawn too: the next Save previews again.
-        if (moved(review.mark, impactEventIds(review.impact))) setReview(null);
-        setReviewError(reviewOutdated(e) ?? errorText(e, "We couldn't save your changes."));
-      }
-
-      return false;
-    } finally {
-      reviewCommitting.current = false;
-    }
-  }
-
-  // `at.mark` is taken again just before the update, so a 409's review is judged from the request that answered it.
-  async function commitEdit(data: GroupFormData, openedEvents: Record<string, OpenedDecision> | undefined, consent: string, at: { mark: number }) {
-    if (data.coverFile) {
-      await GroupCover.upload(id!, data.coverFile);
-    } else if (data.removeCover) {
-      await GroupCover.remove(id!);
-    }
-
-    at.mark = activity.mark();
-    await Groups.update(id!, {
-      name: data.name,
-      description: data.description,
-      tags: data.tags,
-      location: data.location,
-      coverFocal: data.coverFocal || undefined,
-      visibility: data.visibility,
-      memberLimit: data.memberLimit,
-      openedEvents,
-      consent,
-    });
-    // The form goes, and the page with it until the read below answers: focus that is still in the form or the
-    // review waits on the main region.
-    const active = document.activeElement;
+  // The group form's details are saved: the editor closes, the cover change it asked for is made, and the page reads
+  // again. The cover goes after the details, so a refused save never leaves a changed cover behind (DEC-166).
+  function savedEdit(cover: CoverStep | null) {
     returnToGroup.current = true;
-
-    if (reviewHome.ref.current?.contains(active) || groupSave.current?.form?.contains(active)) document.getElementById("main")?.focus({ preventScroll: true });
     setEditing(false);
-    setReviewError(null);
-    await load.retry();
+
+    if (cover) void changeCover(cover, true);
+    else void load.retry();
+  }
+
+  // The group form's save was refused and not sent again: the editor closes on its own, and the page reads from
+  // nothing and says so (DEC-161, DEC-163).
+  function closeOnConflict(why: RevisionConflict) {
+    setEditing(false);
+    dateRefused.clear();
+    setRefusedDate(null);
+    groupRefused.refused(why);
   }
 
   async function setRole(memberId: number, name: string, role: "leader" | "member") {
@@ -701,19 +560,25 @@ function GroupDetailContent() {
     }
   }
 
-  async function uploadCover(file: File) {
-    setCoverBusy(true);
+  // Uploads or removes the cover, then reads the page whether that worked or not. After a saved edit (`afterSave`) the
+  // line says the rest was saved, and only that the cover change is unconfirmed: an answer that was lost may belong to
+  // a change that was made. The form's file is already resized (ImageUpload).
+  function changeCover(step: CoverStep | { pick: File }, afterSave = false) {
+    setCoverError(null);
 
-    try {
-      const resized = await prepareUpload(file, 1600);
-      setCoverError(null);
-      await GroupCover.upload(id!, resized);
+    return coverAction.run(async () => {
+      try {
+        if ("pick" in step) await GroupCover.upload(id!, await prepareUpload(step.pick, 1600));
+        else if ("file" in step) await GroupCover.upload(id!, step.file, step.focal);
+        else await GroupCover.remove(id!);
+      } catch (e) {
+        setCoverError(afterSave
+          ? "We couldn't confirm the cover photo change. Anything else you changed was saved. Check the photo before trying again."
+          : errorText(e, "We couldn't upload the cover photo."));
+      }
+
       await load.retry();
-    } catch (e) {
-      setCoverError(errorText(e, "We couldn't upload the cover photo."));
-    } finally {
-      setCoverBusy(false);
-    }
+    });
   }
 
   return (
@@ -771,10 +636,24 @@ function GroupDetailContent() {
                   <div ref={groupMenu}><Menu
                     label="More group actions"
                     items={[
-                      { label: "Edit group", onSelect: () => { if (!editing) groupSaveAction.reset(); setEditing(true); } },
+                      {
+                        label: "Edit group",
+                        onSelect: () => {
+                          if (!editing) {
+                            groupSaveAction.reset();
+                            groupRefused.clear();
+                            setCoverError(null);
+                          }
+
+                          setEditing(true);
+                        },
+                        disabled: groupSaveAction.running || coverAction.running,
+                      },
                       ...(canCompose && group.status === "active" ? [{ label: EMAIL_MEMBERS, onSelect: () => navigate(composePath({ group: group.id })) }] : []),
-                      { label: coverBusy ? "Uploading cover…" : "Change cover photo", onSelect: () => coverRef.current?.click(), disabled: coverBusy },
-                      ...(isMember ? [{ label: "Leave group", onSelect: () => void toggleJoin(), disabled: !!departureTarget }] : []),
+                      // Not offered while the editor is open: the form has its own cover field, and this one reads the page
+                      // again, which would drop the draft or run over the cover step of the form's save.
+                      ...(editing ? [] : [{ label: coverAction.running ? "Uploading cover…" : "Change cover photo", onSelect: () => coverRef.current?.click(), disabled: coverAction.running || groupSaveAction.running }]),
+                      ...(isMember ? [{ label: "Leave group", onSelect: () => void toggleJoin(), disabled: !!departureTarget || groupSaveAction.running }] : []),
                     ]}
                   /></div>
                   <HiddenFileInput
@@ -783,7 +662,7 @@ function GroupDetailContent() {
                     onChange={(e) => {
                       const f = e.target.files?.[0];
 
-                      if (f) uploadCover(f);
+                      if (f) void changeCover({ pick: f });
                       e.target.value = "";
                     }}
                   />
@@ -800,7 +679,7 @@ function GroupDetailContent() {
                 />
               )}
               {group.visibility !== "invite_only" && !isMember && (
-                <Button variant="primary" onClick={toggleJoin} disabled={joinBusy || !!departureTarget}>
+                <Button variant="primary" onClick={toggleJoin} disabled={joinBusy || !!departureTarget || groupSaveAction.running}>
                   {joinBusy ? "…" : user ? "Join this group" : "Log in to join"}
                 </Button>
               )}
@@ -813,49 +692,9 @@ function GroupDetailContent() {
         {joinError && <div className="mb-4"><ErrorNotice message={joinError} /></div>}
         {coverError && <div className="mb-4"><ErrorNotice message={coverError} /></div>}
         {departureStatus && <p role="status" className="mb-4 rounded-lg border border-border bg-sunken px-4 py-3 text-sm">{departureStatus}</p>}
-        {editing && (
-          <div ref={reviewHome.ref} tabIndex={-1}>
-            {reviewError && <FormError layout="mb-2">{reviewError}</FormError>}
-            {review && !reviewMoved && <GroupVisibilityReview
-              key={JSON.stringify(review.impact)}
-              impact={review.impact}
-              busy={groupSaveAction.running}
-              waiting={activity.pendingFor(reviewIds ?? []) > 0}
-              onConfirm={(d) => void groupSaveAction.run(() => confirmReview(d))}
-              onCancel={() => {
-                setReview(null);
-                setReviewError(null);
-              }}
-              returnFocus={groupSave}
-            />}
-          </div>
-        )}
+        <RefusedSaveLine save={groupRefused} noun="group" canManage={canManage} />
         {editing ? (
-          <GroupForm
-            initial={{
-              name: group.name,
-              description: group.description,
-              location: group.location,
-              tags: group.tags,
-              imageUrl: group.imageUrl,
-              coverFocalX: group.coverFocalX,
-              coverFocalY: group.coverFocalY,
-              coverId: group.id,
-              moreOpen: true,
-              visibility: group.visibility,
-              memberLimit: group.memberLimit,
-            }}
-            saveLabel="Save group"
-            saveRef={groupSave}
-            action={groupSaveAction}
-            onSaved={saveEdit}
-            onCancel={() => {
-              groupSaveAction.reset();
-              setEditing(false);
-              setReview(null);
-              setReviewError(null);
-            }}
-          />
+          <GroupEditor group={group} action={groupSaveAction} onSaved={savedEdit} onConflict={closeOnConflict} onCancel={() => setEditing(false)} />
         ) : (
           <>
             {group.description.trim() && tab !== "about" && (
@@ -925,6 +764,7 @@ function GroupDetailContent() {
                     onChanged={() => void refresh()}
                     onEditDate={dateRefused.clear}
                     onDateConflict={(why) => {
+                      groupRefused.clear();
                       setRefusedDate({ eventId: m.eventId, date: m.date });
                       dateRefused.refused(why);
                     }}

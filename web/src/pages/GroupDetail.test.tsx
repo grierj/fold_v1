@@ -9,7 +9,7 @@ import { Link, MemoryRouter, Route, RouterProvider, Routes, createMemoryRouter, 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ApiError, type Credential } from "../api/core";
 import { Events } from "../api/events";
-import { Groups } from "../api/groups";
+import { GroupCover, Groups } from "../api/groups";
 import { Households } from "../api/households";
 import { People } from "../api/people";
 import type { EventOccurrence, GroupDetailResponse, GroupSummary, Household, OccurrenceResponse, User } from "../types";
@@ -38,12 +38,14 @@ stubService(People, () => ({ search: vi.fn() }));
 
 stubService(Groups, () => ({ get: vi.fn(), update: vi.fn(), visibilityImpact: vi.fn(), addMember: vi.fn(), join: vi.fn(), departurePreview: vi.fn(), confirmDeparture: vi.fn(), memberDeparturePreview: vi.fn(), confirmMemberDeparture: vi.fn() }));
 
+stubService(GroupCover, () => ({ upload: vi.fn(), remove: vi.fn() }));
+
 stubService(Events, () => ({ register: vi.fn(), registerSeries: vi.fn(), undoSeriesRegistration: vi.fn(), dateVisibilityImpact: vi.fn(), managedDate: vi.fn(), removeRegistration: vi.fn(), addRegistration: vi.fn(), restoreRegistration: vi.fn(), update: vi.fn(), visibilityImpact: vi.fn(), setVisibility: vi.fn(), cancelOccurrence: vi.fn() }));
 
 stubService(Households, () => ({ mine: vi.fn() }));
 
 const family: Household = { id: 1, name: "Family", address: "", createdBy: 2, accounts: [], people: [{ id: 3, householdId: 1, canConvert: false, firstName: "Mary", lastName: "", name: "Mary", kind: "adult", photoConsent: false, linkStatus: "none", registrationEligibility: "eligible", createdBy: 2 }] };
-const page: GroupDetailResponse = { group: { id: 1, name: "Family group", description: "", tags: [], imageUrl: "", coverFocalX: 50, coverFocalY: 50, location: "Hall", leaderName: "Leader", memberCount: 1, nextEventAt: null, status: "active", leaderId: 1, visibility: "public", deletionRequested: false, memberLimit: null }, members: [], upcomingEvents: [occurrence({})], truncated: false, hasMore: false, nextCursor: "", canManage: false, isMember: true };
+const page: GroupDetailResponse = { group: { id: 1, name: "Family group", description: "", tags: [], imageUrl: "", coverFocalX: 50, coverFocalY: 50, location: "Hall", leaderName: "Leader", memberCount: 1, nextEventAt: null, status: "active", leaderId: 1, visibility: "public", deletionRequested: false, memberLimit: null, revision: "1.test.g1.1" }, members: [], upcomingEvents: [occurrence({})], truncated: false, hasMore: false, nextCursor: "", canManage: false, isMember: true };
 
 function open() { render(<MemoryRouter initialEntries={["/groups/1"]}><Routes><Route path="/groups/:id" element={<GroupDetail />} /></Routes></MemoryRouter>); }
 
@@ -1614,7 +1616,7 @@ describe("the group visibility review", () => {
     expect(dialog).toHaveAccessibleDescription("The group is public now. Saving makes it invite-only, so fewer people will be able to see it.");
     expect(Groups.update).not.toHaveBeenCalled();
     await userEvent.click(within(dialog).getByRole("button", { name: "Make the group invite-only" }));
-    await waitFor(() => expect(Groups.update).toHaveBeenCalledWith("1", expect.objectContaining({ visibility: "invite_only", consent: A })));
+    await waitFor(() => expect(Groups.update).toHaveBeenCalledWith(1, expect.objectContaining({ visibility: "invite_only", consent: A })));
   });
 
   it("re-opens from a 409 that changed only the current value, with its consent, and never previews again", async () => {
@@ -1627,7 +1629,7 @@ describe("the group visibility review", () => {
     expect(document.activeElement).toBe(within(fresh).getByRole("heading", { name: "Making the group invite-only changes some events" }));
     expect(Groups.visibilityImpact).toHaveBeenCalledOnce();
     await userEvent.click(within(fresh).getByRole("button", { name: "Make the group invite-only" }));
-    await waitFor(() => expect(Groups.update).toHaveBeenLastCalledWith("1", expect.objectContaining({ consent: B })));
+    await waitFor(() => expect(Groups.update).toHaveBeenLastCalledWith(1, expect.objectContaining({ consent: B })));
   });
 
   it("refuses another Save group while the review's confirm is saving (#431)", async () => {
@@ -1761,7 +1763,7 @@ describe("the group visibility review and sign-up updates", () => {
     expect(screen.queryByText(STALE)).not.toBeInTheDocument();
     vi.mocked(Groups.update).mockResolvedValueOnce({ group: page.group });
     await userEvent.click(within(review).getByRole("button", { name: "Make the group invite-only" }));
-    await waitFor(() => expect(Groups.update).toHaveBeenCalledExactlyOnceWith("1", expect.objectContaining({ visibility: "invite_only", consent: B })));
+    await waitFor(() => expect(Groups.update).toHaveBeenCalledExactlyOnceWith(1, expect.objectContaining({ visibility: "invite_only", consent: B })));
   });
 
   for (const ending of ["stored", "answered"] as const) {
@@ -1897,7 +1899,7 @@ describe("the group visibility review and sign-up updates", () => {
       expect(screen.queryByText(STALE)).not.toBeInTheDocument();
       vi.mocked(Groups.update).mockResolvedValueOnce({ group: page.group });
       await userEvent.click(within(review).getByRole("button", { name: "Make the group invite-only" }));
-      await waitFor(() => expect(Groups.update).toHaveBeenCalledExactlyOnceWith("1", expect.objectContaining({ visibility: "invite_only", consent: B })));
+      await waitFor(() => expect(Groups.update).toHaveBeenCalledExactlyOnceWith(1, expect.objectContaining({ visibility: "invite_only", consent: B })));
     });
   }
 
@@ -2085,5 +2087,174 @@ describe("GroupDetail when a date's save meets someone else's change", () => {
     }
 
     expect(edits.sent.map((s) => s.changes)).toEqual([{ title: "Supper night" }, { title: "Supper night!" }]);
+  });
+});
+
+// The group form names its read (DEC-166): a refusal closes the editor on its own and the page says so, and the cover
+// change waits for the details to be saved.
+describe("the group form's refused save", () => {
+  const managed = { ...page, canManage: true, group: { ...page.group, imageUrl: "/uploads/covers/1/a.jpg" } };
+  const changed = () => new ApiError(409, "changed", { code: "group_changed" });
+  const CHANGED = "This group changed while you were editing, so your changes could not be saved. This is the group as it is now.";
+
+  function openPage() {
+    render(<main id="main" tabIndex={-1}><MemoryRouter initialEntries={["/groups/1"]}><Routes><Route path="/groups/:id" element={<GroupDetail />} /></Routes></MemoryRouter></main>);
+  }
+
+  async function editAndSave(edit = async () => { await userEvent.type(screen.getByLabelText("Group name"), " Two"); }) {
+    await openEditor();
+    await edit();
+    await userEvent.click(screen.getByRole("button", { name: "Save group" }));
+  }
+
+  it("closes the editor, reads the page from nothing and says so in a focused line that the next Edit clears", async () => {
+    // Another manager renamed the group while this form was open.
+    const theirs = { ...managed, group: { ...managed.group, name: "Their name", revision: "1.test.g1.2" } };
+    vi.mocked(Groups.get).mockResolvedValueOnce(managed).mockResolvedValue(theirs);
+    vi.mocked(Groups.update).mockRejectedValue(changed());
+    openPage();
+    await editAndSave();
+    const line = await screen.findByText(CHANGED);
+    await waitFor(() => expect(line).toHaveFocus());
+    expect(line).toHaveAttribute("role", "status");
+    expect(screen.queryByLabelText("Group name")).not.toBeInTheDocument();
+    expect(screen.getByRole("heading", { level: 1, name: "Their name" })).toBeInTheDocument();
+    expect(Groups.update).toHaveBeenCalledOnce();
+    await openEditor();
+    expect(screen.queryByText(CHANGED)).not.toBeInTheDocument();
+    expect(screen.getByLabelText("Group name")).toHaveValue("Their name");
+  });
+
+  it("says this person can no longer manage the group, and shows no manager controls", async () => {
+    vi.mocked(Groups.get).mockResolvedValueOnce(managed).mockResolvedValue({ ...page, canManage: false, group: { ...page.group, revision: undefined } });
+    vi.mocked(Groups.update).mockRejectedValue(new ApiError(403, "forbidden", {}));
+    openPage();
+    await editAndSave();
+    const line = await screen.findByText("You can no longer manage this group, so your changes could not be saved.");
+    await waitFor(() => expect(line).toHaveFocus());
+    expect(screen.queryByRole("button", { name: "More group actions" })).not.toBeInTheDocument();
+  });
+
+  it("says only that the changes could not be saved when the group is gone", async () => {
+    vi.mocked(Groups.get).mockResolvedValueOnce(managed).mockRejectedValue(new ApiError(404, "SECRET", { code: "not_found" }));
+    vi.mocked(Groups.update).mockRejectedValue(new ApiError(404, "SECRET", { code: "not_found" }));
+    openPage();
+    await editAndSave();
+    expect(await screen.findByRole("heading", { level: 1, name: "Group not found" })).toBeInTheDocument();
+    expect(await screen.findByText("Your changes could not be saved.")).toBeInTheDocument();
+  });
+
+  it("does not offer Change cover photo while the editor is open, so the page is not read again under a draft", async () => {
+    vi.mocked(Groups.get).mockResolvedValue(managed);
+    openPage();
+    await userEvent.click(await screen.findByRole("button", { name: "More group actions" }));
+    expect(screen.getByRole("menuitem", { name: "Change cover photo" })).toBeEnabled();
+    await userEvent.click(screen.getByRole("menuitem", { name: "Edit group" }));
+    await userEvent.type(await screen.findByLabelText("Group name"), " renamed");
+    await userEvent.click(screen.getByRole("button", { name: "More group actions" }));
+    expect(screen.getByRole("menuitem", { name: "Edit group" })).toBeInTheDocument();
+    expect(screen.queryByRole("menuitem", { name: "Change cover photo" })).not.toBeInTheDocument();
+    await userEvent.keyboard("{Escape}");
+    expect(screen.getByLabelText("Group name")).toHaveValue(`${managed.group.name} renamed`);
+    expect(GroupCover.upload).not.toHaveBeenCalled();
+  });
+
+  it("keeps Edit group and Leave group off while the save is on its way", async () => {
+    vi.mocked(Groups.get).mockResolvedValue({ ...managed, isMember: true });
+    const saving = deferred<Awaited<ReturnType<typeof Groups.update>>>();
+    vi.mocked(Groups.update).mockReturnValue(saving.promise);
+    openPage();
+    await editAndSave();
+    expect(screen.getByRole("button", { name: "Saving…" })).toBeDisabled();
+    await userEvent.click(screen.getByRole("button", { name: "More group actions" }));
+
+    for (const item of ["Edit group", "Leave group"]) expect(screen.getByRole("menuitem", { name: item })).toBeDisabled();
+    expect(screen.queryByRole("menuitem", { name: "Change cover photo" })).not.toBeInTheDocument();
+    await userEvent.keyboard("{Escape}");
+    await act(async () => { saving.resolve({ group: managed.group }); await saving.promise; });
+    await waitFor(() => expect(screen.queryByLabelText("Group name")).not.toBeInTheDocument());
+  });
+
+  it("sends no cover change when the save is refused", async () => {
+    vi.mocked(Groups.get).mockResolvedValueOnce(managed).mockResolvedValue({ ...managed, group: { ...managed.group, name: "Their name", revision: "1.test.g1.2" } });
+    vi.mocked(Groups.update).mockRejectedValue(changed());
+    openPage();
+    await editAndSave(async () => { await userEvent.click(screen.getByRole("checkbox", { name: "Remove the current cover" })); });
+    expect(await screen.findByText(CHANGED)).toBeInTheDocument();
+    expect(GroupCover.remove).not.toHaveBeenCalled();
+  });
+
+  it("removes the cover only after the details are saved, then reads the page", async () => {
+    const order: string[] = [];
+    vi.mocked(Groups.get).mockResolvedValue(managed);
+    vi.mocked(Groups.update).mockImplementation(async () => {
+      order.push("details");
+
+      return { group: managed.group };
+    });
+    vi.mocked(GroupCover.remove).mockImplementation(async () => {
+      order.push("cover");
+
+      return {};
+    });
+    openPage();
+    await editAndSave(async () => { await userEvent.click(screen.getByRole("checkbox", { name: "Remove the current cover" })); });
+    await waitFor(() => expect(Groups.get).toHaveBeenCalledTimes(2));
+    expect(order).toEqual(["details", "cover"]);
+    expect(screen.queryByLabelText("Group name")).not.toBeInTheDocument();
+  });
+
+  it("keeps Join this group off while the save is on its way, for an admin who is not a member", async () => {
+    vi.mocked(Groups.get).mockResolvedValue({ ...managed, isMember: false });
+    const saving = deferred<Awaited<ReturnType<typeof Groups.update>>>();
+    vi.mocked(Groups.update).mockReturnValue(saving.promise);
+    openPage();
+    await editAndSave();
+    expect(screen.getByRole("button", { name: "Join this group" })).toBeDisabled();
+    await act(async () => { saving.resolve({ group: managed.group }); await saving.promise; });
+    await waitFor(() => expect(screen.queryByLabelText("Group name")).not.toBeInTheDocument());
+  });
+
+  it("uploads the picked photo only after the details are saved, and says the cover change is unconfirmed when that fails", async () => {
+    vi.stubGlobal("URL", class extends URL {
+      static createObjectURL = vi.fn(() => "blob:chosen");
+      static revokeObjectURL = vi.fn();
+    });
+    const photo = new File(["x"], "cover.jpg", { type: "image/jpeg" });
+    const saving = deferred<Awaited<ReturnType<typeof Groups.update>>>();
+    vi.mocked(Groups.get).mockResolvedValue(managed);
+    vi.mocked(Groups.update).mockReturnValue(saving.promise);
+    vi.mocked(GroupCover.upload).mockRejectedValue(new TypeError("Failed to fetch"));
+    openPage();
+    await editAndSave(async () => {
+      await userEvent.upload(document.querySelector<HTMLInputElement>('form input[type="file"]')!, photo);
+      await screen.findByRole("button", { name: "Choose different image" });
+      const crop = screen.getByTitle("Click to set the focal point");
+      crop.getBoundingClientRect = () => ({ left: 0, top: 0, width: 200, height: 100, right: 200, bottom: 100, x: 0, y: 0, toJSON: () => ({}) });
+      fireEvent.click(crop, { clientX: 50, clientY: 75 });
+    });
+    expect(GroupCover.upload).not.toHaveBeenCalled();
+    await act(async () => { saving.resolve({ group: managed.group }); await saving.promise; });
+    expect(await screen.findByText("We couldn't confirm the cover photo change. Anything else you changed was saved. Check the photo before trying again.")).toBeInTheDocument();
+    // The new photo's focal point goes with it: sent with the details, a failed upload would crop the old photo for the new.
+    expect(GroupCover.upload).toHaveBeenCalledExactlyOnceWith("1", photo, { x: 25, y: 75 });
+    expect(vi.mocked(Groups.update).mock.calls[0][1].coverFocal).toBeUndefined();
+    vi.unstubAllGlobals();
+  });
+
+  it("shows the saved details and says the cover change is unconfirmed when the removal fails", async () => {
+    const saved = { ...managed, group: { ...managed.group, name: "Family group Two", revision: "1.test.g1.2" } };
+    vi.mocked(Groups.get).mockResolvedValueOnce(managed).mockResolvedValue(saved);
+    vi.mocked(Groups.update).mockResolvedValue({ group: saved.group });
+    vi.mocked(GroupCover.remove).mockRejectedValue(new ApiError(500, "SECRET", { code: "server_error" }));
+    openPage();
+    await editAndSave(async () => {
+      await userEvent.type(screen.getByLabelText("Group name"), " Two");
+      await userEvent.click(screen.getByRole("checkbox", { name: "Remove the current cover" }));
+    });
+    expect(await screen.findByText("We couldn't confirm the cover photo change. Anything else you changed was saved. Check the photo before trying again.")).toBeInTheDocument();
+    expect(screen.getByRole("heading", { level: 1, name: "Family group Two" })).toBeInTheDocument();
+    expect(screen.queryByLabelText("Group name")).not.toBeInTheDocument();
+    expect(document.body.textContent).not.toContain("SECRET");
   });
 });

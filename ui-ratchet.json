@@ -41,7 +41,7 @@
     "web/src/pages/ContactRequests.tsx": 1,
     "web/src/pages/EventDetail.tsx": 1,
     "web/src/pages/ForgotPassword.tsx": 1,
-    "web/src/pages/GroupDetail.tsx": 3,
+    "web/src/pages/GroupDetail.tsx": 2,
     "web/src/pages/GuardianConsent.tsx": 1,
     "web/src/pages/GuestConfirm.tsx": 1,
     "web/src/pages/GuestManage.tsx": 1,

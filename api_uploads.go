@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"log"
+	"math"
 	"net/http"
 	"os"
 	"strconv"
@@ -184,6 +185,10 @@ func uploadKeyFromURL(raw string) (string, bool) {
 	return key, true
 }
 
+// The cover endpoints take no revision: replacing or removing the file is its
+// own action, and the last one wins. Their image_url write changes the group's
+// token like any other column (groupRevisionIn), so a group form opened before
+// it is refused (DEC-166).
 func (a *App) apiUploadGroupCover(c *gin.Context) {
 	g, ok := a.loadManagedGroup(c)
 	if !ok {
@@ -196,6 +201,20 @@ func (a *App) apiUploadGroupCover(c *gin.Context) {
 	}
 	defer tmp.Close()
 	defer os.Remove(tmp.Name())
+	// The new image's focal point travels with it: sent with the details
+	// instead, a failed upload would leave the old photo cropped for the new.
+	updates := map[string]any{}
+	fx, hasX := c.GetPostForm("focalX")
+	fy, hasY := c.GetPostForm("focalY")
+	if hasX || hasY {
+		x, errX := strconv.ParseFloat(fx, 64)
+		y, errY := strconv.ParseFloat(fy, 64)
+		if errX != nil || errY != nil || math.IsNaN(x) || math.IsNaN(y) || math.IsInf(x, 0) || math.IsInf(y, 0) {
+			jsonError(c, http.StatusBadRequest, "invalid body")
+			return
+		}
+		updates["cover_focal_x"], updates["cover_focal_y"] = clampFocal(x), clampFocal(y)
+	}
 
 	rid, err := randomHex(16)
 	if err != nil {
@@ -215,7 +234,8 @@ func (a *App) apiUploadGroupCover(c *gin.Context) {
 	}
 	oldURL := g.ImageURL
 	g.ImageURL = a.Uploads.URL(key)
-	if err := a.DB.Model(g).Update("image_url", g.ImageURL).Error; err != nil {
+	updates["image_url"] = g.ImageURL
+	if err := a.DB.Model(g).Updates(updates).Error; err != nil {
 		a.deleteCoverBlob(ctx, key)
 		jsonError(c, http.StatusInternalServerError, "could not save cover")
 		return

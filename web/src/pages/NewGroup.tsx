@@ -21,14 +21,11 @@ export function NewGroup() {
       location: data.location,
       visibility: data.visibility,
       memberLimit: data.memberLimit,
+      coverFocal: data.coverFocal,
     });
 
     if (data.coverFile) {
       await GroupCover.upload(group.id, data.coverFile);
-    }
-
-    if (data.coverFocal) {
-      await Groups.update(group.id, { coverFocal: data.coverFocal });
     }
 
     setCreated(group);

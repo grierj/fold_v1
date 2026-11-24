@@ -1,7 +1,7 @@
 import AxeBuilder from "@axe-core/playwright";
 import { expect, test, type Page } from "@playwright/test";
 import { mkdir, writeFile } from "node:fs/promises";
-import { apiAs, email, fromMore, nextFrames, PASSWORD, signIn, signInTo, soon } from "./helpers";
+import { apiAs, email, fromMore, nextFrames, PASSWORD, saveGroup, signIn, signInTo, soon } from "./helpers";
 import { measure } from "./ui-measure.mjs";
 
 test("name picker keeps safe identities, teen guidance and existing adult add controls", async ({ page, request }) => {
@@ -34,7 +34,7 @@ test("name picker keeps safe identities, teen guidance and existing adult add co
   await admin("POST", `/admin/groups/${notShared.id}/members`, { userId: adult.id });
   const hidden = await group("Hidden care circle", "invite_only");
   await admin("POST", `/admin/groups/${hidden.id}/members`, { userId: other.id });
-  await admin("PUT", `/groups/${destination.id}`, { memberLimit: 2 });
+  await saveGroup(admin, destination.id, { memberLimit: 2 });
   const startsLocal = `${new Date(Date.now() + 7 * 864e5).toISOString().slice(0, 10)}T19:00`;
   const { event } = await admin("POST", `/groups/${destination.id}/events`, { title: "Picker event", startsLocal, durationMinutes: 60, tzid: "America/Boise", capacity: 1, childcareAvailable: true, childcareCapacity: 2 });
   const hiddenAdult = await apiAs(request, `picker-adult-${suffix}`);

@@ -134,6 +134,9 @@ func (a *App) apiCreateGroup(c *gin.Context) {
 		Location    string          `json:"location"`
 		Visibility  string          `json:"visibility"`
 		MemberLimit json.RawMessage `json:"memberLimit"`
+		// CoverFocal is the cover's focal point, sent with the form that
+		// uploads the cover right after the group exists.
+		CoverFocal *coverFocalJSON `json:"coverFocal"`
 	}
 	if err := c.ShouldBindJSON(&body); err != nil || strings.TrimSpace(body.Name) == "" {
 		fail(c, errNameRequired)
@@ -170,6 +173,15 @@ func (a *App) apiCreateGroup(c *gin.Context) {
 	err := a.DB.Transaction(func(tx *gorm.DB) error {
 		if err := tx.Create(&g).Error; err != nil {
 			return err
+		}
+		// Written after the insert: GORM replaces a zero value with the
+		// column's default (50) on Create, so a focal point at an edge would
+		// be lost.
+		if body.CoverFocal != nil {
+			g.CoverFocalX, g.CoverFocalY = clampFocal(body.CoverFocal.X), clampFocal(body.CoverFocal.Y)
+			if err := tx.Model(&g).Select("cover_focal_x", "cover_focal_y").Updates(&g).Error; err != nil {
+				return err
+			}
 		}
 		if err := tx.Create(&models.Membership{
 			UserID: u.ID, GroupID: g.ID,
@@ -291,6 +303,11 @@ func (a *App) apiGetGroup(c *gin.Context) {
 			return err
 		}
 		out.Group, out.UpcomingEvents = summaries[0], upcoming
+		if manager {
+			if out.Group.Revision, err = a.groupRevisionIn(r.tx, r.group.ID); err != nil {
+				return err
+			}
+		}
 		out.Truncated, out.HasMore, out.NextCursor = hasMore, hasMore, nextGroupUpcomingCursor(r.group.ID, upcoming, hasMore)
 		return nil
 	})
@@ -374,16 +391,13 @@ func (a *App) apiUpdateGroup(c *gin.Context) {
 	}
 	u := apiUser(c)
 	var body struct {
-		Name        *string  `json:"name"`
-		Description *string  `json:"description"`
-		Tags        []string `json:"tags"`
-		Location    *string  `json:"location"`
-		Status      *string  `json:"status"`
-		CoverFocal  *struct {
-			X float64 `json:"x"`
-			Y float64 `json:"y"`
-		} `json:"coverFocal"`
-		Visibility *string `json:"visibility"`
+		Name        *string         `json:"name"`
+		Description *string         `json:"description"`
+		Tags        []string        `json:"tags"`
+		Location    *string         `json:"location"`
+		Status      *string         `json:"status"`
+		CoverFocal  *coverFocalJSON `json:"coverFocal"`
+		Visibility  *string         `json:"visibility"`
 		// OpenedEvents: when the group becomes more private, a "keep" or
 		// "tighten" decision for each leader-opened event that is wider than
 		// the new value, keyed by event id (DEC-48). See visibility-impact.
@@ -395,6 +409,9 @@ func (a *App) apiUpdateGroup(c *gin.Context) {
 		// MemberLimit: a number sets it, null clears it (DEC-39). Lowering it
 		// below the current count is fine; nobody is removed.
 		MemberLimit json.RawMessage `json:"memberLimit"`
+		// Revision is the group's token (groupRevisionIn) of the read the form
+		// opened with; required, whatever the body changes (DEC-166).
+		Revision string `json:"revision"`
 	}
 	if err := c.ShouldBindJSON(&body); err != nil {
 		jsonError(c, http.StatusBadRequest, "invalid body")
@@ -474,6 +491,7 @@ func (a *App) apiUpdateGroup(c *gin.Context) {
 	errHidden := errors.New("group not found")
 	errForbidden := errors.New("group edit forbidden")
 	var impact visibilityImpactJSON
+	var revision string
 	err := a.contactMutation(contactChange{GroupID: g.ID}, func(tx *gorm.DB) error {
 		// Contact gate -> actor -> group -> membership, before domain writes.
 		actor, err := lockActorIn(tx, u, actorNoKeyUpdate)
@@ -504,6 +522,11 @@ func (a *App) apiUpdateGroup(c *gin.Context) {
 		}
 		if move == policy.GroupStatusNoReturn {
 			return errGroupBackToPending
+		}
+		// Before any field is applied, the tightening and its consent check
+		// included: a refusal writes nothing.
+		if err := a.checkGroupRevision(tx, locked.ID, body.Revision); err != nil {
+			return err
 		}
 		// Downstream visibility/audit helpers use the same fresh actor.
 		*u = *actor
@@ -568,10 +591,14 @@ func (a *App) apiUpdateGroup(c *gin.Context) {
 				return err
 			}
 		}
-		if len(columns) == 0 {
-			return nil
+		if len(columns) != 0 {
+			if err := tx.Model(g).Select(columns).Updates(g).Error; err != nil {
+				return err
+			}
 		}
-		return tx.Model(g).Select(columns).Updates(g).Error
+		// After the last write, for the answer.
+		revision, err = a.groupRevisionIn(tx, g.ID)
+		return err
 	})
 	if answerStaleSession(c, err) {
 		return
@@ -592,7 +619,7 @@ func (a *App) apiUpdateGroup(c *gin.Context) {
 		})
 		return
 	}
-	if errors.Is(err, errVisibilityReviewOutdated) || errors.Is(err, errGroupBackToPending) {
+	if isAPIError(err) {
 		fail(c, err)
 		return
 	}
@@ -600,7 +627,20 @@ func (a *App) apiUpdateGroup(c *gin.Context) {
 		jsonError(c, http.StatusInternalServerError, "could not update group")
 		return
 	}
-	a.respondGroup(c, http.StatusOK, g)
+	summary, err := a.groupSummary(u, g)
+	if err != nil {
+		jsonError(c, http.StatusInternalServerError, "could not load group")
+		return
+	}
+	summary.Revision = revision
+	c.JSON(http.StatusOK, groupResponseJSON{Group: summary})
+}
+
+// coverFocalJSON is a cover's focal point as a request sends it, 0-100 on
+// each axis; the server clamps it (clampFocal).
+type coverFocalJSON struct {
+	X float64 `json:"x"`
+	Y float64 `json:"y"`
 }
 
 func (a *App) apiJoinGroup(c *gin.Context) {
@@ -1147,6 +1187,10 @@ type groupSummaryJSON struct {
 	// MyRole is the viewer's own active role, "leader" or "member", on the
 	// directory and My groups lists only (DEC-94); absent otherwise.
 	MyRole string `json:"myRole,omitempty"`
+	// Revision is the group's token (groupRevisionIn) the group form's save
+	// names, only for the group's managers and only on the group page's read
+	// and that save's answer (DEC-166).
+	Revision string `json:"revision,omitempty"`
 }
 
 type memberJSON struct {
