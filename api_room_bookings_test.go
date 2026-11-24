@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -746,7 +747,9 @@ func TestDatePickResentAfterItWasReleasedIsRefused(t *testing.T) {
 // An admin disabled or demoted while their pick waits for the event's lock is
 // refused, on the date pick and the series pick alike, and nothing is written:
 // the actor is read after the lock (lockManagedEventIn). Each change is what
-// its admin route writes, the session version bumped with it.
+// its admin route writes, the session version bumped with it. The picks run on
+// a pool whose default is Repeatable Read: the routes pin Read Committed, so
+// the actor read sees what committed during the wait.
 func TestRoomPickByAnAdminRevokedWhileItWaitsWritesNothing(t *testing.T) {
 	changes := map[string]string{
 		"disabled": "status = '" + models.UserDisabled + "', session_version = session_version + 1",
@@ -768,6 +771,9 @@ func TestRoomPickByAnAdminRevokedWhileItWaitsWritesNothing(t *testing.T) {
 				before := roomState(t, f.app)
 				holder := f.app.DB.Begin()
 				defer holder.Rollback()
+				orig := f.app.DB
+				f.app.DB = repeatableReadPool(t, f.app)
+				t.Cleanup(func() { f.app.DB = orig })
 				gormMust(t, holder.Exec("SELECT 1 FROM events WHERE id = ? FOR UPDATE", ev.ID))
 				answer := make(chan *httptest.ResponseRecorder, 1)
 				go func() { answer <- f.admin.do("PUT", path, pick, true) }()
@@ -781,6 +787,53 @@ func TestRoomPickByAnAdminRevokedWhileItWaitsWritesNothing(t *testing.T) {
 			})
 		}
 	}
+}
+
+// A failed read is never a refusal: with rooms on, a failed read of the rooms
+// switch on a room control's route is the ordinary 500, not rooms_off, and a
+// failed read of the date on the date pick is the ordinary 500, not a missing
+// date. Neither writes anything.
+func TestRoomControlReadFailuresAreNotRefusals(t *testing.T) {
+	wantFailed := func(t *testing.T, label string, w *httptest.ResponseRecorder) {
+		t.Helper()
+		wantCode(t, label, w, http.StatusInternalServerError, "server_error")
+	}
+	reads := func(table, part string) func(tx *gorm.DB) bool {
+		return func(tx *gorm.DB) bool {
+			return tx.Statement.Table == table && strings.Contains(fmt.Sprint(tx.Statement.Clauses["WHERE"].Expression), part)
+		}
+	}
+	t.Run("the rooms switch", func(t *testing.T) {
+		f := newBookingFixture(t)
+		series := createFeedEvent(t, f.leader, f.group, "Weekly", f.startOn.AddDate(0, 0, 1), "FREQ=WEEKLY;COUNT=4")
+		seriesPath := "/api/v1/events/" + itoa(series.ID) + "/room"
+		datePath := f.path(f.eventA, "/room")
+		datePick := withRevision(map[string]any{"roomId": f.hall.ID}, roomRevision(t, f.leader, datePath))
+		seriesPick := withRevision(map[string]any{"roomId": f.hall.ID}, roomRevision(t, f.leader, seriesPath))
+		before := roomState(t, f.app)
+		failed := failStatement(t, f.app, reads("settings", settingRoomsEnabled))
+		wantFailed(t, "the date's rooms", f.leader.do("GET", datePath+"s", nil, false))
+		wantFailed(t, "the date pick", f.leader.do("PUT", datePath, datePick, true))
+		wantFailed(t, "the series rooms", f.leader.do("GET", seriesPath+"s", nil, false))
+		wantFailed(t, "the series pick", f.leader.do("PUT", seriesPath, seriesPick, true))
+		if failed.Load() < 4 {
+			t.Fatalf("the switch's read failed %d times, want once per route", failed.Load())
+		}
+		if after := roomState(t, f.app); after != before {
+			t.Fatalf("a failed read wrote:\n%s\nwant\n%s", after, before)
+		}
+	})
+	t.Run("the date", func(t *testing.T) {
+		f := newBookingFixture(t)
+		path := f.path(f.eventA, "/room")
+		pick := withRevision(map[string]any{"roomId": f.hall.ID}, roomRevision(t, f.leader, path))
+		before := roomState(t, f.app)
+		failStatement(t, f.app, reads("event_occurrences", "original_date"))
+		wantFailed(t, "the date pick whose date read failed", f.leader.do("PUT", path, pick, true))
+		if after := roomState(t, f.app); after != before {
+			t.Fatalf("a failed read wrote:\n%s\nwant\n%s", after, before)
+		}
+	})
 }
 
 // A date with no booking names its own room history, not the church's: a pick

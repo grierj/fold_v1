@@ -1215,6 +1215,8 @@ export interface SeriesBooking {
   kept: number;
   // Dates waiting on an admin's approval (M2.1d).
   pending: number;
+  // Of the dates booked, those an admin's reason booked over another booking.
+  doubleBooked: number;
 }
 
 // A typed place on upcoming dates without a room, for the admin location

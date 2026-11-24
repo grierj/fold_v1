@@ -1481,7 +1481,10 @@ func recordSeriesClocks(tx *gorm.DB, ev *models.Event, x events.Expansion, occs 
 // could cycle with ungated registration writers. Under the contact gate, which
 // serializes role and relationship revocations, the judgment holds until
 // commit; the room picks take no gate, so a revocation committing while one
-// runs is seen by the next request.
+// runs is seen by the next request. The transaction must be Read Committed
+// (contactMutation's, or readCommitted): at Repeatable Read the snapshot is
+// fixed when the event lock is asked for, and the actor read after the wait
+// misses a revocation that committed during it.
 func lockManagedEventIn(tx *gorm.DB, session *models.User, eventID uint) (*models.User, *models.Event, eventFacts, error) {
 	var locked models.Event
 	if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&locked, eventID).Error; err != nil {

@@ -1,6 +1,6 @@
 import * as schema from "valibot";
 import { expect, test } from "@playwright/test";
-import { apiAs, checkState, email, PASSWORD, signInTo } from "./helpers";
+import { apiAs, checkState, email, PASSWORD, pickDateRoom, signInTo } from "./helpers";
 
 // DEC-167: a pick of a date's room names the read it was made from. Two leaders have "Edit this date" open on the
 // same date; the first picks a room, the second then picks another. The second's pick is refused: its Room control
@@ -68,4 +68,49 @@ test("two leaders pick rooms for the same date: the second is told, sees the fir
   expect(read.booking.roomId).toBe(rooms[0].id);
 
   for (const page of pages) await page.context().close();
+});
+
+// A series pick says only what it measured. Another leader books the room for every date, then takes the first date's
+// booking away; the first leader's "Edit series", open since before, picks the same room and books it for every date.
+// The pick goes again under the new revision: it books the bare first date and says so, and that date's card shows it.
+test("a series pick of the room someone else already set books the date they released, and says so", async ({ browser, request }) => {
+  const suffix = Date.now().toString(36);
+  const grier = await apiAs(request, "grier");
+  const leaders = [`series-lead-a-${suffix}`, `series-lead-b-${suffix}`];
+  const { group } = schema.parse(schema.looseObject({ group: idOf }), await grier("POST", "/groups", { name: `Series picks ${suffix}`, description: "", tags: [], location: "Hall", visibility: "public", memberLimit: null }));
+
+  for (const leader of leaders) {
+    const made = schema.parse(idOf, (await grier("POST", "/admin/users", { ageBand: "adult", name: "Series Leader", email: email(leader), password: PASSWORD, role: "member" })).user);
+    await grier("POST", `/admin/groups/${group.id}/members`, { userId: made.id, role: "leader" });
+  }
+
+  const loft = schema.parse(schema.looseObject({ room: idOf }), await grier("POST", "/admin/rooms", { name: `Loft ${suffix}` })).room;
+  const date = dateIn(12);
+
+  const { event } = schema.parse(schema.looseObject({ event: idOf }), await grier("POST", `/groups/${group.id}/events`, {
+    title: `Series picks ${suffix}`, startsLocal: `${date}T19:00`, durationMinutes: 60, tzid: "America/Boise", recurrenceRule: "FREQ=WEEKLY;COUNT=4",
+  }));
+
+  const context = await browser.newContext({ viewport: { width: 390, height: 844 } });
+  const page = await context.newPage();
+  await signInTo(page, leaders[0], `/events/${event.id}`);
+  await page.getByRole("button", { name: "Edit series" }).click();
+  const field = page.getByRole("combobox", { name: /^Room for every date/ });
+  await expect(field).toHaveValue("none");
+
+  const other = await apiAs(request, leaders[1]);
+  const seriesRead = schema.parse(schema.looseObject({ revision: schema.string() }), await other("GET", `/events/${event.id}/rooms`));
+  await other("PUT", `/events/${event.id}/room`, { roomId: loft.id, revision: seriesRead.revision });
+  await pickDateRoom(other, event.id, date, { roomId: null });
+
+  await field.selectOption(String(loft.id));
+  await page.getByRole("button", { name: "Book for every date" }).click();
+  await expect(page.getByRole("status").filter({ hasText: "Booked for 1 date." })).toBeVisible();
+  await expect(page.getByText(/is saved|changed while you were choosing/)).toHaveCount(0);
+  // The page behind reads again: the first date's card names the room.
+  await expect(page.getByRole("article").first()).toContainText(`Loft ${suffix}`);
+
+  const read = schema.parse(schema.looseObject({ booking: schema.looseObject({ roomId: schema.number(), status: schema.string() }) }), await other("GET", `/events/${event.id}/dates/${date}/rooms`));
+  expect(read.booking).toMatchObject({ roomId: loft.id, status: "confirmed" });
+  await context.close();
 });

@@ -6,6 +6,7 @@ import { errorCode } from "../lib/errors";
 import { roomName } from "../lib/place";
 import { RefusedSaveLine, useRefusedSave } from "../lib/refusedSave";
 import { NO_ROOM, roomOptionLabel } from "../lib/roomLabels";
+import { outcomeOf } from "../lib/rosterWrites";
 import { useAction } from "../lib/useAction";
 import { answerNames, useRevisionSave } from "../lib/useRevisionSave";
 import type { DateRoomsResponse, RoomBooking, RoomBookingResponse } from "../types";
@@ -57,9 +58,9 @@ export function RoomField({ eventId, date, idPrefix, onChanged, onGone, focusOnL
   // The occurrence's original YYYY-MM-DD.
   date: string;
   idPrefix: string;
-  // The date's room may have changed (a pick landed, or someone else's change refused it, `refused`): the page behind
-  // reads again quietly and may show the new place.
-  onChanged?: (refused?: boolean) => void;
+  // The date's room may have changed (a pick landed, with the booking it left, `stored`; or someone else's change refused
+  // it, `refused`): the page behind reads again quietly and may show the new place.
+  onChanged?: (refused?: boolean, stored?: RoomBooking | null) => void;
   // This person may no longer manage the date: the host does what it does then.
   onGone: () => void;
   // Put the cursor in the Room select once the rooms load (a "Pick a room" action opened this).
@@ -98,7 +99,7 @@ function DateRoomControl({ eventId, date, id, read, show, onChanged, onGone }: {
   id: string;
   read: DateRoomsResponse;
   show: (next: DateRoomsResponse) => void;
-  onChanged?: (refused?: boolean) => void;
+  onChanged?: (refused?: boolean, stored?: RoomBooking | null) => void;
   onGone: () => void;
 }) {
   const { isAdmin } = useAuth();
@@ -196,7 +197,8 @@ function DateRoomControl({ eventId, date, id, read, show, onChanged, onGone }: {
           return false;
         }
 
-        setPending(null);
+        // A "Book anyway" that may have been stored keeps its prompt and reason, so the next press settles it.
+        if (!(body.overlapReason && outcomeOf(e) === "unsure")) setPending(null);
         throw e;
       }
 
@@ -207,7 +209,7 @@ function DateRoomControl({ eventId, date, id, read, show, onChanged, onGone }: {
       if (stored) show(stored);
       setPending(null);
       overlap.reset();
-      onChanged?.();
+      onChanged?.(false, stored?.booking ?? null);
 
       return done(stored?.booking ?? null);
     }, { fallback: "We couldn't update the room." });
@@ -238,7 +240,13 @@ function DateRoomControl({ eventId, date, id, read, show, onChanged, onGone }: {
 
     if (why === null) return;
     const room = rooms.find((r) => r.id === pending.roomId);
-    send({ ...pending, overlapReason: why }, { roomId: pending.roomId }, () => `Booked ${room?.name ?? "the room"} over another booking.`);
+
+    // "Save times" asked: the minutes it sent are what the booking would hold.
+    const intended = pending.setupMinutes !== undefined && pending.teardownMinutes !== undefined
+      ? { roomId: pending.roomId, setup: pending.setupMinutes, teardown: pending.teardownMinutes }
+      : { roomId: pending.roomId };
+
+    send({ ...pending, overlapReason: why }, intended, () => `Booked ${room?.name ?? "the room"} over another booking.`);
   }
 
   function savePadding() {

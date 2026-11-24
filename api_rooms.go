@@ -38,28 +38,33 @@ func (a *App) roomsEnabled() bool {
 
 // roomsOn hides every room route while rooms are off, before auth, so a
 // church that doesn't use rooms shows no trace of them.
-func (a *App) roomsOn() gin.HandlerFunc { return a.roomsGate(nil) }
+func (a *App) roomsOn() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		if a.roomsEnabled() {
+			c.Next()
+			return
+		}
+		jsonError(c, http.StatusNotFound, "not found")
+		c.Abort()
+	}
+}
 
 // errRoomsOff: room booking is switched off. Only a room control's own routes
 // say so (roomPickerOn), so the control can tell it from the 404 that says its
 // person may no longer manage the event or date, which its host answers.
 var errRoomsOff = apiErr(http.StatusNotFound, "rooms_off", "room booking is turned off")
 
-// roomPickerOn is roomsOn for a room control's routes: they answer errRoomsOff.
-func (a *App) roomPickerOn() gin.HandlerFunc { return a.roomsGate(errRoomsOff) }
-
-func (a *App) roomsGate(off *apiError) gin.HandlerFunc {
+// roomPickerOn is roomsOn for a room control's routes: they answer errRoomsOff,
+// and a failed read of the switch is a 500 the control offers to retry, never
+// rooms_off.
+func (a *App) roomPickerOn() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		if a.roomsEnabled() {
-			c.Next()
+		if err := roomsOnIn(a.DB); err != nil {
+			fail(c, err)
+			c.Abort()
 			return
 		}
-		if off != nil {
-			fail(c, off)
-		} else {
-			jsonError(c, http.StatusNotFound, "not found")
-		}
-		c.Abort()
+		c.Next()
 	}
 }
 

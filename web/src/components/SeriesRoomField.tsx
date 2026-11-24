@@ -128,6 +128,7 @@ function SeriesRoomControl({ eventId, id, read, show, onChanged, onGone }: {
     fields: (value) => compared(value, overBusy.current),
     answers: answerNames("event", eventId),
     stays: () => answerFields(lastAnswer.current),
+    writesMore: true,
     gone: pickGone,
     onConflict: (why) => {
       if (why === "gone") {
@@ -151,7 +152,7 @@ function SeriesRoomControl({ eventId, id, read, show, onChanged, onGone }: {
     if (pending) document.getElementById(reasonId)?.focus();
   }, [pending, reasonId]);
 
-  function send(roomId: number | null, overlapReason?: string, over = 0) {
+  function send(roomId: number | null, overlapReason?: string) {
     refusal.clear();
     void action.run(async () => {
       lastAnswer.current = null;
@@ -190,7 +191,7 @@ function SeriesRoomControl({ eventId, id, read, show, onChanged, onGone }: {
         if (now) show(now);
         setPending(now && !overlapReason ? overBusyOffer(now, roomId) : null);
 
-        return now ? seriesStoredMessage(now) : roomId === null ? "Series room released." : "The room for every date is saved.";
+        return now ? seriesStoredMessage(now) : roomId === null ? "Series room released." : "The series room is saved.";
       }
 
       show({
@@ -203,7 +204,7 @@ function SeriesRoomControl({ eventId, id, read, show, onChanged, onGone }: {
       // Only an admin may double-book what stayed busy, and only with a reason.
       setPending(isAdmin && roomId !== null && !overlapReason && res.lost.length > 0 ? { roomId, dates: res.lost.length } : null);
 
-      return seriesBookingMessage(res, over);
+      return seriesBookingMessage(res);
     }, { fallback: "We couldn't update the room." });
   }
 
@@ -232,7 +233,7 @@ function SeriesRoomControl({ eventId, id, read, show, onChanged, onGone }: {
     const why = overlap.read();
 
     if (why === null) return;
-    send(pending.roomId, why, pending.dates);
+    send(pending.roomId, why);
   }
 
   if (off) return <RoomsOffLine refused />;

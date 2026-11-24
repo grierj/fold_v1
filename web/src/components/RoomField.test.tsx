@@ -557,3 +557,50 @@ it("counts an admin's lost Save times as saved only when the read shows those ti
   await userEvent.click(screen.getByRole("button", { name: "Save times" }));
   expect(await screen.findByText(/This date's room changed while you were choosing/)).toBeInTheDocument();
 });
+
+// An admin's "Book anyway" whose answer was lost keeps its prompt and reason, so the next press settles it: already
+// stored, the double-booking is called booked, never "could not be saved".
+it("keeps an admin's Book anyway and its reason when the answer was lost, and the next press finds it booked", async () => {
+  actor.isAdmin = true;
+  vi.mocked(DateRooms.list)
+    .mockResolvedValueOnce(listed({ rooms: [hall, chapel, closet], booking: null }))
+    .mockResolvedValue(listed({ rooms: [hall, chapel, closet], booking: booked({ roomId: 2, roomName: "Chapel", building: "", doubleBooked: true }) }, "r3"));
+  vi.mocked(DateRooms.set).mockRejectedValueOnce(busy()).mockRejectedValueOnce(new TypeError("Failed to fetch")).mockRejectedValue(changed());
+  show();
+  await userEvent.selectOptions(await select(), "2");
+  await userEvent.type(await screen.findByRole("textbox", { name: /^Reason for double-booking/ }), "Choir moved");
+  await userEvent.click(screen.getByRole("button", { name: "Book anyway" }));
+  await waitFor(() => expect(DateRooms.set).toHaveBeenCalledTimes(2));
+  await waitFor(() => expect(screen.getByRole("button", { name: "Book anyway" })).toBeEnabled());
+  expect(screen.getByRole("textbox", { name: /^Reason for double-booking/ })).toHaveValue("Choir moved");
+  await userEvent.click(screen.getByRole("button", { name: "Book anyway" }));
+  await waitForStatus("Booked Chapel over another booking.");
+  expect(vi.mocked(DateRooms.set).mock.calls[2][2]).toEqual({ roomId: 2, overlapReason: "Choir moved" });
+  expect(conflictLine()).not.toBeInTheDocument();
+  expect(screen.queryByText(/could not be saved/)).not.toBeInTheDocument();
+});
+
+it("carries Save times' minutes into a Book anyway it opened, so a lost answer is found stored", async () => {
+  actor.isAdmin = true;
+  vi.mocked(DateRooms.list)
+    .mockResolvedValueOnce(listed({ rooms: [hall, closet], booking: booked() }))
+    .mockResolvedValue(listed({ rooms: [hall, closet], booking: booked({ setupMinutes: 45, teardownMinutes: 15, doubleBooked: true }) }, "r3"));
+  vi.mocked(DateRooms.set).mockRejectedValueOnce(busy()).mockRejectedValueOnce(new TypeError("Failed to fetch")).mockRejectedValue(changed());
+  show();
+  await userEvent.click(await screen.findByRole("button", { name: "Setup and cleanup times" }));
+  const setupBox = screen.getByRole("spinbutton", { name: "Setup minutes" });
+  const teardownBox = screen.getByRole("spinbutton", { name: "Cleanup minutes" });
+  await userEvent.clear(setupBox);
+  await userEvent.type(setupBox, "45");
+  await userEvent.clear(teardownBox);
+  await userEvent.type(teardownBox, "15");
+  await userEvent.click(screen.getByRole("button", { name: "Save times" }));
+  await userEvent.type(await screen.findByRole("textbox", { name: /^Reason for double-booking/ }), "Long setup");
+  await userEvent.click(screen.getByRole("button", { name: "Book anyway" }));
+  await waitFor(() => expect(DateRooms.set).toHaveBeenCalledTimes(2));
+  await waitFor(() => expect(screen.getByRole("button", { name: "Book anyway" })).toBeEnabled());
+  await userEvent.click(screen.getByRole("button", { name: "Book anyway" }));
+  await waitForStatus("Booked Fellowship Hall over another booking.");
+  expect(vi.mocked(DateRooms.set).mock.calls[2][2]).toEqual({ roomId: 1, setupMinutes: 45, teardownMinutes: 15, overlapReason: "Long setup" });
+  expect(conflictLine()).not.toBeInTheDocument();
+});

@@ -52,7 +52,7 @@ export function RefusedSaveLine({ save, noun, canManage, about, choosing }: { sa
   if (!save.why) return null;
 
   const text = choosing
-    ? `${choosing} changed while you were choosing, so your choice could not be saved. This is the ${noun} as it is now.`
+    ? `${choiceRefused(choosing)} This is the ${noun} as it is now.`
     : canManage === undefined
       ? "Your changes could not be saved."
       : save.why === "changed"
@@ -66,4 +66,10 @@ export function RefusedSaveLine({ save, noun, canManage, about, choosing }: { sa
       {about ? `${about}. ${text}` : text}
     </p>
   );
+}
+
+// What a control that stays on screen says when someone else's change refused a choice (`choosing`, as "This date's
+// room"): the one wording, for a control still showing what is stored and for a list whose row went with the control.
+export function choiceRefused(choosing: string): string {
+  return `${choosing} changed while you were choosing, so your choice could not be saved.`;
 }

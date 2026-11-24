@@ -603,3 +603,37 @@ func TestSeriesPickKeepsConfirmedDatePicksAndReplacesWaitingOnes(t *testing.T) {
 		t.Fatalf("the date's waiting chapel request is in room %d, want the series room %d", second.RoomID, f.hall.ID)
 	}
 }
+
+// Picking the series room it already has books every date that has no booking
+// (a date released on its own since), without asking for approval again, and
+// the answer counts only what this pick did: the dates it booked, and of them
+// the ones an admin's reason booked over another booking.
+func TestSeriesPickOfItsOwnRoomBooksBareDatesAndCountsOverlaps(t *testing.T) {
+	f := newBookingFixture(t)
+	// A holds the hall on the series' first date.
+	roomPickOK(t, f.leader, f.path(f.eventA, "/room"), map[string]any{"roomId": f.hall.ID})
+	series := createFeedEvent(t, f.leader, f.group, "Weekly", f.startOn.Add(30*time.Minute), "FREQ=WEEKLY;COUNT=4")
+	if code, out := f.seriesRoom(t, f.admin, series, map[string]any{"roomId": f.hall.ID}); code != http.StatusOK || out.Booked != 3 || len(out.Lost) != 1 || out.DoubleBooked != 0 {
+		t.Fatalf("book the series: %d %+v", code, out)
+	}
+	if code, out := f.seriesRoom(t, f.admin, series, map[string]any{"roomId": f.hall.ID, "overlapReason": "Choir moved"}); code != http.StatusOK ||
+		out.Booked != 1 || out.DoubleBooked != 1 || len(out.Lost) != 0 {
+		t.Fatalf("book the busy date anyway: %d %+v", code, out)
+	}
+	if w := f.admin.do("PUT", "/api/v1/admin/settings/room-approval", map[string]any{"enabled": true}, true); w.Code != http.StatusOK {
+		t.Fatalf("approval on: %d", w.Code)
+	}
+	second := feedDate(f.startOn.AddDate(0, 0, 7))
+	roomPickOK(t, f.leader, "/api/v1/events/"+itoa(series.ID)+"/dates/"+second+"/room", map[string]any{"roomId": nil})
+	requests := contactCount(t, f.app, &models.RoomRequest{}, "event_id = ?", series.ID)
+	if code, out := f.seriesRoom(t, f.leader, series, map[string]any{"roomId": f.hall.ID}); code != http.StatusOK ||
+		out.Booked != 1 || out.Pending != 0 || out.DoubleBooked != 0 || len(out.Lost) != 0 {
+		t.Fatalf("pick the series room again: %d %+v", code, out)
+	}
+	if n := seriesBookings(t, f.app, series.ID, models.BookingConfirmed); n != 4 {
+		t.Fatalf("%d confirmed bookings, want every date", n)
+	}
+	if n := contactCount(t, f.app, &models.RoomRequest{}, "event_id = ?", series.ID); n != requests {
+		t.Fatalf("picking the approved series room again opened a request: %d, was %d", n, requests)
+	}
+}

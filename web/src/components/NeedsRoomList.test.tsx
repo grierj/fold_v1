@@ -72,7 +72,7 @@ it("opens the one-date Room control under a date the page doesn't list, and not 
   expect(screen.queryByRole("combobox", { name: /^Room/ })).not.toBeInTheDocument();
 });
 
-it("asks again after the inline control books, and says the date has a room now", async () => {
+it("asks again after the inline control books, and says what it booked", async () => {
   vi.mocked(DateRooms.list).mockResolvedValue({ rooms: [hall], booking: null, dateRoom: { id: 70, revision: "r1" } });
   vi.mocked(DateRooms.set).mockResolvedValue({ booking: { roomId: 1, roomName: "Fellowship Hall", building: "Main", status: "confirmed", setupMinutes: 0, teardownMinutes: 0, doubleBooked: false, tooSmall: false, pending: false }, dateRoom: { id: 70, revision: "r2" } });
   show({ hasDate: () => false });
@@ -81,7 +81,20 @@ it("asks again after the inline control books, and says the date has a room now"
   await userEvent.selectOptions(await screen.findByRole("combobox", { name: /^Room/ }), "1");
   await waitFor(() => expect(screen.queryByText("Chapel isn't free then.")).not.toBeInTheDocument());
   expect(SeriesRooms.list).toHaveBeenCalledTimes(2);
-  expect(await screen.findByText("Tuesday, December 15 has a room now.")).toBeInTheDocument();
+  expect(await screen.findByText("Booked Fellowship Hall for Tuesday, December 15.")).toBeInTheDocument();
+});
+
+// A pick waiting for an admin leaves the list too (waiting dates are not listed): it says so, never that the date has
+// a room.
+it("says a pick that waits for an admin's approval is waiting, not that the date has a room", async () => {
+  vi.mocked(DateRooms.list).mockResolvedValue({ rooms: [hall], booking: null, dateRoom: { id: 70, revision: "r1" } });
+  vi.mocked(DateRooms.set).mockResolvedValue({ booking: { roomId: 1, roomName: "Fellowship Hall", building: "Main", status: "requested", setupMinutes: 0, teardownMinutes: 0, doubleBooked: false, tooSmall: false, pending: true }, dateRoom: { id: 70, revision: "r2" } });
+  show({ hasDate: () => false });
+  await userEvent.click(await screen.findByRole("button", { name: "Pick a room for Tuesday, December 15" }));
+  vi.mocked(SeriesRooms.list).mockResolvedValue({ revision: "r1", rooms: [], dates: 10, defaultRoom: null, needsRoom: [needs[0]], pending: 1 });
+  await userEvent.selectOptions(await screen.findByRole("combobox", { name: /^Room/ }), "1");
+  expect(await screen.findByText("Tuesday, December 15 is waiting for an admin to approve Fellowship Hall.")).toBeInTheDocument();
+  expect(screen.queryByText(/has a room|Booked/)).not.toBeInTheDocument();
 });
 
 // A pick refused because someone else gave the date a room: the list asks again and the date leaves it, saying the
@@ -97,9 +110,9 @@ it("asks again after the inline control's pick is refused, and says the choice c
   await userEvent.click(await screen.findByRole("button", { name: "Pick a room for Tuesday, December 15" }));
   vi.mocked(SeriesRooms.list).mockResolvedValue({ revision: "r1", rooms: [], dates: 10, defaultRoom: null, needsRoom: [needs[0]], pending: 0 });
   await userEvent.selectOptions(await screen.findByRole("combobox", { name: /^Room/ }), "1");
-  expect(await screen.findByText("The room for Tuesday, December 15 changed while you were choosing, so your choice could not be saved. It no longer needs a room.")).toBeInTheDocument();
+  expect(await screen.findByText("Tuesday, December 15. This date's room changed while you were choosing, so your choice could not be saved. It is no longer listed under “Dates that need a room”.")).toBeInTheDocument();
   expect(SeriesRooms.list).toHaveBeenCalledTimes(2);
-  expect(screen.queryByText("Tuesday, December 15 has a room now.")).not.toBeInTheDocument();
+  expect(screen.queryByText(/has a room|Booked/)).not.toBeInTheDocument();
 });
 
 it("shows nothing when rooms were turned off after the page loaded", async () => {

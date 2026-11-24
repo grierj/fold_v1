@@ -196,8 +196,12 @@ func (a *App) managedOccurrence(c *gin.Context) (*models.Event, *models.EventOcc
 		return nil, nil, false
 	}
 	var occ models.EventOccurrence
-	if err := a.DB.Where("event_id = ? AND original_date = ? AND status = ?", ev.ID, date, models.OccurrenceScheduled).First(&occ).Error; err != nil {
-		fail(c, errOccurrenceNotFound)
+	err := a.DB.Where("event_id = ? AND original_date = ? AND status = ?", ev.ID, date, models.OccurrenceScheduled).First(&occ).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		err = errOccurrenceNotFound
+	}
+	if err != nil {
+		fail(c, err)
 		return nil, nil, false
 	}
 	return ev, &occ, true
@@ -402,7 +406,7 @@ func (a *App) apiSetDateRoom(c *gin.Context) {
 		out.DateRoom.ID = occ.ID
 		out.DateRoom.Revision, err = a.dateRoomRevisionIn(tx, occ.ID)
 		return err
-	})
+	}, readCommitted)
 	switch {
 	case isAPIError(err):
 		fail(c, err)

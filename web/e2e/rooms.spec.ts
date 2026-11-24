@@ -103,7 +103,7 @@ test("a series room busy on one date lists it, and Pick a room books another roo
   await room.selectOption((await hallOption.getAttribute("value"))!);
   await expect(page.getByRole("status").filter({ hasText: "will be listed under" })).toBeVisible();
   await page.getByRole("button", { name: "Book for every date" }).click();
-  await expect(page.getByRole("status").filter({ hasText: "1 date is busy" })).toBeVisible();
+  await expect(page.getByRole("status").filter({ hasText: "1 date still needs a room" })).toBeVisible();
 
   const list = page.getByRole("region", { name: /^Dates that need a room \(1\)/ });
   await expect(list).toBeVisible();

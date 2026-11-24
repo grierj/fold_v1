@@ -69,6 +69,9 @@ type seriesBookingJSON struct {
 	Kept int `json:"kept"`
 	// Pending: dates waiting on an admin's approval (M2.1d).
 	Pending int `json:"pending"`
+	// DoubleBooked: of the dates booked, those an admin's reason booked over
+	// another booking.
+	DoubleBooked int `json:"doubleBooked"`
 }
 
 // roomChoices lists the active rooms p may book for the given dates, with
@@ -222,7 +225,7 @@ func (a *App) apiSetSeriesRoom(c *gin.Context) {
 		}
 		out.Event = revisionRefJSON{ID: locked.ID, Revision: a.eventRevision(locked, f.group)}
 		return nil
-	})
+	}, readCommitted)
 	if err != nil {
 		answerEventWrite(c, err, "could not save the room")
 		return
@@ -348,6 +351,9 @@ func bookWholeSeries(tx *gorm.DB, ev *models.Event, roomID *uint, user *models.U
 			out.Lost = append(out.Lost, models.FormatCalendarDate(occ.OriginalDate))
 		case bookedPending:
 			out.Pending++
+		case bookedOverlap:
+			out.Booked++
+			out.DoubleBooked++
 		default:
 			out.Booked++
 		}

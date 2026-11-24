@@ -1,10 +1,11 @@
 import { useEffect, useRef, useState } from "react";
 import { SeriesRooms } from "../api/rooms";
 import { errorText } from "../lib/errors";
+import { choiceRefused } from "../lib/refusedSave";
 import { useLoad } from "../lib/useLoad";
 import { useRoomsEnabled } from "../lib/useSite";
 import { formatDayLong } from "../lib/when";
-import type { NeedsRoom } from "../types";
+import type { NeedsRoom, RoomBooking } from "../types";
 import { RoomField } from "./RoomField";
 import { roomsTurnedOff } from "./useRoomPicker";
 import { Button } from "./ui/Button";
@@ -13,6 +14,24 @@ import { AlertCircleIcon } from "./icons";
 
 // A long list shows its first rows; the rest wait behind one button.
 const SHOWN = 10;
+
+const OFF_LIST = "It is no longer listed under “Dates that need a room”.";
+
+// What a row whose Room control was open says when it leaves the list: what the last pick there left, or only that it
+// left, when that pick was refused or none was made.
+function leftList(day: string, pick: { refused: boolean; stored: RoomBooking | null } | null): string {
+  if (pick?.refused) return `${day}. ${choiceRefused("This date's room")} ${OFF_LIST}`;
+
+  const b = pick?.stored;
+
+  if (pick && b === null) return `Room released for ${day}.`;
+
+  if (b?.pending) return `${day} is waiting for an admin to approve ${b.roomName}.`;
+
+  if (b?.status === "confirmed") return `Booked ${b.roomName} for ${day}.`;
+
+  return `${day}. ${OFF_LIST}`;
+}
 
 // "Dates that need a room" on the event page (M2.1c, DEC-103): dates whose
 // room was taken when they moved, or was busy when the series was booked.
@@ -40,9 +59,9 @@ export function NeedsRoomList({ eventId, revision, hasDate, onPick, onGone }: {
   // What the inline control just did, so the row that leaves the list is not silent.
   const [notice, setNotice] = useState("");
   const watching = useRef<string | null>(null);
-  // The open row's last pick was refused because someone else changed the date's room: a row that then leaves the
-  // list says so, never that this person's pick worked.
-  const refusedPick = useRef(false);
+  // What the open row's last pick did: refused by someone else's change, or the booking it left. A row that leaves the
+  // list says what that was, never that the date has a room it does not hold.
+  const lastPick = useRef<{ refused: boolean; stored: RoomBooking | null } | null>(null);
   const noticeRef = useRef<HTMLParagraphElement>(null);
 
   const list = useLoad(() => SeriesRooms.list(eventId), [eventId], { enabled });
@@ -67,9 +86,7 @@ export function NeedsRoomList({ eventId, revision, hasDate, onPick, onGone }: {
     if (was && !loaded.needsRoom.some((n) => n.date === was)) {
       watching.current = null;
       setOpen(null);
-      setNotice(refusedPick.current
-        ? `The room for ${formatDayLong(was)} changed while you were choosing, so your choice could not be saved. It no longer needs a room.`
-        : `${formatDayLong(was)} has a room now.`);
+      setNotice(leftList(formatDayLong(was), lastPick.current));
     }
   }, [loaded]);
 
@@ -127,7 +144,7 @@ export function NeedsRoomList({ eventId, revision, hasDate, onPick, onGone }: {
                       }
 
                       setNotice("");
-                      refusedPick.current = false;
+                      lastPick.current = null;
                       watching.current = open === n.date ? null : n.date;
                       setOpen(open === n.date ? null : n.date);
                     }}
@@ -137,7 +154,7 @@ export function NeedsRoomList({ eventId, revision, hasDate, onPick, onGone }: {
                 </div>
                 {inline && open === n.date && (
                   <div id={panel} className="rounded-md border border-border bg-surface p-3">
-                    <RoomField eventId={eventId} date={n.date} idPrefix={`needs-${n.date}`} focusOnLoad onChanged={(refused) => { refusedPick.current = refused === true; setOwn((c) => c + 1); }}
+                    <RoomField eventId={eventId} date={n.date} idPrefix={`needs-${n.date}`} focusOnLoad onChanged={(refused, stored) => { lastPick.current = { refused: refused === true, stored: stored ?? null }; setOwn((c) => c + 1); }}
                       onGone={() => {
                         watching.current = null;
                         setOpen(null);

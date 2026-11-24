@@ -109,6 +109,11 @@ function answeredRevision(answer: SavedAnswer): string {
 // `gone` says which refusals of a send or of the read mean the person may no longer make it (by default every 403 and
 // 404). A control that stays (`stays`) and is no longer on screen when such a refusal arrives hands nothing over: it
 // returns "left", so a late answer never reaches whatever its host shows now.
+//
+// A save that writes more than `fields` can show (`writesMore`: the series room pick books every date, and its read
+// shows the series room) counts a read that shows what it would leave as this save only when a send of it got no
+// answer. Otherwise someone else stored that value, and the same save goes again under the new revision, so its own
+// answer says what it did.
 export function useRevisionSave<T, F>({
   opened,
   revision,
@@ -120,6 +125,7 @@ export function useRevisionSave<T, F>({
   changedCode = "event_changed",
   stays,
   gone = lostAuthority,
+  writesMore = false,
 }: {
   opened: T;
   revision: string | undefined;
@@ -131,6 +137,7 @@ export function useRevisionSave<T, F>({
   changedCode?: "event_changed" | "date_changed" | "group_changed" | "date_room_changed";
   stays?: (answer: SavedAnswer) => T;
   gone?: (err: ApiError) => boolean;
+  writesMore?: boolean;
 }) {
   const base = useRef({ opened, revision });
   const own = useRef<LostSend>({ current: false });
@@ -210,7 +217,7 @@ export function useRevisionSave<T, F>({
       try {
         stored = await read();
       } catch (err) {
-        if (err instanceof ApiError && gone(err)) return conflict("gone");
+        if (err instanceof ApiError && gone(err)) return stays && !mounted.current ? "left" : conflict("gone");
 
         throw err;
       }
@@ -220,8 +227,9 @@ export function useRevisionSave<T, F>({
       if (!sameSignIn() || !stored.allowed || !stored.revision) return conflict("gone");
 
       const now = fields(stored.value);
+      const storedGoal = same(now, goal);
 
-      if (same(now, goal)) {
+      if (storedGoal && (lost.current || !writesMore)) {
         rebase(stored.value, stored.revision);
 
         if (unseen !== (lost.unseen ?? "")) return conflict("changed");
@@ -231,7 +239,7 @@ export function useRevisionSave<T, F>({
         return "saved";
       }
 
-      if (!same(now, was) || lost.current) {
+      if (!storedGoal && (!same(now, was) || lost.current)) {
         rebase(stored.value, stored.revision);
 
         return conflict("changed");

@@ -147,12 +147,19 @@ chosen when the row is made, or is a setting that may change to any value its ow
   used again (the room controls) passes `stays`: each outcome moves the base its next save names
   (a landed save to what its answer says was stored, a read to what it found), and a send with no
   answer moves nothing; a refusal that arrives after such a control left the screen hands nothing
-  to its host. A room control compares what its pick sets: the room alone for a pick that leaves
+  to its host, whether it was the send's or the read's. A room control compares what its pick sets: the room alone for a pick that leaves
   the padding (or which busy dates it books over) to the server, the padding for "Save times",
   the busy dates for "Book anyway"; a date with no booking and one whose booking lost its room
-  compare apart. After a conflict, as after a landed pick, it asks its host to read again
+  compare apart. A "Book anyway" whose answer was lost keeps its prompt and reason, so the next
+  press settles it. The series pick writes more than its read shows (every date's booking,
+  `writesMore`): a read showing its room counts as this pick only after a send of it got no
+  answer, and otherwise the pick goes again under the new revision, so what the control says
+  comes from the write's own answer (its counts, `doubleBooked` included) or, after a lost
+  answer, from what the read shows. After a conflict, as after a landed pick, it asks its host to read again
   quietly (`reload`), so the page's place and lists show the room while the editor keeps its
-  draft.
+  draft. "Dates that need a room" says what a row's own pick left when the row leaves the list
+  (booked, waiting for an admin, released), and after a refused pick only that the choice could
+  not be saved and the date is no longer listed.
 - `web/src/components/ui/Form.tsx` validates; the submit lifecycle is `web/src/lib/useAction.ts`
   (idle, running, failed, done). It refuses a second run while one is on its way, always leaves
   running, words a throw with `errorText`, and keeps a follow-up step (a reload after the save)
