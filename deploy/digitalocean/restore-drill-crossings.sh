@@ -176,6 +176,16 @@ CROSSING_FORBID_UP='^\++ (run_backup|write_release|restore_dump|run_provision|ne
 # Steps that must never appear in a refused restore.sh. stage_tools alone is
 # allowed: an image check runs in a temporary frozen copy that is deleted.
 CROSSING_FORBID_RESTORE='^\++ (publish_tools|close_site|create_database|collect|pin|swap|recovery_start|record|store|finish_reopen)( |$)|pg_restore -U|^\++ docker compose .* (stop|up|build|down)( |$)'
+# A crossing site runs a release's stock docker-compose.yml, whose backup line
+# names ghcr.io/grierj/fold-backup:${FOLD_VERSION} and which provision.sh pulls
+# with the app. --image relocates only the app, so the drill serves the backup
+# images it builds through a registry mirror for ghcr.io (containerd's
+# hosts.toml): the stock name resolves to the drill registry first and anything
+# the registry lacks goes on to ghcr.io. isolation.sh refuses a host that
+# already has this directory; the crossings remove what they created.
+CROSSING_MIRROR_DIR=/etc/docker/certs.d/ghcr.io
+CROSSING_BACKUP_REPO=ghcr.io/grierj/fold-backup
+CROSSING_MIRROR_CREATED=()
 CROSSING_CASE=0
 CROSSING_PROJECTS=()
 CROSSING_HOST_FILES=(/etc/cron.d/fold-health /etc/cron.d/fold-backup /etc/logrotate.d/fold-backup)
@@ -575,10 +585,12 @@ crossing_prepare() {
   for f in "${CROSSING_HOST_FILES[@]}"; do [[ ! -e "$f" ]] || CROSSING_HOST_BEFORE+=("$f"); done
   CROSSING_HOST_RECORDED=1
   crossing_expose_objects
+  crossing_mirror_ghcr || return 1
   # The candidate is the committed head, built from its own archive. A --image
   # given to the runner serves only the fixture stack; it is never used here.
   CROSSING_CAND_IMG="$(crossing_build_image candidate "$REVISION" "$CROSSING_CANDIDATE_LEVEL" 1)"
   CROSSING_CAND_TAG="${CROSSING_CAND_IMG##*:}"
+  crossing_prove_mirror "$CROSSING_CAND_TAG" || return 1
   CROSSING_LANE_IMG="$(crossing_build_image lane "$LANE_REVISION" 0 1)"
   CROSSING_LANE_TAG="${CROSSING_LANE_IMG##*:}"
   CROSSING_LANDING_IMG="$(crossing_build_image landing "$LANDING_REVISION" 1 1)"
@@ -633,12 +645,76 @@ crossing_build_image() {
   ref="$REGISTRY/fold:$tag"
   docker build --label "org.opencontainers.image.revision=$sha" --build-arg "FOLD_VERSION=$tag" -t "$ref" "$src" >"$cdir/build-$role.log" 2>&1 \
     || { tail -n 40 "$cdir/build-$role.log" >&2; return 1; }
+  crossing_build_backup "$role" "$sha" "$tag" "$src" "$push" >&2 || return 1
   rm -rf "$src" || return 1
   crossing_image_facts "$role" "$sha" "$ref" "$want" built >&2 || return 1
   if (( push )); then
     docker push "$ref" >"$cdir/push-$role.log" 2>&1 || { tail -n 20 "$cdir/push-$role.log" >&2; return 1; }
   fi
   printf '%s\n' "$ref"
+}
+
+# role sha tag src push: when the revision's stock Compose names the backup
+# image, its own deploy/backup built under the tag that Compose will ask for
+# (FOLD_VERSION is the app's tag), in the mirror's repository path.
+crossing_build_backup() {
+  local role="$1" sha="$2" tag="$3" src="$4" push="$5" cdir ref id
+  grep -qF "image: $CROSSING_BACKUP_REPO:" "$src/docker-compose.yml" || return 0
+  cdir="$(crossing_dir)"
+  [[ -f "$src/deploy/backup/Dockerfile" ]] \
+    || { echo "crossing: the $role release ($sha) names $CROSSING_BACKUP_REPO but has no deploy/backup to build it from" >&2; return 1; }
+  ref="$REGISTRY/${CROSSING_BACKUP_REPO#ghcr.io/}:$tag"
+  docker build --label "org.opencontainers.image.revision=$sha" -t "$ref" "$src/deploy/backup" >"$cdir/build-$role-backup.log" 2>&1 \
+    || { tail -n 40 "$cdir/build-$role-backup.log" >&2; return 1; }
+  if (( push )); then
+    docker push "$ref" >"$cdir/push-$role-backup.log" 2>&1 || { tail -n 20 "$cdir/push-$role-backup.log" >&2; return 1; }
+  fi
+  id="$(docker image inspect --format '{{.Id}}' "$ref")" || return 1
+  crossing_emit tools.jsonl --arg role "$role" --arg sha "$sha" --arg image "$ref" --arg imageId "$id" --arg pulledAs "$CROSSING_BACKUP_REPO:$tag" \
+    '{label:"environment", file:"backup image", role:$role, sha:$sha, image:$image, imageId:$imageId, pulledAs:$pulledAs, builtByDrill:true}'
+}
+
+crossing_mirror_ghcr() {
+  local d
+  [[ ! -e "$CROSSING_MIRROR_DIR" && ! -L "$CROSSING_MIRROR_DIR" ]] \
+    || { echo "crossing: $CROSSING_MIRROR_DIR already exists; the drill will not replace a host's registry configuration" >&2; return 1; }
+  for d in /etc/docker /etc/docker/certs.d "$CROSSING_MIRROR_DIR"; do
+    [[ -d "$d" ]] && continue
+    mkdir -m 755 "$d" || return 1
+    CROSSING_MIRROR_CREATED=("$d" "${CROSSING_MIRROR_CREATED[@]}")
+  done
+  # Without referrers, the lookup for the build's attestation goes to ghcr.io and is denied.
+  printf 'server = "https://ghcr.io"\n\n[host."http://%s"]\n  capabilities = ["pull", "resolve", "referrers"]\n' "$REGISTRY" >"$CROSSING_MIRROR_DIR/hosts.toml" || return 1
+  crossing_emit tools.jsonl --arg file "$CROSSING_MIRROR_DIR/hosts.toml" --arg mirror "$REGISTRY" \
+    '{label:"environment", file:$file, mirror:$mirror, writtenByDrill:true}'
+}
+
+# The candidate's backup image, pulled by its stock name, must be the bytes the
+# drill pushed: a daemon that ignores hosts.toml (the classic image store)
+# refuses here, before any site runs.
+crossing_prove_mirror() { # tag
+  local tag="$1" local_repo pushed pulled
+  local_repo="$REGISTRY/${CROSSING_BACKUP_REPO#ghcr.io/}"
+  docker image inspect "$local_repo:$tag" >/dev/null 2>&1 \
+    || { echo "crossing: the candidate's backup image $local_repo:$tag was not built, so the mirror cannot be proved" >&2; return 1; }
+  pushed="$(crossing_repo_digest "$local_repo" "$local_repo:$tag")"
+  [[ -n "$pushed" ]] || { echo "crossing: $local_repo:$tag has no pushed digest" >&2; return 1; }
+  docker pull -q "$CROSSING_BACKUP_REPO:$tag" >/dev/null || { echo "crossing: $CROSSING_BACKUP_REPO:$tag did not resolve through the drill registry; the daemon must use the containerd image store" >&2; return 1; }
+  pulled="$(crossing_repo_digest "$CROSSING_BACKUP_REPO" "$CROSSING_BACKUP_REPO:$tag")"
+  docker image rm "$CROSSING_BACKUP_REPO:$tag" >/dev/null || return 1
+  [[ "$pulled" == "$pushed" ]] || { echo "crossing: $CROSSING_BACKUP_REPO:$tag pulled ${pulled:-no digest}, not the pushed $pushed" >&2; return 1; }
+  crossing_emit tools.jsonl --arg image "$CROSSING_BACKUP_REPO:$tag" --arg digest "$pulled" '{label:"environment", file:"backup image", mirrorProof:true, pulledAs:$image, digest:$digest}'
+}
+crossing_repo_digest() { # repo ref -> the ref's manifest digest in that repository
+  docker image inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' "$2" | awk -F@ -v repo="$1" '$1 == repo { print $2; exit }'
+}
+
+crossing_unmirror() {
+  local d
+  (( ${#CROSSING_MIRROR_CREATED[@]} )) || return 0
+  rm -f "$CROSSING_MIRROR_DIR/hosts.toml" || return 1
+  for d in "${CROSSING_MIRROR_CREATED[@]}"; do rmdir "$d" || return 1; done
+  CROSSING_MIRROR_CREATED=()
 }
 
 # Records an image and fails unless it reports the level the role needs, the
@@ -903,13 +979,14 @@ ENV
 }
 
 crossing_site_end() {
-  crossing_cdc down -v --remove-orphans >"$(crossing_dir)/sites/down-$CX_PROJECT.log" 2>&1 || true
+  drill_down "$CX_DIR" >"$(crossing_dir)/sites/down-$CX_PROJECT.log" 2>&1 || true
   crossing_force_project "$CX_PROJECT"
   crossing_cleanup_host
 }
 
 crossing_force_project() {
-  local p="$1" ids
+  local p="$1" ids volumes
+  volumes="$(drill_anonymous_volumes "$p" 2>/dev/null || true)"
   ids="$(docker ps -aq --filter "label=com.docker.compose.project=$p" 2>/dev/null || true)"
   # shellcheck disable=SC2086 # a whitespace list of ids
   [[ -z "$ids" ]] || docker rm -fv $ids >/dev/null 2>&1 || true
@@ -919,6 +996,7 @@ crossing_force_project() {
   ids="$(docker volume ls -q --filter "label=com.docker.compose.project=$p" 2>/dev/null || true)"
   # shellcheck disable=SC2086
   [[ -z "$ids" ]] || docker volume rm -f $ids >/dev/null 2>&1 || true
+  [[ -z "$volumes" ]] || xargs docker volume rm -f <<<"$volumes" >/dev/null 2>&1 || true
 }
 
 # LANE_BASE's own provisioner writes cron and logrotate entries into the host.
@@ -1003,8 +1081,9 @@ crossing_lineage_site() {
     assert_image "$cid" "$built_id" || { echo 'crossing: the running app is not the image built from the head Dockerfile' >&2; return 1; }
     img_bin="$(crossing_binary_sha "$cid")"
     cid="$(docker create "$CROSSING_CAND_IMG")"
-    cand_bin="$(crossing_binary_sha "$cid")"
-    docker rm "$cid" >/dev/null
+    # The probe has no project label, so teardown would not find it.
+    cand_bin="$(crossing_binary_sha "$cid")" || { docker rm -v "$cid" >/dev/null; return 1; }
+    docker rm -v "$cid" >/dev/null
     jq -n --arg built "$built_id" --arg head "$REVISION" --arg onBox "$img_bin" --arg registry "$cand_bin" --argjson origin "$origin" \
       '{origin:$origin, commit:$head, builtImageId:$built, onBoxBinarySha256:$onBox, registryCandidateBinarySha256:$registry,
         note:"the registry candidate reports its own FOLD_VERSION and the on-box build reports dev, so equal hashes are not required"}' \
@@ -1183,6 +1262,8 @@ crossing_prior_site() {
     || { echo "crossing: the prior-origin host is not the real prior at level 2: $json" >&2; return 1; }
   [[ "$(cat "$CX_DIR/recovery-policy-floor")" == 2 ]]
   [[ "$(crossing_goose)" == "$(crossing_last_version "$PRIOR_REVISION")" ]]
+  # snapshot_state, which every refusal on this site takes, reads it.
+  crossing_cpg fold -c "CREATE TABLE drill_sentinel(id integer PRIMARY KEY, value text); INSERT INTO drill_sentinel VALUES (1, 'original')" >/dev/null
 }
 crossing_require_prior_site() {
   [[ -n "$CROSSING_PRIOR_SITE" && "${CX_SITE:-}" == "$CROSSING_PRIOR_SITE" ]] \
@@ -1246,7 +1327,7 @@ real_l1_pre_upgrade_dump() {
     sleep 1
   done
   docker logs "$cid" >"$cdir/l1-prior-on-pre-upgrade-dump.log" 2>&1 || true
-  docker rm -f "$cid" >/dev/null
+  docker rm -fv "$cid" >/dev/null
   crossing_cpg postgres -c 'DROP DATABASE fold_l1' >/dev/null
   [[ "$started" == true ]] || { echo 'crossing: the prior did not start on its own pre-upgrade dump, which L1 says it does' >&2; return 1; }
   crossing_emit cases.jsonl --arg acceptance M-l1-pre-upgrade-dump --arg site "$CX_SITE" --arg dump "$dump" \
@@ -1310,21 +1391,22 @@ crossing_make_date_private() { # jar base occurrence-path writer
 # (jar) and member (mjar): a group with an event a member signed up for, two
 # public church-wide series each with one private date and nobody registered,
 # a private event, and a group whose one event nobody signed up for.
-# Prints "group reg reset stale private group3 event3" as ids.
+# Prints "group reg reset stale private group3 event3" as ids. Called inside
+# $( ) with || return, where errexit is off: every step answers for itself.
 crossing_visibility_fixtures() { # jar mjar base writer
   local jar="$1" mjar="$2" base="$3" writer="$4" g g3 e5 e6 r s p body
-  g="$(crossing_http_want "$jar" "$base" POST /groups '{"name":"Crossing group","visibility":"public","location":"Hall"}' 201 | jq -er .group.id)"
-  g3="$(crossing_http_want "$jar" "$base" POST /groups '{"name":"Crossing quiet group","visibility":"public","location":"Hall"}' 201 | jq -er .group.id)"
-  e5="$(crossing_http_want "$jar" "$base" POST "/groups/$g/events" "$(jq -nc --arg d "$(crossing_day 6)" '{title:"Crossing E5",startsLocal:($d+"T19:00"),durationMinutes:60,tzid:"UTC"}')" 201 | jq -er .event.id)"
-  e6="$(crossing_http_want "$jar" "$base" POST "/groups/$g3/events" "$(jq -nc --arg d "$(crossing_day 7)" '{title:"Crossing E6",startsLocal:($d+"T19:00"),durationMinutes:60,tzid:"UTC"}')" 201 | jq -er .event.id)"
-  crossing_http_want "$mjar" "$base" PUT "/events/$e5/registrations" "$(jq -nc --arg d "$(crossing_day 6)" '{status:"going",date:$d}')" 200 >/dev/null
-  r="$(crossing_http_want "$jar" "$base" POST /events "$(jq -nc --arg d "$(crossing_day 3)" '{title:"Crossing reset",startsLocal:($d+"T19:00"),durationMinutes:60,tzid:"UTC",recurrenceRule:"FREQ=WEEKLY;COUNT=3"}')" 201 | jq -er .event.id)"
+  g="$(crossing_http_want "$jar" "$base" POST /groups '{"name":"Crossing group","visibility":"public","location":"Hall"}' 201 | jq -er .group.id)" || return 1
+  g3="$(crossing_http_want "$jar" "$base" POST /groups '{"name":"Crossing quiet group","visibility":"public","location":"Hall"}' 201 | jq -er .group.id)" || return 1
+  e5="$(crossing_http_want "$jar" "$base" POST "/groups/$g/events" "$(jq -nc --arg d "$(crossing_day 6)" '{title:"Crossing E5",startsLocal:($d+"T19:00"),durationMinutes:60,tzid:"UTC"}')" 201 | jq -er .event.id)" || return 1
+  e6="$(crossing_http_want "$jar" "$base" POST "/groups/$g3/events" "$(jq -nc --arg d "$(crossing_day 7)" '{title:"Crossing E6",startsLocal:($d+"T19:00"),durationMinutes:60,tzid:"UTC"}')" 201 | jq -er .event.id)" || return 1
+  crossing_http_want "$mjar" "$base" PUT "/events/$e5/registrations" "$(jq -nc --arg d "$(crossing_day 6)" '{status:"going",date:$d}')" 200 >/dev/null || return 1
+  r="$(crossing_http_want "$jar" "$base" POST /events "$(jq -nc --arg d "$(crossing_day 3)" '{title:"Crossing reset",startsLocal:($d+"T19:00"),durationMinutes:60,tzid:"UTC",recurrenceRule:"FREQ=WEEKLY;COUNT=3"}')" 201 | jq -er .event.id)" || return 1
   crossing_make_date_private "$jar" "$base" "/events/$r/occurrences/$(crossing_day 3)" "$writer" || return 1
-  s="$(crossing_http_want "$jar" "$base" POST /events "$(jq -nc --arg d "$(crossing_day 4)" '{title:"Crossing stale reset",startsLocal:($d+"T19:00"),durationMinutes:60,tzid:"UTC",recurrenceRule:"FREQ=WEEKLY;COUNT=3"}')" 201 | jq -er .event.id)"
+  s="$(crossing_http_want "$jar" "$base" POST /events "$(jq -nc --arg d "$(crossing_day 4)" '{title:"Crossing stale reset",startsLocal:($d+"T19:00"),durationMinutes:60,tzid:"UTC",recurrenceRule:"FREQ=WEEKLY;COUNT=3"}')" 201 | jq -er .event.id)" || return 1
   crossing_make_date_private "$jar" "$base" "/events/$s/occurrences/$(crossing_day 4)" "$writer" || return 1
-  p="$(crossing_http_want "$jar" "$base" POST /events "$(jq -nc --arg d "$(crossing_day 5)" '{title:"Crossing private",startsLocal:($d+"T19:00"),durationMinutes:60,tzid:"UTC"}')" 201 | jq -er .event.id)"
+  p="$(crossing_http_want "$jar" "$base" POST /events "$(jq -nc --arg d "$(crossing_day 5)" '{title:"Crossing private",startsLocal:($d+"T19:00"),durationMinutes:60,tzid:"UTC"}')" 201 | jq -er .event.id)" || return 1
   body="$(crossing_with_revision "$jar" "$base" "/events/$p/visibility" '{"visibility":"private"}')" || return 1
-  crossing_http_want "$jar" "$base" PUT "/events/$p/visibility" "$body" 200 >/dev/null
+  crossing_http_want "$jar" "$base" PUT "/events/$p/visibility" "$body" 200 >/dev/null || return 1
   printf '%s %s %s %s %s %s %s\n' "$g" "$e5" "$r" "$s" "$p" "$g3" "$e6"
 }
 
@@ -1357,12 +1439,12 @@ real_level0_started_by_hand() {
     [[ "$(docker inspect --format '{{.State.Running}}' "$cid")" == true ]] || break
     sleep 1
   done
-  [[ "$started" == true ]] || { docker logs "$cid" >&2 || true; docker rm -f "$cid" >/dev/null; echo 'crossing: the lane image did not start by hand on the upgraded copy, which L4 says it does' >&2; return 1; }
+  [[ "$started" == true ]] || { docker logs "$cid" >&2 || true; docker rm -fv "$cid" >/dev/null; echo 'crossing: the lane image did not start by hand on the upgraded copy, which L4 says it does' >&2; return 1; }
   lbase="http://127.0.0.1:$port"; ljar="$cdir/l4-lane.jar"
   crossing_http_login "$ljar" "$lbase" crossing-admin@example.invalid
   out="$cdir/l4-answer.json"
   while read -r -u 3 label method path body; do
-    body="$(crossing_with_revision "$ljar" "$lbase" "$path" "$body")" || { docker logs "$cid" >&2 || true; docker rm -f "$cid" >/dev/null; return 1; }
+    body="$(crossing_with_revision "$ljar" "$lbase" "$path" "$body")" || { docker logs "$cid" >&2 || true; docker rm -fv "$cid" >/dev/null; return 1; }
     before="$(crossing_visibility_state fold_l4 "$e5,$r,$p")"
     status="$(crossing_http "$ljar" "$lbase" "$method" "$path" "$body" "$out")"
     results="$(jq -c --arg l "$label" --arg s "$status" --argjson same "$([[ "$(crossing_visibility_state fold_l4 "$e5,$r,$p")" == "$before" ]] && echo true || echo false)" \
@@ -1373,7 +1455,7 @@ zero-registration-reset PUT /events/$r/visibility {"visibility":"public","resetO
 series-opening PUT /events/$p/visibility {"visibility":"public"}
 EOF
   docker logs "$cid" >"$cdir/l4-lane-by-hand.log" 2>&1 || true
-  docker rm -f "$cid" >/dev/null
+  docker rm -fv "$cid" >/dev/null
   crossing_cpg postgres -c 'DROP DATABASE fold_l4' >/dev/null
   crossing_emit cases.jsonl --arg acceptance M-level0-started-by-hand --arg site "$CX_SITE" --argjson requests "$results" \
     '{kind:"measured", acceptance:$acceptance, id:"level0-started-by-hand", site:$site, fixture:false, laneStarted:true, requests:$requests,
@@ -1432,7 +1514,7 @@ real_prior_refused_at_start() {
 # 00015 beside it, and every visibility change it tries is refused.
 real_prior_running_across_upgrade() {
   local cdir base jar mjar fixture g e5 r s p g3 e6 cid cbase cjar consent t0 since before after status attempt out ok results='[]' label method path body
-  local fenced stale audits notes i rev
+  local fenced stale audits notes i rev window
   crossing_prepare
   cdir="$(crossing_dir)"
   drill_step prior-running/provision
@@ -1481,8 +1563,11 @@ real_prior_running_across_upgrade() {
       since="$(date -u +%Y-%m-%dT%H:%M:%S.%NZ)"
       status="$(crossing_http "$jar" "$base" "$method" "$path" "$body" "$out")"
       sleep 1
-      if crossing_cdc logs --no-color --since "$since" app 2>&1 | grep -qF "$CROSSING_AUDIT_REFUSAL"; then fenced=true; break; fi
-      if crossing_cdc logs --no-color --since "$since" app 2>&1 | grep -qF 0A000; then stale=$((stale+1)); continue; fi
+      # Read whole, then searched: under pipefail, grep -q leaving early makes a
+      # match fail when Compose is still writing (SIGPIPE).
+      window="$(crossing_cdc logs --no-color --since "$since" app 2>&1)"
+      if grep -qF "$CROSSING_AUDIT_REFUSAL" <<<"$window"; then fenced=true; break; fi
+      if grep -qF 0A000 <<<"$window"; then stale=$((stale+1)); continue; fi
       break
     done
     after="$(crossing_visibility_state fold "$e5,$r,$s,$p,$e6")"
@@ -1512,7 +1597,7 @@ EOF
     '{kind:"positive", acceptance:$acceptance, id:"prior-running-across-upgrade", site:$site, fixture:false, requests:$requests, titleEdit:200,
       proof:"protocol: curl against the prior process and the database while the candidate container ran beside it",
       pass:($requests | length == 7 and all(.[]; .pass))}'
-  docker rm -f "$cid" >/dev/null
+  docker rm -fv "$cid" >/dev/null
   crossing_refused_start running-restart "$(crossing_last_version "$REVISION")"
   crossing_site_end
   crossing_use_main
@@ -1662,7 +1747,8 @@ real_current_release_restore() {
   old_id="$(jq -er .attemptId "$cdir/panel-$t3.json")"
   status="$(crossing_api_status DELETE "/admin/users/$t3" "$(crossing_panel_body "$cdir/panel-$t3.json" "$old_id")" "$out")"
   crossing_answer_is "$status" 503 "$out" '.code == "restore_detected"' \
-    || { echo "crossing: the press after a live restore answered $status: $(cat "$out")" >&2; return 1; }
+    || { dc logs --no-color --timestamps --since 10m app db >"$cdir/current-release-live-app.log" 2>&1 || true
+         echo "crossing: the press after a live restore answered $status: $(cat "$out") (app log: $cdir/current-release-live-app.log)" >&2; return 1; }
   live_answer=restore_detected
   [[ "$(pg fold -c "SELECT count(*) FROM contact_requests WHERE reason = '' AND (requester_id=$t3 OR subject_user_id=$t3)")" == 0 ]]
   [[ "$(pg fold -c "SELECT deleted_at IS NULL FROM users WHERE id=$t3")" == t ]]
@@ -1833,7 +1919,7 @@ ARCHIVE
   dc exec -T db pg_restore -l <"$older" >"$cdir/table-sets/$id.archive-toc.txt"
   # The archive's own listing must not carry the objects the candidate adds.
   crossing_toc_tables <"$cdir/table-sets/$id.archive-toc.txt" >"$cdir/table-sets/$id.archive.tables"
-  docker rm -f "$archive_id"
+  docker rm -fv "$archive_id"
   pg postgres -c 'DROP DATABASE drill_archive_fixture'
   URL="$old_url"; login
   drill_step "archive-$id/candidate-schema"

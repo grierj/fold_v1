@@ -352,13 +352,16 @@ is the production command itself, run directly (`qc1-measure.sh --dir`, `restore
 on the machine the script is started on, which has to be a disposable host: a droplet created for
 the run, declared with `FOLD_DRILL_ISOLATED_DAEMON=1`. Run them behind a firewall that restricts inbound
 access to the operator: crossings bind ports 80 and 443 and use an internal health check, not the standard
-public HTTPS smoke check. Both tools refuse before they create anything
+public HTTPS smoke check. `ufw` alone does not restrict those ports, because Docker forwards published
+ports before ufw's rules see them: use a DigitalOcean cloud firewall, which covers IPv4, IPv6 and the
+droplet's VPC interface. A host `iptables` rule on one interface or one address family leaves the
+others open. Both tools refuse before they create anything
 when it is not declared, when `DOCKER_HOST` or `DOCKER_CONTEXT` points away from the local default
 daemon, when the daemon is not named for this host, or when it already holds a container (the QC-1
 harness alone accepts a busy daemon, and only with `--shared-daemon`, which makes the run not
 complete evidence); the drill also refuses when a Docker socket or an owner path (`/etc`, `/opt/fold`,
-`/home`, ...) is mounted writable into its filesystem or when a file its provisioners write already
-exists (`isolation.sh`). Before either step, prepare the browser once on that host:
+`/home`, ...) is mounted writable into its filesystem or when a file its provisioners or its registry
+mirror write already exists, a stock Ubuntu `20auto-upgrades` excepted (`isolation.sh`). Before either step, prepare the browser once on that host:
 `export FOLD_DRILL_ISOLATED_DAEMON=1; QC1_WEB_DIR="$PWD/web" QC1_PREPARE_FIREFOX=1 deploy/digitalocean/qc1/browser-prepare.sh DIR`
 (root, Ubuntu with apt: it runs `npm ci` as locked, installs the locked Playwright's Chromium with its
 system libraries, proves the launch and builds the Firefox container), then `set -a; . DIR/browser.env; set +a`,

@@ -8,8 +8,8 @@
 # whose operator says so with FOLD_DRILL_ISOLATED_DAEMON=1, and it refuses
 # everything else here, before it creates anything: a remote or non-default
 # daemon, a daemon that holds any container, a daemon not named for this host,
-# a Docker socket or owner path mounted in, and any file the provisioners would
-# write. qc1-measure.sh writes nothing to the host and uses only Docker objects
+# a Docker socket or owner path mounted in, and any file the provisioners or
+# the crossings' registry mirror would write. qc1-measure.sh writes nothing to the host and uses only Docker objects
 # it creates, so it takes the same daemon and socket checks without the path list.
 #
 # The pure functions take a mountinfo file or a path list.
@@ -25,7 +25,15 @@ ISOLATION_HOST_PATHS=(
   /etc/sudoers.d/fold-admin /etc/ssh/sshd_config.d/00-fold-hardening.conf
   /etc/fail2ban/jail.d/fold-sshd.local
   /etc/apt/apt.conf.d/20auto-upgrades /etc/apt/apt.conf.d/52fold-unattended
+  /etc/docker/certs.d/ghcr.io
 )
+# Ubuntu's images ship 20auto-upgrades with exactly these two lines and no
+# package owns it, so a stock droplet has it. It is no owner's configuration,
+# and the drill never writes or removes it (every provision runs with
+# --skip-harden, which provision.sh requires under DEPLOY_DRILL). Its hardening writes a third line, so a host it
+# hardened still refuses, as does any other content.
+ISOLATION_STOCK_FILES=(/etc/apt/apt.conf.d/20auto-upgrades)
+ISOLATION_STOCK_CONTENT=($'APT::Periodic::Update-Package-Lists "1";\nAPT::Periodic::Unattended-Upgrade "1";\n')
 # Mount points an owner keeps: a writable bind mount of any of them into the
 # drill's filesystem means the drill could write to the owner's tree.
 ISOLATION_OWNER_MOUNTS=(/etc /etc/cron.d /etc/logrotate.d /opt /opt/fold /root /home /srv /var/spool/cron)
@@ -61,8 +69,18 @@ isolation_mount_problems() { # mountinfo-file [sockets]  (sockets: only the sock
 isolation_preexisting_problems() { # paths...
   local p
   for p in "$@"; do
+    isolation_stock_file "$p" && continue
     if [[ -e "$p" || -L "$p" ]]; then echo "$p already exists; the drill would overwrite or later remove an owner's configuration, so it refuses"; fi
   done
+}
+# Whether PATH is one of ISOLATION_STOCK_FILES, a regular file byte for byte as the image ships it.
+isolation_stock_file() { # path
+  local i
+  for i in "${!ISOLATION_STOCK_FILES[@]}"; do
+    [[ "$1" == "${ISOLATION_STOCK_FILES[i]}" && -f "$1" && ! -L "$1" ]] || continue
+    cmp -s "$1" <(printf '%s' "${ISOLATION_STOCK_CONTENT[i]}") && return 0
+  done
+  return 1
 }
 
 # Problems with where a daemon is reached from, given `docker info --format

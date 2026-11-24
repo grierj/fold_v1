@@ -943,19 +943,19 @@ lifecycle_cases() {
   # No-nonce and foreign-nonce containers are refused unchanged, including
   # their stopped state. Removal is an explicit fixture cleanup only.
   for nonce in foreign absent; do
-    docker rm -f "$(recovery_ids)"
+    docker rm -fv "$(recovery_ids)"
     image="$(jq -er .imageId "$DIR/recovery.lock")"
     label_args=(--label "com.docker.compose.project=$PROJECT" --label com.docker.compose.service=recovery)
     [[ "$nonce" != foreign ]] || label_args+=(--label fold.recovery.nonce=foreign)
     id="$(docker create "${label_args[@]}" "$image")"
     unchanged_loser 'foreign recovery container' "$DIR/restore.sh" --deploy-dir "$DIR" --drill --resume
-    docker rm "$id"
+    docker rm -v "$id"
     restore --resume; assert_private
   done
   # A failed stop is injected by the Docker shim, not by a fake state change
   # in production. No recovery container starts until E2 succeeds for real.
   dc up -d --no-deps app
-  docker rm -f "$(recovery_ids)"
+  docker rm -fv "$(recovery_ids)"
   expect_fail close-failed env RESTORE_DRILL_FAULT=stop-fails "$DIR/restore.sh" --deploy-dir "$DIR" --drill --resume
   [[ "$(docker inspect --format '{{.State.Running}}' "$(dc ps -q app)")" == true ]]
   [[ -z "$(recovery_ids)" ]]
@@ -1015,7 +1015,7 @@ review_reconciliation_cases() {
   pg postgres -c 'CREATE DATABASE fold_restore_test'
   restore --dump "$DB_DUMP"; assert_private
   [[ "$(pg postgres -c "SELECT count(*) FROM pg_database WHERE datname='fold_restore_test'")" == 1 ]]
-  docker rm -f "$(recovery_ids)"
+  docker rm -fv "$(recovery_ids)"
   restore --resume; assert_private
   pg postgres -c 'DROP DATABASE fold_restore_test'
   pre="$(nonce_db fold_pre_restore_)"
@@ -1072,7 +1072,7 @@ review_backup_archive_cases() {
   [[ "$before" == "$(sha256sum "$old" "$old.age")" ]]
   # Reboot-style private recreation must not depend on an expired archive.
   mv "$archive" "$held"
-  docker rm -f "$(recovery_ids)"
+  docker rm -fv "$(recovery_ids)"
   restore --resume; assert_private
   mv "$held" "$archive"
   reopen_checked
@@ -1244,7 +1244,7 @@ ARCHIVE
   DB_DUMP="$WORK/legacy.dump"
   dc exec -T db pg_dump -U church -Fc drill_archive_fixture >"$DB_DUMP"
   dc exec -T db pg_restore -l <"$DB_DUMP" >"$WORK/legacy-toc.txt"
-  docker rm -f "$archive_id"
+  docker rm -fv "$archive_id"
   pg postgres -c 'DROP DATABASE drill_archive_fixture'
   URL="$old_url"; login
   # Stop immediately after swap, before any recovery boot can migrate it.
@@ -1448,7 +1448,7 @@ uploads_interruption_cases() {
     --label "fold.recovery.nonce=$UPLOAD_FOREIGN_NONCE" --entrypoint sleep "$(backup_image)" 600 >/dev/null
   expect_fail 'foreign uploads helper' restore --resume
   [[ -n "$(docker ps -q --filter name=drill-foreign-helper)" && "$(phase)" == collected ]]
-  docker rm -f drill-foreign-helper >/dev/null
+  docker rm -fv drill-foreign-helper >/dev/null
   restore --resume
   [[ -z "$(docker ps -aq --filter label=fold.uploads.role)" ]]
   uploads_private; marker_exists
@@ -1692,8 +1692,10 @@ backup_exclusion_cases() {
       terminal-cleanup)
         restore --dump "$DB_DUMP"
         delete_listed
+        # restore.sh's after-drop fault fires once the old database is dropped and before it
+        # records pre-dropped, so the lock still says pre-drop-intent.
         kill_at after-drop --reopen --checked-church-records
-        [[ "$(phase)" == pre-dropped ]] ;;
+        [[ "$(phase)" == pre-drop-intent ]] ;;
     esac
     before="$(volume_snapshot)"
     rc=0; backup_attempt now >"$WORK/refused-now.log" 2>&1 || rc=$?

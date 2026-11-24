@@ -2,6 +2,9 @@
 # Disposable restore proof, through installed DIR/restore.sh only.
 # Never point this runner at an owner deployment. Artifacts are retained.
 set -Eeuo pipefail
+# Never a terminal: a step under timeout runs in a background process group,
+# and one that touches a terminal on stdin is stopped (SIGTTIN) for good.
+exec </dev/null
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)"
 # shellcheck source=deploy/digitalocean/checks.sh
 source "$ROOT/deploy/digitalocean/checks.sh"
@@ -79,7 +82,13 @@ if jq -e '.available == true' "$FIREFOX_RUNTIME" >/dev/null; then
     || { echo 'restore-drill.sh: the prepared Firefox image is missing or is not the one the preparation proved' >&2; exit 1; }
 fi
 fi
-unset COMPOSE_FILE COMPOSE_PROJECT_NAME COMPOSE_PROFILES RESTORE_DRILL_FAULT RESTORE_DRILL_PAUSE RESTORE_DRILL_FORCE_TWO_STEP
+# The crossing sites pull the backup images the drill builds through a registry mirror for ghcr.io, which only
+# Docker's containerd image store reads: refused now, not hours in at the first crossing.
+[[ "$(docker info --format '{{json .DriverStatus}}')" == *io.containerd.snapshotter* ]] \
+  || { echo 'restore-drill.sh: Docker must use the containerd image store: the crossing sites pull the drill-built backup images through a registry mirror' >&2; exit 1; }
+# An inherited FOLD_VERSION or FOLD_BACKUP_VERSION wins over a site's .env, and COMPOSE_ENV_FILES replaces it, so a stock
+# Compose file would ask for another backup image than the one the drill built and proved.
+unset COMPOSE_FILE COMPOSE_PROJECT_NAME COMPOSE_PROFILES COMPOSE_ENV_FILES FOLD_VERSION FOLD_BACKUP_VERSION RESTORE_DRILL_FAULT RESTORE_DRILL_PAUSE RESTORE_DRILL_FORCE_TWO_STEP
 if [[ -z "$WORK" ]]; then
   WORK="$(mktemp -d /tmp/fold-restore-drill.XXXXXX)"; rmdir "$WORK"
 fi
@@ -93,7 +102,7 @@ drill_progress_init bootstrap base-proof recovery-interruptions reopen-interrupt
   legacy_archive_case review_reconciliation_cases review_backup_archive_cases review_cleanup_retry_cases \
   review_orphaned_restore_case review_moving_tag_case \
   uploads_erasure_cases uploads_interruption_cases backup_exclusion_cases \
-  real_binary_refusals real_level_lineage real_lower_level_rollback_refused real_l1_pre_upgrade_dump real_level0_started_by_hand
+  real_binary_refusals real_level_lineage real_lower_level_rollback_refused real_l1_pre_upgrade_dump real_level0_started_by_hand \
   real_prior_refused_at_start real_prior_running_across_upgrade real_current_release_restore real_older_archive_restore final-verification
 else
 drill_progress_init "${CROSSINGS_ONLY_PLAN[@]}"
@@ -105,7 +114,7 @@ drill_case_begin bootstrap
 handoff_cleanup() {
   local rc=$?
   trap - EXIT
-  if [[ -f "$WORK/site/docker-compose.yml" ]]; then compose_in "$WORK/site" down -v --remove-orphans || rc=1; fi
+  if [[ -f "$WORK/site/docker-compose.yml" ]]; then drill_down "$WORK/site" || rc=1; fi
   exit "$rc"
 }
 trap handoff_cleanup EXIT
@@ -160,7 +169,9 @@ cleanup() {
   fi
   # Level-0 lineage sites and the host files their provisioner writes.
   if (( ! KEEP )); then crossing_cleanup_all || rc=1; else crossing_cleanup_host || rc=1; fi
-  if (( ! KEEP )); then compose_in "$DIR" down -v --remove-orphans || rc=1; fi
+  # Host configuration, so --keep does not retain it.
+  crossing_unmirror || rc=1
+  if (( ! KEEP )); then drill_down "$DIR" || rc=1; fi
   drill_emit result "$rc" || rc=1
   echo "restore drill result=$rc artifacts=$WORK retained_stack=$KEEP"
   [[ "$MODE" == full ]] || drill_mode_finish "$rc"
@@ -406,7 +417,7 @@ reset_case() {
   [[ "$DIR" == "$WORK/site" && "$PROJECT" == fold-deploy-drill-* ]] || exit 1
   dc stop caddy app
   ids="$(recovery_ids)"
-  for name in $ids; do docker rm -f "$name"; done
+  for name in $ids; do docker rm -fv "$name"; done
   reset_fixture_databases || return 1
   pg postgres -c 'CREATE DATABASE fold OWNER church TEMPLATE template0'
   dc exec -T db pg_restore -U church -d fold --no-owner --no-acl --single-transaction --exit-on-error <"$DB_DUMP"

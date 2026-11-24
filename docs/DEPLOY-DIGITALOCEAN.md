@@ -536,7 +536,7 @@ These notes are interim and the steps are recommended, not a promise. They
 describe `/opt/fold/restore.sh` as written in this tree. Local drills on a
 disposable Compose stack have exercised it; the checks on a real droplet in
 [FIRST-CHURCH-CHECKS.md](FIRST-CHURCH-CHECKS.md#live-install-m51-m53) are not
-all done (#310; some were run on a disposable droplet on 2026-11-24; the exact-head full drill passed on a disposable runner, inventory 15.17). Release 0.1.0, which reports `recoveryPolicy` 2,
+all done (#310; some were run on a disposable droplet on 2026-11-24; the exact-head full drill passed on a disposable runner, inventory 15.17, and again run directly on a disposable droplet at `a8c55a3d` on 2026-11-24, on fixture stacks). Release 0.1.0, which reports `recoveryPolicy` 2,
 was published before they were, and the next release does not wait for the
 rest (Grier, 2026-11-24; DEC-165); the checks still owed are listed there. Account erasure still has open work (see `STATUS.md`,
 M7.4); nothing here says a restore brings back or removes every trace of anyone.
