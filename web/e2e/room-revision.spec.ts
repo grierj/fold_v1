@@ -1,6 +1,6 @@
 import * as schema from "valibot";
 import { expect, test } from "@playwright/test";
-import { apiAs, email, PASSWORD, signInTo } from "./helpers";
+import { apiAs, checkState, email, PASSWORD, signInTo } from "./helpers";
 
 // DEC-167: a pick of a date's room names the read it was made from. Two leaders have "Edit this date" open on the
 // same date; the first picks a room, the second then picks another. The second's pick is refused: its Room control
@@ -55,7 +55,7 @@ test("two leaders pick rooms for the same date: the second is told, sees the fir
   await expect(second.getByRole("combobox", { name: /^Room/ })).toHaveValue(String(rooms[0].id));
   await expect(second.getByRole("textbox", { name: /^Title/ })).toHaveValue("Typed while choosing");
   await expect(second.getByRole("button", { name: /^Save/ })).toBeVisible();
-  await second.screenshot({ path: "test-results/room-revision-390.png", fullPage: true });
+  await checkState(second, "room-revision", "conflict");
 
   // The first leader's room is the one stored.
   const read = schema.parse(schema.looseObject({ booking: schema.looseObject({ roomId: schema.number() }) }), await grier("GET", `/events/${event.id}/dates/${date}/rooms`));
