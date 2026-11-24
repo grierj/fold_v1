@@ -7,7 +7,7 @@ import { beforeEach, expect, it, vi } from "vitest";
 import { ApiError } from "../api/core";
 import { SeriesRooms } from "../api/rooms";
 import { Site } from "../api/site";
-import type { SeriesBooking, SeriesRoom } from "../types";
+import type { SeriesBooking, SeriesRoom, SeriesRoomsResponse } from "../types";
 import { Form } from "./ui/Form";
 import { SeriesRoomField } from "./SeriesRoomField";
 
@@ -315,7 +315,8 @@ it("shows the series room as it is now and says so at the field when someone els
   await waitFor(() => expect(line).toHaveFocus());
   expect(await select()).toHaveValue("3");
   expect(SeriesRooms.set).toHaveBeenCalledOnce();
-  expect(onChanged).not.toHaveBeenCalled();
+  // The page behind reads again quietly, so its dates show the room too.
+  expect(onChanged).toHaveBeenCalledOnce();
   vi.mocked(SeriesRooms.set).mockResolvedValueOnce(booking({ defaultRoom: null, booked: 0 }));
   await pickAndBook("none", "Stop the series room");
   await waitForStatus("Series room released.");
@@ -359,4 +360,100 @@ it("hands over to the host when the person may no longer manage the event, and s
   expect(SeriesRooms.set).toHaveBeenCalledOnce();
   fail(new ApiError(403, "no", { code: "not_allowed" }));
   await waitFor(() => expect(onGone).toHaveBeenCalledOnce());
+});
+
+const read = (over: Partial<SeriesRoomsResponse> = {}): SeriesRoomsResponse => ({ revision: "r1", rooms: [hall, chapel, closet], dates: 10, defaultRoom: null, needsRoom: [], pending: 0, ...over });
+const chapelRoom = { id: 2, name: "Chapel", building: "" };
+const busyDates = (...dates: string[]) => dates.map((date) => ({ date, roomName: "Chapel", status: "requested" as const }));
+
+it("says what each date has when a pick whose answer was lost is found stored, as a landed pick would", async () => {
+  vi.mocked(SeriesRooms.list)
+    .mockResolvedValueOnce(read())
+    .mockResolvedValue(read({ revision: "r3", defaultRoom: chapelRoom, needsRoom: busyDates("2026-12-15", "2026-12-08"), pending: 8 }));
+  vi.mocked(SeriesRooms.set).mockRejectedValueOnce(new TypeError("Failed to fetch")).mockRejectedValue(changed());
+  show();
+  await pickAndBook("2");
+  expect(await screen.findByRole("alert")).toBeInTheDocument();
+  await userEvent.click(screen.getByRole("button", { name: "Book for every date" }));
+  await waitForStatus("The room for every date is saved. Sent to an admin for approval: 8 dates. 2 dates are busy; pick another room for them under “Dates that need a room” on the event page.");
+});
+
+it("offers an admin Book anyway for the busy dates a stored pick's read shows", async () => {
+  actor.isAdmin = true;
+  vi.mocked(SeriesRooms.list)
+    .mockResolvedValueOnce(read())
+    .mockResolvedValue(read({ revision: "r3", defaultRoom: chapelRoom, needsRoom: busyDates("2026-12-08", "2026-12-15") }));
+  vi.mocked(SeriesRooms.set).mockRejectedValueOnce(new TypeError("Failed to fetch")).mockRejectedValue(changed());
+  show();
+  await pickAndBook("2");
+  expect(await screen.findByRole("alert")).toBeInTheDocument();
+  await userEvent.click(screen.getByRole("button", { name: "Book for every date" }));
+  expect(await screen.findByRole("textbox", { name: /^Reason for double-booking/ })).toBeInTheDocument();
+  expect(screen.getByText("2 dates are in use. Give a reason to book them anyway.")).toBeInTheDocument();
+});
+
+it("keeps Book anyway through a change that leaves the room and its busy dates as they were", async () => {
+  actor.isAdmin = true;
+  vi.mocked(SeriesRooms.list)
+    .mockResolvedValueOnce(read())
+    // Someone retitled the event: the same room, the same busy dates.
+    .mockResolvedValue(read({ revision: "r3", defaultRoom: chapelRoom, needsRoom: busyDates("2026-12-15", "2026-12-08") }));
+  vi.mocked(SeriesRooms.set)
+    .mockResolvedValueOnce(booking({ defaultRoom: chapelRoom, booked: 8, lost: ["2026-12-08", "2026-12-15"] }))
+    .mockRejectedValueOnce(changed())
+    .mockResolvedValueOnce(booking({ event: { id: 7, revision: "r4" }, defaultRoom: chapelRoom, booked: 10 }));
+  show();
+  await pickAndBook("2");
+  const reason = await screen.findByRole("textbox", { name: /^Reason for double-booking/ });
+  await userEvent.type(reason, "Choir moved");
+  await userEvent.click(screen.getByRole("button", { name: "Book anyway" }));
+  await waitForStatus("Booked for 10 dates, 2 of them over another booking.");
+  expect(vi.mocked(SeriesRooms.set).mock.calls.map((c) => c[2])).toEqual(["r1", "r2", "r3"]);
+  expect(screen.queryByText(/changed while you were choosing/)).not.toBeInTheDocument();
+});
+
+it("asks again about the busy dates the read shows when they changed while an admin gave a reason", async () => {
+  actor.isAdmin = true;
+  vi.mocked(SeriesRooms.list)
+    .mockResolvedValueOnce(read())
+    .mockResolvedValue(read({ revision: "r3", defaultRoom: chapelRoom, needsRoom: busyDates("2026-12-08", "2026-12-15", "2026-12-22") }));
+  vi.mocked(SeriesRooms.set)
+    .mockResolvedValueOnce(booking({ defaultRoom: chapelRoom, booked: 8, lost: ["2026-12-08", "2026-12-15"] }))
+    .mockRejectedValueOnce(changed());
+  show();
+  await pickAndBook("2");
+  const reason = await screen.findByRole("textbox", { name: /^Reason for double-booking/ });
+  await userEvent.type(reason, "Choir moved");
+  await userEvent.click(screen.getByRole("button", { name: "Book anyway" }));
+  await screen.findByText(/The room for every date changed while you were choosing/);
+  expect(screen.getByText("3 dates are in use. Give a reason to book them anyway.")).toBeInTheDocument();
+  expect(screen.getByRole("textbox", { name: /^Reason for double-booking/ })).toHaveValue("Choir moved");
+  expect(SeriesRooms.set).toHaveBeenCalledTimes(2);
+});
+
+it("keeps the select as it is while a pick is on its way", async () => {
+  let land!: (b: SeriesBooking) => void;
+  vi.mocked(SeriesRooms.set).mockReturnValueOnce(new Promise((r) => { land = r; }));
+  show();
+  await pickAndBook("1");
+  await waitForStatus("Saving…");
+  expect(await select()).toBeDisabled();
+  land(booking());
+  await waitForStatus("Booked for 10 dates.");
+  expect(await select()).toBeEnabled();
+});
+
+it("says plainly what happens to a date whose own room is waiting for approval", async () => {
+  show();
+  await select();
+  expect(screen.getByText(/A date already booked in a room of its own keeps it, but a date whose own room is still waiting for approval gets this room instead\./)).toBeInTheDocument();
+});
+
+it("says rooms were turned off without handing over to the host", async () => {
+  const onChanged = show();
+  vi.mocked(SeriesRooms.set).mockRejectedValue(new ApiError(404, "off", { code: "rooms_off" }));
+  await pickAndBook("1");
+  expect(await screen.findByText("Room booking has been turned off, so rooms can't be picked here now.")).toBeInTheDocument();
+  expect(onGone).not.toHaveBeenCalled();
+  expect(onChanged).not.toHaveBeenCalled();
 });

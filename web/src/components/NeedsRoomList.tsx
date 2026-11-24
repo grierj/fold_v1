@@ -6,6 +6,7 @@ import { useRoomsEnabled } from "../lib/useSite";
 import { formatDayLong } from "../lib/when";
 import type { NeedsRoom } from "../types";
 import { RoomField } from "./RoomField";
+import { roomsTurnedOff } from "./useRoomPicker";
 import { Button } from "./ui/Button";
 import { FormError } from "./ui/Field";
 import { AlertCircleIcon } from "./icons";
@@ -39,6 +40,9 @@ export function NeedsRoomList({ eventId, revision, hasDate, onPick, onGone }: {
   // What the inline control just did, so the row that leaves the list is not silent.
   const [notice, setNotice] = useState("");
   const watching = useRef<string | null>(null);
+  // The open row's last pick was refused because someone else changed the date's room: a row that then leaves the
+  // list says so, never that this person's pick worked.
+  const refusedPick = useRef(false);
   const noticeRef = useRef<HTMLParagraphElement>(null);
 
   const list = useLoad(() => SeriesRooms.list(eventId), [eventId], { enabled });
@@ -53,7 +57,8 @@ export function NeedsRoomList({ eventId, revision, hasDate, onPick, onGone }: {
     if (enabled) reload();
   }, [stamp, enabled, reload]);
   const needs: NeedsRoom[] = list.data?.needsRoom ?? [];
-  const error = list.error ? errorText(list.error, "We couldn't load the dates that need a room.") : null;
+  // Room booking turned off since the page read the site settings: no list, as with rooms off.
+  const error = list.error && !roomsTurnedOff(list.error) ? errorText(list.error, "We couldn't load the dates that need a room.") : null;
   const loaded = list.data;
   useEffect(() => {
     if (!loaded) return;
@@ -62,7 +67,9 @@ export function NeedsRoomList({ eventId, revision, hasDate, onPick, onGone }: {
     if (was && !loaded.needsRoom.some((n) => n.date === was)) {
       watching.current = null;
       setOpen(null);
-      setNotice(`${formatDayLong(was)} has a room now.`);
+      setNotice(refusedPick.current
+        ? `The room for ${formatDayLong(was)} changed while you were choosing, so your choice could not be saved. It no longer needs a room.`
+        : `${formatDayLong(was)} has a room now.`);
     }
   }, [loaded]);
 
@@ -71,6 +78,8 @@ export function NeedsRoomList({ eventId, revision, hasDate, onPick, onGone }: {
   }, [notice]);
 
   const notes = notice && <p ref={noticeRef} tabIndex={-1} role="status" className="mt-6 text-sm text-text-muted outline-none">{notice}</p>;
+
+  if (roomsTurnedOff(list.error)) return <>{notes}</>;
 
   if (error) {
     return (
@@ -118,6 +127,7 @@ export function NeedsRoomList({ eventId, revision, hasDate, onPick, onGone }: {
                       }
 
                       setNotice("");
+                      refusedPick.current = false;
                       watching.current = open === n.date ? null : n.date;
                       setOpen(open === n.date ? null : n.date);
                     }}
@@ -127,7 +137,7 @@ export function NeedsRoomList({ eventId, revision, hasDate, onPick, onGone }: {
                 </div>
                 {inline && open === n.date && (
                   <div id={panel} className="rounded-md border border-border bg-surface p-3">
-                    <RoomField eventId={eventId} date={n.date} idPrefix={`needs-${n.date}`} focusOnLoad onChanged={() => setOwn((c) => c + 1)}
+                    <RoomField eventId={eventId} date={n.date} idPrefix={`needs-${n.date}`} focusOnLoad onChanged={(refused) => { refusedPick.current = refused === true; setOwn((c) => c + 1); }}
                       onGone={() => {
                         watching.current = null;
                         setOpen(null);

@@ -1,4 +1,4 @@
-import type { RoomPickerItem, SeriesBooking, SeriesRoom } from "../types";
+import type { RoomPickerItem, SeriesBooking, SeriesRoom, SeriesRoomsResponse } from "../types";
 import { roomName } from "./place";
 import { count } from "./plural";
 
@@ -71,10 +71,24 @@ export function busyDatesNote(room: SeriesRoom, dates: number, where: "edit" | "
   return `${name} is in use on ${room.busyDates} of ${dates} dates. It will be booked on the other ${dates - room.busyDates}, and ${listed}`;
 }
 
+const dates = (n: number) => count(n, "date");
+
+// The dates of a series room that wait for an admin or are busy, in the words a booking's answer and a read share.
+function waitingAndBusy(pending: number, busy: number): string[] {
+  const parts: string[] = [];
+
+  if (pending > 0) parts.push(`Sent to an admin for approval: ${dates(pending)}.`);
+
+  if (busy > 0) {
+    parts.push(`${dates(busy)} ${busy === 1 ? "is" : "are"} busy; pick another room for ${busy === 1 ? "it" : "them"} under “Dates that need a room” on the event page.`);
+  }
+
+  return parts;
+}
+
 // What a series booking did, in words. `over` is how many of the booked dates
 // an admin double-booked.
 export function seriesBookingMessage(res: SeriesBooking, over = 0): string {
-  const dates = (n: number) => count(n, "date");
   const parts: string[] = [];
 
   if (res.defaultRoom === null) parts.push("Series room released.");
@@ -84,12 +98,7 @@ export function seriesBookingMessage(res: SeriesBooking, over = 0): string {
       : `Booked for ${dates(res.booked)}.`);
   }
 
-  if (res.defaultRoom !== null && res.pending > 0) parts.push(`Sent to an admin for approval: ${dates(res.pending)}.`);
-  const n = res.lost.length;
-
-  if (n > 0) {
-    parts.push(`${dates(n)} ${n === 1 ? "is" : "are"} busy; pick another room for ${n === 1 ? "it" : "them"} under “Dates that need a room” on the event page.`);
-  }
+  if (res.defaultRoom !== null) parts.push(...waitingAndBusy(res.pending, res.lost.length));
 
   if (res.kept > 0) {
     parts.push(`${dates(res.kept)} ${res.kept === 1 ? "keeps" : "keep"} the room picked for ${res.kept === 1 ? "it" : "them"}.`);
@@ -98,4 +107,11 @@ export function seriesBookingMessage(res: SeriesBooking, over = 0): string {
   if (parts.length === 0) parts.push("There are no upcoming dates to book.");
 
   return parts.join(" ");
+}
+
+// What a series pick that was already stored (its answer was lost) left, as the read shows it.
+export function seriesStoredMessage(read: SeriesRoomsResponse): string {
+  if (read.defaultRoom === null) return "Series room released.";
+
+  return ["The room for every date is saved.", ...waitingAndBusy(read.pending, read.needsRoom.length)].join(" ");
 }

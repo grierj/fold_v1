@@ -84,6 +84,32 @@ it("asks again after the inline control books, and says the date has a room now"
   expect(await screen.findByText("Tuesday, December 15 has a room now.")).toBeInTheDocument();
 });
 
+// A pick refused because someone else gave the date a room: the list asks again and the date leaves it, saying the
+// choice could not be saved, never that the date has the room this person picked.
+it("asks again after the inline control's pick is refused, and says the choice could not be saved", async () => {
+  const chapel: RoomPickerItem = { ...hall, id: 2, name: "Chapel", building: "" };
+  vi.mocked(DateRooms.list)
+    .mockResolvedValueOnce({ rooms: [hall, chapel], booking: null, dateRoom: { id: 70, revision: "r1" } })
+    .mockResolvedValue({ rooms: [hall, chapel], dateRoom: { id: 70, revision: "r3" },
+      booking: { roomId: 2, roomName: "Chapel", building: "", status: "confirmed", setupMinutes: 0, teardownMinutes: 0, doubleBooked: false, tooSmall: false, pending: false } });
+  vi.mocked(DateRooms.set).mockRejectedValue(new ApiError(409, "changed", { code: "date_room_changed" }));
+  show({ hasDate: () => false });
+  await userEvent.click(await screen.findByRole("button", { name: "Pick a room for Tuesday, December 15" }));
+  vi.mocked(SeriesRooms.list).mockResolvedValue({ revision: "r1", rooms: [], dates: 10, defaultRoom: null, needsRoom: [needs[0]], pending: 0 });
+  await userEvent.selectOptions(await screen.findByRole("combobox", { name: /^Room/ }), "1");
+  expect(await screen.findByText("The room for Tuesday, December 15 changed while you were choosing, so your choice could not be saved. It no longer needs a room.")).toBeInTheDocument();
+  expect(SeriesRooms.list).toHaveBeenCalledTimes(2);
+  expect(screen.queryByText("Tuesday, December 15 has a room now.")).not.toBeInTheDocument();
+});
+
+it("shows nothing when rooms were turned off after the page loaded", async () => {
+  vi.mocked(SeriesRooms.list).mockRejectedValue(new ApiError(404, "off", { code: "rooms_off" }));
+  show();
+  await waitFor(() => expect(SeriesRooms.list).toHaveBeenCalled());
+  expect(screen.queryByRole("heading", { name: /Dates that need a room/ })).not.toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "Try again" })).not.toBeInTheDocument();
+});
+
 it("shows the first 10 dates with the count in the heading, and the rest on request", async () => {
   const many: NeedsRoom[] = Array.from({ length: 14 }, (_, i) => ({ date: `2027-01-${`${i + 1}`.padStart(2, "0")}`, roomName: "Chapel", status: "requested" }));
   vi.mocked(SeriesRooms.list).mockResolvedValue({ revision: "r1", rooms: [], dates: 30, defaultRoom: null, needsRoom: many, pending: 0 });

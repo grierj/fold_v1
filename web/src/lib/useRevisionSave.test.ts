@@ -384,8 +384,26 @@ describe("useRevisionSave", () => {
       const view = renderHook(() => useRevisionSave({ opened: { title: "Supper" }, revision: "r1", read, fields, answers, onConflict, stays, gone }));
       const send = <R>(write: (revision: string | undefined) => Promise<R>, intended: Value) => view.result.current(write, intended);
 
-      return { send, onConflict };
+      return { send, onConflict, view };
     }
+
+    it("hands nothing over when a send's \"gone\" refusal arrives after the control went away", async () => {
+      let refuse!: (err: ApiError) => void;
+      const write = vi.fn().mockReturnValue(new Promise((_, reject) => { refuse = reject; }));
+      const { send, onConflict, view } = open(vi.fn());
+      const sent = send(write, { title: "Brunch" });
+      view.unmount();
+      refuse(new ApiError(403, "no", { code: "not_allowed" }));
+      expect(await sent).toBe("left");
+      expect(onConflict).not.toHaveBeenCalled();
+    });
+
+    it("takes the read's refusal as \"gone\" only when the form names it", async () => {
+      const off = new ApiError(404, "off", { code: "rooms_off" });
+      const { send, onConflict } = open(vi.fn().mockRejectedValue(off), (err) => err.status === 404 && err.code === "not_found");
+      await expect(send(vi.fn().mockRejectedValue(changed()), { title: "Brunch" })).rejects.toBe(off);
+      expect(onConflict).not.toHaveBeenCalled();
+    });
 
     it("names the revision a landed save answered on the next save, from the value the answer says was stored", async () => {
       const read = vi.fn().mockResolvedValue(readOf({ title: "Picnic" }, "r5"));

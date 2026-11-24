@@ -4,24 +4,38 @@ import { SeriesRooms } from "../api/rooms";
 import { useAuth } from "../auth";
 import { roomName } from "../lib/place";
 import { RefusedSaveLine, useRefusedSave } from "../lib/refusedSave";
-import { busyDatesNote, NO_ROOM, seriesBookingMessage, seriesRoomLabel } from "../lib/roomLabels";
+import { busyDatesNote, NO_ROOM, seriesBookingMessage, seriesRoomLabel, seriesStoredMessage } from "../lib/roomLabels";
 import { count } from "../lib/plural";
 import { useAction } from "../lib/useAction";
 import { answerNames, useRevisionSave } from "../lib/useRevisionSave";
-import type { OccurrenceRoom, SeriesBooking, SeriesRoomsResponse } from "../types";
+import type { SeriesBooking, SeriesRoomsResponse } from "../types";
 import { Field, FormError, Select } from "./ui/Field";
 import { Button } from "./ui/Button";
 import { DoubleBookPrompt, useOverlapReason } from "./DoubleBookPrompt";
 import { RoomOptions } from "./RoomOptions";
-import { pickGone, RoomLoadStatus, useRoomPicker } from "./useRoomPicker";
+import { pickGone, RoomLoadStatus, RoomsOffLine, roomsTurnedOff, useRoomPicker } from "./useRoomPicker";
 import { AlertCircleIcon } from "./icons";
 
-// What a series pick writes: the series room.
+// What a series pick writes: the series room, and, booked anyway over busy dates, those dates (`needs`: the dates that
+// need a room, in date order), which a double-booking leaves with none.
 interface SeriesRoomFields {
   roomId: number | null;
+  needs: string[];
 }
 
-const seriesFields = (room: OccurrenceRoom | null): SeriesRoomFields => ({ roomId: room?.id ?? null });
+const readFields = (read: SeriesRoomsResponse): SeriesRoomFields => ({
+  roomId: read.defaultRoom?.id ?? null,
+  needs: read.needsRoom.map((n) => n.date).sort(),
+});
+
+const answerFields = (res: SeriesBooking | null): SeriesRoomFields => ({
+  roomId: res?.defaultRoom?.id ?? null,
+  needs: res?.defaultRoom ? [...res.lost].sort() : [],
+});
+
+// What a pick compares: the dates that need a room only for "Book anyway", which books over them. A plain pick leaves
+// each date to the server (booked, waiting, busy or kept), and intends whatever it stored.
+const compared = (value: SeriesRoomFields, overBusy: boolean): Partial<SeriesRoomFields> => (overBusy ? value : { roomId: value.roomId });
 
 // Every send was refused while the series room stayed as it was: the control says its ordinary refusal.
 const refusedEverySend = () => new ApiError(409, "event changed", { code: "event_changed" });
@@ -37,13 +51,16 @@ const refusedEverySend = () => new ApiError(409, "event changed", { code: "event
 export function SeriesRoomField({ eventId, idPrefix, onChanged, onGone }: {
   eventId: number;
   idPrefix: string;
-  // The series room was booked, changed or released: the page behind may show new places.
+  // The series room may have changed (a pick landed, or someone else's change refused it): the page behind reads again
+  // quietly and may show new places.
   onChanged?: () => void;
   // This person may no longer manage the event: the host does what it does then.
   onGone: () => void;
 }) {
   // A church with rooms off, or a site we can't read, sees no rooms control at all.
-  const { enabled, list, loading, loadError } = useRoomPicker(() => SeriesRooms.list(eventId), [eventId]);
+  const { enabled, off, list, loading, loadError } = useRoomPicker(() => SeriesRooms.list(eventId), [eventId]);
+
+  if (off) return <RoomsOffLine />;
 
   if (!enabled && !loadError) return null;
 
@@ -71,6 +88,10 @@ function SeriesRoomControl({ eventId, id, read, show, onChanged, onGone }: {
   const reasonId = `${id}-reason`;
   const action = useAction();
   const refusal = useRefusedSave();
+  // Room booking was turned off since the control loaded: it says so in place of the picker.
+  const [off, setOff] = useState(false);
+  // Whether the pick on its way books over busy dates, and so whether those dates are compared.
+  const overBusy = useRef(false);
   const current = read.defaultRoom;
   const { rooms, dates } = read;
   const suggestions = read.suggestions ?? null;
@@ -91,18 +112,22 @@ function SeriesRoomControl({ eventId, id, read, show, onChanged, onGone }: {
   const lastAnswer = useRef<SeriesBooking | null>(null);
   const landedAnswer = () => lastAnswer.current;
 
-  const save = useRevisionSave<SeriesRoomFields, SeriesRoomFields>({
-    opened: seriesFields(current),
+  // Only an admin may double-book the dates a read shows busy in the room it booked, and only with a reason.
+  const overBusyOffer = (shown: SeriesRoomsResponse, roomId: number | null) =>
+    isAdmin && roomId !== null && shown.defaultRoom?.id === roomId && shown.needsRoom.length > 0 ? { roomId, dates: shown.needsRoom.length } : null;
+
+  const save = useRevisionSave<SeriesRoomFields, Partial<SeriesRoomFields>>({
+    opened: readFields(read),
     revision: read.revision,
     read: async () => {
       const now = await SeriesRooms.list(eventId);
       lastRead.current = now;
 
-      return { allowed: true, revision: now.revision, value: seriesFields(now.defaultRoom) };
+      return { allowed: true, revision: now.revision, value: readFields(now) };
     },
-    fields: (value) => value,
+    fields: (value) => compared(value, overBusy.current),
     answers: answerNames("event", eventId),
-    stays: () => seriesFields(lastAnswer.current?.defaultRoom ?? null),
+    stays: () => answerFields(lastAnswer.current),
     gone: pickGone,
     onConflict: (why) => {
       if (why === "gone") {
@@ -111,9 +136,13 @@ function SeriesRoomControl({ eventId, id, read, show, onChanged, onGone }: {
         return;
       }
 
-      if (lastRead.current) show(lastRead.current);
-      setPending(null);
+      const now = lastRead.current;
+
+      if (now) show(now);
+      // Booking over busy dates, the read's busy dates in the same room are asked about again; the reason stays.
+      setPending(now && overBusy.current && pending ? overBusyOffer(now, pending.roomId) : null);
       refusal.refused(why);
+      onChanged?.();
     },
   });
 
@@ -126,13 +155,25 @@ function SeriesRoomControl({ eventId, id, read, show, onChanged, onGone }: {
     refusal.clear();
     void action.run(async () => {
       lastAnswer.current = null;
+      overBusy.current = overlapReason !== undefined;
+      let sent;
 
-      const sent = await save(async (revision) => {
-        const res = await SeriesRooms.set(eventId, overlapReason ? { roomId, overlapReason } : { roomId }, revision);
-        lastAnswer.current = res;
+      try {
+        sent = await save(async (revision) => {
+          const res = await SeriesRooms.set(eventId, overlapReason ? { roomId, overlapReason } : { roomId }, revision);
+          lastAnswer.current = res;
 
-        return res;
-      }, { roomId }, overlapReason ?? "");
+          return res;
+        }, { roomId, needs: [] }, overlapReason ?? "");
+      } catch (e) {
+        if (roomsTurnedOff(e)) {
+          setOff(true);
+
+          return false;
+        }
+
+        throw e;
+      }
 
       if (sent === "refused") throw refusedEverySend();
 
@@ -143,11 +184,13 @@ function SeriesRoomControl({ eventId, id, read, show, onChanged, onGone }: {
       const res = landedAnswer();
 
       if (!res) {
-        // Already stored by a send whose answer was lost: the read shows it.
-        if (lastRead.current) show(lastRead.current);
-        setPending(null);
+        // Already stored by a send whose answer was lost: the read shows it, and says what each date has.
+        const now = lastRead.current;
 
-        return roomId === null ? "Series room released." : "The room for every date is saved.";
+        if (now) show(now);
+        setPending(now && !overlapReason ? overBusyOffer(now, roomId) : null);
+
+        return now ? seriesStoredMessage(now) : roomId === null ? "Series room released." : "The room for every date is saved.";
       }
 
       show({
@@ -192,6 +235,8 @@ function SeriesRoomControl({ eventId, id, read, show, onChanged, onGone }: {
     send(pending.roomId, why, pending.dates);
   }
 
+  if (off) return <RoomsOffLine />;
+
   const busy = action.running;
   // A series room an admin set that this person can't list (a restricted room) still shows by name.
   const hidden = current && !rooms.some((r) => r.id === current.id) ? current : null;
@@ -206,9 +251,9 @@ function SeriesRoomControl({ eventId, id, read, show, onChanged, onGone }: {
         id={id}
         label="Room for every date"
         optional
-        hint="Choose a room, then book it for every upcoming date. If bookings need an admin's approval, they wait for one. A date you gave its own room keeps it. “No series room” releases the rooms it booked."
+        hint="Choose a room, then book it for every upcoming date. If bookings need an admin's approval, they wait for one. A date already booked in a room of its own keeps it, but a date whose own room is still waiting for approval gets this room instead. “No series room” releases the rooms it booked."
       >
-        <Select value={pick} aria-busy={busy || undefined} onChange={(e) => choose(e.target.value)}>
+        <Select value={pick} disabled={busy} aria-busy={busy || undefined} onChange={(e) => choose(e.target.value)}>
           <option value={NO_ROOM}>No series room</option>
           {hidden && <option value={String(hidden.id)}>{roomName(hidden)}</option>}
           <RoomOptions rooms={rooms} suggestions={suggestions} label={(r, reason) => seriesRoomLabel(r, dates, reason)} />

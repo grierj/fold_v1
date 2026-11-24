@@ -3,6 +3,7 @@ import { ApiError } from "../api/core";
 import { DateRooms, type DateRoomInput } from "../api/rooms";
 import { useAuth } from "../auth";
 import { errorCode } from "../lib/errors";
+import { roomName } from "../lib/place";
 import { RefusedSaveLine, useRefusedSave } from "../lib/refusedSave";
 import { NO_ROOM, roomOptionLabel } from "../lib/roomLabels";
 import { useAction } from "../lib/useAction";
@@ -12,24 +13,35 @@ import { Field, FormError, Input, Select } from "./ui/Field";
 import { Button } from "./ui/Button";
 import { DoubleBookPrompt, useOverlapReason } from "./DoubleBookPrompt";
 import { RoomOptions } from "./RoomOptions";
-import { pickGone, RoomLoadStatus, useRoomPicker } from "./useRoomPicker";
+import { pickGone, RoomLoadStatus, RoomsOffLine, roomsTurnedOff, useRoomPicker } from "./useRoomPicker";
 import { AlertCircleIcon } from "./icons";
 
-// What a pick of a date's room writes, as the server stores it: the room the date holds or waits for (null when it
-// holds none, so a room someone booked on a date that had lost its room is a change), and for an admin the padding.
+// What a pick of a date's room writes, as the server stores it: the room the date holds or waits for, or none. A date
+// with no booking and one whose booking lost its room or was not approved are different (`lost`), so a release is
+// already stored only when the date has no booking. The padding is what the server stored.
 interface DateRoomFields {
   roomId: number | null;
+  lost?: true;
   setup?: number;
   teardown?: number;
 }
 
-// Padding a pick leaves that the control cannot know (another room's usual minutes): never equal to a read.
-const UNKNOWN_MINUTES = -1;
+function roomFields(booking: RoomBooking | null): DateRoomFields {
+  if (booking === null) return { roomId: null };
 
-function roomFields(booking: RoomBooking | null, admin: boolean): DateRoomFields {
-  if (booking === null || !(booking.status === "confirmed" || booking.pending)) return { roomId: null };
+  if (!(booking.status === "confirmed" || booking.pending)) return { roomId: null, lost: true };
 
-  return admin ? { roomId: booking.roomId, setup: booking.setupMinutes, teardown: booking.teardownMinutes } : { roomId: booking.roomId };
+  return { roomId: booking.roomId, setup: booking.setupMinutes, teardown: booking.teardownMinutes };
+}
+
+// What a pick compares: the padding only for "Save times", which sets it. A pick that leaves the padding to the server
+// (the room's usual minutes, or the same room's own) intends whatever the server chose for that room.
+function compared(value: DateRoomFields, padding: boolean): DateRoomFields {
+  if (padding) return value;
+
+  const { roomId, lost } = value;
+
+  return lost ? { roomId, lost } : { roomId };
 }
 
 // Every send was refused while nothing the pick writes changed: the control says its ordinary refusal.
@@ -45,8 +57,9 @@ export function RoomField({ eventId, date, idPrefix, onChanged, onGone, focusOnL
   // The occurrence's original YYYY-MM-DD.
   date: string;
   idPrefix: string;
-  // A booking was made, changed or released: the page behind may show the new place.
-  onChanged?: () => void;
+  // The date's room may have changed (a pick landed, or someone else's change refused it, `refused`): the page behind
+  // reads again quietly and may show the new place.
+  onChanged?: (refused?: boolean) => void;
   // This person may no longer manage the date: the host does what it does then.
   onGone: () => void;
   // Put the cursor in the Room select once the rooms load (a "Pick a room" action opened this).
@@ -54,7 +67,7 @@ export function RoomField({ eventId, date, idPrefix, onChanged, onGone, focusOnL
 }) {
   const id = `${idPrefix}-room`;
   // A church with rooms off, or a site we can't read, sees no rooms control at all.
-  const { enabled, list, loading, loadError } = useRoomPicker(() => DateRooms.list(eventId, date), [eventId, date]);
+  const { enabled, off, list, loading, loadError } = useRoomPicker(() => DateRooms.list(eventId, date), [eventId, date]);
 
   const focused = useRef(false);
   useEffect(() => {
@@ -62,6 +75,8 @@ export function RoomField({ eventId, date, idPrefix, onChanged, onGone, focusOnL
     focused.current = true;
     document.getElementById(id)?.focus();
   }, [focusOnLoad, loading, loadError, enabled, id]);
+
+  if (off) return <RoomsOffLine />;
 
   if (!enabled && !loadError) return null;
 
@@ -83,10 +98,14 @@ function DateRoomControl({ eventId, date, id, read, show, onChanged, onGone }: {
   id: string;
   read: DateRoomsResponse;
   show: (next: DateRoomsResponse) => void;
-  onChanged?: () => void;
+  onChanged?: (refused?: boolean) => void;
   onGone: () => void;
 }) {
   const { isAdmin } = useAuth();
+  // Room booking was turned off since the control loaded: it says so in place of the picker.
+  const [off, setOff] = useState(false);
+  // Whether the pick on its way sets the padding ("Save times"), and so whether the padding is compared.
+  const padding = useRef(false);
   const reasonId = `${id}-reason`;
   const action = useAction();
   const refusal = useRefusedSave();
@@ -107,17 +126,17 @@ function DateRoomControl({ eventId, date, id, read, show, onChanged, onGone }: {
   const landedAnswer = () => lastAnswer.current;
 
   const save = useRevisionSave<DateRoomFields, DateRoomFields>({
-    opened: roomFields(booking, isAdmin),
+    opened: roomFields(booking),
     revision: read.dateRoom.revision,
     read: async () => {
       const now = await DateRooms.list(eventId, date);
       lastRead.current = now;
 
-      return { allowed: true, revision: now.dateRoom.revision, value: roomFields(now.booking, isAdmin) };
+      return { allowed: true, revision: now.dateRoom.revision, value: roomFields(now.booking) };
     },
-    fields: (value) => value,
+    fields: (value) => compared(value, padding.current),
     answers: answerNames("dateRoom", read.dateRoom.id),
-    stays: () => roomFields(lastAnswer.current?.booking ?? null, isAdmin),
+    stays: () => roomFields(lastAnswer.current?.booking ?? null),
     gone: pickGone,
     changedCode: "date_room_changed",
     onConflict: (why) => {
@@ -130,6 +149,7 @@ function DateRoomControl({ eventId, date, id, read, show, onChanged, onGone }: {
       if (lastRead.current) show(lastRead.current);
       setPending(null);
       refusal.refused(why);
+      onChanged?.(true);
     },
   });
 
@@ -149,6 +169,7 @@ function DateRoomControl({ eventId, date, id, read, show, onChanged, onGone }: {
     refusal.clear();
     void action.run(async () => {
       lastAnswer.current = null;
+      padding.current = body.setupMinutes !== undefined;
 
       try {
         const sent = await save(async (revision) => {
@@ -162,6 +183,12 @@ function DateRoomControl({ eventId, date, id, read, show, onChanged, onGone }: {
 
         if (sent !== "saved") return false;
       } catch (e) {
+        if (roomsTurnedOff(e)) {
+          setOff(true);
+
+          return false;
+        }
+
         // An admin may book over a conflict, with a reason.
         if (errorCode(e) === "room_busy" && isAdmin && body.roomId !== null) {
           setPending(body);
@@ -202,16 +229,7 @@ function DateRoomControl({ eventId, date, id, read, show, onChanged, onGone }: {
     const room = rooms.find((r) => String(r.id) === value);
 
     if (!room) return;
-    send({ roomId: room.id }, intendedPick(room.id), (b) => (b?.pending ? "" : `Booked ${room.name}.`));
-  }
-
-  // The room as the server stores the pick: the same room keeps its padding; another room's usual minutes are unknown.
-  function intendedPick(roomId: number): DateRoomFields {
-    if (!isAdmin) return { roomId };
-
-    const held = roomFields(booking, true);
-
-    return held.roomId === roomId ? held : { roomId, setup: UNKNOWN_MINUTES, teardown: UNKNOWN_MINUTES };
+    send({ roomId: room.id }, { roomId: room.id }, (b) => (b?.pending ? "" : `Booked ${room.name}.`));
   }
 
   function bookAnyway() {
@@ -220,7 +238,7 @@ function DateRoomControl({ eventId, date, id, read, show, onChanged, onGone }: {
 
     if (why === null) return;
     const room = rooms.find((r) => r.id === pending.roomId);
-    send({ ...pending, overlapReason: why }, intendedPick(pending.roomId), () => `Booked ${room?.name ?? "the room"} over another booking.`);
+    send({ ...pending, overlapReason: why }, { roomId: pending.roomId }, () => `Booked ${room?.name ?? "the room"} over another booking.`);
   }
 
   function savePadding() {
@@ -241,12 +259,17 @@ function DateRoomControl({ eventId, date, id, read, show, onChanged, onGone }: {
     send({ roomId: booking.roomId, setupMinutes: s, teardownMinutes: t }, { roomId: booking.roomId, setup: s, teardown: t }, () => "Setup and cleanup times saved.");
   }
 
+  if (off) return <RoomsOffLine />;
+
   const busy = action.running;
   const waiting = booking?.pending === true;
   const rejected = booking?.status === "rejected";
   const requested = booking?.status === "requested" && !waiting;
   const value = booking && (booking.status === "confirmed" || waiting) ? String(booking.roomId) : requested ? "" : NO_ROOM;
   const anyBusy = rooms.some((r) => r.busy);
+  // A room the date holds that this person can't book (a restricted room or a room turned off) still shows, by the
+  // name the date's place gives it.
+  const held = value !== "" && value !== NO_ROOM && booking && !rooms.some((r) => r.id === booking.roomId) ? booking : null;
   const done = action.state.status === "done" ? action.state.text : "";
 
   const onPaddingEnter = (e: KeyboardEvent<HTMLInputElement>) => {
@@ -262,6 +285,7 @@ function DateRoomControl({ eventId, date, id, read, show, onChanged, onGone }: {
         <Select value={value} aria-busy={busy || undefined} onChange={(e) => choose(e.target.value)}>
           {requested && <option value="">Pick a room</option>}
           <option value={NO_ROOM}>No room</option>
+          {held && <option value={String(held.roomId)}>{roomName({ name: held.roomName, building: held.building })}</option>}
           <RoomOptions rooms={rooms} suggestions={suggestions} label={roomOptionLabel} disabled={(r) => r.busy && !isAdmin} />
         </Select>
       </Field>

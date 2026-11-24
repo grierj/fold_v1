@@ -15,7 +15,7 @@ import { Adds } from "../api/adds";
 import { People } from "../api/people";
 import { UnsavedChangesBlocker } from "../lib/unsavedChanges";
 import { addRequest } from "../test/addRequest";
-import type { EventDetailResponse, EventOccurrence, NeedsRoom, OccurrenceResponse } from "../types";
+import type { EventDetailResponse, EventOccurrence, NeedsRoom, OccurrenceResponse, SeriesRoomsResponse } from "../types";
 import { occurrence } from "../test/occurrence";
 import { deferred as held, HOST_EVENTS, kept409, keptRead, READ_OUTCOMES, runHostCase } from "../test/keptPanel";
 import { endsFor, removedRow, ROSTER_ENDS, ROSTER_OPS, startHeld } from "../test/rosterOps";
@@ -995,6 +995,56 @@ describe("EventDetail dates that need a room", () => {
     expect(room).toBeInTheDocument();
     // The cursor goes to the Room control, not the date field.
     await waitFor(() => expect(room).toHaveFocus());
+  });
+
+  // After a conflict the page reads again the quiet way it does after a pick lands, so the date's place and the list
+  // show the room someone else gave it, and the editor around the Room control keeps its draft.
+  it("reads the page again after a date's room pick is refused, keeping the date editor's draft", async () => {
+    const hall = { id: 1, name: "Fellowship Hall", building: "Main", capacity: 80, features: "", restricted: false, busy: false, tooSmall: false };
+    const chapel = { ...hall, id: 2, name: "Chapel", building: "" };
+    needs({ date: "2026-12-08", roomName: "Fellowship Hall", status: "requested" });
+    vi.mocked(DateRooms.list)
+      .mockResolvedValueOnce({ rooms: [hall, chapel], booking: null, dateRoom: { id: 70, revision: "r1" } })
+      .mockResolvedValue({ rooms: [hall, chapel], dateRoom: { id: 70, revision: "r3" },
+        booking: { roomId: 2, roomName: "Chapel", building: "", status: "confirmed", setupMinutes: 0, teardownMinutes: 0, doubleBooked: false, tooSmall: false, pending: false } });
+    vi.spyOn(DateRooms, "set").mockRejectedValue(new ApiError(409, "changed", { code: "date_room_changed" }));
+    renderPage();
+    await userEvent.click(await screen.findByRole("button", { name: /^Pick a room for / }));
+    const title = await screen.findByRole("textbox", { name: /^Title/ });
+    await userEvent.clear(title);
+    await userEvent.type(title, "Supper night");
+    const pageReads = vi.mocked(Events.get).mock.calls.length;
+    const listReads = vi.mocked(SeriesRooms.list).mock.calls.length;
+    await userEvent.selectOptions(await screen.findByRole("combobox", { name: /^Room/ }), "1");
+    await screen.findByText(/This date.s room changed while you were choosing/);
+    await waitFor(() => expect(vi.mocked(Events.get).mock.calls.length).toBeGreaterThan(pageReads));
+    await waitFor(() => expect(vi.mocked(SeriesRooms.list).mock.calls.length).toBeGreaterThan(listReads));
+    expect(screen.getByRole("textbox", { name: /^Title/ })).toHaveValue("Supper night");
+    expect(screen.getByRole("button", { name: "Save this date" })).toBeInTheDocument();
+  });
+
+  it("reads the page again after the series room pick is refused, keeping the series editor's draft", async () => {
+    const hall = { id: 1, name: "Fellowship Hall", building: "Main", capacity: 80, features: "", restricted: false, busyDates: 0, tooSmall: false };
+    const chapel = { ...hall, id: 2, name: "Chapel", building: "" };
+    // Another leader booked the chapel for the series just before this pick: every read from then on shows it.
+    let stored: SeriesRoomsResponse = { revision: "r1", rooms: [hall, chapel], dates: 2, defaultRoom: null, needsRoom: [], pending: 0 };
+    vi.spyOn(SeriesRooms, "list").mockImplementation(() => Promise.resolve(stored));
+    vi.spyOn(SeriesRooms, "set").mockImplementation(() => {
+      stored = { ...stored, revision: "r3", defaultRoom: { id: 2, name: "Chapel", building: "" } };
+
+      return Promise.reject(new ApiError(409, "changed", { code: "event_changed" }));
+    });
+    renderPage();
+    await userEvent.click(await screen.findByRole("button", { name: "Edit series" }));
+    const title = await screen.findByRole("textbox", { name: /^Title/ });
+    await userEvent.clear(title);
+    await userEvent.type(title, "Supper night");
+    const pageReads = vi.mocked(Events.get).mock.calls.length;
+    await userEvent.selectOptions(await screen.findByRole("combobox", { name: /^Room for every date/ }), "1");
+    await userEvent.click(screen.getByRole("button", { name: "Book for every date" }));
+    await screen.findByText(/The room for every date changed while you were choosing/);
+    await waitFor(() => expect(vi.mocked(Events.get).mock.calls.length).toBeGreaterThan(pageReads));
+    expect(screen.getByRole("textbox", { name: /^Title/ })).toHaveValue("Supper night");
   });
 
   it("shows nothing when no date needs a room", async () => {

@@ -106,8 +106,9 @@ function answeredRevision(answer: SavedAnswer): string {
 // read found and its revision. A send with no answer moves nothing, so the lost-answer rule above holds across sends.
 // Without it, the base is the read the form opened with, for as long as the form lives.
 //
-// `gone` says which refusals of a send mean the person may no longer make it (by default every 403 and 404); a 403 or
-// 404 to the read is always "gone".
+// `gone` says which refusals of a send or of the read mean the person may no longer make it (by default every 403 and
+// 404). A control that stays (`stays`) and is no longer on screen when such a refusal arrives hands nothing over: it
+// returns "left", so a late answer never reaches whatever its host shows now.
 export function useRevisionSave<T, F>({
   opened,
   revision,
@@ -179,7 +180,7 @@ export function useRevisionSave<T, F>({
       } catch (err) {
         if (unanswered(err)) noAnswer();
 
-        if (err instanceof ApiError && gone(err)) return conflict("gone");
+        if (err instanceof ApiError && gone(err)) return stays && !mounted.current ? "left" : conflict("gone");
 
         if (errorCode(err) !== changedCode) throw err;
 
@@ -209,7 +210,7 @@ export function useRevisionSave<T, F>({
       try {
         stored = await read();
       } catch (err) {
-        if (err instanceof ApiError && lostAuthority(err)) return conflict("gone");
+        if (err instanceof ApiError && gone(err)) return conflict("gone");
 
         throw err;
       }
