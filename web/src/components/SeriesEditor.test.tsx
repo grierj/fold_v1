@@ -765,6 +765,7 @@ describe("SeriesEditor and the read it opened with", () => {
     const onSaved = vi.fn();
     const onConflict = vi.fn();
     const view = render(<SeriesEditor series={opened} idPrefix="left" onSaved={onSaved} onConflict={onConflict} />);
+    await userEvent.type(screen.getByRole("textbox", { name: "Title" }), " night");
     await userEvent.click(saveButton());
     await waitFor(() => expect(Events.get).toHaveBeenCalledOnce());
     view.unmount();

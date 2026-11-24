@@ -703,20 +703,21 @@ describe("EventVisibilityControl and the read it opened with", () => {
       expect(onSaved).not.toHaveBeenCalled();
     });
 
-    // The page's read lists 90 days of dates and a reset reaches every later one, so it cannot show the reset stored.
-    it("hands the page a conflict on a reset, even when the second press's preview finds nothing left to reset", async () => {
+    // A reset alone leaves the event's revision, so its second press is not refused. With an audience change it is,
+    // and the page's read lists 90 days of dates while a reset reaches every later one: it cannot show the reset stored.
+    it("hands the page a conflict on a reset with an audience change, even when the second press's preview finds nothing left to do", async () => {
       visibilityImpact.mockResolvedValueOnce({ visibility: "private", currentVisibility: "private", futureOverrides: 1, tightened: [], leaderOpened: [] })
-        .mockResolvedValueOnce({ visibility: "private", currentVisibility: "private", tightened: [], leaderOpened: [], resetDates: [{ occurrenceId: 51, date: "2026-12-01", title: "Picnic", visibility: "public" as const }], consent: A })
-        .mockResolvedValueOnce({ visibility: "private", currentVisibility: "private", tightened: [], leaderOpened: [], resetDates: [], consent: B });
-      get.mockResolvedValue(readOf({ revision: "r3" }));
+        .mockResolvedValueOnce({ visibility: "public", currentVisibility: "private", tightened: [], leaderOpened: [], resetDates: [{ occurrenceId: 51, date: "2026-12-01", title: "Picnic", visibility: "invite_only" as const }], consent: A })
+        .mockResolvedValueOnce({ visibility: "public", currentVisibility: "public", tightened: [], leaderOpened: [], resetDates: [], consent: B });
+      get.mockResolvedValue(readOf({ visibility: "public", leaderOpened: false, revision: "r3" }));
       const { onSaved, onConflict } = open();
       await userEvent.click(await screen.findByLabelText("Also reset those dates to the series setting"));
-      await userEvent.click(screen.getByRole("button", { name: "Save visibility" }));
-      await userEvent.click(await screen.findByRole("button", { name: "Reset 1 date" }));
+      await makePublic();
+      await userEvent.click(await screen.findByRole("button", { name: "Make this event public" }));
       expect(await screen.findByText(offline)).toBeInTheDocument();
       await userEvent.click(screen.getByRole("button", { name: "Save visibility" }));
       await waitFor(() => expect(onConflict).toHaveBeenCalledExactlyOnceWith("changed"));
-      expect(setVisibility.mock.calls.map(([, body]) => [body.consent, body.resetOverrides])).toEqual([[A, true], [B, true]]);
+      expect(setVisibility.mock.calls.map(([, body]) => [body.visibility, body.consent, body.resetOverrides])).toEqual([["public", A, true], ["public", B, true]]);
       expect(onSaved).not.toHaveBeenCalled();
     });
   });

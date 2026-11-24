@@ -105,7 +105,8 @@ export function EventVisibilityControl({
 
   // What this save can write: the audience and whether it is leader-opened, which follows the group's. The page's
   // read lists 90 days of dates and a reset reaches every later one, so a refused reset is always a conflict, also
-  // when an earlier press stored it and its answer was lost.
+  // when an earlier press stored it and its answer was lost (a reset alone leaves the revision, so only one that also
+  // changed the audience is refused).
   const opened: Audience = { visibility, leaderOpened, groupVisibility };
 
   const send = useRevisionSave({
