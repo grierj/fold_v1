@@ -23,9 +23,11 @@ async function newSeries(request: APIRequestContext, title: string) {
   const { group } = schema.parse(schema.looseObject({ group: idOf }), await grier("POST", "/groups", { name: `Date revision ${suffix}`, description: "", tags: [], location: "Hall", visibility: "public", memberLimit: null }));
   await grier("POST", `/admin/groups/${group.id}/members`, { userId: made.id, role: "leader" });
   const date = dateIn(9);
+
   const { event } = schema.parse(schema.looseObject({ event: idOf }), await grier("POST", `/groups/${group.id}/events`, {
     title, startsLocal: `${date}T19:00`, durationMinutes: 60, tzid: "America/Boise", location: "Room 201", recurrenceRule: "FREQ=WEEKLY;COUNT=3",
   }));
+
   const read = async () => schema.parse(managed, await grier("GET", `/events/${event.id}/occurrences/${date}`)).occurrence;
 
   return { id: event.id, groupId: group.id, date, title, leader, read };
