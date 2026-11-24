@@ -196,9 +196,8 @@ incomplete settlement are in `docs/agents/deploy.md` and `docs/API.md`.
 
 The barrier and the recovery level ship together. The binary's `recoveryPolicyLevel`
 (`restore_fence.go`) equals `deploy/recovery-policy` (`TestRecoveryPolicyFileMatchesConstant`)
-and `fold version --json` reports it. **Never publish a release at `recoveryPolicy >= 1` before
-R4-6c-R's current-release restore tooling and operator procedure are verified** (review only;
-see `deploy.md`).
+and `fold version --json` reports it. The next release does not wait for the remaining
+real-droplet restore checks, which stay owed (DEC-165; see `deploy.md`).
 
 - **Boot step.** `bootRestoreFence` runs in `serve` after migrations and before anything serves.
   One transaction under the migrations advisory lock creates and advances the `settings` row
