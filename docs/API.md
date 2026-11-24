@@ -718,8 +718,11 @@ event from nothing and says the changes weren't saved, as after a refused
 series save. A reset is always treated as different, also one an earlier press
 stored: the page's read lists 90 days of dates and a reset reaches every later
 one, so the read cannot show it is still the same decision or already done
-(a reset alone leaves the revision, so only a reset that also changed the
-audience is refused after its answer was lost). After a third refusal with nothing changed it shows
+(a reset that leaves both the visibility and the leader-opened mark as they
+were leaves the revision, so only a reset that changed either is refused after
+its answer was lost). A save that carries a reason counts as done only when
+the earlier press whose answer was lost carried the same reason, since no read
+returns the reason. After a third refusal with nothing changed it shows
 "We couldn't change who can see this. Please try again." and stays open. Any
 other failure of the read leaves the control open with its ordinary error.
 

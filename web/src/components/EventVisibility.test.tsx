@@ -693,6 +693,38 @@ describe("EventVisibilityControl and the read it opened with", () => {
       expect(screen.queryByText(/couldn't/)).not.toBeInTheDocument();
     });
 
+    it("hands the page a conflict when the reason was edited between a lost press and the next", async () => {
+      const wider = { visibility: "public" as const, groupVisibility: "private" as const, leaderOpened: true, revision: "r3" };
+      get.mockResolvedValue(readOf(wider));
+      const onSaved = vi.fn();
+      const onConflict = vi.fn();
+      render(<EventVisibilityControl eventId={7} groupName="Garden" groupVisibility="private" visibility="private" revision="r1" onSaved={onSaved} onConflict={onConflict} />);
+      await userEvent.click(screen.getByRole("radio", { name: /^Public/ }));
+      await userEvent.type(screen.getByRole("textbox", { name: /^Reason/ }), "Neighbours welcome");
+      await userEvent.click(screen.getByRole("button", { name: "Save visibility" }));
+      expect(await screen.findByText(offline)).toBeInTheDocument();
+      // No read returns the reason: with another reason the stored save cannot be shown to be this one.
+      await userEvent.type(screen.getByRole("textbox", { name: /^Reason/ }), " and their friends");
+      await userEvent.click(screen.getByRole("button", { name: "Save visibility" }));
+      await waitFor(() => expect(onConflict).toHaveBeenCalledExactlyOnceWith("changed"));
+      expect(onSaved).not.toHaveBeenCalled();
+      expect(setVisibility.mock.calls.map(([, body]) => body.reason)).toEqual(["Neighbours welcome", "Neighbours welcome and their friends"]);
+    });
+
+    it("counts the second press as saved when it carries the reason the lost press sent", async () => {
+      get.mockResolvedValue(readOf({ visibility: "public", groupVisibility: "private", leaderOpened: true, revision: "r3" }));
+      const onSaved = vi.fn();
+      const onConflict = vi.fn();
+      render(<EventVisibilityControl eventId={7} groupName="Garden" groupVisibility="private" visibility="private" revision="r1" onSaved={onSaved} onConflict={onConflict} />);
+      await userEvent.click(screen.getByRole("radio", { name: /^Public/ }));
+      await userEvent.type(screen.getByRole("textbox", { name: /^Reason/ }), "Neighbours welcome");
+      await userEvent.click(screen.getByRole("button", { name: "Save visibility" }));
+      expect(await screen.findByText(offline)).toBeInTheDocument();
+      await userEvent.click(screen.getByRole("button", { name: "Save visibility" }));
+      await waitFor(() => expect(onSaved).toHaveBeenCalledOnce());
+      expect(onConflict).not.toHaveBeenCalled();
+    });
+
     it("hands the page a conflict when the read shows Public with a leader-opened mark the save would not leave", async () => {
       get.mockResolvedValue(readOf({ visibility: "public", leaderOpened: true, revision: "r3" }));
       const { onSaved, onConflict } = open();

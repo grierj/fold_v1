@@ -2827,7 +2827,6 @@ describe("EventDetail when a series save meets someone else's change", () => {
   });
 
   it("closes the editor as after a normal save, with no line, when the second press finds the first one stored", async () => {
-    // The first press was stored and its answer lost; the read after the second press's refusal shows it.
     const mine: EventDetailResponse = { ...opened, event: { ...opened.event, title: "Hybrid study night", revision: "r2" } };
     vi.mocked(Events.get).mockResolvedValueOnce(opened).mockResolvedValue(mine);
     vi.mocked(Events.update).mockRejectedValueOnce(new TypeError("Failed to fetch")).mockRejectedValueOnce(changed());
