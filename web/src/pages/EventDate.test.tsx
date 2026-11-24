@@ -1234,7 +1234,7 @@ describe("the date page when a date's save meets someone else's change", () => {
     vi.mocked(Dates.get).mockResolvedValueOnce(managerAnswer()).mockResolvedValue({ occurrence: { cancelled: true, date: "2026-12-01", title: "One invited date" } });
     await saveInto({ cancelled: true });
     expect(await screen.findByText("This date was cancelled. Your calendar shows the dates that are still on.")).toBeInTheDocument();
-    const line = screen.getByText("Your changes weren't saved.");
+    const line = await screen.findByText("Your changes weren't saved.");
     await waitFor(() => expect(line).toHaveFocus());
     expect(edits.sent).toHaveLength(1);
   });

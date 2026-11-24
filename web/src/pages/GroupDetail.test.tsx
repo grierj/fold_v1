@@ -2054,7 +2054,7 @@ describe("GroupDetail when a date's save meets someone else's change", () => {
     vi.mocked(Groups.get).mockResolvedValueOnce(managing).mockRejectedValue(failure());
     await saveTitleInto({}, new ApiError(404, "SECRET", { code: "not_found" }));
     expect(await screen.findByRole("heading", { level: 1, name: heading })).toBeInTheDocument();
-    const line = screen.getByText(`${DAY}. Your changes weren't saved.`);
+    const line = await screen.findByText(`${DAY}. Your changes weren't saved.`);
     await waitFor(() => expect(line).toHaveFocus());
     expect(document.body.textContent).not.toContain("SECRET");
   });
