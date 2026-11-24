@@ -1050,7 +1050,7 @@ func TestHouseholdRestoreUsesCumulativePools(t *testing.T) {
 	app := testApp(t)
 	admin, gid := openGroup(t, app, "HouseholdRestore")
 	eventID, date := seedChildcareEvent(t, app, admin, gid, intPtr(2), intPtr(1), true)
-	apiDo(t, admin, "PUT", "/api/v1/events/"+itoa(eventID), map[string]any{"remoteAvailable": true, "remoteCapacity": 1}, http.StatusOK)
+	apiDo(t, admin, "PUT", "/api/v1/events/"+itoa(eventID), seriesBody(t, admin, "/api/v1/events/"+itoa(eventID), map[string]any{"remoteAvailable": true, "remoteCapacity": 1}), http.StatusOK)
 	holder, c, spouse, child := householdFamily(t, app, admin, "returningfamily")
 	result := batchAnswer(t, c, eventID, date, map[string]any{"status": "going", "attendanceMode": "in_person", "people": []map[string]any{{"personId": spouse.ID, "status": "going", "attendanceMode": "remote"}, {"personId": child.ID, "status": "going", "childcareRequested": true}}}, http.StatusOK)
 	occurrenceID := result.Registration.OccurrenceID

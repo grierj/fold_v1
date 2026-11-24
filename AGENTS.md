@@ -226,6 +226,7 @@ section or decision; check it still exists.
   state (waiting or lost, double-booked) is `policy.RoomBookingStateOf`, and the booking and request
   moves are tables in `internal/policy/room_lifecycle.go`; a status changes only through
   `changeBookings` or `moveRoomRequest`/`moveRoomRequestsWhere` (`room_status.go`).
+- A series save names its read: the token is `seriesToken`, checked by `checkSeriesBase` under the event's row lock (DEC-162).
 - Registrations: seat decisions go through `registration_seats.go` (`poolFits`, `seatChange`,
   `seatTally`; party size and childcare demand each have one SQL and one Go form,
   `TestSeatSQLMatchesGoRules`); the status changes only by a `policy.RegistrationMove`

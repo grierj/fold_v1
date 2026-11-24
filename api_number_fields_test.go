@@ -36,22 +36,14 @@ func TestMemberLimitAndCapacityShareOneRule(t *testing.T) {
 		{"", nil, false, true}, {"null", nil, true, true}, {"1", intPtr(1), true, true}, {"100000", intPtr(100000), true, true},
 		{"0", nil, false, false}, {"100001", nil, false, false}, {`"3"`, nil, false, false},
 	} {
-		raw := json.RawMessage(tt.raw)
-		var rawPtr *json.RawMessage
+		var raw json.RawMessage
 		if tt.raw != "" {
-			rawPtr = &raw
+			raw = json.RawMessage(tt.raw)
 		}
-		limit, set, msg := parseMemberLimit(rawPtrOrNil(rawPtr))
-		capacity, capSet, err := parseCapacity(rawPtr)
+		limit, set, msg := parseMemberLimit(raw)
+		capacity, capSet, err := parseCapacity(raw)
 		if !intPtrEqual(limit, tt.want) || set != tt.set || (msg == "") != tt.ok || !intPtrEqual(capacity, tt.want) || capSet != tt.set || (err == nil) != tt.ok {
 			t.Errorf("%q: member limit (%v %t %q), capacity (%v %t %v)", tt.raw, limit, set, msg, capacity, capSet, err)
 		}
 	}
-}
-
-func rawPtrOrNil(p *json.RawMessage) json.RawMessage {
-	if p == nil {
-		return nil
-	}
-	return *p
 }

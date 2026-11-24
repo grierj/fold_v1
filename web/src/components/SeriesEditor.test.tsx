@@ -9,11 +9,12 @@ import { ERROR_COPY } from "../lib/errors";
 import { formatDayFull } from "../lib/when";
 import { occurrence } from "../test/occurrence";
 import { careKid, deferred, KEPT, KEPT_COUNT, kept409, keptForbiddenNow, keptPerson, observeKept, READ_OUTCOMES, readFailures, type ReadOutcome } from "../test/keptPanel";
-import type { Attendee, EventOccurrence, OccurrenceResponse } from "../types";
-import { SeriesEditor } from "./SeriesEditor";
+import type { Attendee, EventDetailResponse, EventInput, EventOccurrence, EventSeries, OccurrenceResponse } from "../types";
+import { savedFields, SeriesEditor } from "./SeriesEditor";
 import { UnsavedChangesBlocker } from "../lib/unsavedChanges";
 import { DateRooms, SeriesRooms } from "../api/rooms";
 import { Events } from "../api/events";
+import * as core from "../api/core";
 import { ApiError } from "../api/core";
 import { Site } from "../api/site";
 import { forgetSite } from "../lib/useSite";
@@ -619,5 +620,192 @@ describe("SeriesEditor after a save", () => {
     view.rerender(<SeriesEditor series={{ ...single, recurrenceRule: "FREQ=WEEKLY;BYDAY=TU" }} idPrefix="weekly" onSaved={onSaved} onClose={() => {}} />);
     expect(screen.getByRole("combobox", { name: /^Room/ })).toBeInTheDocument();
     expect(SeriesRooms.list).not.toHaveBeenCalled();
+  });
+});
+
+stubService(Events, () => ({ get: vi.fn() }));
+
+// DEC-162: the save names the read the editor opened with; a refusal is checked against the event as stored.
+describe("SeriesEditor and the read it opened with", () => {
+  const opened = { ...baseSeries, revision: "r1" };
+
+  const stored: EventSeries = {
+    ...testEvent(7), ...baseSeries, startsAt: "2026-12-03T02:00:00Z", endsAt: "2026-12-03T03:30:00Z", revision: "r2",
+  };
+
+  const readOf = (event: EventSeries, canManage = true): EventDetailResponse => ({ event, occurrences: [], canManage, canSetVisibility: true });
+  const changed = () => new ApiError(409, "changed", { code: "event_changed" });
+  const saveButton = () => screen.getByRole("button", { name: "Save series" });
+
+  beforeEach(() => {
+    vi.mocked(Events.update).mockReset();
+    vi.mocked(Events.get).mockReset();
+  });
+
+  it("sends the revision it opened with, also after the page hands it a newer read", async () => {
+    vi.mocked(Events.update).mockResolvedValue({ event: stored });
+    const { rerender } = render(<SeriesEditor series={opened} idPrefix="rev" onSaved={() => {}} />);
+    rerender(<SeriesEditor series={{ ...opened, title: "Brunch", capacity: 9, revision: "r2" }} idPrefix="rev" onSaved={() => {}} />);
+    expect(screen.getByRole("textbox", { name: "Title" })).toHaveValue("Supper");
+    expect(screen.getByLabelText(/^Seat limit/)).toHaveValue(null);
+    await userEvent.click(saveButton());
+    expect(Events.update).toHaveBeenCalledExactlyOnceWith(7, expect.objectContaining({ title: "Supper", revision: "r1" }));
+    expect(vi.mocked(Events.update).mock.calls[0][1]).not.toHaveProperty("capacity");
+  });
+
+  it("saves again under the new revision, once, when nothing it can write was changed", async () => {
+    vi.mocked(Events.update).mockRejectedValueOnce(changed()).mockResolvedValueOnce({ event: stored });
+    // The editor opened with every optional value absent; the stored read spells each one out as its default.
+    vi.mocked(Events.get).mockResolvedValue(readOf(stored));
+    const onSaved = vi.fn();
+    const onConflict = vi.fn();
+    render(<SeriesEditor series={opened} idPrefix="again" onSaved={onSaved} onConflict={onConflict} />);
+    await userEvent.type(screen.getByRole("textbox", { name: "Title" }), " night");
+    await userEvent.click(saveButton());
+    await waitFor(() => expect(onSaved).toHaveBeenCalledOnce());
+    expect(Events.get).toHaveBeenCalledExactlyOnceWith(7);
+    expect(Events.update).toHaveBeenCalledTimes(2);
+    const [first, second] = vi.mocked(Events.update).mock.calls.map(([, body]) => body);
+    expect(first).toMatchObject({ title: "Supper night", revision: "r1" });
+    expect(second).toEqual({ ...first, revision: "r2" });
+    expect(onConflict).not.toHaveBeenCalled();
+    expect(screen.queryByText(/couldn't/)).not.toBeInTheDocument();
+  });
+
+  it("compares every field a save can write", () => {
+    type Writable = Exclude<keyof EventInput, "visibility" | "visibilityReason" | "roomId" | "hosts" | "revision">;
+
+    type Compared = keyof ReturnType<typeof savedFields>;
+
+    const exact: [Writable] extends [Compared] ? ([Compared] extends [Writable] ? true : false) : false = true;
+
+    expect(exact).toBe(true);
+  });
+
+  // One stored value changed per row; typed as the normaliser's answer, so a field it compares cannot lack a row.
+  const CHANGED: ReturnType<typeof savedFields> = {
+    title: "Brunch", description: "Bring a dish", startsLocal: "2026-12-09T19:00", durationMinutes: 60, tzid: "UTC",
+    location: "Library", recurrenceRule: "FREQ=WEEKLY;BYDAY=TH", rruleUntil: "2027-03-01", capacity: 12,
+    waitlistEnabled: true, guestsAllowed: 2, reminderEmailMinutes: 120, reminderPush: false, videoProvider: "link",
+    videoUrl: "https://meet.example.org/supper", videoReveal: "always", remoteAvailable: true, remoteCapacity: 8,
+    childcareAvailable: true, childcareCapacity: 4, childcareAges: "2–5", childcareNotes: "Nursery",
+  };
+
+  it.each(Object.entries(CHANGED))("hands the page a conflict, sending nothing more, when %s was changed", async (key, value) => {
+    const now: EventSeries = Object.assign({}, stored, { [key]: value });
+    expect(savedFields(now)).not.toEqual(savedFields(stored));
+    vi.mocked(Events.update).mockRejectedValue(changed());
+    vi.mocked(Events.get).mockResolvedValue(readOf(now));
+    const onSaved = vi.fn();
+    const onConflict = vi.fn();
+    render(<SeriesEditor series={opened} idPrefix={`conflict-${key}`} onSaved={onSaved} onConflict={onConflict} />);
+    await userEvent.click(saveButton());
+    await waitFor(() => expect(onConflict).toHaveBeenCalledExactlyOnceWith("changed"));
+    expect(Events.update).toHaveBeenCalledOnce();
+    expect(Events.get).toHaveBeenCalledOnce();
+    expect(onSaved).not.toHaveBeenCalled();
+  });
+
+  it("shows the ordinary error, keeping the draft open, after three refusals with nothing changed", async () => {
+    vi.mocked(Events.update).mockRejectedValue(changed());
+    vi.mocked(Events.get).mockResolvedValue(readOf(stored));
+    const onSaved = vi.fn();
+    const onConflict = vi.fn();
+    render(<SeriesEditor series={opened} idPrefix="bound" onSaved={onSaved} onConflict={onConflict} />);
+    const title = screen.getByRole("textbox", { name: "Title" });
+    await userEvent.type(title, " night");
+    await userEvent.click(saveButton());
+    expect(await screen.findByText("We couldn't update the series. Please try again.")).toBeInTheDocument();
+    expect(Events.update).toHaveBeenCalledTimes(3);
+    expect(Events.get).toHaveBeenCalledTimes(3);
+    expect(onConflict).not.toHaveBeenCalled();
+    expect(onSaved).not.toHaveBeenCalled();
+    expect(title).toBeEnabled();
+    expect(title).toHaveValue("Supper night");
+    expect(saveButton()).toBeEnabled();
+  });
+
+  it.each([
+    ["the server fails", new ApiError(500, "boom", { code: "server_error" }), "We couldn't update the series. Please try again in a minute."],
+    ["the network fails", new TypeError("offline"), "We couldn't reach Fold. Check your connection and try again."],
+  ])("shows the ordinary error, keeping the draft open, when the read after a refusal fails: %s", async (_name, cause, text) => {
+    vi.mocked(Events.update).mockRejectedValue(changed());
+    vi.mocked(Events.get).mockRejectedValue(cause);
+    const onConflict = vi.fn();
+    render(<SeriesEditor series={opened} idPrefix="read-fails" onSaved={() => {}} onConflict={onConflict} />);
+    const title = screen.getByRole("textbox", { name: "Title" });
+    await userEvent.type(title, " night");
+    await userEvent.click(saveButton());
+    expect(await screen.findByText(text)).toBeInTheDocument();
+    expect(Events.update).toHaveBeenCalledOnce();
+    expect(onConflict).not.toHaveBeenCalled();
+    expect(title).toBeEnabled();
+    expect(title).toHaveValue("Supper night");
+  });
+
+  it.each([
+    ["answers 403", () => vi.mocked(Events.get).mockRejectedValue(new ApiError(403, "no", { code: "forbidden" }))],
+    ["answers 404", () => vi.mocked(Events.get).mockRejectedValue(new ApiError(404, "gone", { code: "not_found" }))],
+    ["no longer lets this person manage it", () => vi.mocked(Events.get).mockResolvedValue(readOf({ ...stored, revision: undefined }, false))],
+  ])("hands the page the closing path with no notice when the read after a refusal %s", async (_name, answer) => {
+    vi.mocked(Events.update).mockRejectedValue(changed());
+    answer();
+    const onSaved = vi.fn();
+    const onConflict = vi.fn();
+    render(<SeriesEditor series={opened} idPrefix="gone" onSaved={onSaved} onConflict={onConflict} />);
+    await userEvent.click(saveButton());
+    await waitFor(() => expect(onConflict).toHaveBeenCalledExactlyOnceWith("gone"));
+    expect(Events.update).toHaveBeenCalledOnce();
+    expect(onSaved).not.toHaveBeenCalled();
+  });
+  it("sends nothing more when the person has left the editor before the read after a refusal lands", async () => {
+    vi.mocked(Events.update).mockRejectedValueOnce(changed()).mockResolvedValue({ event: stored });
+    const read = deferred<EventDetailResponse>();
+    vi.mocked(Events.get).mockReturnValue(read.promise);
+    const onSaved = vi.fn();
+    const onConflict = vi.fn();
+    const view = render(<SeriesEditor series={opened} idPrefix="left" onSaved={onSaved} onConflict={onConflict} />);
+    await userEvent.click(saveButton());
+    await waitFor(() => expect(Events.get).toHaveBeenCalledOnce());
+    view.unmount();
+    await act(async () => { read.resolve(readOf(stored)); await read.promise; });
+    expect(Events.update).toHaveBeenCalledOnce();
+    expect(onSaved).not.toHaveBeenCalled();
+    expect(onConflict).not.toHaveBeenCalled();
+  });
+
+  it("sends nothing more, and hands the page the closing path, when the tab's sign-in changed before the read after a refusal lands", async () => {
+    const mine: core.Credential = { token: "t1", marker: "m1", viewer: 1, seen: "m1", verified: true };
+    const held = vi.spyOn(core, "currentCredential").mockReturnValue(mine);
+    const still = vi.spyOn(core, "credentialCurrent").mockReturnValue(true);
+    vi.mocked(Events.update).mockRejectedValueOnce(changed()).mockResolvedValue({ event: stored });
+    const read = deferred<EventDetailResponse>();
+    vi.mocked(Events.get).mockReturnValue(read.promise);
+    const onSaved = vi.fn();
+    const onConflict = vi.fn();
+    render(<SeriesEditor series={opened} idPrefix="other" onSaved={onSaved} onConflict={onConflict} />);
+    await userEvent.click(saveButton());
+    await waitFor(() => expect(Events.get).toHaveBeenCalledOnce());
+    still.mockReturnValue(false);
+    await act(async () => { read.resolve(readOf(stored)); await read.promise; });
+    await waitFor(() => expect(onConflict).toHaveBeenCalledExactlyOnceWith("gone"));
+    expect(still).toHaveBeenCalledWith(mine);
+    expect(Events.update).toHaveBeenCalledOnce();
+    expect(onSaved).not.toHaveBeenCalled();
+    held.mockRestore();
+    still.mockRestore();
+  });
+
+  it.each([403, 404])("hands the page the closing path when the save it sent again by itself answers %i", async (status) => {
+    vi.mocked(Events.update).mockRejectedValueOnce(changed()).mockRejectedValueOnce(new ApiError(status, "no", { code: status === 403 ? "forbidden" : "not_found" }));
+    vi.mocked(Events.get).mockResolvedValue(readOf(stored));
+    const onSaved = vi.fn();
+    const onConflict = vi.fn();
+    render(<SeriesEditor series={opened} idPrefix={`resent-${status}`} onSaved={onSaved} onConflict={onConflict} />);
+    await userEvent.click(saveButton());
+    await waitFor(() => expect(onConflict).toHaveBeenCalledExactlyOnceWith("gone"));
+    expect(Events.update).toHaveBeenCalledTimes(2);
+    expect(onSaved).not.toHaveBeenCalled();
+    expect(screen.queryByText(/couldn't/)).not.toBeInTheDocument();
   });
 });

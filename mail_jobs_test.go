@@ -2708,7 +2708,7 @@ func queueHeldGuestVerify(t *testing.T, app *App, full bool) heldGuestVerify {
 	}
 	if full {
 		apiDo(t, f.admin, "PUT", fmt.Sprintf("/api/v1/events/%d", f.event.ID),
-			map[string]any{"capacity": 1, "waitlistEnabled": false}, http.StatusOK)
+			seriesBody(t, f.admin, fmt.Sprintf("/api/v1/events/%d", f.event.ID), map[string]any{"capacity": 1, "waitlistEnabled": false}), http.StatusOK)
 		member := newTestUser(t, app, "member", "password1234", models.RoleMember)
 		var g models.Group
 		if err := app.DB.First(&g, f.groupID).Error; err != nil {

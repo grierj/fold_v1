@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log"
 	"net/http"
 	"reflect"
@@ -681,12 +682,13 @@ type eventBody struct {
 	// value (DEC-51). Wider than the group is a leader-opened override.
 	Visibility       *string `json:"visibility"`
 	VisibilityReason *string `json:"visibilityReason"`
-	// Capacity, waitlist, and guests (M1.5). Capacity is raw JSON so null
-	// (clear to unlimited) is distinguishable from absent (leave it).
-	// guestsAllowed is a number 0-5; null clears to 0.
-	Capacity        *json.RawMessage `json:"capacity"`
-	WaitlistEnabled *bool            `json:"waitlistEnabled"`
-	GuestsAllowed   *json.RawMessage `json:"guestsAllowed"`
+	// Capacity, waitlist, and guests (M1.5). Capacity and guestsAllowed are
+	// raw JSON values, not pointers, so null (clear capacity to unlimited,
+	// guestsAllowed to 0) is distinguishable from absent (leave it): a
+	// pointer would read null as absent.
+	Capacity        json.RawMessage `json:"capacity"`
+	WaitlistEnabled *bool           `json:"waitlistEnabled"`
+	GuestsAllowed   json.RawMessage `json:"guestsAllowed"`
 	// Remote attendance (M1.8 slice 2). RemoteCapacity is raw JSON like
 	// Capacity: null clears to unlimited; a set limit must be positive.
 	RemoteAvailable    *bool           `json:"remoteAvailable"`
@@ -707,6 +709,9 @@ type eventBody struct {
 	// Create only: the room for every date (M2.1c). A series edit changes
 	// it through PUT /events/:id/room.
 	RoomID *uint `json:"roomId"`
+	// Update only, and required there: the series token (seriesToken) of the
+	// read the edit was made from.
+	Revision string `json:"revision"`
 }
 
 // specFrom builds the series rule from the body over base (nil on create),
@@ -1113,6 +1118,30 @@ func (a *App) apiCreateEvent(c *gin.Context) {
 	c.JSON(http.StatusCreated, eventSeriesResponseJSON{Event: j})
 }
 
+// errEventChanged refuses a series save made from an older read of the event
+// than the one it would change (DEC-162). Nothing is written.
+var errEventChanged = apiErr(http.StatusConflict, "event_changed", "the event changed since this edit was based on it")
+
+// seriesToken is the revision a series editor based on ev holds:
+// 1.<generation>.<event id>.<event revision>. The generation is the guarded
+// date edit's (dateGeneration), so a token from before a restart, and so
+// before any restore, never matches. The trigger of migration 00010 raises
+// the revision on every change to a tracked column of the event row.
+func (a *App) seriesToken(ev *models.Event) string {
+	return fmt.Sprintf("1.%s.%d.%d", a.dateGeneration(), ev.ID, ev.EditRevision)
+}
+
+// checkSeriesBase refuses base unless it is the token of locked, the event as
+// read under its row lock. There are no attempt receipts for a series save,
+// so equality is the whole rule: a missing, malformed, older, other event's or
+// other generation's token is refused alike.
+func (a *App) checkSeriesBase(locked *models.Event, base string) error {
+	if base != a.seriesToken(locked) {
+		return errEventChanged
+	}
+	return nil
+}
+
 func (a *App) loadManagedEvent(c *gin.Context) (*models.Event, bool) {
 	ev, _, err := a.loadManagedEventFor(c)
 	if err != nil {
@@ -1146,6 +1175,9 @@ func (a *App) apiUpdateEvent(c *gin.Context) {
 	err = a.contactMutation(contactChange{EventID: ev.ID}, func(tx *gorm.DB) error {
 		actor, lockedEv, _, err := lockManagedEventIn(tx, me, ev.ID)
 		if err != nil {
+			return err
+		}
+		if err := a.checkSeriesBase(lockedEv, body.Revision); err != nil {
 			return err
 		}
 		me = actor
@@ -1385,7 +1417,9 @@ func (a *App) apiUpdateEvent(c *gin.Context) {
 				}
 			}
 		}
-		return nil
+		// The answer's token: edit_revision is the trigger's, never written by
+		// Save, so it is read back after the last write.
+		return tx.Raw("SELECT edit_revision FROM events WHERE id = ?", locked.ID).Row().Scan(&locked.EditRevision)
 	})
 	if err != nil {
 		switch {
@@ -1401,6 +1435,7 @@ func (a *App) apiUpdateEvent(c *gin.Context) {
 	ev = &locked
 	j := toEventJSON(ev)
 	applyEventVideoReveal(&j, ev, false, true) // the locked row was re-checked: only managers reach here
+	j.Revision = a.seriesToken(ev)
 	c.JSON(http.StatusOK, eventSeriesResponseJSON{Event: j})
 }
 
@@ -1892,6 +1927,10 @@ type eventJSON struct {
 	VideoURL      string `json:"videoUrl,omitempty"`
 	VideoReveal   string `json:"videoReveal"`
 	VideoHidden   bool   `json:"videoHidden,omitempty"`
+	// Revision is the series token (seriesToken) a series save names, only
+	// for the event's managers and only on the event page's read and the
+	// save's answer.
+	Revision string `json:"revision,omitempty"`
 }
 
 const maxRecurrenceLen = 300

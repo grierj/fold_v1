@@ -371,6 +371,8 @@ export interface EventSeries {
   videoUrl?: string;
   videoReveal: VideoReveal;
   videoHidden?: boolean;
+  // The series token a series save names, only for the event's managers, on the event page's read and the save's answer.
+  revision?: string;
 }
 
 // The register endpoint's registration object (M1.5): the final status,
@@ -1775,6 +1777,8 @@ export interface EventInput {
   videoReveal?: VideoReveal;
   reminderEmailMinutes?: number;
   reminderPush?: boolean;
+  // Required by a series save: the revision of the read it was made from.
+  revision?: string;
 }
 
 // What creating an event must send.

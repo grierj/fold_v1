@@ -99,7 +99,7 @@ func TestVideoLinkValidation(t *testing.T) {
 
 	// An update with a non-https address is refused and stores nothing.
 	w := admin.do("PUT", fmt.Sprintf("/api/v1/events/%d", ev.ID),
-		map[string]any{"videoUrl": "http://insecure.example.org/call"}, true)
+		seriesBody(t, admin, fmt.Sprintf("/api/v1/events/%d", ev.ID), map[string]any{"videoUrl": "http://insecure.example.org/call"}), true)
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("update to http: %d %s, want 400", w.Code, w.Body.String())
 	}
@@ -113,7 +113,7 @@ func TestVideoLinkValidation(t *testing.T) {
 
 	// none clears the URL.
 	w = admin.do("PUT", fmt.Sprintf("/api/v1/events/%d", ev.ID),
-		map[string]any{"videoProvider": "none"}, true)
+		seriesBody(t, admin, fmt.Sprintf("/api/v1/events/%d", ev.ID), map[string]any{"videoProvider": "none"}), true)
 	if w.Code != http.StatusOK {
 		t.Fatalf("clear video: %d %s", w.Code, w.Body.String())
 	}
@@ -193,7 +193,7 @@ func TestVideoRevealInEventAPI(t *testing.T) {
 
 	// always: everyone who can see the event sees the link.
 	w := admin.do("PUT", fmt.Sprintf("/api/v1/events/%d", ev.ID),
-		map[string]any{"videoReveal": "always"}, true)
+		seriesBody(t, admin, fmt.Sprintf("/api/v1/events/%d", ev.ID), map[string]any{"videoReveal": "always"}), true)
 	if w.Code != http.StatusOK {
 		t.Fatalf("set reveal always: %d %s", w.Code, w.Body.String())
 	}

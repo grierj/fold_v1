@@ -944,7 +944,8 @@ POST /api/v1/groups/:id/events              → 201 {event} | 409 group_events_n
      Leadership, the session, and the group's visibility and status are checked
      again after the body arrives. The default uses the group's value then;
      a session that ended answers 401.
-PUT  /api/v1/events/:id                     → 200 {event}   (leader, host, or admin; series edit)
+PUT  /api/v1/events/:id                     → 200 {event} | 409 event_changed   (leader, host, or admin; series edit)
+     body: the create body's fields to change (not visibility, visibilityReason, roomId or hosts, which have their own routes), and the required revision of the read the edit was made from (below)
 PUT  /api/v1/events/:id/visibility          → 200 {event}   (leader, host, or admin)
      body: {visibility, reason?, consent?, resetOverrides?}
 DELETE /api/v1/events/:id                   → 200 {}        (leader, host, or admin)
@@ -991,11 +992,13 @@ enrichment only runs for returned dates. Invalid cursors or limits return
 `event`: `{id, groupId?, groupName?, groupVisibility?, hostedBy?, title,
 description, startsLocal, durationMinutes, tzid, startsAt, endsAt, location,
 recurrenceRule, rruleUntil, visibility, leaderOpened, churchWide,
-hosts?, videoProvider, videoUrl?, videoReveal, videoHidden?}`. `groupId` is omitted for a church-wide event and for an opened
+hosts?, videoProvider, videoUrl?, videoReveal, videoHidden?, revision?}`. `groupId` is omitted for a church-wide event and for an opened
 event whose group the viewer cannot see; `hostedBy` is the church name
 then. `hosts` (`{userId, name, email}`) is present for an admin reading a
 church-wide event. `startsAt` and `endsAt` are UTC. `startsLocal` is the
-wall clock.
+wall clock. `revision` is the series token, present only for a viewer who may
+manage the event, on the event page (`GET /events/:id`) and on the series
+edit's answer.
 
 `occurrence`: `{id, eventId, date, startsAt, endsAt, startsLocal, endsLocal,
 tzid, durationMinutes, location, title, description, recurrenceRule, rruleUntil,
@@ -1027,10 +1030,40 @@ form sends the browser's time zone. An empty
 `recurrenceRule` is one date. The rule must not contain `DTSTART` or a
 newline; `rruleUntil` is a separate inclusive `YYYY-MM-DD`, not an `UNTIL`
 inside the rule. A rule that does not parse is 400. `capacity` is a
-positive whole number or null (null clears to unlimited); `waitlistEnabled`
-holds overflow sign-ups on a waitlist when a capacity is set;
+positive whole number or null (null, or leaving it out on create, is no
+limit; on a series edit null clears the limit and leaving it out keeps it);
+`waitlistEnabled` holds overflow sign-ups on a waitlist when a capacity is set;
 `guestsAllowed` is 0–5 (null clears to 0), capping extra unnamed guests on
 one registration.
+
+**The series revision (DEC-162).** A series edit names the read it was made
+from: its body's `revision` is the `revision` of the read the editor opened
+with, `1.<generation>.<event id>.<event revision>`, opaque to the client. A
+body the server cannot read is answered first, whatever its revision: 400 for a
+`revision` of any JSON type but a string (a JSON `null` is read as missing, so it
+answers 409 `event_changed` below), and for a seat, guest or reminder number or
+a childcare text that is not valid on its own (`invalid_capacity` and the like).
+Then, under the
+event's row lock and before judging anything against the stored event, the
+server compares the revision with the token of the event as stored, and refuses
+any other value (missing, garbled, another event's, one from before the server
+restarted, or one read before any later change to the event) with 409
+`event_changed`, writing nothing: no event or date change, notice, audit row or
+job. The event's revision rises with every change to a stored series field, its
+visibility and its series room, by anyone; a save that changes nothing leaves
+it, and the daily extender does not move it. The answer's `event.revision` is
+the new token. Refused, the web editor reads the event again, and what that read
+says decides: when nothing the editor can save differs from the read it opened
+with, it sends the same save with the new revision, up to three sends in all,
+and after a third refusal whose read still shows no difference it shows its
+ordinary save error and stays open; when something differs, it closes and the
+page shows the event as stored, saying the changes were not saved; when the
+read (or a save the editor sent again) answers 403 or 404, or says the person no
+longer manages the event, it closes and the page shows what that person may
+now see, saying the changes were not saved where it still shows the event. Any
+other failure of the read leaves the editor open with its ordinary save error.
+The editor sends again only while it is still open under the sign-in that
+pressed Save.
 
 Childcare (M1.8 slice 3): event create and series update accept
 `childcareAvailable` (default false), `childcareNotes` (up to 500
@@ -1125,7 +1158,8 @@ receive a stored cancellation notification. A date whose time moves sends `event
 (variant `time`) to going and waitlisted people; a changed event place sends
 `event.changed` (variant `place`) on every future date. Raising the capacity
 promotes waitlisted parties in line order on each future date whose
-effective capacity grew; lowering it removes nobody. Per-date overrides,
+effective capacity grew, and clearing it (`capacity: null`) promotes them
+as raising it does; lowering it removes nobody. Per-date overrides,
 including a location-only override, are left alone. Dates the new rule adds
 are inserted. A series edit that would make a date someone kept after
 leaving end later (a move or a retimed restore) is refused as a whole with
@@ -1306,8 +1340,15 @@ What each deployed client shows:
   so it says only the group leader or an admin can schedule events there,
   even to a leader. Reloading the page fixes it.
 
+- *"Edit series" / "Edit event" from the earlier release* sends no `revision`
+  (DEC-162), so its save answers 409 `event_changed`, which that page shows as
+  "We couldn't update the series. Please try again in a minute." Nothing is
+  saved. Reloading the page loads the current SPA, which saves normally.
+
 The upgrade restarts the server, so any revision a tab already holds is
-refused once with `date_changed` (After any restart, above).
+refused once: a date's with `date_changed` (After any restart, above), and a
+series' with `event_changed`, after which the current editor saves again by
+itself when the event has not changed.
 
 ### Registration
 

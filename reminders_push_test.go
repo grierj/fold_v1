@@ -627,7 +627,7 @@ func TestEventReminderPushSwitch(t *testing.T) {
 	var out struct {
 		Event eventJSON `json:"event"`
 	}
-	w := f.leader.do("PUT", "/api/v1/events/"+itoa(ev.ID), map[string]any{"reminderPush": false}, true)
+	w := f.leader.do("PUT", "/api/v1/events/"+itoa(ev.ID), seriesBody(t, f.leader, "/api/v1/events/"+itoa(ev.ID), map[string]any{"reminderPush": false}), true)
 	decodeJSON(t, w, &out)
 	if w.Code != http.StatusOK || out.Event.ReminderPush || stored("Default") {
 		t.Fatalf("series edit: %d %s", w.Code, w.Body.String())

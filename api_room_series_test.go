@@ -92,7 +92,7 @@ func TestRoomSeriesBooksFreeDatesAndFlagsBusyOnes(t *testing.T) {
 
 	// Editing the series time moves every booking.
 	later := f.startOn.Add(90 * time.Minute)
-	if w := f.leader.do("PUT", "/api/v1/events/"+itoa(series.ID), map[string]any{"startsLocal": later.Format("2006-01-02T15:04")}, true); w.Code != http.StatusOK {
+	if w := f.leader.do("PUT", "/api/v1/events/"+itoa(series.ID), seriesBody(t, f.leader, "/api/v1/events/"+itoa(series.ID), map[string]any{"startsLocal": later.Format("2006-01-02T15:04")}), true); w.Code != http.StatusOK {
 		t.Fatalf("series edit: %d %s", w.Code, w.Body.String())
 	}
 	if n := contactCount(t, f.app, &models.RoomBooking{},
@@ -237,7 +237,7 @@ func TestRoomSeriesEditsBookAddedAndRestoredDates(t *testing.T) {
 	}
 	edit := func(rule string) {
 		t.Helper()
-		if w := f.leader.do("PUT", "/api/v1/events/"+itoa(series.ID), map[string]any{"recurrenceRule": rule}, true); w.Code != http.StatusOK {
+		if w := f.leader.do("PUT", "/api/v1/events/"+itoa(series.ID), seriesBody(t, f.leader, "/api/v1/events/"+itoa(series.ID), map[string]any{"recurrenceRule": rule}), true); w.Code != http.StatusOK {
 			t.Fatalf("series edit %s: %d %s", rule, w.Code, w.Body.String())
 		}
 	}
@@ -473,7 +473,7 @@ func TestRoomSeriesEditsSkipInactiveGroup(t *testing.T) {
 	f.archiveGroup(t)
 	edit := func(rule string) {
 		t.Helper()
-		if w := f.leader.do("PUT", "/api/v1/events/"+itoa(series.ID), map[string]any{"recurrenceRule": rule}, true); w.Code != http.StatusOK {
+		if w := f.leader.do("PUT", "/api/v1/events/"+itoa(series.ID), seriesBody(t, f.leader, "/api/v1/events/"+itoa(series.ID), map[string]any{"recurrenceRule": rule}), true); w.Code != http.StatusOK {
 			t.Fatalf("series edit %s: %d %s", rule, w.Code, w.Body.String())
 		}
 	}

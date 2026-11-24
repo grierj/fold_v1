@@ -751,7 +751,8 @@
     "remoteCapacity": null,
     "videoProvider": "link",
     "videoUrl": "https://example.com/study-call",
-    "videoReveal": "registered_only"
+    "videoReveal": "registered_only",
+    "revision": "R"
   },
   "occurrences": [
     {
@@ -1041,7 +1042,8 @@
     "remoteCapacity": null,
     "videoProvider": "link",
     "videoUrl": "https://example.com/opened-call",
-    "videoReveal": "always"
+    "videoReveal": "always",
+    "revision": "R"
   },
   "occurrences": [
     {
@@ -1192,7 +1194,8 @@
     "remoteCapacity": null,
     "videoProvider": "link",
     "videoUrl": "https://example.com/private-call",
-    "videoReveal": "registered_only"
+    "videoReveal": "registered_only",
+    "revision": "R"
   },
   "occurrences": [
     {
@@ -1366,7 +1369,8 @@
     "remoteCapacity": null,
     "videoProvider": "link",
     "videoUrl": "https://example.com/potluck-call",
-    "videoReveal": "registered_only"
+    "videoReveal": "registered_only",
+    "revision": "R"
   },
   "occurrences": [
     {
@@ -1495,7 +1499,8 @@
     "childcareAges": "",
     "remoteCapacity": null,
     "videoProvider": "none",
-    "videoReveal": "registered_only"
+    "videoReveal": "registered_only",
+    "revision": "R"
   },
   "occurrences": [
     {
@@ -2240,7 +2245,8 @@
     "remoteCapacity": null,
     "videoProvider": "link",
     "videoUrl": "https://example.com/study-call",
-    "videoReveal": "registered_only"
+    "videoReveal": "registered_only",
+    "revision": "R"
   },
   "occurrences": [
     {
@@ -2528,7 +2534,8 @@
     "remoteCapacity": null,
     "videoProvider": "link",
     "videoUrl": "https://example.com/opened-call",
-    "videoReveal": "always"
+    "videoReveal": "always",
+    "revision": "R"
   },
   "occurrences": [
     {
@@ -2679,7 +2686,8 @@
     "remoteCapacity": null,
     "videoProvider": "link",
     "videoUrl": "https://example.com/private-call",
-    "videoReveal": "registered_only"
+    "videoReveal": "registered_only",
+    "revision": "R"
   },
   "occurrences": [
     {
@@ -7774,7 +7782,8 @@
     "remoteCapacity": null,
     "videoProvider": "link",
     "videoUrl": "https://example.com/potluck-call",
-    "videoReveal": "registered_only"
+    "videoReveal": "registered_only",
+    "revision": "R"
   },
   "occurrences": [
     {
@@ -7900,7 +7909,8 @@
     "childcareAges": "",
     "remoteCapacity": null,
     "videoProvider": "none",
-    "videoReveal": "registered_only"
+    "videoReveal": "registered_only",
+    "revision": "R"
   },
   "occurrences": [
     {

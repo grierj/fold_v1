@@ -215,7 +215,7 @@ func TestVisibilityOverrideProtectsDateFromSeriesClockEdit(t *testing.T) {
 	app, admin, _, ev, dates := dateVisibilityFixture(t, models.VisibilityPrivate)
 	saveDate(t, admin, ev.ID, models.FormatCalendarDate(dates[0].OriginalDate), map[string]any{"visibility": "public"}, http.StatusOK, "")
 	changed := dates[0].StartsAt.UTC().Add(time.Hour).Format("2006-01-02T15:04")
-	apiDo(t, admin, "PUT", fmt.Sprintf("/api/v1/events/%d", ev.ID), map[string]any{"startsLocal": changed, "tzid": "UTC"}, 200)
+	apiDo(t, admin, "PUT", fmt.Sprintf("/api/v1/events/%d", ev.ID), seriesBody(t, admin, fmt.Sprintf("/api/v1/events/%d", ev.ID), map[string]any{"startsLocal": changed, "tzid": "UTC"}), 200)
 	var first, second models.EventOccurrence
 	app.DB.First(&first, dates[0].ID)
 	app.DB.First(&second, dates[1].ID)

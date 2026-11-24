@@ -159,19 +159,19 @@ func TestSeriesCancelWithholdsTheDateFromAnEndedGrant(t *testing.T) {
 	gormMust(t, f.app.DB.Create(&models.Registration{UserID: &member.ID, OccurrenceID: target.ID, Status: models.RegGoing, AttendanceMode: models.AttendanceInPerson, Source: "web"}))
 	eid := itoa(f.event.ID)
 
-	apiDo(t, f.admin, "PUT", "/api/v1/events/"+eid, map[string]any{"recurrenceRule": "FREQ=WEEKLY;COUNT=1"}, http.StatusOK)
+	apiDo(t, f.admin, "PUT", "/api/v1/events/"+eid, seriesBody(t, f.admin, "/api/v1/events/"+eid, map[string]any{"recurrenceRule": "FREQ=WEEKLY;COUNT=1"}), http.StatusOK)
 	if got := savedOccurrenceAccess(t, f); got.Status != policy.OccurrenceAccessEnded {
 		t.Fatalf("fixture: dropping the date left the grant %+v", got)
 	}
-	apiDo(t, f.admin, "PUT", "/api/v1/events/"+eid, map[string]any{"recurrenceRule": "FREQ=WEEKLY;COUNT=3",
-		"title": "NEWSECRETTITLE", "location": "NEWSECRETPLACE"}, http.StatusOK)
+	apiDo(t, f.admin, "PUT", "/api/v1/events/"+eid, seriesBody(t, f.admin, "/api/v1/events/"+eid, map[string]any{"recurrenceRule": "FREQ=WEEKLY;COUNT=3",
+		"title": "NEWSECRETTITLE", "location": "NEWSECRETPLACE"}), http.StatusOK)
 	if s := regStatus(t, f.app, f.recipient.ID, target.ID); s != models.RegGoing {
 		t.Fatalf("fixture: the departed row is %s", s)
 	}
 	mark := markNotices(t, f.app)
 
-	apiDo(t, f.admin, "PUT", "/api/v1/events/"+eid, map[string]any{"recurrenceRule": "FREQ=WEEKLY;COUNT=1",
-		"title": "SECONDSECRET", "location": "SECONDPLACE"}, http.StatusOK)
+	apiDo(t, f.admin, "PUT", "/api/v1/events/"+eid, seriesBody(t, f.admin, "/api/v1/events/"+eid, map[string]any{"recurrenceRule": "FREQ=WEEKLY;COUNT=1",
+		"title": "SECONDSECRET", "location": "SECONDPLACE"}), http.StatusOK)
 	if o := occurrenceRow(t, f.app, target.ID); o.Status != models.OccurrenceCancelled || o.CancelSource != models.CancelSourceSeries {
 		t.Fatalf("the date was not dropped again: %+v", o)
 	}
@@ -278,9 +278,9 @@ func TestRemovalWithholdsTheDateFromAnEndedGrant(t *testing.T) {
 	gormMust(t, f.app.DB.Create(&models.Membership{UserID: member.ID, GroupID: f.group, Role: models.MembershipMember, Status: models.MembershipActive}))
 	gormMust(t, f.app.DB.Create(&models.Registration{UserID: &member.ID, OccurrenceID: target.ID, Status: models.RegGoing, AttendanceMode: models.AttendanceInPerson, Source: "web"}))
 	eid := itoa(f.event.ID)
-	apiDo(t, f.admin, "PUT", "/api/v1/events/"+eid, map[string]any{"recurrenceRule": "FREQ=WEEKLY;COUNT=1"}, http.StatusOK)
-	apiDo(t, f.admin, "PUT", "/api/v1/events/"+eid, map[string]any{"recurrenceRule": "FREQ=WEEKLY;COUNT=3",
-		"title": "NEWSECRETTITLE", "location": "NEWSECRETPLACE"}, http.StatusOK)
+	apiDo(t, f.admin, "PUT", "/api/v1/events/"+eid, seriesBody(t, f.admin, "/api/v1/events/"+eid, map[string]any{"recurrenceRule": "FREQ=WEEKLY;COUNT=1"}), http.StatusOK)
+	apiDo(t, f.admin, "PUT", "/api/v1/events/"+eid, seriesBody(t, f.admin, "/api/v1/events/"+eid, map[string]any{"recurrenceRule": "FREQ=WEEKLY;COUNT=3",
+		"title": "NEWSECRETTITLE", "location": "NEWSECRETPLACE"}), http.StatusOK)
 	if got := savedOccurrenceAccess(t, f); got.Status != policy.OccurrenceAccessEnded || regStatus(t, f.app, f.recipient.ID, target.ID) != models.RegGoing {
 		t.Fatalf("fixture: the grant %+v", got)
 	}

@@ -500,7 +500,7 @@ func TestSeriesEditMovesNotifyChanged(t *testing.T) {
 	}
 	// Move the series start time: both future dates move.
 	w = admin.do("PUT", fmt.Sprintf("/api/v1/events/%d", eventID),
-		map[string]any{"startsLocal": start.Add(time.Hour).Format("2006-01-02T15:04")}, true)
+		seriesBody(t, admin, fmt.Sprintf("/api/v1/events/%d", eventID), map[string]any{"startsLocal": start.Add(time.Hour).Format("2006-01-02T15:04")}), true)
 	if w.Code != http.StatusOK {
 		t.Fatalf("series move: %d %s", w.Code, w.Body.String())
 	}

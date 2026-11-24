@@ -168,13 +168,14 @@ for (const scenario of ["adult-decline", "adult-block", "teen-removal"] as const
     // Own scoped RSVP, not household/proxy or ordinary RSVP. The real server
     // returns the current answer after each save; mode/guests are explicit.
     if (scenario === "adult-decline") {
-      await admin("PUT", `/events/${event.id}`, { capacity: 1 });
+      // A series save names the read it was made from (DEC-162).
+      const capped = await admin("PUT", `/events/${event.id}`, { capacity: 1, revision: (await admin("GET", `/events/${event.id}`)).event.revision });
       await page.getByLabel("Guests", { exact: true }).fill("2");
       await page.getByRole("button", { name: "Going", exact: true }).click();
       await expect(page.getByRole("alert")).toHaveText(/This event is full/);
       await expect(page.getByLabel("Guests", { exact: true })).toHaveValue("2");
       await capture(page, "capacity-error-preserves-values");
-      await admin("PUT", `/events/${event.id}`, { capacity: 10 });
+      await admin("PUT", `/events/${event.id}`, { capacity: 10, revision: capped.event.revision });
       await page.getByLabel("Guests", { exact: true }).fill("0");
       await page.getByRole("button", { name: "Maybe", exact: true }).click();
       await expect(page.getByText("You said maybe. Change it anytime.", { exact: true })).toBeVisible();
