@@ -1788,7 +1788,7 @@ func TestDateEditAndDepartureRaceLeaveNoMovedKeptDate(t *testing.T) {
 			preview := f.preview(t)
 			date := models.FormatCalendarDate(f.occ.OriginalDate)
 			base := editBaseOf(t, f.leaderC, f.ev.ID, date)
-			body := dateEditBody(newDateAttempt(t), base.Revision, map[string]any{"durationMinutes": int(f.occ.EndsAt.Sub(f.occ.StartsAt)/time.Minute) + 30})
+			body := dateEditBody(base.Revision, map[string]any{"durationMinutes": int(f.occ.EndsAt.Sub(f.occ.StartsAt)/time.Minute) + 30})
 			gate := holdContactGate(t, f.app)
 			edit := func() <-chan *httptest.ResponseRecorder {
 				return goPostDateEdit(cloneContactClient(f.leaderC), f.ev.ID, date, body)

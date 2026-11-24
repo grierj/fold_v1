@@ -4,11 +4,9 @@ import (
 	"bytes"
 	"crypto/hmac"
 	"crypto/sha256"
-	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"net/http"
 	"regexp"
@@ -27,28 +25,23 @@ import (
 	"gorm.io/gorm/clause"
 )
 
-// The guarded date edit (M8.1). A manager's editor holds the date's revision
-// token, read from a manager surface; POST /events/:id/occurrences/:date/edits
-// names it and an attempt id, and is refused with date_changed when the date,
-// its series or the inherited group place changed since. A retry of an
-// applied attempt is recognised by the date's receipt and answered without a
-// second application.
+// The guarded date edit (M8.1, DEC-164). A manager's editor holds the date's
+// revision token, read from a manager surface; POST
+// /events/:id/occurrences/:date/edits names it, and is refused with
+// date_changed when the date, its series or the inherited group place changed
+// since. A resend of an applied edit names a base the edit itself moved on, so
+// it is refused the same way and the client reads the date again.
 //
-// Restore safety: the token and the receipt are bound to a per-process
-// generation (processKey), checked before any receipt. Every restart, and so
-// every scripted restore, rollback and re-upgrade, starts a new generation, so
-// a token from before it is refused, never matched against restored rows. A
-// database restored under a still-running process keeps the generation; that
-// is the same limit the restore barrier states (docs/agents/erasure.md).
+// Restore safety: the token is bound to a per-process generation
+// (processKey). Every restart, and so every scripted restore, rollback and
+// re-upgrade, starts a new generation, so a token from before it is refused,
+// never matched against restored rows. A database restored under a
+// still-running process keeps the generation; that is the same limit the
+// restore barrier states (docs/agents/erasure.md).
 
 var (
-	errDateChanged = apiErr(http.StatusConflict, "date_changed", "the date changed since this edit was based on it")
-	// errDateBaseSuperseded is date_changed when the locked check proved the
-	// submitted base older than the date (baseSuperseded): an earlier send of
-	// that base can never apply in this generation, so a browser holding one
-	// whose outcome it could not read may start over after a fresh read.
-	errDateBaseSuperseded = apiErrWith(errDateChanged, gin.H{"baseSuperseded": true})
-	errDateEditInvalid    = apiErr(http.StatusBadRequest, "date_edit_invalid", "that date edit isn't one we can read")
+	errDateChanged     = apiErr(http.StatusConflict, "date_changed", "the date changed since this edit was based on it")
+	errDateEditInvalid = apiErr(http.StatusBadRequest, "date_edit_invalid", "that date edit isn't one we can read")
 	// errDatePageOutdated answers the retired date PUT (apiRetiredDatePut):
 	// the page that sent it is from before the guarded edit.
 	errDatePageOutdated = apiErr(http.StatusConflict, "date_page_outdated", "this page is out of date; reload it to edit the date")
@@ -65,14 +58,11 @@ var (
 		"someone who left the group kept this date; remove them from it before making it end later")
 )
 
-var (
-	dateTokenRe   = regexp.MustCompile(`^1\.([0-9a-f]{16})\.[0-9]{1,19}\.[0-9]{1,19}\.[0-9]{1,19}\.(?:-|[0-9a-f]{16})$`)
-	dateAttemptRe = regexp.MustCompile(`^[0-9a-f]{32}$`)
-)
+var dateTokenRe = regexp.MustCompile(`^1\.([0-9a-f]{16})\.[0-9]{1,19}\.[0-9]{1,19}\.[0-9]{1,19}\.(?:-|[0-9a-f]{16})$`)
 
-// dateEditSettled is the callback's answer for a replay or a no-op: the whole
-// transaction rolls back, both reconcile passes included, and the handler
-// answers 200 only when that rollback is confirmed.
+// dateEditSettled is the callback's answer for a no-op: the whole transaction
+// rolls back, both reconcile passes included, and the handler answers 200
+// only when that rollback is confirmed.
 type dateEditSettled struct{ resp occurrenceJSON }
 
 func (*dateEditSettled) Error() string { return "date edit settled without a write" }
@@ -148,69 +138,6 @@ func (a *App) dateToken(ev *models.Event, occ *models.EventOccurrence, shown *mo
 	return a.editRevision(occ.ID, ev.EditRevision, occ.EditRevision, place)
 }
 
-// baseSuperseded is whether base, a well-formed token of this generation, is
-// strictly older than the date's current counters: the same occurrence, no
-// counter ahead of the current one and at least one behind. The triggers of
-// 00010 only ever raise a counter, so such a base never becomes current again
-// in this generation (a database restored under a running process is the
-// stated limit). A mismatch on the inherited place alone proves nothing: the
-// group's place can change back, so the base can match again (A to B to A).
-func baseSuperseded(base string, occurrenceID uint, eventRev, dateRev int64) bool {
-	parts := strings.Split(base, ".")
-	if len(parts) != 6 {
-		return false
-	}
-	var n [3]uint64
-	for i, s := range parts[2:5] {
-		v, err := strconv.ParseUint(s, 10, 64)
-		if err != nil {
-			return false
-		}
-		n[i] = v
-	}
-	if eventRev < 0 || dateRev < 0 || n[0] != uint64(occurrenceID) {
-		return false
-	}
-	ev, date := uint64(eventRev), uint64(dateRev)
-	return n[1] <= ev && n[2] <= date && (n[1] < ev || n[2] < date)
-}
-
-// dateEditIntent is one request as the receipt binds it.
-type dateEditIntent struct {
-	attempt   []byte
-	base      string
-	canonical string
-	reason    string
-	// consent is the reviewed impact's token, "" when absent.
-	consent string
-}
-
-// dateReceipt is the keyed digest stored on the date when an attempt applies:
-// the actor, the event, the date, the attempt and its normalized intent, and
-// result, the date's token after every effect of the edit. A later change to
-// the event, the date or the inherited place changes the current token, so the
-// receipt stops matching and a late retry gets date_changed.
-func (a *App) dateReceipt(actorID, eventID, occurrenceID uint, in dateEditIntent, result string) []byte {
-	m := hmac.New(sha256.New, a.processKey("date-edit-receipt:v1"))
-	m.Write([]byte("fold.date-edit.receipt.v1\x00"))
-	var n [8]byte
-	for _, id := range []uint{actorID, eventID, occurrenceID} {
-		binary.BigEndian.PutUint64(n[:], uint64(id))
-		m.Write(n[:])
-	}
-	m.Write(in.attempt)
-	var l [4]byte
-	for _, s := range []string{in.base, in.canonical, in.reason, in.consent} {
-		binary.BigEndian.PutUint32(l[:], uint32(len(s)))
-		m.Write(l[:])
-		m.Write([]byte(s))
-	}
-	binary.BigEndian.PutUint32(l[:], uint32(len(result)))
-	m.Write(l[:])
-	m.Write([]byte(result))
-	return m.Sum(nil)
-}
-
 // dateEditChanges is the request's changes object; each field is raw so its
 // presence is explicit.
 type dateEditChanges struct {
@@ -230,7 +157,10 @@ func (ch dateEditChanges) empty() bool {
 
 // dateEdit is a parsed, normalized request.
 type dateEdit struct {
-	intent        dateEditIntent
+	base string
+	// consent is the reviewed impact's token, "" when absent.
+	consent       string
+	reason        string
 	startsLocal   *string
 	duration      *int
 	title         *string
@@ -272,25 +202,26 @@ func rawString(raw json.RawMessage) (*string, bool) {
 // a value that fails a field's own rule gets that field's answer.
 func parseDateEdit(raw []byte) (*dateEdit, error) {
 	var body struct {
-		Attempt  string          `json:"attempt"`
+		// Attempt is optional, unvalidated and ignored: a page from the
+		// earlier release and the restore drill's candidate writer still send
+		// one, and decodeStrict refuses an unknown key.
+		Attempt  json.RawMessage `json:"attempt"`
 		Revision string          `json:"revision"`
 		Changes  json.RawMessage `json:"changes"`
 		Reason   *string         `json:"reason"`
 		Consent  *string         `json:"consent"`
 	}
 	var ch dateEditChanges
-	if !decodeStrict(raw, &body) || !dateAttemptRe.MatchString(body.Attempt) || !dateTokenRe.MatchString(body.Revision) ||
+	if !decodeStrict(raw, &body) || !dateTokenRe.MatchString(body.Revision) ||
 		!decodeStrict(body.Changes, &ch) || ch.empty() {
 		return nil, errDateEditInvalid
 	}
 	if body.Consent != nil && !consent.WellFormed(*body.Consent) {
 		return nil, errDateEditInvalid
 	}
-	e := &dateEdit{}
-	e.intent.attempt, _ = hex.DecodeString(body.Attempt)
-	e.intent.base = body.Revision
+	e := &dateEdit{base: body.Revision}
 	if body.Consent != nil {
-		e.intent.consent = *body.Consent
+		e.consent = *body.Consent
 	}
 	var ok bool
 	if e.startsLocal, ok = rawString(ch.StartsLocal); !ok {
@@ -317,9 +248,9 @@ func parseDateEdit(raw []byte) (*dateEdit, error) {
 		return nil, errDateEditInvalid
 	}
 	if e.visibilitySet && body.Reason != nil {
-		e.intent.reason = strings.TrimSpace(*body.Reason)
+		e.reason = strings.TrimSpace(*body.Reason)
 	}
-	if len(e.intent.reason) > 500 {
+	if len(e.reason) > 500 {
 		return nil, errReasonTooLong
 	}
 	if e.capacity, e.capacitySet, err = parseCapacity(ch.CapacityOverride); err != nil {
@@ -334,34 +265,11 @@ func parseDateEdit(raw []byte) (*dateEdit, error) {
 	if err := validateEventText(strOrEmpty(e.title), "", strOrEmpty(e.location)); err != nil {
 		return nil, err
 	}
-	e.intent.canonical = e.canonical()
 	return e, nil
 }
 
-// canonical is the normalized changes in a fixed order: null for an absent
-// field, {"v": value} for a present one (the value may be null).
-func (e *dateEdit) canonical() string {
-	field := func(present bool, v any) any {
-		if !present {
-			return nil
-		}
-		return map[string]any{"v": v}
-	}
-	b, _ := json.Marshal([]any{
-		field(e.startsLocal != nil, e.startsLocal),
-		field(e.duration != nil, e.duration),
-		field(e.title != nil, e.title),
-		field(e.location != nil, e.location),
-		field(e.capacitySet, e.capacity),
-		field(e.remoteSet, e.remote),
-		field(e.visibilitySet, e.visibility),
-	})
-	return string(b)
-}
-
 // dateEditStep runs the test hook at a named point of the guarded edit:
-// "selected" after the losers are selected, "effects" after every effect and
-// before the receipt, "receipt" after the receipt is written.
+// "selected" after the losers are selected, "effects" after every effect.
 func (a *App) dateEditStep(tx *gorm.DB, step string) error {
 	if a.hooks.dateEditStep == nil {
 		return nil
@@ -486,10 +394,10 @@ func (a *App) apiEditDate(c *gin.Context) {
 	})
 	// A participating edit is acknowledged for the actor the attempt that
 	// decided it locked, only once its outcome is known: committed, or
-	// rolled back with the rollback confirmed (a settled replay or no-op, a
-	// refusal). An unknown COMMIT, an unconfirmed rollback, the refusals
-	// made before the writer (the preflight, the body, a detected restore)
-	// and the 401 carry none.
+	// rolled back with the rollback confirmed (a settled no-op, a refusal).
+	// An unknown COMMIT, an unconfirmed rollback, the refusals made before
+	// the writer (the preflight, the body, a detected restore) and the 401
+	// carry none.
 	var settled *dateEditSettled
 	decided := err == nil || (rollbackConfirmed(err) && (errors.As(err, &settled) || errors.Is(err, errDateVisibility) || decidedRefusal(err)))
 	if ackErr := a.acknowledgeDecision(c, judged, decided); ackErr != nil {
@@ -558,20 +466,7 @@ func (a *App) editDateIn(tx *gorm.DB, d *singleDate, me *models.User, ip string,
 	}
 	shown := a.groupShownTo(me, f.group, f.rel)
 	current := a.dateToken(&ev, &o, shown)
-	if edit.intent.base[2:18] != a.editGeneration() {
-		return occurrenceJSON{}, errDateChanged
-	}
-	if o.EditReceipt != nil && hmac.Equal(o.EditReceipt, a.dateReceipt(me.ID, ev.ID, o.ID, edit.intent, current)) {
-		resp, err := a.managedDateIn(tx, me, &ev, &o, shown, current)
-		if err != nil {
-			return occurrenceJSON{}, err
-		}
-		return occurrenceJSON{}, &dateEditSettled{resp}
-	}
-	if edit.intent.base != current {
-		if baseSuperseded(edit.intent.base, o.ID, ev.EditRevision, o.EditRevision) {
-			return occurrenceJSON{}, errDateBaseSuperseded
-		}
+	if edit.base[2:18] != a.editGeneration() || edit.base != current {
 		return occurrenceJSON{}, errDateChanged
 	}
 	var wallStart *time.Time
@@ -667,7 +562,7 @@ func (a *App) editDateIn(tx *gorm.DB, d *singleDate, me *models.User, ip string,
 			cancelled = len(s.rows) > 0
 		}
 		b, h := dateImpactIn(me.ID, &ev, &prior, before, after, sel)
-		plan, token, err := a.checkConsentIn(tx, &edit.intent.consent, h, b.entries)
+		plan, token, err := a.checkConsentIn(tx, &edit.consent, h, b.entries)
 		if errors.Is(err, errConsentMismatch) {
 			impact := b.impact
 			impact.Consent = token
@@ -682,7 +577,7 @@ func (a *App) editDateIn(tx *gorm.DB, d *singleDate, me *models.User, ip string,
 				return occurrenceJSON{}, err
 			}
 		}
-		if err := a.changeDateVisibilitySelected(tx, me, ip, &ev, &o, f.group, edit.visibility, edit.intent.reason, false, cd); err != nil {
+		if err := a.changeDateVisibilitySelected(tx, me, ip, &ev, &o, f.group, edit.visibility, edit.reason, false, cd); err != nil {
 			return occurrenceJSON{}, err
 		}
 		if err := plan.Done(); err != nil {
@@ -716,26 +611,14 @@ func (a *App) editDateIn(tx *gorm.DB, d *singleDate, me *models.User, ip string,
 	if err := a.dateEditStep(tx, "effects"); err != nil {
 		return occurrenceJSON{}, err
 	}
-	// The receipt is the last write to the event or the date: no effect above
-	// and no reconcile pass after the callback writes either row again.
+	// The answer's token is read after every effect: the triggers of 00010
+	// raised the counters, and no reconcile pass after the callback writes the
+	// event or the date again.
 	if err := tx.Raw("SELECT e.edit_revision AS event, o.edit_revision AS date FROM events e JOIN event_occurrences o ON o.event_id = e.id WHERE o.id = ?", o.ID).
 		Row().Scan(&ev.EditRevision, &o.EditRevision); err != nil {
 		return occurrenceJSON{}, err
 	}
-	result := a.dateToken(&ev, &o, shown)
-	receipt := a.dateReceipt(me.ID, ev.ID, o.ID, edit.intent, result)
-	res := tx.Exec("UPDATE event_occurrences SET edit_receipt = ? WHERE id = ?", receipt, o.ID)
-	if res.Error != nil {
-		return occurrenceJSON{}, res.Error
-	}
-	if res.RowsAffected != 1 {
-		return occurrenceJSON{}, fmt.Errorf("date edit receipt wrote %d rows", res.RowsAffected)
-	}
-	o.EditReceipt = receipt
-	if err := a.dateEditStep(tx, "receipt"); err != nil {
-		return occurrenceJSON{}, err
-	}
-	return a.managedDateIn(tx, me, &ev, &o, shown, result)
+	return a.managedDateIn(tx, me, &ev, &o, shown, a.dateToken(&ev, &o, shown))
 }
 
 // sameDateColumns is whether next writes nothing the guarded edit writes

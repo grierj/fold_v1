@@ -342,13 +342,6 @@ type dateNeedsConsentJSON struct {
 	Impact visibilityImpactJSON `json:"impact"`
 }
 
-// dateChangedJSON is what a 409 date_changed from the guarded edit may carry
-// beside error and code: baseSuperseded only when the submitted base is
-// proved older than the date (errDateBaseSuperseded), absent otherwise.
-type dateChangedJSON struct {
-	BaseSuperseded bool `json:"baseSuperseded,omitempty"`
-}
-
 // keptDatesConflictJSON is what a 409 date_kept_after_leaving carries beside
 // error and code: each refused date (its original date, sorted) and how many
 // people kept it. Counts only, never names, ids or links (DEC-156).

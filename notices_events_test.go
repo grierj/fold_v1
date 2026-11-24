@@ -205,7 +205,7 @@ func TestManualCancelWithholdsAnArchivedGroupsDate(t *testing.T) {
 
 	apiDo(t, f.admin, "PUT", "/api/v1/groups/"+itoa(f.group), map[string]any{"status": models.GroupArchived}, http.StatusOK)
 	base := editBaseOf(t, f.admin, f.event.ID, f.date(1))
-	wantDateEdit(t, f.admin, f.event.ID, f.date(1), dateEditBody(newDateAttempt(t), base.Revision,
+	wantDateEdit(t, f.admin, f.event.ID, f.date(1), dateEditBody(base.Revision,
 		map[string]any{"title": "HIDDENTITLE", "location": "HIDDENPLACE"}), http.StatusOK, "")
 	for _, u := range []*models.User{teen, f.memberUser, f.leaderUser} {
 		if s := regStatus(t, f.app, u.ID, target.ID); s != models.RegGoing {
@@ -335,7 +335,7 @@ func TestReenableWithholdsAHiddenDate(t *testing.T) {
 	// While the second is away the group is archived and the date renamed.
 	apiDo(t, f.admin, "PUT", "/api/v1/groups/"+itoa(f.group), map[string]any{"status": models.GroupArchived}, http.StatusOK)
 	base := editBaseOf(t, f.admin, f.event.ID, f.date(2))
-	wantDateEdit(t, f.admin, f.event.ID, f.date(2), dateEditBody(newDateAttempt(t), base.Revision,
+	wantDateEdit(t, f.admin, f.event.ID, f.date(2), dateEditBody(base.Revision,
 		map[string]any{"title": "HIDDENTITLE", "location": "HIDDENPLACE"}), http.StatusOK, "")
 	mark = markNotices(t, f.app)
 	apiDo(t, f.admin, "PUT", "/api/v1/admin/users/"+itoa(away.ID), map[string]any{"status": models.UserActive}, http.StatusOK)
@@ -543,7 +543,7 @@ func TestReenableAsMemberJudgesTheRoleItComesBackTo(t *testing.T) {
 	apiDo(t, f.admin, "PUT", "/api/v1/groups/"+itoa(f.group), map[string]any{"status": models.GroupArchived}, http.StatusOK)
 	for i, title := range map[int]string{2: "ROOMYSECRET", 3: "FULLSECRET"} {
 		base := editBaseOf(t, f.admin, f.event.ID, f.date(i))
-		wantDateEdit(t, f.admin, f.event.ID, f.date(i), dateEditBody(newDateAttempt(t), base.Revision,
+		wantDateEdit(t, f.admin, f.event.ID, f.date(i), dateEditBody(base.Revision,
 			map[string]any{"title": title, "location": "HIDDENPLACE"}), http.StatusOK, "")
 	}
 

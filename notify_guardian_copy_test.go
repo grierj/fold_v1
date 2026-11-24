@@ -1098,7 +1098,7 @@ func TestGuardianCopyOfADateNeverStraddlesAnEdit(t *testing.T) {
 					if step != "grants" || !fired.CompareAndSwap(false, true) {
 						return
 					}
-					w := postDateEdit(f.admin, f.event.ID, date, dateEditBody(newDateAttempt(t), base.Revision,
+					w := postDateEdit(f.admin, f.event.ID, date, dateEditBody(base.Revision,
 						map[string]any{"startsLocal": target.StartsAt.Add(2 * time.Hour).UTC().Format("2006-01-02T15:04")}))
 					if w.Code != http.StatusOK {
 						t.Errorf("the edit at the seam: %d %s", w.Code, w.Body.String())

@@ -1881,7 +1881,7 @@ func TestImpossibleDatesKeepTheirAnswers(t *testing.T) {
 		apiDo(t, admin, "GET", fmt.Sprintf("/api/v1/events/%d/dates/%s", eventID, bad), nil, http.StatusNotFound)
 		apiDo(t, admin, "GET", fmt.Sprintf("/api/v1/events/%d/dates/%s/calendar.ics", eventID, bad), nil, http.StatusNotFound)
 		apiDo(t, admin, "POST", fmt.Sprintf("/api/v1/events/%d/cancel", eventID), map[string]any{"date": bad}, http.StatusBadRequest)
-		apiDo(t, admin, "POST", dateEditPath(eventID, bad), dateEditBody(newDateAttempt(t), "1.0000000000000000.0.0.0.-", map[string]any{"location": "Hall"}), http.StatusBadRequest)
+		apiDo(t, admin, "POST", dateEditPath(eventID, bad), dateEditBody("1.0000000000000000.0.0.0.-", map[string]any{"location": "Hall"}), http.StatusBadRequest)
 		// The retired writer still refuses a malformed date before date_page_outdated.
 		apiDo(t, admin, "PUT", fmt.Sprintf("/api/v1/events/%d/occurrences/%s", eventID, bad), map[string]any{"location": "Hall"}, http.StatusBadRequest)
 		// parseDateWindow checks from and to on the group list and the calendar.
@@ -2034,7 +2034,7 @@ func TestEventChangedNoticeSerializesWithRealAdminDelete(t *testing.T) {
 		base := editBaseOf(t, f.admin, f.eventID, f.date)
 		return gatedErasureScene{app: f.app, victim: f.victim, sends: []string{notify.EventChanged},
 			run: func() error {
-				return doExpect(f.admin, "POST", dateEditPath(f.eventID, f.date), dateEditBody(newDateAttempt(t), base.Revision, map[string]any{"location": "The new hall"}), http.StatusOK)
+				return doExpect(f.admin, "POST", dateEditPath(f.eventID, f.date), dateEditBody(base.Revision, map[string]any{"location": "The new hall"}), http.StatusOK)
 			},
 			erase: eraseVia(f.eraser, f.victim),
 			told: func(t *testing.T) {
@@ -2900,7 +2900,7 @@ func TestDateEditUsesZoneAfterHeldBody(t *testing.T) {
 			wall := f.date + "T" + tc.clock
 			changes := map[string]any{"startsLocal": " " + wall + " ", "durationMinutes": 90}
 			base := editBaseOf(t, f.actor, f.event.ID, f.date)
-			held := f.actor.doHeld("POST", dateEditPath(f.event.ID, f.date), dateEditBody(newDateAttempt(t), base.Revision, changes))
+			held := f.actor.doHeld("POST", dateEditPath(f.event.ID, f.date), dateEditBody(base.Revision, changes))
 			apiDo(t, f.admin, "PUT", eventPath, seriesBody(t, f.admin, eventPath, map[string]any{"tzid": tc.zone}), http.StatusOK)
 			var before models.EventOccurrence
 			if err := f.app.DB.Where("event_id = ? AND original_date = ?", f.event.ID, f.date).First(&before).Error; err != nil {
@@ -2953,7 +2953,7 @@ func TestDateEditInvalidStartAfterHeldBodyWritesNothing(t *testing.T) {
 		"location": "New hall", "visibility": models.VisibilityPrivate,
 	}
 	base := editBaseOf(t, f.actor, f.event.ID, f.date)
-	held := f.actor.doHeld("POST", dateEditPath(f.event.ID, f.date), dateEditBody(newDateAttempt(t), base.Revision, changes))
+	held := f.actor.doHeld("POST", dateEditPath(f.event.ID, f.date), dateEditBody(base.Revision, changes))
 	apiDo(t, f.admin, "PUT", eventPath, seriesBody(t, f.admin, eventPath, map[string]any{"tzid": "Asia/Tokyo"}), http.StatusOK)
 	before := eventWriterState(t, f.app, f.event.ID)
 	held.release()
@@ -2977,7 +2977,7 @@ func TestDateEditEventDeletedAfterHeldBody(t *testing.T) {
 	f := newEventWriterRace(t, false)
 	eventPath := "/api/v1/events/" + itoa(f.event.ID)
 	base := editBaseOf(t, f.actor, f.event.ID, f.date)
-	held := f.actor.doHeld("POST", dateEditPath(f.event.ID, f.date), dateEditBody(newDateAttempt(t), base.Revision, map[string]any{
+	held := f.actor.doHeld("POST", dateEditPath(f.event.ID, f.date), dateEditBody(base.Revision, map[string]any{
 		"startsLocal": f.date + "T21:00", "location": "New hall", "visibility": models.VisibilityPrivate,
 	}))
 	apiDo(t, f.admin, "DELETE", eventPath, nil, http.StatusOK)
@@ -3099,7 +3099,7 @@ func TestEventWritersKeepEventFirstLockOrder(t *testing.T) {
 			case "date":
 				// The guarded edit, on a base read without a lock.
 				base := editBaseOf(t, f.actor, f.event.ID, f.date)
-				method, path, body = "POST", dateEditPath(f.event.ID, f.date), dateEditBody(newDateAttempt(t), base.Revision, map[string]any{"visibility": models.VisibilityPrivate})
+				method, path, body = "POST", dateEditPath(f.event.ID, f.date), dateEditBody(base.Revision, map[string]any{"visibility": models.VisibilityPrivate})
 			}
 			done := queueContact(func() *httptest.ResponseRecorder { return f.actor.do(method, path, body, true) })
 			testdb.WaitUntil(t, "event writer waiting on its first row lock", 5*time.Second, func() bool {
@@ -3314,7 +3314,7 @@ func TestDateEditEndPassingDuringARoomWaitReruns(t *testing.T) {
 	// (DEC-156), and the new end is still ahead of the clock the first
 	// attempt judges on.
 	minutes := int(target.EndsAt.Sub(target.StartsAt)/time.Minute) - 1
-	answer := goPostDateEdit(f.admin, f.event.ID, date, dateEditBody(newDateAttempt(t), base.Revision, map[string]any{"durationMinutes": minutes, "title": "NEWSECRETTITLE"}))
+	answer := goPostDateEdit(f.admin, f.event.ID, date, dateEditBody(base.Revision, map[string]any{"durationMinutes": minutes, "title": "NEWSECRETTITLE"}))
 	waitForLockedUsersQuery(t, f.app, `%FROM "rooms"%FOR UPDATE%`)
 	after := target.EndsAt.Add(time.Minute)
 	clock.set(after)
@@ -3358,7 +3358,7 @@ func TestDateEditPromotionReadsItsOwnClock(t *testing.T) {
 	clock := newMutableClock(f.app, cutoff.Add(-time.Minute))
 	base := editBaseOf(t, f.admin, f.event.ID, date)
 	release := holdRows(t, f.app, "SELECT id FROM users WHERE id = ? FOR UPDATE", going.ID)
-	answer := goPostDateEdit(f.admin, f.event.ID, date, dateEditBody(newDateAttempt(t), base.Revision, map[string]any{"location": "A bigger hall", "capacityOverride": 3}))
+	answer := goPostDateEdit(f.admin, f.event.ID, date, dateEditBody(base.Revision, map[string]any{"location": "A bigger hall", "capacityOverride": 3}))
 	waitForLockedUsersQuery(t, f.app, `%FROM users%FOR KEY SHARE%`)
 	clock.set(cutoff.Add(time.Minute))
 	release()

@@ -3,7 +3,6 @@
 // screenshot and running the UI checks for each. Writes results.json and
 // result.txt under $VERIFY_EVIDENCE/ui/. Exit 1 when a hard check fails.
 // Run only against an instance started by `verify-fold up`.
-import { randomBytes } from "node:crypto";
 import { createRequire } from "node:module";
 import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
@@ -45,10 +44,10 @@ async function api(page, method, p, data) {
 }
 
 // A manager's date save through the guarded edit, as the date editor sends it: the revision from the
-// manager's own read of that date, a fresh attempt id and only the changed fields.
+// manager's own read of that date and only the changed fields.
 async function saveDate(page, eventId, date, changes) {
   const { occurrence: base } = await api(page, "GET", `/events/${eventId}/occurrences/${date}`);
-  const { occurrence } = await api(page, "POST", `/events/${eventId}/occurrences/${date}/edits`, { attempt: randomBytes(16).toString("hex"), revision: base.revision, changes });
+  const { occurrence } = await api(page, "POST", `/events/${eventId}/occurrences/${date}/edits`, { revision: base.revision, changes });
   if (occurrence?.id !== base.id || !occurrence.revision) throw new Error(`seed: the save of ${date} did not answer that date`);
 }
 

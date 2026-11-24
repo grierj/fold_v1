@@ -417,7 +417,7 @@ func (h householdAcrossTwoDates) editB(t *testing.T) <-chan *httptest.ResponseRe
 	t.Helper()
 	date := models.FormatCalendarDate(h.b.OriginalDate)
 	base := editBaseOf(t, h.f.admin, h.f.event.ID, date)
-	return goPostDateEdit(h.f.admin, h.f.event.ID, date, dateEditBody(newDateAttempt(t), base.Revision, map[string]any{"title": "Edited B"}))
+	return goPostDateEdit(h.f.admin, h.f.event.ID, date, dateEditBody(base.Revision, map[string]any{"title": "Edited B"}))
 }
 
 // both waits for the edit and the removal and checks each applied: w was

@@ -1234,7 +1234,7 @@ func TestCancelledDateTombstoneOutlivesTheDateAndARetime(t *testing.T) {
 		t.Fatalf("the manager's edit base of a cancelled date: %+v", base)
 	}
 	apiDo(t, departed, "GET", managedDatePath(f.event.ID, tombstoneDate(target)), nil, http.StatusNotFound)
-	wantDateEdit(t, f.admin, f.event.ID, tombstoneDate(target), dateEditBody(newDateAttempt(t), base.Revision, map[string]any{"startsLocal": earlier}), http.StatusOK, "")
+	wantDateEdit(t, f.admin, f.event.ID, tombstoneDate(target), dateEditBody(base.Revision, map[string]any{"startsLocal": earlier}), http.StatusOK, "")
 	var moved models.EventOccurrence
 	gormMust(t, f.app.DB.First(&moved, target.ID))
 	if !moved.EndsAt.Before(*stamped.EndedAt) || moved.Status != models.OccurrenceCancelled {
@@ -3095,7 +3095,7 @@ func TestInvitationReadersNeverStraddleAnEdit(t *testing.T) {
 				if step != "grants" || !fired.CompareAndSwap(false, true) {
 					return
 				}
-				edit = postDateEdit(f.admin, f.event.ID, date, dateEditBody(newDateAttempt(t), base.Revision,
+				edit = postDateEdit(f.admin, f.event.ID, date, dateEditBody(base.Revision,
 					map[string]any{"startsLocal": newStart.UTC().Format("2006-01-02T15:04"), "title": movedTitle, "location": movedPlace}))
 			}
 			code, body := read()
@@ -3153,7 +3153,7 @@ func TestInvitationReadersNeverStraddleAnEdit(t *testing.T) {
 				if step != "grants" || !fired.CompareAndSwap(false, true) {
 					return
 				}
-				edit = postDateEdit(f.admin, f.event.ID, date, dateEditBody(newDateAttempt(t), base.Revision,
+				edit = postDateEdit(f.admin, f.event.ID, date, dateEditBody(base.Revision,
 					map[string]any{"startsLocal": newStart.UTC().Format("2006-01-02T15:04"), "title": movedTitle, "location": movedPlace}))
 			}
 			code, body := read()
