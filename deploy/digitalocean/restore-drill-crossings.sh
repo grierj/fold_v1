@@ -683,7 +683,8 @@ crossing_mirror_ghcr() {
     mkdir -m 755 "$d" || return 1
     CROSSING_MIRROR_CREATED=("$d" "${CROSSING_MIRROR_CREATED[@]}")
   done
-  printf 'server = "https://ghcr.io"\n\n[host."http://%s"]\n  capabilities = ["pull", "resolve"]\n' "$REGISTRY" >"$CROSSING_MIRROR_DIR/hosts.toml" || return 1
+  # Without referrers, the lookup for the build's attestation goes to ghcr.io and is denied.
+  printf 'server = "https://ghcr.io"\n\n[host."http://%s"]\n  capabilities = ["pull", "resolve", "referrers"]\n' "$REGISTRY" >"$CROSSING_MIRROR_DIR/hosts.toml" || return 1
   crossing_emit tools.jsonl --arg file "$CROSSING_MIRROR_DIR/hosts.toml" --arg mirror "$REGISTRY" \
     '{label:"environment", file:$file, mirror:$mirror, writtenByDrill:true}'
 }
