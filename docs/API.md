@@ -708,7 +708,7 @@ visibility, the leader-opened state and the group's visibility it follows. The
 same, it sends the same save with the new revision, up to three sends in all,
 and the server judges the consent again, so a save sent again that now needs a
 review opens the review. Different, or a read that no longer lets the person set
-the visibility (a 403 or 404 on the read or on a save it sent again, included),
+the visibility (a 403 or 404 on the read or on any save, the first included),
 and the panel closes on its own, with any open review, and the page reads the
 event from nothing and says the changes weren't saved, as after a refused
 series save. A reset is always treated as different: the page's read lists 90
@@ -1112,9 +1112,9 @@ says decides: when nothing the editor can save differs from the read it opened
 with, it sends the same save with the new revision, up to three sends in all,
 and after a third refusal whose read still shows no difference it shows its
 ordinary save error and stays open; when something differs, it closes and the
-page shows the event as stored, saying the changes were not saved; when the
-read (or a save the editor sent again) answers 403 or 404, or says the person no
-longer manages the event, it closes and the page shows what that person may
+page shows the event as stored, saying the changes were not saved; when any
+save or the read answers 403 or 404, or the read says the person no longer
+manages the event, it closes and the page shows what that person may
 now see, saying the changes were not saved (on the missing-event and
 event-unavailable screens too). Any
 other failure of the read leaves the editor open with its ordinary save error.

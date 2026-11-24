@@ -26,7 +26,9 @@ const lostAuthority = (err: ApiError) => err.status === 403 || err.status === 40
 // is read once: while nothing the save can write has changed (the person's own room booking, a restart), the same
 // save goes again under the new revision; anything else goes to `onConflict`, and the page shows what is stored.
 // Repeated refusals alone are never a conflict. Only the form and the sign-in that pressed Save send again: an answer
-// that lands after the form went away, or after this tab took another account, sends nothing more.
+// that lands after the form went away, or after this tab took another account, sends nothing more. A 403 or 404 to
+// any send or to the read says the person may no longer manage or see what they were editing: that is `onConflict`
+// too ("gone"), so the page stops showing it.
 //
 // `fields` is everything the save can write, as the form reads it (an absent value read as the form reads it). A
 // field left out would be overwritten without a word. It answers null when a read cannot show that the save is still
@@ -74,7 +76,7 @@ export function useRevisionSave<T, F>({
 
         return "saved";
       } catch (err) {
-        if (sends > 1 && err instanceof ApiError && lostAuthority(err)) return conflict("gone");
+        if (err instanceof ApiError && lostAuthority(err)) return conflict("gone");
 
         if (errorCode(err) !== "event_changed") throw err;
       }

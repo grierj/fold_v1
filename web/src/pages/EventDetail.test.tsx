@@ -2915,6 +2915,23 @@ describe("EventDetail when a visibility save meets someone else's change", () =>
     expect(Events.setVisibility).toHaveBeenCalledWith(7, expect.objectContaining({ visibility: "public", revision: "r2" }));
   });
 
+  it.each([403, 404])("closes the panel and stops showing the event when the first save answers %i", async (status) => {
+    vi.mocked(Events.get).mockResolvedValueOnce(opened).mockRejectedValue(new ApiError(404, "gone", { code: "not_found" }));
+    vi.mocked(Events.setVisibility).mockReset().mockRejectedValue(new ApiError(status, "no", { code: "x" }));
+    render(<main id="main" tabIndex={-1}><MemoryRouter initialEntries={["/events/7"]}><DateWritesProvider credential={credential}><Routes><Route path="/events/:id" element={<EventDetail />} /></Routes></DateWritesProvider></MemoryRouter></main>);
+    await userEvent.click(await screen.findByRole("button", { name: "Edit event" }));
+    await userEvent.click(screen.getByRole("radio", { name: /^Private/ }));
+    await userEvent.click(screen.getByRole("button", { name: "Save visibility" }));
+    expect(await screen.findByText("Event not found")).toBeInTheDocument();
+    const notice = await screen.findByText(UNSAVED);
+    await waitFor(() => expect(notice).toHaveFocus());
+    expect(screen.queryByRole("heading", { level: 1, name: "Hybrid study" })).not.toBeInTheDocument();
+    panelClosed();
+    expect(Events.setVisibility).toHaveBeenCalledOnce();
+    // The page's own read after the close, and no read by the control.
+    expect(Events.get).toHaveBeenCalledTimes(2);
+  });
+
   it("closes an open review with the panel", async () => {
     const after = await saveIntoRefusal(async () => theirs, true);
     expect(Events.setVisibility).toHaveBeenCalledExactlyOnceWith(7, expect.objectContaining({ visibility: "private", revision: "r1", consent: tightening.consent }));

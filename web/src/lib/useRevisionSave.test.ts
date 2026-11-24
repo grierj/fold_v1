@@ -111,6 +111,16 @@ describe("useRevisionSave", () => {
     expect(onConflict).toHaveBeenCalledExactlyOnceWith("gone");
   });
 
+  it.each([403, 404])("hands over \"gone\" when the first save answers %i, reading nothing", async (status) => {
+    const read = vi.fn();
+    const write = vi.fn().mockRejectedValue(new ApiError(status, "no", { code: "x" }));
+    const { send, onConflict } = setup(read);
+    expect(await send(write)).toBe("conflict");
+    expect(onConflict).toHaveBeenCalledExactlyOnceWith("gone");
+    expect(write).toHaveBeenCalledOnce();
+    expect(read).not.toHaveBeenCalled();
+  });
+
   it.each([403, 404])("hands over \"gone\" when a save it sent again by itself answers %i", async (status) => {
     const write = vi.fn().mockRejectedValueOnce(changed()).mockRejectedValueOnce(new ApiError(status, "no", { code: "x" }));
     const { send, onConflict } = setup(vi.fn().mockResolvedValue(readOf({ title: "Supper" })));
@@ -119,10 +129,10 @@ describe("useRevisionSave", () => {
     expect(write).toHaveBeenCalledTimes(2);
   });
 
-  it("throws the first send's own refusal, a 403 or a decision, for the form to handle", async () => {
+  it("throws the first send's own refusal, a validation error or a decision, for the form to handle", async () => {
     const read = vi.fn();
 
-    for (const err of [new ApiError(403, "no", { code: "forbidden" }), new ApiError(409, "review", { needsDecision: true })]) {
+    for (const err of [new ApiError(400, "no", { code: "visibility_not_allowed" }), new ApiError(409, "review", { needsDecision: true })]) {
       const { send, onConflict } = setup(read);
       await expect(send(vi.fn().mockRejectedValue(err))).rejects.toBe(err);
       expect(onConflict).not.toHaveBeenCalled();
