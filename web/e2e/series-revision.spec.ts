@@ -52,7 +52,10 @@ for (const width of [390, 1280]) {
     const other = await browser.newContext({ baseURL: test.info().project.use.baseURL, viewport: { width, height: 844 } });
     const second = await other.newPage();
     await signIn(second, "grier");
-    await openEditor(second, series.id);
+    // Through the group page's "Manage sign-ups" link: the roster it opens moves the page to itself on every read.
+    await second.goto(`/events/${series.id}?manage=${dateIn(9)}&edit=series`);
+    await expect(second.getByRole("button", { name: "Save series" })).toBeVisible();
+    await expect(second.getByRole("region", { name: "Manage sign-ups" })).toBeVisible();
 
     await page.getByRole("textbox", { name: "Title" }).fill(`Two editors supper ${width}`);
     await page.getByRole("button", { name: "Save series" }).click();
@@ -63,8 +66,8 @@ for (const width of [390, 1280]) {
     await second.getByRole("button", { name: "Save series" }).click();
     await expect(second.getByRole("button", { name: "Save series" })).toHaveCount(0);
     await expect(second.getByRole("status").filter({ hasText: NOTICE })).toBeInViewport();
+    await expect(second.getByRole("status").filter({ hasText: NOTICE })).toBeFocused();
     await expect(second.getByRole("heading", { level: 1, name: `Two editors supper ${width}` })).toBeVisible();
-    await expect(second.getByRole("button", { name: "Edit series" })).toBeFocused();
     await expect(second.getByText("Fellowship hall")).toHaveCount(0);
     expect(await series.read()).toMatchObject({ title: `Two editors supper ${width}`, location: "Room 201" });
 

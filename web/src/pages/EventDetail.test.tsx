@@ -2771,11 +2771,12 @@ describe("EventDetail when a series save meets someone else's change", () => {
     expect(screen.queryByText(NOTICE)).not.toBeInTheDocument();
     await act(async () => { after.resolve(theirs); await after.promise; });
     expect(await screen.findByRole("heading", { level: 1, name: "Bible study" })).toBeInTheDocument();
-    // Into a status region that was already there, empty, so the text is announced when it arrives.
-    expect((await screen.findByText(NOTICE)).parentElement).toHaveAttribute("role", "status");
+    const notice = await screen.findByText(NOTICE);
+    expect(notice).toHaveAttribute("role", "status");
+    // The line takes focus from Edit, where a save's reload leaves it: focus reads it out and brings it into view.
+    await waitFor(() => expect(notice).toHaveFocus());
     const edit = screen.getByRole("button", { name: "Edit event" });
     expect(edit).toHaveAttribute("aria-expanded", "false");
-    await waitFor(() => expect(edit).toHaveFocus());
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
     await userEvent.click(edit);
     expect(screen.queryByText(NOTICE)).not.toBeInTheDocument();
@@ -2798,7 +2799,9 @@ describe("EventDetail when a series save meets someone else's change", () => {
     expect(Events.update).toHaveBeenCalledOnce();
     showsNothingOfTheEvent();
     await act(async () => { after.resolve(demoted); await after.promise; });
-    expect((await screen.findByText("You can no longer manage this event, so your changes weren't saved.")).parentElement).toHaveAttribute("role", "status");
+    const notice = await screen.findByText("You can no longer manage this event, so your changes weren't saved.");
+    expect(notice).toHaveAttribute("role", "status");
+    await waitFor(() => expect(notice).toHaveFocus());
     expect(screen.queryByText(NOTICE)).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Edit event" })).not.toBeInTheDocument();
   });
