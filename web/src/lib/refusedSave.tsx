@@ -36,8 +36,9 @@ export function useRefusedSave(load: Pick<Load<unknown>, "loading" | "data" | "r
 }
 
 // The line for the screen the page shows: `canManage` is whether the viewer may still manage the `noun` shown; leave it
-// out on a screen that shows none (not found, unavailable), where the line says nothing about it.
-export function RefusedSaveLine({ save, noun, canManage }: { save: ReturnType<typeof useRefusedSave>; noun: string; canManage?: boolean }) {
+// out on a screen that shows none (not found, unavailable), where the line says nothing about it. `about` names which
+// one, on a page that lists several (a date's day on the event and group pages).
+export function RefusedSaveLine({ save, noun, canManage, about }: { save: ReturnType<typeof useRefusedSave>; noun: string; canManage?: boolean; about?: string }) {
   if (!save.why) return null;
 
   const text = canManage === undefined
@@ -50,7 +51,7 @@ export function RefusedSaveLine({ save, noun, canManage }: { save: ReturnType<ty
 
   return (
     <p ref={save.line} role="status" tabIndex={-1} className="mb-4 scroll-mt-4 rounded-lg border border-border bg-sunken px-4 py-3 text-sm outline-none">
-      {text}
+      {about ? `${about}. ${text}` : text}
     </p>
   );
 }

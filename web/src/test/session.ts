@@ -4,7 +4,7 @@ import { createElement, Fragment, useLayoutEffect, type ReactNode } from "react"
 import { expect, it, vi } from "vitest";
 import { AuthProvider, useAuth } from "../auth";
 import type { Credential } from "../api/core";
-import { DateWritesProvider } from "../lib/dateWrites";
+import { RosterWritesProvider } from "../lib/rosterWrites";
 import { bootstrapAnswer } from "./credential";
 import { testUser } from "./fixtures";
 import type { SentEdit } from "./guardedEdits";
@@ -15,8 +15,8 @@ interface SessionProps {
   onCredential?: (credential: Credential | null) => void;
 }
 
-// App's own session shape (App.tsx): the real AuthProvider's credential reaches DateWritesProvider, and another
-// person, an erased account reading as signed out included, remounts everything under it.
+// App's own session shape (App.tsx): the real AuthProvider, and another person, an erased account reading as signed
+// out included, remounts everything under it.
 function Keyed({ children, onCredential }: SessionProps) {
   const { user, loading, credential } = useAuth();
 
@@ -24,7 +24,7 @@ function Keyed({ children, onCredential }: SessionProps) {
 
   if (loading) return null;
 
-  return createElement(Fragment, { key: user ? `${user.id}:${user.status}` : "anon" }, createElement(DateWritesProvider, { credential, children }));
+  return createElement(Fragment, { key: user ? `${user.id}:${user.status}` : "anon" }, createElement(RosterWritesProvider, { children }));
 }
 
 export function SignedInSession(props: SessionProps) {
@@ -120,8 +120,9 @@ export function erasureCases(host: () => ErasureHost) {
     expect(h.drafted()).toBeChecked();
     await userEvent.click(within(dialog).getByRole("button", { name: "Save and notify" }));
     await waitFor(() => expect(h.sent()).toHaveLength(2));
-    expect(h.sent()[1]).toMatchObject({ attempt: h.sent()[0].attempt });
-    expect(h.sent()[1].consent).toMatch(/^[0-9a-f]{32}$/);
+    // The same save with the question's token added, under a new attempt id: no send is ever replayed.
+    expect(h.sent()[1]).toMatchObject({ revision: h.sent()[0].revision, changes: h.sent()[0].changes, consent: expect.stringMatching(/^[0-9a-f]{32}$/) });
+    expect(h.sent()[1].attempt).not.toBe(h.sent()[0].attempt);
   });
 
   it("asks the server nothing when the window gets focus back while no question is open", async () => {

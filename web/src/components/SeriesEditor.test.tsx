@@ -4,7 +4,7 @@ import { act, fireEvent, render, screen, waitFor, within } from "@testing-librar
 import userEvent from "@testing-library/user-event";
 import { RouterProvider, createMemoryRouter } from "react-router-dom";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { DateWritesProvider } from "../lib/dateWrites";
+import { RosterWritesProvider } from "../lib/rosterWrites";
 import { ERROR_COPY } from "../lib/errors";
 import { formatDayFull } from "../lib/when";
 import { occurrence } from "../test/occurrence";
@@ -453,7 +453,7 @@ describe("SeriesEditor and kept dates", () => {
   const home = () => screen.getByRole("region", { name: KEPT.home });
 
   function mount(onAuthorityLost = vi.fn()) {
-    const router = createMemoryRouter([{ path: "/", element: <DateWritesProvider><SeriesEditor series={series} idPrefix="kept" onSaved={() => {}} onAuthorityLost={onAuthorityLost} /></DateWritesProvider> }]);
+    const router = createMemoryRouter([{ path: "/", element: <RosterWritesProvider><SeriesEditor series={series} idPrefix="kept" onSaved={() => {}} onAuthorityLost={onAuthorityLost} /></RosterWritesProvider> }]);
     render(<RouterProvider router={router} />);
 
     return { onAuthorityLost };

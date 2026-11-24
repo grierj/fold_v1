@@ -24,12 +24,13 @@ const MAX_SENDS = 3;
 // The server says the person may no longer manage or see what they were editing.
 export const lostAuthority = (err: ApiError) => err.status === 403 || err.status === 404;
 
-// useRevisionSave is the one conflict protocol for a manager's save (DEC-162, DEC-163). The save names the read the
-// form opened with (`revision`, kept from the first render, like `opened`). On a refusal (`event_changed`) the value
-// is read once and compared, in this order: what is stored is what this save would leave (`intended`: an earlier
-// press stored it and its answer was lost), so the save is done and nothing more is sent; nothing the save can write
-// has changed since the form opened (the person's own room booking, a restart), so the same save goes again under the
-// new revision; anything else goes to `onConflict`, and the page shows what is stored.
+// useRevisionSave is the one conflict protocol for a manager's save (DEC-162, DEC-163, DEC-164). The save names the read
+// the form opened with (`revision`, kept from the first render, like `opened`). On a refusal (`changedCode`: an event's
+// `event_changed`, a single date's `date_changed`) the value is read once and compared, in this order: what is stored
+// is what this save would leave (`intended`: an earlier press stored it and its answer was lost), so the save is done
+// and nothing more is sent; nothing the save can write has changed since the form opened (the person's own room
+// booking, a restart), so the same save goes again under the new revision; anything else goes to `onConflict`, and
+// the page shows what is stored.
 // Repeated refusals alone are never a conflict. Only the form and the sign-in that pressed Save send again: an answer
 // that lands after the form went away, or after this tab took another account, sends nothing more. A 403 or 404 to
 // any send or to the read says the person may no longer manage or see what they were editing: that is `onConflict`
@@ -48,12 +49,14 @@ export function useRevisionSave<T, F>({
   read,
   fields,
   onConflict,
+  changedCode = "event_changed",
 }: {
   opened: T;
   revision: string | undefined;
   read: () => Promise<RevisionRead<T>>;
   fields: (value: T) => F | null;
   onConflict?: (why: RevisionConflict) => void;
+  changedCode?: "event_changed" | "date_changed";
 }) {
   const [base] = useState(() => ({ opened, revision }));
   const mounted = useRef(true);
@@ -86,7 +89,7 @@ export function useRevisionSave<T, F>({
       } catch (err) {
         if (err instanceof ApiError && lostAuthority(err)) return conflict("gone");
 
-        if (errorCode(err) !== "event_changed") throw err;
+        if (errorCode(err) !== changedCode) throw err;
       }
 
       if (!mounted.current) return "left";

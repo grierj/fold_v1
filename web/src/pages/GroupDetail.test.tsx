@@ -1,4 +1,4 @@
-import { createRosterWrites, type RosterWriteEnd, type RosterWrites } from "../lib/rosterWrites";
+import { createRosterWrites, RosterWritesProvider, type RosterWriteEnd, type RosterWrites } from "../lib/rosterWrites";
 import { testUser } from "../test/fixtures";
 import { renderWithAuth } from "../test/auth";
 import { stubService } from "../test/service";
@@ -12,16 +12,15 @@ import { Events } from "../api/events";
 import { Groups } from "../api/groups";
 import { Households } from "../api/households";
 import { People } from "../api/people";
-import type { GroupDetailResponse, GroupSummary, Household, OccurrenceResponse, User } from "../types";
+import type { EventOccurrence, GroupDetailResponse, GroupSummary, Household, OccurrenceResponse, User } from "../types";
 import { occurrence } from "../test/occurrence";
 import { Site } from "../api/site";
-import { DateWritesProvider } from "../lib/dateWrites";
 import { HOST_EVENTS, kept409, keptRead, READ_OUTCOMES, runHostCase } from "../test/keptPanel";
 import { UnsavedChangesBlocker } from "../lib/unsavedChanges";
 import { endsFor, removedRow, ROSTER_ENDS, ROSTER_OPS, startHeld, watchChecks, writeAfterTheCheck } from "../test/rosterOps";
 import { GroupDetail } from "./GroupDetail";
 import { stubEditSends, verifiedCredential, type EditSends } from "../test/guardedEdits";
-import { setMarkerCookie } from "../test/credential";
+import { clearMarkerCookie, setMarkerCookie } from "../test/credential";
 import { erasureCases, SignedInSession } from "../test/session";
 import { ERROR_COPY } from "../lib/errors";
 import type { JsonObject } from "../lib/wireValues";
@@ -525,12 +524,12 @@ const managerOnlyDate = occurrence({
   attendees: [{ registrationId: 5, userId: 4, name: "Protected Teen", email: "protected@example.com", accountType: "teen", status: "going", guestCount: 0, attendanceMode: "in_person" }],
 });
 
-it("reads no date for an editor because dates were listed or more were loaded: only Edit this date reads one, then its page's answers", async () => {
+it("reads no date for an editor because dates were listed or more were loaded: only Edit this date reads one", async () => {
   const second = occurrence({ id: 2, eventId: 8, date: "2026-12-08", startsAt: "2026-12-08T19:00:00Z", endsAt: "2026-12-08T20:00:00Z", startsLocal: "2026-12-08T19:00", groupId: 1 });
   vi.mocked(Groups.get).mockResolvedValueOnce({ ...page, canManage: true, upcomingEvents: [occurrence({ groupId: 1 })], hasMore: true, nextCursor: "c1" })
     .mockResolvedValueOnce({ ...page, canManage: true, upcomingEvents: [second], hasMore: false, nextCursor: "" });
   vi.mocked(Events.managedDate).mockImplementation(async (_id, date) => forGroup({ occurrence: { ...(date === second.date ? second : occurrence({})), revision: "r0" } }));
-  render(<MemoryRouter initialEntries={["/groups/1"]}><DateWritesProvider credential={credential}><Routes><Route path="/groups/:id" element={<GroupDetail />} /></Routes></DateWritesProvider></MemoryRouter>);
+  render(<MemoryRouter initialEntries={["/groups/1"]}><RosterWritesProvider><Routes><Route path="/groups/:id" element={<GroupDetail />} /></Routes></RosterWritesProvider></MemoryRouter>);
   await userEvent.click(await screen.findByRole("button", { name: "Load more dates" }));
   await screen.findByRole("button", { name: /^More for .* on 2026-12-08$/ });
   expect(Events.managedDate).not.toHaveBeenCalled();
@@ -543,7 +542,8 @@ it("reads no date for an editor because dates were listed or more were loaded: o
   await userEvent.type(screen.getByLabelText("Title"), "!");
   await userEvent.click(screen.getByRole("button", { name: "Save this date" }));
   await waitFor(() => expect(edits.sent).toHaveLength(1));
-  expect(edits.sent[0]).toMatchObject({ url: "/events/8/occurrences/2026-12-08/edits", revision: "r0", changes: { title: "Supper!" } });
+  expect(edits.sent[0]).toMatchObject({ eventId: 8, date: "2026-12-08", revision: "r0", changes: { title: "Supper!" } });
+  expect(Events.managedDate).toHaveBeenCalledOnce();
   expect(vi.mocked(Groups.get).mock.calls.map((call) => call.slice(1))).toContainEqual([expect.objectContaining({ cursor: "c1" })]);
 });
 
@@ -558,7 +558,7 @@ describe("the date editor while other reads are held or fail", () => {
   }
 
   function renderInSession(store = createRosterWrites()) {
-    render(<MemoryRouter initialEntries={["/groups/1"]}><DateWritesProvider rosterWrites={store} credential={credential}><Routes><Route path="/groups/:id" element={<GroupDetail />} /></Routes></DateWritesProvider></MemoryRouter>);
+    render(<MemoryRouter initialEntries={["/groups/1"]}><RosterWritesProvider rosterWrites={store}><Routes><Route path="/groups/:id" element={<GroupDetail />} /></Routes></RosterWritesProvider></MemoryRouter>);
 
     return store;
   }
@@ -592,45 +592,25 @@ describe("the date editor while other reads are held or fail", () => {
     expect(edits.sent[0]).toMatchObject({ revision: "r1", changes: { title: "Fresh title!" } });
   });
 
-  it("asks before the tab closes while a typed date change waits, off the screen, for its date to be read again", async () => {
+  it("asks before the tab closes while a typed date change waits off the screen for the page to load, and brings the draft back", async () => {
     vi.mocked(Groups.get).mockResolvedValue(managing);
-    vi.mocked(Events.managedDate).mockResolvedValueOnce(forGroup({ occurrence: occurrence({ revision: "r0" }) }));
+    vi.mocked(Events.managedDate).mockResolvedValue(forGroup({ occurrence: occurrence({ revision: "r0" }) }));
     const leaving = () => !window.dispatchEvent(new Event("beforeunload", { cancelable: true }));
     const store = renderInSession();
     await openEditor();
     await userEvent.type(await screen.findByLabelText("Title"), "!");
     expect(leaving()).toBe(true);
-    const reread = later<OccurrenceResponse>();
-    vi.mocked(Events.managedDate).mockReturnValue(reread.promise);
-    // A roster write on the date ends: the page is asked again, and the date with it.
+    // A roster write on the date ends: the page is asked again, and that read fails.
+    vi.mocked(Groups.get).mockRejectedValueOnce(new TypeError("Failed to fetch"));
     act(() => store.begin("7:2026-12-01")("stored"));
-    expect(await screen.findByText("Loading this date…")).toBeInTheDocument();
+    expect(await screen.findByText("This date can be edited again once the page loads. What you typed is kept.")).toBeInTheDocument();
     expect(screen.queryByLabelText("Title")).not.toBeInTheDocument();
     expect(leaving()).toBe(true);
-    await act(async () => { reread.resolve(forGroup({ occurrence: occurrence({ revision: "r0" }) })); await reread.promise; });
+    await userEvent.click(await screen.findByRole("button", { name: "Try again" }));
     expect(await screen.findByLabelText("Title")).toHaveValue("Supper!");
+    // The draft came back with the read it opened from: the date is not read again.
+    expect(Events.managedDate).toHaveBeenCalledOnce();
     await userEvent.click(screen.getByRole("button", { name: "Close" }));
-    expect(leaving()).toBe(false);
-  });
-
-  it("asks nothing on leaving once Try again has stored a save that was in doubt, while the date is read again", async () => {
-    vi.mocked(Groups.get).mockResolvedValue(managing);
-    vi.mocked(Events.managedDate).mockResolvedValue(forGroup({ occurrence: occurrence({ revision: "r0" }) }));
-    const leaving = () => !window.dispatchEvent(new Event("beforeunload", { cancelable: true }));
-    renderInSession();
-    await openEditor();
-    await userEvent.type(await screen.findByLabelText("Title"), "!");
-    await waitFor(() => expect(screen.getByRole("button", { name: "Save this date" })).toBeEnabled());
-    edits.answer(new TypeError("Failed to fetch"));
-    await userEvent.click(screen.getByRole("button", { name: "Save this date" }));
-    const again = await screen.findByRole("button", { name: "Try again" });
-    await waitFor(() => expect(again).toBeEnabled());
-    expect(leaving()).toBe(false);
-    const reread = later<OccurrenceResponse>();
-    vi.mocked(Events.managedDate).mockReturnValue(reread.promise);
-    await userEvent.click(again);
-    await waitFor(() => expect(edits.sent).toHaveLength(2));
-    expect(await screen.findByText("Loading this date…")).toBeInTheDocument();
     expect(leaving()).toBe(false);
   });
 
@@ -824,14 +804,13 @@ it.each([["Edit event", ""], ["Edit series", "FREQ=WEEKLY"]])("sends %s from a d
   expect(Events.update).not.toHaveBeenCalled();
 });
 
-it("asks nothing when Edit event leaves a date edit whose save was stored, while the date is still being read again", async () => {
+it("asks nothing when Edit event leaves after a date edit was saved: the save closed the editor", async () => {
   vi.mocked(Groups.get).mockResolvedValue({ ...page, canManage: true, upcomingEvents: [occurrence({ groupId: 1 })] });
-  const reread = deferred<OccurrenceResponse>();
-  vi.mocked(Events.managedDate).mockResolvedValueOnce(forGroup({ occurrence: { ...occurrence({}), revision: "r0" } })).mockReturnValue(reread.promise);
+  vi.mocked(Events.managedDate).mockResolvedValue(forGroup({ occurrence: { ...occurrence({}), revision: "r0" } }));
   const confirm = vi.spyOn(window, "confirm").mockReturnValue(false);
 
   const router = createMemoryRouter([
-    { path: "/groups/:id", element: <><UnsavedChangesBlocker /><DateWritesProvider credential={credential}><GroupDetail /></DateWritesProvider></> },
+    { path: "/groups/:id", element: <><UnsavedChangesBlocker /><RosterWritesProvider><GroupDetail /></RosterWritesProvider></> },
     { path: "/events/:id", element: <Where /> },
   ], { initialEntries: ["/groups/1"] });
 
@@ -842,8 +821,8 @@ it("asks nothing when Edit event leaves a date edit whose save was stored, while
   await userEvent.type(await screen.findByLabelText("Title"), "!");
   await waitFor(() => expect(screen.getByRole("button", { name: "Save this date" })).toBeEnabled());
   await userEvent.click(screen.getByRole("button", { name: "Save this date" }));
-  await waitFor(() => expect(edits.sent).toHaveLength(1));
-  await waitFor(() => expect(vi.mocked(Events.managedDate).mock.calls.length).toBeGreaterThan(1));
+  await waitFor(() => expect(screen.queryByRole("button", { name: "Save this date" })).not.toBeInTheDocument());
+  expect(edits.sent).toHaveLength(1);
   await userEvent.click(more);
   await userEvent.click(screen.getByRole("menuitem", { name: "Edit event" }));
   expect(await screen.findByText("At /events/7?edit=series")).toBeInTheDocument();
@@ -857,7 +836,7 @@ it("asks before Edit event leaves a date edit that has a change typed, and keeps
   const confirm = vi.spyOn(window, "confirm").mockReturnValue(false);
 
   const router = createMemoryRouter([
-    { path: "/groups/:id", element: <><UnsavedChangesBlocker /><DateWritesProvider credential={credential}><GroupDetail /></DateWritesProvider></> },
+    { path: "/groups/:id", element: <><UnsavedChangesBlocker /><RosterWritesProvider><GroupDetail /></RosterWritesProvider></> },
     { path: "/events/:id", element: <Where /> },
   ], { initialEntries: ["/groups/1"] });
 
@@ -1107,7 +1086,7 @@ describe("GroupDetail and the kept-dates panel (DEC-156)", () => {
   afterEach(() => { vi.useRealTimers(); });
 
   async function openAndSave() {
-    render(<MemoryRouter initialEntries={["/groups/1"]}><DateWritesProvider credential={credential}><Routes><Route path="/groups/:id" element={<GroupDetail />} /></Routes></DateWritesProvider></MemoryRouter>);
+    render(<MemoryRouter initialEntries={["/groups/1"]}><RosterWritesProvider><Routes><Route path="/groups/:id" element={<GroupDetail />} /></Routes></RosterWritesProvider></MemoryRouter>);
     await userEvent.click(await screen.findByRole("button", { name: /^More for .* on 2026-12-01$/ }));
     await userEvent.click(screen.getByRole("menuitem", { name: "Edit this date" }));
     const minutes = await screen.findByRole("spinbutton", { name: "Minutes" });
@@ -1120,7 +1099,7 @@ describe("GroupDetail and the kept-dates panel (DEC-156)", () => {
   for (const event of HOST_EVENTS) {
     for (const outcome of READ_OUTCOMES) {
       it(`event (${event}) settled ${outcome}`, async () => {
-        await runHostCase(event, outcome, { openAndSave, pageLoads: () => vi.mocked(Groups.get).mock.calls.length, edits, base: () => forGroup(keptRead("2026-12-01")), remounts: true });
+        await runHostCase(event, outcome, { openAndSave, pageLoads: () => vi.mocked(Groups.get).mock.calls.length, edits, base: () => forGroup(keptRead("2026-12-01")) });
         // A recheck leaves the page alone; a Remove that ended stored or lost asks for it again, once.
         expect(Groups.get).toHaveBeenCalledTimes(event === "iv" || event.startsWith("lost-") ? 2 : 1);
         expect(window.confirm).not.toHaveBeenCalled();
@@ -1152,7 +1131,7 @@ describe("GroupDetail and the kept-dates panel (DEC-156)", () => {
 // stops the save before anything is sent and closes the question. A write that may have stored
 // something asks for the page again, and the next Save counts afresh; an answered one turns Save back on at once.
 describe("GroupDetail: a roster write on the date holds its editor's Save", () => {
-  const STALE = "This date changed while you were saving. Check it and save again.";
+  const STALE = "The page changed while we were asking, so your changes weren't saved. You can save again.";
   const FRESH = "ffffffffffffffffffffffffffffffff";
   // The writer's question for a tightening of the date that cancels `registrants` people (DEC-158).
   const challenge = (registrants: number, consent = "c".repeat(32)) => new ApiError(409, "x", { code: "date_needs_consent", impact: { visibility: "private", currentVisibility: "public", tightened: [{ id: 7, title: "Supper", visibility: "public", registrants, occurrenceId: 1 }], leaderOpened: [], consent } });
@@ -1178,7 +1157,7 @@ describe("GroupDetail: a roster write on the date holds its editor's Save", () =
   };
 
   function renderInSession(store?: RosterWrites) {
-    render(<MemoryRouter initialEntries={["/groups/1"]}><DateWritesProvider rosterWrites={store} credential={credential}><Routes><Route path="/groups/:id" element={<GroupDetail />} /></Routes></DateWritesProvider></MemoryRouter>);
+    render(<MemoryRouter initialEntries={["/groups/1"]}><RosterWritesProvider rosterWrites={store}><Routes><Route path="/groups/:id" element={<GroupDetail />} /></Routes></RosterWritesProvider></MemoryRouter>);
   }
 
   async function openDateEditor() {
@@ -1202,7 +1181,7 @@ describe("GroupDetail: a roster write on the date holds its editor's Save", () =
     for (const end of endsFor(op)) {
       const answered = end === "answered" || end === "event_full";
 
-      it(`panel: a held ${op} disables Save and sends nothing; ending ${end} ${answered ? "turns Save on with no reread" : "rereads, then one save asks the writer's fresh question"}`, async () => {
+      it(`panel: a held ${op} disables Save and sends nothing; ending ${end} turns Save on${answered ? "" : " and asks for the page once"}, and one save asks the writer's fresh question`, async () => {
         renderInSession();
         await editorBeside();
         const puts = edits.sent.length;
@@ -1218,19 +1197,11 @@ describe("GroupDetail: a roster write on the date holds its editor's Save", () =
 
         if (!answered) vi.mocked(Groups.get).mockReturnValueOnce(reread.promise);
         await act(async () => { ROSTER_ENDS[end](write); await write.promise.catch(() => {}); });
+        // The editor keeps its draft and the read it opened from; the writer counts afresh on the next save.
+        expect(save()).toBeEnabled();
+        expect(Groups.get).toHaveBeenCalledTimes(answered ? loads : loads + 1);
 
-        if (answered) {
-          expect(save()).toBeEnabled();
-          expect(Groups.get).toHaveBeenCalledTimes(loads);
-        } else {
-          expect(Groups.get).toHaveBeenCalledTimes(loads + 1);
-          expect(save()).toBeDisabled();
-          await act(async () => { reread.resolve(groupPage); await reread.promise; });
-          // The page's answer reads the date again for the editor, which comes back with the draft.
-          await waitFor(() => expect(save()).toBeEnabled());
-          expect(Groups.get).toHaveBeenCalledTimes(loads + 1);
-        }
-
+        if (!answered) await act(async () => { reread.resolve(groupPage); await reread.promise; });
         expect(minutes()).toHaveValue(150);
         expect(screen.getByRole("radio", { name: /^Private/ })).toBeChecked();
         edits.answer(challenge(3, FRESH));
@@ -1240,7 +1211,7 @@ describe("GroupDetail: a roster write on the date holds its editor's Save", () =
         await userEvent.click(within(asked).getByRole("button", { name: "Save and notify" }));
         await waitFor(() => expect(edits.sent).toHaveLength(puts + 2));
         expect(window.confirm).not.toHaveBeenCalled();
-        expect(edits.sent[puts + 1]).toMatchObject({ attempt: edits.sent[puts].attempt, changes: { durationMinutes: 150, visibility: "private" }, consent: FRESH });
+        expect(edits.sent[puts + 1]).toMatchObject({ revision: edits.sent[puts].revision, changes: { durationMinutes: 150, visibility: "private" }, consent: FRESH });
       });
     }
 
@@ -1361,10 +1332,11 @@ describe("GroupDetail: the date question in the app's dialog", () => {
       { path: "/elsewhere", element: <p>Elsewhere</p> },
     ], { initialEntries: ["/groups/1"] });
 
-    const tree = (c: Credential | null) => <DateWritesProvider rosterWrites={store} credential={c}><RouterProvider router={router} /></DateWritesProvider>;
-    const view = render(tree(credential));
+    const tree = () => <RosterWritesProvider rosterWrites={store}><RouterProvider router={router} /></RosterWritesProvider>;
+    const view = render(tree());
 
-    return { router, swap: (c: Credential | null) => view.rerender(tree(c)) };
+    // Renders the page again, as a new credential reaching the session does.
+    return { router, rerender: () => view.rerender(tree()) };
   }
 
   // Edit this date → Private → Save, with the writer's answer queued; resolves once the question is up.
@@ -1405,7 +1377,7 @@ describe("GroupDetail: the date question in the app's dialog", () => {
     expect(window.confirm).not.toHaveBeenCalled();
   });
 
-  it("a stable Yes sends the same attempt once with only the token added; each new 409, even the same count, asks again", async () => {
+  it("a stable Yes sends the same save once with only the token added; each new 409, even the same count, asks again", async () => {
     host();
     await ask();
     const first = await screen.findByRole("dialog", { name: "Save this date?" });
@@ -1415,14 +1387,14 @@ describe("GroupDetail: the date question in the app's dialog", () => {
     const again = await screen.findByRole("dialog", { name: "Save this date?" });
     expect(again).toHaveAccessibleDescription(`We checked again before saving. ${question}`);
     expect(edits.sent).toHaveLength(2);
-    expect(edits.sent[1]).toMatchObject({ attempt: edits.sent[0].attempt, revision: "r0", changes: { visibility: "private" }, consent: T1 });
-    expect(edits.sent[1].body).toBe(`${edits.sent[0].body.slice(0, -1)},"consent":"${T1}"}`);
+    expect(edits.sent[1]).toEqual({ ...edits.sent[0], attempt: expect.any(String), consent: T1 });
+    expect(edits.sent[1].attempt).not.toBe(edits.sent[0].attempt);
     // The first question's Yes is gone with it: it answers nothing now.
     await userEvent.click(yes);
     expect(edits.sent).toHaveLength(2);
     await userEvent.click(within(again).getByRole("button", { name: "Save and notify" }));
     await waitFor(() => expect(edits.sent).toHaveLength(3));
-    expect(edits.sent[2]).toMatchObject({ attempt: edits.sent[0].attempt, consent: T2 });
+    expect(edits.sent[2]).toMatchObject({ revision: edits.sent[0].revision, consent: T2 });
     expect(asked()).not.toBeInTheDocument();
     expect(window.confirm).not.toHaveBeenCalled();
   });
@@ -1431,26 +1403,25 @@ describe("GroupDetail: the date question in the app's dialog", () => {
     host();
     await ask();
     const kept = within(await screen.findByRole("dialog", { name: "Save this date?" })).getByRole("button", { name: "Save and notify" });
-    await userEvent.click(screen.getByRole("button", { name: "Close" }));
+    await userEvent.keyboard("{Escape}");
     expect(asked()).not.toBeInTheDocument();
-    await ask(challenge(T2));
+    edits.answer(challenge(T2));
+    await waitFor(() => expect(save()).toBeEnabled());
+    await userEvent.click(save());
     const reopened = await screen.findByRole("dialog", { name: "Save this date?" });
     await userEvent.click(kept);
     expect(reopened).toBeInTheDocument();
     expect(edits.sent).toHaveLength(2);
     await userEvent.click(within(reopened).getByRole("button", { name: "Save and notify" }));
     await waitFor(() => expect(edits.sent).toHaveLength(3));
-    expect(edits.sent[2]).toMatchObject({ attempt: edits.sent[1].attempt, consent: T2 });
+    expect(edits.sent[2]).toMatchObject({ revision: edits.sent[1].revision, consent: T2 });
     expect(edits.sent[1].attempt).not.toBe(edits.sent[0].attempt);
   });
 
-  // Each retires the read, the route, the row or the credential the question was asked under.
+  // Each retires the route, the row, the roster or the sign-in the question was asked under.
   const invalidations: Array<[string, (h: ReturnType<typeof host>, store: RosterWrites) => Promise<void> | void]> = [
     ["the same address again", async ({ router }) => { await act(() => router.navigate("/groups/1")); }],
     ["another page and back", async ({ router }) => { await act(() => router.navigate("/elsewhere")); await act(() => router.navigate("/groups/1")); }],
-    ["the page's answer after a sign-up update elsewhere", async (_, store) => {
-      await act(async () => store.begin("7:2026-12-08")("stored"));
-    }],
     ["the page reads again and this person no longer manages the group", async (_, store) => {
       vi.mocked(Groups.get).mockResolvedValue({ ...groupPage, canManage: false });
       await act(async () => store.begin("7:2026-12-08")("stored"));
@@ -1461,8 +1432,8 @@ describe("GroupDetail: the date question in the app's dialog", () => {
       setMarkerCookie("m-another-tab");
       act(() => { store.begin("7:2026-12-08"); });
     }],
-    ["another credential", async ({ swap }) => { const next = await verifiedCredential(); act(() => swap(next)); }],
-    ["signing out", ({ swap }) => { act(() => swap(null)); }],
+    ["another credential", async ({ rerender }) => { await verifiedCredential(); act(() => rerender()); }],
+    ["signing out in another tab", ({ rerender }) => { clearMarkerCookie(); act(() => rerender()); }],
   ];
 
   for (const [name, invalidate] of invalidations) {
@@ -1501,7 +1472,7 @@ describe("GroupDetail: the date question in the app's dialog", () => {
   ];
 
   for (const [name, hide, show, reopens] of hides) {
-    it(`closes the question as no on ${name}, and once shown again the editor reads the date afresh and a kept Yes sends nothing`, async () => {
+    it(`closes the question as no on ${name}, and once shown again the editor comes back with its draft and a kept Yes sends nothing`, async () => {
       vi.mocked(Groups.get).mockResolvedValue(sevenDates);
       host();
       await ask();
@@ -1513,9 +1484,10 @@ describe("GroupDetail: the date question in the app's dialog", () => {
       await show();
 
       if (reopens) {
-        // Shown again, the editor reads the date before anything can be saved.
-        await waitFor(() => expect(Events.managedDate).toHaveBeenCalledTimes(reads + 1));
+        // Shown again, the editor comes back with its draft and the read it opened from.
         await waitFor(() => expect(save()).toBeEnabled());
+        expect(screen.getByRole("radio", { name: /^Private/ })).toBeChecked();
+        expect(Events.managedDate).toHaveBeenCalledTimes(reads);
       } else {
         expect(await screen.findByRole("button", { name: /^More for .* on 2026-12-01$/ })).toBeInTheDocument();
         expect(screen.queryByRole("button", { name: "Save this date" })).not.toBeInTheDocument();
@@ -1544,19 +1516,19 @@ describe("GroupDetail: the date question in the app's dialog", () => {
     expect(seen).toEqual([false]);
   });
 
-  it("a Yes after this tab's marker changed sends nothing, and the new credential's read can save again", async () => {
-    const { swap } = host();
+  it("a Yes after this tab's marker changed sends nothing, and a press under the new credential saves", async () => {
+    const { rerender } = host();
     await ask();
     const dialog = await screen.findByRole("dialog", { name: "Save this date?" });
     setMarkerCookie("m-another-tab");
     await userEvent.click(within(dialog).getByRole("button", { name: "Save and notify" }));
     expect(asked()).not.toBeInTheDocument();
     expect(edits.sent).toHaveLength(1);
-    const next = await verifiedCredential();
-    act(() => swap(next));
-    // The new credential's editor starts again from its own read: the draft never crosses credentials.
-    expect(await screen.findByRole("radio", { name: /^Private/ })).not.toBeChecked();
-    await userEvent.click(screen.getByRole("radio", { name: /^Private/ }));
+    expect(await screen.findByText("The page changed while we were asking, so your changes weren't saved. You can save again.")).toBeInTheDocument();
+    await verifiedCredential();
+    act(() => rerender());
+    // The same person: the draft stays; the server judges the new press under the new credential.
+    expect(screen.getByRole("radio", { name: /^Private/ })).toBeChecked();
     await waitFor(() => expect(save()).toBeEnabled());
     await userEvent.click(save());
     await waitFor(() => expect(edits.sent).toHaveLength(2));
@@ -1756,7 +1728,7 @@ describe("the group visibility review and sign-up updates", () => {
 
   async function editGroup(store: RosterWrites) {
     vi.mocked(Groups.get).mockResolvedValue({ ...page, canManage: true });
-    render(<MemoryRouter initialEntries={["/groups/1"]}><DateWritesProvider rosterWrites={store} credential={credential}><Routes><Route path="/groups/:id" element={<GroupDetail />} /></Routes></DateWritesProvider></MemoryRouter>);
+    render(<MemoryRouter initialEntries={["/groups/1"]}><RosterWritesProvider rosterWrites={store}><Routes><Route path="/groups/:id" element={<GroupDetail />} /></Routes></RosterWritesProvider></MemoryRouter>);
     await userEvent.click(await screen.findByRole("button", { name: "More group actions" }));
     await userEvent.click(screen.getByRole("menuitem", { name: "Edit group" }));
     await userEvent.type(screen.getByLabelText("Group name"), " Two");
@@ -2004,5 +1976,81 @@ describe("the group visibility review and sign-up updates", () => {
     await userEvent.click(await screen.findByRole("button", { name: "More group actions" }));
     await userEvent.click(screen.getByRole("menuitem", { name: "Edit group" }));
     expect(screen.queryByText(STALE)).not.toBeInTheDocument();
+  });
+});
+
+// DEC-164: the group page's "Edit this date" uses the one conflict protocol, as the event page's does. Refused as stale
+// over another change, the editor closes, the page reads from nothing and the line above the dates names the day and
+// takes focus: a group page lists many dates, and a long one may hide any row.
+describe("GroupDetail when a date's save meets someone else's change", () => {
+  const DAY = "Tuesday, December 1, 2026";
+  const NOTICE = `${DAY}. This date changed while you were editing, so your changes weren't saved. This is the date as it is now.`;
+  const changed = () => new ApiError(409, "x", { code: "date_changed" });
+  const listed = occurrence({ groupId: 1 });
+  const managing = { ...page, canManage: true, upcomingEvents: [listed] };
+
+  beforeEach(() => {
+    vi.mocked(Groups.get).mockResolvedValue(managing);
+  });
+
+  async function saveTitleInto(stored: Partial<EventOccurrence>) {
+    vi.mocked(Events.managedDate).mockResolvedValueOnce(forGroup({ occurrence: { ...listed, revision: "r0" } })).mockResolvedValue(forGroup({ occurrence: { ...listed, revision: "r1", ...stored } }));
+    edits.answer(changed());
+    render(<MemoryRouter initialEntries={["/groups/1"]}><RosterWritesProvider><Routes><Route path="/groups/:id" element={<GroupDetail />} /></Routes></RosterWritesProvider></MemoryRouter>);
+    await userEvent.click(await screen.findByRole("button", { name: "More for Supper on 2026-12-01" }));
+    await userEvent.click(screen.getByRole("menuitem", { name: "Edit this date" }));
+    await userEvent.type(await screen.findByLabelText("Title"), " night");
+    await waitFor(() => expect(screen.getByRole("button", { name: "Save this date" })).toBeEnabled());
+    await userEvent.click(screen.getByRole("button", { name: "Save this date" }));
+  }
+
+  it("sends the save again under the new revision when nothing it can write changed, and closes as a save does", async () => {
+    await saveTitleInto({});
+    await waitFor(() => expect(screen.queryByLabelText("Title")).not.toBeInTheDocument());
+    expect(edits.sent.map((s) => s.revision)).toEqual(["r0", "r1"]);
+    expect(screen.queryByText(/weren't saved/)).not.toBeInTheDocument();
+  });
+
+  it("closes as a save does, with no line, when the read shows the save already stored", async () => {
+    await saveTitleInto({ title: "Supper night" });
+    await waitFor(() => expect(screen.queryByLabelText("Title")).not.toBeInTheDocument());
+    expect(edits.sent).toHaveLength(1);
+    expect(screen.queryByText(/weren't saved/)).not.toBeInTheDocument();
+  });
+
+  it("closes the editor over another change, reads the page from nothing and says so above the dates, focused; opening the editor clears it", async () => {
+    const after = deferred<GroupDetailResponse>();
+    const reads = vi.mocked(Groups.get).mock.calls.length;
+    vi.mocked(Groups.get).mockResolvedValueOnce(managing).mockReturnValueOnce(after.promise);
+    await saveTitleInto({ location: "Annex" });
+    await waitFor(() => expect(vi.mocked(Groups.get).mock.calls.length).toBe(reads + 2));
+    expect(screen.queryByLabelText("Title")).not.toBeInTheDocument();
+    const theirs = { ...managing, upcomingEvents: [{ ...listed, location: "Annex" }] };
+    vi.mocked(Groups.get).mockResolvedValue(theirs);
+    await act(async () => { after.resolve(theirs); await after.promise; });
+    const notice = await screen.findByText(NOTICE);
+    await waitFor(() => expect(notice).toHaveFocus());
+    expect(notice.closest("article")).toBeNull();
+    expect(edits.sent).toHaveLength(1);
+    await userEvent.click(screen.getByRole("button", { name: "More for Supper on 2026-12-01" }));
+    await userEvent.click(screen.getByRole("menuitem", { name: "Edit this date" }));
+    expect(screen.queryByText(NOTICE)).not.toBeInTheDocument();
+    expect(await screen.findByRole("textbox", { name: /^Location/ })).toHaveValue("Annex");
+  });
+
+  it("saves twice in a row: the first save closes the editor, and the second opens from a read of its own", async () => {
+    vi.mocked(Events.managedDate).mockResolvedValueOnce(forGroup({ occurrence: { ...listed, revision: "r0" } })).mockResolvedValue(forGroup({ occurrence: { ...listed, title: "Supper night", revision: "r1" } }));
+    render(<MemoryRouter initialEntries={["/groups/1"]}><RosterWritesProvider><Routes><Route path="/groups/:id" element={<GroupDetail />} /></Routes></RosterWritesProvider></MemoryRouter>);
+    for (const [typed, revision] of [[" night", "r0"], ["!", "r1"]] as const) {
+      await userEvent.click(await screen.findByRole("button", { name: "More for Supper on 2026-12-01" }));
+      await userEvent.click(screen.getByRole("menuitem", { name: "Edit this date" }));
+      await userEvent.type(await screen.findByLabelText("Title"), typed);
+      await waitFor(() => expect(screen.getByRole("button", { name: "Save this date" })).toBeEnabled());
+      await userEvent.click(screen.getByRole("button", { name: "Save this date" }));
+      await waitFor(() => expect(screen.queryByLabelText("Title")).not.toBeInTheDocument());
+      expect(edits.sent[edits.sent.length - 1].revision).toBe(revision);
+    }
+
+    expect(edits.sent.map((s) => s.changes)).toEqual([{ title: "Supper night" }, { title: "Supper night!" }]);
   });
 });

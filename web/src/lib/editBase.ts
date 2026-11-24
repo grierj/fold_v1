@@ -1,8 +1,8 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
-import { ApiError } from "../api/core";
-import { Events } from "../api/events";
+import { ApiError, currentCredential } from "../api/core";
+import { Events, type DateEditChanges } from "../api/events";
 import type { EventOccurrence, Visibility } from "../types";
-import { useDateAttempts, useEditBase, type DateAttempts, type ReadPermit, type ReadStamp } from "./dateWrites";
+import type { RevisionRead } from "./useRevisionSave";
 import { isBoolean, isNumber, isString, type JsonValue } from "./wireValues";
 
 // What a listed date names to open its editor (M8.1): which date, never what it says. Nothing here is shown,
@@ -16,8 +16,9 @@ export interface DateOpener {
   groupId?: number;
 }
 
-// The one date a manager edits, from a fresh manager read: its own form inputs and token, and nothing else (no
-// roster, counts or other people). Each host's editor is built from this alone.
+// The one date a manager edits, from a fresh manager read: its own form inputs and token, the event's values the date
+// falls back to (null where the read does not carry one), and nothing else (no roster, counts or other people). Each
+// host's editor is built from this alone.
 export interface EditBase {
   id: number;
   eventId: number;
@@ -37,6 +38,10 @@ export interface EditBase {
   churchWide: boolean;
   groupName?: string;
   groupVisibility?: Visibility;
+  seriesStartsLocal: string | null;
+  seriesDurationMinutes: number | null;
+  seriesTitle: string | null;
+  seriesLocation: string | null;
 }
 
 // The read's fields are checked here, where its JSON enters the editor, whatever its static type says: the
@@ -101,113 +106,147 @@ export function editBaseOf(o: EventOccurrence | undefined, opener: DateOpener): 
     capacity: o.capacity, remoteCapacity: o.remoteCapacity, remoteAvailable: o.remoteAvailable,
     visibility: o.visibility, visibilityOverride: o.visibilityOverride, seriesVisibility: o.seriesVisibility,
     churchWide: o.churchWide, groupName: o.groupName, groupVisibility: o.groupVisibility,
+    seriesStartsLocal: isWallMinute(o.seriesStartsLocal) ? o.seriesStartsLocal : null,
+    seriesDurationMinutes: atLeast(o.seriesDurationMinutes, 1) ? o.seriesDurationMinutes : null,
+    seriesTitle: isString(o.seriesTitle) ? o.seriesTitle : null,
+    seriesLocation: isString(o.seriesLocation) ? o.seriesLocation : null,
   };
 }
 
-// The read answered, but not the date the list named (moved to another row, another group, cancelled).
-class NotThisDate extends Error {}
+// The manager's read of one date: a participating read pinned to the credential this tab holds, when it holds one.
+const managedRead = (opener: DateOpener) => Events.managedDate(opener.eventId, opener.date, currentCredential() ?? undefined);
 
-// A manager read of one date, stamped before it is sent and pinned to the credential its attempts belong to.
-async function readEditBase(attempts: DateAttempts, opener: DateOpener): Promise<{ stamp: ReadStamp; base: EditBase }> {
-  const stamp = attempts.stamp(opener.eventId, opener.date);
-  const read = await Events.managedDate(opener.eventId, opener.date, attempts.credential);
-  const base = editBaseOf(read.occurrence, opener);
-
-  if (!base) throw new NotThisDate();
-
-  return { stamp, base };
-}
-
-// "denied": the server said this person may not manage the date (a readable 401, 403 or 404), or it answered
-// another date than the list named; the host checks its page again. A credential the server no longer
+// The server said this person may not manage the date (a readable 401, 403 or 404). A credential the server no longer
 // recognizes is not a refusal of the date: the tab checks its credential, and the read can be asked again.
 export function editReadRefused(cause: unknown): boolean {
-  if (cause instanceof NotThisDate) return true;
-
   return cause instanceof ApiError && !cause.unreadable && cause.code !== "session_expired" && [401, 403, 404].includes(cause.status);
 }
 
-export type EditRead =
+type EditRead =
   | { kind: "loading" }
-  | { kind: "ready"; base: EditBase; permit: ReadPermit | null; attempts: DateAttempts; reading: boolean }
+  | { kind: "ready"; base: EditBase }
   | { kind: "failed"; retry: () => void }
-  | { kind: "denied" }
-  // No credential this tab can pin a read to.
-  | { kind: "unavailable" };
+  | { kind: "denied" };
 
-interface Answer {
-  owner: string;
-  attempts: DateAttempts;
-  result: { stamp: ReadStamp; base: EditBase } | { refused: boolean };
-}
-
-export const dateKey = (eventId: number, date: string) => `${eventId}:${date}`;
-
-// One editor's exact read (EventDetail, GroupDetail). It reads when asked to `open` and again whenever `owner`
-// changes (the host's route, its shown answer, the row being hidden and shown again), so nothing read under one
-// owner is shown or registered under another; meanwhile it is loading and shows nothing. A settlement or a roster
-// write that may have changed the date asks the host for its page (useEditRefresh, useDateWrites); the date is
-// read again only once that answer is shown, and until then the old read no longer counts, so Save stays closed.
-// The answer is registered once it is committed on screen and retired when it is replaced.
+// A listed date's read for its editor (EventDetail, GroupDetail), once while `open` for each `owner` (the host's route,
+// the date, its row, its group): nothing read under one owner is shown under another, and a row hidden and shown
+// again, or a page that failed and loaded again, keeps the read it has. "denied": the server refused it, or it answered
+// another date than the list named (moved to another row or group, cancelled); the host checks its page again.
 export function useEditRead(opener: DateOpener, owner: string, open: boolean, onRefused: () => void): EditRead {
-  const attempts = useDateAttempts();
-  const key = dateKey(opener.eventId, opener.date);
-  const want = open && attempts ? `${owner}|${key}|${opener.occurrenceId}|${opener.groupId ?? ""}` : null;
   const [asked, setAsked] = useState(0);
-  const [answer, setAnswer] = useState<Answer | null>(null);
-  const [reading, setReading] = useState(false);
+  const [answer, setAnswer] = useState<{ owner: string; asked: number; result: EditBase | { refused: boolean } } | null>(null);
   const latest = useRef({ opener, onRefused });
-  const seq = useRef(0);
+  const mine = answer?.owner === owner && answer.asked === asked ? answer : null;
+  const answered = mine !== null;
 
   useLayoutEffect(() => {
     latest.current = { opener, onRefused };
   });
 
   useEffect(() => {
-    if (!want || !attempts) return;
-    const mine = ++seq.current;
-    setReading(true);
-    readEditBase(attempts, latest.current.opener).then(
-      (result) => { if (seq.current === mine) { setAnswer({ owner: want, attempts, result }); setReading(false); } },
-      (cause: unknown) => { if (seq.current === mine) { setAnswer({ owner: want, attempts, result: { refused: editReadRefused(cause) } }); setReading(false); } },
+    if (!open || answered) return;
+    let current = true;
+    managedRead(latest.current.opener).then(
+      (read) => { if (current) setAnswer({ owner, asked, result: editBaseOf(read.occurrence, latest.current.opener) ?? { refused: true } }); },
+      (cause: unknown) => { if (current) setAnswer({ owner, asked, result: { refused: editReadRefused(cause) } }); },
     );
 
-    return () => { seq.current++; };
-  }, [want, attempts, asked]);
+    return () => { current = false; };
+  }, [open, owner, asked, answered]);
 
-  const mine = answer && answer.owner === want && answer.attempts === attempts ? answer : null;
-  const read = mine && "stamp" in mine.result ? mine.result : null;
   const refused = !!mine && "refused" in mine.result && mine.result.refused;
 
   useEffect(() => {
     if (refused) latest.current.onRefused();
   }, [refused]);
 
-  const permit = useEditBase(attempts, read?.stamp ?? null, read ? { occurrenceId: read.base.id, revision: read.base.revision } : null);
-
-  if (!attempts) return { kind: "unavailable" };
-
   if (!mine) return { kind: "loading" };
 
-  if (read) return { kind: "ready", base: read.base, permit, attempts, reading };
-
-  if (reading) return { kind: "loading" };
+  if (!("refused" in mine.result)) return { kind: "ready", base: mine.result };
 
   return refused ? { kind: "denied" } : { kind: "failed", retry: () => setAsked((n) => n + 1) };
 }
 
-// A host's page shows these dates' events: after a guarded edit of one of them settles, from this page or
-// another, it is asked for again (once per batch of dates). A roster write's end is left to the host's own rule
-// (useDateWrites' rosters, ManageDate's gate).
-export function useEditRefresh(shows: (eventId: number) => boolean, reload: () => void) {
-  const attempts = useDateAttempts();
-  const latest = useRef({ shows, reload });
+// One field a date save can write, as a read shows it: its value as the form reads it, and whether the read proves the
+// value is the date's own rather than one it falls back to (the event's, or the group's place), which a later series
+// change would move.
+interface Held<V> {
+  value: V;
+  own: boolean;
+}
 
-  useLayoutEffect(() => {
-    latest.current = { shows, reload };
-  });
+/** @public what a single-date save can write, as dateFields reads it; its test compares one field at a time. */
+export interface DateFields {
+  startsLocal: Held<string>;
+  durationMinutes: Held<number>;
+  title: Held<string>;
+  location: Held<string>;
+  // "event": a cleared limit, which falls back to the event's, a value this read cannot show.
+  capacity: Held<number | null | "event">;
+  remoteCapacity: Held<number | null | "event">;
+  visibility: Visibility | "series";
+  // What gives the values above their meaning: the clock they are on, what "same as the series" is, and whether the
+  // date has remote seats at all.
+  tzid: string;
+  seriesVisibility: Visibility;
+  remoteAvailable: boolean;
+}
 
-  useEffect(() => attempts?.onRefresh((_keys, settled) => {
-    if ([...settled].some((key) => latest.current.shows(Number(key.slice(0, key.indexOf(":")))))) latest.current.reload();
-  }), [attempts]);
+const held = <V,>(value: V, own: boolean): Held<V> => ({ value, own });
+
+// The one normaliser over everything a single-date save can write (DEC-164), for the read the editor opened with and
+// for the read after a refusal, so useRevisionSave can tell "already stored", "as it opened" and "changed" apart. A date
+// field is either the date's own or the value it falls back to, and the manager's read shows only the value that
+// applies, beside some of the fallbacks: a field counts as the date's own only where the read proves it (the value
+// differs from the fallback it shows). The capacities have no fallback in the read, so they never count as own.
+export function dateFields(b: EditBase): DateFields {
+  const seriesTime = b.seriesStartsLocal?.slice(11);
+
+  return {
+    startsLocal: held(b.startsLocal, seriesTime !== undefined && b.startsLocal !== `${b.date}T${seriesTime}`),
+    durationMinutes: held(b.durationMinutes, b.seriesDurationMinutes !== null && b.durationMinutes !== b.seriesDurationMinutes),
+    title: held(b.title, b.seriesTitle !== null && b.title !== b.seriesTitle),
+    // An event with no place of its own falls back to its group's, which the read does not show.
+    location: held(b.location, !!b.seriesLocation && b.location !== b.seriesLocation),
+    capacity: held(b.capacity, false),
+    remoteCapacity: held(b.remoteCapacity, false),
+    visibility: b.visibilityOverride ?? "series",
+    tzid: b.tzid,
+    seriesVisibility: b.seriesVisibility,
+    remoteAvailable: b.remoteAvailable,
+  };
+}
+
+// What dateFields reads once `changes` is stored over the date the editor opened with: each value the save writes is
+// the date's own (the server trims text, as the form sends it); a cleared limit falls back to the event's, which no read
+// shows. A value a read cannot prove own never reads back as this save stored, so a lost answer is never claimed
+// saved by mistake: the refusal path sends again or closes instead.
+export function intendedDateFields(opened: DateFields, changes: DateEditChanges): DateFields {
+  const out = { ...opened };
+  const limit = (value: number | null) => (value === null ? held<number | null | "event">("event", false) : held(value, true));
+
+  if (changes.startsLocal !== undefined) out.startsLocal = held(changes.startsLocal, true);
+
+  if (changes.durationMinutes !== undefined) out.durationMinutes = held(changes.durationMinutes, true);
+
+  if (changes.title !== undefined) out.title = held(changes.title.trim(), true);
+
+  if (changes.location !== undefined) out.location = held(changes.location.trim(), true);
+
+  if (changes.capacityOverride !== undefined) out.capacity = limit(changes.capacityOverride);
+
+  if (changes.remoteCapacityOverride !== undefined) out.remoteCapacity = limit(changes.remoteCapacityOverride);
+
+  if (changes.visibility !== undefined) out.visibility = changes.visibility ?? "series";
+
+  return out;
+}
+
+// The manager's read again after a refused save, as useRevisionSave compares it: null for a read that opens no editor
+// (cancelled, moved to another row or group, malformed), which is a conflict.
+export async function readDateFields(opener: DateOpener): Promise<RevisionRead<DateFields | null>> {
+  const { occurrence } = await managedRead(opener);
+  const base = editBaseOf(occurrence, opener);
+
+  return { allowed: true, revision: occurrence?.revision, value: base && dateFields(base) };
 }

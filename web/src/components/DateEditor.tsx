@@ -1,31 +1,29 @@
 import { useRosterActivity } from "../lib/rosterWrites";
 import { Form } from "./ui/Form";
-import { useCallback, useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore, type MutableRefObject } from "react";
-import { bootstrapCredential } from "../api/core";
-import type { DateEditChanges } from "../api/events";
+import { useEffect, useLayoutEffect, useRef, useState, type MutableRefObject } from "react";
+import { bootstrapCredential, credentialCurrent, currentCredential, type Credential } from "../api/core";
+import { Events, type DateEditChanges } from "../api/events";
 import type { KeptDateCount, Visibility } from "../types";
 import { errorText, keptDatesOf } from "../lib/errors";
-import { formatDayFull, formatWallClock, zoneNote } from "../lib/when";
+import { formatDayFull, zoneNote } from "../lib/when";
 import { isRemoteError, remoteProblem } from "./RemoteField";
 import { Field, FormError, Input, showFieldErrors } from "./ui/Field";
 import { FormActions } from "./ui/FormActions";
 import { Button } from "./ui/Button";
 import { VisibilityField } from "./EventVisibility";
 import { RoomField } from "./RoomField";
-import { useConfirm, type PendingAction } from "./ui/ConfirmDialog";
-import type { ConsentRound, DateAttempts, EditVerdict, ReadPermit } from "../lib/dateWrites";
-import { dateKey, type EditBase } from "../lib/editBase";
+import { useConfirm } from "./ui/ConfirmDialog";
+import { dateFields, intendedDateFields, readDateFields, type DateFields, type DateOpener, type EditBase } from "../lib/editBase";
 import { KeptDates } from "./KeptDates";
 import { useKeptRefusal } from "./keptRefusal";
 import { useFocusHome, useKeepFocusHome } from "../lib/focusHome";
 import { useUnsavedChanges } from "../lib/unsavedChanges";
-import { changeSentence, VISIBILITY_WORD } from "../lib/visibilityChange";
+import { changeSentence } from "../lib/visibilityChange";
 import { count as plural } from "../lib/plural";
-import { reviewOutdated } from "../lib/visibilityConsent";
+import { dateDecision, reviewOutdated } from "../lib/visibilityConsent";
+import { useRevisionSave, type RevisionConflict } from "../lib/useRevisionSave";
 
-const STALE_SAVE = "This date changed while you were saving. Check it and save again.";
-const UNSURE_SAVE = "We couldn't tell whether this date saved. Check it below, and try again if you need to.";
-const UNCONFIRMED = "We couldn't confirm what happened to your earlier save, and this date has changed since. Check it before you change anything else.";
+const STALE_QUESTION = "The page changed while we were asking, so your changes weren't saved. You can save again.";
 
 // The fields a save can change, written the way the inputs hold them.
 interface Fields {
@@ -38,18 +36,6 @@ interface Fields {
   remoteCapacity: string;
   visibility: Visibility | "series";
 }
-
-// Each draft field, and the reason, has a version that moves on every edit: a stored save marks the versions it
-// submitted, and the next read resets exactly those fields to what is stored, even where the stored value went
-// back to what this editor first saw (another manager restored it).
-type VersionKey = keyof DateEditChanges | "reason";
-
-type Versions = Partial<Record<VersionKey, number>>;
-
-const versionOf: Record<keyof Fields, VersionKey> = {
-  date: "startsLocal", time: "startsLocal", duration: "durationMinutes", title: "title", location: "location",
-  capacity: "capacityOverride", remoteCapacity: "remoteCapacityOverride", visibility: "visibility",
-};
 
 function fieldsOf(base: EditBase): Fields {
   return {
@@ -64,100 +50,62 @@ function fieldsOf(base: EditBase): Fields {
   };
 }
 
-const changeKeys: ReadonlyArray<keyof DateEditChanges> = ["startsLocal", "durationMinutes", "title", "location", "capacityOverride", "remoteCapacityOverride", "visibility"];
-const fieldKeys: ReadonlyArray<keyof Fields> = ["date", "time", "duration", "title", "location", "capacity", "remoteCapacity", "visibility"];
-
-// Each field the stored date changed since `was` takes the stored value; the others keep what was typed.
-function rebased(draft: Fields, was: Fields, now: Fields): Fields {
-  const out = { ...draft };
-
-  for (const key of fieldKeys) if (was[key] !== now[key]) Object.assign(out, { [key]: now[key] });
-
-  return out;
-}
-
-// What Save sends: each change from the date as read, start date and time together, the shown duration kept,
-// an explicit clear as null. Remote seats only where the date has them.
-function changesOf(draft: Fields, stored: Fields, base: EditBase): DateEditChanges {
+// What Save sends: each change from the date as the editor opened it, start date and time together, the shown
+// duration kept, text as the server stores it (trimmed), an explicit clear as null. Remote seats only where the date
+// has them.
+function changesOf(draft: Fields, base: EditBase): DateEditChanges {
+  const opened = fieldsOf(base);
   const changes: DateEditChanges = {};
   const startsLocal = `${draft.date}T${draft.time}`;
 
   if (startsLocal !== base.startsLocal) changes.startsLocal = startsLocal;
 
-  if (draft.duration !== stored.duration) changes.durationMinutes = draft.duration;
+  if (draft.duration !== opened.duration) changes.durationMinutes = draft.duration;
 
-  if (draft.title !== stored.title) changes.title = draft.title;
+  if (draft.title.trim() !== opened.title) changes.title = draft.title.trim();
 
-  if (draft.location !== stored.location) changes.location = draft.location;
+  if (draft.location.trim() !== opened.location) changes.location = draft.location.trim();
   const cap = draft.capacity.trim();
 
-  if (cap !== stored.capacity) changes.capacityOverride = cap === "" ? null : Number(cap);
+  if (cap !== opened.capacity) changes.capacityOverride = cap === "" ? null : Number(cap);
 
   if (base.remoteAvailable) {
     const remote = draft.remoteCapacity.trim();
 
-    if (remote !== stored.remoteCapacity) changes.remoteCapacityOverride = remote === "" ? null : Number(remote);
+    if (remote !== opened.remoteCapacity) changes.remoteCapacityOverride = remote === "" ? null : Number(remote);
   }
 
-  if (draft.visibility !== stored.visibility) changes.visibility = draft.visibility;
+  if (draft.visibility !== opened.visibility) changes.visibility = draft.visibility;
 
   return changes;
 }
 
-const visibilityLabel = (v: Visibility | "series" | null) => (v === "series" || v === null ? "same as the series" : VISIBILITY_WORD[v]);
-
-// The submitted fields of a save whose answer never arrived, as the person typed them: no stored value is quoted.
-function proposedLines(changes: Readonly<DateEditChanges>, reason?: string): string[] {
-  const lines: string[] = [];
-
-  if (changes.startsLocal !== undefined) lines.push(`Starts: ${formatWallClock(changes.startsLocal)}`);
-
-  if (changes.durationMinutes !== undefined) lines.push(`Minutes: ${changes.durationMinutes}`);
-
-  if (changes.title !== undefined) lines.push(`Title: ${changes.title || "(none)"}`);
-
-  if (changes.location !== undefined) lines.push(`Location: ${changes.location || "(none)"}`);
-
-  if (changes.capacityOverride !== undefined) lines.push(`Capacity: ${changes.capacityOverride === null ? "same as the event" : changes.capacityOverride}`);
-
-  if (changes.remoteCapacityOverride !== undefined) lines.push(`Remote seat limit: ${changes.remoteCapacityOverride === null ? "same as the event" : changes.remoteCapacityOverride}`);
-
-  if (changes.visibility !== undefined) lines.push(`Who can see it: ${visibilityLabel(changes.visibility)}`);
-
-  if (reason) lines.push(`Reason: ${reason}`);
-
-  return lines;
-}
-
-// What a host holds for an editor it may unmount and mount again (while it checks that the manager still
-// manages the date, or reads the date again): the draft, the stored date as the editor last saw it, the reason,
-// the draft's identity and field versions, what the last send's answer said, and the dates its last save was
-// refused for because someone who left kept them (DEC-156), which a remount opens again. `unsent` says the draft
-// holds a change no save has taken: the host asks before the page is left while the editor is off the screen.
+// What a host holds for an editor it may take off the screen and bring back (while it checks that the manager
+// still manages the date, or reads the page again): the read the draft opened from, with its revision, the draft
+// and the reason, and the dates its last save was refused for because someone who left kept them (DEC-156), which a
+// remount opens again, with the form's last error line. `unsent` says the draft holds a change no save has taken: the
+// host asks before the page is left while the editor is off the screen.
 export interface DateDraftHold {
-  unsent: boolean;
+  opened: EditBase;
   draft: Fields;
-  seen: Fields;
   reason: string;
-  draftId: string;
-  versions: Versions;
-  notice: string | null;
+  unsent: boolean;
   kept: KeptDateCount[] | null;
+  notice: string | null;
 }
 
 interface DateEditorProps {
-  // The date as a fresh manager read gives it (lib/editBase): the form's values and its token.
+  // Which date: the save's refusal reads it again through this.
+  opener: DateOpener;
+  // A manager read of the date (lib/editBase), which a new draft opens from; a held draft keeps the read it opened from.
   base: EditBase;
-  // That read, registered with the credential's attempts once on screen; null until then. Save, Try again and
-  // the question act only through it, and only while the attempts say it may.
-  permit: ReadPermit | null;
-  attempts: DateAttempts;
-  // When present, the editor starts from it and writes back to it after every render, so the host may unmount
-  // the editor and mount it again with the same draft; a newer stored date rebases it as on every host.
+  // When present, the editor starts from it and writes back to it after every render, so the host may unmount the
+  // editor and mount it again with the same draft.
   hold?: MutableRefObject<DateDraftHold | null>;
-  // The update was stored; `stillOpen` is false when this editor went away while it ran. The attempts ask the
-  // host for its page and this date again; this only says what the editor itself does next.
-  onSaved: (stillOpen: boolean) => void;
+  // The update was stored: the host closes the editor and reads its page again, as after any save.
+  onSaved: () => void;
+  // The save was refused and not sent again: the host closes the editor and shows the date as it is now (DEC-164).
+  onConflict: (why: RevisionConflict) => void;
   onClose: () => void;
   // The room was booked or released (its own action, not part of Save).
   onRoomChanged?: () => void;
@@ -165,101 +113,39 @@ interface DateEditorProps {
   focusRoom?: boolean;
   // The kept-dates panel's read was refused: this person may no longer manage the event's sign-ups.
   onAuthorityLost?: () => void;
-  // A save was refused with a readable 401, 403 or 404: this person may no longer manage the date.
-  onLost?: () => void;
 }
 
-let drafts = 0;
+// The press ended without sending anything more: the person said no, or the question no longer stood.
+const DECLINED = Symbol("declined");
+const WITHDRAWN = Symbol("withdrawn");
 
-// DateEditor changes one occurrence only (time, duration, title, location, caps, visibility), through the
-// guarded date edit (M8.1): Save freezes what differs from the read it was opened from and sends it once, with
-// that read's token. Later series changes leave an edited date alone.
-//
-// When a newer read arrives (this editor's own save, another editor's, a refresh), each field the stored date
-// changed takes the stored value and the others keep what was typed, so a later save never sends an old value
-// back as a change; after a stored save, the fields it submitted take the stored value.
-export function DateEditor({
-  base,
-  permit,
-  attempts,
-  hold,
-  onSaved,
-  onClose,
-  onRoomChanged,
-  focusRoom,
-  onAuthorityLost,
-  onLost,
-}: DateEditorProps) {
-  const stored = fieldsOf(base);
-  const key = dateKey(base.eventId, base.date);
-  const [draft, setDraft] = useState(() => hold?.current?.draft ?? stored);
-  // The stored date as this editor last saw it.
-  const [seen, setSeen] = useState(() => hold?.current?.seen ?? stored);
-  const [reason, setReasonValue] = useState(() => hold?.current?.reason ?? "");
-  const [draftId, setDraftId] = useState(() => hold?.current?.draftId ?? `draft-${++drafts}`);
-  const versions = useRef<Versions>(hold?.current?.versions ?? {});
-  const bump = (k: VersionKey) => { versions.current = { ...versions.current, [k]: (versions.current[k] ?? 0) + 1 }; };
-
-  const edit = <K extends keyof Fields>(k: K) => (value: Fields[K]) => {
-    bump(versionOf[k]);
-    setDraft((d) => ({ ...d, [k]: value }));
-  };
-
-  const setReason = (value: string) => {
-    bump("reason");
-    setReasonValue(value);
-  };
-
-  // The replay of this draft's uncertain save answered that the date changed (it may or may not have saved), here
-  // or on another page: what was typed and the reason go before any render shows them, also for a draft brought
-  // back from a hold, and a new draft starts from the date as read.
-  if (attempts.draftRetired(draftId)) {
-    versions.current = {};
-    setDraftId(`draft-${++drafts}`);
-    setSeen(stored);
-    setDraft(stored);
-    setReasonValue("");
-  } else if (JSON.stringify(seen) !== JSON.stringify(stored)) {
-    // A newer read: catch the draft up before this render shows it.
-    setSeen(stored);
-    setDraft(rebased(draft, seen, stored));
-  }
-
-  // A stored save's fields take the stored value on the first read made after it, before Save can be pressed
-  // again: a field typed again since keeps what was typed.
-  useLayoutEffect(() => {
-    if (!permit) return;
-    const submitted = attempts.takeSettledDraft(permit, draftId);
-
-    if (!submitted) return;
-    const now = versions.current;
-    setDraft((d) => {
-      const out = { ...d };
-
-      for (const k of fieldKeys) if (submitted[versionOf[k]] !== undefined && submitted[versionOf[k]] === now[versionOf[k]]) Object.assign(out, { [k]: stored[k] });
-
-      return out;
-    });
-
-    if (submitted.reason !== undefined && submitted.reason === now.reason) setReasonValue("");
-  }, [permit, attempts, draftId]);
-
+// DateEditor changes one occurrence only (time, duration, title, location, caps, visibility). Later series changes
+// leave an edited date alone. Its save is the one conflict protocol (useRevisionSave, DEC-164): it names the read the
+// draft opened with, and a refusal reads the date once and either is done, sends again or closes the editor.
+export function DateEditor({ opener, base, hold, onSaved, onConflict, onClose, onRoomChanged, focusRoom, onAuthorityLost }: DateEditorProps) {
+  // The read this draft opened from: its values and its revision, for as long as the draft lives.
+  const [opened] = useState(() => hold?.current?.opened ?? base);
+  const [draft, setDraft] = useState(() => hold?.current?.draft ?? fieldsOf(opened));
+  const [reason, setReason] = useState(() => hold?.current?.reason ?? "");
+  const edit = <K extends keyof Fields>(k: K) => (value: Fields[K]) => setDraft((d) => ({ ...d, [k]: value }));
   const [remoteError, setRemoteError] = useState<string | null>(null);
-  const remotePrefix = `date-${base.id}`;
-  // The form keeps keyboard focus when a question closes over a Save this render disables (a roster write on
-  // the date began, or ended and the date waits for a new read).
+  const remotePrefix = `date-${opened.id}`;
+  // The form keeps keyboard focus when a question closes over a Save this render disables (a roster write on the
+  // date began).
   const home = useFocusHome<HTMLFormElement>();
   const root = home.ref;
   useKeepFocusHome(home);
   const [busy, setBusy] = useState(false);
-  const [error, setErrorState] = useState<string | null>(() => hold?.current?.notice ?? null);
+  const sending = useRef(false);
+  // A stored save ends the draft: nothing is written back to the hold after it.
+  const saved = useRef(false);
+  const [error, setErrorState] = useState(() => hold?.current?.notice ?? null);
 
-  // The host may unmount this editor in the commit that shows an answer (its page reads again), so the hold
-  // hears of a message at once, not after the render that would show it.
+  // An answer may land while the host has this editor off the screen: the hold hears of it at once.
   const setError = (message: string | null) => {
     setErrorState(message);
 
-    if (hold?.current) hold.current.notice = message;
+    if (hold?.current?.opened === opened) hold.current.notice = message;
   };
 
   const mounted = useRef(true);
@@ -268,21 +154,18 @@ export function DateEditor({
 
     return () => { mounted.current = false; };
   }, []);
-  // Roster writes on this date, from any roster or kept-dates panel in the session: while one is in flight
-  // nothing can be saved, and one that begins closes an open question as no (the attempts withdraw it too).
-  const roster = useRosterActivity(base.eventId, base.date);
-  const subscribe = useCallback((changed: () => void) => attempts.subscribe(changed), [attempts]);
-  useSyncExternalStore(subscribe, attempts.version);
-  // The writer's question this editor holds, with the read that sent the save, from the answer until it closes.
-  const asking = useRef<{ round: ConsentRound; permit: ReadPermit } | null>(null);
-  // The question closes as no in the commit after it stops standing, whatever ended it (a roster write on the
-  // date, that read retired or replaced, this tab's credential or marker gone, another answer): this editor
-  // renders on every change of the attempts, and `withdrawn` changes the save's authority.
-  const withdrawn = asking.current !== null && !attempts.question(asking.current.permit, asking.current.round);
+
+  // Roster writes on this date, from any roster or kept-dates panel in the session: while one is in flight nothing
+  // can be saved, and one that begins or ends closes an open question as no.
+  const roster = useRosterActivity(opened.eventId, opened.date);
+  // The writer's question this editor holds, from the answer until it closes: the roster sequence and the sign-in of
+  // the press that asked it, which must still hold for it to stand.
+  const asking = useRef<{ at: number; credential: Credential | null } | null>(null);
+  const withdrawn = asking.current !== null && (roster.changes() !== asking.current.at || !sameSignIn(asking.current.credential));
   // An administrator can erase this person from their own browser, which leaves this tab's marker cookie as it
   // was, so the credential's own focus check sees nothing. Coming back to the window while the question is open
-  // asks the server again who this tab signs in as; an answer for anyone else replaces the credential, which
-  // retires the question as above. A failed check changes nothing: the writer still refuses a stale actor.
+  // asks the server again who this tab signs in as; an answer for anyone else replaces the credential and the
+  // session under it. A failed check changes nothing: the writer still refuses a stale actor.
   useEffect(() => {
     let checking = false;
 
@@ -301,10 +184,6 @@ export function DateEditor({
     };
   }, []);
   const beginSave = useConfirm(`${roster.changes()}|${withdrawn ? "withdrawn" : ""}`);
-  const latestPermit = useRef(permit);
-  useLayoutEffect(() => {
-    latestPermit.current = permit;
-  });
 
   const submit = useRef<HTMLButtonElement>(null);
 
@@ -317,132 +196,29 @@ export function DateEditor({
     onAuthorityLost,
   });
 
-  const status = attempts.status(key);
-  const locked = busy || status !== "idle";
-  const changesNow = JSON.stringify(changesOf(draft, stored, base));
-  // What this editor's last stored save took, which the form still shows as changes until the date is read again.
-  // Try again stores the same changes: the form is locked from the save in doubt until its answer.
-  const taken = useRef<string | null>(null);
-  // A save on its way or in doubt is the session's attempts' to finish, here or on another page.
-  const unsent = !locked && changesNow !== "{}" && changesNow !== taken.current;
-
-  useLayoutEffect(() => {
-    if (hold) hold.current = { unsent, draft, seen, reason, draftId, versions: versions.current, notice: error, kept: kept.refusal?.dates ?? null };
+  const openedFields = dateFields(opened);
+  const send = useRevisionSave<DateFields | null, DateFields>({
+    opened: openedFields,
+    revision: opened.revision,
+    read: () => readDateFields(opener),
+    fields: (value) => value,
+    onConflict: (why) => {
+      if (hold?.current?.opened === opened) hold.current = null;
+      onConflict(why);
+    },
+    changedCode: "date_changed",
   });
 
-  const canSave = !!permit && attempts.canSave(permit);
-  const recovery = permit ? attempts.recovery(permit) : null;
-  const canReplay = !!permit && attempts.canReplay(permit);
+  const changesNow = JSON.stringify(changesOf(draft, opened));
+  const unsent = !busy && !saved.current && changesNow !== "{}";
 
-  // Settles one send's answer, asking the writer's question when it returns one. The question, and every
-  // follow-up send, belong to `via`, the read the save was sent through, while it is still this editor's; a
-  // question is answered no whenever this editor can no longer ask it. `at` is the date's roster sequence when
-  // Save was pressed: a write that began or ended since stops the question.
-  async function settle(first: EditVerdict, action: PendingAction, replaying: boolean, at: number, via: ReadPermit) {
-    let v = first;
-    let asked = 0;
-
-    for (;;) {
-      if (v.kind === "consent") {
-        const round = v.round;
-        const p = via;
-        const current = () => mounted.current && action.current() && roster.changes() === at && latestPermit.current === p && attempts.question(p, round);
-        // Every question comes from the writer's own answer, about this date and the change saved (the attempts
-        // asked only one that is); a second one in the same save says it checked again, and needs its own yes.
-        const again = asked++ > 0 ? "We checked again before saving. " : "";
-        const question = `${again}${formatDayFull(base.date)}. ${changeSentence("date", v.current, v.target)} This cancels and notifies ${plural(v.count, "registered person", "registered people")} who can no longer see this date.`;
-        let yes = false;
-
-        if (current()) {
-          asking.current = { round, permit: p };
-          yes = await action.ask({
-            title: "Save this date?",
-            body: question,
-            confirmLabel: "Save and notify",
-            tone: "normal",
-            native: `${question} Save this date?`,
-          });
-        }
-
-        // Checked once more as the answer lands: the read, the roster sequence and the question must still hold.
-        const live = current();
-
-        if (asking.current?.round === round) asking.current = null;
-        const next = attempts.answer(round, yes && live, p);
-
-        if (!next) {
-          // A no the person chose says nothing; a question this editor could no longer ask says why, also to the
-          // hold, for the editor a new read of the date mounts in its place.
-          if (yes || !live) setError(STALE_SAVE);
-
-          if (mounted.current) setBusy(false);
-
-          return;
-        }
-
-        v = await next;
-        continue;
-      }
-
-      break;
-    }
-
-    if (!mounted.current) return;
-
-    switch (v.kind) {
-      case "stored":
-        taken.current = changesNow;
-        kept.close();
-        setBusy(false);
-        setError(null);
-        onSaved(action.here());
-
-        return;
-      case "notSent":
-        setBusy(false);
-        setError(STALE_SAVE);
-
-        return;
-      case "unsure":
-        setBusy(false);
-        setError(UNSURE_SAVE);
-
-        return;
-      case "changed":
-        setBusy(false);
-        setError(replaying ? UNCONFIRMED : STALE_SAVE);
-
-        return;
-      case "refused": {
-        const keptDates = keptDatesOf(v.cause);
-        // A refusal for a kept date is told by the kept-dates panel alone (DEC-156); this editor edits one date,
-        // so an unreadable list still names it.
-        const msg = keptDates ? null : reviewOutdated(v.cause) ?? errorText(v.cause, "We couldn't update this date.");
-
-        if (keptDates) kept.open(keptDates.length > 0 ? keptDates : [{ date: base.date, keptCount: 0 }]);
-
-        const done = () => {
-          setBusy(false);
-          setError(msg);
-        };
-
-        if (msg && isRemoteError(v.cause)) {
-          showFieldErrors(root.current, () => {
-            done();
-            setRemoteError(msg);
-          });
-        } else {
-          done();
-        }
-
-        if (v.lost) onLost?.();
-      }
-    }
-  }
+  useLayoutEffect(() => {
+    if (hold && !saved.current) hold.current = { opened, draft, reason, unsent, kept: kept.refusal?.dates ?? null, notice: error };
+  });
 
   async function save(e: React.FormEvent) {
     e.preventDefault();
-    const remoteMsg = remoteProblem({ available: base.remoteAvailable, capacity: draft.remoteCapacity }, true);
+    const remoteMsg = remoteProblem({ available: opened.remoteAvailable, capacity: draft.remoteCapacity }, true);
 
     if (remoteMsg) {
       showFieldErrors(root.current, () => setRemoteError(remoteMsg));
@@ -451,7 +227,7 @@ export function DateEditor({
     }
 
     setRemoteError(null);
-    const changes = changesOf(draft, stored, base);
+    const changes = changesOf(draft, opened);
 
     if (Object.keys(changes).length === 0) {
       onClose();
@@ -459,39 +235,102 @@ export function DateEditor({
       return;
     }
 
-    if (!permit || roster.writing) return;
-    const submitted: Versions = {};
-
-    for (const k of changeKeys) if (changes[k] !== undefined) submitted[k] = versions.current[k] ?? 0;
-    const why = changes.visibility !== undefined ? reason : undefined;
-
-    if (why?.trim()) submitted.reason = versions.current.reason ?? 0;
+    if (sending.current || roster.writing) return;
+    sending.current = true;
     const action = beginSave();
+    // Every send of this press (the first, the consent answer's and any the protocol sends again) goes only while
+    // nothing it was judged under moved: this editor is on screen, no roster write on the date began or ended, and
+    // this tab signs in as it did.
     const at = roster.changes();
+    const credential = currentCredential();
+    const live = () => mounted.current && roster.changes() === at && sameSignIn(credential);
+    const reasonSent = changes.visibility !== undefined ? reason.trim() || undefined : undefined;
+    // The question must be about this save: the date's row, the visibility the opened read showed, and the value
+    // asked for ("same as the series" resolved from that read). A save that changes no visibility is never asked.
+    const expected = changes.visibility === undefined ? null : {
+      eventId: opened.eventId, occurrenceId: opened.id, current: opened.visibility,
+      target: changes.visibility === "series" || changes.visibility === null ? opened.seriesVisibility : changes.visibility,
+    };
+    let consent: string | undefined;
+    let asked = 0;
 
-    // The claim is made here, before any await: null when this read may not save now (another send, a doubt,
-    // a roster write, a read made before the date's last change), and nothing was sent.
-    const sending = attempts.save(permit, base.eventId, base.date, changes, {
-      reason: why, draft: { id: draftId, versions: submitted }, shown: { visibility: base.visibility, seriesVisibility: base.seriesVisibility },
-    });
+    const write = async (revision: string | undefined) => {
+      for (;;) {
+        if (!live()) throw WITHDRAWN;
 
-    if (!sending) return;
+        try {
+          return await Events.editDate(opened.eventId, opened.date, { revision: revision ?? "", changes, reason: reasonSent, consent });
+        } catch (err) {
+          const decision = expected && dateDecision(err, expected);
+
+          if (!decision) throw err;
+
+          if (!live()) throw WITHDRAWN;
+          // Every question comes from the writer's own answer; a second one in the same save says it checked again,
+          // and needs its own yes.
+          const again = asked++ > 0 ? "We checked again before saving. " : "";
+          const question = `${again}${formatDayFull(opened.date)}. ${changeSentence("date", decision.current, decision.target)} This cancels and notifies ${plural(decision.count, "registered person", "registered people")} who can no longer see this date.`;
+          asking.current = { at, credential };
+          let yes = false;
+
+          try {
+            yes = await action.ask({ title: "Save this date?", body: question, confirmLabel: "Save and notify", tone: "normal", native: `${question} Save this date?` });
+          } finally {
+            asking.current = null;
+          }
+
+          // A no the person chose says nothing; a question that closed because what it asked under moved says why.
+          if (!yes) throw live() && action.current() ? DECLINED : WITHDRAWN;
+          consent = decision.token;
+        }
+      }
+    };
+
     setBusy(true);
     setError(null);
-    await settle(await sending, action, false, at, permit);
-  }
 
-  // Try again: the same bytes as the save whose answer never arrived, once, through this read.
-  async function replay() {
-    if (!permit) return;
-    const action = beginSave();
-    const at = roster.changes();
-    const sending = attempts.replay(permit);
+    try {
+      const sent = await send(write, intendedDateFields(openedFields, changes));
 
-    if (!sending) return;
-    setBusy(true);
-    setError(null);
-    await settle(await sending, action, true, at, permit);
+      if (sent === "saved") {
+        // The answer may land while the host has this editor off the screen: the draft it holds is this one.
+        const mine = mounted.current || hold?.current?.opened === opened;
+        saved.current = true;
+
+        if (hold?.current?.opened === opened) hold.current = null;
+        kept.close();
+
+        if (mine) onSaved();
+      } else if (sent === "refused") {
+        setError("We couldn't update this date. Please try again.");
+      }
+    } catch (err) {
+      if (err === WITHDRAWN) {
+        setError(STALE_QUESTION);
+      } else if (err !== DECLINED) {
+        const keptDates = keptDatesOf(err);
+        // A refusal for a kept date is told by the kept-dates panel alone (DEC-156); this editor edits one date, so an
+        // unreadable list still names it.
+        const msg = keptDates ? null : reviewOutdated(err) ?? errorText(err, "We couldn't update this date.");
+
+        if (keptDates) kept.open(keptDates.length > 0 ? keptDates : [{ date: opened.date, keptCount: 0 }]);
+
+        if (msg && isRemoteError(err)) {
+          // The fields take focus again before the refused one is focused.
+          showFieldErrors(root.current, () => {
+            setBusy(false);
+            setError(msg);
+            setRemoteError(msg);
+          });
+        } else {
+          setError(msg);
+        }
+      }
+    } finally {
+      sending.current = false;
+
+      if (mounted.current) setBusy(false);
+    }
   }
 
   // Leaving the page with a change typed and not sent asks first (DEC-98), as the series editor does.
@@ -500,26 +339,19 @@ export function DateEditor({
   return (<>
     <Form ref={root} tabIndex={-1} noValidate onSubmit={save} className="mt-3 space-y-3 border-t border-border pt-3">
       <p className="text-sm text-text-muted">
-        This date only. Later series changes leave it alone. The series date stays {formatDayFull(base.date)}. {zoneNote(base.tzid)}
+        This date only. Later series changes leave it alone. The series date stays {formatDayFull(opened.date)}. {zoneNote(opened.tzid)}
       </p>
       {error && <FormError>{error}</FormError>}
-      {recovery && <div className="space-y-2 rounded-lg border border-border p-3">
-        <p role="status" className="text-sm">We couldn't tell whether your last save of {formatDayFull(base.date)} went through. It asked for:</p>
-        <ul className="list-disc pl-5 text-sm">{proposedLines(recovery.changes, recovery.reason).map((line) => <li key={line}>{line}</li>)}</ul>
-        <p className="text-sm text-text-muted">Try again sends the same change once more. It never applies twice.</p>
-        <Button variant="secondary" layout="w-full sm:w-auto" disabled={busy || !canReplay || roster.writing} onClick={() => void replay()}>Try again</Button>
-      </div>}
-      {!busy && !recovery && status === "unsure" && <p role="status" className="text-sm">Checking this date's last save…</p>}
-      {/* The draft a save sends cannot change while it is being saved, or while an earlier save is unsettled. */}
-      <fieldset disabled={locked} className="min-w-0 space-y-3">
+      {/* The draft a save sends cannot change while it is being saved. */}
+      <fieldset disabled={busy} className="min-w-0 space-y-3">
       <div className="grid gap-3">
-        <Field id={`cev-date-${base.id}`} label="Date">
+        <Field id={`cev-date-${opened.id}`} label="Date">
           <Input type="date" value={draft.date} onChange={(e) => edit("date")(e.target.value)} required />
         </Field>
-        <Field id={`cev-time-${base.id}`} label="Start time">
+        <Field id={`cev-time-${opened.id}`} label="Start time">
           <Input type="time" value={draft.time} onChange={(e) => edit("time")(e.target.value)} required />
         </Field>
-        <Field id={`cev-dur-${base.id}`} label="Minutes">
+        <Field id={`cev-dur-${opened.id}`} label="Minutes">
           <Input
             type="number"
             min={1}
@@ -530,15 +362,15 @@ export function DateEditor({
         </Field>
       </div>
       <div className="grid gap-3">
-        <Field id={`cev-title-${base.id}`} label="Title">
+        <Field id={`cev-title-${opened.id}`} label="Title">
           <Input value={draft.title} onChange={(e) => edit("title")(e.target.value)} />
         </Field>
-        <Field id={`cev-loc-${base.id}`} label="Location" optional>
+        <Field id={`cev-loc-${opened.id}`} label="Location" optional>
           <Input value={draft.location} onChange={(e) => edit("location")(e.target.value)} />
         </Field>
       </div>
-      <RoomField eventId={base.eventId} date={base.date} idPrefix={`cev-${base.id}`} onChanged={onRoomChanged} focusOnLoad={focusRoom} />
-      <Field id={`cev-cap-${base.id}`} label="Capacity for this date" optional hint="Leave it blank to use the event’s capacity.">
+      <RoomField eventId={opened.eventId} date={opened.date} idPrefix={`cev-${opened.id}`} onChanged={onRoomChanged} focusOnLoad={focusRoom} />
+      <Field id={`cev-cap-${opened.id}`} label="Capacity for this date" optional hint="Leave it blank to use the event’s capacity.">
         <Input
           type="number"
           min={1}
@@ -547,7 +379,7 @@ export function DateEditor({
           onChange={(e) => edit("capacity")(e.target.value)}
         />
       </Field>
-      {base.remoteAvailable && (
+      {opened.remoteAvailable && (
         <Field
           id={`remote-capacity-${remotePrefix}`}
           label="Remote seat limit for this date"
@@ -564,23 +396,27 @@ export function DateEditor({
           />
         </Field>
       )}
-      <VisibilityField id={`date-visibility-${base.id}`} value={draft.visibility === "series" ? (base.seriesVisibility ?? base.visibility ?? "public") : draft.visibility} onChange={edit("visibility")}
+      <VisibilityField id={`date-visibility-${opened.id}`} value={draft.visibility === "series" ? opened.seriesVisibility : draft.visibility} onChange={edit("visibility")}
         inheritSelected={draft.visibility === "series"} onInherit={() => edit("visibility")("series")}
-        seriesVisibility={base.seriesVisibility ?? base.visibility ?? "public"}
-        churchWide={base.churchWide} groupName={base.groupName} groupVisibility={base.groupVisibility}
+        seriesVisibility={opened.seriesVisibility}
+        churchWide={opened.churchWide} groupName={opened.groupName} groupVisibility={opened.groupVisibility}
         reason={reason} onReason={setReason} />
       </fieldset>
       <FormActions>
-        <Button ref={submit} variant="primary" layout="w-full sm:w-auto" type="submit" disabled={locked || !canSave || roster.writing}>
-          {busy || status === "sending" ? "Saving…" : "Save this date"}
+        <Button ref={submit} variant="primary" layout="w-full sm:w-auto" type="submit" disabled={busy || roster.writing}>
+          {busy ? "Saving…" : "Save this date"}
         </Button>
-        {/* Close stays available: a save already sent is held by the attempts, not by this editor. */}
-        <Button variant="secondary" layout="w-full sm:w-auto" onClick={onClose}>
+        <Button variant="secondary" layout="w-full sm:w-auto" disabled={busy} onClick={onClose}>
           Close
         </Button>
       </FormActions>
     </Form>
     {/* After the form, never inside it: the panel's roster has forms of its own. */}
-    {kept.refusal && <KeptDates key={kept.refusal.seq} eventId={base.eventId} keptDates={kept.refusal.dates} onRefused={kept.refused} onClose={kept.close} />}
+    {kept.refusal && <KeptDates key={kept.refusal.seq} eventId={opened.eventId} keptDates={kept.refusal.dates} onRefused={kept.refused} onClose={kept.close} />}
   </>);
+}
+
+// Whether this tab still signs in with the credential a press began under.
+function sameSignIn(credential: Credential | null): boolean {
+  return credential === null ? currentCredential() === null : credentialCurrent(credential);
 }

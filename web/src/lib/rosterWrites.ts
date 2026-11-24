@@ -1,4 +1,4 @@
-import { createContext, useCallback, useContext, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
+import { createContext, createElement, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
 import { ApiError } from "../api/core";
 import type { LoadOutcome } from "./useLoad";
 
@@ -119,7 +119,15 @@ export function createRosterWrites(): RosterWrites {
   };
 }
 
-export const RosterWritesContext = createContext<RosterWrites | null>(null);
+const RosterWritesContext = createContext<RosterWrites | null>(null);
+
+// The signed-in session's roster writes (App puts it inside the user-keyed Layout, around every route): writes in
+// flight are counted here per date, so they outlive the roster that started them and every host that remounts.
+export function RosterWritesProvider({ children, rosterWrites }: { children: ReactNode; rosterWrites?: RosterWrites }) {
+  const [own] = useState(createRosterWrites);
+
+  return createElement(RosterWritesContext.Provider, { value: rosterWrites ?? own }, children);
+}
 
 export const rosterKey = (eventId: number, date: string) => `${eventId}:${date}`;
 
@@ -183,6 +191,42 @@ export function useRosterActivityOf() {
     pendingFor: store.pendingFor,
     subscribe: store.subscribe,
   }), [store]);
+}
+
+// What a page that lists dates tells useRosterSettled about its one useLoad.
+interface ListingLoad {
+  epoch: () => number;
+  dataEpoch: number;
+  reload: () => void;
+}
+
+// A page that lists dates and has no roster gate of its own (EventDetail, GroupDetail). A roster write that may have
+// changed a date it shows (any end but "answered": a date row's roster, or a kept-dates panel's in an editor) asks for
+// the page again, and `settling` holds that date's Edit until the page shows an answer asked for after the end, so no
+// editor opens from what the page showed before it. `shows` is decided from the page's address, not from what it has
+// loaded: a read on its way may hold the date.
+export function useRosterSettled(load: ListingLoad, shows: (eventId: number) => boolean) {
+  const store = useRosterStore();
+  const latest = useRef({ load, shows });
+  // For each date, the page's epoch when its last roster write ended.
+  const [ended, setEnded] = useState(() => new Map<string, number>());
+
+  useLayoutEffect(() => {
+    latest.current = { load, shows };
+  });
+
+  useEffect(() => store.subscribe((event) => {
+    if (event.end === undefined || event.end === "answered" || !latest.current.shows(event.eventId)) return;
+    const at = latest.current.load.epoch();
+    setEnded((old) => new Map(old).set(event.key, at));
+    latest.current.load.reload();
+  }), [store]);
+
+  return (eventId: number, date: string) => {
+    const at = ended.get(rosterKey(eventId, date));
+
+    return at !== undefined && load.dataEpoch <= at;
+  };
 }
 
 // What a host that fails closed around a roster tells the gate about its one useLoad.

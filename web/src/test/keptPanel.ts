@@ -123,9 +123,6 @@ interface Host {
   edits: EditSends;
   // What the editor's own (pinned) manager read answers; the panel's reads are never pinned.
   base: () => OccurrenceResponse;
-  // The host reads the date again for its editor after each answer of its page (EventDetail, GroupDetail), so a
-  // write that asks for the page remounts the editor and its panel, which reads once more.
-  remounts?: boolean;
 }
 
 // The panel's reads, apart from the editor's own.
@@ -180,20 +177,15 @@ export async function runHostCase(event: HostEvent, outcome: ReadOutcome, host: 
 
   const held = deferred<OccurrenceResponse>();
   const asksPage = event === "iv" || event.startsWith("lost-");
-  const remount = !!host.remounts && asksPage;
   reads.push(held.promise);
-
-  if (remount) reads.push(held.promise);
   const before = panelReads();
   const seen = observeKept([date]);
   await fire();
   const reread = asksPage ? loads + 1 : loads;
   expect(host.pageLoads()).toBe(reread);
   expect(keptForbiddenNow([date])).toEqual([]);
-
-  if (remount) await waitFor(() => expect(panelReads()).toBe(before + 2));
   expect(await screen.findByRole("region", { name: KEPT.home })).toHaveTextContent(KEPT.checking);
-  expect(panelReads()).toBe(before + (remount ? 2 : 1));
+  expect(panelReads()).toBe(before + 1);
   expect(minutes()).toHaveValue(150);
   seen.stop();
   seen.expectClean();

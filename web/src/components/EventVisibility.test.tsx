@@ -1,4 +1,4 @@
-import { createRosterWrites, type RosterWriteEnd, type RosterWrites } from "../lib/rosterWrites";
+import { createRosterWrites, RosterWritesProvider, type RosterWriteEnd, type RosterWrites } from "../lib/rosterWrites";
 import { stubService } from "../test/service";
 import { Events } from "../api/events";
 import { ApiError } from "../api/core";
@@ -8,7 +8,6 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { EventVisibilityControl } from "./EventVisibility";
 import type { EventDetailResponse, EventSeries, VisibilityImpact } from "../types";
 import { testEvent } from "../test/fixtures";
-import { DateWritesProvider } from "../lib/dateWrites";
 import { watchChecks, writeAfterTheCheck } from "../test/rosterOps";
 
 const { setVisibility, visibilityImpact } = vi.hoisted(() => ({ setVisibility: vi.fn(), visibilityImpact: vi.fn() }));
@@ -285,7 +284,7 @@ describe("sign-up updates on the event", () => {
 
   function mount(store: RosterWrites, eventId = 7) {
     const onSaved = vi.fn();
-    render(<DateWritesProvider rosterWrites={store}><EventVisibilityControl eventId={eventId} groupName="Garden" groupVisibility="public" visibility="public" onSaved={onSaved} /></DateWritesProvider>);
+    render(<RosterWritesProvider rosterWrites={store}><EventVisibilityControl eventId={eventId} groupName="Garden" groupVisibility="public" visibility="public" onSaved={onSaved} /></RosterWritesProvider>);
 
     return onSaved;
   }
@@ -430,7 +429,7 @@ describe("sign-up updates on the event", () => {
     const store = createRosterWrites();
     const checks = watchChecks(store);
     const preview = holdPreview();
-    render(<DateWritesProvider rosterWrites={store}><button type="button">Roster</button><EventVisibilityControl eventId={7} groupName="Garden" groupVisibility="public" visibility="public" onSaved={() => {}} /></DateWritesProvider>);
+    render(<RosterWritesProvider rosterWrites={store}><button type="button">Roster</button><EventVisibilityControl eventId={7} groupName="Garden" groupVisibility="public" visibility="public" onSaved={() => {}} /></RosterWritesProvider>);
     await choose();
     await userEvent.click(save());
     const roster = screen.getByRole("button", { name: "Roster" });

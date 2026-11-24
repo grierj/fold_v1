@@ -24,7 +24,7 @@ import { RefusedSaveLine, useRefusedSave } from "../lib/refusedSave";
 import { RsvpButtons } from "../components/RsvpButtons";
 import { GuestRegistrationForm } from "../components/GuestRegistrationForm";
 import { DateActions } from "../components/DateActions";
-import { formatTime, heldIn } from "../lib/when";
+import { formatDayFull, formatTime, heldIn } from "../lib/when";
 import { placeLine } from "../lib/place";
 import { dateLine, whenLine } from "../lib/repeat";
 import type { EventHostRow, EventOccurrence, HouseholdPerson } from "../types";
@@ -40,8 +40,7 @@ import { applyActorRsvpResults, type ActorRsvpResult, type SeriesFeedbackSignal 
 import { useRsvpMutationGate, type RsvpMutationGate } from "../lib/useRsvpMutationGate";
 import { ConfirmProvider, useConfirm, usePageFacts } from "../components/ui/ConfirmDialog";
 import { useLeaveQuestion } from "../lib/leaveQuestion";
-import { useDateAttempts, useDateWrites } from "../lib/dateWrites";
-import { dateKey, useEditRefresh } from "../lib/editBase";
+import { useRosterSettled } from "../lib/rosterWrites";
 import { seriesSchedules } from "../lib/registration";
 
 const ManageRoster = lazy(() => import("../components/ManageRoster").then((module) => ({ default: module.ManageRoster })));
@@ -104,18 +103,9 @@ function EventDetailContent() {
   // only the newest request may commit anything.
   const load = useLoad(() => Events.get(id ?? ""), [id], { enabled: !!id });
 
-  // A roster write on one of its dates (a row's, or a kept-dates panel's inside an editor) holds that date's
-  // Edit until this page shows an answer asked for after it. A date's own edits are held per credential by the
-  // guarded attempts (lib/dateWrites), which ask this page and the date's editor again when one settles.
-  const dateWrites = useDateWrites({
-    epoch: load.epoch,
-    dataEpoch: load.dataEpoch,
-    shows: (target) => target.eventId === Number(id),
-    reload: () => refreshDates(),
-    rosters: true,
-  });
-
-  useEditRefresh((eventId) => eventId === Number(id), () => refreshDates());
+  // A roster write on one of its dates (a row's, or a kept-dates panel's inside an editor) holds that date's Edit
+  // until this page shows an answer asked for after it.
+  const settling = useRosterSettled({ epoch: load.epoch, dataEpoch: load.dataEpoch, reload: () => refreshDates() }, (eventId) => eventId === Number(id));
 
   const page = load.data ?? null;
   const loading = load.loading;
@@ -139,6 +129,9 @@ function EventDetailContent() {
     if (!document.activeElement || document.activeElement === document.body) editButton.current?.focus();
   }, [editing]);
   const refusedSave = useRefusedSave(load);
+  // A date's save refused and not sent again (DEC-164): which date, for the line above the dates.
+  const dateRefused = useRefusedSave(load);
+  const [refusedDate, setRefusedDate] = useState<{ eventId: number; date: string } | null>(null);
   const notFound = load.error instanceof ApiError && load.error.status === 404;
   const error = load.error && !notFound ? errorText(load.error, "We couldn't load this event.") : null;
   const setPage = load.setData;
@@ -170,7 +163,16 @@ function EventDetailContent() {
     parkFocus();
     setEditing(false);
     setRoomsRevision((n) => n + 1);
+    dateRefused.clear();
     refusedSave.refused(why);
+  }
+
+  // A date editor's save was refused and not sent again: the row closed it, and the page reads from nothing and says so.
+  function dateConflict(why: RevisionConflict, eventId: number, date: string) {
+    setRoomsRevision((n) => n + 1);
+    refusedSave.clear();
+    setRefusedDate({ eventId, date });
+    dateRefused.refused(why);
   }
 
   function reportSeriesFeedback(eventId: number, date: string, actorResults: ActorRsvpResult[]) {
@@ -191,7 +193,7 @@ function EventDetailContent() {
   }
 
   if (notFound) {
-    return <Missing title="Event not found" body="It may have been cancelled or removed, or it may be private." notice={<RefusedSaveLine save={refusedSave} noun="event" />} />;
+    return <Missing title="Event not found" body="It may have been cancelled or removed, or it may be private." notice={<><RefusedSaveLine save={refusedSave} noun="event" /><RefusedSaveLine save={dateRefused} noun="date" /></>} />;
   }
 
   if (!page) {
@@ -199,6 +201,7 @@ function EventDetailContent() {
       <div className="fold-page fold-page-narrow">
         <h1 className="text-3xl font-bold mb-6">Event unavailable</h1>
         <RefusedSaveLine save={refusedSave} noun="event" />
+        <RefusedSaveLine save={dateRefused} noun="date" />
         <ErrorNotice message={error ?? "We couldn't load this event."} onRetry={() => void load.retry()} />
       </div>
     );
@@ -337,6 +340,9 @@ function EventDetailContent() {
 
       {!single && <h2 className="text-xl font-semibold mt-6 mb-4">Upcoming dates</h2>}
       {householdError && <ErrorNotice message={householdError} onRetry={retryHousehold} />}
+      {/* Above the list, never in a row a long list may hide: focus brings it into view, and it names the day. */}
+      {refusedDate && <RefusedSaveLine save={dateRefused} noun="date" about={formatDayFull(refusedDate.date)}
+        canManage={occurrences.some((o) => o.eventId === refusedDate.eventId && o.date === refusedDate.date) ? canManage : undefined} />}
       {occurrences.length === 0 && (
         <EmptyState title="No upcoming dates." body="This event has no more dates on the calendar." />
       )}
@@ -352,9 +358,7 @@ function EventDetailContent() {
             loggedIn={!!user}
             canManage={canManage}
             manageRequested={canManage && manageDate === m.date}
-            writingDate={dateWrites.writing(m.eventId, m.date)}
-            settlingDate={dateWrites.settling(m.eventId, m.date)}
-            generation={load.dataEpoch}
+            settlingDate={settling(m.eventId, m.date)}
             pageFailed={load.error != null}
             editRequest={pickRequest?.date === m.date ? pickRequest.seq : 0}
             onRsvp={handleRsvp}
@@ -364,6 +368,8 @@ function EventDetailContent() {
             onSeriesFeedback={reportSeriesFeedback}
             onTerminalRefresh={() => void load.retry()}
             onChanged={refreshDates}
+            onEditDate={dateRefused.clear}
+            onDateConflict={(why) => dateConflict(why, m.eventId, m.date)}
             onNeedLogin={() => navigate("/login", { state: { from: `/events/${id}` } })}
           />}
         </CompactDates>
@@ -381,9 +387,7 @@ function DateRow({
   loggedIn,
   canManage,
   manageRequested,
-  writingDate,
   settlingDate,
-  generation,
   pageFailed,
   editRequest,
   onRsvp,
@@ -393,6 +397,8 @@ function DateRow({
   onSeriesFeedback,
   onTerminalRefresh,
   onChanged,
+  onEditDate,
+  onDateConflict,
   onNeedLogin,
 }: {
   instance: EventOccurrence;
@@ -405,12 +411,9 @@ function DateRow({
   canManage: boolean;
   // ?manage=<this date> asked for the Manage sign-ups panel to open (DEC-99).
   manageRequested: boolean;
-  // A roster write on this date is on its way, or answered and the page does not show it yet (EventDetailContent's dateWrites).
-  writingDate: boolean;
+  // A roster write on this date ended and the page does not show an answer asked for after it (useRosterSettled).
   settlingDate: boolean;
-  // The page's shown answer: the date's editor reads the date again for each. While the page's latest read
-  // failed, the editor shows nothing of the date.
-  generation: number;
+  // While the page's latest read failed, the editor shows nothing of the date.
   pageFailed: boolean;
   // Counts up each time "Pick a room" asks for this date's editor; 0 when it hasn't.
   editRequest: number;
@@ -421,15 +424,14 @@ function DateRow({
   onSeriesFeedback: (eventId: number, date: string, actorResults: ActorRsvpResult[]) => void;
   onTerminalRefresh: () => void;
   onChanged: () => void;
+  // The date's editor opened, which clears what the page said about its last refused save.
+  onEditDate: () => void;
+  onDateConflict: (why: RevisionConflict) => void;
   onNeedLogin: () => void;
 }) {
   const navigate = useNavigate();
   const { canCompose } = useAuth();
   const [editingDate, setEditingDate] = useState(false);
-  // This date's guarded edit: anything but idle closes Edit; a save whose answer never arrived is reached
-  // through its own opener, outside the menu, so Close or leaving never strands it.
-  const attempts = useDateAttempts();
-  const editStatus = attempts?.status(dateKey(instance.eventId, instance.date)) ?? "idle";
   const [managing, setManaging] = useState(manageRequested);
   const manageRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
@@ -444,6 +446,7 @@ function DateRow({
   const [focusRoom, setFocusRoom] = useState(false);
   useEffect(() => {
     if (editRequest > 0 && editRequest !== handledRequest.current) {
+      onEditDate();
       setEditingDate(true);
       setFocusRoom(true);
     }
@@ -508,7 +511,7 @@ function DateRow({
         tone="quiet"
         label={`More for ${instance.date}`}
         items={[
-          { label: "Edit this date", onSelect: () => { setFocusRoom(false); setEditingDate((v) => !v); }, disabled: writingDate || settlingDate || editStatus !== "idle" },
+          { label: "Edit this date", onSelect: () => { setFocusRoom(false); onEditDate(); setEditingDate((v) => !v); }, disabled: settlingDate },
           { label: "Manage sign-ups", onSelect: () => setManaging((v) => !v) },
           // A single date's people are the event's: the header's menu has it.
           ...(canCompose && !single ? [{ label: EMAIL_GOING, onSelect: () => navigate(composePath({ occurrence: instance.id })) }] : []),
@@ -551,20 +554,20 @@ function DateRow({
             </Button>
           )}
         </div>
-        {canManage && !editingDate && editStatus === "unsure" && (
-          <Button variant="secondary" layout="w-full sm:w-auto" onClick={() => { setFocusRoom(false); setEditingDate(true); }}>Check your last change to this date</Button>
-        )}
         {canManage && editingDate && (
           <div ref={editorRef} className="scroll-mt-4">
           <ManagedDateEditor
             opener={{ eventId: instance.eventId, date: instance.date, occurrenceId: instance.id }}
-            generation={generation}
             pageFailed={pageFailed}
             onRoomChanged={onChanged}
             focusRoom={focusRoom}
-            onSaved={(stillOpen) => {
-              // An editor that went away while its save ran (managing rights came and went) closes nothing it did not own.
-              if (stillOpen) setEditingDate(false);
+            onSaved={() => {
+              setEditingDate(false);
+              onChanged();
+            }}
+            onConflict={(why) => {
+              setEditingDate(false);
+              onDateConflict(why);
             }}
             onClose={() => setEditingDate(false)}
             onRefused={() => {

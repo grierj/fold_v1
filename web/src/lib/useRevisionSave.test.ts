@@ -218,4 +218,16 @@ describe("useRevisionSave", () => {
     expect(still).toHaveBeenCalledWith(mine);
     expect(write).toHaveBeenCalledOnce();
   });
+
+  it("takes a single date's date_changed as its refusal when told to, and throws an event_changed it was not told of", async () => {
+    const read = vi.fn().mockResolvedValue(readOf({ title: "Supper" }));
+    const dateChanged = new ApiError(409, "changed", { code: "date_changed" });
+    const view = renderHook(() => useRevisionSave({ opened: { title: "Supper" }, revision: "r1", read, fields, changedCode: "date_changed" }));
+    const write = vi.fn().mockRejectedValueOnce(dateChanged).mockResolvedValueOnce({});
+    expect(await view.result.current(write, { title: "Supper night" })).toBe("saved");
+    expect(write.mock.calls).toEqual([["r1"], ["r2"]]);
+    const other = changed();
+    await expect(view.result.current(vi.fn().mockRejectedValue(other), { title: "Supper night" })).rejects.toBe(other);
+    expect(read).toHaveBeenCalledOnce();
+  });
 });
