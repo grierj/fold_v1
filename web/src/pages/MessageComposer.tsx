@@ -3,12 +3,18 @@ import { lazy, Suspense, useEffect, useId, useRef, useState, type FormEvent } fr
 import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { ChevronLeftIcon } from "../components/icons";
 import { useAuth } from "../auth";
+import { ApiError } from "../api/core";
 import { Messages, previewHTMLPath } from "../api/messages";
-import type { ComposeOptions, Message, MessagePreview } from "../types";
+import type { AudienceChange, ComposeOptions, Message, MessageAudience, MessagePreview, MessageReview } from "../types";
 import { ERROR_COPY, errorCode, errorText, type ErrorCode } from "../lib/errors";
-import { audienceKey, audienceLabel, confirmLine, emptyChoice, fromAudience, guardianLine, historyLine, historyTeenLine, isOneEvent, prefillChoice, pushHistoryLine, retryQuestion, statusLabel, toAudience, type AudienceChoice } from "../lib/messages";
+import { audienceKey, audienceLabel, changeLines, confirmLine, fromAudience, guardianLine, historyLine, historyTeenLine, isOneEvent, prefillChoice, pushHistoryLine, retryQuestion, reviewRefusal, statusLabel, toAudience, type AudienceChoice } from "../lib/messages";
 import { reminderAudience, reminderDateText, reminderName } from "../lib/reminders";
+import { RefusedSaveLine, useRefusedSave } from "../lib/refusedSave";
+import { outcomeOf } from "../lib/rosterWrites";
+import { useAction } from "../lib/useAction";
+import { answerNames, useRevisionSave, type RevisionConflict } from "../lib/useRevisionSave";
 import { useChurchZoneLoad } from "../lib/useSite";
+import { isNumber, isObject } from "../lib/wireValues";
 import { useUnsavedChanges } from "../lib/unsavedChanges";
 import { browserTimeZone, wallClock, wallToInstant, zoneNote } from "../lib/when";
 import { AudiencePicker } from "../components/messages/AudiencePicker";
@@ -33,7 +39,7 @@ const RichTextView = lazy(() => import("../components/messages/RichTextEditor").
 // after that, and once cancelled, it is read only. Every error is the
 // API's code in words (lib/errors.ts).
 
-type Action = "draft" | "preview" | "test" | "send";
+type Kind = "draft" | "preview" | "test" | "send" | "schedule" | "cancel" | "retry";
 
 type Errors = { audience?: string; subject?: string; body?: string; when?: string; form?: string; test?: string };
 
@@ -53,57 +59,244 @@ const FIELD_OF: Partial<Record<ErrorCode, keyof Errors>> = {
 
 const YEAR_MS = 366 * 24 * 60 * 60 * 1000;
 
+// What a save writes, as the server stores it.
+type MessageValue = Pick<Message, "subject" | "bodyHtml" | "audience" | "pushAlert" | "channel">;
+
+const valueOf = (m: Message): MessageValue => ({ subject: m.subject, bodyHtml: m.bodyHtml, audience: m.audience, pushAlert: m.pushAlert, channel: m.channel });
+
+const sorted = (xs: readonly string[] | undefined, fallback: readonly string[]) => [...(xs?.length ? xs : fallback)].sort();
+
+// An audience in the server's canonical form: only the fields its type uses, the server's defaults filled in, sets in
+// one order.
+function canonicalAudience(a: MessageAudience) {
+  switch (a.type) {
+    case "group": return { type: a.type, groupId: a.groupId, roles: sorted(a.roles, ["leader", "member"]) };
+    case "occurrence": return { type: a.type, occurrenceId: a.occurrenceId, statuses: sorted(a.statuses, ["going", "waitlisted"]) };
+    case "event_series": return { type: a.type, eventId: a.eventId, statuses: sorted(a.statuses, ["going", "waitlisted"]) };
+    case "events": return { type: a.type, eventIds: [...new Set(a.eventIds ?? [])].sort((x, y) => x - y), statuses: sorted(a.statuses, ["going", "waitlisted"]) };
+    case "users": return { type: a.type, userIds: [...new Set(a.userIds ?? [])].sort((x, y) => x - y) };
+    default: return { type: a.type };
+  }
+}
+
+// messageFields is everything PUT /messages/:id writes, as the server stores it: the subject trimmed, the body (the
+// server sanitises it, so an editor's HTML it rewrites never reads as already stored), the audience in canonical form,
+// the channel and "Push notification too".
+const messageFields = (v: MessageValue) => ({ subject: v.subject.trim(), body: v.bodyHtml, audience: canonicalAudience(v.audience), channel: v.channel, pushAlert: v.pushAlert });
+
+type SavedAnswer = ReturnType<typeof answerNames> extends (answer: unknown) => answer is infer S ? S : never;
+
+// A save the server answered with a message, by id, with a revision.
+const namesAMessage = (answer: unknown): answer is { message: Message } =>
+  isObject(answer) && "message" in answer && isObject(answer.message) && "id" in answer.message && isNumber(answer.message.id) && answerNames("message", answer.message.id)(answer);
+
+// The value a new message's form opens with, before its first save.
+const BLANK: MessageValue = { subject: "", bodyHtml: "", audience: { type: "group" }, pushAlert: true, channel: "email" };
+
+// Every send was refused while nothing the form writes changed: the form says its ordinary refusal.
+const refusedEverySend = () => new ApiError(409, "message changed", { code: "message_changed" });
+
+// What a press of the confirmation sent: the text it was pressed on, the status the message had, when it should go
+// and the review it showed.
+interface Asked {
+  revision: string | undefined;
+  value: MessageValue;
+  status: Message["status"];
+  at: string | null;
+  review: MessageReview;
+  // What changed since the review before this one (message_list_changed); null for a first review.
+  change: AudienceChange | null;
+  // The server asked for a fresh review without a change to show (message_review_needed, or a restart).
+  again: boolean;
+  snap: string;
+}
+
+// Whether m shows that the send `asked` stored: going out, with its text, at its time. A send changes no text, so the
+// text alone proves nothing.
+function wentOut(m: Message, asked: Asked): boolean {
+  if (!["scheduled", "sending", "sent"].includes(m.status)) return false;
+
+  if (JSON.stringify(messageFields(valueOf(m))) !== JSON.stringify(messageFields(asked.value))) return false;
+
+  if (asked.at) return !!m.scheduledAt && Date.parse(m.scheduledAt) === Date.parse(asked.at);
+
+  return m.status !== "scheduled" || (!!m.scheduledAt && Date.parse(m.scheduledAt) <= Date.now() + 60_000);
+}
+
 export function MessageComposerPage() {
   const { id } = useParams<{ id: string }>();
   const [params] = useSearchParams();
-  const navigate = useNavigate();
-  const { user, isAdmin } = useAuth();
   // The schedule is in the church's zone: wait for it, so a saved time is
   // never read on the browser's clock first.
   const church = useChurchZoneLoad();
   const zone = church.zone ?? browserTimeZone();
-  const ids = { audience: useId(), subject: useId(), body: useId(), day: useId(), when: useId() };
+  const [options, setOptions] = useState<ComposeOptions | null>(null);
+  // The message one opening of the composer starts from (null for a new one), and the opening's number: each read of
+  // another message mounts a new Composer, whose saves name the read it opened with.
+  const [opening, setOpening] = useState<{ message: Message | null; n: number } | null>(null);
+  // The message the composer shows, a new draft once its first save lands included, so that address is not read again.
+  const shown = useRef<number | null>(null);
+  const [loadError, setLoadError] = useState<{ text: string; missing: boolean } | null>(null);
+  const [reload, setReload] = useState(0);
+  const refusal = useRefusedSave();
+
+  useEffect(() => {
+    let alive = true;
+    Messages.options()
+      .then((o) => { if (alive) setOptions(o); })
+      .catch((e) => { if (alive) setLoadError({ text: errorText(e, "We couldn't open the composer."), missing: false }); });
+
+    return () => { alive = false; };
+  }, [reload]);
+
+  useEffect(() => {
+    if (!id) {
+      if (opening === null || shown.current !== null) {
+        shown.current = null;
+        setOpening((o) => ({ message: null, n: (o?.n ?? 0) + 1 }));
+      }
+
+      return;
+    }
+
+    if (Number(id) === shown.current) return;
+    let alive = true;
+    Messages.get(Number(id))
+      .then(({ message: m }) => {
+        if (!alive) return;
+        shown.current = m.id;
+        setOpening((o) => ({ message: m, n: (o?.n ?? 0) + 1 }));
+      })
+      .catch((e) => { if (alive) setLoadError({ text: errorText(e, "We couldn't open this message."), missing: errorCode(e) === "not_found" }); });
+
+    return () => { alive = false; };
+    // opening is read only to tell a first visit to /messages/new.
+  }, [id, reload]);
+
+  const back = <ButtonLink variant="link" to="/messages"><ChevronLeftIcon className="h-4 w-4 shrink-0" /><span aria-hidden="true">Messages</span><span className="sr-only">Back to messages</span></ButtonLink>;
+  const page = (children: React.ReactNode) => <div className="fold-page fold-page-narrow space-y-6 wrap-anywhere">{children}</div>;
+
+  if (loadError) {
+    return page(<>
+      {back}
+      <RefusedSaveLine save={refusal} noun="message" />
+      {loadError.missing
+        ? <EmptyState level={1} title="This message isn't here" body="It may have been written by someone else. Your own messages are on the Messages page." action={<ButtonLink variant="primary" to="/messages">Go to messages</ButtonLink>} />
+        : <><h1 className="text-3xl font-bold">Message</h1><ErrorNotice message={loadError.text} onRetry={() => { setLoadError(null); setReload((n) => n + 1); }} /></>}
+    </>);
+  }
+
+  if (!options || !church.done || !opening) return page(<Skeleton kind="page" label="Loading the composer…" />);
+
+  if (!options.canCompose && !opening.message) {
+    return page(<>
+      {back}
+      <EmptyState level={1} title="Messages are for leaders" body="Group leaders, event hosts and admins write to their groups and events here. Ask a leader if you'd like something sent." action={<ButtonLink variant="secondary" to="/my-groups">Go to my groups</ButtonLink>} />
+    </>);
+  }
+
+  return page(
+    <Composer key={opening.n} options={options} zone={zone} opened={opening.message} params={params} refusal={refusal} back={back}
+      onShown={(m) => { shown.current = m; }}
+      onGone={() => setLoadError({ text: "", missing: true })} />,
+  );
+}
+
+// Composer is one opening of a message, from the read the page made (or a new one). It stays open after its saves and
+// sends, so each save names what the last outcome left (useRevisionSave's `stays`).
+function Composer({ options, zone, opened, params, refusal, back, onShown, onGone }: {
+  options: ComposeOptions;
+  zone: string;
+  opened: Message | null;
+  params: URLSearchParams;
+  refusal: ReturnType<typeof useRefusedSave>;
+  back: React.ReactNode;
+  // The message the composer shows now (a new draft's first save).
+  onShown: (id: number) => void;
+  // The message is not there, or not this person's, any more.
+  onGone: () => void;
+}) {
+  const navigate = useNavigate();
+  const { user, isAdmin } = useAuth();
+  const ids = { audience: useId(), subject: useId(), body: useId(), day: useId(), when: useId(), change: useId() };
   const form = useRef<HTMLFormElement>(null);
   const heading = useRef<HTMLHeadingElement>(null);
   // The question replaces the button that asked it, so focus moves to it.
   const confirmButton = useRef<HTMLButtonElement>(null);
   const previewSection = useRef<HTMLElement>(null);
+  const alive = useRef(true);
+  useEffect(() => {
+    alive.current = true;
 
-  const [options, setOptions] = useState<ComposeOptions | null>(null);
-  const [message, setMessage] = useState<Message | null>(null);
-  const [loadError, setLoadError] = useState<{ text: string; missing: boolean } | null>(null);
-  const [reload, setReload] = useState(0);
-  const [editing, setEditing] = useState(false);
-  const [ready, setReady] = useState(false);
+    return () => { alive.current = false; };
+  }, []);
+
+  const start = opened ? formTime(opened, zone) : null;
+  const firstChoice = opened ? fromAudience(opened.audience, options) : prefillChoice(params, options);
+  const [message, setMessage] = useState<Message | null>(opened);
+  const [editing, setEditing] = useState(opened ? opened.status === "draft" && opened.editable : true);
   const [editorKey, setEditorKey] = useState(0);
 
-  const [choice, setChoice] = useState<AudienceChoice>(emptyChoice);
-  const [subject, setSubject] = useState("");
-  const [body, setBody] = useState("");
-  const [when, setWhen] = useState<"now" | "later">("now");
-  const [day, setDay] = useState("");
-  const [time, setTime] = useState("09:00");
+  const [choice, setChoice] = useState<AudienceChoice>(firstChoice);
+  const [subject, setSubject] = useState(opened?.subject ?? "");
+  const [body, setBody] = useState(opened?.bodyHtml ?? "");
+  const [when, setWhen] = useState<"now" | "later">(start?.when ?? "now");
+  const [day, setDay] = useState(start?.day ?? "");
+  const [time, setTime] = useState(start?.time ?? "09:00");
   // "Push notification too" (DEC-123, DEC-127), on by default. Hidden when
   // the church turned notifications off; the saved value stays as it was.
-  const [pushAlert, setPushAlert] = useState(true);
+  const [pushAlert, setPushAlert] = useState(opened?.pushAlert ?? true);
+
   // What was last saved, to tell edits from it; body is null until the
   // editor says how it writes the saved HTML.
-  const [saved, setSaved] = useState<{ subject: string; body: string | null; key: string; pushAlert: boolean } | null>(null);
+  const [saved, setSaved] = useState<{ subject: string; body: string | null; key: string; pushAlert: boolean }>(
+    { subject: opened?.subject ?? "", body: null, key: audienceKey(toAudience(firstChoice)), pushAlert: opened?.pushAlert ?? true });
 
   const [errors, setErrors] = useState<Errors>({});
-  const [busy, setBusy] = useState<Action | "schedule" | "cancel" | "retry" | null>(null);
-  const [note, setNote] = useState("");
+  const action = useAction();
+  // Which press the action is running, for its button's words; set when its work starts.
+  const kind = useRef<Kind | null>(null);
+  const doing = (k: Kind) => action.running && kind.current === k;
   const [preview, setPreview] = useState<(MessagePreview & { id: number; n: number }) | null>(null);
   // The question before sending, for exactly what was on screen (snap).
-  const [confirm, setConfirm] = useState<{ eligible: number; push: number; at: string | null; snap: string } | null>(null);
+  const [confirm, setConfirm] = useState<Asked | null>(null);
+  // Bumped by "Review the whole list": the picker counts again and opens its list.
+  const [reviewing, setReviewing] = useState(0);
   // Once it goes out: who got it, checked every few seconds while sending.
   const { history, failed: historyFailed, stale, announce, retryLoad } = useMessageHistory(editing ? null : message, setMessage);
   const [retryError, setRetryError] = useState("");
 
+  // The message the saves are for: null until a new draft's first save lands.
+  const messageId = useRef<number | null>(opened?.id ?? null);
+  // The message as the last answer or read showed it, with its revision: what the next send names.
+  const known = useRef<Message | null>(opened);
+  const lastRead = useRef<Message | null>(null);
+  // A send whose answer was lost: the next answer from the server settles it.
+  const lostSend = useRef<Asked | null>(null);
+
+  const save = useRevisionSave<MessageValue, ReturnType<typeof messageFields>>({
+    opened: opened ? valueOf(opened) : BLANK,
+    revision: opened?.revision,
+    read: async () => {
+      const { message: m } = await Messages.get(messageId.current ?? 0);
+      lastRead.current = m;
+      known.current = m;
+
+      return { allowed: m.editable, revision: m.revision, value: valueOf(m) };
+    },
+    fields: messageFields,
+    answers: (answer): answer is SavedAnswer => namesAMessage(answer) && (messageId.current === null || answer.message.id === messageId.current),
+    stays: () => (known.current ? valueOf(known.current) : BLANK),
+    // A message that isn't there, or isn't this person's. A 403 or another 404 is about the people chosen.
+    gone: (err) => err.status === 404 && err.code === "not_found",
+    changedCode: "message_changed",
+    onConflict: refused,
+  });
+
   const audience = toAudience(choice);
   const key = audienceKey(audience);
-  const dirty = editing && !!saved && (saved.subject !== subject.trim() || saved.key !== key || saved.pushAlert !== pushAlert || (saved.body !== null && saved.body !== body));
-  const pushShown = !!options?.pushEnabled;
+  const dirty = editing && (saved.subject !== subject.trim() || saved.key !== key || saved.pushAlert !== pushAlert || (saved.body !== null && saved.body !== body));
+  const pushShown = !!options.pushEnabled;
   const { markSaved, resume } = useUnsavedChanges(dirty);
   // Any change after "Send to N people?" withdraws the question: it would
   // otherwise send something other than what it asked about.
@@ -120,86 +313,70 @@ export function MessageComposerPage() {
     if (previewN) previewSection.current?.scrollIntoView?.({ block: "start" });
   }, [previewN]);
 
-  useEffect(() => {
-    let alive = true;
-    Messages.options()
-      .then((o) => { if (alive) setOptions(o); })
-      .catch((e) => { if (alive) setLoadError({ text: errorText(e, "We couldn't open the composer."), missing: false }); });
-
-    return () => { alive = false; };
-  }, [reload]);
-
-  // A saved message loads by id; after the first save of a new one the
-  // address changes to it, and what is on screen is already that message.
-  useEffect(() => {
-    if (!id || Number(id) === message?.id) return;
-    let alive = true;
-    Messages.get(Number(id))
-      .then(({ message: m }) => { if (alive) { setMessage(m); setReady(false); } })
-      .catch((e) => { if (alive) setLoadError({ text: errorText(e, "We couldn't open this message."), missing: errorCode(e) === "not_found" }); });
-
-    return () => { alive = false; };
-  }, [id, message?.id, reload]);
-
-  // Fill the form once the options (and the message, when there is one) are here.
-  useEffect(() => {
-    if (ready || !options || !church.done || (id && !message)) return;
-
-    if (message) startFrom(message, options, message.status === "draft" && message.editable);
-    else {
-      const c = prefillChoice(params, options);
-      setChoice(c);
-      setSaved({ subject: "", body: null, key: audienceKey(toAudience(c)), pushAlert: true });
-      setEditing(true);
-    }
-
-    setReady(true);
-  }, [ready, options, id, message, params, church.done]);
-
-  function startFrom(m: Message, o: ComposeOptions, edit: boolean) {
-    const c = fromAudience(m.audience, o);
+  function startFrom(m: Message, edit: boolean) {
+    const c = fromAudience(m.audience, options);
+    const s = formTime(m, zone);
     setChoice(c);
     setSubject(m.subject);
     setPushAlert(m.pushAlert);
     setBody(m.bodyHtml);
     setSaved({ subject: m.subject, body: null, key: audienceKey(toAudience(c)), pushAlert: m.pushAlert });
-    const later = m.status === "scheduled" && m.scheduledAt && new Date(m.scheduledAt).getTime() > Date.now() + 60_000;
-    setWhen(later ? "later" : "now");
+    setWhen(s.when);
 
-    if (later && m.scheduledAt) {
-      const w = wallClock(m.scheduledAt, zone);
-      setDay(w.day);
-      setTime(w.time);
+    if (s.when === "later") {
+      setDay(s.day);
+      setTime(s.time);
     }
 
     setEditorKey((k) => k + 1);
     setEditing(edit);
     setErrors({});
     setConfirm(null);
+
+    if (edit) refusal.clear();
+  }
+
+  // The save was refused and not sent again (DEC-163): the editor closes on its own and the page shows the message as
+  // it is now, or says it is not there.
+  function refused(why: RevisionConflict) {
+    if (!alive.current) return;
+    const m = lastRead.current;
+    markSaved();
+
+    if (!m) {
+      refusal.refused("gone");
+      onGone();
+
+      return;
+    }
+
+    setMessage(m);
+    startFrom(m, false);
+    refusal.refused(why);
   }
 
   // The editor writes saved HTML its own way; that is the baseline.
   function onEditorReady(html: string) {
     setBody(html);
-    setSaved((s) => (s && s.body === null ? { ...s, body: html } : s));
+    setSaved((s) => (s.body === null ? { ...s, body: html } : s));
   }
 
   function show(next: Errors) {
     showFieldErrors(form.current, () => setErrors(next));
   }
 
-  function problems(action: Action): Errors {
+  function problems(k: Kind): Errors {
     const e: Errors = {};
 
     if (!audience) e.audience = choice.target ? "Choose at least one kind of person." : ERROR_COPY.message_audience;
 
-    if (action === "test" || action === "send") {
+    if (k === "test" || k === "send") {
       if (!subject.trim()) e.subject = "Add a subject.";
 
       if (!body) e.body = "Write your message.";
     }
 
-    if (action === "send" && when === "later") {
+    if (k === "send" && when === "later") {
       const at = wallToInstant(day, time, zone);
       const ms = at ? new Date(at).getTime() : NaN;
 
@@ -210,23 +387,47 @@ export function MessageComposerPage() {
     return e;
   }
 
+  // The message went out as a press asked, its answer seen now or lost before: the page shows it.
+  function sent(m: Message) {
+    lostSend.current = null;
+    known.current = m;
+    setMessage(m);
+    setEditing(false);
+    setConfirm(null);
+    setPreview(null);
+    refusal.clear();
+    requestAnimationFrame(() => heading.current?.focus());
+  }
+
   // place shows a server error under its field, or with the buttons. A
-  // message that started sending meanwhile (message_locked), or whose people
-  // changed under the schedule press (message_changed), is read again.
-  function place(cause: unknown, fallback: string, where: keyof Errors = "form") {
+  // message that started sending meanwhile (message_locked) is read again;
+  // when that is a send of this page's whose answer was lost, it went.
+  async function place(cause: unknown, fallback: string, where: keyof Errors = "form") {
     const code = errorCode(cause);
     const field = code ? FIELD_OF[code] : undefined;
     const text = errorText(cause, fallback);
 
-    if ((code === "message_locked" || code === "message_changed") && message && options) {
-      Messages.get(message.id)
-        .then(({ message: m }) => {
-          markSaved();
-          setMessage(m);
-          startFrom(m, options, false);
-          setErrors({ form: text });
-        })
-        .catch(() => show({ form: text }));
+    if (code === "message_locked" && message) {
+      try {
+        const { message: m } = await Messages.get(message.id);
+
+        if (!alive.current) return;
+        const lost = lostSend.current;
+
+        if (lost && wentOut(m, lost)) {
+          sent(m);
+
+          return;
+        }
+
+        markSaved();
+        known.current = m;
+        setMessage(m);
+        startFrom(m, false);
+        setErrors({ form: text });
+      } catch {
+        if (alive.current) show({ form: text });
+      }
 
       return;
     }
@@ -234,16 +435,37 @@ export function MessageComposerPage() {
     show({ [field ?? where]: text });
   }
 
-  async function save(): Promise<Message> {
+  // Saves the form through the one conflict protocol: a new message's first save creates it, and every later one names
+  // the read it was made from. null: the save was refused and the editor has closed (or the page went).
+  async function saveForm(): Promise<Message | null> {
     if (!audience) throw new Error("save needs an audience");
+
+    refusal.clear();
     const draft = { subject: subject.trim(), bodyHtml: body, audience, pushAlert };
-    const { message: m } = message ? await Messages.update(message.id, draft) : await Messages.create(draft);
+    const creating = messageId.current === null;
+
+    const outcome = await save(async (revision) => {
+      const res = messageId.current === null ? await Messages.create(draft) : await Messages.update(messageId.current, draft, revision);
+
+      if (namesAMessage(res) && (messageId.current === null || res.message.id === messageId.current)) {
+        messageId.current = res.message.id;
+        known.current = res.message;
+      }
+
+      return res;
+    }, { ...draft, channel: "email" });
+
+    if (outcome === "refused") throw refusedEverySend();
+
+    if (outcome !== "saved" || !alive.current || !known.current) return null;
+    const m = known.current;
     setMessage(m);
     setSaved({ subject: draft.subject, body, key, pushAlert });
 
-    if (!message) {
+    if (creating) {
       // The new address is the same draft, now saved: no "Leave without
       // saving?" for this move, and the guard is back right after it.
+      onShown(m.id);
       markSaved();
       navigate(`/messages/${m.id}`, { replace: true });
       resume();
@@ -255,20 +477,31 @@ export function MessageComposerPage() {
   // A picture is added to a saved message, so a new one is saved as a draft
   // first (it needs its audience, like any draft). The editor shows the words.
   async function saveForPicture(): Promise<{ id: number } | { error: string }> {
-    if (message) return { id: message.id };
+    if (messageId.current !== null) return { id: messageId.current };
 
     if (!audience) return { error: "Choose who this message is for first. A picture is added to a saved draft." };
 
-    try {
-      return { id: (await save()).id };
-    } catch (e) {
-      return { error: errorText(e, "We couldn't save the draft first.") };
-    }
+    if (action.running) return { error: "The draft is being saved. Add the picture again in a moment." };
+    let out: { id: number } | { error: string } = { error: "We couldn't save the draft first." };
+    await action.run(async () => {
+      kind.current = "draft";
+
+      try {
+        const m = await saveForm();
+
+        if (m) out = { id: m.id };
+      } catch (e) {
+        out = { error: errorText(e, "We couldn't save the draft first.") };
+      }
+
+      return false;
+    });
+
+    return out;
   }
 
-  async function run(action: Action) {
-    if (busy) return;
-    const found = problems(action);
+  function run(k: "draft" | "preview" | "test" | "send") {
+    const found = problems(k);
 
     if (Object.keys(found).length) {
       show(found);
@@ -276,158 +509,225 @@ export function MessageComposerPage() {
       return;
     }
 
-    setErrors({});
-    setNote("");
-    setConfirm(null);
-    setBusy(action);
-    let m: Message;
+    void action.run(async () => {
+      kind.current = k;
+      setErrors({});
+      setConfirm(null);
+      let m: Message | null;
 
-    try {
-      m = await save();
-    } catch (e) {
-      place(e, "We couldn't save the message.");
-      setBusy(null);
+      try {
+        m = await saveForm();
+      } catch (e) {
+        await place(e, "We couldn't save the message.");
+
+        return false;
+      }
+
+      if (!m) return false;
+
+      try {
+        if (k === "draft") return "Draft saved.";
+
+        if (k === "preview") {
+          const { preview: p } = await Messages.preview(m.id);
+          setPreview((old) => ({ ...p, id: m.id, n: (old?.n ?? 0) + 1 }));
+        }
+
+        if (k === "test") {
+          await Messages.test(m.id);
+
+          return `Sent to you at ${user?.email ?? "your email address"}.`;
+        }
+
+        if (k === "send") await ask(m, null, false);
+      } catch (e) {
+        const fallback = { draft: "", preview: "We couldn't show the preview.", test: "We couldn't send the test.", send: "We couldn't count who gets it." }[k];
+        await place(e, fallback, k === "test" ? "test" : "form");
+      }
+
+      return false;
+    });
+  }
+
+  // Takes a review of who m reaches and asks before sending (DEC-169).
+  async function ask(m: Message, change: AudienceChange | null, again: boolean, review?: MessageReview) {
+    const r = review ?? (await Messages.review(m.id)).review;
+
+    if (!alive.current) return;
+
+    if (r.summary.eligible === 0) {
+      show({ audience: ERROR_COPY.message_nobody });
 
       return;
     }
 
-    try {
-      if (action === "draft") setNote("Draft saved.");
-
-      if (action === "preview") {
-        const { preview: p } = await Messages.preview(m.id);
-        setPreview((old) => ({ ...p, id: m.id, n: (old?.n ?? 0) + 1 }));
-      }
-
-      if (action === "test") {
-        await Messages.test(m.id);
-        setNote(`Sent to you at ${user?.email ?? "your email address"}.`);
-      }
-
-      if (action === "send") {
-        const { summary } = await Messages.audiencePreview(m.audience);
-
-        if (summary.eligible === 0) show({ audience: ERROR_COPY.message_nobody });
-        else setConfirm({ eligible: summary.eligible, push: pushShown && pushAlert ? summary.push : 0, at: when === "later" ? wallToInstant(day, time, zone) : null, snap });
-      }
-    } catch (e) {
-      const fallback = { draft: "", preview: "We couldn't show the preview.", test: "We couldn't send the test.", send: "We couldn't count who gets it." }[action];
-      place(e, fallback, action === "test" ? "test" : "form");
-    } finally {
-      setBusy(null);
-    }
+    setConfirm({ revision: m.revision, value: valueOf(m), status: m.status, at: when === "later" ? wallToInstant(day, time, zone) : null, review: r, change, again, snap });
   }
 
-  async function schedule() {
-    if (!message || !asking || busy) return;
-    setBusy("schedule");
+  // The confirmation: it names the text it was pressed on and the review it showed. A changed list shows the change
+  // and a fresh review; a lost answer is settled by the next press, which the server refuses if the first one went.
+  function schedule() {
+    const id = messageId.current;
+    const asked = asking;
 
-    try {
-      const { message: m } = await Messages.schedule(message.id, asking.at ?? undefined);
-      setMessage(m);
-      setEditing(false);
-      setConfirm(null);
-      setPreview(null);
-      setNote("");
-      requestAnimationFrame(() => heading.current?.focus());
-    } catch (e) {
-      setConfirm(null);
-      place(e, "We couldn't schedule the message.");
-    } finally {
-      setBusy(null);
-    }
+    if (id === null || !asked) return;
+
+    void action.run(async () => {
+      kind.current = "schedule";
+
+      try {
+        const res = await Messages.schedule(id, { revision: asked.revision, review: asked.review.token, scheduledAt: asked.at ?? undefined });
+
+        if (!alive.current) return false;
+
+        if (!namesAMessage(res) || res.message.id !== id || res.message.status === "draft") {
+          lostSend.current = asked;
+
+          throw new ApiError(502, "unreadable answer", {}, true);
+        }
+
+        sent(res.message);
+
+        return false;
+      } catch (e) {
+        if (!alive.current) return false;
+        const refusedReview = reviewRefusal(e);
+
+        if (refusedReview) {
+          const m = known.current;
+
+          if (m) await ask(m, refusedReview.change, refusedReview.change === null, refusedReview.review);
+
+          return false;
+        }
+
+        if (outcomeOf(e) === "unsure") {
+          lostSend.current = asked;
+
+          throw e;
+        }
+
+        if (errorCode(e) === "message_changed") {
+          const { message: m } = await Messages.get(id);
+
+          if (!alive.current) return false;
+          known.current = m;
+
+          if (lostSend.current && wentOut(m, lostSend.current)) {
+            sent(m);
+
+            return false;
+          }
+
+          // Nothing this send names changed (a restart, or the same words saved again): ask again on the message as it is.
+          if (m.editable && m.status === asked.status && JSON.stringify(messageFields(valueOf(m))) === JSON.stringify(messageFields(asked.value))) {
+            await ask(m, null, true);
+
+            return false;
+          }
+
+          lastRead.current = m;
+          refused(m.editable ? "changed" : "gone");
+
+          return false;
+        }
+
+        setConfirm(null);
+        await place(e, "We couldn't schedule the message.");
+
+        return false;
+      }
+    }, { fallback: "We couldn't tell whether it went out, and pressing it again won't send it twice." });
   }
 
-  async function cancelMessage() {
-    if (!message || busy) return;
+  // "Review the whole list": back to the form, with the picker's list counted again and open.
+  function reviewList() {
+    setConfirm(null);
+    setReviewing((n) => n + 1);
+  }
+
+  function cancelMessage() {
+    if (!message) return;
 
     if (!window.confirm("Cancel this message? It won't be sent, and you can't undo this.")) return;
-    setBusy("cancel");
 
-    try {
-      const { message: m } = await Messages.cancel(message.id);
-      setMessage(m);
-      setEditing(false);
-    } catch (e) {
-      place(e, "We couldn't cancel the message.");
-    } finally {
-      setBusy(null);
-    }
+    void action.run(async () => {
+      kind.current = "cancel";
+
+      try {
+        const { message: m } = await Messages.cancel(message.id);
+        known.current = m;
+        setMessage(m);
+        setEditing(false);
+      } catch (e) {
+        await place(e, "We couldn't cancel the message.");
+      }
+
+      return false;
+    });
   }
 
   // Try again (DEC-131): only the people it failed for, after asking.
-  async function retry() {
-    if (!message || busy) return;
+  function retry() {
+    if (!message) return;
 
     if (!window.confirm(retryQuestion(history?.counts.failed ?? message.failedCount, history?.counts.guardianCopiesFailed ?? 0))) return;
-    setBusy("retry");
     setRetryError("");
 
-    try {
-      const { message: m } = await Messages.retry(message.id);
-      setMessage(m);
-    } catch (e) {
-      setRetryError(errorText(e, "We couldn't send it again. Try again in a few minutes."));
-    } finally {
-      setBusy(null);
-    }
+    void action.run(async () => {
+      kind.current = "retry";
+
+      try {
+        const { message: m } = await Messages.retry(message.id);
+        setMessage(m);
+      } catch (e) {
+        setRetryError(errorText(e, "We couldn't send it again. Try again in a few minutes."));
+      }
+
+      return false;
+    });
   }
 
   // Discarding a draft cancels it for good; it stays on the list as Discarded.
-  async function discardDraft() {
-    if (!message || busy) return;
+  function discardDraft() {
+    if (!message) return;
 
     if (!window.confirm("Discard this draft? You can't undo this.")) return;
-    setBusy("cancel");
 
-    try {
-      await Messages.cancel(message.id);
-      markSaved();
-      navigate("/messages");
-    } catch (e) {
-      place(e, "We couldn't discard the draft.");
-      setBusy(null);
-    }
+    void action.run(async () => {
+      kind.current = "cancel";
+
+      try {
+        await Messages.cancel(message.id);
+        markSaved();
+        navigate("/messages");
+      } catch (e) {
+        await place(e, "We couldn't discard the draft.");
+      }
+
+      return false;
+    });
   }
 
   // Done editing a scheduled message: what Preview or the test saved stays;
   // only unsaved changes are asked about.
   function doneEditing() {
-    if (!message || !options) return;
+    if (!message) return;
 
     if (dirty && !window.confirm("Stop editing? Your unsaved changes will be lost.")) return;
-    startFrom(message, options, false);
+    startFrom(message, false);
   }
 
   function submit(e: FormEvent) {
     e.preventDefault();
-    void run("send");
-  }
-
-  const back = <ButtonLink variant="link" to="/messages"><ChevronLeftIcon className="h-4 w-4 shrink-0" /><span aria-hidden="true">Messages</span><span className="sr-only">Back to messages</span></ButtonLink>;
-  const page = (children: React.ReactNode) => <div className="fold-page fold-page-narrow space-y-6 wrap-anywhere">{children}</div>;
-
-  if (loadError) {
-    return page(<>
-      {back}
-      {loadError.missing
-        ? <EmptyState level={1} title="This message isn't here" body="It may have been written by someone else. Your own messages are on the Messages page." action={<ButtonLink variant="primary" to="/messages">Go to messages</ButtonLink>} />
-        : <><h1 className="text-3xl font-bold">Message</h1><ErrorNotice message={loadError.text} onRetry={() => { setLoadError(null); setReload((n) => n + 1); }} /></>}
-    </>);
-  }
-
-  if (!options || !ready) return page(<Skeleton kind="page" label="Loading the composer…" />);
-
-  if (!options.canCompose && !message) {
-    return page(<>
-      {back}
-      <EmptyState level={1} title="Messages are for leaders" body="Group leaders, event hosts and admins write to their groups and events here. Ask a leader if you'd like something sent." action={<ButtonLink variant="secondary" to="/my-groups">Go to my groups</ButtonLink>} />
-    </>);
+    run("send");
   }
 
   const oneEvent = isOneEvent(audience);
   const scheduled = message?.status === "scheduled";
   const title = editing ? (message ? "Edit message" : "New message") : message?.displaySubject || message?.subject || "Untitled message";
+  const note = action.state.status === "done" ? action.state.text : "";
+  const formError = errors.form ?? (action.state.status === "failed" ? action.state.text : undefined);
 
   if (!editing && message) {
     const reminder = message.category === "reminder";
@@ -438,14 +738,15 @@ export function MessageComposerPage() {
     const pushReminder = message.channel === "push";
     const label = statusLabel(message, zone);
 
-    return page(<>
+    return <>
       {reminder && !isAdmin && message.reminder && datePath
         ? <ButtonLink variant="link" to={datePath}>‹ Back to {message.reminder.eventTitle}</ButtonLink>
         : reminder && isAdmin
           ? <ButtonLink variant="link" to="/messages?show=reminders">‹ Back to automatic reminders</ButtonLink>
           : back}
       <h1 ref={heading} tabIndex={-1} className="fold-page-header text-3xl font-bold focus:outline-none">{title}</h1>
-      <SendProblem message={message} history={history} busy={busy === "retry"} error={retryError} onRetry={() => void retry()} />
+      <RefusedSaveLine save={refusal} noun="message" canManage />
+      <SendProblem message={message} history={history} busy={doing("retry")} error={retryError} onRetry={retry} />
       <section aria-label="This message" className="space-y-6">
         <div className="space-y-1">
           <p className="text-lg font-semibold">{label}</p>
@@ -489,25 +790,27 @@ export function MessageComposerPage() {
           </Suspense>
         </div>
       </section>
-      {errors.form && <FormError>{errors.form}</FormError>}
+      {formError && <FormError>{formError}</FormError>}
       {message.editable && (
         <FormActions>
-          <Button variant="primary" layout="w-full sm:w-auto" onClick={() => startFrom(message, options, true)}>Edit</Button>
-          <Button variant="danger-outline" layout="w-full sm:w-auto" disabled={busy === "cancel"} onClick={() => void cancelMessage()}>
-            {busy === "cancel" ? "Cancelling…" : "Cancel message"}
+          <Button variant="primary" layout="w-full sm:w-auto" disabled={action.running} onClick={() => startFrom(message, true)}>Edit</Button>
+          <Button variant="danger-outline" layout="w-full sm:w-auto" disabled={action.running} onClick={cancelMessage}>
+            {doing("cancel") ? "Cancelling…" : "Cancel message"}
           </Button>
         </FormActions>
       )}
-    </>);
+    </>;
   }
 
-  return page(<>
+  const sendWord = asking?.at ? "Schedule" : "Send now";
+
+  return <>
     {back}
     <h1 ref={heading} tabIndex={-1} className="fold-page-header text-3xl font-bold focus:outline-none">{title}</h1>
     <Form ref={form} aria-label={title} onSubmit={submit} className="space-y-8">
       <section aria-labelledby={`${ids.audience}-h`} className="space-y-4">
         <h2 id={`${ids.audience}-h`} className="text-xl font-semibold">Who gets it</h2>
-        <AudiencePicker id={ids.audience} options={options} choice={choice} error={errors.audience} push={pushShown && pushAlert}
+        <AudiencePicker id={ids.audience} options={options} choice={choice} error={errors.audience} push={pushShown && pushAlert} reviewing={reviewing}
           onChange={(c) => { setChoice(c); setErrors((e) => ({ ...e, audience: undefined })); }} />
         {/* A companion to the email, never instead of it (DEC-123). */}
         {pushShown && (
@@ -530,8 +833,8 @@ export function MessageComposerPage() {
           </Suspense>
         </Field>
         <div className="flex flex-wrap gap-2">
-          <Button variant="secondary" layout="w-full sm:w-auto" disabled={!!busy} onClick={() => void run("preview")}>{busy === "preview" ? "Saving…" : "Preview"}</Button>
-          <Button variant="secondary" layout="w-full sm:w-auto" disabled={!!busy} onClick={() => void run("test")}>{busy === "test" ? "Sending…" : "Send a test to me"}</Button>
+          <Button variant="secondary" layout="w-full sm:w-auto" disabled={action.running} onClick={() => run("preview")}>{doing("preview") ? "Saving…" : "Preview"}</Button>
+          <Button variant="secondary" layout="w-full sm:w-auto" disabled={action.running} onClick={() => run("test")}>{doing("test") ? "Sending…" : "Send a test to me"}</Button>
         </div>
         {scheduled && <p className="text-sm text-text-muted">Your changes save when you preview or send a test. The message stays scheduled.</p>}
         {errors.test && <FormError>{errors.test}</FormError>}
@@ -573,33 +876,65 @@ export function MessageComposerPage() {
         {when === "now" && errors.when && <FormError>{errors.when}</FormError>}
       </section>
 
-      {errors.form && <FormError>{errors.form}</FormError>}
+      {formError && <FormError>{formError}</FormError>}
       <p role="status" className="text-sm text-text-muted empty:hidden">{note}</p>
-      {asking ? (
-        <div role="group" aria-labelledby={`${ids.when}-c`} className="space-y-3 rounded-lg border border-primary-border bg-primary-subtle p-4">
-          <p id={`${ids.when}-c`} className="font-semibold text-primary-on-subtle">{confirmLine(asking.eligible, asking.at, zone)}</p>
-          <p className="text-sm text-primary-on-subtle">To {audience ? audienceLabel(audience, options) : "the people you chose"}. You can change or cancel it until it starts sending.</p>
-          {asking.push > 0 && <p className="text-sm text-primary-on-subtle">{asking.push} {asking.push === 1 ? "person gets" : "people get"} a push notification too.</p>}
+      {asking?.change ? (
+        <div role="group" aria-labelledby={`${ids.change}-h`} aria-describedby={`${ids.change}-d`} className="space-y-3 rounded-lg border border-primary-border bg-primary-subtle p-4">
+          <p id={`${ids.change}-h`} className="font-semibold text-primary-on-subtle">Who gets this changed since you looked.</p>
+          <div id={`${ids.change}-d`} className="space-y-1 text-sm text-primary-on-subtle">
+            {changeLines(asking.change).map((line) => <p key={line}>{line}</p>)}
+            <p>{confirmLine(asking.review.summary.eligible, asking.at, zone)}</p>
+          </div>
           <FormActions>
-            <Button ref={confirmButton} variant="primary" layout="w-full sm:w-auto" disabled={busy === "schedule"} onClick={() => void schedule()}>
-              {busy === "schedule" ? "Scheduling…" : asking.at ? "Schedule" : "Send now"}
+            <Button ref={confirmButton} variant="primary" layout="w-full sm:w-auto" disabled={action.running} onClick={schedule}>
+              {doing("schedule") ? (asking.at ? "Scheduling…" : "Sending…") : asking.at ? "Schedule for the list as it is now" : "Send to the list as it is now"}
             </Button>
-            <Button variant="secondary" layout="w-full sm:w-auto" onClick={() => setConfirm(null)}>Go back</Button>
+            <Button variant="secondary" layout="w-full sm:w-auto" disabled={action.running} onClick={reviewList}>Review the whole list</Button>
+            <Button variant="ghost" layout="w-full sm:w-auto" disabled={action.running} onClick={() => setConfirm(null)}>Go back</Button>
+          </FormActions>
+        </div>
+      ) : asking ? (
+        <div role="group" aria-labelledby={`${ids.when}-c`} className="space-y-3 rounded-lg border border-primary-border bg-primary-subtle p-4">
+          <p id={`${ids.when}-c`} className="font-semibold text-primary-on-subtle">{confirmLine(asking.review.summary.eligible, asking.at, zone)}</p>
+          {asking.again && <p className="text-sm text-primary-on-subtle">We checked who gets it again, so this is the list as it is now.</p>}
+          <p className="text-sm text-primary-on-subtle">To {audience ? audienceLabel(audience, options) : "the people you chose"}. You can change or cancel it until it starts sending.</p>
+          {pushShown && pushAlert && asking.review.summary.push > 0 && <p className="text-sm text-primary-on-subtle">{asking.review.summary.push} {asking.review.summary.push === 1 ? "person gets" : "people get"} a push notification too.</p>}
+          <FormActions>
+            <Button ref={confirmButton} variant="primary" layout="w-full sm:w-auto" disabled={action.running} onClick={schedule}>
+              {doing("schedule") ? (asking.at ? "Scheduling…" : "Sending…") : sendWord}
+            </Button>
+            <Button variant="secondary" layout="w-full sm:w-auto" disabled={action.running} onClick={() => setConfirm(null)}>Go back</Button>
           </FormActions>
         </div>
       ) : (
         <FormActions>
-          <Button type="submit" variant="primary" layout="w-full sm:w-auto" disabled={!!busy}>{busy === "send" ? "Saving…" : when === "now" ? "Send now" : "Schedule"}</Button>
+          <Button type="submit" variant="primary" layout="w-full sm:w-auto" disabled={action.running}>{doing("send") ? "Saving…" : when === "now" ? "Send now" : "Schedule"}</Button>
           {scheduled
-            ? <Button variant="secondary" layout="w-full sm:w-auto" onClick={doneEditing}>Done editing</Button>
-            : <Button variant="secondary" layout="w-full sm:w-auto" disabled={!!busy} onClick={() => void run("draft")}>{busy === "draft" ? "Saving…" : "Save draft"}</Button>}
+            ? <Button variant="secondary" layout="w-full sm:w-auto" disabled={action.running} onClick={doneEditing}>Done editing</Button>
+            : <Button variant="secondary" layout="w-full sm:w-auto" disabled={action.running} onClick={() => run("draft")}>{doing("draft") ? "Saving…" : "Save draft"}</Button>}
           {message?.status === "draft" && (
-            <Button variant="danger-outline" layout="w-full sm:w-auto" disabled={!!busy} onClick={() => void discardDraft()}>
-              {busy === "cancel" ? "Discarding…" : "Discard draft"}
+            <Button variant="danger-outline" layout="w-full sm:w-auto" disabled={action.running} onClick={discardDraft}>
+              {doing("cancel") ? "Discarding…" : "Discard draft"}
             </Button>
           )}
         </FormActions>
       )}
     </Form>
-  </>);
+  </>;
+}
+
+// When a message's form says it goes: a scheduled time still ahead, as that day and time on the church's clock.
+interface FormTime {
+  when: "now" | "later";
+  day: string;
+  time: string;
+}
+
+function formTime(m: Message, zone: string): FormTime {
+  const later = m.status === "scheduled" && m.scheduledAt && new Date(m.scheduledAt).getTime() > Date.now() + 60_000;
+
+  if (!later || !m.scheduledAt) return { when: "now", day: "", time: "09:00" };
+  const w = wallClock(m.scheduledAt, zone);
+
+  return { when: "later", day: w.day, time: w.time };
 }

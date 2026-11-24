@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { composeOptions, recipients, summary } from "../test/compose";
-import { AUDIENCE_LABEL_MAX, AUDIENCE_LABEL_WIDTH_EM, audienceLabel, audienceLabels, confirmLine, emptyChoice, failedLine, fromAudience, guardianLine, historyLine, historyTeenLine, isOneEvent, prefillChoice, pushBadge, pushHistoryLine, pushLine, labelWidthEm, retryQuestion, shortLabel, statusLabel, summaryLine, teenLine, toAudience } from "./messages";
+import { ApiError } from "../api/core";
+import { AUDIENCE_LABEL_MAX, AUDIENCE_LABEL_WIDTH_EM, audienceLabel, audienceLabels, changeLines, confirmLine, emptyChoice, failedLine, fromAudience, guardianLine, historyLine, historyTeenLine, isOneEvent, prefillChoice, pushBadge, pushHistoryLine, pushLine, labelWidthEm, retryQuestion, reviewRefusal, shortLabel, statusLabel, summaryLine, teenLine, toAudience } from "./messages";
 
 describe("audiences", () => {
   it("turns the picker's choice into the API's audience and back", () => {
@@ -375,5 +376,29 @@ describe("audienceLabels (#288)", () => {
       expect(count(label)).toBeLessThanOrEqual(AUDIENCE_LABEL_MAX);
       expect(labelWidthEm(label)).toBeLessThanOrEqual(AUDIENCE_LABEL_WIDTH_EM);
     }
+  });
+});
+
+describe("a changed list (DEC-169)", () => {
+  const change = (added: string[], dropped: string[], addedMore = 0, droppedUnnamed = 0) => ({ added, addedMore, dropped, droppedUnnamed });
+
+  it("names who will now get it and who will no longer, counting the rest, never why", () => {
+    expect(changeLines(change(["Pat Lee"], ["Sam Roe"], 0, 1))).toEqual(["Pat Lee will now get this.", "2 people will no longer get it: Sam Roe and 1 other."]);
+    expect(changeLines(change(["Pat Lee", "Kim Ng", "Bo Bell"], []))).toEqual(["Pat Lee, Kim Ng and Bo Bell will now get this."]);
+    expect(changeLines(change(["Pat Lee"], [], 3))).toEqual(["Pat Lee and 3 others will now get this."]);
+    expect(changeLines(change([], ["Sam Roe"]))).toEqual(["Sam Roe will no longer get it."]);
+    expect(changeLines(change([], [], 0, 1))).toEqual(["1 person will no longer get it."]);
+    expect(changeLines(change([], [], 0, 4))).toEqual(["4 people will no longer get it."]);
+    expect(changeLines(change([], ["Sam Roe", "Ann Adult"], 0, 2))).toEqual(["4 people will no longer get it: Sam Roe, Ann Adult and 2 others."]);
+  });
+
+  it("reads the refusal's body, and nothing else, as a refused confirmation", () => {
+    const review = JSON.parse(JSON.stringify({ summary: summary(), token: "t" }));
+    const listChanged = new ApiError(409, "x", { code: "message_list_changed", review, change: change(["Pat Lee"], []) });
+    expect(reviewRefusal(listChanged)).toEqual({ review, change: change(["Pat Lee"], []) });
+    expect(reviewRefusal(new ApiError(409, "x", { code: "message_review_needed", review }))).toEqual({ review, change: null });
+    expect(reviewRefusal(new ApiError(409, "x", { code: "message_list_changed", review: { ...review, token: "" } }))).toBeNull();
+    expect(reviewRefusal(new ApiError(409, "x", { code: "message_changed", review }))).toBeNull();
+    expect(reviewRefusal(new ApiError(502, "x", {}, true))).toBeNull();
   });
 });

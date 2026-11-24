@@ -22,14 +22,17 @@ const LISTED_DATES = 10;
 // counts only: the API never sends an address (DEC-31). A count that comes
 // back after a newer change is dropped. push: "Push notification too" is
 // on (and the church allows it), so the count says who also gets a push
-// and the list marks them with a phone and words (M3.13d2).
-export function AudiencePicker({ options, choice, onChange, error, id, push = false }: {
+// and the list marks them with a phone and words (M3.13d2). reviewing:
+// bumped when the sender asks to review the whole list (DEC-169), which
+// counts again and opens the list.
+export function AudiencePicker({ options, choice, onChange, error, id, push = false, reviewing = 0 }: {
   options: ComposeOptions;
   choice: AudienceChoice;
   onChange: (c: AudienceChoice) => void;
   error?: string;
   id: string;
   push?: boolean;
+  reviewing?: number;
 }) {
   const chipsLabel = useId();
   const [kind, raw] = choice.target.split(":");
@@ -39,6 +42,7 @@ export function AudiencePicker({ options, choice, onChange, error, id, push = fa
   const [summary, setSummary] = useState<{ key: string; summary: AudienceSummary } | null>(null);
   const [countError, setCountError] = useState<{ key: string; text: string } | null>(null);
   const latest = useRef("");
+  const list = useRef<HTMLDetailsElement>(null);
 
   useEffect(() => {
     latest.current = key;
@@ -53,7 +57,17 @@ export function AudiencePicker({ options, choice, onChange, error, id, push = fa
 
     return () => clearTimeout(timer);
     // audience is derived from key, so key alone says when to count again.
-  }, [key]);
+  }, [key, reviewing]);
+
+  useEffect(() => {
+    const details = list.current;
+
+    if (!reviewing || !details) return;
+    details.open = true;
+    const summary = details.querySelector("summary");
+    summary?.focus({ preventScroll: true });
+    summary?.scrollIntoView?.({ block: "start" });
+  }, [reviewing]);
 
   const listed = (target: string) => {
     const [k, v] = target.split(":");
@@ -159,7 +173,7 @@ export function AudiencePicker({ options, choice, onChange, error, id, push = fa
         </>}
       </div>
       {current && current.recipients.length > 0 && (
-        <details>
+        <details ref={list}>
           <summary className="inline-flex min-h-11 cursor-pointer items-center text-sm font-semibold text-primary">See who's on the list</summary>
           <ul className="mt-2 divide-y divide-border rounded-md border border-border bg-surface text-sm">
             {current.recipients.map((r, i) => <RecipientRow key={`${r.name}-${i}`} r={r} push={push} />)}

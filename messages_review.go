@@ -34,7 +34,7 @@ import (
 var (
 	// errMessageListChanged: who the message reaches changed between the review
 	// and the confirmation. The answer carries the change and a fresh review.
-	errMessageListChanged = apiErr(http.StatusConflict, "message_list_changed", "who gets this message changed since you looked")
+	errMessageListChanged = apiErr(http.StatusConflict, "message_list_changed", "who gets this message changed since you looked; check the list, then send it")
 	// errMessageReviewNeeded: the confirmation's review is not one this message,
 	// this sender and this text can use. The answer carries a fresh review.
 	errMessageReviewNeeded = apiErr(http.StatusConflict, "message_review_needed", "check who gets this message before it goes")

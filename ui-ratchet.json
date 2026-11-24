@@ -45,7 +45,6 @@
     "web/src/pages/GuestManage.tsx": 1,
     "web/src/pages/Invite.tsx": 1,
     "web/src/pages/Login.tsx": 1,
-    "web/src/pages/MessageComposer.tsx": 1,
     "web/src/pages/Profile.tsx": 3
   },
   "closeAndReopen": {},

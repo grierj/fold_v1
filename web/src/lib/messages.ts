@@ -1,6 +1,8 @@
+import { array, boolean, minLength, number, object, optional, pipe, record, safeParse, string } from "valibot";
+import { ApiError } from "../api/core";
 import { isCallable } from "./wireValues";
 import { people } from "./plural";
-import type { AudienceRole, AudienceStatus, AudienceSummary, ComposeOptions, HistoryStatus, Message, MessageAudience, MessageHistoryPush, MessagePushCounts, MessagePushWait, MessageRecipientCounts, MessageRecipients } from "../types";
+import type { AudienceChange, AudienceRole, AudienceStatus, AudienceSummary, ComposeOptions, HistoryStatus, Message, MessageAudience, MessageHistoryPush, MessagePushCounts, MessagePushWait, MessageRecipientCounts, MessageRecipients, MessageReview } from "../types";
 import { formatShortDay, formatWhenIn } from "./when";
 import { registrationStatusLabel } from "./status";
 
@@ -30,6 +32,7 @@ export const ROLE_CHOICES: { id: AudienceRole; label: string }[] = [
 const DEFAULT_STATUSES: AudienceStatus[] = ["going", "waitlisted"];
 const DEFAULT_ROLES: AudienceRole[] = ["member", "leader"];
 
+/** @public tested directly: the picker before anything is chosen. */
 export const emptyChoice = (): AudienceChoice => ({ target: "", dates: "all", statuses: DEFAULT_STATUSES, roles: DEFAULT_ROLES });
 
 export function toAudience(c: AudienceChoice): MessageAudience | null {
@@ -610,3 +613,64 @@ export const MERGE_FIELDS: { field: string; label: string; event: boolean }[] = 
   { field: "event_link", label: "Event page link", event: true },
   { field: "manage_link", label: "Link to their sign-up", event: true },
 ];
+
+const wireReview = object({
+  summary: object({
+    people: number(),
+    eligible: number(),
+    teens: number(),
+    skipped: record(string(), number()),
+    push: number(),
+    recipients: array(object({ name: string(), teen: boolean(), skipped: optional(string()), push: optional(boolean()) })),
+    more: boolean(),
+  }),
+  token: pipe(string(), minLength(1)),
+});
+
+const wireRefusal = object({
+  review: wireReview,
+  change: optional(object({ added: array(string()), addedMore: number(), dropped: array(string()), droppedUnnamed: number() })),
+});
+
+// A send confirmation the server did not take (DEC-169): `message_list_changed` carries what changed since the review
+// it named, `message_review_needed` only a fresh review; both carry the fresh one. Anything else, or a body without
+// them, is no such answer.
+export interface ReviewRefusal {
+  review: MessageReview;
+  change: AudienceChange | null;
+}
+
+export function reviewRefusal(cause: unknown): ReviewRefusal | null {
+  if (!(cause instanceof ApiError) || (cause.code !== "message_list_changed" && cause.code !== "message_review_needed")) return null;
+  const parsed = safeParse(wireRefusal, cause.data);
+
+  if (!parsed.success) return null;
+
+  const change = cause.code === "message_list_changed" ? parsed.output.change ?? null : null;
+
+  return { review: parsed.output.review, change };
+}
+
+// "Sam Roe", "Sam Roe and Pat Lee", "Sam Roe, Pat Lee and 2 others".
+function namesAnd(names: string[], others: number): string {
+  const all = others > 0 ? [...names, others === 1 ? "1 other" : `${others} others`] : names;
+
+  return all.length <= 1 ? all.join("") : `${all.slice(0, -1).join(", ")} and ${all[all.length - 1]}`;
+}
+
+// changeLines says how the list changed since the sender looked, one line for who will now get it and one for who
+// will no longer: "Pat Lee will now get this." and "2 people will no longer get it: Sam Roe and 1 other." Never why.
+export function changeLines(change: AudienceChange): string[] {
+  const lines: string[] = [];
+
+  if (change.added.length > 0) lines.push(`${namesAnd(change.added, change.addedMore)} will now get this.`);
+  else if (change.addedMore > 0) lines.push(`${people(change.addedMore)} will now get this.`);
+
+  const gone = change.dropped.length + change.droppedUnnamed;
+
+  if (gone === 1 && change.dropped.length === 1) lines.push(`${change.dropped[0]} will no longer get it.`);
+  else if (gone > 0 && change.dropped.length === 0) lines.push(`${people(gone)} will no longer get it.`);
+  else if (gone > 0) lines.push(`${people(gone)} will no longer get it: ${namesAnd(change.dropped, change.droppedUnnamed)}.`);
+
+  return lines;
+}

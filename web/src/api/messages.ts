@@ -8,6 +8,7 @@ import type {
   MessageReadResponse,
   MessageRecipients,
   MessageResponse,
+  MessageReviewResponse,
   MessageScheduledResponse,
   MessageTestResponse,
 } from "../types";
@@ -32,11 +33,14 @@ export const Messages = {
     api<MessageListResponse>(`/messages${query({ category, ...options })}`),
   get: (id: Id) => api<MessageResponse>(path`/messages/${id}`),
   create: (draft: MessageDraft) => api<MessageResponse>("/messages", { method: "POST", body: { channel: "email", ...draft } }),
-  update: (id: Id, draft: MessageDraft) =>
-    api<MessageResponse>(path`/messages/${id}`, { method: "PUT", body: { channel: "email", ...draft } }),
-  // scheduledAt absent: send now.
-  schedule: (id: Id, scheduledAt?: string) =>
-    api<MessageScheduledResponse>(path`/messages/${id}/schedule`, { method: "POST", body: scheduledAt ? { scheduledAt } : {} }),
+  // revision names the read the edit was made from (DEC-169).
+  update: (id: Id, draft: MessageDraft, revision: string | undefined) =>
+    api<MessageResponse>(path`/messages/${id}`, { method: "PUT", body: { channel: "email", ...draft, revision } }),
+  // Who it reaches, with the token the send confirmation names (DEC-169).
+  review: (id: Id) => api<MessageReviewResponse>(path`/messages/${id}/review`),
+  // The confirmation: the text it was pressed on (revision) and the review it showed. scheduledAt absent: send now.
+  schedule: (id: Id, send: { revision: string | undefined; review: string; scheduledAt?: string }) =>
+    api<MessageScheduledResponse>(path`/messages/${id}/schedule`, { method: "POST", body: send }),
   // One picture for the body of a saved draft (DEC-118); the answer's url goes in the editor.
   uploadImage: (id: Id, file: File) => apiUpload<MessageImageResponse>(path`/messages/${id}/images`, "image", file),
   cancel: (id: Id) => api<MessageResponse>(path`/messages/${id}/cancel`, { method: "POST" }),

@@ -122,7 +122,7 @@ var (
 	errMessageBody     = apiErr(http.StatusBadRequest, "message_body", "write a message of under about "+thousands(maxMessageText)+" characters")
 	errMessageNobody   = apiErr(http.StatusBadRequest, "message_nobody", "no one would get this message; choose people who can get email")
 	errMessageLocked   = apiErr(http.StatusConflict, "message_locked", "this message is already sending or sent, so it can't change")
-	errMessageChanged  = apiErr(http.StatusConflict, "message_changed", "this message changed since you opened it, so your changes could not be saved")
+	errMessageChanged  = apiErr(http.StatusConflict, "message_changed", "this message changed somewhere else, so it could not be saved or sent; check it and try again")
 	errMessageWhen     = apiErr(http.StatusBadRequest, "message_when", "pick a time from now to a year ahead")
 	errMessageChannel  = apiErr(http.StatusBadRequest, "message_channel", "texting isn't set up yet; send this as an email")
 	errMessageNotYours = apiErr(http.StatusForbidden, "message_not_yours", "you can't send to those people")
