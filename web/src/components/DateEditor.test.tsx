@@ -1,7 +1,7 @@
-import { createRosterWrites, type RosterWrites } from "../lib/rosterWrites";
+import { createRosterWrites, RosterWritesProvider, type RosterWrites } from "../lib/rosterWrites";
 import { stubService } from "../test/service";
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
-import { createRef, useLayoutEffect, useState, type ReactNode, type RefObject } from "react";
+import { createRef, type ReactNode, type RefObject } from "react";
 import { MemoryRouter } from "react-router-dom";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -13,8 +13,8 @@ import { ApiError, type Credential } from "../api/core";
 import { DateEditor, type DateDraftHold } from "./DateEditor";
 import { ManagedDateEditor } from "./ManagedDateEditor";
 import { ConfirmProvider } from "./ui/ConfirmDialog";
-import { DateWritesProvider, useDateAttempts, type ReadPermit } from "../lib/dateWrites";
-import { editBaseOf, useEditRead, useEditRefresh } from "../lib/editBase";
+import { useEditRead } from "../lib/editBase";
+import type { RevisionConflict } from "../lib/useRevisionSave";
 import { ERROR_COPY } from "../lib/errors";
 import { formatDayFull } from "../lib/when";
 import type { Attendee, EventOccurrence, OccurrenceResponse } from "../types";
@@ -28,10 +28,13 @@ stubService(Site, () => ({ get: vi.fn() }));
 stubService(DateRooms, () => ({ list: vi.fn(), set: vi.fn() }));
 
 const DATE = "2026-12-01";
+const OPENER = { eventId: 7, date: DATE, occurrenceId: 1 };
+const NETWORK = "We couldn't reach Fold. Check your connection and try again.";
 let credential: Credential;
 let edits: EditSends;
 
-// What the editor's own manager read (pinned to the credential) answers now.
+// What the editor's own manager read (pinned to the credential) answers now: the read it opens from, and the read
+// after a refused save.
 let base: EventOccurrence;
 
 // The kept-dates panel's reads (never pinned), in order; with none queued it reads `panelRead`.
@@ -52,39 +55,36 @@ beforeEach(async () => {
 const editorReads = () => vi.mocked(Events.managedDate).mock.calls.filter((call) => call[2] !== undefined).length;
 
 interface Props {
-  generation?: number;
-  onSaved?: (stillOpen: boolean) => void;
+  onSaved?: () => void;
+  onConflict?: (why: RevisionConflict) => void;
   onClose?: () => void;
   onRefused?: () => void;
   store?: RosterWrites;
   dialog?: boolean;
+  pageFailed?: boolean;
 }
 
-// A page listing the date: a settled edit asks for it again, and each answer it shows is a new generation.
-function TestHost({ generation, ...props }: Omit<Props, "store" | "dialog"> & { generation: number }) {
-  const [answers, setAnswers] = useState(0);
-  useEditRefresh(() => true, () => setAnswers((n) => n + 1));
-
-  return <ManagedDateEditor opener={{ eventId: base.eventId, date: base.date, occurrenceId: base.id }} generation={generation * 1000 + answers}
-    onSaved={props.onSaved ?? (() => {})} onClose={props.onClose ?? (() => {})} onRefused={props.onRefused ?? (() => {})} />;
-}
-
-// The editor as the event page opens it for the listed date `base` names.
-function editor({ generation = 0, onSaved = () => {}, onClose = () => {}, onRefused = () => {}, store, dialog = false }: Props = {}) {
-  const inner = <TestHost generation={generation} onSaved={onSaved} onClose={onClose} onRefused={onRefused} />;
+// The editor as the event page opens it for the listed date OPENER names.
+function editor({ onSaved = () => {}, onConflict = () => {}, onClose = () => {}, onRefused = () => {}, store, dialog = false, pageFailed = false }: Props = {}) {
+  const inner = <ManagedDateEditor opener={OPENER} pageFailed={pageFailed} onSaved={onSaved} onConflict={onConflict} onClose={onClose} onRefused={onRefused} />;
 
   return session(dialog ? <ConfirmProvider>{inner}</ConfirmProvider> : inner, store);
 }
 
 function session(ui: ReactNode, store?: RosterWrites) {
-  return <MemoryRouter><DateWritesProvider credential={credential} rosterWrites={store}>{ui}</DateWritesProvider></MemoryRouter>;
+  return <MemoryRouter><RosterWritesProvider rosterWrites={store}>{ui}</RosterWritesProvider></MemoryRouter>;
 }
 
 // The editor alone over its own read, with a host's hold (ManageDate's way of keeping a draft across a remount).
-function HoldHarness({ hold, onAuthorityLost = () => {} }: { hold: RefObject<DateDraftHold | null>; onAuthorityLost?: () => void }) {
-  const read = useEditRead({ eventId: base.eventId, date: base.date, occurrenceId: base.id }, "hold", true, () => {});
+function HoldHarness({ hold, onAuthorityLost = () => {}, onSaved = () => {}, onConflict = () => {} }: {
+  hold: RefObject<DateDraftHold | null>;
+  onAuthorityLost?: () => void;
+  onSaved?: () => void;
+  onConflict?: (why: RevisionConflict) => void;
+}) {
+  const read = useEditRead(OPENER, "hold", true, () => {});
 
-  return read.kind === "ready" ? <DateEditor base={read.base} permit={read.permit} attempts={read.attempts} hold={hold} onSaved={() => {}} onClose={() => {}} onAuthorityLost={onAuthorityLost} /> : <p>{read.kind}</p>;
+  return read.kind === "ready" ? <DateEditor opener={OPENER} base={read.base} hold={hold} onSaved={onSaved} onConflict={onConflict} onClose={() => {}} onAuthorityLost={onAuthorityLost} /> : <p>{read.kind}</p>;
 }
 
 async function ready() {
@@ -96,6 +96,23 @@ async function ready() {
 
 const save = () => userEvent.click(screen.getByRole("button", { name: "Save this date" }));
 
+async function typeTitle(text = "Carols") {
+  await ready();
+  const title = screen.getByRole("textbox", { name: "Title" });
+  await userEvent.clear(title);
+  await userEvent.type(title, text);
+}
+
+const changed = () => new ApiError(409, "x", { code: "date_changed" });
+
+function deferred<T>() {
+  let resolve: (value: T) => void = () => {};
+  let reject: (cause: unknown) => void = () => {};
+  const promise = new Promise<T>((yes, no) => { resolve = yes; reject = no; });
+
+  return { promise, resolve, reject };
+}
+
 it("opens one date through the shared visibility field without changing the series", async () => {
   const onSaved = vi.fn();
   base = occurrence({ revision: "r0", visibility: "private", seriesVisibility: "private", groupId: 4, groupVisibility: "invite_only", groupName: "Hidden fellowship" });
@@ -106,11 +123,10 @@ it("opens one date through the shared visibility field without changing the seri
   expect(screen.getByText(/Only leaders will see who signed up/)).toBeInTheDocument();
   await userEvent.type(screen.getByRole("textbox", { name: /^Reason/ }), "  Welcome neighbours ");
   await save();
-  await waitFor(() => expect(onSaved).toHaveBeenCalledWith(true));
-  // One guarded POST from the read's token: no preview, no consent until the writer asks, the reason trimmed.
+  await waitFor(() => expect(onSaved).toHaveBeenCalledOnce());
+  // One POST from the read's revision: no preview, no consent until the writer asks, the reason trimmed.
   expect(edits.sent).toHaveLength(1);
-  expect(edits.sent[0]).toMatchObject({ url: "/events/7/occurrences/2026-12-01/edits", revision: "r0", changes: { visibility: "public" }, reason: "Welcome neighbours" });
-  expect(edits.sent[0].attempt).toMatch(/^[0-9a-f]{32}$/);
+  expect(edits.sent[0]).toMatchObject({ eventId: 7, date: DATE, revision: "r0", changes: { visibility: "public" }, reason: "Welcome neighbours" });
   expect(edits.sent[0].consent).toBeUndefined();
   expect(Events.dateVisibilityImpact).not.toHaveBeenCalled();
 });
@@ -133,9 +149,8 @@ it.each([
   ["no church-wide flag", { churchWide: undefined }],
 ] as const)("opens nothing when the read answers %s, and asks the host to check its page", async (_label, over) => {
   const onRefused = vi.fn();
-  const listed = base;
-  base = { ...listed, ...over };
-  render(session(<ManagedDateEditor opener={{ eventId: 7, date: DATE, occurrenceId: listed.id }} generation={0} onSaved={() => {}} onClose={() => {}} onRefused={onRefused} />));
+  base = { ...base, ...over };
+  render(editor({ onRefused }));
   await waitFor(() => expect(onRefused).toHaveBeenCalledOnce());
   expect(screen.queryByRole("button", { name: "Save this date" })).not.toBeInTheDocument();
   expect(screen.queryByRole("textbox")).not.toBeInTheDocument();
@@ -144,7 +159,7 @@ it.each([
 it("on the group page, opens nothing for a date the read puts in another group", async () => {
   const onRefused = vi.fn();
   base = occurrence({ revision: "r0", groupId: 9, groupName: "Other group", groupVisibility: "public" });
-  render(session(<ManagedDateEditor opener={{ eventId: 7, date: DATE, occurrenceId: 1, groupId: 3 }} generation={0} onSaved={() => {}} onClose={() => {}} onRefused={onRefused} />));
+  render(session(<ManagedDateEditor opener={{ ...OPENER, groupId: 3 }} onSaved={() => {}} onConflict={() => {}} onClose={() => {}} onRefused={onRefused} />));
   await waitFor(() => expect(onRefused).toHaveBeenCalledOnce());
   expect(screen.queryByRole("textbox")).not.toBeInTheDocument();
 });
@@ -158,12 +173,11 @@ it("a refused read shows nothing of the date and asks the host to check its page
   expect(document.body.textContent).not.toContain("SECRET");
 });
 
-it("a read that fails offers Retry loading, apart from any Try again, with the fields hidden", async () => {
+it("a read that fails offers Retry loading, with the fields hidden", async () => {
   vi.mocked(Events.managedDate).mockRejectedValueOnce(new TypeError("Failed to fetch"));
   render(editor());
-  expect(await screen.findByText("We couldn't load this date to edit it. What you typed is kept.")).toBeInTheDocument();
+  expect(await screen.findByText("We couldn't load this date to edit it.")).toBeInTheDocument();
   expect(screen.queryByRole("textbox")).not.toBeInTheDocument();
-  expect(screen.queryByRole("button", { name: "Try again" })).not.toBeInTheDocument();
   await userEvent.click(screen.getByRole("button", { name: "Retry loading" }));
   await ready();
   expect(editorReads()).toBe(2);
@@ -175,13 +189,6 @@ it("a credential the server no longer knows is not a refusal: the read can be as
   render(editor({ onRefused }));
   expect(await screen.findByRole("button", { name: "Retry loading" })).toBeInTheDocument();
   expect(onRefused).not.toHaveBeenCalled();
-});
-
-it("with no credential this tab can pin, shows no fields and sends nothing", async () => {
-  render(<MemoryRouter><DateWritesProvider credential={null}><ManagedDateEditor opener={{ eventId: 7, date: DATE, occurrenceId: 1 }} generation={0} onSaved={() => {}} onClose={() => {}} onRefused={() => {}} /></DateWritesProvider></MemoryRouter>);
-  expect(await screen.findByText(/We couldn't confirm this tab's sign-in/)).toBeInTheDocument();
-  expect(screen.queryByRole("textbox")).not.toBeInTheDocument();
-  expect(Events.managedDate).not.toHaveBeenCalled();
 });
 
 it("puts the Room control beside Location when rooms are on, and not otherwise", async () => {
@@ -214,39 +221,35 @@ it("keeps the rest of the editor working while the rooms fail to load", async ()
   expect(edits.sent.map((s) => s.changes)).toEqual([{ title: "Supper!" }]);
 });
 
-it("an unchanged form closes without sending anything", async () => {
+it("an unchanged form closes without sending anything, and so does one changed only by spaces around text", async () => {
   const onClose = vi.fn();
   render(editor({ onClose }));
   await ready();
   await save();
   expect(onClose).toHaveBeenCalledOnce();
+  await userEvent.type(screen.getByRole("textbox", { name: "Title" }), "  ");
+  await save();
+  expect(onClose).toHaveBeenCalledTimes(2);
   expect(edits.sent).toHaveLength(0);
 });
 
-it("sends only what changed: a title alone keeps the stored clock, a start alone keeps the shown duration, a cleared cap is null", async () => {
+it("sends only what changed, text as the server stores it: a title alone keeps the stored clock and the caps", async () => {
   base = occurrence({ revision: "r0", capacity: 20, remoteAvailable: true, remoteCapacity: 0, durationMinutes: 45 });
   render(editor());
   await ready();
-  await userEvent.type(screen.getByRole("textbox", { name: "Title" }), "!");
+  await userEvent.type(screen.getByRole("textbox", { name: "Title" }), " night  ");
   await save();
   await waitFor(() => expect(edits.sent).toHaveLength(1));
-  expect(edits.sent[0].changes).toEqual({ title: "Supper!" });
+  expect(edits.sent[0].changes).toEqual({ title: "Supper night" });
 });
 
-it("names dates in words: the series day, and a new start in the recovery panel on the event's own clock", async () => {
+it("names the series day in words, and no date in the form as digits", async () => {
   base = occurrence({ revision: "r0", tzid: "America/Boise", startsLocal: "2026-12-01T19:00", startsAt: "2026-12-02T02:00:00Z" });
-  edits.answer(new TypeError("Failed to fetch"));
   render(editor());
   await ready();
   expect(screen.getByText(/The series date stays Tuesday, December 1, 2026\./)).toBeInTheDocument();
-  fireEvent.change(screen.getByLabelText("Date"), { target: { value: "2026-12-04" } });
-  fireEvent.change(screen.getByLabelText("Start time"), { target: { value: "19:30" } });
-  await save();
-  await screen.findByRole("button", { name: "Try again" });
-  expect(screen.getByRole("listitem")).toHaveTextContent("Starts: Friday, December 4, 2026 at 7:30 PM");
-  expect(edits.sent[0].changes).toEqual({ startsLocal: "2026-12-04T19:30" });
   const form = screen.getByRole("button", { name: "Save this date" }).closest("form");
-  expect(form?.textContent).not.toMatch(/\d{4}-\d{2}-\d{2}/);
+  expect(form?.querySelector("p")?.textContent).not.toMatch(/\d{4}-\d{2}-\d{2}/);
 });
 
 it("pairs a new start date with its time, and clears a cap as null while keeping a remote zero", async () => {
@@ -258,169 +261,6 @@ it("pairs a new start date with its time, and clears a cap as null while keeping
   await save();
   await waitFor(() => expect(edits.sent).toHaveLength(1));
   expect(edits.sent[0].changes).toEqual({ startsLocal: "2026-12-04T19:00", capacityOverride: null });
-  expect(JSON.parse(edits.sent[0].body).changes).toHaveProperty("capacityOverride", null);
-});
-
-it("takes each field a newer read changed and keeps the others as typed, so Save sends only the typed change", async () => {
-  const before = occurrence({ revision: "r0", capacity: 20 });
-  base = before;
-  const view = render(editor());
-  await ready();
-  await userEvent.clear(screen.getByRole("textbox", { name: "Title" }));
-  await userEvent.type(screen.getByRole("textbox", { name: "Title" }), "Carols");
-  await userEvent.clear(screen.getByRole("textbox", { name: /^Location/ }));
-  await userEvent.type(screen.getByRole("textbox", { name: /^Location/ }), "Porch");
-
-  // The page shows a newer answer, so the date is read again: another manager moved the place and the capacity.
-  base = { ...before, location: "Annex", capacity: 30, revision: "r1" };
-  view.rerender(editor({ generation: 1 }));
-  await waitFor(() => expect(screen.getByRole("textbox", { name: /^Location/ })).toHaveValue("Annex"));
-  expect(screen.getByRole("textbox", { name: "Title" })).toHaveValue("Carols");
-  expect(screen.getByRole("spinbutton", { name: /^Capacity for this date/ })).toHaveValue(30);
-  await ready();
-  await save();
-  await waitFor(() => expect(edits.sent).toHaveLength(1));
-  expect(edits.sent[0]).toMatchObject({ revision: "r1", changes: { title: "Carols" } });
-});
-
-it("after a stored save, the next read resets the submitted fields even where another manager put the old value back", async () => {
-  render(editor());
-  await ready();
-  await userEvent.clear(screen.getByRole("textbox", { name: "Title" }));
-  await userEvent.type(screen.getByRole("textbox", { name: "Title" }), "Carols");
-  await userEvent.clear(screen.getByRole("textbox", { name: /^Location/ }));
-  await userEvent.type(screen.getByRole("textbox", { name: /^Location/ }), "Porch");
-  // Stored as Carols; before this editor reads again another manager names it Supper again, as it was opened.
-  edits.answer({ occurrence: { ...base, title: "Carols", revision: "r1" } });
-  base = { ...base, title: "Supper", revision: "r2" };
-  await userEvent.click(screen.getByRole("button", { name: "Save this date" }));
-  await waitFor(() => expect(editorReads()).toBe(2));
-  await ready();
-  expect(edits.sent[0].changes).toEqual({ title: "Carols", location: "Porch" });
-  expect(screen.getByRole("textbox", { name: "Title" })).toHaveValue("Supper");
-  expect(screen.getByRole("textbox", { name: /^Location/ })).toHaveValue("Hall");
-  // A capacity-only save now sends capacity alone.
-  await userEvent.type(screen.getByRole("spinbutton", { name: /^Capacity for this date/ }), "12");
-  await save();
-  await waitFor(() => expect(edits.sent).toHaveLength(2));
-  expect(edits.sent[1]).toMatchObject({ revision: "r2", changes: { capacityOverride: 12 } });
-  expect(edits.sent[1].attempt).not.toBe(edits.sent[0].attempt);
-});
-
-it("a field typed again while the save ran keeps what was typed", async () => {
-  render(editor({ dialog: true }));
-  await ready();
-  await userEvent.type(screen.getByRole("textbox", { name: "Title" }), "!");
-  let finish: (r: OccurrenceResponse) => void = () => {};
-
-  edits.answer(new Promise<OccurrenceResponse>((resolve) => { finish = resolve; }));
-  await save();
-  await waitFor(() => expect(edits.sent).toHaveLength(1));
-  base = { ...base, title: "Supper!", revision: "r1" };
-  await act(async () => { finish({ occurrence: { ...base } }); });
-  await waitFor(() => expect(editorReads()).toBe(2));
-  expect(screen.getByRole("textbox", { name: "Title" })).toHaveValue("Supper!");
-});
-
-it.each([
-  ["the connection drops", new TypeError("Failed to fetch")],
-  ["the server fails", new ApiError(500, "SECRET", {})],
-  ["a proxy answers with a page of its own", new ApiError(413, "request failed (413)", {}, true)],
-] as const)("when %s, Save stays closed, the date is read again and Try again resends the same bytes once", async (_label, cause) => {
-  const onSaved = vi.fn();
-  edits.answer(cause);
-  render(editor({ onSaved }));
-  await ready();
-  await userEvent.type(screen.getByRole("textbox", { name: "Title" }), "!");
-  await save();
-  await waitFor(() => expect(screen.getByText("We couldn't tell whether this date saved. Check it below, and try again if you need to.")).toBeInTheDocument());
-  expect(onSaved).not.toHaveBeenCalled();
-  const again = await screen.findByRole("button", { name: "Try again" });
-  // Only the submitted change is shown, never what the date said before, and the date is named in words.
-  expect(screen.getByRole("listitem")).toHaveTextContent("Title: Supper!");
-  expect(screen.getByText(`We couldn't tell whether your last save of ${formatDayFull(DATE)} went through. It asked for:`)).toBeInTheDocument();
-  expect(screen.getByRole("button", { name: "Save this date" })).toBeDisabled();
-  expect(screen.getByRole("textbox", { name: "Title" })).toBeDisabled();
-  expect(document.body.textContent).not.toContain("SECRET");
-  await waitFor(() => expect(again).toBeEnabled());
-  await userEvent.click(again);
-  await waitFor(() => expect(onSaved).toHaveBeenCalled());
-  expect(edits.sent).toHaveLength(2);
-  expect(edits.sent[1].body).toBe(edits.sent[0].body);
-});
-
-describe("a replay that finds the date changed retires the draft that made it", () => {
-  const conflict = () => new ApiError(409, "x", { code: "date_changed", baseSuperseded: true });
-  const unconfirmed = "We couldn't confirm what happened to your earlier save, and this date has changed since. Check it before you change anything else.";
-
-  async function typeAndLoseTheAnswer() {
-    await userEvent.clear(screen.getByRole("textbox", { name: "Title" }));
-    await userEvent.type(screen.getByRole("textbox", { name: "Title" }), "Carols");
-    await userEvent.clear(screen.getByRole("textbox", { name: /^Location/ }));
-    await userEvent.type(screen.getByRole("textbox", { name: /^Location/ }), "Porch");
-    await userEvent.click(screen.getByRole("radio", { name: /^Public/ }));
-    await userEvent.type(screen.getByRole("textbox", { name: /^Reason/ }), "Open it up");
-    edits.answer(new TypeError("Failed to fetch"));
-    await save();
-    await screen.findByText("We couldn't tell whether this date saved. Check it below, and try again if you need to.");
-  }
-
-  beforeEach(() => {
-    base = occurrence({ revision: "r0", visibility: "private", seriesVisibility: "private", groupId: 4, groupVisibility: "invite_only", groupName: "Hidden fellowship" });
-  });
-
-  it("on its own editor: the title, place, visibility and reason it typed never become a new save", async () => {
-    const onClose = vi.fn();
-    render(editor({ onClose }));
-    await ready();
-    await typeAndLoseTheAnswer();
-    const again = await screen.findByRole("button", { name: "Try again" });
-    await waitFor(() => expect(again).toBeEnabled());
-    // Another manager changed the title meanwhile.
-    base = { ...base, title: "Potluck", revision: "r9" };
-    edits.answer(conflict());
-    await userEvent.click(again);
-    expect(await screen.findByText(unconfirmed)).toBeInTheDocument();
-    const saveButton = await ready();
-    expect(screen.getByRole("textbox", { name: "Title" })).toHaveValue("Potluck");
-    expect(screen.getByRole("textbox", { name: /^Location/ })).toHaveValue("Hall");
-    expect(screen.getByRole("radio", { name: "Same as series (private)" })).toBeChecked();
-    expect(screen.getByRole("textbox", { name: /^Reason/ })).toHaveValue("");
-    expect(screen.queryByRole("button", { name: "Try again" })).not.toBeInTheDocument();
-    // Nothing was typed since: Save sends nothing and closes.
-    await userEvent.click(saveButton);
-    expect(onClose).toHaveBeenCalledOnce();
-    expect(edits.sent).toHaveLength(2);
-    // A later change sends only itself.
-    await userEvent.type(screen.getByRole("spinbutton", { name: /^Capacity for this date/ }), "5");
-    await save();
-    await waitFor(() => expect(edits.sent).toHaveLength(3));
-    expect(edits.sent[2]).toMatchObject({ revision: "r9", changes: { capacityOverride: 5 } });
-    expect(edits.sent[2].reason).toBeUndefined();
-  });
-
-  it("from another editor: the held draft is not brought back when its editor mounts again", async () => {
-    const hold = createRef<DateDraftHold>();
-    // One session: the held editor, then the same date's editor on another page, then the held one again.
-    const view = render(session(<HoldHarness hold={hold} />));
-    await ready();
-    await typeAndLoseTheAnswer();
-    expect(hold.current?.draft.title).toBe("Carols");
-    view.rerender(session(<TestHost generation={1} onSaved={() => {}} onClose={() => {}} onRefused={() => {}} />));
-    const again = await screen.findByRole("button", { name: "Try again" });
-    await waitFor(() => expect(again).toBeEnabled());
-    base = { ...base, title: "Potluck", revision: "r9" };
-    edits.answer(conflict());
-    await userEvent.click(again);
-    expect(await screen.findByText(unconfirmed)).toBeInTheDocument();
-    view.rerender(session(<HoldHarness hold={hold} />));
-    await ready();
-    expect(screen.getByRole("textbox", { name: "Title" })).toHaveValue("Potluck");
-    expect(screen.getByRole("textbox", { name: /^Location/ })).toHaveValue("Hall");
-    expect(screen.getByRole("radio", { name: "Same as series (private)" })).toBeChecked();
-    await waitFor(() => expect(hold.current?.draft.title).toBe("Potluck"));
-    expect(hold.current?.reason).toBe("");
-  });
 });
 
 it("a readable refusal answers only this send and keeps what was typed", async () => {
@@ -434,87 +274,492 @@ it("a readable refusal answers only this send and keeps what was typed", async (
   expect(screen.getByRole("button", { name: "Save this date" })).toBeEnabled();
 });
 
-it("a refusal that says this person may no longer manage the date asks the host to check its page", async () => {
-  const onRefused = vi.fn();
-  edits.answer(new ApiError(403, "SECRET", { code: "forbidden" }));
-  render(editor({ onRefused }));
-  await ready();
-  await userEvent.type(screen.getByRole("textbox", { name: "Title" }), "!");
+// DEC-164: refused as stale, the editor reads the date once and compares what the save can write (lib/editBase
+// dateFields): already stored, as it opened, or changed.
+describe("a save refused as stale (date_changed)", () => {
+  it("is done when the date already shows what the save would leave: an earlier press stored it", async () => {
+    const onSaved = vi.fn();
+    const onConflict = vi.fn();
+    edits.answer(changed());
+    render(editor({ onSaved, onConflict }));
+    await typeTitle();
+    base = { ...base, title: "Carols", own: { title: "Carols" }, revision: "r1" };
+    await save();
+    await waitFor(() => expect(onSaved).toHaveBeenCalledOnce());
+    expect(edits.sent).toHaveLength(1);
+    expect(editorReads()).toBe(2);
+    expect(onConflict).not.toHaveBeenCalled();
+  });
+
+  it("sends the same save again under the new revision, unseen, when nothing it can write changed", async () => {
+    const onSaved = vi.fn();
+    const onConflict = vi.fn();
+    edits.answer(changed());
+    render(editor({ onSaved, onConflict }));
+    await typeTitle();
+    // A room booking or a restart moved the revision only.
+    base = { ...base, revision: "r1" };
+    await save();
+    await waitFor(() => expect(onSaved).toHaveBeenCalledOnce());
+    expect(edits.sent.map((s) => [s.revision, s.changes])).toEqual([["r0", { title: "Carols" }], ["r1", { title: "Carols" }]]);
+    expect(onConflict).not.toHaveBeenCalled();
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
+  it.each([
+    ["the place", { location: "Annex", own: { location: "Annex" } }],
+    ["the seat limit", { capacity: 12, own: { capacityOverride: 12 } }],
+    ["the visibility the date follows", { seriesVisibility: "private" as const, visibility: "private" as const }],
+    ["the time zone its clock is on", { tzid: "America/Boise" }],
+    ["whether it has remote seats", { remoteAvailable: true }],
+    ["another manager's own title over the inherited one", { title: "Potluck", own: { title: "Potluck" } }],
+  ])("closes as a conflict when %s changed, and sends nothing more", async (_label, over) => {
+    const onSaved = vi.fn();
+    const onConflict = vi.fn();
+    edits.answer(changed());
+    render(editor({ onSaved, onConflict }));
+    await ready();
+    fireEvent.change(screen.getByLabelText("Start time"), { target: { value: "20:00" } });
+    base = { ...base, ...over, revision: "r1" };
+    await save();
+    await waitFor(() => expect(onConflict).toHaveBeenCalledExactlyOnceWith("changed"));
+    expect(edits.sent).toHaveLength(1);
+    expect(onSaved).not.toHaveBeenCalled();
+  });
+
+  it("closes as a conflict when the date was cancelled meanwhile", async () => {
+    const onConflict = vi.fn();
+    edits.answer(changed());
+    render(editor({ onConflict }));
+    await typeTitle();
+    base = { ...base, cancelled: true, revision: "r1" };
+    await save();
+    await waitFor(() => expect(onConflict).toHaveBeenCalledExactlyOnceWith("changed"));
+    expect(edits.sent).toHaveLength(1);
+  });
+
+  // A rule's own hour can give a date a clock that differs from the series start with no start of its own: that is not
+  // this save's start stored, so the save goes again and the start becomes the date's own.
+  it("sends a start change again when the read shows the start only as a clock the rule gives the date", async () => {
+    const onSaved = vi.fn();
+    const onConflict = vi.fn();
+    edits.answer(changed());
+    render(editor({ onSaved, onConflict }));
+    await ready();
+    fireEvent.change(screen.getByLabelText("Start time"), { target: { value: "20:00" } });
+    base = { ...base, startsLocal: "2026-12-01T20:00", startsAt: "2026-12-01T20:00:00Z", revision: "r1" };
+    await save();
+    await waitFor(() => expect(onSaved).toHaveBeenCalledOnce());
+    expect(edits.sent.map((s) => [s.revision, s.changes])).toEqual([["r0", { startsLocal: "2026-12-01T20:00" }], ["r1", { startsLocal: "2026-12-01T20:00" }]]);
+    expect(onConflict).not.toHaveBeenCalled();
+  });
+
+  it("sends a change to the event's own value again: the date still falls back to it, and the save leaves it so", async () => {
+    const onSaved = vi.fn();
+    edits.answer(changed());
+    render(editor({ onSaved }));
+    await typeTitle();
+    base = { ...base, location: "New hall", seriesLocation: "New hall", revision: "r1" };
+    await save();
+    await waitFor(() => expect(onSaved).toHaveBeenCalledOnce());
+    expect(edits.sent.map((s) => s.revision)).toEqual(["r0", "r1"]);
+  });
+
+  it.each([403, 404])("the read after the refusal answering %i: this person may no longer manage the date", async (status) => {
+    const onConflict = vi.fn();
+    edits.answer(changed());
+    render(editor({ onConflict }));
+    await typeTitle();
+    vi.mocked(Events.managedDate).mockRejectedValue(new ApiError(status, "SECRET", { code: "x" }));
+    await save();
+    await waitFor(() => expect(onConflict).toHaveBeenCalledExactlyOnceWith("gone"));
+    expect(edits.sent).toHaveLength(1);
+  });
+
+  it.each([403, 404])("a send answered %i, first or sent again: this person may no longer manage the date", async (status) => {
+    for (const answers of [[new ApiError(status, "SECRET", { code: "x" })], [changed(), new ApiError(status, "SECRET", { code: "x" })]]) {
+      const onConflict = vi.fn();
+      edits = stubEditSends();
+      edits.answer(...answers);
+      base = occurrence({ revision: "r0" });
+      const view = render(editor({ onConflict }));
+      await typeTitle();
+      base = { ...base, revision: "r1" };
+      await save();
+      await waitFor(() => expect(onConflict).toHaveBeenCalledExactlyOnceWith("gone"));
+      expect(edits.sent).toHaveLength(answers.length);
+      view.unmount();
+    }
+  });
+
+  it("refused three times with nothing it can write changed: the ordinary error, the draft kept", async () => {
+    const onConflict = vi.fn();
+    edits.answer(changed(), changed(), changed());
+    render(editor({ onConflict }));
+    await typeTitle();
+    base = { ...base, revision: "r1" };
+    await save();
+    expect(await screen.findByText("We couldn't update this date. Please try again.")).toBeInTheDocument();
+    expect(edits.sent).toHaveLength(3);
+    expect(onConflict).not.toHaveBeenCalled();
+    expect(screen.getByRole("textbox", { name: "Title" })).toHaveValue("Carols");
+  });
+
+  it("a refusal that lands after the editor went away reads and sends nothing more", async () => {
+    const onConflict = vi.fn();
+    const answer = deferred<OccurrenceResponse>();
+    edits.answer(answer.promise);
+    const view = render(editor({ onConflict }));
+    await typeTitle();
+    await save();
+    await waitFor(() => expect(edits.sent).toHaveLength(1));
+    view.rerender(session(null));
+    await act(async () => { answer.reject(changed()); await answer.promise.catch(() => {}); });
+    expect(editorReads()).toBe(1);
+    expect(edits.sent).toHaveLength(1);
+    expect(onConflict).not.toHaveBeenCalled();
+  });
+});
+
+// DEC-164: a reply that never arrived is the ordinary save error; the next press settles it through the refusal.
+describe("a lost reply", () => {
+  it.each([
+    ["a dropped connection", () => new TypeError("Failed to fetch"), NETWORK],
+    ["a server failure", () => new ApiError(502, "proxy", {}, true), "We couldn't update this date. Please try again in a minute."],
+  ])("after %s, the editor stays open with the draft; the next press finds the first one stored and is done", async (_label, lost, line) => {
+    const onSaved = vi.fn();
+    const onConflict = vi.fn();
+    edits.answer(lost(), changed());
+    render(editor({ onSaved, onConflict }));
+    await typeTitle();
+    await save();
+    expect(await screen.findByText(line)).toBeInTheDocument();
+    expect(screen.getByRole("textbox", { name: "Title" })).toHaveValue("Carols");
+    expect(screen.getByRole("button", { name: "Save this date" })).toBeEnabled();
+    expect(onSaved).not.toHaveBeenCalled();
+    // The first press was stored; its answer was lost.
+    base = { ...base, title: "Carols", own: { title: "Carols" }, revision: "r1" };
+    await save();
+    await waitFor(() => expect(onSaved).toHaveBeenCalledOnce());
+    expect(edits.sent.map((s) => s.revision)).toEqual(["r0", "r0"]);
+    expect(onConflict).not.toHaveBeenCalled();
+  });
+
+  it("a reply lost before anything was stored: the next press saves", async () => {
+    const onSaved = vi.fn();
+    edits.answer(new TypeError("Failed to fetch"));
+    render(editor({ onSaved }));
+    await typeTitle();
+    await save();
+    expect(await screen.findByText(NETWORK)).toBeInTheDocument();
+    await save();
+    await waitFor(() => expect(onSaved).toHaveBeenCalledOnce());
+    expect(edits.sent.map((s) => s.revision)).toEqual(["r0", "r0"]);
+    expect(editorReads()).toBe(1);
+  });
+
+  it.each([
+    ["a seat limit", async () => { await userEvent.type(screen.getByRole("spinbutton", { name: /^Capacity for this date/ }), "12"); }, { capacity: 12, own: { capacityOverride: 12 } }],
+    ["a start time", async () => { fireEvent.change(screen.getByLabelText("Start time"), { target: { value: "20:00" } }); },
+      { startsLocal: "2026-12-01T20:00", startsAt: "2026-12-01T20:00:00Z", own: { startsLocal: "2026-12-01T20:00" } }],
+  ])("%s stored with its answer lost: the next press finds it stored and is done", async (_label, change, stored) => {
+    const onSaved = vi.fn();
+    const onConflict = vi.fn();
+    edits.answer(new TypeError("Failed to fetch"), changed());
+    render(editor({ onSaved, onConflict }));
+    await ready();
+    await change();
+    await save();
+    expect(await screen.findByText(NETWORK)).toBeInTheDocument();
+    base = { ...base, ...stored, revision: "r1" };
+    await save();
+    await waitFor(() => expect(onSaved).toHaveBeenCalledOnce());
+    expect(edits.sent.map((s) => s.revision)).toEqual(["r0", "r0"]);
+    expect(onConflict).not.toHaveBeenCalled();
+  });
+
+  // #455: a lost send may have been stored and then undone by someone else; sending again would redo it.
+  it("after a lost reply, a refusal finding the date as it opened closes as a conflict, sending the opened revision only", async () => {
+    const onSaved = vi.fn();
+    const onConflict = vi.fn();
+    edits.answer(new TypeError("Failed to fetch"), changed());
+    render(editor({ onSaved, onConflict }));
+    await typeTitle();
+    await save();
+    expect(await screen.findByText(NETWORK)).toBeInTheDocument();
+    // Stored at r1, then another manager put the opening title back (r2).
+    base = { ...base, revision: "r2" };
+    await save();
+    await waitFor(() => expect(onConflict).toHaveBeenCalledExactlyOnceWith("changed"));
+    expect(edits.sent.map((s) => s.revision)).toEqual(["r0", "r0"]);
+    expect(onSaved).not.toHaveBeenCalled();
+  });
+
+  // The reason goes to the audit row and the notice, and no read returns it.
+  it("a visibility change stored with its answer lost, then a new reason: the next press is a conflict, never a save that drops the reason", async () => {
+    const onSaved = vi.fn();
+    const onConflict = vi.fn();
+    edits.answer(new TypeError("Failed to fetch"), changed());
+    base = occurrence({ revision: "r0", visibility: "private", seriesVisibility: "private", groupId: 4, groupVisibility: "invite_only", groupName: "Hidden fellowship" });
+    const view = render(editor({ onSaved, onConflict }));
+    await ready();
+    await userEvent.click(screen.getByRole("radio", { name: /^Public/ }));
+    await userEvent.type(screen.getByRole("textbox", { name: /^Reason/ }), "Choir");
+    await save();
+    expect(await screen.findByText(NETWORK)).toBeInTheDocument();
+    base = { ...base, visibility: "public", own: { visibility: "public" }, revision: "r1" };
+    await userEvent.type(screen.getByRole("textbox", { name: /^Reason/ }), " and friends");
+    await save();
+    await waitFor(() => expect(onConflict).toHaveBeenCalledExactlyOnceWith("changed"));
+    expect(edits.sent.map((s) => s.reason)).toEqual(["Choir", "Choir and friends"]);
+    expect(onSaved).not.toHaveBeenCalled();
+    view.unmount();
+
+    // The same reason both times: the first press stored it, and the second is done.
+    edits = stubEditSends();
+    edits.answer(new TypeError("Failed to fetch"), changed());
+    base = occurrence({ revision: "r0", visibility: "private", seriesVisibility: "private", groupId: 4, groupVisibility: "invite_only", groupName: "Hidden fellowship" });
+    render(editor({ onSaved, onConflict }));
+    await ready();
+    await userEvent.click(screen.getByRole("radio", { name: /^Public/ }));
+    await userEvent.type(screen.getByRole("textbox", { name: /^Reason/ }), "Choir");
+    await save();
+    expect(await screen.findByText(NETWORK)).toBeInTheDocument();
+    base = { ...base, visibility: "public", own: { visibility: "public" }, revision: "r1" };
+    await save();
+    await waitFor(() => expect(onSaved).toHaveBeenCalledOnce());
+    expect(onConflict).toHaveBeenCalledOnce();
+  });
+
+  it("remembers a lost reply across a remount from the hold", async () => {
+    const hold = createRef<DateDraftHold>();
+    const onConflict = vi.fn();
+    edits.answer(new TypeError("Failed to fetch"), changed());
+    const view = render(session(<HoldHarness hold={hold} onConflict={onConflict} />));
+    await typeTitle();
+    await save();
+    expect(await screen.findByText(NETWORK)).toBeInTheDocument();
+    view.unmount();
+    base = { ...base, revision: "r2" };
+    render(session(<HoldHarness hold={hold} onConflict={onConflict} />));
+    await ready();
+    await save();
+    await waitFor(() => expect(onConflict).toHaveBeenCalledExactlyOnceWith("changed"));
+    expect(edits.sent.map((s) => s.revision)).toEqual(["r0", "r0"]);
+  });
+
+  it.each([
+    ["an empty object (a page from something in between)", {}],
+    ["another date's answer", { occurrence: occurrence({ id: 2, revision: "r1" }) }],
+    ["an answer with no revision", { occurrence: occurrence({ id: 1 }) }],
+  ])("keeps the draft and says the ordinary error, closing nothing, when the answer is %s", async (_label, answer) => {
+    const onSaved = vi.fn();
+    const onConflict = vi.fn();
+    // SAFETY: a wire answer the static type would not allow, as something in between could send it.
+    edits.answer(answer as OccurrenceResponse);
+    render(editor({ onSaved, onConflict }));
+    await typeTitle();
+    await save();
+    expect(await screen.findByText("We couldn't update this date. Please try again in a minute.")).toBeInTheDocument();
+    expect(screen.getByRole("textbox", { name: "Title" })).toHaveValue("Carols");
+    expect(screen.getByRole("button", { name: "Save this date" })).toBeEnabled();
+    expect(onSaved).not.toHaveBeenCalled();
+    expect(onConflict).not.toHaveBeenCalled();
+  });
+});
+
+describe("the hold", () => {
+  it("brings back every typed field and the reason when the editor is mounted again", async () => {
+    const hold = createRef<DateDraftHold>();
+    base = occurrence({ revision: "r0", visibility: "private", seriesVisibility: "private", groupId: 4, groupVisibility: "invite_only", groupName: "Hidden fellowship" });
+    const view = render(session(<HoldHarness hold={hold} />));
+    await ready();
+    await userEvent.clear(screen.getByRole("spinbutton", { name: "Minutes" }));
+    await userEvent.type(screen.getByRole("spinbutton", { name: "Minutes" }), "150");
+    await userEvent.clear(screen.getByRole("textbox", { name: "Title" }));
+    await userEvent.type(screen.getByRole("textbox", { name: "Title" }), "Typed title");
+    await userEvent.type(screen.getByRole("textbox", { name: /^Location/ }), "Typed place");
+    await userEvent.type(screen.getByRole("spinbutton", { name: /^Capacity for this date/ }), "12");
+    await userEvent.click(screen.getByRole("radio", { name: /^Public/ }));
+    await userEvent.type(screen.getByRole("textbox", { name: /^Reason/ }), "Open it up");
+    view.unmount();
+    render(session(<HoldHarness hold={hold} />));
+    await ready();
+    expect(screen.getByRole("spinbutton", { name: "Minutes" })).toHaveValue(150);
+    expect(screen.getByRole("textbox", { name: "Title" })).toHaveValue("Typed title");
+    expect(screen.getByRole("textbox", { name: /^Location/ })).toHaveValue("HallTyped place");
+    expect(screen.getByRole("spinbutton", { name: /^Capacity for this date/ })).toHaveValue(12);
+    expect(screen.getByRole("radio", { name: /^Public/ })).toBeChecked();
+    expect(screen.getByRole("textbox", { name: /^Reason/ })).toHaveValue("Open it up");
+  });
+
+  it("keeps the read the draft opened from: under a newer stored date it merges nothing and closes nothing, and the next Save decides", async () => {
+    const hold = createRef<DateDraftHold>();
+    const onConflict = vi.fn();
+    const view = render(session(<HoldHarness hold={hold} onConflict={onConflict} />));
+    await ready();
+    await userEvent.clear(screen.getByRole("spinbutton", { name: "Minutes" }));
+    await userEvent.type(screen.getByRole("spinbutton", { name: "Minutes" }), "150");
+    view.unmount();
+    base = occurrence({ revision: "r1", title: "Stored rename", location: "New hall", own: { title: "Stored rename", location: "New hall" } });
+    render(session(<HoldHarness hold={hold} onConflict={onConflict} />));
+    await ready();
+    expect(screen.getByRole("spinbutton", { name: "Minutes" })).toHaveValue(150);
+    expect(screen.getByRole("textbox", { name: "Title" })).toHaveValue("Supper");
+    expect(screen.getByRole("textbox", { name: /^Location/ })).toHaveValue("Hall");
+    expect(onConflict).not.toHaveBeenCalled();
+    edits.answer(changed());
+    await save();
+    expect(edits.sent[0]).toMatchObject({ revision: "r0", changes: { durationMinutes: 150 } });
+    await waitFor(() => expect(onConflict).toHaveBeenCalledExactlyOnceWith("changed"));
+  });
+
+  it("a save stored while the editor is off the screen ends the draft and tells the host", async () => {
+    const hold = createRef<DateDraftHold>();
+    const onSaved = vi.fn();
+    const answer = deferred<OccurrenceResponse>();
+    edits.answer(answer.promise);
+    const view = render(session(<HoldHarness hold={hold} onSaved={onSaved} />));
+    await typeTitle();
+    await save();
+    await waitFor(() => expect(edits.sent).toHaveLength(1));
+    view.unmount();
+    expect(hold.current?.draft.title).toBe("Carols");
+    await act(async () => { answer.resolve({ occurrence: occurrence({ title: "Carols", revision: "r1" }) }); await answer.promise; });
+    expect(onSaved).toHaveBeenCalledOnce();
+    expect(hold.current).toBeNull();
+  });
+
+  it("a question withdrawn while the editor is off the screen says so when it comes back", async () => {
+    const hold = createRef<DateDraftHold>();
+    const answer = deferred<OccurrenceResponse>();
+    edits.answer(answer.promise);
+    const view = render(session(<ConfirmProvider><HoldHarness hold={hold} /></ConfirmProvider>));
+    await ready();
+    await userEvent.click(screen.getByRole("radio", { name: /^Private/ }));
+    await save();
+    await waitFor(() => expect(edits.sent).toHaveLength(1));
+    view.unmount();
+    await act(async () => {
+      answer.reject(new ApiError(409, "x", { code: "date_needs_consent", impact: { visibility: "private", currentVisibility: "public", tightened: [{ id: 7, title: "One date", visibility: "public", registrants: 2, occurrenceId: 1 }], leaderOpened: [], consent: "1".repeat(32) } }));
+      await answer.promise.catch(() => {});
+    });
+    // Leaving the page while the editor is off the screen asks first: the change was never saved.
+    expect(hold.current?.unsent).toBe(true);
+    render(session(<ConfirmProvider><HoldHarness hold={hold} /></ConfirmProvider>));
+    expect(await screen.findByText("The page changed while we were asking, so your changes could not be saved. You can save again.")).toBeInTheDocument();
+    expect(screen.getByRole("radio", { name: /^Private/ })).toBeChecked();
+    expect(edits.sent).toHaveLength(1);
+  });
+
+  it("the listed date's draft waits off the screen while the page's read has failed, and comes back without a new read", async () => {
+    const view = render(editor());
+    await typeTitle();
+    view.rerender(editor({ pageFailed: true }));
+    expect(screen.getByText("This date can be edited again once the page loads. What you typed is kept.")).toBeInTheDocument();
+    expect(screen.queryByRole("textbox", { name: "Title" })).not.toBeInTheDocument();
+    view.rerender(editor());
+    expect(await screen.findByRole("textbox", { name: "Title" })).toHaveValue("Carols");
+    expect(editorReads()).toBe(1);
+  });
+
+  it("Close and opening again start from a new read of the stored date", async () => {
+    function Toggle({ open }: { open: boolean }) {
+      return open ? <ManagedDateEditor opener={OPENER} onSaved={() => {}} onConflict={() => {}} onClose={() => {}} onRefused={() => {}} /> : null;
+    }
+
+    const view = render(session(<Toggle open />));
+    await ready();
+    await userEvent.clear(screen.getByRole("spinbutton", { name: "Minutes" }));
+    await userEvent.type(screen.getByRole("spinbutton", { name: "Minutes" }), "150");
+    base = { ...base, revision: "r1", title: "Carols" };
+    view.rerender(session(<Toggle open={false} />));
+    view.rerender(session(<Toggle open />));
+    await ready();
+    expect(screen.getByRole("spinbutton", { name: "Minutes" })).toHaveValue(60);
+    expect(screen.getByRole("textbox", { name: "Title" })).toHaveValue("Carols");
+    expect(editorReads()).toBe(2);
+  });
+
+  it.each(["first", "second"] as const)("open, close and open again: the %s read to answer never puts the first open's read on screen", async (order) => {
+    const first = deferred<OccurrenceResponse>();
+    const second = deferred<OccurrenceResponse>();
+    vi.mocked(Events.managedDate).mockReturnValueOnce(first.promise).mockReturnValueOnce(second.promise);
+    const host = (open: boolean) => session(open ? <ManagedDateEditor opener={OPENER} onSaved={() => {}} onConflict={() => {}} onClose={() => {}} onRefused={() => {}} /> : null);
+    const view = render(host(true));
+    view.rerender(host(false));
+    view.rerender(host(true));
+    await waitFor(() => expect(editorReads()).toBe(2));
+    const answers = { first: () => first.resolve({ occurrence: occurrence({ title: "First open", revision: "r-first" }) }), second: () => second.resolve({ occurrence: occurrence({ title: "Second open", revision: "r-second" }) }) };
+
+    for (const which of order === "first" ? (["first", "second"] as const) : (["second", "first"] as const)) {
+      await act(async () => { answers[which](); await Promise.resolve(); });
+    }
+
+    expect(await screen.findByRole("textbox", { name: "Title" })).toHaveValue("Second open");
+    expect(document.body.textContent).not.toContain("First open");
+    await ready();
+    await userEvent.type(screen.getByRole("textbox", { name: "Title" }), "!");
+    await save();
+    await waitFor(() => expect(edits.sent).toHaveLength(1));
+    expect(edits.sent[0]).toMatchObject({ revision: "r-second", changes: { title: "Second open!" } });
+  });
+});
+
+it("two managers on one date: the second save, made from the read before the first, closes as a conflict", async () => {
+  const conflicts = { first: vi.fn(), second: vi.fn() };
+  const saves = { first: vi.fn(), second: vi.fn() };
+  render(session(<>
+    <section aria-label="First editor"><ManagedDateEditor opener={OPENER} onSaved={saves.first} onConflict={conflicts.first} onClose={() => {}} onRefused={() => {}} /></section>
+    <section aria-label="Second editor"><ManagedDateEditor opener={OPENER} onSaved={saves.second} onConflict={conflicts.second} onClose={() => {}} onRefused={() => {}} /></section>
+  </>));
+
+  // Both editors give their fields the date's ids, so each is found inside its own editor.
+  const editorOf = (name: string) => {
+    const region = screen.getByRole("region", { name });
+    const field = (id: string) => region.querySelector<HTMLInputElement>(`#${id}`)!;
+
+    return { ...within(region), title: () => field("cev-title-1"), place: () => field("cev-loc-1") };
+  };
+
+  await waitFor(() => expect(screen.getAllByRole("button", { name: "Save this date" })).toHaveLength(2));
+  const first = editorOf("First editor");
+  const second = editorOf("Second editor");
+  await userEvent.type(first.title(), "!");
+  await userEvent.click(first.getByRole("button", { name: "Save this date" }));
+  await waitFor(() => expect(saves.first).toHaveBeenCalledOnce());
+  base = { ...base, title: "Supper!", own: { title: "Supper!" }, revision: "r1" };
+  edits.answer(changed());
+  await userEvent.type(second.place(), " annex");
+  await userEvent.click(second.getByRole("button", { name: "Save this date" }));
+  await waitFor(() => expect(conflicts.second).toHaveBeenCalledExactlyOnceWith("changed"));
+  expect(edits.sent.map((s) => [s.revision, s.changes])).toEqual([["r0", { title: "Supper!" }], ["r0", { location: "Hall annex" }]]);
+  expect(saves.second).not.toHaveBeenCalled();
+});
+
+// Grier (DEC-161, DEC-163): nothing tells a person to close, reopen, reload or refresh, and nothing claims proof.
+it("says nothing about closing, reopening, reloading or refreshing, and claims no proof, on any of its own lines", async () => {
+  const lines: string[] = [];
+  const said = () => [...document.querySelectorAll("[role='status'], [role='alert'], p")].map((el) => el.textContent ?? "");
+  vi.mocked(Events.managedDate).mockRejectedValueOnce(new TypeError("Failed to fetch"));
+  const view = render(editor({ dialog: true }));
+  await screen.findByRole("button", { name: "Retry loading" });
+  lines.push(...said());
+  await userEvent.click(screen.getByRole("button", { name: "Retry loading" }));
+  edits.answer(changed(), changed(), changed(), new TypeError("Failed to fetch"));
+  await typeTitle();
+  base = { ...base, revision: "r1" };
   await save();
-  await waitFor(() => expect(onRefused).toHaveBeenCalled());
-});
-
-it("a first date_changed reads the date again and needs another Save with a new attempt", async () => {
-  edits.answer(new ApiError(409, "x", { code: "date_changed" }));
-  render(editor());
-  await ready();
-  await userEvent.type(screen.getByRole("textbox", { name: "Title" }), "!");
-  base = { ...base, location: "Annex", revision: "r1" };
+  await screen.findByText("We couldn't update this date. Please try again.");
+  lines.push(...said());
   await save();
-  await waitFor(() => expect(screen.getByText("This date changed while you were saving. Check it and save again.")).toBeInTheDocument());
-  await waitFor(() => expect(screen.getByRole("textbox", { name: /^Location/ })).toHaveValue("Annex"));
-  await ready();
-  expect(edits.sent).toHaveLength(1);
-  await save();
-  await waitFor(() => expect(edits.sent).toHaveLength(2));
-  expect(edits.sent[1]).toMatchObject({ revision: "r1", changes: { title: "Supper!" } });
-  expect(edits.sent[1].attempt).not.toBe(edits.sent[0].attempt);
-});
+  await screen.findByText(NETWORK);
+  lines.push(...said());
+  view.rerender(editor({ dialog: true, pageFailed: true }));
+  lines.push(...said());
+  expect(lines.length).toBeGreaterThan(3);
 
-it("with a hold, a remount under the same date restores every typed field and the reason", async () => {
-  const hold = createRef<DateDraftHold>();
-  base = occurrence({ revision: "r0", visibility: "private", seriesVisibility: "private", groupId: 4, groupVisibility: "invite_only", groupName: "Hidden fellowship" });
-  const view = render(session(<HoldHarness hold={hold} />));
-  await ready();
-  await userEvent.clear(screen.getByRole("spinbutton", { name: "Minutes" }));
-  await userEvent.type(screen.getByRole("spinbutton", { name: "Minutes" }), "150");
-  await userEvent.clear(screen.getByRole("textbox", { name: "Title" }));
-  await userEvent.type(screen.getByRole("textbox", { name: "Title" }), "Typed title");
-  await userEvent.type(screen.getByRole("textbox", { name: /^Location/ }), "Typed place");
-  await userEvent.type(screen.getByRole("spinbutton", { name: /^Capacity for this date/ }), "12");
-  await userEvent.click(screen.getByRole("radio", { name: /^Public/ }));
-  await userEvent.type(screen.getByRole("textbox", { name: /^Reason/ }), "Open it up");
-  view.unmount();
-  render(session(<HoldHarness hold={hold} />));
-  await ready();
-  expect(screen.getByRole("spinbutton", { name: "Minutes" })).toHaveValue(150);
-  expect(screen.getByRole("textbox", { name: "Title" })).toHaveValue("Typed title");
-  expect(screen.getByRole("textbox", { name: /^Location/ })).toHaveValue("HallTyped place");
-  expect(screen.getByRole("spinbutton", { name: /^Capacity for this date/ })).toHaveValue(12);
-  expect(screen.getByRole("radio", { name: /^Public/ })).toBeChecked();
-  expect(screen.getByRole("textbox", { name: /^Reason/ })).toHaveValue("Open it up");
-});
-
-it("with a hold, a remount under a newer date takes the stored value only where the stored date changed", async () => {
-  const hold = createRef<DateDraftHold>();
-  const view = render(session(<HoldHarness hold={hold} />));
-  await ready();
-  await userEvent.clear(screen.getByRole("spinbutton", { name: "Minutes" }));
-  await userEvent.type(screen.getByRole("spinbutton", { name: "Minutes" }), "150");
-  await userEvent.clear(screen.getByRole("textbox", { name: "Title" }));
-  await userEvent.type(screen.getByRole("textbox", { name: "Title" }), "Typed title");
-  view.unmount();
-  base = occurrence({ revision: "r1", title: "Stored rename", location: "New hall" });
-  render(session(<HoldHarness hold={hold} />));
-  await ready();
-  expect(screen.getByRole("spinbutton", { name: "Minutes" })).toHaveValue(150);
-  expect(screen.getByRole("textbox", { name: "Title" })).toHaveValue("Stored rename");
-  expect(screen.getByRole("textbox", { name: /^Location/ })).toHaveValue("New hall");
-});
-
-it("a new read under the same route keeps the draft; Close and reopening start from the stored date", async () => {
-  function Toggle({ open }: { open: boolean }) {
-    return open ? <ManagedDateEditor opener={{ eventId: 7, date: DATE, occurrenceId: 1 }} generation={0} onSaved={() => {}} onClose={() => {}} onRefused={() => {}} /> : null;
-  }
-
-  const view = render(session(<Toggle open />));
-  await ready();
-  await userEvent.clear(screen.getByRole("spinbutton", { name: "Minutes" }));
-  await userEvent.type(screen.getByRole("spinbutton", { name: "Minutes" }), "150");
-  view.rerender(session(<Toggle open={false} />));
-  view.rerender(session(<Toggle open />));
-  await ready();
-  expect(screen.getByRole("spinbutton", { name: "Minutes" })).toHaveValue(60);
+  for (const line of lines) expect(line).not.toMatch(/\b(re-?open|reload|refresh)\b|\bclose (it|this|the)\b|now shows your changes|went through|tell whether/i);
 });
 
 // W3: a save refused because someone who left kept the date (DEC-156).
@@ -524,14 +769,6 @@ const NOBODY_ONE = "Nobody is keeping this date now. Save again to apply your ch
 const keptRow = (name: string): Attendee => ({ registrationId: 31, userId: 5, name, status: "going", attendanceMode: "in_person", guestCount: 0, keptAfterLeaving: true });
 const managedRead = (over: Partial<EventOccurrence> = {}): OccurrenceResponse => ({ occurrence: occurrence({ attendeesVisible: true, keptCount: 1, attendees: [keptRow("Old Name")], ...over }) });
 const kept409 = (body: JsonObject = { keptDates: [{ date: DATE, keptCount: 1 }] }) => new ApiError(409, "SECRET", { code: "date_kept_after_leaving", ...body });
-
-function deferred<T>() {
-  let resolve: (value: T) => void = () => {};
-  let reject: (cause: unknown) => void = () => {};
-  const promise = new Promise<T>((yes, no) => { resolve = yes; reject = no; });
-
-  return { promise, resolve, reject };
-}
 
 async function typeAndSave(minutes = "150") {
   await ready();
@@ -693,7 +930,7 @@ describe("W3: a 409 for a kept date", () => {
 });
 
 // DEC-158: the writer selects the cancellations and returns a decision; the editor asks only from that answer,
-// never from a preview, and a yes adds only the returned token to the same attempt.
+// never from a preview, and a yes sends the same save with only the returned token added.
 describe("visibility consent", () => {
   const T1 = "11111111111111111111111111111111";
   const T2 = "22222222222222222222222222222222";
@@ -712,16 +949,28 @@ describe("visibility consent", () => {
     await save();
   }
 
-  it("asks from the writer's answer, and a yes resends the same attempt with only its token added", async () => {
+  it("asks from the writer's answer, and a yes sends the same save with only its token added", async () => {
     edits.answer(decision(tighten(2, "public", T1)));
     const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
     await open();
     await waitFor(() => expect(edits.sent).toHaveLength(2));
     expect(confirm).toHaveBeenCalledExactlyOnceWith("Tuesday, December 1, 2026. This date is public now. Saving makes it invite-only, so fewer people will be able to see it. This cancels and notifies 2 registered people who can no longer see this date. Save this date?");
     expect(edits.sent[0].consent).toBeUndefined();
-    expect(edits.sent[1]).toMatchObject({ attempt: edits.sent[0].attempt, revision: "r0", changes: { visibility: "series" }, consent: T1 });
-    expect(edits.sent[1].body).toBe(`${edits.sent[0].body.slice(0, -1)},"consent":"${T1}"}`);
+    expect(edits.sent[1]).toEqual({ ...edits.sent[0], consent: T1 });
+    expect(edits.sent[1]).toMatchObject({ revision: "r0", changes: { visibility: "series" } });
     expect(Events.dateVisibilityImpact).not.toHaveBeenCalled();
+  });
+
+  it("a no is not a lost reply: the next press, refused after a room booking, sends again", async () => {
+    edits.answer(decision(tighten(1, "public", T1)), changed());
+    vi.spyOn(window, "confirm").mockReturnValueOnce(false).mockReturnValue(true);
+    await open();
+    await waitFor(() => expect(window.confirm).toHaveBeenCalledOnce());
+    await ready();
+    base = { ...base, revision: "r1" };
+    await save();
+    await waitFor(() => expect(edits.sent).toHaveLength(3));
+    expect(edits.sent.map((s) => s.revision)).toEqual(["r0", "r0", "r1"]);
   });
 
   it("a second question in the same save says it checked again, from the new answer", async () => {
@@ -759,36 +1008,17 @@ describe("visibility consent", () => {
     expect(screen.getByRole("radio", { name: "Same as series (invite only)" })).toBeChecked();
   });
 
-  it("asks only through the read the save was sent through: a newer read registered while it was on its way asks nothing", async () => {
-    base = occurrence({ revision: "r0" });
-    const reread = createRef<() => void>();
+  it("a yes refused as stale whose date is as it opened sends the save again under the new revision, with the token", async () => {
+    edits.answer(decision(tighten(2, "public", T1)), changed());
+    // The yes is answered, as it lands, while another manager's restart moved the revision only.
+    vi.spyOn(window, "confirm").mockImplementation(() => {
+      base = { ...base, revision: "r1" };
 
-    // A host that hands the editor a read it registers itself, and a newer one on demand, without a remount.
-    function Direct() {
-      const attempts = useDateAttempts();
-      const [permit, setPermit] = useState<ReadPermit | null>(null);
-      const fresh = () => attempts?.register(attempts.stamp(7, DATE), { occurrenceId: 1, revision: "r0" }) ?? null;
-      useLayoutEffect(() => { if (attempts && !permit) setPermit(fresh()); });
-      reread.current = () => setPermit(fresh());
-      const edit = editBaseOf(base, { eventId: 7, date: DATE, occurrenceId: 1 });
-
-      return attempts && permit && edit ? <DateEditor base={edit} permit={permit} attempts={attempts} onSaved={() => {}} onClose={() => {}} /> : null;
-    }
-
-    render(session(<ConfirmProvider><Direct /></ConfirmProvider>));
-    await userEvent.click(await screen.findByRole("radio", { name: /^Private/ }));
-    let reject: (cause: unknown) => void = () => {};
-
-    edits.answer(new Promise<OccurrenceResponse>((_, no) => { reject = no; }));
-    await ready();
-    await save();
-    await waitFor(() => expect(edits.sent).toHaveLength(1));
-    act(() => reread.current?.());
-    await act(async () => { reject(new ApiError(409, "x", { code: "date_needs_consent", impact: { visibility: "private", currentVisibility: "public", tightened: [{ id: 7, title: "One date", visibility: "public", registrants: 2, occurrenceId: 1 }], leaderOpened: [], consent: T1 } })); });
-    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
-    expect(await screen.findByText("This date changed while you were saving. Check it and save again.")).toBeInTheDocument();
-    expect(edits.sent).toHaveLength(1);
-    await ready();
+      return true;
+    });
+    await open();
+    await waitFor(() => expect(edits.sent).toHaveLength(3));
+    expect(edits.sent.map((s) => [s.revision, s.consent])).toEqual([["r0", undefined], ["r0", T1], ["r1", T1]]);
   });
 
   it("an editor closed while the question is open answers it no, so the date can be saved again", async () => {
@@ -796,7 +1026,7 @@ describe("visibility consent", () => {
     base = occurrence({ revision: "r0", visibility: "public", visibilityOverride: "public", seriesVisibility: "invite_only" });
 
     function Toggle({ open }: { open: boolean }) {
-      return <ConfirmProvider>{open && <ManagedDateEditor opener={{ eventId: 7, date: DATE, occurrenceId: 1 }} generation={0} onSaved={() => {}} onClose={() => {}} onRefused={() => {}} />}</ConfirmProvider>;
+      return <ConfirmProvider>{open && <ManagedDateEditor opener={OPENER} onSaved={() => {}} onConflict={() => {}} onClose={() => {}} onRefused={() => {}} />}</ConfirmProvider>;
     }
 
     const view = render(session(<Toggle open />));
@@ -816,7 +1046,7 @@ describe("visibility consent", () => {
 // roster or kept-dates panel in the session) holds Save from its begin to its end, and a begin closes an open
 // question as no.
 describe("roster writes on the date", () => {
-  const STALE = "This date changed while you were saving. Check it and save again.";
+  const STALE = "The page changed while we were asking, so your changes could not be saved. You can save again.";
   const T = "33333333333333333333333333333333";
   const challenge = () => new ApiError(409, "x", { code: "date_needs_consent", impact: { visibility: "private", currentVisibility: "public", tightened: [{ id: 7, title: "One date", visibility: "public", registrants: 2, occurrenceId: 1 }], leaderOpened: [], consent: T } });
 
@@ -905,134 +1135,4 @@ describe("roster writes on the date", () => {
 
     return form;
   }
-});
-
-describe("two opens of the same date, whichever read answers first", () => {
-  function later<T>() {
-    let resolve: (value: T) => void = () => {};
-    const promise = new Promise<T>((yes) => { resolve = yes; });
-
-    return { promise, resolve };
-  }
-
-  const opener = { eventId: 7, date: DATE, occurrenceId: 1 };
-
-  it.each(["first", "second"] as const)("open, close and open again: the %s read to answer never puts the first open's read on screen", async (order) => {
-    const first = later<OccurrenceResponse>();
-    const second = later<OccurrenceResponse>();
-    vi.mocked(Events.managedDate).mockReturnValueOnce(first.promise).mockReturnValueOnce(second.promise);
-    const host = (open: boolean) => session(open ? <ManagedDateEditor opener={opener} generation={0} onSaved={() => {}} onClose={() => {}} onRefused={() => {}} /> : null);
-    const view = render(host(true));
-    view.rerender(host(false));
-    view.rerender(host(true));
-    await waitFor(() => expect(editorReads()).toBe(2));
-    const answers = { first: () => first.resolve({ occurrence: occurrence({ title: "First open", revision: "r-first" }) }), second: () => second.resolve({ occurrence: occurrence({ title: "Second open", revision: "r-second" }) }) };
-
-    for (const which of order === "first" ? (["first", "second"] as const) : (["second", "first"] as const)) {
-      await act(async () => { answers[which](); await Promise.resolve(); });
-    }
-
-    expect(await screen.findByRole("textbox", { name: "Title" })).toHaveValue("Second open");
-    expect(document.body.textContent).not.toContain("First open");
-    await ready();
-    await userEvent.type(screen.getByRole("textbox", { name: "Title" }), "!");
-    await save();
-    await waitFor(() => expect(edits.sent).toHaveLength(1));
-    expect(edits.sent[0]).toMatchObject({ revision: "r-second", changes: { title: "Second open!" } });
-  });
-
-  it.each(["first", "second"] as const)("two editors of the date open at once, the %s one's read answering first: one save, and the other never sends its old base", async (order) => {
-    const reads = { first: later<OccurrenceResponse>(), second: later<OccurrenceResponse>() };
-    vi.mocked(Events.managedDate).mockReturnValueOnce(reads.first.promise).mockReturnValueOnce(reads.second.promise);
-    render(session(<>
-      <section aria-label="First editor"><TestHost generation={0} /></section>
-      <section aria-label="Second editor"><TestHost generation={0} /></section>
-    </>));
-    await waitFor(() => expect(editorReads()).toBe(2));
-    const other = order === "first" ? "second" : "first";
-    await act(async () => { reads[order].resolve({ occurrence: occurrence({ revision: "r0" }) }); await Promise.resolve(); });
-    await act(async () => { reads[other].resolve({ occurrence: occurrence({ revision: "r0" }) }); await Promise.resolve(); });
-
-    // Both editors give their fields the date's ids, so each is found inside its own editor.
-    const editorOf = (name: string) => {
-      const region = screen.getByRole("region", { name });
-      const field = (id: string) => region.querySelector<HTMLInputElement>(`#${id}`)!;
-
-      return { ...within(region), title: () => field("cev-title-1"), place: () => field("cev-loc-1") };
-    };
-
-    const first = editorOf("First editor");
-    const second = editorOf("Second editor");
-    await waitFor(() => expect(first.getByRole("button", { name: "Save this date" })).toBeEnabled());
-    await waitFor(() => expect(second.getByRole("button", { name: "Save this date" })).toBeEnabled());
-    await userEvent.type(second.place(), " annex");
-    await userEvent.type(first.title(), "!");
-    base = { ...base, title: "Supper!", revision: "r1" };
-    await userEvent.click(first.getByRole("button", { name: "Save this date" }));
-    await waitFor(() => expect(edits.sent).toHaveLength(1));
-    // Both editors read the date again before either can save; the second keeps only what it typed.
-    await waitFor(() => expect(second.title()).toHaveValue("Supper!"));
-    await waitFor(() => expect(second.getByRole("button", { name: "Save this date" })).toBeEnabled());
-    expect(second.place()).toHaveValue("Hall annex");
-    await userEvent.click(second.getByRole("button", { name: "Save this date" }));
-    await waitFor(() => expect(edits.sent).toHaveLength(2));
-    expect(edits.sent.map((s) => [s.revision, s.changes])).toEqual([["r0", { title: "Supper!" }], ["r1", { location: "Hall annex" }]]);
-  });
-});
-
-describe("the listed date's editor while its read is held", () => {
-  function later<T>() {
-    let resolve: (value: T) => void = () => {};
-    let reject: (cause: unknown) => void = () => {};
-    const promise = new Promise<T>((yes, no) => { resolve = yes; reject = no; });
-
-    return { promise, resolve, reject };
-  }
-
-  const opener = { eventId: 7, date: DATE, occurrenceId: 1 };
-
-  const mounted = (c: Credential, generation = 0) => <MemoryRouter><DateWritesProvider credential={c}>
-    <ManagedDateEditor opener={opener} generation={generation} onSaved={() => {}} onClose={() => {}} onRefused={() => {}} />
-  </DateWritesProvider></MemoryRouter>;
-
-  it("a newer read that fails while an older one is held shows the failure, never the older answer; Retry loading reads afresh", async () => {
-    const older = later<OccurrenceResponse>();
-    const newer = later<OccurrenceResponse>();
-    vi.mocked(Events.managedDate).mockReturnValueOnce(older.promise).mockReturnValueOnce(newer.promise).mockResolvedValue({ occurrence: occurrence({ title: "Third read", revision: "r3" }) });
-    const view = render(mounted(credential, 0));
-    // The page shows a new answer: the date is read again.
-    view.rerender(mounted(credential, 1));
-    await waitFor(() => expect(editorReads()).toBe(2));
-    await act(async () => { newer.reject(new TypeError("Failed to fetch")); await newer.promise.catch(() => {}); });
-    expect(await screen.findByText("We couldn't load this date to edit it. What you typed is kept.")).toBeInTheDocument();
-    await act(async () => { older.resolve({ occurrence: occurrence({ title: "Held title", revision: "r-held" }) }); await older.promise; });
-    expect(screen.queryByRole("textbox", { name: "Title" })).not.toBeInTheDocument();
-    expect(document.body.textContent).not.toContain("Held title");
-    await userEvent.click(screen.getByRole("button", { name: "Retry loading" }));
-    expect(await screen.findByRole("textbox", { name: "Title" })).toHaveValue("Third read");
-    await ready();
-    await userEvent.type(screen.getByRole("textbox", { name: "Title" }), "!");
-    await save();
-    await waitFor(() => expect(edits.sent).toHaveLength(1));
-    expect(edits.sent[0].revision).toBe("r3");
-  });
-
-  it("a credential replaced while its read is on its way: that read is never shown, and the new credential's read and save are its own", async () => {
-    const inFlight = later<OccurrenceResponse>();
-    vi.mocked(Events.managedDate).mockReturnValueOnce(inFlight.promise).mockResolvedValue({ occurrence: occurrence({ revision: "r-new" }) });
-    const view = render(mounted(credential));
-    await waitFor(() => expect(editorReads()).toBe(1));
-    const next = await verifiedCredential();
-    edits = stubEditSends();
-    view.rerender(mounted(next));
-    await waitFor(() => expect(vi.mocked(Events.managedDate).mock.lastCall?.[2]).toBe(next));
-    await act(async () => { inFlight.resolve({ occurrence: occurrence({ title: "Stale title", revision: "r-stale" }) }); await inFlight.promise; });
-    expect(await screen.findByRole("textbox", { name: "Title" })).toHaveValue("Supper");
-    expect(document.body.textContent).not.toContain("Stale title");
-    await ready();
-    await userEvent.type(screen.getByRole("textbox", { name: "Title" }), "!");
-    await save();
-    await waitFor(() => expect(edits.sent).toHaveLength(1));
-    expect(edits.sent[0].revision).toBe("r-new");
-  });
 });

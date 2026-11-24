@@ -4,7 +4,7 @@ import { act, fireEvent, render, screen, waitFor, within } from "@testing-librar
 import userEvent from "@testing-library/user-event";
 import { RouterProvider, createMemoryRouter } from "react-router-dom";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { DateWritesProvider } from "../lib/dateWrites";
+import { RosterWritesProvider } from "../lib/rosterWrites";
 import { ERROR_COPY } from "../lib/errors";
 import { formatDayFull } from "../lib/when";
 import { occurrence } from "../test/occurrence";
@@ -272,7 +272,7 @@ describe("SeriesEditor form layout (DEC-95)", () => {
   });
 
   it("sends nothing more after a save its page has not closed it for yet: nothing to change, no Saving… left (#427)", async () => {
-    vi.mocked(Events.update).mockReset().mockResolvedValue({ event: testEvent(7) });
+    vi.mocked(Events.update).mockReset().mockResolvedValue({ event: { ...testEvent(7), revision: "r9" } });
     const onSaved = vi.fn();
     render(<SeriesEditor series={baseSeries} idPrefix="again" onSaved={onSaved} onClose={() => {}} />);
     const title = screen.getByRole("textbox", { name: "Title" });
@@ -288,7 +288,7 @@ describe("SeriesEditor form layout (DEC-95)", () => {
   });
 
   it("keeps showing what it sent when the page's reload brings new values", async () => {
-    vi.mocked(Events.update).mockReset().mockResolvedValue({ event: testEvent(7) });
+    vi.mocked(Events.update).mockReset().mockResolvedValue({ event: { ...testEvent(7), revision: "r9" } });
     const series = { ...baseSeries, recurrenceRule: "FREQ=WEEKLY;COUNT=4" };
     const onSaved = vi.fn();
     const view = render(<SeriesEditor series={series} idPrefix="flip" onSaved={onSaved} onClose={() => {}} />);
@@ -315,13 +315,13 @@ describe("SeriesEditor form layout (DEC-95)", () => {
     await act(async () => { jitsi.resolve({ url: "https://meet.jit.si/fold-new111link" }); await jitsi.promise; });
     const link = screen.getByRole("textbox", { name: /^Video link/ });
     expect(link).toHaveValue(sent);
-    await act(async () => { put.resolve({ event: testEvent(7) }); await put.promise; });
+    await act(async () => { put.resolve({ event: { ...testEvent(7), revision: "r9" } }); await put.promise; });
     expect(onSaved).toHaveBeenCalledOnce();
     expect(link).toHaveValue(sent);
   });
 
   it("asks nothing when leaving after a save of an edit", async () => {
-    vi.mocked(Events.update).mockReset().mockResolvedValue({ event: testEvent(7) });
+    vi.mocked(Events.update).mockReset().mockResolvedValue({ event: { ...testEvent(7), revision: "r9" } });
     const confirm = vi.spyOn(window, "confirm").mockReturnValue(false);
     const onSaved = vi.fn();
 
@@ -362,7 +362,7 @@ describe("SeriesEditor form layout (DEC-95)", () => {
   });
 
   it("asks before leaving unsaved edits, and not after a save", async () => {
-    vi.mocked(Events.update).mockReset().mockResolvedValue({ event: testEvent(7) });
+    vi.mocked(Events.update).mockReset().mockResolvedValue({ event: { ...testEvent(7), revision: "r9" } });
     const confirm = vi.spyOn(window, "confirm").mockReturnValue(false);
 
     const router = createMemoryRouter(
@@ -453,7 +453,7 @@ describe("SeriesEditor and kept dates", () => {
   const home = () => screen.getByRole("region", { name: KEPT.home });
 
   function mount(onAuthorityLost = vi.fn()) {
-    const router = createMemoryRouter([{ path: "/", element: <DateWritesProvider><SeriesEditor series={series} idPrefix="kept" onSaved={() => {}} onAuthorityLost={onAuthorityLost} /></DateWritesProvider> }]);
+    const router = createMemoryRouter([{ path: "/", element: <RosterWritesProvider><SeriesEditor series={series} idPrefix="kept" onSaved={() => {}} onAuthorityLost={onAuthorityLost} /></RosterWritesProvider> }]);
     render(<RouterProvider router={router} />);
 
     return { onAuthorityLost };
@@ -604,7 +604,7 @@ describe("SeriesEditor after a save", () => {
 
   beforeEach(() => {
     forgetSite();
-    vi.mocked(Events.update).mockReset().mockResolvedValue({ event: testEvent(7) });
+    vi.mocked(Events.update).mockReset().mockResolvedValue({ event: { ...testEvent(7), revision: "r9" } });
   });
 
   it("keeps the room field it opened with when a read makes the event a series", async () => {
@@ -670,6 +670,41 @@ describe("SeriesEditor and the read it opened with", () => {
     expect(second).toEqual({ ...first, revision: "r2" });
     expect(onConflict).not.toHaveBeenCalled();
     expect(screen.queryByText(/couldn't/)).not.toBeInTheDocument();
+  });
+
+  it.each([
+    ["an empty object (a page from something in between)", {}],
+    ["another event's answer", { event: { ...stored, id: 8 } }],
+    ["an answer with no revision", { event: { ...stored, revision: undefined } }],
+  ])("keeps the draft and says the ordinary error, closing nothing, when the answer is %s", async (_, answer) => {
+    // SAFETY: a wire answer the static type would not allow, as something in between could send it.
+    vi.mocked(Events.update).mockResolvedValue(answer as Awaited<ReturnType<typeof Events.update>>);
+    const onSaved = vi.fn();
+    const onConflict = vi.fn();
+    render(<SeriesEditor series={opened} idPrefix="answer" onSaved={onSaved} onConflict={onConflict} />);
+    await userEvent.type(screen.getByRole("textbox", { name: "Title" }), " night");
+    await userEvent.click(saveButton());
+    expect(await screen.findByText("We couldn't update the series. Please try again in a minute.")).toBeInTheDocument();
+    expect(onSaved).not.toHaveBeenCalled();
+    expect(onConflict).not.toHaveBeenCalled();
+    expect(screen.getByRole("textbox", { name: "Title" })).toHaveValue("Supper night");
+    expect(saveButton()).toBeEnabled();
+  });
+
+  // #455: a send with no answer may have been stored, and someone may have put the opening value back since.
+  it("after a send with no answer, a refusal finding the series as it opened is a conflict, sending the opened revision only", async () => {
+    vi.mocked(Events.update).mockRejectedValueOnce(new TypeError("Failed to fetch")).mockRejectedValueOnce(changed()).mockResolvedValue({ event: stored });
+    vi.mocked(Events.get).mockResolvedValue(readOf(stored));
+    const onSaved = vi.fn();
+    const onConflict = vi.fn();
+    render(<SeriesEditor series={opened} idPrefix="lost" onSaved={onSaved} onConflict={onConflict} />);
+    await userEvent.type(screen.getByRole("textbox", { name: "Title" }), " night");
+    await userEvent.click(saveButton());
+    expect(await screen.findByText("We couldn't reach Fold. Check your connection and try again.")).toBeInTheDocument();
+    await userEvent.click(saveButton());
+    await waitFor(() => expect(onConflict).toHaveBeenCalledExactlyOnceWith("changed"));
+    expect(vi.mocked(Events.update).mock.calls.map(([, body]) => body.revision)).toEqual(["r1", "r1"]);
+    expect(onSaved).not.toHaveBeenCalled();
   });
 
   it("compares every field a save can write", () => {

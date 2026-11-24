@@ -1725,10 +1725,11 @@ type occurrenceJSON struct {
 	hideSeries bool `json:"-"`
 	ID         uint `json:"id"`
 	// Revision is the date's edit token (dateToken), only for its managers;
-	// the guarded date edit names it. Cancelled is set only on the manager's
-	// edit base (GET /events/:id/occurrences/:date), which also answers a
-	// cancelled date.
+	// the guarded date edit names it. Own and Cancelled are set only on the
+	// manager's edit base (GET /events/:id/occurrences/:date, and the edit's
+	// answer), which also answers a cancelled date.
 	Revision              string           `json:"revision,omitempty"`
+	Own                   *dateOwnJSON     `json:"own,omitempty"`
 	Cancelled             bool             `json:"cancelled,omitempty"`
 	EventID               uint             `json:"eventId"`
 	Date                  string           `json:"date"`

@@ -6,7 +6,7 @@ import { useLoad } from "./useLoad";
 type Shown = "loaded" | "missing";
 
 // A page reduced to what the piece needs: a read it can retry, and the screen that read leads to.
-function setup(screenShown: Shown = "loaded", canManage = true) {
+function setup(screenShown: Shown = "loaded", canManage = true, about?: string) {
   let answer!: () => void;
   let api!: ReturnType<typeof useRefusedSave>;
   let retry!: () => void;
@@ -20,7 +20,7 @@ function setup(screenShown: Shown = "loaded", canManage = true) {
 
     if (screenShown === "missing") return <div><RefusedSaveLine save={api} noun="widget" /></div>;
 
-    return <div><RefusedSaveLine save={api} noun="widget" canManage={canManage} /></div>;
+    return <div><RefusedSaveLine save={api} noun="widget" canManage={canManage} about={about} /></div>;
   }
 
   render(<Page />);
@@ -34,6 +34,15 @@ function setup(screenShown: Shown = "loaded", canManage = true) {
 }
 
 describe("useRefusedSave and RefusedSaveLine", () => {
+  it("names which one first, on a page that lists several", async () => {
+    const page = setup("loaded", true, "Tuesday, December 1, 2026");
+    await page.answer();
+    page.refused("changed");
+    await page.answer();
+    expect(screen.getByRole("status")).toHaveTextContent("Tuesday, December 1, 2026. This widget changed while you were editing, so your changes could not be saved. This is the widget as it is now.");
+    expect(screen.getByRole("status")).toHaveFocus();
+  });
+
   it("shows nothing on an ordinary visit", async () => {
     const page = setup();
     await page.answer();

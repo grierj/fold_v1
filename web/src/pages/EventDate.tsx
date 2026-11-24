@@ -1,5 +1,5 @@
 import { canRegisterAsGuest } from "../lib/can";
-import { lazy, Suspense, useCallback, useEffect, useId, useLayoutEffect, useRef, useState, type RefObject } from "react";
+import { lazy, Suspense, useCallback, useEffect, useId, useLayoutEffect, useRef, useState, type ReactNode, type RefObject } from "react";
 import { Link, useParams } from "react-router-dom";
 import { ApiError } from "../api/core";
 import { Dates, Events } from "../api/events";
@@ -29,6 +29,7 @@ import { DateReminderLines } from "../components/DateReminders";
 import { ConfirmProvider, useConfirm, type PendingAction } from "../components/ui/ConfirmDialog";
 import { useLeaveQuestion } from "../lib/leaveQuestion";
 import { manageAuthority } from "../lib/manageAuthority";
+import { RefusedSaveLine, useRefusedSave } from "../lib/refusedSave";
 
 const ManageDate = lazy(() => import("../components/ManageDate").then((module) => ({ default: module.ManageDate })));
 
@@ -198,6 +199,9 @@ function DateDetail({ id, date }: { id: string; date: string }) {
 
   const reloadPage = useCallback(() => void reload(), [reload]);
   const retryPage = useCallback(() => void recheck(), [recheck]);
+  // A date save refused and not sent again (DEC-164): the editor closed, and the page reads from nothing, failing
+  // closed like any recheck, and then says so.
+  const refusedSave = useRefusedSave({ loading: load.loading, data: load.data, retry: recheck });
 
   // Coming back to the window is a recheck too (useLoad retries on focus): it hides results and the held page.
   useEffect(() => {
@@ -516,7 +520,7 @@ function DateDetail({ id, date }: { id: string; date: string }) {
     }
   }, [guestOpen]);
 
-  if (tombstone) return <CancelledDate cancelled={tombstone} heading={heading} />;
+  if (tombstone) return <CancelledDate cancelled={tombstone} heading={heading} notice={<RefusedSaveLine save={refusedSave} noun="date" />} />;
 
   const when = occurrence ? dateLine(occurrence.startsAt, occurrence.endsAt) : "";
   const pressed = (status: AnswerStatus) => !!occurrence && (occurrence.myRegistration === status || (status === "going" && occurrence.myRegistration === "waitlisted"));
@@ -564,8 +568,10 @@ function DateDetail({ id, date }: { id: string; date: string }) {
         </div>}
       </section>}
     </div>
+    <RefusedSaveLine save={refusedSave} noun="date" canManage={occurrence ? occurrence.canManage === true : undefined} />
     {showManage && <Suspense fallback={<Skeleton kind="lines" label="Loading the manager tools…" />}>
-      <ManageDate eventId={Number(id)} date={date} occurrenceId={occurrence?.id} authority={authority} onDateChanged={reloadPage} onGone={retryPage} onRetryPage={retryPage} />
+      <ManageDate eventId={Number(id)} date={date} occurrenceId={occurrence?.id} authority={authority} onDateChanged={reloadPage}
+        onConflict={refusedSave.refused} onOpenEditor={refusedSave.clear} onGone={retryPage} onRetryPage={retryPage} />
     </Suspense>}
     {barShown && <StickyRsvpBar label="Answer this date">
       {actions.length > 0 && <div ref={answerGroup} role="group" aria-label="Your answer" className="flex min-w-0 flex-1 sm:max-w-sm">
@@ -615,8 +621,10 @@ function AnswerDetails({ occurrence, values, busy, full, root, onEdit }: {
 // A cancelled date as the server lets a qualified viewer see it (M8.1 brief 2.2): its title, its
 // date and that it was cancelled, with no answer, series, video, attendee, reminder, guest, share or
 // calendar-download controls.
-function CancelledDate({ cancelled, heading }: { cancelled: CancelledEventDate; heading: RefObject<HTMLHeadingElement | null> }) {
+// `notice` says what happened to a save refused on this date just before it was cancelled.
+function CancelledDate({ cancelled, heading, notice }: { cancelled: CancelledEventDate; heading: RefObject<HTMLHeadingElement | null>; notice: ReactNode }) {
   return <div className="fold-page fold-page-narrow space-y-6 wrap-anywhere">
+    {notice}
     <div className="fold-page-header">
       <div>
         <ButtonLink variant="link" to="/calendar"><ChevronLeftIcon className="h-4 w-4 shrink-0" /><span aria-hidden="true">Calendar</span><span className="sr-only">Back to calendar</span></ButtonLink>

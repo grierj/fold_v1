@@ -228,11 +228,12 @@ section or decision; check it still exists.
   moves are tables in `internal/policy/room_lifecycle.go`; a status changes only through
   `changeBookings` or `moveRoomRequest`/`moveRoomRequestsWhere` (`room_status.go`).
 - An event's series and visibility saves name their read (DEC-162, DEC-163): the token is built and compared only in
-  `edit_revision.go` (`eventRevision`, `checkEventRevision`, inside the write transaction under the row lock), and
-  both forms send it through `web/src/lib/useRevisionSave.ts`, which owns the read-and-compare after a refusal. An
-  editor a refusal closes hands it to `useRefusedSave` (`web/src/lib/refusedSave.tsx`), which reads the page from
-  nothing and says the changes weren't saved with `RefusedSaveLine`. The single-date edit keeps its own protocol for
-  now (`dateToken`, `api_date_edits.go`).
+  `edit_revision.go` (`eventRevision`, `checkEventRevision`, inside the write transaction under the row lock). The
+  single-date edit names its read too, with its own token (`dateToken`, `api_date_edits.go`, DEC-164). All three
+  forms send it through `web/src/lib/useRevisionSave.ts`, which owns the read-and-compare after a refusal; the date
+  editor's comparison is `dateFields` (`web/src/lib/editBase.ts`). An editor a refusal closes hands it to
+  `useRefusedSave` (`web/src/lib/refusedSave.tsx`), which reads the page from nothing and says the changes weren't
+  saved with `RefusedSaveLine`.
 - Registrations: seat decisions go through `registration_seats.go` (`poolFits`, `seatChange`,
   `seatTally`; party size and childcare demand each have one SQL and one Go form,
   `TestSeatSQLMatchesGoRules`); the status changes only by a `policy.RegistrationMove`

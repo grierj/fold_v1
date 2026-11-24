@@ -133,11 +133,17 @@ chosen when the row is made, or is a setting that may change to any value its ow
 
 ## Web client
 
-- The shapes to copy, each one value that names the state:
-  `web/src/lib/useLoad.ts` (a load), `web/src/lib/dateWrites.tsx` (`Phase`, a guarded date edit),
+- The shapes to copy, each one value that names the state: `web/src/lib/useLoad.ts` (a load),
   `web/src/components/DeleteUserPanel.tsx` and `web/src/pages/ReasonReviewLegacy.tsx` (`Phase`, a
   delete and its review), `web/src/lib/pushState.ts` (`DeviceState`, `PushCardState`) and the
   `busy` union in `web/src/pages/MessageComposer.tsx`.
+- A manager's save that names the read it was made from (the series editor, an event's
+  visibility, one date's edit; DEC-162 to DEC-164) goes through `web/src/lib/useRevisionSave.ts`:
+  sent, then on a refusal read once and done, sent again or handed to the page as a conflict,
+  which `web/src/lib/refusedSave.tsx` tells. A save counts only when its answer names what it
+  saved (`answerNames`); after a send with no answer, a refusal is never sent again under a newer
+  revision until a save lands. Nothing about a save outlives the draft that sent it (the date
+  editor keeps that no-answer mark with its held draft).
 - `web/src/components/ui/Form.tsx` validates; the submit lifecycle is `web/src/lib/useAction.ts`
   (idle, running, failed, done). It refuses a second run while one is on its way, always leaves
   running, words a throw with `errorText`, and keeps a follow-up step (a reload after the save)

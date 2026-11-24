@@ -1,15 +1,17 @@
 import { outcomeOf, useRosterGate } from "../lib/rosterWrites";
 import { lazy, Suspense, useCallback, useEffect, useId, useLayoutEffect, useRef, useState, type MutableRefObject } from "react";
 import { useLocation } from "react-router-dom";
+import { currentCredential } from "../api/core";
 import { Events } from "../api/events";
-import { useDateAttempts, useEditBase, type DateAttempts } from "../lib/dateWrites";
-import { dateKey, editBaseOf, editReadRefused, useEditRefresh } from "../lib/editBase";
+import { editBaseOf, editReadRefused } from "../lib/editBase";
 import { useFocusHome, useKeepFocusHome } from "../lib/focusHome";
 import type { ManageAuthority } from "../lib/manageAuthority";
 import { useKeptDraft } from "../lib/unsavedChanges";
 import { useLoad } from "../lib/useLoad";
+import type { RevisionConflict } from "../lib/useRevisionSave";
 import { isObject } from "../lib/wireValues";
 import { DateEditor, type DateDraftHold } from "./DateEditor";
+import { useDateEditorToggle } from "./ManagedDateEditor";
 import { ErrorNotice } from "./ErrorNotice";
 import { Button, ButtonLink } from "./ui/Button";
 import { ConfirmProvider, usePageFacts } from "./ui/ConfirmDialog";
@@ -26,6 +28,10 @@ interface ManageDateProps {
   authority: ManageAuthority;
   // The page's quiet reload, after this date changed here.
   onDateChanged: () => void;
+  // A save was refused and not sent again: the editor closed, and the page reads from nothing and says so (DEC-164),
+  // until the editor opens again (onOpenEditor).
+  onConflict: (why: RevisionConflict) => void;
+  onOpenEditor: () => void;
   // The page's retry, when a manager read was refused: the page's answer decides.
   onGone: () => void;
   // The page's "Try again" while authority is unknown.
@@ -39,64 +45,61 @@ export function ManageDate(props: ManageDateProps) {
   return <ConfirmProvider><ManageDateTools {...props} /></ConfirmProvider>;
 }
 
-// What a managed read was asked under: the route (a visit to the same address is another), the date the page
-// shows and this tab's credential's attempts. Nothing read, typed or asked under one is shown or sent under another.
-interface Owner {
-  key: string;
-  attempts: DateAttempts | null;
-}
+// The owner each failed managed read was asked under: the route (a visit to the same address is another), the date
+// and the row the page shows. Nothing read, typed or asked under one is shown or sent under another.
+const failedUnder = new WeakMap<object, string>();
 
-const sameOwner = (a: Owner, b: Owner) => a.key === b.key && a.attempts === b.attempts;
-
-// The owner each failed managed read was asked under.
-const failedUnder = new WeakMap<object, Owner>();
-
-function ManageDateTools({ eventId, date, occurrenceId, authority, onDateChanged, onGone, onRetryPage }: ManageDateProps) {
+function ManageDateTools({ eventId, date, occurrenceId, authority, onDateChanged, onConflict, onOpenEditor, onGone, onRetryPage }: ManageDateProps) {
   const headingId = useId();
   const home = useFocusHome<HTMLElement>();
   const location = useLocation();
-  const [editing, setEditing] = useState(false);
+
+  // The toggle and the editor's endings, as on the event and group pages: while the date's save is on its way (also
+  // with the editor off the screen for an authority check) the toggle is off and an editor shown again stays as it was.
+  const dateEditor = useDateEditorToggle({
+    onEditDate: onOpenEditor,
+    // A stored save reads the date and the page again, as after any change made here.
+    onChanged: () => { refresh(); onDateChanged(); },
+    onDateConflict: onConflict,
+    onTerminalRefresh: onGone,
+  });
+
+  const editing = dateEditor.open;
   const [managing, setManaging] = useState(false);
   const granted = authority === "granted";
   // The managed read never stands in for authority: it loads only while granted, and leaving granted drops it.
-  // The roster and the editor share it: stamped before it is sent, and pinned to this tab's credential when
-  // there is one, so the editor's base is the same answer the roster shows.
-  const attempts = useDateAttempts();
+  // The roster and the editor share it, so the editor's base is the same answer the roster shows.
   // The page has no occurrence while it checks authority again (nothing here is shown meanwhile); only another
   // row for the date is another owner.
   const shownRow = useRef(occurrenceId);
 
   if (occurrenceId !== undefined) shownRow.current = occurrenceId;
-  const ownerKey = `${location.key}|${eventId}|${date}|${shownRow.current ?? ""}`;
-  const owner: Owner = { key: ownerKey, attempts };
+  const owner = `${location.key}|${eventId}|${date}|${shownRow.current ?? ""}`;
 
   const managed = useLoad(async () => {
     const asked = owner;
 
     try {
-      const stamp = attempts?.stamp(eventId, date) ?? null;
-      const read = await Events.managedDate(eventId, date, attempts?.credential);
+      const read = await Events.managedDate(eventId, date, currentCredential() ?? undefined);
 
-      return { owner: asked, stamp, occurrence: read.occurrence };
+      return { owner: asked, occurrence: read.occurrence };
     } catch (cause: unknown) {
       const failure = isObject(cause) ? cause : new Error("managed read failed");
       failedUnder.set(failure, asked);
       throw failure;
     }
-  }, [ownerKey, attempts], { enabled: granted && (editing || managing) });
+  }, [owner], { enabled: granted && (editing || managing) });
 
-  // useLoad still holds the last owner's answer in the render where the owner changes: it is never shown, read
-  // by the editor or registered under this one.
-  const current = managed.data && sameOwner(managed.data.owner, owner) ? managed.data : undefined;
-  const failedOwner = isObject(managed.error) ? failedUnder.get(managed.error) : undefined;
-  const failure = failedOwner && sameOwner(failedOwner, owner) ? managed.error : null;
+  // useLoad still holds the last owner's answer in the render where the owner changes: it is never shown or read by
+  // the editor.
+  const current = managed.data?.owner === owner ? managed.data : undefined;
+  const failure = isObject(managed.error) && failedUnder.get(managed.error) === owner ? managed.error : null;
 
-  // The editor's draft, held while authority is checked so the editor can unmount and come back with it, for
-  // this owner only: another route visit or credential, even for a moment, ends it.
-  const held = useRef<{ owner: Owner; hold: MutableRefObject<DateDraftHold | null> } | null>(null);
+  // The editor's draft, held while authority is checked so the editor can unmount and come back with it, for this
+  // owner only: another route visit or row, even for a moment, ends it.
+  const held = useRef<{ owner: string; hold: MutableRefObject<DateDraftHold | null> } | null>(null);
 
-  if (held.current && !sameOwner(held.current.owner, owner)) held.current = null;
-  held.current ??= { owner, hold: { current: null } };
+  if (held.current?.owner !== owner) held.current = { owner, hold: { current: null } };
   const hold = held.current.hold;
   // While authority is checked or the date is read again the editor is off the screen and its draft is kept here.
   useKeptDraft(() => hold.current?.unsent === true, editing);
@@ -113,42 +116,39 @@ function ManageDateTools({ eventId, date, occurrenceId, authority, onDateChanged
   // While the roster is on screen no refresh of the managed read is quiet: the old names, contacts and care
   // notes go in the render the refresh starts.
   const refresh = useCallback(() => void (rosterOpen.current ? managed.retry() : managed.reload()), [managed.retry, managed.reload]);
-  // A guarded edit of this date settled, from here or another page: the managed read and the page again. A
-  // roster write's read is the gate's.
-  useEditRefresh((id) => id === eventId, () => {
-    refresh();
-    onDateChanged();
-  });
   // The one facts call under this provider: a question started under one answer never submits under another.
-  usePageFacts(JSON.stringify({ authority, owner: ownerKey, data: current?.occurrence ?? null }));
+  usePageFacts(JSON.stringify({ authority, owner, data: current?.occurrence ?? null }));
   // A recheck, the gate closing or a write's retry removes the focused control in this component's render.
   useKeepFocusHome(home);
 
   // A credential the server no longer recognizes is not a refusal of the date: the tab checks its credential.
   const refused = failure != null && outcomeOf(failure) === "refused" && editReadRefused(failure);
 
+  const closeEditorRow = dateEditor.close;
+
   useEffect(() => {
     if (!refused) return;
-    setEditing(false);
+    closeEditorRow();
     setManaging(false);
     onGone();
-  }, [refused, onGone]);
+  }, [refused, onGone, closeEditorRow]);
 
   const recheck = useCallback(() => {
     gate.clearNote();
     void managed.retry();
   }, [gate.clearNote, managed.retry]);
 
-  const closeEditor = () => {
-    hold.current = null;
-    setEditing(false);
+  // Closing ends the draft. Opening reads the date again even when the roster already shows it: the form is the read's.
+  const toggleEditor = () => {
+    if (editing) hold.current = null;
+    else if (managing) refresh();
+
+    dateEditor.toggle();
   };
 
-  // Opening the editor reads the date again even when the roster already shows it: the form is the read's.
-  const openEditor = () => {
-    setEditing(true);
-
-    if (managing) refresh();
+  const closeEditor = () => {
+    hold.current = null;
+    dateEditor.editor.onClose();
   };
 
   const closeRoster = () => {
@@ -157,10 +157,9 @@ function ManageDateTools({ eventId, date, occurrenceId, authority, onDateChanged
   };
 
   const data = current?.occurrence;
-  // The editor's base: the managed read, for the date the page shows, with its token.
-  const base = data && occurrenceId !== undefined ? editBaseOf(data, { eventId, date, occurrenceId }) : null;
-  const permit = useEditBase(attempts, editing && base ? current?.stamp ?? null : null, editing && base ? { occurrenceId: base.id, revision: base.revision } : null);
-  const editStatus = attempts?.status(dateKey(eventId, date)) ?? "idle";
+  // The editor's base: the managed read, for the date the page shows, with its revision.
+  const opener = occurrenceId !== undefined ? { eventId, date, occurrenceId } : null;
+  const base = data && opener ? editBaseOf(data, opener) : null;
 
   return <section ref={home.ref} tabIndex={-1} aria-labelledby={headingId} className="fold-section space-y-3 pt-6">
     <h2 id={headingId} className="text-xl font-semibold">Manage this date</h2>
@@ -173,8 +172,7 @@ function ManageDateTools({ eventId, date, occurrenceId, authority, onDateChanged
       <p className="text-text-muted">Change this date or who's signed up. Series changes are on the event page.</p>
       <div className="flex flex-wrap items-center gap-2">
         <ButtonLink variant="link" to={`/events/${eventId}`}>Open the event page</ButtonLink>
-        <Button variant="secondary" aria-expanded={editing} disabled={!editing && editStatus !== "idle"} onClick={() => (editing ? closeEditor() : openEditor())}>Edit this date</Button>
-        {!editing && editStatus === "unsure" && <Button variant="secondary" onClick={openEditor}>Check your last change to this date</Button>}
+        <Button variant="secondary" aria-expanded={editing} disabled={dateEditor.saving} onClick={toggleEditor}>Edit this date</Button>
         <Button variant="secondary" aria-expanded={managing} onClick={() => (managing ? closeRoster() : setManaging(true))}>Manage sign-ups</Button>
       </div>
       {(editing || managing) && (failure != null
@@ -182,21 +180,20 @@ function ManageDateTools({ eventId, date, occurrenceId, authority, onDateChanged
         : !data || gate.closed
           ? <Skeleton kind="lines" label="Loading this date…" />
           : <>
-            {editing && (attempts && base
+            {editing && (opener && base
               ? <DateEditor
+                opener={opener}
                 base={base}
-                permit={permit}
-                attempts={attempts}
                 hold={hold}
-                onSaved={closeEditor}
+                onSaved={dateEditor.editor.onSaved}
+                onSaving={dateEditor.editor.onSaving}
+                pending={dateEditor.saving}
+                onConflict={dateEditor.editor.onConflict}
                 onRoomChanged={refresh}
                 onClose={closeEditor}
                 onAuthorityLost={onGone}
-                onLost={onGone}
               />
-              : <p role="alert">{attempts
-                ? "This date changed since the page loaded. Reload the page to edit it."
-                : "We couldn't confirm this tab's sign-in, so this date can't be edited here. Reload the page to try again."}</p>)}
+              : <p role="alert">This date can't be edited now.</p>)}
             {managing && (data.attendeesVisible === true
               ? <>
                 {gate.note && <p role="status" className="text-sm">Your last change may not have gone through. Here's the list as it is now.</p>}

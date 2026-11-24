@@ -1,9 +1,8 @@
 import { act, render, screen } from "@testing-library/react";
-import { createRef, type RefObject } from "react";
-import { expect, it, vi } from "vitest";
+import { createRef, useState, type RefObject } from "react";
+import { describe, expect, it, vi } from "vitest";
 import { ApiError } from "../api/core";
-import { DateWritesProvider } from "./dateWrites";
-import { createRosterWrites, outcomeOf, rosterWriteFailure, useRosterActivity, useRosterActivityOf, useRosterGate, useRosterWrites, type RosterWrites } from "./rosterWrites";
+import { createRosterWrites, RosterWritesProvider, outcomeOf, rosterWriteFailure, useRosterActivity, useRosterActivityOf, useRosterGate, useRosterSettled, useRosterWrites, type RosterWrites } from "./rosterWrites";
 import type { LoadOutcome } from "./useLoad";
 
 const DATE = "2026-12-01";
@@ -47,7 +46,7 @@ function land(load: FakeLoad, rerender: () => void) {
 function gateSetup(store = createRosterWrites()) {
   const load = fakeLoad();
   const out = createRef<Gate>();
-  const tree = () => <DateWritesProvider rosterWrites={store}><GateHost load={load} out={out} /></DateWritesProvider>;
+  const tree = () => <RosterWritesProvider rosterWrites={store}><GateHost load={load} out={out} /></RosterWritesProvider>;
   const view = render(tree());
 
   return { store, load, out, rerender: () => view.rerender(tree()), view };
@@ -137,7 +136,7 @@ function ActivityProbe({ out }: { out: ActivitySeen }) {
 it("useRosterActivity gives the date's writing and changes, and useRosterActivityOf renders at every begin and end", () => {
   const store: RosterWrites = createRosterWrites();
   const out: ActivitySeen = { renders: 0 };
-  render(<DateWritesProvider rosterWrites={store}><ActivityProbe out={out} /></DateWritesProvider>);
+  render(<RosterWritesProvider rosterWrites={store}><ActivityProbe out={out} /></RosterWritesProvider>);
   expect(screen.getByText("idle 0")).toBeInTheDocument();
   expect(out.changes?.()).toBe(0);
   let end: (e: "stored" | "answered") => void = () => {};
@@ -215,7 +214,7 @@ it("(c) a gate mounted during a write is closed for any data until the end and n
   const out = createRef<Gate>();
   // Every render, the first included, is closed: the gate never shows data from before it saw the write.
   const renders: boolean[] = [];
-  const tree = () => <DateWritesProvider rosterWrites={store}><GateHost load={load} out={out} renders={renders} /></DateWritesProvider>;
+  const tree = () => <RosterWritesProvider rosterWrites={store}><GateHost load={load} out={out} renders={renders} /></RosterWritesProvider>;
   const view = render(tree());
   expect(renders.length).toBeGreaterThan(0);
   expect(renders.every(Boolean)).toBe(true);
@@ -317,7 +316,7 @@ it("registers a roster's own writes inside a provider, for every roster of the d
 
  return null; }
 
-  render(<DateWritesProvider rosterWrites={store}><Own /></DateWritesProvider>);
+  render(<RosterWritesProvider rosterWrites={store}><Own /></RosterWritesProvider>);
   let end: (e: "stored") => void = () => {};
 
   act(() => { end = store.begin(`7:${DATE}`); });
@@ -342,4 +341,48 @@ it("keeps outcomeOf as it was and sorts roster write failures", () => {
   expect(rosterWriteFailure(new ApiError(400, "bad"))).toBe("answered");
   expect(rosterWriteFailure(new ApiError(409, "full", { code: "event_full" }))).toBe("answered");
   expect(rosterWriteFailure(new ApiError(409, "ask", { code: "date_add_approval_required" }))).toBe("answered");
+});
+
+// A page listing event 7's dates with no roster gate of its own (EventDetail, GroupDetail): its Edit this date waits on
+// a roster write's end until it shows a read asked for after it.
+function ListingPage({ onReload }: { onReload: () => void }) {
+  const [epoch, setEpoch] = useState(0);
+  const [dataEpoch, setDataEpoch] = useState(0);
+  const settling = useRosterSettled({ epoch: () => epoch, dataEpoch, reload: () => { onReload(); setEpoch((n) => n + 1); } }, (eventId) => eventId === 7);
+
+  return <>
+    <p>{settling(7, DATE) ? "settling" : "free"} {settling(7, "2026-12-08") ? "other settling" : "other free"}</p>
+    <button type="button" onClick={() => setDataEpoch(epoch)}>Show the read</button>
+  </>;
+}
+
+describe("useRosterSettled", () => {
+  function setup() {
+    const store = createRosterWrites();
+    const onReload = vi.fn();
+    render(<RosterWritesProvider rosterWrites={store}><ListingPage onReload={onReload} /></RosterWritesProvider>);
+
+    return { store, onReload };
+  }
+
+  it("an answered roster write and another event's write hold nothing and ask for nothing", () => {
+    const { store, onReload } = setup();
+    act(() => store.begin(`7:${DATE}`)("answered"));
+    act(() => store.begin(`8:${DATE}`)("stored"));
+    expect(onReload).not.toHaveBeenCalled();
+    expect(screen.getByText("free other free")).toBeInTheDocument();
+  });
+
+  for (const end of ["stored", "lost", "unsure"] as const) {
+    it(`a roster write that ends ${end} holds that date until the page shows a read asked for after it, and asks for the page once`, () => {
+      const { store, onReload } = setup();
+      const release = store.begin(`7:${DATE}`);
+      expect(screen.getByText("free other free")).toBeInTheDocument();
+      act(() => release(end));
+      expect(onReload).toHaveBeenCalledOnce();
+      expect(screen.getByText("settling other free")).toBeInTheDocument();
+      act(() => screen.getByRole("button", { name: "Show the read" }).click());
+      expect(screen.getByText("free other free")).toBeInTheDocument();
+    });
+  }
 });

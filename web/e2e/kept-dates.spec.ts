@@ -142,8 +142,8 @@ async function refuseOnDatePage(page: Page, date: string, from: number, to: numb
   await expect(page.getByRole("spinbutton", { name: "Minutes" })).toHaveValue(String(to));
 }
 
-// The group page keeps its date editor open after a save; the event page and the date page close it.
-async function removeAndSave(page: Page, to: number, { closes = true } = {}) {
+// Every host closes its date editor after a save (DEC-164).
+async function removeAndSave(page: Page, to: number) {
   await removeInPanel(page);
   await expect(panelOf(page).getByText(NOBODY_ONE)).toBeVisible();
   await expect(page.getByText(ERROR_COPY)).toHaveCount(0);
@@ -151,9 +151,7 @@ async function removeAndSave(page: Page, to: number, { closes = true } = {}) {
   expect(await marker(page)).toBe(1);
   await page.getByRole("button", { name: "Save this date" }).click();
   await expect(panelOf(page)).toHaveCount(0);
-
-  if (closes) await expect(page.getByRole("spinbutton", { name: "Minutes" })).toHaveCount(0);
-  else await expect(page.getByRole("button", { name: "Save this date" })).toBeEnabled();
+  await expect(page.getByRole("spinbutton", { name: "Minutes" })).toHaveCount(0);
   await expect(page.getByRole("alert")).toHaveCount(0);
   expect(await marker(page)).toBe(1);
 }
@@ -325,7 +323,7 @@ test("flow 4: inside the cutoff, the event page and the group page each clear a 
   await expectOneDatePanel(page, date);
   await expect(page.getByRole("spinbutton", { name: "Minutes" })).toHaveValue("90");
   expect(await marker(page)).toBe(1);
-  await removeAndSave(page, 90, { closes: false });
+  await removeAndSave(page, 90);
   expect((await managedRead(request, leaderLogin, two.id, date)).durationMinutes).toBe(90);
   expect((await managedRead(request, leaderLogin, one.id, date)).durationMinutes).toBe(90);
 });
