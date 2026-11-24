@@ -47,6 +47,17 @@ suppressions. The guards named here are parse-only; each test file states its ow
   decides the audience and builds every row it will write (email facts, the guardian copies switch
   and links, push choices) in one read-only snapshot (`preparedAudienceIn`, `preparedRowsIn`), then
   claims in a separate write transaction (users FOR KEY SHARE, then the message).
+- **The send confirmation names the list the sender reviewed** (DEC-169, `messages_review.go`).
+  Send now and Schedule first take a review: who the message reaches, as the people preparation
+  would write a row for (an email row that goes out, or a push row when the message has push on),
+  sealed into a token bound to the sender, the message and its revision, stored nowhere. The
+  confirmation's `schedule` works that set out again under the message's lock and schedules only
+  when it is the same; a change is answered with who now gets it (named) and who no longer does
+  (named only while the audience still lists them, otherwise counted; never why). There is no
+  second notion of audience: the review reads `resolveAudienceIn` and `audienceReachIn`, as the
+  preview and the send count do. The check is at the confirmation only: a scheduled message goes
+  to the list as it stands when it goes out, guardian copies are added then and are not part of
+  the review, and nothing holds or prompts a scheduled send.
 - **A claimed batch row** (a reminder or an event audience's announcement) decides and fills from
   one statement (`loadDateFacts`, `decideDatedRow`) on its claim transaction, which is pinned to
   Read Committed (`readCommitted`): the claim, the early status check, the choice
