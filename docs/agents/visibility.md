@@ -18,8 +18,8 @@ event, group or date pages. Background: DEC-48, DEC-156, DEC-157, DEC-158, PLAN 
 - An event's visibility save names its read (DEC-163): it sends the event page's `revision`, which
   `checkEventRevision` (`edit_revision.go`) compares under the event's row lock, after the authority
   recheck and before the no-change answer and the consent check. The token covers the group's
-  visibility too (it decides leader-opened), read after the contact gate that every group visibility
-  write also holds. The control sends it through `useRevisionSave`. A date's own visibility edit
+  visibility too (it decides leader-opened; the tag is the value, so a change and a change back match
+  again), read after the contact gate that every update of an existing group's visibility also holds. The control sends it through `useRevisionSave`. A date's own visibility edit
   names its read through the date's revision (the guarded edit, `api_date_edits.go`); the group form
   does not name its read yet (#454).
 

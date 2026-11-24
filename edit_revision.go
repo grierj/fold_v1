@@ -54,9 +54,10 @@ func checkEditRevision(given, current string, stale error) error {
 // the event row. audience tags the group's visibility on a group's event
 // (group as the read or the locked write loaded it), since it decides whether
 // a wider value is leader-opened (leaderOpens): a group change conflicts
-// though the event row is untouched. It is "c" on a church-wide event. Every
-// writer of groups.visibility holds the exclusive contact gate, which both
-// event saves hold, so the group is not locked here.
+// though the event row is untouched. It is "c" on a church-wide event. The tag
+// is the value, not a counter: a group that changes and changes back matches
+// again. Every update of an existing group's visibility holds the exclusive
+// contact gate, which both event saves hold, so the group is not locked here.
 func (a *App) eventRevision(ev *models.Event, group *models.Group) string {
 	return a.editRevision(ev.ID, ev.EditRevision, revisionAudience(ev, group))
 }

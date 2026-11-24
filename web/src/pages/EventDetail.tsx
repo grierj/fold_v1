@@ -331,7 +331,9 @@ function EventDetailContent() {
           />
           {canSetVisibility && (
             <EventVisibilityControl
-              key={`${event.id}-${event.visibility}-${event.leaderOpened}`}
+              // The group's audience is part of what the control shows and of the revision it sends: a read that
+              // changes it starts the control again, so the two always come from the same read.
+              key={`${event.id}-${event.visibility}-${event.leaderOpened}-${event.groupVisibility ?? ""}`}
               eventId={event.id}
               churchWide={event.churchWide}
               groupName={event.groupName}

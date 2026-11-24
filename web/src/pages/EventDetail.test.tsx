@@ -2894,6 +2894,27 @@ describe("EventDetail when a visibility save meets someone else's change", () =>
     expect(Events.setVisibility).toHaveBeenCalledOnce();
   });
 
+  it("starts the control again when a read shows another group audience, so what it shows and the revision it sends come from one read", async () => {
+    const before: EventDetailResponse = { ...opened, event: { ...opened.event, visibility: "invite_only", groupVisibility: "private", revision: "r1" } };
+    const after: EventDetailResponse = { ...before, event: { ...before.event, groupVisibility: "public", revision: "r2" } };
+    vi.mocked(Events.get).mockResolvedValueOnce(before).mockResolvedValue(after);
+    vi.mocked(Events.register).mockResolvedValue({ registration: {
+      registrationId: 12, userId: 2, eventId: 7, occurrenceId: 1, date: "2026-12-01", status: "going",
+      guestCount: 0, childcareCount: 0, childcareAgesNote: "", waitlistPosition: null, attendanceMode: "in_person",
+    }, people: [] });
+    vi.mocked(Events.setVisibility).mockReset().mockResolvedValue({ event: after.event });
+    render(<main id="main" tabIndex={-1}><MemoryRouter initialEntries={["/events/7"]}><DateWritesProvider credential={credential}><Routes><Route path="/events/:id" element={<EventDetail />} /></Routes></DateWritesProvider></MemoryRouter></main>);
+    await userEvent.click(await screen.findByRole("button", { name: "Edit event" }));
+    expect(screen.getByRole("radio", { name: /^Public/ })).not.toHaveAccessibleName(/same as the group/);
+    // An answer to the date reads the page again, quietly, with the panel open.
+    await userEvent.click(within(screen.getByRole("group", { name: "Your answer" })).getByRole("button", { name: "Going" }));
+    await waitFor(() => expect(Events.get).toHaveBeenCalledTimes(2));
+    await userEvent.click(await screen.findByRole("radio", { name: /^Public \(same as the group\)/ }));
+    await userEvent.click(screen.getByRole("button", { name: "Save visibility" }));
+    await waitFor(() => expect(Events.setVisibility).toHaveBeenCalledOnce());
+    expect(Events.setVisibility).toHaveBeenCalledWith(7, expect.objectContaining({ visibility: "public", revision: "r2" }));
+  });
+
   it("closes an open review with the panel", async () => {
     const after = await saveIntoRefusal(async () => theirs, true);
     expect(Events.setVisibility).toHaveBeenCalledExactlyOnceWith(7, expect.objectContaining({ visibility: "private", revision: "r1", consent: tightening.consent }));

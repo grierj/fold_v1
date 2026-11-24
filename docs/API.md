@@ -686,8 +686,9 @@ a series save sends (DEC-162). The answers, in the order the handler gives them:
    A person who may not manage the event never gets `event_changed`.
 5. 409 `event_changed` for any revision but the event's current token
    (missing, empty, garbled, another event's, one from before the server
-   restarted, or one read before any later change to the event or to its
-   group's visibility), writing nothing: no event or date change, cancellation, notice, audit row or job.
+   restarted, one read before any later change to the event, or one read
+   while its group's visibility was a different value than it is now), writing
+   nothing: no event or date change, cancellation, notice, audit row or job.
    This comes before the no-change answer and before any consent work, so a
    stale page's no-change save is refused too.
 6. 200 `{event}` for a save that changes nothing (the same visibility and
@@ -1114,7 +1115,8 @@ ordinary save error and stays open; when something differs, it closes and the
 page shows the event as stored, saying the changes were not saved; when the
 read (or a save the editor sent again) answers 403 or 404, or says the person no
 longer manages the event, it closes and the page shows what that person may
-now see, saying the changes were not saved where it still shows the event. Any
+now see, saying the changes were not saved (on the missing-event and
+event-unavailable screens too). Any
 other failure of the read leaves the editor open with its ordinary save error.
 The editor sends again only while it is still open under the sign-in that
 pressed Save.
