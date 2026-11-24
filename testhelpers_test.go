@@ -881,9 +881,10 @@ func scheduleGroupEvent(t *testing.T, c *apiClient, gid uint, title string) even
 
 func setVisibility(t *testing.T, c *apiClient, eventID uint, visibility, reason string, want int) string {
 	t.Helper()
-	return apiDo(t, c, "PUT", fmt.Sprintf("/api/v1/events/%d/visibility", eventID), map[string]any{
+	path := fmt.Sprintf("/api/v1/events/%d/visibility", eventID)
+	return apiDo(t, c, "PUT", path, visibilityBody(t, c, path, map[string]any{
 		"visibility": visibility, "reason": reason,
-	}, want)
+	}), want)
 }
 
 type eventPage struct {
@@ -1565,6 +1566,28 @@ func confirmVisibility(t *testing.T, c *apiClient, path string, body map[string]
 	}
 	out := maps.Clone(body)
 	out["consent"] = impact.Consent
+	if eventVisibilityPath.MatchString(path) {
+		return visibilityBody(t, c, path, out)
+	}
+	return out
+}
+
+// visibilityBody is body for PUT /api/v1/events/:id/visibility at path with
+// the revision the event page's visibility control would send, read by c just
+// before (DEC-163). A client that may not manage the event reads none, and the
+// server refuses it before judging the revision. A body that already names a
+// revision keeps it. Another route's body is returned as it is, so a test over
+// several routes sends each body through it.
+func visibilityBody(t *testing.T, c *apiClient, path string, body map[string]any) map[string]any {
+	t.Helper()
+	m := eventVisibilityPath.FindStringSubmatch(path)
+	if m == nil {
+		return body
+	}
+	out := seriesBody(t, c, "/api/v1/events/"+m[1], nil)
+	for k, v := range body {
+		out[k] = v
+	}
 	return out
 }
 

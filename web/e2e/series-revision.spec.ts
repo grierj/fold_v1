@@ -10,7 +10,7 @@ const stored = schema.looseObject({ event: schema.looseObject({
   title: schema.string(), location: schema.string(), capacity: schema.nullable(schema.number()),
 }) });
 
-const NOTICE = "Someone changed this event while you were editing, so your changes weren't saved. This is the event as it is now.";
+const NOTICE = "This event changed while you were editing, so your changes weren't saved. This is the event as it is now.";
 
 const dateIn = (days: number) => new Date(Date.now() + days * 864e5).toISOString().slice(0, 10);
 

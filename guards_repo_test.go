@@ -382,7 +382,7 @@ func TestVisibilityConsentDocsUseCurrentRequestFields(t *testing.T) {
 		t.Fatal(err)
 	}
 	for endpoint, body := range map[string]string{
-		"PUT  /api/v1/events/:id/visibility":              "body: {visibility, reason?, consent?, resetOverrides?}",
+		"PUT  /api/v1/events/:id/visibility":              "body: {visibility, reason?, consent?, resetOverrides?, revision}",
 		"PUT  /api/v1/events/:id/occurrences/:date ":      "edit payload: ignored after standard CSRF processing; writes nothing (see Cutover under Guarded date edit)",
 		"POST /api/v1/events/:id/occurrences/:date/edits": "body: {attempt, revision, changes: {startsLocal?, durationMinutes?, title?, location?, capacityOverride?, remoteCapacityOverride?, visibility?}, reason?, consent?}",
 	} {

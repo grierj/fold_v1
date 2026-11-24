@@ -63,6 +63,7 @@
   "teen-access.spec.ts": 3.8,
   "teen-consent.spec.ts": 6.2,
   "teen-conversion.spec.ts": 0,
+  "visibility-revision.spec.ts": 6.0,
   "waitlist.spec.ts": 1.8,
   "zone-picker.spec.ts": 7.1
 }

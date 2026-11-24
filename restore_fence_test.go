@@ -10,6 +10,7 @@ import (
 	"go/token"
 	"io"
 	"io/fs"
+	"maps"
 	"math/rand"
 	"net"
 	"net/http"
@@ -3086,6 +3087,24 @@ func (s *foldSession) call(method, path string, body any, into any) (int, string
 	return res.StatusCode, string(b)
 }
 
+// visibilityBody is visibilityBody (testhelpers_test.go) for a real binary's
+// session: body with the revision this binary's event page gives s, read just
+// before.
+func (s *foldSession) visibilityBody(path string, body map[string]any) map[string]any {
+	s.t.Helper()
+	m := eventVisibilityPath.FindStringSubmatch(path)
+	if m == nil {
+		s.t.Fatalf("%s is not an event's visibility", path)
+	}
+	var page struct {
+		Event eventJSON `json:"event"`
+	}
+	s.want("GET", "/api/v1/events/"+m[1], nil, http.StatusOK, &page)
+	out := maps.Clone(body)
+	out["revision"] = page.Event.Revision
+	return out
+}
+
 func (s *foldSession) want(method, path string, body any, want int, into any) string {
 	s.t.Helper()
 	code, out := s.call(method, path, body, into)
@@ -3330,7 +3349,7 @@ func TestRealServeRestartRotatesTheEpoch(t *testing.T) {
 		t.Fatalf("a real restart did not rotate the epoch: %q -> %q", e1, e2)
 	}
 	admin2 := q.session(t, "admin@example.com")
-	code, body := admin2.call("PUT", path, map[string]any{"visibility": "private", "resetOverrides": true, "consent": impact.Consent}, nil)
+	code, body := admin2.call("PUT", path, admin2.visibilityBody(path, map[string]any{"visibility": "private", "resetOverrides": true, "consent": impact.Consent}), nil)
 	if code != http.StatusConflict || !strings.Contains(body, `"needsDecision":true`) {
 		t.Fatalf("a token from before the restart: %d %s", code, body)
 	}
@@ -3338,7 +3357,7 @@ func TestRealServeRestartRotatesTheEpoch(t *testing.T) {
 		Impact visibilityImpactJSON `json:"impact"`
 	}
 	_ = json.Unmarshal([]byte(body), &answer)
-	admin2.want("PUT", path, map[string]any{"visibility": "private", "resetOverrides": true, "consent": answer.Impact.Consent}, http.StatusOK, nil)
+	admin2.want("PUT", path, admin2.visibilityBody(path, map[string]any{"visibility": "private", "resetOverrides": true, "consent": answer.Impact.Consent}), http.StatusOK, nil)
 }
 
 // TestPriorProcessRunningAcrossTheUpgrade (C18): v0.1.0, already serving when
@@ -3413,7 +3432,7 @@ func TestPriorProcessRunningAcrossTheUpgrade(t *testing.T) {
 	var impact visibilityImpactJSON
 	p1 := fmt.Sprintf("/api/v1/events/%d/visibility", e1.Event.ID)
 	curAdmin.want("GET", p1+"-impact?visibility=private&resetOverrides=1", nil, http.StatusOK, &impact)
-	curAdmin.want("PUT", p1, map[string]any{"visibility": "private", "resetOverrides": true, "consent": impact.Consent}, http.StatusOK, nil)
+	curAdmin.want("PUT", p1, curAdmin.visibilityBody(p1, map[string]any{"visibility": "private", "resetOverrides": true, "consent": impact.Consent}), http.StatusOK, nil)
 
 	snapshot := func() string {
 		var rows []string
@@ -3519,7 +3538,8 @@ func TestRealServeBootWaitsForAnOpenConfirmation(t *testing.T) {
 		})
 	}
 	answer := make(chan *httptest.ResponseRecorder, 1)
-	go func() { answer <- admin.do("PUT", paths[0], with(body, "consent", consents[0]), true) }()
+	first := visibilityBody(t, admin, paths[0], with(body, "consent", consents[0]))
+	go func() { answer <- admin.do("PUT", paths[0], first, true) }()
 	var holder int
 	select {
 	case holder = <-parked:
@@ -3556,9 +3576,10 @@ func TestRealServeBootWaitsForAnOpenConfirmation(t *testing.T) {
 	if e2 == e1 {
 		t.Fatal("the boot did not rotate the epoch")
 	}
-	stale := admin.do("PUT", paths[1], with(body, "consent", consents[1]), true)
+	stale := admin.do("PUT", paths[1], visibilityBody(t, admin, paths[1], with(body, "consent", consents[1])), true)
 	fresh := wantDecision(t, stale)
-	p.session(t, "admin@example.com").want("PUT", paths[1], with(body, "consent", fresh.Consent), http.StatusOK, nil)
+	served := p.session(t, "admin@example.com")
+	served.want("PUT", paths[1], served.visibilityBody(paths[1], with(body, "consent", fresh.Consent)), http.StatusOK, nil)
 }
 
 // appOn is testApp's App on another database, with the given secret: an

@@ -14,8 +14,9 @@ SaaS operator) must be able to run it with `docker compose up`. The shipped arti
 
 ## Scope, fixtures, and performance work
 
-- Keep code changes focused on directly supporting the requested change. Do not expand the work
-  to fix unrelated findings. Those findings may be filed as issues. Every issue must state its
+- Keep code changes focused on directly supporting the requested change. "Where we can simplify
+  and consolidate, do the extra work to do so" (Grier): consolidating the code a change touches is
+  wanted, and the PR says so. Do not expand the work to fix unrelated findings. Those findings may be filed as issues. Every issue must state its
   severity, impact, who experiences it, and how likely it is to happen. A P0 (catastrophic) issue
   may be raised to a human for a decision on including it immediately.
 - Ordinary fixtures are preset data for unit, integration, or end-to-end tests of actual
@@ -226,7 +227,10 @@ section or decision; check it still exists.
   state (waiting or lost, double-booked) is `policy.RoomBookingStateOf`, and the booking and request
   moves are tables in `internal/policy/room_lifecycle.go`; a status changes only through
   `changeBookings` or `moveRoomRequest`/`moveRoomRequestsWhere` (`room_status.go`).
-- A series save names its read: the token is `seriesToken`, checked by `checkSeriesBase` under the event's row lock (DEC-162).
+- An event's series and visibility saves name their read (DEC-162, DEC-163): the token is built and compared only in
+  `edit_revision.go` (`eventRevision`, `checkEventRevision`, inside the write transaction under the row lock), and
+  both forms send it through `web/src/lib/useRevisionSave.ts`, which owns the read-and-compare after a refusal. The
+  single-date edit keeps its own protocol for now (`dateToken`, `api_date_edits.go`).
 - Registrations: seat decisions go through `registration_seats.go` (`poolFits`, `seatChange`,
   `seatTally`; party size and childcare demand each have one SQL and one Go form,
   `TestSeatSQLMatchesGoRules`); the status changes only by a `policy.RegistrationMove`
@@ -305,6 +309,13 @@ or write down why not. Example: group and single-event tightening share `visibil
 `cancelLosers` and `GroupVisibilityReview`. In the UI, one shared component per kind of control:
 `components/ui/Field` and its rows (DEC-65), `ZonePicker` (every time zone field but setup),
 `VisibilityField` / `EventVisibilityControl`, and `SeriesEditor`.
+
+Conflicts (Grier, DEC-163): "Any time we don't save and require someone to try again we need to
+make sure they're not confused as to what happened." All conflicts behave the same when it comes
+to closing editors. Say "updated", never "now shows your changes": outside the audit log there is
+no proof management. Make good faith, but simple, efforts at conflict avoidance: the target is a
+church with a few paid staff who are admins and mostly one leader per group, and 500 people with 6
+staff is VERY LARGE.
 
 Errors a person can't act on, or that are a security risk, never reach them (Grier, DEC-52). Rate
 limits and anything that could reveal whether an account exists answer with the form's usual
@@ -428,6 +439,7 @@ table), and a new area gets a new file there and a row in that table, not a row 
 | Token contrast: text 4.5:1, control edges 3:1 | `npm run contrast` (in CI) |
 | The entry JS chunk stays under its gzip budget; rarely needed libraries load with `import()` | `npm run bundle-size` (in CI) |
 | Seat counts never overrun under concurrent registration | `TestConcurrentGoingRespectsCapacity` |
+| A save that takes a revision checks it with the one shared check inside its write transaction (DEC-163) | `TestSavesCheckTheirRevisionInTheirTransaction`, `TestEditRevisionGuardCatchesABypass` |
 | Secrets in URLs never reach the access log | `TestAccessLogKeepsSecretsOut` |
 | Tests sit next to their code | `TestTestFilesSitNextToTheirSource` |
 | Source guards read the whole production tree, not a directory glob | `internal/guardkit` tests, `TestContactRequestTextGuardReadsTheRealTree` |

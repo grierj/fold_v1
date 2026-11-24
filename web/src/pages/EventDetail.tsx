@@ -19,6 +19,7 @@ import { Field, FormError, Input } from "../components/ui/Field";
 import { Button, ButtonLink } from "../components/ui/Button";
 import { ExternalLinkIcon } from "../components/icons";
 import { EventVisibilityControl } from "../components/EventVisibility";
+import type { RevisionConflict } from "../lib/useRevisionSave";
 import { RsvpButtons } from "../components/RsvpButtons";
 import { GuestRegistrationForm } from "../components/GuestRegistrationForm";
 import { DateActions } from "../components/DateActions";
@@ -68,12 +69,12 @@ function EventDetailContent() {
   const [deleting, setDeleting] = useState(false);
   const deletingNow = useRef(false);
   const [editing, setEditing] = useState(false);
-  // A series save was refused and its editor closed on its own (DEC-161, DEC-162): someone else changed the event,
-  // or this person may no longer manage it. It is said once the page shows the event as it is now, until the editor
-  // opens again. The page was read from nothing, so no live region outlasts that read: the line takes focus, which
+  // A save in the panel was refused and the panel closed on its own (DEC-161, DEC-163): the event changed (another
+  // person, another tab or this person's own action), or this person may no longer manage it. It is said once the
+  // page's read answers, even when it finds no event, until the editor opens again. The page was read from nothing, so no live region outlasts that read: the line takes focus, which
   // reads it out and brings it into view whatever else the page scrolled to.
-  const unsavedPending = useRef<"changed" | "gone" | null>(null);
-  const [unsaved, setUnsaved] = useState<"changed" | "gone" | null>(null);
+  const unsavedPending = useRef<RevisionConflict | null>(null);
+  const [unsaved, setUnsaved] = useState<RevisionConflict | null>(null);
   const unsavedNotice = useRef<HTMLParagraphElement>(null);
   // The series editor and the visibility control share a panel that a save closes: while either runs, the other
   // is locked and the panel stays open, so neither's answer is lost.
@@ -144,7 +145,7 @@ function EventDetailContent() {
     if (!document.activeElement || document.activeElement === document.body) editButton.current?.focus();
   }, [editing]);
   useEffect(() => {
-    if (!unsavedPending.current || loading || !page) return;
+    if (!unsavedPending.current || loading) return;
     setUnsaved(unsavedPending.current);
     unsavedPending.current = null;
   }, [loading, page]);
@@ -176,6 +177,16 @@ function EventDetailContent() {
     if (editorRef.current?.contains(document.activeElement)) document.getElementById("main")?.focus({ preventScroll: true });
   }
 
+  // A save in the panel (the series editor or the visibility control) was refused and not sent again: the panel closes
+  // on its own, the page reads the event from nothing and says the changes weren't saved (DEC-161, DEC-163).
+  function closeOnConflict(why: RevisionConflict) {
+    parkFocus();
+    setEditing(false);
+    unsavedPending.current = why;
+    setRoomsRevision((n) => n + 1);
+    void load.retry();
+  }
+
   function reportSeriesFeedback(eventId: number, date: string, actorResults: ActorRsvpResult[]) {
     const signal = { eventId, date, actorResults, revision: ++seriesFeedbackRevision.current };
     setPage((current) => current ? {
@@ -193,14 +204,24 @@ function EventDetailContent() {
     );
   }
 
+  const unsavedLine = (text: string) => (
+    <p ref={unsavedNotice} role="status" tabIndex={-1} className="mb-4 scroll-mt-4 rounded-lg border border-border bg-sunken px-4 py-3 text-sm outline-none">
+      {text}
+    </p>
+  );
+
+  // Without the event the line says nothing about it.
+  const unsavedNoEvent = unsaved ? unsavedLine("Your changes weren't saved.") : null;
+
   if (notFound) {
-    return <Missing title="Event not found" body="It may have been cancelled or removed, or it may be private." />;
+    return <Missing title="Event not found" body="It may have been cancelled or removed, or it may be private." notice={unsavedNoEvent} />;
   }
 
   if (!page) {
     return (
       <div className="fold-page fold-page-narrow">
         <h1 className="text-3xl font-bold mb-6">Event unavailable</h1>
+        {unsavedNoEvent}
         <ErrorNotice message={error ?? "We couldn't load this event."} onRetry={() => void load.retry()} />
       </div>
     );
@@ -259,15 +280,11 @@ function EventDetailContent() {
           </div>
         )}
       </div>
-      {unsaved && (
-        <p ref={unsavedNotice} role="status" tabIndex={-1} className="mb-4 scroll-mt-4 rounded-lg border border-border bg-sunken px-4 py-3 text-sm outline-none">
-          {unsaved === "changed"
-            ? "Someone changed this event while you were editing, so your changes weren't saved. This is the event as it is now."
-            : canManage
-              ? "Your changes weren't saved. This is the event as it is now."
-              : "You can no longer manage this event, so your changes weren't saved."}
-        </p>
-      )}
+      {unsaved && unsavedLine(unsaved === "changed"
+        ? "This event changed while you were editing, so your changes weren't saved. This is the event as it is now."
+        : canManage
+          ? "Your changes weren't saved. This is the event as it is now."
+          : "You can no longer manage this event, so your changes weren't saved.")}
       <div className="grid gap-4 pb-4 sm:grid-cols-2 sm:gap-8">
         <div className="space-y-2">
           {line && <p className="font-semibold wrap-anywhere">{line}</p>}
@@ -304,13 +321,7 @@ function EventDetailContent() {
               setRoomsRevision((n) => n + 1);
               void load.retry();
             }}
-            onConflict={(why) => {
-              parkFocus();
-              setEditing(false);
-              unsavedPending.current = why;
-              setRoomsRevision((n) => n + 1);
-              void load.retry();
-            }}
+            onConflict={closeOnConflict}
             onClose={() => {
               closedPanel.current = true;
               setEditing(false);
@@ -320,17 +331,21 @@ function EventDetailContent() {
           />
           {canSetVisibility && (
             <EventVisibilityControl
-              key={`${event.id}-${event.visibility}-${event.leaderOpened}`}
+              // The group's audience is part of what the control shows and of the revision it sends: a read that
+              // changes it starts the control again, so the two always come from the same read.
+              key={`${event.id}-${event.visibility}-${event.leaderOpened}-${event.groupVisibility ?? ""}`}
               eventId={event.id}
               churchWide={event.churchWide}
               groupName={event.groupName}
               groupVisibility={event.groupVisibility}
               visibility={event.visibility}
               leaderOpened={event.leaderOpened}
+              revision={event.revision}
               onSaved={() => {
                 parkFocus();
                 void load.retry();
               }}
+              onConflict={closeOnConflict}
               action={visibilityAction}
               locked={seriesAction.running}
             />

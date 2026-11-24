@@ -1,5 +1,6 @@
 import { Form } from "./ui/Form";
 import { useEffect, useId, useLayoutEffect, useRef, useState } from "react";
+import { ApiError } from "../api/core";
 import { Events } from "../api/events";
 import type { Visibility, VisibilityImpact } from "../types";
 import { GroupVisibilityReview } from "./GroupVisibilityReview";
@@ -10,8 +11,15 @@ import { ROSTER_STALE, ROSTER_WAITING, visibilityRank } from "../lib/visibilityC
 import { useRosterActivityOf } from "../lib/dateWrites";
 import { useFocusHome, useKeepFocusHome, useLockedFocus } from "../lib/focusHome";
 import { useAction, type Action } from "../lib/useAction";
+import { lostAuthority, useRevisionSave, type RevisionConflict } from "../lib/useRevisionSave";
 import { Checkbox, Choices, Field, FormError, Input, Radio } from "./ui/Field";
 import { Button } from "./ui/Button";
+
+interface Audience {
+  visibility: Visibility;
+  leaderOpened?: boolean;
+  groupVisibility?: Visibility;
+}
 
 const CHOICES: { value: Visibility; label: string; description: string }[] = [
   { value: "public", label: "Public", description: "Anyone can see it." },
@@ -26,7 +34,8 @@ const CHOICES: { value: Visibility; label: string; description: string }[] = [
 // every reset of its dates, is saved only with the consent of the impact the
 // server showed (DEC-158). A review opens, and is confirmed, only when no
 // sign-up update on the event began, ended or is in flight since the request
-// it comes from was sent; while one is in flight Save waits.
+// it comes from was sent; while one is in flight Save waits. The save names the
+// read the control opened with and a refusal is the shared protocol's (DEC-163).
 export function EventVisibilityControl({
   eventId,
   groupName,
@@ -34,7 +43,9 @@ export function EventVisibilityControl({
   visibility,
   leaderOpened,
   churchWide,
+  revision,
   onSaved,
+  onConflict,
   action: shared,
   locked = false,
 }: {
@@ -44,7 +55,11 @@ export function EventVisibilityControl({
   visibility: Visibility;
   leaderOpened?: boolean;
   churchWide?: boolean;
+  // The event page's revision when this control opened.
+  revision?: string;
   onSaved: () => void;
+  // The save was refused and not sent again: the page shows the event as it is now.
+  onConflict?: (why: RevisionConflict) => void;
   // The page's run for this control, so it can lock what shares the panel (the series editor) while it runs.
   action?: Action;
   // Another run in the same panel is on its way.
@@ -83,6 +98,23 @@ export function EventVisibilityControl({
 
     return () => { live = false; };
   }, [eventId, visibility]);
+
+  // What this save can write: the audience and whether it is leader-opened, which follows the group's. The page's
+  // read lists 90 days of dates and a reset reaches every later one, so a refused reset is always a conflict.
+  const opened: Audience = { visibility, leaderOpened, groupVisibility };
+
+  const send = useRevisionSave({
+    opened,
+    revision,
+    read: async () => {
+      const stored = await Events.get(eventId);
+
+      return { allowed: stored.canSetVisibility, revision: stored.event.revision, value: stored.event };
+    },
+    fields: (a) => (resetOverrides ? null : { visibility: a.visibility, leaderOpened: a.leaderOpened ?? false, groupVisibility: a.groupVisibility ?? null }),
+    onConflict,
+  });
+
   // `mark` is the session roster sequence the request behind the review was sent at.
   const [review, setReview] = useState<{ impact: VisibilityImpact; mark: number } | null>(null);
 
@@ -148,6 +180,13 @@ export function EventVisibilityControl({
       try {
         impact = await Events.visibilityImpact(eventId, value, resetOverrides);
       } catch (err) {
+        // The preview is refused like the save would be: the page closes the panel and says so.
+        if (err instanceof ApiError && lostAuthority(err)) {
+          onConflict?.("gone");
+
+          return false;
+        }
+
         setError(errorText(err, "We couldn't check this event."));
 
         return false;
@@ -181,7 +220,15 @@ export function EventVisibilityControl({
     setError(null);
 
     try {
-      await Events.setVisibility(eventId, { visibility: value, reason: reason.trim() || undefined, consent, resetOverrides });
+      const sent = await send((rev) => Events.setVisibility(eventId, { visibility: value, reason: reason.trim() || undefined, consent, resetOverrides, revision: rev }));
+
+      if (sent === "refused") {
+        setError("We couldn't change who can see this. Please try again.");
+
+        return false;
+      }
+
+      if (sent !== "saved") return false;
       setReview(null);
       onSaved();
     } catch (err) {

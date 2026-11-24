@@ -130,11 +130,6 @@ func refuseKeptDates(tx *gorm.DB, raised map[uint]string) error {
 	return keptDatesConflict{keptDatesConflictJSON{KeptDates: kept}}
 }
 
-// dateGeneration is this process's generation, 16 hex characters.
-func (a *App) dateGeneration() string {
-	return hex.EncodeToString(a.processKey("date-edit-generation:v1")[:8])
-}
-
 // dateToken is the revision an editor based on occ holds:
 // 1.<generation>.<occurrence id>.<event revision>.<date revision>.<place>.
 // place tags the group's place when it is what the date shows (the date and
@@ -150,7 +145,7 @@ func (a *App) dateToken(ev *models.Event, occ *models.EventOccurrence, shown *mo
 		m.Write([]byte(shown.Location))
 		place = hex.EncodeToString(m.Sum(nil)[:8])
 	}
-	return fmt.Sprintf("1.%s.%d.%d.%d.%s", a.dateGeneration(), occ.ID, ev.EditRevision, occ.EditRevision, place)
+	return a.editRevision(occ.ID, ev.EditRevision, occ.EditRevision, place)
 }
 
 // baseSuperseded is whether base, a well-formed token of this generation, is
@@ -563,7 +558,7 @@ func (a *App) editDateIn(tx *gorm.DB, d *singleDate, me *models.User, ip string,
 	}
 	shown := a.groupShownTo(me, f.group, f.rel)
 	current := a.dateToken(&ev, &o, shown)
-	if edit.intent.base[2:18] != a.dateGeneration() {
+	if edit.intent.base[2:18] != a.editGeneration() {
 		return occurrenceJSON{}, errDateChanged
 	}
 	if o.EditReceipt != nil && hmac.Equal(o.EditReceipt, a.dateReceipt(me.ID, ev.ID, o.ID, edit.intent, current)) {
