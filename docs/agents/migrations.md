@@ -70,6 +70,9 @@ it is for.
   earlier release starts on the upgraded database). Its writes advance the
   counters (proven with raw SQL in the migration test, not a previous binary).
   A binary that predates `00008`, including v0.1.0, requires the pre-upgrade dump.
+  The server no longer reads or writes `edit_receipt` (DEC-164); the column and the trigger's
+  clearing of it stay until a contract migration drops them, which the contract gate allows only
+  once a tagged release holds `00010`.
 - `00011` adds `push_subscriptions.binding_generation` with a BEFORE UPDATE trigger that adds one
   whenever the owner or a key changes and keeps the stored value otherwise, overwriting what a
   writer supplies, so a previous binary's writes count too. A push service's answer changes a

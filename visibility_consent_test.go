@@ -428,12 +428,11 @@ func TestVisibilityCancellationsCancelExactlyTheCheckedSet(t *testing.T) {
 			}
 			send := func() *httptest.ResponseRecorder { return f.admin.do("PUT", path, body, true) }
 			if route == "date" {
-				// The editor's question first, then the same attempt with its
+				// The editor's question first, then the same request with its
 				// consent, the confirmation the hook below runs under.
 				base := editBaseOf(t, f.admin, f.ev.ID, f.day(0))
-				attempt := newDateAttempt(t)
-				asked := wantDateEdit(t, f.admin, f.ev.ID, f.day(0), dateEditBody(attempt, base.Revision, body), http.StatusConflict, "date_needs_consent")
-				confirmed := dateEditBody(attempt, base.Revision, body, "consent", consentOf(t, asked))
+				asked := wantDateEdit(t, f.admin, f.ev.ID, f.day(0), dateEditBody(base.Revision, body), http.StatusConflict, "date_needs_consent")
+				confirmed := dateEditBody(base.Revision, body, "consent", consentOf(t, asked))
 				send = func() *httptest.ResponseRecorder { return postDateEdit(f.admin, f.ev.ID, f.day(0), confirmed) }
 			} else {
 				body = confirmVisibility(t, f.admin, path, body)
@@ -525,7 +524,7 @@ var checkedWriters = func() []checkedWriter {
 			date := models.FormatCalendarDate(f.dates[0].OriginalDate)
 			changes := map[string]any{"visibility": io}
 			token := dateEditConsent(t, f.admin, f.ev.ID, date, changes)
-			body := dateEditBody(newDateAttempt(t), editBaseOf(t, f.admin, f.ev.ID, date).Revision, changes, "consent", token)
+			body := dateEditBody(editBaseOf(t, f.admin, f.ev.ID, date).Revision, changes, "consent", token)
 			return postDateEdit(f.admin, f.ev.ID, date, body)
 		}, false},
 		{"event", put((*vcFixture).eventPath), true},
@@ -957,7 +956,7 @@ func TestEventResetBindsTheCurrentSeries(t *testing.T) {
 		apiDo(t, f.admin, "PUT", f.eventPath(), confirmVisibility(t, f.admin, f.eventPath(), map[string]any{"visibility": models.VisibilityPrivate}), http.StatusOK)
 		before := f.everything(t)
 		base := editBaseOf(t, f.admin, f.ev.ID, f.day(0))
-		fresh := wantDecision(t, postDateEdit(f.admin, f.ev.ID, f.day(0), dateEditBody(newDateAttempt(t), base.Revision, body, "consent", token)))
+		fresh := wantDecision(t, postDateEdit(f.admin, f.ev.ID, f.day(0), dateEditBody(base.Revision, body, "consent", token)))
 		if fresh.CurrentVisibility != models.VisibilityPrivate || f.everything(t) != before {
 			t.Fatalf("the date's 409 names %q, or the old token wrote", fresh.CurrentVisibility)
 		}
@@ -1021,7 +1020,7 @@ func TestDateEditReasonNamedLikeAResetSaves(t *testing.T) {
 	}
 	date := models.FormatCalendarDate(f.dates[3].OriginalDate)
 	base := editBaseOf(t, f.admin, f.ev.ID, date)
-	wantDateEdit(t, f.admin, f.ev.ID, date, dateEditBody(newDateAttempt(t), base.Revision, map[string]any{"visibility": "private"}, "reason", " series_reset "), http.StatusOK, "")
+	wantDateEdit(t, f.admin, f.ev.ID, date, dateEditBody(base.Revision, map[string]any{"visibility": "private"}, "reason", " series_reset "), http.StatusOK, "")
 	if got := f.takeDeclared(); !slices.Equal(got, []string{consentNoReview}) {
 		t.Fatalf("the guarded edit declared %v", got)
 	}
@@ -1136,7 +1135,7 @@ func writerRowsUnderTheGate(t *testing.T) {
 		if consent != "" {
 			args = append([]any{"consent", consent}, extra...)
 		}
-		wantDateEdit(t, f.admin, f.ev.ID, date, dateEditBody(newDateAttempt(t), editBaseOf(t, f.admin, f.ev.ID, date).Revision, changes, args...), http.StatusOK, "")
+		wantDateEdit(t, f.admin, f.ev.ID, date, dateEditBody(editBaseOf(t, f.admin, f.ev.ID, date).Revision, changes, args...), http.StatusOK, "")
 	}
 	rows := []row{
 		{"4 a church-wide event created public and private", func(t *testing.T, f *vcFixture) {
@@ -1316,7 +1315,7 @@ func TestConsentEpochCheckIsOrderedWithTheBoot(t *testing.T) {
 			token := dateEditConsent(t, f.admin, f.ev.ID, date, changes)
 			revision := editBaseOf(t, f.admin, f.ev.ID, date).Revision
 			return token, func(c string) *httptest.ResponseRecorder {
-				return postDateEdit(f.admin, f.ev.ID, date, dateEditBody(newDateAttempt(t), revision, changes, "consent", c))
+				return postDateEdit(f.admin, f.ev.ID, date, dateEditBody(revision, changes, "consent", c))
 			}
 		}},
 	}
@@ -1866,7 +1865,7 @@ func TestVisibilityCancellationsConsumeACheckedPlan(t *testing.T) {
 	}
 	for name, mutated := range map[string]map[string]string{
 		"a second marker":                    mutate("api_events.go", "func (a *App) apiCreateEvent(", "func marker(tx *gorm.DB) { tx.Exec(\"SELECT set_config('fold.visibility_"+"consent', 'v1', true)\") }\nfunc (a *App) apiCreateEvent("),
-		"a date writer with no check":        mutate("api_date_edits.go", "plan, token, err := a.checkConsentIn(tx, &edit.intent.consent, h, b.entries)", "plan, token, err := a.checkConsentInX(tx, &edit.intent.consent, h, b.entries)"),
+		"a date writer with no check":        mutate("api_date_edits.go", "plan, token, err := a.checkConsentIn(tx, &edit.consent, h, b.entries)", "plan, token, err := a.checkConsentInX(tx, &edit.consent, h, b.entries)"),
 		"a check in a loop":                  mutate("api_group_visibility.go", "plan, token, err := a.checkConsentIn(tx, given, h, b.entries)", "var plan *consent.Plan[dateLosers]; var token string; for range 1 { plan, token, err = a.checkConsentIn(tx, given, h, b.entries) }"),
 		"no Done":                            mutate("api_event_access.go", "return plan.Done()", "return nil"),
 		"a read of the plan's copy again":    mutate("api_group_visibility.go", "dates, rows, now := sel.dates, sel.rows, sel.now", "dates, rows, now := c.Selection().dates, sel.rows, sel.now"),
@@ -2337,11 +2336,10 @@ func TestVisibilityConsentLifecycleMatrix(t *testing.T) {
 				if r.name == "date" {
 					// The guarded edit on a base read after the transition, so
 					// only the consent can be stale; the answer to its
-					// question resends the same attempt.
+					// question resends the same request.
 					base := editBaseOf(t, f.admin, f.ev.ID, f.day(0))
-					attempt := newDateAttempt(t)
 					send = func(body map[string]any, token string) *httptest.ResponseRecorder {
-						return postDateEdit(f.admin, f.ev.ID, f.day(0), dateEditBody(attempt, base.Revision, body, "consent", token))
+						return postDateEdit(f.admin, f.ev.ID, f.day(0), dateEditBody(base.Revision, body, "consent", token))
 					}
 				}
 				body := f.decided(t, path, r.body)
@@ -2987,7 +2985,7 @@ func TestVisibilityConsentPreviewMatchesWrite(t *testing.T) {
 			}
 			revision := editBaseOf(t, f.admin, f.ev.ID, day(f, 1)).Revision
 			f.twin(t, f.datePath(1), changes, nil, func(c string) *httptest.ResponseRecorder {
-				return postDateEdit(f.admin, f.ev.ID, day(f, 1), dateEditBody(newDateAttempt(t), revision, changes, "consent", c))
+				return postDateEdit(f.admin, f.ev.ID, day(f, 1), dateEditBody(revision, changes, "consent", c))
 			})
 		})
 	}
@@ -3132,7 +3130,7 @@ func TestVisibilityConsentAuthority(t *testing.T) {
 
 // TestDateEditConsentRefusalsRunOnce (C12): the guarded date edit reruns
 // only a date that ended during its first attempt, after a confirmed
-// rollback (singleDateMutation); a consent mismatch, and the same attempt
+// rollback (singleDateMutation); a consent mismatch, and the same request
 // asked again, are answered from their first attempt with nothing written. An
 // outdated page's body on the retired PUT never reaches the writer.
 func TestDateEditConsentRefusalsRunOnce(t *testing.T) {
@@ -3140,7 +3138,6 @@ func TestDateEditConsentRefusalsRunOnce(t *testing.T) {
 	f.outsider(t, "outsider", 0)
 	changes := map[string]any{"visibility": models.VisibilityInviteOnly}
 	base := editBaseOf(t, f.admin, f.ev.ID, f.day(0))
-	attempt := newDateAttempt(t)
 	for _, tc := range []struct {
 		name     string
 		send     func() *httptest.ResponseRecorder
@@ -3148,10 +3145,10 @@ func TestDateEditConsentRefusalsRunOnce(t *testing.T) {
 		attempts int64
 	}{
 		{"a mismatch", func() *httptest.ResponseRecorder {
-			return postDateEdit(f.admin, f.ev.ID, f.day(0), dateEditBody(attempt, base.Revision, changes, "consent", strings.Repeat("0", 32)))
+			return postDateEdit(f.admin, f.ev.ID, f.day(0), dateEditBody(base.Revision, changes, "consent", strings.Repeat("0", 32)))
 		}, func(t *testing.T, w *httptest.ResponseRecorder) { wantDecision(t, w) }, 1},
-		{"the same attempt with no consent", func() *httptest.ResponseRecorder {
-			return postDateEdit(f.admin, f.ev.ID, f.day(0), dateEditBody(attempt, base.Revision, changes))
+		{"the same request with no consent", func() *httptest.ResponseRecorder {
+			return postDateEdit(f.admin, f.ev.ID, f.day(0), dateEditBody(base.Revision, changes))
 		}, func(t *testing.T, w *httptest.ResponseRecorder) { wantDecision(t, w) }, 1},
 		{"an outdated body on the retired PUT", func() *httptest.ResponseRecorder {
 			return f.admin.do("PUT", f.datePath(0), with(changes, "confirm", true), true)

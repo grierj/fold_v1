@@ -691,6 +691,8 @@ shared `components/ui` controls. Dates are formatted only in `lib/when.ts`.
       only for equality.
     - A Save sends `{attempt, revision, changes}` with only the changed
       fields (a blank capacity is `null`); Try again resends the same bytes.
+      (As built then. DEC-164 replaced the replay: the client sends
+      `{revision, changes}` and the server ignores `attempt`.)
       A 200 is an acknowledgment only when `occurrence.id` is the edited
       date's and `occurrence.revision` is a non-empty string; an unreadable
       2xx, a network error and a 5xx are unsure.

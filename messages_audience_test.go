@@ -206,9 +206,9 @@ func TestEventAudienceLeavesOutADateTheyCannotSee(t *testing.T) {
 	// where the edit's own before pass ends the grant.
 	clock := newMutableClock(f.app, target.EndsAt.Add(-time.Hour))
 	base := editBaseOf(t, f.admin, f.event.ID, date)
-	wantDateEdit(t, f.admin, f.event.ID, date, dateEditBody(newDateAttempt(t), base.Revision, changes), http.StatusConflict, "date_kept_after_leaving")
+	wantDateEdit(t, f.admin, f.event.ID, date, dateEditBody(base.Revision, changes), http.StatusConflict, "date_kept_after_leaving")
 	clock.set(target.EndsAt)
-	wantDateEdit(t, f.admin, f.event.ID, date, dateEditBody(newDateAttempt(t), base.Revision, changes), http.StatusOK, "")
+	wantDateEdit(t, f.admin, f.event.ID, date, dateEditBody(base.Revision, changes), http.StatusOK, "")
 	f.app.clock = nil
 	var kept models.Registration
 	gormMust(t, f.app.DB.Where("occurrence_id = ? AND user_id = ?", target.ID, f.recipient.ID).First(&kept))
@@ -383,7 +383,7 @@ func TestAudiencePreviewNeverStraddlesAnEdit(t *testing.T) {
 		if step != "grants" || !fired.CompareAndSwap(false, true) {
 			return
 		}
-		w := postDateEdit(f.admin, f.event.ID, date, dateEditBody(newDateAttempt(t), base.Revision,
+		w := postDateEdit(f.admin, f.event.ID, date, dateEditBody(base.Revision,
 			map[string]any{"startsLocal": target.StartsAt.Add(2 * time.Hour).UTC().Format("2006-01-02T15:04"), "title": "Moved secret title"}))
 		if w.Code != http.StatusOK {
 			t.Errorf("the edit at the seam: %d %s", w.Code, w.Body.String())

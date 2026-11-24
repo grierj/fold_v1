@@ -259,11 +259,9 @@ real-droplet restore checks, which stay owed (DEC-165; see `deploy.md`).
   `TestDefinitiveResponsesEndTheAttempt`, `TestOutcomeClassification`, `TestSettleAuthorization`,
   `TestSettleUnknownCommit`, `TestRestoreFenceFencedIdAcrossARestart`.
 - The guarded date edit (`api_date_edits.go`) derives its keys from the same per-process key
-  (`processKey`), so its tokens and the receipt it stores on a date (`event_occurrences.edit_receipt`)
-  never match after a restart, restore or rollback. The receipt is a 32-byte HMAC with no readable
-  person id, reason or draft text; erasure writes no `events` or `event_occurrences` column, and the
-  residue scan reads the bytes like any other. It does not reuse `admin_operation_attempts`: the
-  receipt is one value per date that any tracked change clears, and needs no sweep. A database
+  (`processKey`), so its tokens never match after a restart, restore or rollback. It stores no
+  replay receipt: `event_occurrences.edit_receipt` is unused (DEC-164) until a contract migration
+  drops it, and erasure writes no `events` or `event_occurrences` column. A database
   restored under a still-running process keeps the process key, the same limit as the barrier's
   (`TestDateEditRestoreUnderLiveProcessIsTheStatedLimit`; `TestDateEditRestartRefusesOldTokens`,
   `TestDateEditRestoredDumpRefusesExactOldToken`).

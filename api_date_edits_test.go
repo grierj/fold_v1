@@ -2,8 +2,6 @@ package main
 
 import (
 	"bytes"
-	"crypto/rand"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -38,15 +36,6 @@ func managedDatePath(eventID uint, date string) string {
 	return fmt.Sprintf("/api/v1/events/%d/occurrences/%s", eventID, date)
 }
 
-func newDateAttempt(t *testing.T) string {
-	t.Helper()
-	b := make([]byte, 16)
-	if _, err := rand.Read(b); err != nil {
-		t.Fatal(err)
-	}
-	return hex.EncodeToString(b)
-}
-
 // editBaseOf reads one date's edit base through the manager's HTTP read.
 func editBaseOf(t *testing.T, c *apiClient, eventID uint, date string) occurrenceJSON {
 	t.Helper()
@@ -62,8 +51,8 @@ func editBaseOf(t *testing.T, c *apiClient, eventID uint, date string) occurrenc
 	return body.Occurrence
 }
 
-func dateEditBody(attempt, revision string, changes map[string]any, extra ...any) map[string]any {
-	body := map[string]any{"attempt": attempt, "revision": revision, "changes": changes}
+func dateEditBody(revision string, changes map[string]any, extra ...any) map[string]any {
+	body := map[string]any{"revision": revision, "changes": changes}
 	for i := 0; i+1 < len(extra); i += 2 {
 		body[extra[i].(string)] = extra[i+1]
 	}
@@ -102,8 +91,8 @@ func wantEditedDate(t *testing.T, w *httptest.ResponseRecorder, base occurrenceJ
 }
 
 // saveDate is an ordinary save of one date through the guarded edit, as the
-// date editor sends it: the base from c's own HTTP edit-base read, a fresh
-// attempt and only the changed fields (a nil value clears one), with extra as
+// date editor sends it: the base from c's own HTTP edit-base read and only
+// the changed fields (a nil value clears one), with extra as
 // the body's own fields (a visibility change's reason). It wants status and,
 // for a refusal, code; a 200 must acknowledge the date. It never answers a
 // consent question: a save meant to cancel registrations is
@@ -111,7 +100,7 @@ func wantEditedDate(t *testing.T, w *httptest.ResponseRecorder, base occurrenceJ
 func saveDate(t *testing.T, c *apiClient, eventID uint, date string, changes map[string]any, status int, code string, extra ...any) *httptest.ResponseRecorder {
 	t.Helper()
 	base := editBaseOf(t, c, eventID, date)
-	w := wantDateEdit(t, c, eventID, date, dateEditBody(newDateAttempt(t), base.Revision, changes, extra...), status, code)
+	w := wantDateEdit(t, c, eventID, date, dateEditBody(base.Revision, changes, extra...), status, code)
 	if status == http.StatusOK {
 		wantEditedDate(t, w, base)
 	}
@@ -120,13 +109,12 @@ func saveDate(t *testing.T, c *apiClient, eventID uint, date string, changes map
 
 // saveDateConsenting is a save meant to cancel registrations, as the editor
 // asks it: the first answer must be 409 date_needs_consent naming someone,
-// and the same attempt and revision sent again with that question's consent
+// and the same revision and changes sent again with that question's consent
 // must save. It returns the question's impact for the caller's own checks.
 func saveDateConsenting(t *testing.T, c *apiClient, eventID uint, date string, changes map[string]any, extra ...any) visibilityImpactJSON {
 	t.Helper()
 	base := editBaseOf(t, c, eventID, date)
-	attempt := newDateAttempt(t)
-	w := wantDateEdit(t, c, eventID, date, dateEditBody(attempt, base.Revision, changes, extra...), http.StatusConflict, "date_needs_consent")
+	w := wantDateEdit(t, c, eventID, date, dateEditBody(base.Revision, changes, extra...), http.StatusConflict, "date_needs_consent")
 	var asked dateNeedsConsentJSON
 	if err := json.Unmarshal(w.Body.Bytes(), &asked); err != nil {
 		t.Fatalf("answer %q: %v", w.Body.String(), err)
@@ -134,7 +122,7 @@ func saveDateConsenting(t *testing.T, c *apiClient, eventID uint, date string, c
 	if len(asked.Impact.Tightened) == 0 || asked.Impact.Tightened[0].Registrants == 0 || !consent.WellFormed(asked.Impact.Consent) {
 		t.Fatalf("the consent question names nobody: %s", w.Body.String())
 	}
-	w = wantDateEdit(t, c, eventID, date, dateEditBody(attempt, base.Revision, changes, append(slices.Clone(extra), "consent", asked.Impact.Consent)...), http.StatusOK, "")
+	w = wantDateEdit(t, c, eventID, date, dateEditBody(base.Revision, changes, append(slices.Clone(extra), "consent", asked.Impact.Consent)...), http.StatusOK, "")
 	wantEditedDate(t, w, base)
 	return asked.Impact
 }
@@ -285,7 +273,7 @@ func TestDateEditAppliesAndAnswersRevision(t *testing.T) {
 	if base.Revision == "" {
 		t.Fatal("the manager's event page has no revision")
 	}
-	w := wantDateEdit(t, f.admin, f.event.ID, f.date(0), dateEditBody(newDateAttempt(t), base.Revision, map[string]any{"title": "  Harvest supper "}), http.StatusOK, "")
+	w := wantDateEdit(t, f.admin, f.event.ID, f.date(0), dateEditBody(base.Revision, map[string]any{"title": "  Harvest supper "}), http.StatusOK, "")
 	got := answeredRevision(t, w)
 	if got == base.Revision {
 		t.Fatal("an applied edit answered its base revision")
@@ -302,7 +290,7 @@ func TestDateEditAppliesAndAnswersRevision(t *testing.T) {
 	if b := editBaseOf(t, f.admin, f.event.ID, f.date(0)); b.Revision != got || b.Title != "Harvest supper" || b.Cancelled {
 		t.Fatalf("edit base = %+v", b)
 	}
-	if o := occurrenceRow(t, f.app, f.dates[0].ID); o.TitleOverride == nil || *o.TitleOverride != "Harvest supper" || len(o.EditReceipt) != 32 {
+	if o := occurrenceRow(t, f.app, f.dates[0].ID); o.TitleOverride == nil || *o.TitleOverride != "Harvest supper" {
 		t.Fatalf("stored = %+v", o)
 	}
 	// Nobody else sees a token: not a member, not a signed-out visitor.
@@ -320,7 +308,7 @@ func TestManagedDateAnswersAMovedDateByItsOriginalDay(t *testing.T) {
 	f := newDateEditFixture(t)
 	base := editBaseOf(t, f.leader, f.event.ID, f.date(0))
 	moved := f.dates[0].StartsAt.AddDate(0, 0, 2).Format("2006-01-02T15:04")
-	w := wantDateEdit(t, f.leader, f.event.ID, f.date(0), dateEditBody(newDateAttempt(t), base.Revision, map[string]any{"startsLocal": moved}), http.StatusOK, "")
+	w := wantDateEdit(t, f.leader, f.event.ID, f.date(0), dateEditBody(base.Revision, map[string]any{"startsLocal": moved}), http.StatusOK, "")
 	after := editBaseOf(t, f.leader, f.event.ID, f.date(0))
 	if after.ID != f.dates[0].ID || after.EventID != f.event.ID || after.Date != f.date(0) || after.Revision != answeredRevision(t, w) {
 		t.Fatalf("moved date read by its original day = %+v", after)
@@ -366,7 +354,7 @@ func TestDateEditRefusesStaleRevision(t *testing.T) {
 			base := editBaseOf(t, f.admin, f.event.ID, f.date(0))
 			write()
 			before := f.state(t)
-			wantDateEdit(t, f.admin, f.event.ID, f.date(0), dateEditBody(newDateAttempt(t), base.Revision, map[string]any{"location": "Kitchen"}), http.StatusConflict, "date_changed")
+			wantDateEdit(t, f.admin, f.event.ID, f.date(0), dateEditBody(base.Revision, map[string]any{"location": "Kitchen"}), http.StatusConflict, "date_changed")
 			if after := f.state(t); after != before {
 				t.Fatalf("a stale edit wrote:\n%s\n%s", before, after)
 			}
@@ -381,10 +369,10 @@ func TestDateEditDelayedDeliveryABA(t *testing.T) {
 	f := newDateEditFixture(t)
 	gormMust(t, f.app.DB.Create(&models.Registration{UserID: &f.memberUser.ID, OccurrenceID: f.dates[0].ID, Status: models.RegGoing, AttendanceMode: models.AttendanceInPerson, Source: "web"}))
 	base := editBaseOf(t, f.admin, f.event.ID, f.date(0))
-	held := f.leader.doHeld("POST", dateEditPath(f.event.ID, f.date(0)), dateEditBody(newDateAttempt(t), base.Revision, map[string]any{"startsLocal": f.dates[0].StartsAt.Add(time.Hour).Format("2006-01-02T15:04")}))
+	held := f.leader.doHeld("POST", dateEditPath(f.event.ID, f.date(0)), dateEditBody(base.Revision, map[string]any{"startsLocal": f.dates[0].StartsAt.Add(time.Hour).Format("2006-01-02T15:04")}))
 	for _, start := range []time.Time{f.dates[0].StartsAt.Add(2 * time.Hour), f.dates[0].StartsAt} {
 		b := editBaseOf(t, f.admin, f.event.ID, f.date(0))
-		wantDateEdit(t, f.admin, f.event.ID, f.date(0), dateEditBody(newDateAttempt(t), b.Revision, map[string]any{"startsLocal": start.Format("2006-01-02T15:04")}), http.StatusOK, "")
+		wantDateEdit(t, f.admin, f.event.ID, f.date(0), dateEditBody(b.Revision, map[string]any{"startsLocal": start.Format("2006-01-02T15:04")}), http.StatusOK, "")
 	}
 	before := f.state(t)
 	held.release()
@@ -399,11 +387,14 @@ func TestDateEditDelayedDeliveryABA(t *testing.T) {
 	}
 }
 
-// TestDateEditReplayIsReadOnly: the same attempt again answers 200 and
-// changes nothing at all, including the reconcile work the wrapper would
-// otherwise commit: the edited date carries an exact-date grant, and the
-// clock is past that date's stored end when the replay runs.
-func TestDateEditReplayIsReadOnly(t *testing.T) {
+// TestDateEditResendOfAnAppliedEditIsRefused: the same request sent again
+// after it applied names a base the edit itself moved on, so it is refused
+// with date_changed and writes nothing: no second audit row or notice, the
+// date's values and both revision counters as the edit left them, and none
+// of the reconcile work the wrapper would otherwise commit (the edited date
+// carries an exact-date grant, and the clock is past that date's stored end
+// when the resend runs).
+func TestDateEditResendOfAnAppliedEditIsRefused(t *testing.T) {
 	f := newDepartureReadFixture(t, models.VisibilityInviteOnly, models.RegGoing, policy.OccurrenceOriginDepartureSelf)
 	edited := f.dates[1] // the retained grant's own date
 	target := models.FormatCalendarDate(edited.OriginalDate)
@@ -420,7 +411,7 @@ func TestDateEditReplayIsReadOnly(t *testing.T) {
 		},
 		"capacity raise with a waitlist": func(t *testing.T) (map[string]any, []any) {
 			gormMust(t, f.app.DB.Model(&models.Event{}).Where("id = ?", f.event.ID).Update("waitlist_enabled", true))
-			gormMust(t, f.app.DB.Model(&models.EventOccurrence{}).Where("id = ?", edited.ID).Updates(map[string]any{"capacity_override": 1, "visibility_override": nil}))
+			gormMust(t, f.app.DB.Model(&models.EventOccurrence{}).Where("id = ?", edited.ID).Updates(map[string]any{"capacity_override": 1, "visibility_override": models.VisibilityPublic}))
 			at := time.Now().UTC().Add(-time.Minute)
 			for i, u := range []*models.User{f.issuer, f.other} {
 				r := models.Registration{UserID: &u.ID, OccurrenceID: edited.ID, Status: models.RegGoing, AttendanceMode: models.AttendanceInPerson, Source: "web"}
@@ -438,37 +429,63 @@ func TestDateEditReplayIsReadOnly(t *testing.T) {
 			clock.set(time.Now().UTC())
 			changes, extra := cases[name](t)
 			base := editBaseOf(t, f.admin, f.event.ID, target)
-			body := dateEditBody(newDateAttempt(t), base.Revision, changes, extra...)
+			body := dateEditBody(base.Revision, changes, extra...)
+			// Beyond the date itself, what the edit writes: audit rows,
+			// notices and registration moves.
+			effects := func() string {
+				var statuses []string
+				gormMust(t, f.app.DB.Model(&models.Registration{}).Where("occurrence_id = ?", edited.ID).Order("id").Pluck("status", &statuses))
+				c := createEventWriteCounts(t, f.app)
+				return fmt.Sprint(statuses, c["audit"], c["notices"])
+			}
+			before := effects()
 			first := answeredRevision(t, wantDateEdit(t, f.admin, f.event.ID, target, body, http.StatusOK, ""))
+			applied := createEventWriteCounts(t, f.app)
+			if effects() == before {
+				t.Fatalf("fixture: the edit wrote no audit row, notice or registration move: %s", before)
+			}
 			// The edited date, as the edit stored it, ends; a commit of the
-			// replay's own reconcile would now end the grant.
+			// resend's own reconcile would now end the grant.
 			clock.set(occurrenceRow(t, f.app, edited.ID).EndsAt.Add(time.Minute))
 			if savedOccurrenceAccess(t, f).Status != policy.OccurrenceAccessActive {
 				t.Fatal("fixture: the grant ended early")
 			}
 			state := eventWriterState(t, f.app, f.event.ID)
-			if second := answeredRevision(t, wantDateEdit(t, f.admin, f.event.ID, target, body, http.StatusOK, "")); second != first {
-				t.Fatalf("the replay answered %q, the edit %q", second, first)
-			}
+			o := occurrenceRow(t, f.app, edited.ID)
+			var eventRev int64
+			gormMust(t, f.app.DB.Raw("SELECT edit_revision FROM events WHERE id = ?", f.event.ID).Scan(&eventRev))
+			wantDateEdit(t, f.admin, f.event.ID, target, body, http.StatusConflict, "date_changed")
 			if after := eventWriterState(t, f.app, f.event.ID); after != state {
-				t.Fatalf("the replay wrote:\n%s\n%s", state, after)
+				t.Fatalf("the resend wrote:\n%s\n%s", state, after)
+			}
+			if got := createEventWriteCounts(t, f.app); !maps.Equal(got, applied) {
+				t.Fatalf("the resend added rows: %v, after the edit %v", got, applied)
+			}
+			var eventAfter int64
+			gormMust(t, f.app.DB.Raw("SELECT edit_revision FROM events WHERE id = ?", f.event.ID).Scan(&eventAfter))
+			if after := occurrenceRow(t, f.app, edited.ID); after.EditRevision != o.EditRevision || eventAfter != eventRev || !after.UpdatedAt.Equal(o.UpdatedAt) {
+				t.Fatalf("the resend moved the revision: date %d -> %d, event %d -> %d", o.EditRevision, after.EditRevision, eventRev, eventAfter)
+			}
+			if b := editBaseOf(t, f.admin, f.event.ID, target); b.Revision != first {
+				t.Fatalf("after the resend the date reads %q, the edit answered %q", b.Revision, first)
 			}
 			if savedOccurrenceAccess(t, f).Status != policy.OccurrenceAccessActive {
-				t.Fatal("the replay committed the wrapper's reconcile")
+				t.Fatal("the resend committed the wrapper's reconcile")
 			}
 		})
 	}
 }
 
 // TestDateEditConcurrentIdenticalPosts: two identical requests, the second
-// waiting on the contact gate behind the first, apply once.
+// waiting on the contact gate behind the first, apply once: the second finds
+// the base the first moved on and is refused.
 func TestDateEditConcurrentIdenticalPosts(t *testing.T) {
 	f := newDateEditFixture(t)
 	gormMust(t, f.app.DB.Create(&models.Registration{UserID: &f.memberUser.ID, OccurrenceID: f.dates[0].ID, Status: models.RegGoing, AttendanceMode: models.AttendanceInPerson, Source: "web"}))
 	base := editBaseOf(t, f.admin, f.event.ID, f.date(0))
-	body := dateEditBody(newDateAttempt(t), base.Revision, map[string]any{"location": "Kitchen"})
-	// A second client of the same person: the receipt binds the person, and
-	// the two requests share no cookie jar.
+	body := dateEditBody(base.Revision, map[string]any{"location": "Kitchen"})
+	// A second client of the same person: the two requests share no cookie
+	// jar.
 	second := loginAPI(t, f.app, f.adminUser.Name, "password1234")
 	release := holdEventRow(t, f.app, f.event.ID)
 	one := goPostDateEdit(f.admin, f.event.ID, f.date(0), body)
@@ -477,60 +494,12 @@ func TestDateEditConcurrentIdenticalPosts(t *testing.T) {
 	waitForLockedUsersQuery(t, f.app, "%pg_advisory_xact_lock%")
 	release()
 	w1, w2 := awaitResponse(t, one), awaitResponse(t, two)
-	if w1.Code != http.StatusOK || w2.Code != http.StatusOK || answeredRevision(t, w1) != answeredRevision(t, w2) {
+	if w1.Code != http.StatusOK || w2.Code != http.StatusConflict || answerCode(t, w2) != "date_changed" {
 		t.Fatalf("identical edits: %d %s / %d %s", w1.Code, w1.Body.String(), w2.Code, w2.Body.String())
 	}
 	if n := countOf(t, f.app, f.memberUser.ID, notify.EventChanged); n != 1 {
 		t.Fatalf("%d change notices, want 1", n)
 	}
-}
-
-// TestDateEditReceiptBindsIntent: once an attempt applied, its id with any
-// other intent, or the same body from another manager, is a stale edit, and
-// the stored receipt stays the one the attempt wrote.
-func TestDateEditReceiptBindsIntent(t *testing.T) {
-	f := newDateEditFixture(t)
-	gormMust(t, f.app.DB.Model(&models.EventOccurrence{}).Where("id = ?", f.dates[1].ID).Update("visibility_override", models.VisibilityPublic))
-	base := editBaseOf(t, f.admin, f.event.ID, f.date(1))
-	attempt := newDateAttempt(t)
-	// Nobody is cancelled, so the consent is not checked; the receipt still
-	// binds it.
-	given, other := strings.Repeat("a", 32), strings.Repeat("b", 32)
-	body := dateEditBody(attempt, base.Revision, map[string]any{"visibility": "private", "title": "Open supper"}, "reason", "Members and friends", "consent", given)
-	wantDateEdit(t, f.admin, f.event.ID, f.date(1), body, http.StatusOK, "")
-	receipt := occurrenceRow(t, f.app, f.dates[1].ID).EditReceipt
-	state := f.state(t)
-	for name, other := range map[string]map[string]any{
-		"other changes": dateEditBody(attempt, base.Revision, map[string]any{"visibility": "private", "title": "Closed supper"}, "reason", "Members and friends", "consent", given),
-		"other reason":  dateEditBody(attempt, base.Revision, map[string]any{"visibility": "private", "title": "Open supper"}, "reason", "Someone else's words", "consent", given),
-		"other consent": dateEditBody(attempt, base.Revision, map[string]any{"visibility": "private", "title": "Open supper"}, "reason", "Members and friends", "consent", other),
-		"no consent":    dateEditBody(attempt, base.Revision, map[string]any{"visibility": "private", "title": "Open supper"}, "reason", "Members and friends"),
-	} {
-		t.Run(name, func(t *testing.T) {
-			wantDateEdit(t, f.admin, f.event.ID, f.date(1), other, http.StatusConflict, "date_changed")
-		})
-	}
-	t.Run("another manager", func(t *testing.T) {
-		wantDateEdit(t, f.leader, f.event.ID, f.date(1), body, http.StatusConflict, "date_changed")
-	})
-	if after := f.state(t); after != state {
-		t.Fatal("a refused replay wrote")
-	}
-	wantDateEdit(t, f.admin, f.event.ID, f.date(1), body, http.StatusOK, "")
-	if got := occurrenceRow(t, f.app, f.dates[1].ID).EditReceipt; !bytes.Equal(got, receipt) {
-		t.Fatal("a replay changed the receipt")
-	}
-}
-
-// TestDateEditReplayAfterSeriesEditConflicts: the receipt binds the token the
-// edit produced, so a later series-only change ends the replay.
-func TestDateEditReplayAfterSeriesEditConflicts(t *testing.T) {
-	f := newDateEditFixture(t)
-	base := editBaseOf(t, f.admin, f.event.ID, f.date(0))
-	body := dateEditBody(newDateAttempt(t), base.Revision, map[string]any{"title": "Moved"})
-	wantDateEdit(t, f.admin, f.event.ID, f.date(0), body, http.StatusOK, "")
-	apiDo(t, f.admin, "PUT", fmt.Sprintf("/api/v1/events/%d", f.event.ID), seriesBody(t, f.admin, fmt.Sprintf("/api/v1/events/%d", f.event.ID), map[string]any{"description": "Bring a dish"}), http.StatusOK)
-	wantDateEdit(t, f.admin, f.event.ID, f.date(0), body, http.StatusConflict, "date_changed")
 }
 
 // TestDateEditNoOpWritesNothing: changes equal to the stored values answer 200
@@ -547,7 +516,7 @@ func TestDateEditNoOpWritesNothing(t *testing.T) {
 		"equal both":       {"capacityOverride": 8, "visibility": "private"},
 	} {
 		t.Run(name, func(t *testing.T) {
-			w := wantDateEdit(t, f.admin, f.event.ID, f.date(1), dateEditBody(newDateAttempt(t), base.Revision, changes), http.StatusOK, "")
+			w := wantDateEdit(t, f.admin, f.event.ID, f.date(1), dateEditBody(base.Revision, changes), http.StatusOK, "")
 			if got := answeredRevision(t, w); got != base.Revision {
 				t.Fatalf("a no-op answered %q, base %q", got, base.Revision)
 			}
@@ -557,17 +526,17 @@ func TestDateEditNoOpWritesNothing(t *testing.T) {
 		})
 	}
 	// A capacity-only change keeps the explicit private override, and its
-	// replay is read-only too.
-	body := dateEditBody(newDateAttempt(t), base.Revision, map[string]any{"capacityOverride": 5})
+	// resend is refused without a write.
+	body := dateEditBody(base.Revision, map[string]any{"capacityOverride": 5})
 	wantDateEdit(t, f.admin, f.event.ID, f.date(1), body, http.StatusOK, "")
 	o := occurrenceRow(t, f.app, f.dates[1].ID)
 	if o.VisibilityOverride == nil || *o.VisibilityOverride != models.VisibilityPrivate || o.CapacityOverride == nil || *o.CapacityOverride != 5 {
 		t.Fatalf("after a capacity-only edit: %+v", o)
 	}
 	state = f.state(t)
-	wantDateEdit(t, f.admin, f.event.ID, f.date(1), body, http.StatusOK, "")
+	wantDateEdit(t, f.admin, f.event.ID, f.date(1), body, http.StatusConflict, "date_changed")
 	if after := f.state(t); after != state {
-		t.Fatal("the capacity replay wrote")
+		t.Fatal("the capacity resend wrote")
 	}
 	if n := auditCount(t, f.app, "event.visibility_changed") + auditCount(t, f.app, "event.visibility_override"); n != 0 {
 		t.Fatalf("%d visibility audit rows from edits that did not change it", n)
@@ -575,40 +544,40 @@ func TestDateEditNoOpWritesNothing(t *testing.T) {
 }
 
 // TestDateEditAuthorization: the same 404 and 403 as the date edit always had,
-// checked before any receipt, and the locked recheck answers 404 when access
+// checked before the revision, and the locked recheck answers 404 when access
 // is lost or the event is deleted while the body arrives. None of them write.
 func TestDateEditAuthorization(t *testing.T) {
 	f := newDateEditFixture(t)
 	stranger := loginAPI(t, f.app, f.outsiders[0].Name, "password1234")
 	base := editBaseOf(t, f.admin, f.event.ID, f.date(0))
 	state := f.state(t)
-	wantDateEdit(t, stranger, f.event.ID, f.date(0), dateEditBody(newDateAttempt(t), base.Revision, map[string]any{"title": "x"}), http.StatusNotFound, "")
-	wantDateEdit(t, f.admin, 999999, f.date(0), dateEditBody(newDateAttempt(t), base.Revision, map[string]any{"title": "x"}), http.StatusNotFound, "")
-	wantDateEdit(t, f.member, f.event.ID, f.date(0), dateEditBody(newDateAttempt(t), base.Revision, map[string]any{"title": "x"}), http.StatusForbidden, "")
-	wantDateEdit(t, f.admin, f.event.ID, "2001-01-01", dateEditBody(newDateAttempt(t), base.Revision, map[string]any{"title": "x"}), http.StatusNotFound, "")
+	wantDateEdit(t, stranger, f.event.ID, f.date(0), dateEditBody(base.Revision, map[string]any{"title": "x"}), http.StatusNotFound, "")
+	wantDateEdit(t, f.admin, 999999, f.date(0), dateEditBody(base.Revision, map[string]any{"title": "x"}), http.StatusNotFound, "")
+	wantDateEdit(t, f.member, f.event.ID, f.date(0), dateEditBody(base.Revision, map[string]any{"title": "x"}), http.StatusForbidden, "")
+	wantDateEdit(t, f.admin, f.event.ID, "2001-01-01", dateEditBody(base.Revision, map[string]any{"title": "x"}), http.StatusNotFound, "")
 	apiDo(t, stranger, "GET", managedDatePath(f.event.ID, f.date(0)), nil, http.StatusNotFound)
 	apiDo(t, f.admin, "GET", managedDatePath(f.event.ID, "2001-01-01"), nil, http.StatusNotFound)
 	if after := f.state(t); after != state {
 		t.Fatal("a refused edit wrote")
 	}
 
-	// A demoted leader who is still a member gets 403 before any receipt,
-	// even for an attempt they applied.
+	// A demoted leader who is still a member gets 403 before the revision
+	// is compared, even for a request they applied.
 	leaderBase := editBaseOf(t, f.leader, f.event.ID, f.date(0))
-	applied := dateEditBody(newDateAttempt(t), leaderBase.Revision, map[string]any{"title": "Leader's title"})
+	applied := dateEditBody(leaderBase.Revision, map[string]any{"title": "Leader's title"})
 	wantDateEdit(t, f.leader, f.event.ID, f.date(0), applied, http.StatusOK, "")
 	roles := "/api/v1/groups/" + itoa(f.group) + "/members/" + itoa(f.leaderUser.ID) + "/role"
 	apiDo(t, f.admin, "PUT", roles, map[string]any{"role": models.MembershipMember}, http.StatusOK)
 	state = f.state(t)
 	wantDateEdit(t, f.leader, f.event.ID, f.date(0), applied, http.StatusForbidden, "")
 	if after := f.state(t); after != state {
-		t.Fatal("a demoted leader's replay wrote")
+		t.Fatal("a demoted leader's resend wrote")
 	}
 
 	// Demoted after the preflight, while the body arrives: 404 at the lock.
 	apiDo(t, f.admin, "PUT", roles, map[string]any{"role": models.MembershipLeader}, http.StatusOK)
 	fresh := editBaseOf(t, f.leader, f.event.ID, f.date(0))
-	held := f.leader.doHeld("POST", dateEditPath(f.event.ID, f.date(0)), dateEditBody(newDateAttempt(t), fresh.Revision, map[string]any{"title": "Too late"}))
+	held := f.leader.doHeld("POST", dateEditPath(f.event.ID, f.date(0)), dateEditBody(fresh.Revision, map[string]any{"title": "Too late"}))
 	apiDo(t, f.admin, "PUT", roles, map[string]any{"role": models.MembershipMember}, http.StatusOK)
 	state = f.state(t)
 	held.release()
@@ -621,7 +590,7 @@ func TestDateEditAuthorization(t *testing.T) {
 
 	// Deleted after the preflight: the existing 404.
 	fresh = editBaseOf(t, f.admin, f.event.ID, f.date(0))
-	held = f.admin.doHeld("POST", dateEditPath(f.event.ID, f.date(0)), dateEditBody(newDateAttempt(t), fresh.Revision, map[string]any{"title": "Gone"}))
+	held = f.admin.doHeld("POST", dateEditPath(f.event.ID, f.date(0)), dateEditBody(fresh.Revision, map[string]any{"title": "Gone"}))
 	apiDo(t, f.admin, "DELETE", fmt.Sprintf("/api/v1/events/%d", f.event.ID), nil, http.StatusOK)
 	held.release()
 	if w := held.wait(t); w.Code != http.StatusNotFound || !strings.Contains(w.Body.String(), "event not found") {
@@ -639,7 +608,7 @@ func TestDateEditConsentMatchesLockedSelection(t *testing.T) {
 	// Absent, a well-formed token of nothing, and the token of another change.
 	stale := dateEditConsent(t, f.admin, f.event.ID, f.date(1), map[string]any{"visibility": "private"})
 	for _, extra := range [][]any{nil, {"consent", strings.Repeat("0", 32)}, {"consent", stale}} {
-		w := wantDateEdit(t, f.admin, f.event.ID, f.date(1), dateEditBody(newDateAttempt(t), base.Revision, map[string]any{"visibility": "series"}, extra...), http.StatusConflict, "date_needs_consent")
+		w := wantDateEdit(t, f.admin, f.event.ID, f.date(1), dateEditBody(base.Revision, map[string]any{"visibility": "series"}, extra...), http.StatusConflict, "date_needs_consent")
 		var body struct {
 			Impact visibilityImpactJSON `json:"impact"`
 		}
@@ -651,7 +620,7 @@ func TestDateEditConsentMatchesLockedSelection(t *testing.T) {
 	if after := f.state(t); after != state {
 		t.Fatal("a consent refusal wrote")
 	}
-	wantDateEdit(t, f.admin, f.event.ID, f.date(1), dateEditBody(newDateAttempt(t), base.Revision, map[string]any{"visibility": "series"}, "consent", dateEditConsent(t, f.admin, f.event.ID, f.date(1), map[string]any{"visibility": "series"})), http.StatusOK, "")
+	wantDateEdit(t, f.admin, f.event.ID, f.date(1), dateEditBody(base.Revision, map[string]any{"visibility": "series"}, "consent", dateEditConsent(t, f.admin, f.event.ID, f.date(1), map[string]any{"visibility": "series"})), http.StatusOK, "")
 	for _, r := range regs {
 		if s := regStatus(t, f.app, *r.UserID, r.OccurrenceID); s != models.RegCancelled {
 			t.Fatalf("an agreed loser is %s", s)
@@ -663,12 +632,12 @@ func TestDateEditConsentMatchesLockedSelection(t *testing.T) {
 	// Nobody to cancel: no consent needed.
 	gormMust(t, f.app.DB.Model(&models.EventOccurrence{}).Where("id = ?", f.dates[2].ID).Update("visibility_override", models.VisibilityPublic))
 	b2 := editBaseOf(t, f.admin, f.event.ID, f.date(2))
-	wantDateEdit(t, f.admin, f.event.ID, f.date(2), dateEditBody(newDateAttempt(t), b2.Revision, map[string]any{"visibility": nil}), http.StatusOK, "")
+	wantDateEdit(t, f.admin, f.event.ID, f.date(2), dateEditBody(b2.Revision, map[string]any{"visibility": nil}), http.StatusOK, "")
 	// A consent given for people who are no longer there cancels nobody, so
 	// nothing needs asking again.
 	gormMust(t, f.app.DB.Model(&models.EventOccurrence{}).Where("id = ?", f.dates[3].ID).Update("visibility_override", models.VisibilityPublic))
 	b3 := editBaseOf(t, f.admin, f.event.ID, f.date(3))
-	wantDateEdit(t, f.admin, f.event.ID, f.date(3), dateEditBody(newDateAttempt(t), b3.Revision, map[string]any{"visibility": "series"}, "consent", dateEditConsent(t, f.admin, f.event.ID, f.date(3), map[string]any{"visibility": "series"})), http.StatusOK, "")
+	wantDateEdit(t, f.admin, f.event.ID, f.date(3), dateEditBody(b3.Revision, map[string]any{"visibility": "series"}, "consent", dateEditConsent(t, f.admin, f.event.ID, f.date(3), map[string]any{"visibility": "series"})), http.StatusOK, "")
 }
 
 // TestDateEditConsentUsesTheMovedStart: consent counts the date as it will be,
@@ -680,7 +649,7 @@ func TestDateEditConsentUsesTheMovedStart(t *testing.T) {
 	gormMust(t, f.app.DB.Model(&models.EventOccurrence{}).Where("id = ?", f.dates[1].ID).Updates(map[string]any{"starts_at": past, "ends_at": past.Add(time.Hour)}))
 	base := editBaseOf(t, f.admin, f.event.ID, f.date(1))
 	future := time.Now().UTC().AddDate(0, 0, 3).Format("2006-01-02T15:04")
-	w := wantDateEdit(t, f.admin, f.event.ID, f.date(1), dateEditBody(newDateAttempt(t), base.Revision, map[string]any{"startsLocal": future, "visibility": "series"}), http.StatusConflict, "date_needs_consent")
+	w := wantDateEdit(t, f.admin, f.event.ID, f.date(1), dateEditBody(base.Revision, map[string]any{"startsLocal": future, "visibility": "series"}), http.StatusConflict, "date_needs_consent")
 	if !strings.Contains(w.Body.String(), `"registrants":2`) {
 		t.Fatalf("consent for a moved date: %s", w.Body.String())
 	}
@@ -700,7 +669,7 @@ func TestDateEditOneClockAtTheBoundary(t *testing.T) {
 		return nil
 	}
 	base := editBaseOf(t, f.admin, f.event.ID, f.date(1))
-	wantDateEdit(t, f.admin, f.event.ID, f.date(1), dateEditBody(newDateAttempt(t), base.Revision, map[string]any{"visibility": "series"}, "consent", dateEditConsent(t, f.admin, f.event.ID, f.date(1), map[string]any{"visibility": "series"})), http.StatusOK, "")
+	wantDateEdit(t, f.admin, f.event.ID, f.date(1), dateEditBody(base.Revision, map[string]any{"visibility": "series"}, "consent", dateEditConsent(t, f.admin, f.event.ID, f.date(1), map[string]any{"visibility": "series"})), http.StatusOK, "")
 	for _, r := range regs {
 		if s := regStatus(t, f.app, *r.UserID, r.OccurrenceID); s != models.RegCancelled {
 			t.Fatalf("an agreed loser is %s", s)
@@ -718,7 +687,7 @@ func TestDateEditOneClockAtTheBoundary(t *testing.T) {
 func TestDateEditRenameAndTightenNamesTheKnownTitle(t *testing.T) {
 	renameAndTightenNamesTheKnownTitle(t, func(f dateEditFixture) {
 		base := editBaseOf(t, f.admin, f.event.ID, f.date(1))
-		wantDateEdit(t, f.admin, f.event.ID, f.date(1), dateEditBody(newDateAttempt(t), base.Revision,
+		wantDateEdit(t, f.admin, f.event.ID, f.date(1), dateEditBody(base.Revision,
 			map[string]any{"title": "NEWPRIVATETITLE", "visibility": "series"}, "consent", dateEditConsent(t, f.admin, f.event.ID, f.date(1), map[string]any{"title": "NEWPRIVATETITLE", "visibility": "series"})), http.StatusOK, "")
 	})
 }
@@ -811,8 +780,8 @@ func TestDateEditTightenWithholdsATitleSetWhileHidden(t *testing.T) {
 		t.Fatalf("fixture: archiving left the teen %s", s)
 	}
 	base := editBaseOf(t, f.admin, f.event.ID, f.date(1))
-	w := wantDateEdit(t, f.admin, f.event.ID, f.date(1), dateEditBody(newDateAttempt(t), base.Revision, map[string]any{"title": "HIDDENTITLE"}), http.StatusOK, "")
-	wantDateEdit(t, f.admin, f.event.ID, f.date(1), dateEditBody(newDateAttempt(t), answeredRevision(t, w),
+	w := wantDateEdit(t, f.admin, f.event.ID, f.date(1), dateEditBody(base.Revision, map[string]any{"title": "HIDDENTITLE"}), http.StatusOK, "")
+	wantDateEdit(t, f.admin, f.event.ID, f.date(1), dateEditBody(answeredRevision(t, w),
 		map[string]any{"visibility": "series"}, "consent", dateEditConsent(t, f.admin, f.event.ID, f.date(1), map[string]any{"visibility": "series"})), http.StatusOK, "")
 	if s := regStatus(t, f.app, teen.ID, f.dates[1].ID); s != models.RegCancelled {
 		t.Fatalf("the retained outsider is %s", s)
@@ -848,8 +817,8 @@ func TestDateEditTightenWithholdsATitleSetWhileHidden(t *testing.T) {
 	}
 }
 
-// TestDateEditLateFailureRollsBackEverything: a failure after the receipt is
-// written rolls back the date, its cancellations, promotion, notices and the
+// TestDateEditLateFailureRollsBackEverything: a failure after every effect
+// rolls back the date, its cancellations, promotion, notices and the
 // reconcile pass that ended an expired grant on the edited date.
 func TestDateEditLateFailureRollsBackEverything(t *testing.T) {
 	f := newDepartureReadFixture(t, models.VisibilityInviteOnly, models.RegGoing, policy.OccurrenceOriginDepartureSelf)
@@ -870,12 +839,8 @@ func TestDateEditLateFailureRollsBackEverything(t *testing.T) {
 	var reached []string
 	f.app.hooks.dateEditStep = func(tx *gorm.DB, step string) error {
 		reached = append(reached, step)
-		if step != "receipt" {
+		if step != "effects" {
 			return nil
-		}
-		var receipt []byte
-		if err := tx.Raw("SELECT edit_receipt FROM event_occurrences WHERE id = ?", target.ID).Row().Scan(&receipt); err != nil || len(receipt) != 32 {
-			t.Errorf("the receipt is not written before the hook: %x %v", receipt, err)
 		}
 		var ended int64
 		tx.Model(&models.Registration{}).Where("id = ? AND access_ended_at IS NOT NULL", f.access.RegistrationID).Count(&ended)
@@ -887,12 +852,12 @@ func TestDateEditLateFailureRollsBackEverything(t *testing.T) {
 		return errors.New("late failure")
 	}
 	state := eventWriterState(t, f.app, f.event.ID)
-	w := postDateEdit(f.admin, f.event.ID, date, dateEditBody(newDateAttempt(t), base.Revision,
+	w := postDateEdit(f.admin, f.event.ID, date, dateEditBody(base.Revision,
 		map[string]any{"visibility": "series", "startsLocal": target.StartsAt.AddDate(0, 0, 30).Format("2006-01-02T15:04")}, "consent", dateEditConsent(t, f.admin, f.event.ID, date, map[string]any{"visibility": "series", "startsLocal": target.StartsAt.AddDate(0, 0, 30).Format("2006-01-02T15:04")})))
 	if w.Code != http.StatusInternalServerError {
 		t.Fatalf("late failure: %d %s", w.Code, w.Body.String())
 	}
-	if strings.Join(reached, ",") != "selected,effects,receipt" {
+	if strings.Join(reached, ",") != "selected,effects" {
 		t.Fatalf("steps reached: %v", reached)
 	}
 	if after := eventWriterState(t, f.app, f.event.ID); after != state {
@@ -946,7 +911,7 @@ func TestDateEditSettlesTheRoom(t *testing.T) {
 		t.Fatalf("fixture: the edit base shows room %+v", base.Room)
 	}
 	free := f.startOn.Add(time.Hour)
-	w := wantDateEdit(t, f.leader, f.eventA.ID, day, dateEditBody(newDateAttempt(t), base.Revision, map[string]any{"startsLocal": free.Format("2006-01-02T15:04")}), http.StatusOK, "")
+	w := wantDateEdit(t, f.leader, f.eventA.ID, day, dateEditBody(base.Revision, map[string]any{"startsLocal": free.Format("2006-01-02T15:04")}), http.StatusOK, "")
 	if got := answeredDate(t, w); got.Room == nil || got.Room.ID != f.hall.ID {
 		t.Fatalf("a free move answered room %+v", got.Room)
 	}
@@ -954,7 +919,7 @@ func TestDateEditSettlesTheRoom(t *testing.T) {
 		t.Fatalf("the booking after a free move: %+v", b)
 	}
 
-	w = wantDateEdit(t, f.admin, f.eventA.ID, day, dateEditBody(newDateAttempt(t), answeredRevision(t, w), map[string]any{"startsLocal": clash}), http.StatusOK, "")
+	w = wantDateEdit(t, f.admin, f.eventA.ID, day, dateEditBody(answeredRevision(t, w), map[string]any{"startsLocal": clash}), http.StatusOK, "")
 	got := answeredDate(t, w)
 	if got.Room != nil {
 		t.Fatalf("a move into a conflict answered room %+v", got.Room)
@@ -982,7 +947,7 @@ func TestDateEditRoomLossRollsBack(t *testing.T) {
 	before := bookingOf(t, f.app, f.eventA.ID)
 	base := editBaseOf(t, f.leader, f.eventA.ID, day)
 	f.app.hooks.dateEditStep = func(tx *gorm.DB, step string) error {
-		if step != "receipt" {
+		if step != "effects" {
 			return nil
 		}
 		var b models.RoomBooking
@@ -997,7 +962,7 @@ func TestDateEditRoomLossRollsBack(t *testing.T) {
 		return errors.New("late failure")
 	}
 	state := eventWriterState(t, f.app, f.eventA.ID)
-	w := postDateEdit(f.admin, f.eventA.ID, day, dateEditBody(newDateAttempt(t), base.Revision, map[string]any{"startsLocal": clash}))
+	w := postDateEdit(f.admin, f.eventA.ID, day, dateEditBody(base.Revision, map[string]any{"startsLocal": clash}))
 	if w.Code != http.StatusInternalServerError {
 		t.Fatalf("late failure: %d %s", w.Code, w.Body.String())
 	}
@@ -1022,11 +987,11 @@ func TestDateEditClearsCapacityWithNull(t *testing.T) {
 	gormMust(t, f.app.DB.Create(&models.Registration{UserID: &f.leaderUser.ID, OccurrenceID: f.dates[0].ID, Status: models.RegGoing, AttendanceMode: models.AttendanceInPerson, Source: "web"}))
 	gormMust(t, f.app.DB.Create(&models.Registration{UserID: &f.memberUser.ID, OccurrenceID: f.dates[0].ID, Status: models.RegWaitlisted, WaitlistedAt: &at, AttendanceMode: models.AttendanceInPerson, Source: "web"}))
 	base := editBaseOf(t, f.admin, f.event.ID, f.date(0))
-	w := wantDateEdit(t, f.admin, f.event.ID, f.date(0), dateEditBody(newDateAttempt(t), base.Revision, map[string]any{"title": "Seats for all"}), http.StatusOK, "")
+	w := wantDateEdit(t, f.admin, f.event.ID, f.date(0), dateEditBody(base.Revision, map[string]any{"title": "Seats for all"}), http.StatusOK, "")
 	if o := occurrenceRow(t, f.app, f.dates[0].ID); o.CapacityOverride == nil || *o.CapacityOverride != 1 {
 		t.Fatal("an omitted capacity changed the cap")
 	}
-	wantDateEdit(t, f.admin, f.event.ID, f.date(0), dateEditBody(newDateAttempt(t), answeredRevision(t, w), map[string]any{"capacityOverride": nil}), http.StatusOK, "")
+	wantDateEdit(t, f.admin, f.event.ID, f.date(0), dateEditBody(answeredRevision(t, w), map[string]any{"capacityOverride": nil}), http.StatusOK, "")
 	if o := occurrenceRow(t, f.app, f.dates[0].ID); o.CapacityOverride != nil {
 		t.Fatalf("null left the cap at %d", *o.CapacityOverride)
 	}
@@ -1051,9 +1016,9 @@ func TestDateEditTokenFromEveryManagerSurface(t *testing.T) {
 			n++
 			date := f.date(n % 4)
 			token := surfaces[name](who.client, date)
-			w := wantDateEdit(t, who.client, f.event.ID, date, dateEditBody(newDateAttempt(t), token, map[string]any{"title": fmt.Sprintf("Edit %d", n)}), http.StatusOK, "")
+			w := wantDateEdit(t, who.client, f.event.ID, date, dateEditBody(token, map[string]any{"title": fmt.Sprintf("Edit %d", n)}), http.StatusOK, "")
 			// The answer's own token edits again.
-			wantDateEdit(t, who.client, f.event.ID, date, dateEditBody(newDateAttempt(t), answeredRevision(t, w), map[string]any{"durationMinutes": 30 + n}), http.StatusOK, "")
+			wantDateEdit(t, who.client, f.event.ID, date, dateEditBody(answeredRevision(t, w), map[string]any{"durationMinutes": 30 + n}), http.StatusOK, "")
 		}
 	}
 	for _, c := range []*apiClient{f.member, anonClient(t, f.app, "10.9.9.9")} {
@@ -1074,7 +1039,7 @@ func TestDateEditTokenFromEveryManagerSurface(t *testing.T) {
 	if len(page.Occurrences) != 1 || !strings.HasSuffix(page.Occurrences[0].Revision, ".-") {
 		t.Fatalf("the host's page: %+v", page.Occurrences)
 	}
-	wantDateEdit(t, hc, cw.ID, page.Occurrences[0].Date, dateEditBody(newDateAttempt(t), page.Occurrences[0].Revision, map[string]any{"location": "Lake"}), http.StatusOK, "")
+	wantDateEdit(t, hc, cw.ID, page.Occurrences[0].Date, dateEditBody(page.Occurrences[0].Revision, map[string]any{"location": "Lake"}), http.StatusOK, "")
 }
 
 // TestManagedDateReadCarriesTheDatesOwnValues: the manager's read of a date,
@@ -1177,8 +1142,8 @@ func TestDateEditPendingGroupLeader(t *testing.T) {
 		if strings.HasSuffix(token, ".-") {
 			t.Fatalf("%s: the group's place is not tagged: %s", name, token)
 		}
-		w := wantDateEdit(t, f.leader, f.event.ID, date, dateEditBody(newDateAttempt(t), token, map[string]any{"title": "Pending " + name}), http.StatusOK, "")
-		wantDateEdit(t, f.leader, f.event.ID, date, dateEditBody(newDateAttempt(t), answeredRevision(t, w), map[string]any{"durationMinutes": 45}), http.StatusOK, "")
+		w := wantDateEdit(t, f.leader, f.event.ID, date, dateEditBody(token, map[string]any{"title": "Pending " + name}), http.StatusOK, "")
+		wantDateEdit(t, f.leader, f.event.ID, date, dateEditBody(answeredRevision(t, w), map[string]any{"durationMinutes": 45}), http.StatusOK, "")
 	}
 	if raw := f.member.do("GET", fmt.Sprintf("/api/v1/events/%d", f.event.ID), nil, false).Body.String(); strings.Contains(raw, `"revision"`) {
 		t.Fatalf("a member's read of a pending group's event carries a revision: %s", raw)
@@ -1220,16 +1185,16 @@ func TestDateEditInheritedPlace(t *testing.T) {
 		t.Fatalf("an inherited place: %+v", base)
 	}
 	apiDo(t, f.admin, "PUT", "/api/v1/groups/"+gid, groupBody(t, f.admin, "/api/v1/groups/"+gid, map[string]any{"location": "Chapel"}), http.StatusOK)
-	wantDateEdit(t, f.admin, f.event.ID, f.date(0), dateEditBody(newDateAttempt(t), base.Revision, map[string]any{"title": "Still here"}), http.StatusConflict, "date_changed")
+	wantDateEdit(t, f.admin, f.event.ID, f.date(0), dateEditBody(base.Revision, map[string]any{"title": "Still here"}), http.StatusConflict, "date_changed")
 	base = editBaseOf(t, f.admin, f.event.ID, f.date(0))
 	apiDo(t, f.admin, "PUT", "/api/v1/groups/"+gid, groupBody(t, f.admin, "/api/v1/groups/"+gid, map[string]any{"location": "Garden"}), http.StatusOK)
-	wantDateEdit(t, f.admin, f.event.ID, f.date(0), dateEditBody(newDateAttempt(t), base.Revision, map[string]any{"location": "Garden"}), http.StatusConflict, "date_changed")
+	wantDateEdit(t, f.admin, f.event.ID, f.date(0), dateEditBody(base.Revision, map[string]any{"location": "Garden"}), http.StatusConflict, "date_changed")
 	if o := occurrenceRow(t, f.app, f.dates[0].ID); o.LocationOverride != nil {
 		t.Fatal("a refused edit pinned the place")
 	}
 	// Back to the place the token was read with: the tag matches again.
 	apiDo(t, f.admin, "PUT", "/api/v1/groups/"+gid, groupBody(t, f.admin, "/api/v1/groups/"+gid, map[string]any{"location": "Chapel"}), http.StatusOK)
-	wantDateEdit(t, f.admin, f.event.ID, f.date(0), dateEditBody(newDateAttempt(t), base.Revision, map[string]any{"title": "Chapel supper"}), http.StatusOK, "")
+	wantDateEdit(t, f.admin, f.event.ID, f.date(0), dateEditBody(base.Revision, map[string]any{"title": "Chapel supper"}), http.StatusOK, "")
 
 	apiDo(t, f.admin, "PUT", fmt.Sprintf("/api/v1/events/%d", f.event.ID), seriesBody(t, f.admin, fmt.Sprintf("/api/v1/events/%d", f.event.ID), map[string]any{"location": "Own room"}), http.StatusOK)
 	own := editBaseOf(t, f.admin, f.event.ID, f.date(1))
@@ -1237,7 +1202,7 @@ func TestDateEditInheritedPlace(t *testing.T) {
 		t.Fatalf("an event place still tags the group: %s", own.Revision)
 	}
 	apiDo(t, f.admin, "PUT", "/api/v1/groups/"+gid, groupBody(t, f.admin, "/api/v1/groups/"+gid, map[string]any{"location": "Somewhere else"}), http.StatusOK)
-	wantDateEdit(t, f.admin, f.event.ID, f.date(1), dateEditBody(newDateAttempt(t), own.Revision, map[string]any{"title": "Own supper"}), http.StatusOK, "")
+	wantDateEdit(t, f.admin, f.event.ID, f.date(1), dateEditBody(own.Revision, map[string]any{"title": "Own supper"}), http.StatusOK, "")
 }
 
 // TestDateEditClearingTheInheritedPlaceTellsAttendees: a date that shows its
@@ -1250,7 +1215,7 @@ func TestDateEditClearingTheInheritedPlaceTellsAttendees(t *testing.T) {
 	if base.Location != "Group hall" {
 		t.Fatalf("fixture: the date shows %q", base.Location)
 	}
-	w := wantDateEdit(t, f.admin, f.event.ID, f.date(0), dateEditBody(newDateAttempt(t), base.Revision, map[string]any{"location": ""}), http.StatusOK, "")
+	w := wantDateEdit(t, f.admin, f.event.ID, f.date(0), dateEditBody(base.Revision, map[string]any{"location": ""}), http.StatusOK, "")
 	if got := answeredDate(t, w); got.Location != "" {
 		t.Fatalf("the answer still shows %q", got.Location)
 	}
@@ -1289,7 +1254,7 @@ func TestDateEditPlaceChangeIsJudgedPerRecipient(t *testing.T) {
 		}
 	}
 	base := editBaseOf(t, f.admin, f.event.ID, f.date(1))
-	wantDateEdit(t, f.admin, f.event.ID, f.date(1), dateEditBody(newDateAttempt(t), base.Revision, map[string]any{"location": "Group hall"}), http.StatusOK, "")
+	wantDateEdit(t, f.admin, f.event.ID, f.date(1), dateEditBody(base.Revision, map[string]any{"location": "Group hall"}), http.StatusOK, "")
 	if got := placeNotices(t, f.app, f.outsiders[0].ID, pinned.ID); len(got) != 1 || !strings.Contains(got[0].Body, "The place changed.") || !strings.Contains(got[0].Body, "Group hall") {
 		t.Fatalf("the outsider going, newly shown the place: %+v", got)
 	}
@@ -1298,7 +1263,7 @@ func TestDateEditPlaceChangeIsJudgedPerRecipient(t *testing.T) {
 	}
 
 	base = editBaseOf(t, f.admin, f.event.ID, f.date(2))
-	wantDateEdit(t, f.admin, f.event.ID, f.date(2), dateEditBody(newDateAttempt(t), base.Revision, map[string]any{"location": ""}), http.StatusOK, "")
+	wantDateEdit(t, f.admin, f.event.ID, f.date(2), dateEditBody(base.Revision, map[string]any{"location": ""}), http.StatusOK, "")
 	if got := placeNotices(t, f.app, f.memberUser.ID, cleared.ID); len(got) != 1 || !strings.Contains(got[0].Body, "The place changed.") {
 		t.Fatalf("the member going, who lost the place: %+v", got)
 	}
@@ -1364,11 +1329,11 @@ func TestDateEditPlaceChangeFollowsEachReadersOwnView(t *testing.T) {
 
 	for _, i := range []int{guestPin, invitePin} {
 		base := editBaseOf(t, f.admin, f.event.ID, f.date(i))
-		wantDateEdit(t, f.admin, f.event.ID, f.date(i), dateEditBody(newDateAttempt(t), base.Revision, map[string]any{"location": "Group hall"}), http.StatusOK, "")
+		wantDateEdit(t, f.admin, f.event.ID, f.date(i), dateEditBody(base.Revision, map[string]any{"location": "Group hall"}), http.StatusOK, "")
 	}
 	for _, i := range []int{guestClear, inviteClear} {
 		base := editBaseOf(t, f.admin, f.event.ID, f.date(i))
-		wantDateEdit(t, f.admin, f.event.ID, f.date(i), dateEditBody(newDateAttempt(t), base.Revision, map[string]any{"location": ""}), http.StatusOK, "")
+		wantDateEdit(t, f.admin, f.event.ID, f.date(i), dateEditBody(base.Revision, map[string]any{"location": ""}), http.StatusOK, "")
 	}
 	if guestSees(guestPin) != "Group hall" || guestSees(guestClear) != "" || inviteeSees(invitePin) != "Group hall" || inviteeSees(inviteClear) != "" {
 		t.Fatalf("fixture: after the edits guests see %q and %q, invitees %q and %q", guestSees(guestPin), guestSees(guestClear), inviteeSees(invitePin), inviteeSees(inviteClear))
@@ -1411,7 +1376,7 @@ func TestDateEditTighteningACancelledDateNamesItOnlyToItsReaders(t *testing.T) {
 	gormMust(t, f.app.DB.Create(&models.Registration{UserID: &reader.ID, OccurrenceID: target.ID, Status: models.RegGoing, AttendanceMode: models.AttendanceInPerson, Source: "web"}))
 	apiDo(t, f.admin, "POST", "/api/v1/events/"+itoa(f.event.ID)+"/cancel", map[string]any{"date": f.date(1)}, http.StatusOK)
 	base := editBaseOf(t, f.admin, f.event.ID, f.date(1))
-	w := wantDateEdit(t, f.admin, f.event.ID, f.date(1), dateEditBody(newDateAttempt(t), base.Revision, map[string]any{"title": "HIDDENTITLE"}), http.StatusOK, "")
+	w := wantDateEdit(t, f.admin, f.event.ID, f.date(1), dateEditBody(base.Revision, map[string]any{"title": "HIDDENTITLE"}), http.StatusOK, "")
 	if o := occurrenceRow(t, f.app, target.ID); o.Status != models.OccurrenceCancelled {
 		t.Fatalf("fixture: the date is %s", o.Status)
 	}
@@ -1422,7 +1387,7 @@ func TestDateEditTighteningACancelledDateNamesItOnlyToItsReaders(t *testing.T) {
 	apiDo(t, holderClient, "GET", dateReadPath(f.event.ID, f.date(1)), nil, http.StatusNotFound)
 	mark := markNotices(t, f.app)
 
-	wantDateEdit(t, f.admin, f.event.ID, f.date(1), dateEditBody(newDateAttempt(t), answeredRevision(t, w),
+	wantDateEdit(t, f.admin, f.event.ID, f.date(1), dateEditBody(answeredRevision(t, w),
 		map[string]any{"visibility": "series"}, "consent", dateEditConsent(t, f.admin, f.event.ID, f.date(1), map[string]any{"visibility": "series"})), http.StatusOK, "")
 	got := noticesSince(t, f.app, holder.ID, notify.RegistrationCancelled, mark.notice)
 	if len(got) != 1 || got[0].Title != "Registration cancelled: An event you registered for" {
@@ -1445,13 +1410,13 @@ func freshProcess(t *testing.T, app *App) *App {
 	return fresh
 }
 
-// TestDateEditRestartRefusesOldTokens: a token or receipt from an earlier
-// process never matches, so a retry after a restart is a safe conflict and
-// never a second application.
+// TestDateEditRestartRefusesOldTokens: a token from an earlier process never
+// matches, so a resend after a restart is a safe conflict and never a second
+// application.
 func TestDateEditRestartRefusesOldTokens(t *testing.T) {
 	f := newDateEditFixture(t)
 	base := editBaseOf(t, f.admin, f.event.ID, f.date(0))
-	applied := dateEditBody(newDateAttempt(t), base.Revision, map[string]any{"title": "Before the restart"})
+	applied := dateEditBody(base.Revision, map[string]any{"title": "Before the restart"})
 	wantDateEdit(t, f.admin, f.event.ID, f.date(0), applied, http.StatusOK, "")
 	unapplied := editBaseOf(t, f.admin, f.event.ID, f.date(1))
 
@@ -1459,7 +1424,7 @@ func TestDateEditRestartRefusesOldTokens(t *testing.T) {
 	c2 := loginAPI(t, app2, f.adminUser.Name, "password1234")
 	state := f.state(t)
 	wantDateEdit(t, c2, f.event.ID, f.date(0), applied, http.StatusConflict, "date_changed")
-	wantDateEdit(t, c2, f.event.ID, f.date(1), dateEditBody(newDateAttempt(t), unapplied.Revision, map[string]any{"title": "x"}), http.StatusConflict, "date_changed")
+	wantDateEdit(t, c2, f.event.ID, f.date(1), dateEditBody(unapplied.Revision, map[string]any{"title": "x"}), http.StatusConflict, "date_changed")
 	if after := f.state(t); after != state {
 		t.Fatal("an old token wrote in a new process")
 	}
@@ -1467,17 +1432,17 @@ func TestDateEditRestartRefusesOldTokens(t *testing.T) {
 	if fresh.Revision[:18] == unapplied.Revision[:18] {
 		t.Fatal("a new process minted the same generation")
 	}
-	wantDateEdit(t, c2, f.event.ID, f.date(1), dateEditBody(newDateAttempt(t), fresh.Revision, map[string]any{"title": "After the restart"}), http.StatusOK, "")
+	wantDateEdit(t, c2, f.event.ID, f.date(1), dateEditBody(fresh.Revision, map[string]any{"title": "After the restart"}), http.StatusOK, "")
 }
 
 // TestDateEditRestoredDumpRefusesExactOldToken: restore.sh restores with the
 // app stopped. The exact token from before the dump, sent to the process that
-// serves the restored data, is a conflict, not a replay or a second write.
+// serves the restored data, is a conflict, not a second write.
 func TestDateEditRestoredDumpRefusesExactOldToken(t *testing.T) {
 	fenceTools(t)
 	f := newDateEditFixture(t)
 	base := editBaseOf(t, f.admin, f.event.ID, f.date(0))
-	body := dateEditBody(newDateAttempt(t), base.Revision, map[string]any{"title": "After the dump"})
+	body := dateEditBody(base.Revision, map[string]any{"title": "After the dump"})
 	dumped := f.state(t)
 	dump := fenceDump(t, f.app.DB)
 	wantDateEdit(t, f.admin, f.event.ID, f.date(0), body, http.StatusOK, "")
@@ -1499,18 +1464,18 @@ func TestDateEditRestoredDumpRefusesExactOldToken(t *testing.T) {
 
 // TestDateEditRestoreUnderLiveProcessIsTheStatedLimit pins the limit the
 // restore barrier shares: restored under the same process, the old token
-// matches the restored rows again, and the attempt applies a second time with
+// matches the restored rows again, and the request applies a second time with
 // its effects (never a 200 that applied nothing).
 func TestDateEditRestoreUnderLiveProcessIsTheStatedLimit(t *testing.T) {
 	fenceTools(t)
 	f := newDateEditFixture(t)
 	base := editBaseOf(t, f.admin, f.event.ID, f.date(0))
-	body := dateEditBody(newDateAttempt(t), base.Revision, map[string]any{"title": "Applied twice"})
+	body := dateEditBody(base.Revision, map[string]any{"title": "Applied twice"})
 	dump := fenceDump(t, f.app.DB)
 	wantDateEdit(t, f.admin, f.event.ID, f.date(0), body, http.StatusOK, "")
 	fenceRestore(t, f.app.DB, dump, false)
 	wantDateEdit(t, f.admin, f.event.ID, f.date(0), body, http.StatusOK, "")
-	if o := occurrenceRow(t, f.app, f.dates[0].ID); o.TitleOverride == nil || *o.TitleOverride != "Applied twice" || len(o.EditReceipt) != 32 {
+	if o := occurrenceRow(t, f.app, f.dates[0].ID); o.TitleOverride == nil || *o.TitleOverride != "Applied twice" {
 		t.Fatalf("after the second application: %+v", o)
 	}
 }
@@ -1534,7 +1499,7 @@ func TestDateEditExpiryDuringLockWait(t *testing.T) {
 	base := editBaseOf(t, f.admin, f.event.ID, date)
 	release := holdEventRow(t, f.app, f.event.ID)
 	moved := target.StartsAt.AddDate(0, 0, 30).Format("2006-01-02T15:04")
-	answer := goPostDateEdit(f.admin, f.event.ID, date, dateEditBody(newDateAttempt(t), base.Revision,
+	answer := goPostDateEdit(f.admin, f.event.ID, date, dateEditBody(base.Revision,
 		map[string]any{"startsLocal": moved, "title": "NEWSECRETTITLE", "location": "NEWSECRETPLACE"}))
 	waitForLockedUsersQuery(t, f.app, `%FROM "events"%FOR UPDATE%`)
 	if savedOccurrenceAccess(t, f).Status != policy.OccurrenceAccessActive {
@@ -1588,14 +1553,14 @@ func TestDateEditHeldZoneChange(t *testing.T) {
 	f := newDateEditFixture(t)
 	base := editBaseOf(t, f.admin, f.event.ID, f.date(0))
 	wall := f.dates[0].StartsAt.Add(time.Hour).Format("2006-01-02T15:04")
-	held := f.admin.doHeld("POST", dateEditPath(f.event.ID, f.date(0)), dateEditBody(newDateAttempt(t), base.Revision, map[string]any{"startsLocal": wall}))
+	held := f.admin.doHeld("POST", dateEditPath(f.event.ID, f.date(0)), dateEditBody(base.Revision, map[string]any{"startsLocal": wall}))
 	apiDo(t, f.admin, "PUT", fmt.Sprintf("/api/v1/events/%d", f.event.ID), seriesBody(t, f.admin, fmt.Sprintf("/api/v1/events/%d", f.event.ID), map[string]any{"tzid": "America/Chicago"}), http.StatusOK)
 	held.release()
 	if w := held.wait(t); w.Code != http.StatusConflict || answerCode(t, w) != "date_changed" {
 		t.Fatalf("the held edit after a zone change: %d %s", w.Code, w.Body.String())
 	}
 	fresh := editBaseOf(t, f.admin, f.event.ID, f.date(0))
-	wantDateEdit(t, f.admin, f.event.ID, f.date(0), dateEditBody(newDateAttempt(t), fresh.Revision, map[string]any{"startsLocal": wall}), http.StatusOK, "")
+	wantDateEdit(t, f.admin, f.event.ID, f.date(0), dateEditBody(fresh.Revision, map[string]any{"startsLocal": wall}), http.StatusOK, "")
 	chicago, err := time.LoadLocation("America/Chicago")
 	if err != nil {
 		t.Fatal(err)
@@ -1613,42 +1578,39 @@ func TestDateEditHeldZoneChange(t *testing.T) {
 func TestDateEditRejectsMalformed(t *testing.T) {
 	f := newDateEditFixture(t)
 	base := editBaseOf(t, f.admin, f.event.ID, f.date(0))
-	good := newDateAttempt(t)
 	state := f.state(t)
 	for name, body := range map[string]map[string]any{
-		"no attempt":           {"revision": base.Revision, "changes": map[string]any{"title": "x"}},
-		"short attempt":        dateEditBody("abcd", base.Revision, map[string]any{"title": "x"}),
-		"upper-case attempt":   dateEditBody(strings.ToUpper(good), base.Revision, map[string]any{"title": "x"}),
-		"bad revision":         dateEditBody(good, "2.abc", map[string]any{"title": "x"}),
-		"empty changes":        dateEditBody(good, base.Revision, map[string]any{}),
-		"unknown change":       dateEditBody(good, base.Revision, map[string]any{"description": "x"}),
-		"unknown key":          dateEditBody(good, base.Revision, map[string]any{"title": "x"}, "confirm", true),
-		"reason alone":         dateEditBody(good, base.Revision, map[string]any{"title": "x"}, "reason", "why"),
-		"the old count key":    dateEditBody(good, base.Revision, map[string]any{"title": "x"}, "confirmCount", 1),
-		"consent not a token":  dateEditBody(good, base.Revision, map[string]any{"title": "x"}, "consent", "abc"),
-		"upper-case consent":   dateEditBody(good, base.Revision, map[string]any{"title": "x"}, "consent", strings.Repeat("A", 32)),
-		"consent not a string": dateEditBody(good, base.Revision, map[string]any{"title": "x"}, "consent", 1),
-		"null title":           dateEditBody(good, base.Revision, map[string]any{"title": nil}),
-		"numeric start":        dateEditBody(good, base.Revision, map[string]any{"startsLocal": 5}),
-		"null duration":        dateEditBody(good, base.Revision, map[string]any{"durationMinutes": nil}),
-		"changes not a object": {"attempt": good, "revision": base.Revision, "changes": "title"},
+		"no revision":          {"changes": map[string]any{"title": "x"}},
+		"bad revision":         dateEditBody("2.abc", map[string]any{"title": "x"}),
+		"empty changes":        dateEditBody(base.Revision, map[string]any{}),
+		"unknown change":       dateEditBody(base.Revision, map[string]any{"description": "x"}),
+		"unknown key":          dateEditBody(base.Revision, map[string]any{"title": "x"}, "confirm", true),
+		"reason alone":         dateEditBody(base.Revision, map[string]any{"title": "x"}, "reason", "why"),
+		"the old count key":    dateEditBody(base.Revision, map[string]any{"title": "x"}, "confirmCount", 1),
+		"consent not a token":  dateEditBody(base.Revision, map[string]any{"title": "x"}, "consent", "abc"),
+		"upper-case consent":   dateEditBody(base.Revision, map[string]any{"title": "x"}, "consent", strings.Repeat("A", 32)),
+		"consent not a string": dateEditBody(base.Revision, map[string]any{"title": "x"}, "consent", 1),
+		"null title":           dateEditBody(base.Revision, map[string]any{"title": nil}),
+		"numeric start":        dateEditBody(base.Revision, map[string]any{"startsLocal": 5}),
+		"null duration":        dateEditBody(base.Revision, map[string]any{"durationMinutes": nil}),
+		"changes not a object": {"revision": base.Revision, "changes": "title"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			wantDateEdit(t, f.admin, f.event.ID, f.date(0), body, http.StatusBadRequest, "date_edit_invalid")
 		})
 	}
-	wantDateEdit(t, f.admin, f.event.ID, f.date(0), dateEditBody(good, base.Revision, map[string]any{"capacityOverride": 0}), http.StatusBadRequest, "invalid_capacity")
-	wantDateEdit(t, f.admin, f.event.ID, f.date(0), dateEditBody(good, base.Revision, map[string]any{"visibility": "secret"}), http.StatusBadRequest, "visibility_not_allowed")
-	wantDateEdit(t, f.admin, f.event.ID, f.date(0), dateEditBody(good, base.Revision, map[string]any{"visibility": "private"}, "reason", strings.Repeat("x", 501)), http.StatusBadRequest, "")
+	wantDateEdit(t, f.admin, f.event.ID, f.date(0), dateEditBody(base.Revision, map[string]any{"capacityOverride": 0}), http.StatusBadRequest, "invalid_capacity")
+	wantDateEdit(t, f.admin, f.event.ID, f.date(0), dateEditBody(base.Revision, map[string]any{"visibility": "secret"}), http.StatusBadRequest, "visibility_not_allowed")
+	wantDateEdit(t, f.admin, f.event.ID, f.date(0), dateEditBody(base.Revision, map[string]any{"visibility": "private"}, "reason", strings.Repeat("x", 501)), http.StatusBadRequest, "")
 	if after := f.state(t); after != state {
 		t.Fatal("a malformed edit wrote")
 	}
-	raw := f.admin.do("POST", dateEditPath(f.event.ID, f.date(0)), rawJSON(`{"attempt":"`+good+`","revision":"`+base.Revision+`","changes":{"title":"x"}} trailing`), true)
+	raw := f.admin.do("POST", dateEditPath(f.event.ID, f.date(0)), rawJSON(`{"revision":"`+base.Revision+`","changes":{"title":"x"}} trailing`), true)
 	if raw.Code != http.StatusBadRequest {
 		t.Fatalf("trailing data: %d %s", raw.Code, raw.Body.String())
 	}
 	// A consent where nothing needs one is not checked.
-	wantDateEdit(t, f.admin, f.event.ID, f.date(0), dateEditBody(good, base.Revision, map[string]any{"title": "x"}, "consent", strings.Repeat("f", 32)), http.StatusOK, "")
+	wantDateEdit(t, f.admin, f.event.ID, f.date(0), dateEditBody(base.Revision, map[string]any{"title": "x"}, "consent", strings.Repeat("f", 32)), http.StatusOK, "")
 }
 
 // TestDateEditTighteningPromotesOnTheSavedDate: one save renames a public date,
@@ -1676,7 +1638,7 @@ func TestDateEditTighteningPromotesOnTheSavedDate(t *testing.T) {
 	mark := markNotices(t, f.app)
 
 	base := editBaseOf(t, f.admin, f.event.ID, f.date(0))
-	wantDateEdit(t, f.admin, f.event.ID, f.date(0), dateEditBody(newDateAttempt(t), base.Revision,
+	wantDateEdit(t, f.admin, f.event.ID, f.date(0), dateEditBody(base.Revision,
 		map[string]any{"title": "NEWDATESECRET", "location": "NEWPLACESECRET", "visibility": "series"}, "consent", dateEditConsent(t, f.admin, f.event.ID, f.date(0), map[string]any{"title": "NEWDATESECRET", "location": "NEWPLACESECRET", "visibility": "series"})), http.StatusOK, "")
 	if s := regStatus(t, f.app, guest.ID, target.ID); s != models.RegCancelled {
 		t.Fatalf("fixture: the guest is %s", s)
@@ -1721,7 +1683,7 @@ func TestDateEditOnePromotionPassInsideTheCutoff(t *testing.T) {
 	newMutableClock(f.app, target.StartsAt.Add(-time.Hour))
 	mark := markNotices(t, f.app)
 
-	wantDateEdit(t, f.admin, f.event.ID, f.date(0), dateEditBody(newDateAttempt(t), base.Revision,
+	wantDateEdit(t, f.admin, f.event.ID, f.date(0), dateEditBody(base.Revision,
 		map[string]any{"visibility": "series", "capacityOverride": 2}, "consent", dateEditConsent(t, f.admin, f.event.ID, f.date(0), map[string]any{"visibility": "series", "capacityOverride": 2})), http.StatusOK, "")
 	if s := regStatus(t, f.app, guest.ID, target.ID); s != models.RegCancelled {
 		t.Fatalf("fixture: the guest is %s", s)
@@ -1768,7 +1730,7 @@ func TestDateEditPlaceJudgedAcrossAVisibilityChange(t *testing.T) {
 	}
 	for i, place := range map[int]string{cleared: "", pinned: "Group hall"} {
 		base := editBaseOf(t, f.admin, f.event.ID, f.date(i))
-		wantDateEdit(t, f.admin, f.event.ID, f.date(i), dateEditBody(newDateAttempt(t), base.Revision,
+		wantDateEdit(t, f.admin, f.event.ID, f.date(i), dateEditBody(base.Revision,
 			map[string]any{"location": place, "visibility": "series"}), http.StatusOK, "")
 	}
 	if s := regStatus(t, f.app, f.outsiders[0].ID, f.dates[cleared].ID); s != models.RegGoing {
@@ -1811,7 +1773,7 @@ func TestDateEditRSVPPromotingAGrantDoesNotWaitOnTheEdit(t *testing.T) {
 	}
 	base := editBaseOf(t, f.admin, f.event.ID, date)
 	release := holdEventRow(t, f.app, f.event.ID)
-	answer := goPostDateEdit(f.admin, f.event.ID, date, dateEditBody(newDateAttempt(t), base.Revision, map[string]any{"title": "Edited title"}))
+	answer := goPostDateEdit(f.admin, f.event.ID, date, dateEditBody(base.Revision, map[string]any{"title": "Edited title"}))
 	waitForLockedUsersQuery(t, f.app, `%FROM "events"%FOR UPDATE%`)
 
 	var free []uint
@@ -1898,7 +1860,7 @@ var dateEditRoutes = []struct {
 			delete(changes, "consent")
 			extra = append(extra, "consent", c)
 		}
-		return goPostDateEdit(f.admin, f.event.ID, date, dateEditBody(newDateAttempt(t), base.Revision, changes, extra...))
+		return goPostDateEdit(f.admin, f.event.ID, date, dateEditBody(base.Revision, changes, extra...))
 	}},
 }
 
@@ -2046,7 +2008,7 @@ func TestDateEditMoveLaterOfAKeptDateIsRefusedBeforeTheEnd(t *testing.T) {
 	base := editBaseOf(t, f.admin, f.event.ID, date)
 	state := eventWriterState(t, f.app, f.event.ID)
 	moved := target.StartsAt.AddDate(0, 0, 30).Format("2006-01-02T15:04")
-	w := wantDateEdit(t, f.admin, f.event.ID, date, dateEditBody(newDateAttempt(t), base.Revision,
+	w := wantDateEdit(t, f.admin, f.event.ID, date, dateEditBody(base.Revision,
 		map[string]any{"startsLocal": moved, "title": "NEWSECRETTITLE", "location": "NEWSECRETPLACE"}), http.StatusConflict, "date_kept_after_leaving")
 	wantKeptDates(t, w, keptDateCountJSON{Date: date, KeptCount: 1})
 	if attempts.Load() != 1 || effects.Load() != 0 {
@@ -2085,10 +2047,10 @@ func TestDateEditEndPassingInTheWrapperRerunsTheEdit(t *testing.T) {
 		CreatedAt: start.Add(-2 * time.Hour), ExpiresAt: start.Add(-time.Hour)}))
 	mark := markNotices(t, f.app).notice
 	attempts := countDateAttempts(f.app)
-	var receipt atomic.Bool
+	var effects atomic.Bool
 	f.app.hooks.dateEditStep = func(_ *gorm.DB, step string) error {
-		if step == "receipt" {
-			receipt.Store(true)
+		if step == "effects" {
+			effects.Store(true)
 		}
 		return nil
 	}
@@ -2096,10 +2058,10 @@ func TestDateEditEndPassingInTheWrapperRerunsTheEdit(t *testing.T) {
 	base := editBaseOf(t, f.admin, f.event.ID, date)
 	// The edit keeps the date's end: a later end on this kept date is refused
 	// outright (DEC-156), so the rerun guards a change of title and place.
-	answer := goPostDateEdit(f.admin, f.event.ID, date, dateEditBody(newDateAttempt(t), base.Revision,
+	answer := goPostDateEdit(f.admin, f.event.ID, date, dateEditBody(base.Revision,
 		map[string]any{"title": "NEWSECRETTITLE", "location": "NEWSECRETPLACE"}))
 	waitForLockedUsersQuery(t, f.app, `%FROM users%FOR KEY SHARE%`)
-	if !receipt.Load() {
+	if !effects.Load() {
 		release()
 		t.Fatal("the edit waited on the recipient before its callback finished")
 	}
@@ -2127,7 +2089,7 @@ func TestDateEditEndPassingInTheWrapperRerunsTheEdit(t *testing.T) {
 // TestDateEditSecondEndCrossingAnswersDateChanged: the old end passes during
 // the first attempt and the new end, two minutes later, during the rerun. The
 // edit answers date_changed and writes nothing: the date, the event's other
-// grant, the notices and the receipt are as they were.
+// grant and the notices are as they were.
 func TestDateEditSecondEndCrossingAnswersDateChanged(t *testing.T) {
 	f := newDepartureReadFixture(t, models.VisibilityInviteOnly, models.RegGoing, policy.OccurrenceOriginDepartureSelf)
 	// A later end needs a date nobody kept after leaving (DEC-156): the
@@ -2153,16 +2115,14 @@ func TestDateEditSecondEndCrossingAnswersDateChanged(t *testing.T) {
 	base := editBaseOf(t, f.admin, f.event.ID, date)
 	state := eventWriterState(t, f.app, f.event.ID)
 	minutes := int(target.EndsAt.Sub(target.StartsAt)/time.Minute) + 2
-	w := wantDateEdit(t, f.admin, f.event.ID, date, dateEditBody(newDateAttempt(t), base.Revision, map[string]any{"durationMinutes": minutes}), http.StatusConflict, "date_changed")
-	// The base was the date's own: an end crossing proves nothing about it.
-	wantSuperseded(t, "a second end crossing", w, false)
+	wantDateEdit(t, f.admin, f.event.ID, date, dateEditBody(base.Revision, map[string]any{"durationMinutes": minutes}), http.StatusConflict, "date_changed")
 	if attempts.Load() != 2 {
 		t.Fatalf("attempts %d, want 2", attempts.Load())
 	}
 	if after := eventWriterState(t, f.app, f.event.ID); after != state {
 		t.Fatalf("the refused edit wrote:\n%s\n%s", state, after)
 	}
-	if o := occurrenceRow(t, f.app, target.ID); !o.EndsAt.Equal(target.EndsAt) || o.EditReceipt != nil {
+	if o := occurrenceRow(t, f.app, target.ID); !o.EndsAt.Equal(target.EndsAt) {
 		t.Fatalf("the refused edit changed the date: %+v", o)
 	}
 	if got := savedOccurrenceAccess(t, f); got.Status != policy.OccurrenceAccessActive {
@@ -2327,7 +2287,7 @@ func TestDateEditPromotionJudgesTheCutoffAfterTheWaits(t *testing.T) {
 			if losers > 0 {
 				extra = []any{"consent", dateEditConsent(t, f.admin, f.event.ID, f.date(0), changes)}
 			}
-			return goPostDateEdit(f.admin, f.event.ID, f.date(0), dateEditBody(newDateAttempt(t), base.Revision, changes, extra...))
+			return goPostDateEdit(f.admin, f.event.ID, f.date(0), dateEditBody(base.Revision, changes, extra...))
 		}},
 	}
 	for _, route := range routes {
@@ -2419,8 +2379,7 @@ func TestDateEditPromotionJudgesTheCutoffAfterTheWaits(t *testing.T) {
 // the rerun takes the contact gate, a fenced writer holding the gate detects
 // a restore and marks this process, then releases the gate. The rerun, once
 // it holds the gate, answers 503 restore_detected and writes nothing: the
-// date, its receipt, the departed person's grant, notices and audit stay as
-// they were.
+// date, the departed person's grant, notices and audit stay as they were.
 func TestDateEditRetryHonorsRestoreDetectedUnderTheGate(t *testing.T) {
 	f := newDepartureReadFixture(t, models.VisibilityInviteOnly, models.RegGoing, policy.OccurrenceOriginDepartureSelf)
 	target := f.dates[1]
@@ -2471,7 +2430,7 @@ func TestDateEditRetryHonorsRestoreDetectedUnderTheGate(t *testing.T) {
 	}
 	// A title change keeps the date's end, so the kept grant does not refuse
 	// it (DEC-156) and the old end passing mid-edit still forces the rerun.
-	wantDateEdit(t, f.admin, f.event.ID, date, dateEditBody(newDateAttempt(t), base.Revision,
+	wantDateEdit(t, f.admin, f.event.ID, date, dateEditBody(base.Revision,
 		map[string]any{"title": "NEWSECRETTITLE"}), http.StatusServiceUnavailable, "restore_detected")
 	select {
 	case err := <-detector:
@@ -2490,7 +2449,7 @@ func TestDateEditRetryHonorsRestoreDetectedUnderTheGate(t *testing.T) {
 	if got := savedOccurrenceAccess(t, f); got.Status != grant.Status || got.EndedAt != nil {
 		t.Fatalf("the grant changed: %+v, was %+v", got, grant)
 	}
-	if o := occurrenceRow(t, f.app, target.ID); o.EditReceipt != nil || !o.EndsAt.Equal(target.EndsAt) {
+	if o := occurrenceRow(t, f.app, target.ID); !o.EndsAt.Equal(target.EndsAt) {
 		t.Fatalf("the date changed: %+v", o)
 	}
 }
@@ -2584,7 +2543,7 @@ func TestDateConsentCountsTheProspectiveDate(t *testing.T) {
 					if tc.want > 0 {
 						before := f.state(t)
 						base := editBaseOf(t, f.admin, f.event.ID, date)
-						w := wantDateEdit(t, f.admin, f.event.ID, date, dateEditBody(newDateAttempt(t), base.Revision, withVisibility(changes)), http.StatusConflict, "date_needs_consent")
+						w := wantDateEdit(t, f.admin, f.event.ID, date, dateEditBody(base.Revision, withVisibility(changes)), http.StatusConflict, "date_needs_consent")
 						if got := count(t, w, true); got != tc.want {
 							t.Fatalf("the POST counts %d, want %d: %s", got, tc.want, w.Body.String())
 						}
@@ -2592,7 +2551,7 @@ func TestDateConsentCountsTheProspectiveDate(t *testing.T) {
 						extra = append(extra, "consent", consentOf(t, w))
 					}
 					base := editBaseOf(t, f.admin, f.event.ID, date)
-					wantDateEdit(t, f.admin, f.event.ID, date, dateEditBody(newDateAttempt(t), base.Revision, withVisibility(changes), extra...), http.StatusOK, "")
+					wantDateEdit(t, f.admin, f.event.ID, date, dateEditBody(base.Revision, withVisibility(changes), extra...), http.StatusOK, "")
 				}
 				wantCancelled := tc.want
 				if writer == "preview" {
@@ -2761,8 +2720,8 @@ func removeKept(f occurrenceReadFixture, date string) *httptest.ResponseRecorder
 // TestLaterEndRefusedWhileADateIsKept (DEC-156): on both single-date editors,
 // any change that makes a date someone kept after leaving end later is
 // refused on its first attempt with the refused date and its count, before
-// any write or question: the date, its receipt, the grant, the notices and
-// the audit are as they were, and the departed person still reads the date.
+// any write or question: the date, the grant, the notices and the audit are
+// as they were, and the departed person still reads the date.
 // A change that keeps or brings the end earlier applies, and a leader's add
 // never refuses anything.
 func TestLaterEndRefusedWhileADateIsKept(t *testing.T) {
@@ -2819,9 +2778,6 @@ func TestLaterEndRefusedWhileADateIsKept(t *testing.T) {
 				}
 				if after := eventWriterState(t, f.app, f.event.ID); after != state {
 					t.Fatalf("the refused edit wrote:\n%s\n%s", state, after)
-				}
-				if o := occurrenceRow(t, f.app, target.ID); o.EditReceipt != nil {
-					t.Fatalf("the refusal left a receipt: %+v", o)
 				}
 				if got := savedOccurrenceAccess(t, f); got.Status != policy.OccurrenceAccessActive {
 					t.Fatalf("the refusal ended the grant: %+v", got)
@@ -2950,7 +2906,7 @@ func TestKeptDateRefusalReaderInTheEdit(t *testing.T) {
 			return nil
 		}
 		base := editBaseOf(t, f.admin, f.event.ID, date)
-		wantDateEdit(t, f.admin, f.event.ID, date, dateEditBody(newDateAttempt(t), base.Revision,
+		wantDateEdit(t, f.admin, f.event.ID, date, dateEditBody(base.Revision,
 			map[string]any{"startsLocal": wallAt(target.StartsAt.AddDate(0, 0, 30))}), http.StatusOK, "")
 		if inside.Load() != http.StatusNotFound {
 			t.Fatalf("the read inside the edit: %d", inside.Load())
@@ -2964,7 +2920,7 @@ func TestKeptDateRefusalReaderInTheEdit(t *testing.T) {
 		newMutableClock(f.app, target.EndsAt.Add(-time.Hour))
 		apiDo(t, f.client, "GET", dateReadPath(f.event.ID, date), nil, http.StatusOK)
 		base := editBaseOf(t, f.admin, f.event.ID, date)
-		wantDateEdit(t, f.admin, f.event.ID, date, dateEditBody(newDateAttempt(t), base.Revision,
+		wantDateEdit(t, f.admin, f.event.ID, date, dateEditBody(base.Revision,
 			map[string]any{"startsLocal": wallAt(target.StartsAt.AddDate(0, 0, 30))}), http.StatusConflict, "date_kept_after_leaving")
 		apiDo(t, f.client, "GET", dateReadPath(f.event.ID, date), nil, http.StatusOK)
 		if o := occurrenceRow(t, f.app, target.ID); !o.EndsAt.Equal(target.EndsAt) {
@@ -3120,7 +3076,7 @@ func lengthen(t *testing.T, app *App, c *apiClient, eventID uint, occ models.Eve
 	o := occurrenceRow(t, app, occ.ID)
 	date := models.FormatCalendarDate(o.OriginalDate)
 	base := editBaseOf(t, c, eventID, date)
-	return postDateEdit(c, eventID, date, dateEditBody(newDateAttempt(t), base.Revision, map[string]any{"durationMinutes": int(o.EndsAt.Sub(o.StartsAt)/time.Minute) + 30}))
+	return postDateEdit(c, eventID, date, dateEditBody(base.Revision, map[string]any{"durationMinutes": int(o.EndsAt.Sub(o.StartsAt)/time.Minute) + 30}))
 }
 
 // TestKeptDateRegrantPaths: what refuses a later end is the live grant's
@@ -4174,9 +4130,8 @@ func TestManagedDateReadAcknowledgesItsSnapshotViewer(t *testing.T) {
 
 // TestDateEditAcknowledgesTheWritersOutcome: a participating guarded edit
 // (M8.1) is acknowledged for the actor its writer locked, only once the
-// outcome is known: an applied edit, a settled replay, and the writer's
-// refusals whose rollback was confirmed (a stale base, a start the writer
-// cannot parse). A failed edit, an unconfirmed rollback and a failed COMMIT
+// outcome is known: an applied edit, and the writer's refusals whose rollback
+// was confirmed (its resend, a stale base, a start the writer cannot parse). A failed edit, an unconfirmed rollback and a failed COMMIT
 // carry no acknowledgment, nor do the refusals made before the writer (the
 // preflight's 403, a malformed body), which no locked actor decided.
 func TestDateEditAcknowledgesTheWritersOutcome(t *testing.T) {
@@ -4185,28 +4140,28 @@ func TestDateEditAcknowledgesTheWritersOutcome(t *testing.T) {
 	date := f.date(0)
 
 	base := editBaseOf(t, admin, f.event.ID, date)
-	applied := dateEditBody(newDateAttempt(t), base.Revision, map[string]any{"title": "Acknowledged title"})
+	applied := dateEditBody(base.Revision, map[string]any{"title": "Acknowledged title"})
 	w := wantDateEdit(t, admin, f.event.ID, date, applied, http.StatusOK, "")
 	wantAck(t, "an applied edit", w, admin, f.adminUser)
-	w = wantDateEdit(t, admin, f.event.ID, date, applied, http.StatusOK, "")
-	wantAck(t, "a settled replay", w, admin, f.adminUser)
-	w = wantDateEdit(t, admin, f.event.ID, date, dateEditBody(newDateAttempt(t), base.Revision, map[string]any{"title": "Stale"}), http.StatusConflict, "date_changed")
+	w = wantDateEdit(t, admin, f.event.ID, date, applied, http.StatusConflict, "date_changed")
+	wantAck(t, "its resend", w, admin, f.adminUser)
+	w = wantDateEdit(t, admin, f.event.ID, date, dateEditBody(base.Revision, map[string]any{"title": "Stale"}), http.StatusConflict, "date_changed")
 	wantAck(t, "a stale base", w, admin, f.adminUser)
 	base = editBaseOf(t, admin, f.event.ID, date)
-	w = postDateEdit(admin, f.event.ID, date, dateEditBody(newDateAttempt(t), base.Revision, map[string]any{"startsLocal": "not a time"}))
+	w = postDateEdit(admin, f.event.ID, date, dateEditBody(base.Revision, map[string]any{"startsLocal": "not a time"}))
 	if w.Code < 400 || w.Code >= 500 {
 		t.Fatalf("an unparsable start: %d %s", w.Code, w.Body.String())
 	}
 	wantAck(t, "the writer's field refusal", w, admin, f.adminUser)
 
-	w = wantDateEdit(t, member, f.event.ID, date, dateEditBody(newDateAttempt(t), base.Revision, map[string]any{"title": "x"}), http.StatusForbidden, "")
+	w = wantDateEdit(t, member, f.event.ID, date, dateEditBody(base.Revision, map[string]any{"title": "x"}), http.StatusForbidden, "")
 	wantNoAck(t, "the preflight's refusal", w)
-	w = postDateEdit(admin, f.event.ID, date, map[string]any{"attempt": "nope"})
+	w = postDateEdit(admin, f.event.ID, date, map[string]any{"changes": map[string]any{"title": "x"}})
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("a malformed body: %d %s", w.Code, w.Body.String())
 	}
 	wantNoAck(t, "a malformed body", w)
-	plain := wantDateEdit(t, f.admin, f.event.ID, date, dateEditBody(newDateAttempt(t), base.Revision, map[string]any{"title": "Plain title"}), http.StatusOK, "")
+	plain := wantDateEdit(t, f.admin, f.event.ID, date, dateEditBody(base.Revision, map[string]any{"title": "Plain title"}), http.StatusOK, "")
 	wantNoAck(t, "a plain edit", plain)
 
 	for _, c := range []struct {
@@ -4222,12 +4177,12 @@ func TestDateEditAcknowledgesTheWritersOutcome(t *testing.T) {
 			state := f.state(t)
 			var fired atomic.Bool
 			f.app.hooks.dateEditStep = func(tx *gorm.DB, step string) error {
-				if step != "receipt" || !fired.CompareAndSwap(false, true) {
+				if step != "effects" || !fired.CompareAndSwap(false, true) {
 					return nil
 				}
 				return c.step(tx)
 			}
-			w := postDateEdit(admin, f.event.ID, date, dateEditBody(newDateAttempt(t), base.Revision, map[string]any{"title": "Never acknowledged"}))
+			w := postDateEdit(admin, f.event.ID, date, dateEditBody(base.Revision, map[string]any{"title": "Never acknowledged"}))
 			f.app.hooks.dateEditStep = nil
 			if !fired.Load() || w.Code == http.StatusOK {
 				t.Fatalf("%s (fired %t): %d %s", c.name, fired.Load(), w.Code, w.Body.String())
@@ -4238,36 +4193,6 @@ func TestDateEditAcknowledgesTheWritersOutcome(t *testing.T) {
 				t.Fatalf("%s wrote", c.name)
 			}
 		})
-	}
-}
-
-// supersededKey reads a 409 date_changed answer's baseSuperseded key: absent
-// (false, false), or present with its value.
-func supersededKey(t *testing.T, w *httptest.ResponseRecorder) (value, present bool) {
-	t.Helper()
-	var body map[string]json.RawMessage
-	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
-		t.Fatalf("answer %q: %v", w.Body.String(), err)
-	}
-	raw, ok := body["baseSuperseded"]
-	if !ok {
-		return false, false
-	}
-	if string(raw) != "true" {
-		t.Fatalf("baseSuperseded is %s, never anything but true: %s", raw, w.Body.String())
-	}
-	var shape dateChangedJSON
-	decodeJSON(t, w, &shape)
-	return shape.BaseSuperseded, true
-}
-
-func wantSuperseded(t *testing.T, what string, w *httptest.ResponseRecorder, want bool) {
-	t.Helper()
-	if w.Code != http.StatusConflict || answerCode(t, w) != "date_changed" {
-		t.Fatalf("%s: %d %s, want 409 date_changed", what, w.Code, w.Body.String())
-	}
-	if got, present := supersededKey(t, w); got != want || present != want {
-		t.Fatalf("%s: baseSuperseded %t (present %t), want %t: %s", what, got, present, want, w.Body.String())
 	}
 }
 
@@ -4282,141 +4207,38 @@ func withCounters(t *testing.T, token string, occ uint, eventRev, dateRev int64)
 	return strings.Join(parts, ".")
 }
 
-// TestBaseSupersededIsProvedOnlyByOlderCounters: the flag needs the same
-// occurrence, no counter ahead and one behind; a place tag never decides it,
-// and nothing that does not parse does.
-func TestBaseSupersededIsProvedOnlyByOlderCounters(t *testing.T) {
-	const gen = "0123456789abcdef"
-	tok := func(occ, ev, date string, place string) string {
-		return "1." + gen + "." + occ + "." + ev + "." + date + "." + place
-	}
-	for _, c := range []struct {
-		name string
-		base string
-		want bool
-	}{
-		{"an older date counter", tok("7", "3", "4", "-"), true},
-		{"an older event counter", tok("7", "2", "5", "-"), true},
-		{"both older", tok("7", "1", "1", "aaaaaaaaaaaaaaaa"), true},
-		{"the same counters, another place", tok("7", "3", "5", "aaaaaaaaaaaaaaaa"), false},
-		{"the same counters", tok("7", "3", "5", "-"), false},
-		{"a date counter ahead", tok("7", "2", "6", "-"), false},
-		{"an event counter ahead", tok("7", "4", "4", "-"), false},
-		{"another occurrence", tok("8", "1", "1", "-"), false},
-		{"a counter past uint64", tok("7", "18446744073709551616", "1", "-"), false},
-		{"a short token", "1." + gen + ".7.3", false},
-		{"not numbers", tok("7", "x", "1", "-"), false},
-	} {
-		if got := baseSuperseded(c.base, 7, 3, 5); got != c.want {
-			t.Errorf("%s (%s): %t, want %t", c.name, c.base, got, c.want)
-		}
-	}
-	if baseSuperseded(tok("7", "1", "1", "-"), 7, -1, 5) {
-		t.Error("a negative stored counter proved a supersession")
-	}
-}
-
-// TestDateEditSignalsASupersededBase: date_changed carries baseSuperseded
-// only when the locked check proves the base older than the date, and the
-// answer is still the writer's acknowledged decision. Every other
-// date_changed, and every refusal before the writer, leaves the key out.
-func TestDateEditSignalsASupersededBase(t *testing.T) {
+// TestDateEditRefusesAForgedOrForeignBase: a well-formed token of this
+// process that the date never issued, its counters ahead of the date's or
+// another date's, is date_changed, decided by the writer and acknowledged,
+// and writes nothing.
+func TestDateEditRefusesAForgedOrForeignBase(t *testing.T) {
 	f := newDateEditFixture(t)
 	admin := pinnedAs(t, f.admin)
 	date := f.date(0)
-	edit := func(base string, changes map[string]any) *httptest.ResponseRecorder {
-		return postDateEdit(admin, f.event.ID, date, dateEditBody(newDateAttempt(t), base, changes))
+	base := editBaseOf(t, admin, f.event.ID, date)
+	o := occurrenceRow(t, f.app, f.dates[0].ID)
+	var evRev int64
+	gormMust(t, f.app.DB.Raw("SELECT edit_revision FROM events WHERE id = ?", f.event.ID).Scan(&evRev))
+	state := f.state(t)
+	for name, tok := range map[string]string{
+		"a date counter ahead":   withCounters(t, base.Revision, o.ID, evRev, o.EditRevision+3),
+		"an event counter ahead": withCounters(t, base.Revision, o.ID, evRev+1, o.EditRevision),
+		"another occurrence":     withCounters(t, base.Revision, f.dates[1].ID, evRev, o.EditRevision),
+	} {
+		w := wantDateEdit(t, admin, f.event.ID, date, dateEditBody(tok, map[string]any{"title": "Forged"}), http.StatusConflict, "date_changed")
+		wantAck(t, name, w, admin, f.adminUser)
 	}
-
-	t.Run("a later date edit", func(t *testing.T) {
-		base := editBaseOf(t, admin, f.event.ID, date)
-		wantDateEdit(t, admin, f.event.ID, date, dateEditBody(newDateAttempt(t), base.Revision, map[string]any{"title": "Moved on"}), http.StatusOK, "")
-		state := f.state(t)
-		w := edit(base.Revision, map[string]any{"title": "Stale"})
-		wantSuperseded(t, "a stale date base", w, true)
-		wantAck(t, "a superseded base", w, admin, f.adminUser)
-		if f.state(t) != state {
-			t.Fatal("a superseded base wrote")
-		}
-	})
-	t.Run("a series edit", func(t *testing.T) {
-		base := editBaseOf(t, admin, f.event.ID, date)
-		apiDo(t, f.admin, "PUT", fmt.Sprintf("/api/v1/events/%d", f.event.ID), seriesBody(t, f.admin, fmt.Sprintf("/api/v1/events/%d", f.event.ID), map[string]any{"title": "Supper again"}), http.StatusOK)
-		wantSuperseded(t, "a stale series base", edit(base.Revision, map[string]any{"title": "Stale"}), true)
-	})
-	t.Run("a replay after a later edit", func(t *testing.T) {
-		base := editBaseOf(t, admin, f.event.ID, date)
-		applied := dateEditBody(newDateAttempt(t), base.Revision, map[string]any{"title": "Applied once"})
-		wantDateEdit(t, admin, f.event.ID, date, applied, http.StatusOK, "")
-		next := editBaseOf(t, admin, f.event.ID, date)
-		wantDateEdit(t, admin, f.event.ID, date, dateEditBody(newDateAttempt(t), next.Revision, map[string]any{"title": "Later"}), http.StatusOK, "")
-		wantSuperseded(t, "the replay", postDateEdit(admin, f.event.ID, date, applied), true)
-	})
-	t.Run("the inherited place alone", func(t *testing.T) {
-		base := editBaseOf(t, admin, f.event.ID, date)
-		apiDo(t, f.admin, "PUT", "/api/v1/groups/"+itoa(f.group), groupBody(t, f.admin, "/api/v1/groups/"+itoa(f.group), map[string]any{"location": "Chapel " + newDateAttempt(t)[:6]}), http.StatusOK)
-		wantSuperseded(t, "a place-only change", edit(base.Revision, map[string]any{"title": "Stale"}), false)
-	})
-	t.Run("counters ahead or another occurrence", func(t *testing.T) {
-		base := editBaseOf(t, admin, f.event.ID, date)
-		o := occurrenceRow(t, f.app, f.dates[0].ID)
-		var evRev int64
-		gormMust(t, f.app.DB.Raw("SELECT edit_revision FROM events WHERE id = ?", f.event.ID).Scan(&evRev))
-		for name, tok := range map[string]string{
-			"a date counter ahead":   withCounters(t, base.Revision, o.ID, evRev, o.EditRevision+3),
-			"an event counter ahead": withCounters(t, base.Revision, o.ID, evRev+1, 1),
-			"another occurrence":     withCounters(t, base.Revision, f.dates[1].ID, 1, 1),
-		} {
-			wantSuperseded(t, name, edit(tok, map[string]any{"title": "Forged"}), false)
-		}
-	})
-	t.Run("refusals before the writer", func(t *testing.T) {
-		base := editBaseOf(t, admin, f.event.ID, date)
-		w := postDateEdit(admin, f.event.ID, date, map[string]any{"attempt": newDateAttempt(t), "revision": base.Revision})
-		if w.Code != http.StatusBadRequest {
-			t.Fatalf("a body with no changes: %d %s", w.Code, w.Body.String())
-		}
-		if _, present := supersededKey(t, w); present {
-			t.Fatalf("a malformed body carried the flag: %s", w.Body.String())
-		}
-		f.app.fence.detected.Store(true)
-		defer f.app.fence.detected.Store(false)
-		w = edit(withCounters(t, base.Revision, f.dates[0].ID, 1, 1), map[string]any{"title": "x"})
-		if answerCode(t, w) != "restore_detected" {
-			t.Fatalf("a detected restore: %d %s", w.Code, w.Body.String())
-		}
-		if _, present := supersededKey(t, w); present {
-			t.Fatalf("a detected restore carried the flag: %s", w.Body.String())
-		}
-	})
+	if after := f.state(t); after != state {
+		t.Fatalf("a forged base wrote:\n%s\n%s", state, after)
+	}
 }
 
-// TestDateEditSupersessionAcrossProcesses: a base another process issued is
-// never proved superseded, whatever its counters; the process that issued it
-// proves it once the date moves on, even when the change came from the other
-// process.
-func TestDateEditSupersessionAcrossProcesses(t *testing.T) {
-	f := newDateEditFixture(t)
-	date := f.date(0)
-	base := editBaseOf(t, f.admin, f.event.ID, date)
-	stale := dateEditBody(newDateAttempt(t), base.Revision, map[string]any{"title": "From the first process"})
-	app2 := freshProcess(t, f.app)
-	c2 := loginAPI(t, app2, f.adminUser.Name, "password1234")
-	wantSuperseded(t, "the first process's base on the second", postDateEdit(c2, f.event.ID, date, stale), false)
-	b2 := editBaseOf(t, c2, f.event.ID, date)
-	wantDateEdit(t, c2, f.event.ID, date, dateEditBody(newDateAttempt(t), b2.Revision, map[string]any{"title": "From the second process"}), http.StatusOK, "")
-	wantSuperseded(t, "the second process's write proved on the first", postDateEdit(f.admin, f.event.ID, date, stale), true)
-	wantSuperseded(t, "the second process's older base on the first", postDateEdit(f.admin, f.event.ID, date, dateEditBody(newDateAttempt(t), b2.Revision, map[string]any{"title": "x"})), false)
-}
-
-// TestDateEditHeldOriginalAcrossAnInheritedPlaceABA: the case the flag must
-// never claim. A send held in delivery is based on the group's place A; the
-// place changes to B, so the same bytes sent again answer date_changed with
-// no flag, and a fresh read shows a different base. The place goes back to A
-// and the held original applies after all. Had the browser taken the
-// conflict and the different read as proof, it would have started a second
-// edit while the first was still on its way. The replay after it is a settled
-// 200 with one set of effects.
+// TestDateEditHeldOriginalAcrossAnInheritedPlaceABA: a send held in delivery
+// is based on the group's place A; the place changes to B, so the same bytes
+// sent again answer date_changed and a fresh read shows a different base. The
+// place goes back to A and the held original applies after all: a place
+// change alone never rules out a base matching again. The same bytes sent
+// once more after it applied are refused, so the effects happen once.
 func TestDateEditHeldOriginalAcrossAnInheritedPlaceABA(t *testing.T) {
 	f := newDateEditFixture(t)
 	gid := itoa(f.group)
@@ -4426,11 +4248,11 @@ func TestDateEditHeldOriginalAcrossAnInheritedPlaceABA(t *testing.T) {
 	if base.Location != "Group hall" || strings.HasSuffix(base.Revision, ".-") {
 		t.Fatalf("fixture: the date does not show the group's place: %+v", base)
 	}
-	body := dateEditBody(newDateAttempt(t), base.Revision, map[string]any{"startsLocal": f.dates[0].StartsAt.Add(time.Hour).Format("2006-01-02T15:04")})
+	body := dateEditBody(base.Revision, map[string]any{"startsLocal": f.dates[0].StartsAt.Add(time.Hour).Format("2006-01-02T15:04")})
 	held := f.admin.doHeld("POST", dateEditPath(f.event.ID, date), body)
 
 	apiDo(t, f.admin, "PUT", "/api/v1/groups/"+gid, groupBody(t, f.admin, "/api/v1/groups/"+gid, map[string]any{"location": "Chapel"}), http.StatusOK)
-	wantSuperseded(t, "the replay under place B", postDateEdit(f.admin, f.event.ID, date, body), false)
+	wantDateEdit(t, f.admin, f.event.ID, date, body, http.StatusConflict, "date_changed")
 	if b := editBaseOf(t, f.admin, f.event.ID, date); b.Revision == base.Revision {
 		t.Fatal("fixture: the read under place B has the original base")
 	}
@@ -4439,7 +4261,7 @@ func TestDateEditHeldOriginalAcrossAnInheritedPlaceABA(t *testing.T) {
 	if w := held.wait(t); w.Code != http.StatusOK {
 		t.Fatalf("the held original under place A again: %d %s", w.Code, w.Body.String())
 	}
-	if o := occurrenceRow(t, f.app, f.dates[0].ID); o.StartsAtOverride == nil || o.StartsAt.Equal(f.dates[0].StartsAt) || len(o.EditReceipt) != 32 {
+	if o := occurrenceRow(t, f.app, f.dates[0].ID); o.StartsAtOverride == nil || o.StartsAt.Equal(f.dates[0].StartsAt) {
 		t.Fatalf("the held original did not apply: %+v", o)
 	}
 	state := f.state(t)
@@ -4447,45 +4269,61 @@ func TestDateEditHeldOriginalAcrossAnInheritedPlaceABA(t *testing.T) {
 	if notices != 1 {
 		t.Fatalf("the registrant got %d change notices, want 1", notices)
 	}
-	wantDateEdit(t, f.admin, f.event.ID, date, body, http.StatusOK, "")
+	wantDateEdit(t, f.admin, f.event.ID, date, body, http.StatusConflict, "date_changed")
 	if f.state(t) != state || countOf(t, f.app, f.memberUser.ID, notify.EventChanged) != notices {
-		t.Fatal("the replay after the original applied it a second time")
+		t.Fatal("the resend after the original applied it a second time")
 	}
 }
 
-// TestDateEditTakesTheBrowsersFrozenBytes keeps a tab still running the
-// earlier release's client working: that client froze its body
-// (DateEdits.freeze, since removed from web/src/api/events.ts), sent those
-// bytes, appended the challenge's token to them, and replayed them byte for
-// byte from "Try again". The handler reads them, they apply, and a settlement
-// and its replay name the edited occurrence with a revision, which is what
-// that client checked before it counted a send as stored.
-func TestDateEditTakesTheBrowsersFrozenBytes(t *testing.T) {
+// TestDateEditTakesAnEarlierPagesBody keeps a tab still running the earlier
+// release's client working: that client sent a 32-hex attempt id in its body,
+// froze those bytes, appended the challenge's token to them, and could send
+// them again byte for byte from "Try again". The handler reads them and they
+// apply, naming the edited occurrence with a revision, which is what that
+// client checked before it counted a send as stored. Sent again after they
+// applied, the bytes are a stale base. The attempt is never read: a body
+// without one, or with one that was never an id, applies the same way.
+func TestDateEditTakesAnEarlierPagesBody(t *testing.T) {
 	f := newDateEditFixture(t)
 	admin := pinnedAs(t, f.admin)
 	f.openWithOutsiders(t, 0)
 	date := f.date(0)
-	base := editBaseOf(t, admin, f.event.ID, date)
-	attempt := newDateAttempt(t)
-	frozen := `{"attempt":"` + attempt + `","revision":"` + base.Revision + `","changes":{"title":"Supper","capacityOverride":null,"visibility":"series"},"reason":"Too many"}`
 	post := func(body string) *httptest.ResponseRecorder {
 		return admin.do("POST", dateEditPath(f.event.ID, date), rawJSON(body), true)
 	}
+	base := editBaseOf(t, admin, f.event.ID, date)
+	frozen := `{"attempt":"0123456789abcdef0123456789abcdef","revision":"` + base.Revision + `","changes":{"title":"Supper","capacityOverride":null,"visibility":"series"},"reason":"Too many"}`
 	w := post(frozen)
 	if w.Code != http.StatusConflict || answerCode(t, w) != "date_needs_consent" {
 		t.Fatalf("the frozen body: %d %s", w.Code, w.Body.String())
 	}
-	token := consentOf(t, w)
-	consented := frozen[:len(frozen)-1] + `,"consent":"` + token + `"}`
-	for _, what := range []string{"the consented body", "its replay"} {
-		w = post(consented)
+	consented := frozen[:len(frozen)-1] + `,"consent":"` + consentOf(t, w) + `"}`
+	w = post(consented)
+	if w.Code != http.StatusOK {
+		t.Fatalf("the consented body: %d %s", w.Code, w.Body.String())
+	}
+	wantAck(t, "the consented body", w, admin, f.adminUser)
+	if got := answeredDate(t, w); got.ID != f.dates[0].ID || got.Revision == "" || got.Title != "Supper" {
+		t.Fatalf("the consented body answered %+v", got)
+	}
+	state := f.state(t)
+	w = post(consented)
+	if w.Code != http.StatusConflict || answerCode(t, w) != "date_changed" {
+		t.Fatalf("the consented body sent again: %d %s", w.Code, w.Body.String())
+	}
+	wantAck(t, "the consented body sent again", w, admin, f.adminUser)
+	if after := f.state(t); after != state {
+		t.Fatalf("the consented body sent again wrote:\n%s\n%s", state, after)
+	}
+
+	for name, attempt := range map[string]string{"no attempt": "", "an attempt that was never an id": `"attempt":5,`} {
+		base := editBaseOf(t, admin, f.event.ID, date)
+		w := post(`{` + attempt + `"revision":"` + base.Revision + `","changes":{"title":"` + name + `"}}`)
 		if w.Code != http.StatusOK {
-			t.Fatalf("%s: %d %s", what, w.Code, w.Body.String())
+			t.Fatalf("%s: %d %s", name, w.Code, w.Body.String())
 		}
-		wantAck(t, what, w, admin, f.adminUser)
-		got := answeredDate(t, w)
-		if got.ID != f.dates[0].ID || got.Revision == "" || got.Title != "Supper" {
-			t.Fatalf("%s answered %+v", what, got)
+		if got := answeredDate(t, w); got.ID != f.dates[0].ID || got.Title != name {
+			t.Fatalf("%s answered %+v", name, got)
 		}
 	}
 }
@@ -4510,7 +4348,7 @@ func wantDatePageOutdated(t *testing.T, w *httptest.ResponseRecorder) {
 // manage it, then a malformed date (400) and a missing one (404). A manager
 // reaching a date gets 409 date_page_outdated whatever the body, a body that
 // would have tightened and renamed the date or one that can't be read, and
-// nothing is written: the date and its revision and receipt, registrations,
+// nothing is written: the date and its revision, registrations,
 // audit, notices and jobs. Refusals the snapshot decided are acknowledged for
 // the viewer it judged, and a demotion or a move of the date committed after
 // the judgment leaves the answer the snapshot's.

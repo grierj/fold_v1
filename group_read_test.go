@@ -989,12 +989,12 @@ func TestGroupReadRevisionsAreEditBases(t *testing.T) {
 	if !moved.Load() {
 		t.Fatal("the read never reached its seam")
 	}
-	wantDateEdit(t, f.leader, f.event.ID, day, dateEditBody(newDateAttempt(t), stale, map[string]any{"title": "On the old place"}), http.StatusConflict, "date_changed")
+	wantDateEdit(t, f.leader, f.event.ID, day, dateEditBody(stale, map[string]any{"title": "On the old place"}), http.StatusConflict, "date_changed")
 	fresh := rowRevision(t, groupDetailSuffix)
 	if fresh == stale || fresh != editBaseOf(t, f.leader, f.event.ID, day).Revision {
 		t.Fatalf("after the move: fresh %s, stale %s", fresh, stale)
 	}
-	wantDateEdit(t, f.leader, f.event.ID, day, dateEditBody(newDateAttempt(t), fresh, map[string]any{"title": "On the new place"}), http.StatusOK, "")
+	wantDateEdit(t, f.leader, f.event.ID, day, dateEditBody(fresh, map[string]any{"title": "On the new place"}), http.StatusOK, "")
 
 	base := rowRevision(t, groupDetailSuffix)
 	demoted := atReaderSeam(f.app, "authorized", "group detail", func() {
@@ -1005,7 +1005,7 @@ func TestGroupReadRevisionsAreEditBases(t *testing.T) {
 	if got := rowRevision(t, groupDetailSuffix); !demoted.Load() || got != base {
 		t.Fatalf("the demotion's answer: fired %t, revision %s want %s", demoted.Load(), got, base)
 	}
-	wantDateEdit(t, f.leader, f.event.ID, day, dateEditBody(newDateAttempt(t), base, map[string]any{"title": "After the demotion"}), http.StatusForbidden, "")
+	wantDateEdit(t, f.leader, f.event.ID, day, dateEditBody(base, map[string]any{"title": "After the demotion"}), http.StatusForbidden, "")
 	var o models.EventOccurrence
 	gormMust(t, f.app.DB.First(&o, occ.ID))
 	if o.TitleOverride == nil || *o.TitleOverride != "On the new place" {

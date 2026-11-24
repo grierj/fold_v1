@@ -2,7 +2,7 @@ import { isString } from "../src/lib/wireValues";
 import type { JsonObject, JsonValue } from "../src/lib/wireValues";
 import AxeBuilder from "@axe-core/playwright";
 import { mkdirSync } from "node:fs";
-import { createHash, randomBytes } from "node:crypto";
+import { createHash } from "node:crypto";
 import { digestPreimage, encodeChoices } from "../src/lib/reasonSetDigest";
 import { parseRoomLabel } from "../src/lib/roomLabels";
 import { expect, type APIRequestContext, type Locator, type Page } from "@playwright/test";
@@ -91,14 +91,13 @@ export async function apiAs(request: APIRequestContext, name: string) {
 }
 
 // saveDate is a manager's ordinary save of one date through the guarded edit, as the date editor sends
-// it: the revision from the manager's own read of that date, a fresh attempt id and only the changed
-// fields (null clears one). It expects the save itself: any refusal, a consent question included, fails.
+// it: the revision from the manager's own read of that date and only the changed fields (null clears
+// one). It expects the save itself: any refusal, a consent question included, fails.
 export async function saveDate(api: Awaited<ReturnType<typeof apiAs>>, eventId: number, date: string, changes: JsonObject) {
   const base = (await api("GET", `/events/${eventId}/occurrences/${date}`)).occurrence;
 
   if (!isString(base?.revision) || !base.revision) throw new Error(`The managed read of ${date} carried no revision`);
-  const attempt = randomBytes(16).toString("hex");
-  const saved = (await api("POST", `/events/${eventId}/occurrences/${date}/edits`, { attempt, revision: base.revision, changes })).occurrence;
+  const saved = (await api("POST", `/events/${eventId}/occurrences/${date}/edits`, { revision: base.revision, changes })).occurrence;
 
   expect(saved?.id).toBe(base.id);
   expect(isString(saved?.revision) && saved.revision !== "").toBe(true);

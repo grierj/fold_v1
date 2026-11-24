@@ -167,14 +167,13 @@ func TestDateTighteningCancelsOnlyThatDateAndRechecksGuestRedemption(t *testing.
 	token := tokenInEmail(t, latestEmail(t, app, pending))
 	day := models.FormatCalendarDate(dates[0].OriginalDate)
 	base := editBaseOf(t, admin, ev.ID, day)
-	attempt := newDateAttempt(t)
-	asked := wantDateEdit(t, admin, ev.ID, day, dateEditBody(attempt, base.Revision, map[string]any{"visibility": nil}), http.StatusConflict, "date_needs_consent")
+	asked := wantDateEdit(t, admin, ev.ID, day, dateEditBody(base.Revision, map[string]any{"visibility": nil}), http.StatusConflict, "date_needs_consent")
 	var n int64
 	app.DB.Model(&models.Registration{}).Where("status <> ?", models.RegCancelled).Count(&n)
 	if n != 2 {
 		t.Fatalf("unconfirmed cancellations: %d", n)
 	}
-	wantEditedDate(t, wantDateEdit(t, admin, ev.ID, day, dateEditBody(attempt, base.Revision, map[string]any{"visibility": nil}, "consent", consentOf(t, asked)), http.StatusOK, ""), base)
+	wantEditedDate(t, wantDateEdit(t, admin, ev.ID, day, dateEditBody(base.Revision, map[string]any{"visibility": nil}, "consent", consentOf(t, asked)), http.StatusOK, ""), base)
 	app.DB.Model(&models.Registration{}).Where("occurrence_id = ?", dates[1].ID).Count(&n)
 	if n != 1 {
 		t.Fatal("sibling registration cancelled")
@@ -247,10 +246,10 @@ func TestConcurrentRegistrationVersusDateTightening(t *testing.T) {
 	close(start)
 	// Sign-ups race the save, so an agreed count may be stale by the time
 	// the write locks the date: each 409 date_needs_consent carries the fresh
-	// impact, and the manager agrees to that one with the same attempt, as
+	// impact, and the manager agrees to that one on the same base, as
 	// the date editor does (DEC-158). A sign-up never moves the date's
 	// revision, so any other answer fails.
-	body := dateEditBody(newDateAttempt(t), base.Revision, map[string]any{"visibility": "series"})
+	body := dateEditBody(base.Revision, map[string]any{"visibility": "series"})
 	for try := 0; ; try++ {
 		w := postDateEdit(admin, ev.ID, day, body)
 		if w.Code == http.StatusOK {
@@ -503,7 +502,7 @@ func TestDateVisibilityAuditAndPreviewUseExactDates(t *testing.T) {
 	}
 
 	apiDo(t, admin, "GET", fmt.Sprintf("/api/v1/events/%d/occurrences/2026-02-30/visibility-impact?visibility=public", ev.ID), nil, 404)
-	apiDo(t, admin, "POST", dateEditPath(ev.ID, "2026-02-30"), dateEditBody(newDateAttempt(t), "1.0000000000000000.0.0.0.-", map[string]any{"visibility": "public"}), 400)
+	apiDo(t, admin, "POST", dateEditPath(ev.ID, "2026-02-30"), dateEditBody("1.0000000000000000.0.0.0.-", map[string]any{"visibility": "public"}), 400)
 	// The retired writer still answers a malformed date before date_page_outdated.
 	apiDo(t, admin, "PUT", fmt.Sprintf("/api/v1/events/%d/occurrences/2026-02-30", ev.ID), map[string]any{"visibility": "public"}, 400)
 
@@ -534,7 +533,7 @@ func TestDateVisibilityRechecksAfterHeldBody(t *testing.T) {
 		t.Run(change, func(t *testing.T) {
 			f := newEventWriterRace(t, change == "demoted admin")
 			base := editBaseOf(t, f.actor, f.event.ID, f.date)
-			held := f.actor.doHeld("POST", dateEditPath(f.event.ID, f.date), dateEditBody(newDateAttempt(t), base.Revision, map[string]any{"visibility": models.VisibilityPrivate, "location": "New hall"}))
+			held := f.actor.doHeld("POST", dateEditPath(f.event.ID, f.date), dateEditBody(base.Revision, map[string]any{"visibility": models.VisibilityPrivate, "location": "New hall"}))
 			f.revoke(t, change)
 			before := eventWriterState(t, f.app, f.event.ID)
 			held.release()

@@ -66,7 +66,7 @@ export const Events = {
   // The manager's edit base for one date. A scheduled date that has not ended carries its roster (attendeesVisible).
   managedDate: (id: Id, date: string, pinned?: Credential) => api<OccurrenceResponse>(path`/events/${id}/occurrences/${date}`, { pinned }),
   editDate: (id: Id, date: string, body: DateEditBody) =>
-    api<OccurrenceResponse>(path`/events/${id}/occurrences/${date}/edits`, { method: "POST", body: { attempt: attemptId(), ...body } }),
+    api<OccurrenceResponse>(path`/events/${id}/occurrences/${date}/edits`, { method: "POST", body }),
   delete: (id: Id) => api<unknown>(path`/events/${id}`, { method: "DELETE" }),
 };
 
@@ -88,12 +88,6 @@ interface DateEditBody {
   changes: DateEditChanges;
   reason?: string;
   consent?: string;
-}
-
-// The server still takes an attempt id: each send makes a new one and none is ever sent twice, so a send is never
-// matched to an earlier one.
-function attemptId(): string {
-  return Array.from(crypto.getRandomValues(new Uint8Array(16)), (b) => b.toString(16).padStart(2, "0")).join("");
 }
 
 // One date of an event: /events/:id/dates/:date, where :date is the

@@ -402,11 +402,11 @@ type EventOccurrence struct {
 	// empty (scheduled, or cancelled before this was tracked, which is treated
 	// like manual). Cleared whenever the date goes back to scheduled.
 	CancelSource string `gorm:"type:text;not null;default:''"`
-	// EditRevision and EditReceipt belong to the guarded date edit (migration
-	// 00010). The revision counts changes to the date's tracked columns, kept
-	// by a trigger that also clears the receipt; the receipt is a keyed HMAC
-	// of the last guarded edit, written only by that edit's own UPDATE. GORM
-	// only reads them.
+	// EditRevision belongs to the guarded date edit (migration 00010): it
+	// counts changes to the date's tracked columns, kept by a trigger. GORM
+	// only reads it. EditReceipt is unused: nothing reads or writes the
+	// column, which a contract migration drops once a tagged release holds
+	// 00010 (docs/agents/migrations.md).
 	EditRevision int64  `gorm:"->;not null;default:1"`
 	EditReceipt  []byte `gorm:"->"`
 	CreatedAt    time.Time

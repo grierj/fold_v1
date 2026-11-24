@@ -102,9 +102,8 @@ type testHooks struct {
 	guardianCopyBegin func()
 	// dateEditStep runs inside the guarded date edit's transaction, given
 	// the open transaction and the point reached: "selected" after the
-	// losers of a tightening are selected, "effects" after every effect and
-	// before the receipt, "receipt" after the receipt is written. A returned
-	// error rolls the edit back.
+	// losers of a tightening are selected, "effects" after every effect. A
+	// returned error rolls the edit back.
 	dateEditStep func(tx *gorm.DB, step string) error
 	// singleDateAttempts counts the attempts of a single-date edit
 	// (singleDateMutation), guarded and legacy: two means the date's end

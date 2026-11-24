@@ -182,9 +182,9 @@ func (a *App) attemptMAC(kind string, actor, subject uint, mintMs uint64, nonce 
 
 // processKey derives a key for purpose from the per-process attempt key. It
 // changes on every start and is never stored, so nothing keyed by it survives
-// a restart: the guarded date edit binds its tokens and receipts to it so a
-// restored or rolled-back database is never matched against a token from
-// before the restart (docs/agents/erasure.md, attempt ids).
+// a restart: the guarded date edit binds its tokens to it so a restored or
+// rolled-back database is never matched against a token from before the
+// restart (docs/agents/erasure.md, attempt ids).
 func (a *App) processKey(purpose string) []byte {
 	if err := a.attempts.init(); err != nil {
 		panic(err)
