@@ -93,7 +93,7 @@ drill_progress_init bootstrap base-proof recovery-interruptions reopen-interrupt
   legacy_archive_case review_reconciliation_cases review_backup_archive_cases review_cleanup_retry_cases \
   review_orphaned_restore_case review_moving_tag_case \
   uploads_erasure_cases uploads_interruption_cases backup_exclusion_cases \
-  real_binary_refusals real_level_lineage real_lower_level_rollback_refused real_l1_pre_upgrade_dump real_level0_started_by_hand
+  real_binary_refusals real_level_lineage real_lower_level_rollback_refused real_l1_pre_upgrade_dump real_level0_started_by_hand \
   real_prior_refused_at_start real_prior_running_across_upgrade real_current_release_restore real_older_archive_restore final-verification
 else
 drill_progress_init "${CROSSINGS_ONLY_PLAN[@]}"
