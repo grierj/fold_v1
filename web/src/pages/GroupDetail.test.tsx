@@ -2144,7 +2144,7 @@ describe("the group form's refused save", () => {
     expect(await screen.findByText("Your changes could not be saved.")).toBeInTheDocument();
   });
 
-  it("keeps Change cover photo off while the editor is open, so the page is not read again under a draft", async () => {
+  it("does not offer Change cover photo while the editor is open, so the page is not read again under a draft", async () => {
     vi.mocked(Groups.get).mockResolvedValue(managed);
     openPage();
     await userEvent.click(await screen.findByRole("button", { name: "More group actions" }));
@@ -2152,13 +2152,14 @@ describe("the group form's refused save", () => {
     await userEvent.click(screen.getByRole("menuitem", { name: "Edit group" }));
     await userEvent.type(await screen.findByLabelText("Group name"), " renamed");
     await userEvent.click(screen.getByRole("button", { name: "More group actions" }));
-    expect(screen.getByRole("menuitem", { name: "Change cover photo" })).toBeDisabled();
+    expect(screen.getByRole("menuitem", { name: "Edit group" })).toBeInTheDocument();
+    expect(screen.queryByRole("menuitem", { name: "Change cover photo" })).not.toBeInTheDocument();
     await userEvent.keyboard("{Escape}");
     expect(screen.getByLabelText("Group name")).toHaveValue(`${managed.group.name} renamed`);
     expect(GroupCover.upload).not.toHaveBeenCalled();
   });
 
-  it("keeps Edit group, Change cover photo and Leave group off while the save is on its way", async () => {
+  it("keeps Edit group and Leave group off while the save is on its way", async () => {
     vi.mocked(Groups.get).mockResolvedValue({ ...managed, isMember: true });
     const saving = deferred<Awaited<ReturnType<typeof Groups.update>>>();
     vi.mocked(Groups.update).mockReturnValue(saving.promise);
@@ -2167,7 +2168,8 @@ describe("the group form's refused save", () => {
     expect(screen.getByRole("button", { name: "Saving…" })).toBeDisabled();
     await userEvent.click(screen.getByRole("button", { name: "More group actions" }));
 
-    for (const item of ["Edit group", "Change cover photo", "Leave group"]) expect(screen.getByRole("menuitem", { name: item })).toBeDisabled();
+    for (const item of ["Edit group", "Leave group"]) expect(screen.getByRole("menuitem", { name: item })).toBeDisabled();
+    expect(screen.queryByRole("menuitem", { name: "Change cover photo" })).not.toBeInTheDocument();
     await userEvent.keyboard("{Escape}");
     await act(async () => { saving.resolve({ group: managed.group }); await saving.promise; });
     await waitFor(() => expect(screen.queryByLabelText("Group name")).not.toBeInTheDocument());
@@ -2233,7 +2235,7 @@ describe("the group form's refused save", () => {
     });
     expect(GroupCover.upload).not.toHaveBeenCalled();
     await act(async () => { saving.resolve({ group: managed.group }); await saving.promise; });
-    expect(await screen.findByText("Your other changes were saved, but the cover photo could not be uploaded. You can try again from Edit group.")).toBeInTheDocument();
+    expect(await screen.findByText("The cover photo could not be uploaded. Anything else you changed was saved. You can try again from Edit group.")).toBeInTheDocument();
     // The new photo's focal point goes with it: sent with the details, a failed upload would crop the old photo for the new.
     expect(GroupCover.upload).toHaveBeenCalledExactlyOnceWith("1", photo, { x: 25, y: 75 });
     expect(vi.mocked(Groups.update).mock.calls[0][1].coverFocal).toBeUndefined();
@@ -2250,7 +2252,7 @@ describe("the group form's refused save", () => {
       await userEvent.type(screen.getByLabelText("Group name"), " Two");
       await userEvent.click(screen.getByRole("checkbox", { name: "Remove the current cover" }));
     });
-    expect(await screen.findByText("Your other changes were saved, but the cover photo could not be removed. You can try again from Edit group.")).toBeInTheDocument();
+    expect(await screen.findByText("The cover photo could not be removed. Anything else you changed was saved. You can try again from Edit group.")).toBeInTheDocument();
     expect(screen.getByRole("heading", { level: 1, name: "Family group Two" })).toBeInTheDocument();
     expect(screen.queryByLabelText("Group name")).not.toBeInTheDocument();
     expect(document.body.textContent).not.toContain("SECRET");
