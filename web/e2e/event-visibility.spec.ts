@@ -126,9 +126,9 @@ test("a sign-up after the review is asked about before anyone is cancelled", asy
   expect(schema.parse(event, await manager("GET", `/events/${ev}`)).event.visibility).toBe("invite_only");
 });
 
-// DEC-158: another manager's series change under a reset review brings the review back, named for the new
-// series value, and Cancel from the keyboard returns to Save visibility with nothing saved.
-test("a series change under a reset review comes back named for the new value", async ({ page, request }) => {
+// DEC-163: another manager's series change under a reset review is a change this person never saw. Confirming the
+// review saves nothing: the panel closes on its own, the page shows the event as it is now and says so.
+test("a series change under a reset review closes the panel and says nothing was saved", async ({ page, request }) => {
   test.setTimeout(30_000);
   const { admin, group, ev, date } = await gardenEvent(request, "Seed club", 23);
   await saveDate(admin, ev, date, { visibility: "invite_only" });
@@ -142,17 +142,14 @@ test("a series change under a reset review comes back named for the new value", 
   const review = page.getByRole("dialog");
   await expect(review.getByRole("heading", { name: "Reset this event's dates to the series setting" })).toBeFocused();
   await expect(review).toContainText("After the reset, more people will be able to see this date.");
-  await admin("PUT", `/events/${ev}/visibility`, { visibility: "invite_only", consent: "" });
+  await admin("PUT", `/events/${ev}/visibility`, { visibility: "invite_only", consent: "", revision: (await admin("GET", `/events/${ev}`)).event.revision });
   await review.getByRole("button", { name: "Reset 1 date" }).focus();
   await page.keyboard.press("Enter");
-  await expect(review.getByRole("heading", { name: "Making this event public" })).toBeFocused();
-  await expect(review).toHaveAccessibleDescription("This event is invite-only now. Saving makes it public, so more people will be able to see it.");
-  const event = schema.looseObject({ event: schema.looseObject({ visibility: schema.string() }) });
-  expect(schema.parse(event, await admin("GET", `/events/${ev}`)).event.visibility).toBe("invite_only");
-  await review.getByRole("button", { name: "Cancel" }).focus();
-  await page.keyboard.press("Enter");
+  const notice = page.getByRole("status").filter({ hasText: "This event changed while you were editing, so your changes could not be saved. This is the event as it is now." });
+  await expect(notice).toBeFocused();
   await expect(review).toHaveCount(0);
-  await expect(page.getByRole("button", { name: "Save visibility" })).toBeFocused();
+  await expect(page.getByRole("button", { name: "Save visibility" })).toHaveCount(0);
+  const event = schema.looseObject({ event: schema.looseObject({ visibility: schema.string() }) });
   expect(schema.parse(event, await admin("GET", `/events/${ev}`)).event.visibility).toBe("invite_only");
 });
 

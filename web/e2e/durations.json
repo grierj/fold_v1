@@ -52,7 +52,7 @@
   "rooms.spec.ts": 4.6,
   "roster.spec.ts": 0.6,
   "screens.spec.ts": 0,
-  "series-revision.spec.ts": 8.0,
+  "series-revision.spec.ts": 9.0,
   "series-rsvp.spec.ts": 50.4,
   "series-visibility.spec.ts": 2.8,
   "session.spec.ts": 4.1,
@@ -63,6 +63,7 @@
   "teen-access.spec.ts": 3.8,
   "teen-consent.spec.ts": 6.2,
   "teen-conversion.spec.ts": 0,
+  "visibility-revision.spec.ts": 6.0,
   "waitlist.spec.ts": 1.8,
   "zone-picker.spec.ts": 7.1
 }

@@ -91,7 +91,7 @@ func TestOpenedDateDiscoveryAndFeedPrivacy(t *testing.T) {
 func TestSeriesVisibilityPreservesAndResetsDates(t *testing.T) {
 	app, admin, anon, ev, dates := dateVisibilityFixture(t, models.VisibilityPrivate)
 	saveDate(t, admin, ev.ID, models.FormatCalendarDate(dates[0].OriginalDate), map[string]any{"visibility": "public"}, http.StatusOK, "")
-	apiDo(t, admin, "PUT", fmt.Sprintf("/api/v1/events/%d/visibility", ev.ID), map[string]any{"visibility": "invite_only"}, 200)
+	apiDo(t, admin, "PUT", fmt.Sprintf("/api/v1/events/%d/visibility", ev.ID), visibilityBody(t, admin, fmt.Sprintf("/api/v1/events/%d/visibility", ev.ID), map[string]any{"visibility": "invite_only"}), 200)
 	exact := fmt.Sprintf("/api/v1/events/%d/dates/%s", ev.ID, models.FormatCalendarDate(dates[0].OriginalDate))
 	apiDo(t, anon, "GET", exact, nil, 200)
 	var impact visibilityImpactJSON
@@ -102,12 +102,12 @@ func TestSeriesVisibilityPreservesAndResetsDates(t *testing.T) {
 	// A reset is review-required even when it cancels nobody (DEC-158): a body
 	// with no consent is an old tab's, and "" is answered with the impact.
 	resetPath := fmt.Sprintf("/api/v1/events/%d/visibility", ev.ID)
-	apiDo(t, admin, "PUT", resetPath, map[string]any{"visibility": "invite_only", "resetOverrides": true}, http.StatusConflict)
-	w := admin.do("PUT", resetPath, map[string]any{"visibility": "invite_only", "resetOverrides": true, "consent": ""}, true)
+	apiDo(t, admin, "PUT", resetPath, visibilityBody(t, admin, resetPath, map[string]any{"visibility": "invite_only", "resetOverrides": true}), http.StatusConflict)
+	w := admin.do("PUT", resetPath, visibilityBody(t, admin, resetPath, map[string]any{"visibility": "invite_only", "resetOverrides": true, "consent": ""}), true)
 	if w.Code != http.StatusConflict || !strings.Contains(w.Body.String(), `"resetDates":[{`) {
 		t.Fatalf("a reset without its review: %d %s", w.Code, w.Body.String())
 	}
-	apiDo(t, admin, "PUT", resetPath, map[string]any{"visibility": "invite_only", "resetOverrides": true, "consent": consentOf(t, w)}, 200)
+	apiDo(t, admin, "PUT", resetPath, visibilityBody(t, admin, resetPath, map[string]any{"visibility": "invite_only", "resetOverrides": true, "consent": consentOf(t, w)}), 200)
 	apiDo(t, anon, "GET", exact, nil, 404)
 	var date models.EventOccurrence
 	app.DB.First(&date, dates[0].ID)

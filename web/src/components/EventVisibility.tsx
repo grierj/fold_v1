@@ -1,5 +1,7 @@
+import { useRosterActivityOf } from "../lib/rosterWrites";
 import { Form } from "./ui/Form";
 import { useEffect, useId, useLayoutEffect, useRef, useState } from "react";
+import { ApiError } from "../api/core";
 import { Events } from "../api/events";
 import type { Visibility, VisibilityImpact } from "../types";
 import { GroupVisibilityReview } from "./GroupVisibilityReview";
@@ -7,11 +9,23 @@ import { openedEventWarning } from "./EventIntro";
 import { errorText } from "../lib/errors";
 import { decisionImpact, reviewOutdated } from "../lib/visibilityConsent";
 import { ROSTER_STALE, ROSTER_WAITING, visibilityRank } from "../lib/visibilityChange";
-import { useRosterActivityOf } from "../lib/dateWrites";
 import { useFocusHome, useKeepFocusHome, useLockedFocus } from "../lib/focusHome";
 import { useAction, type Action } from "../lib/useAction";
+import { lostAuthority, useRevisionSave, type RevisionConflict } from "../lib/useRevisionSave";
 import { Checkbox, Choices, Field, FormError, Input, Radio } from "./ui/Field";
 import { Button } from "./ui/Button";
+
+interface Audience {
+  visibility: Visibility;
+  leaderOpened?: boolean;
+  groupVisibility?: Visibility;
+  // The save carries a reason no read can show to be the stored one: the read never counts it done.
+  unverified?: boolean;
+}
+
+// A group event wider than its group is leader-opened, as the server decides it on save (`leaderOpens`, DEC-17/28).
+const opensWider = (value: Visibility, groupVisibility?: Visibility, churchWide?: boolean) =>
+  !churchWide && groupVisibility != null && visibilityRank(value) > visibilityRank(groupVisibility);
 
 const CHOICES: { value: Visibility; label: string; description: string }[] = [
   { value: "public", label: "Public", description: "Anyone can see it." },
@@ -26,7 +40,8 @@ const CHOICES: { value: Visibility; label: string; description: string }[] = [
 // every reset of its dates, is saved only with the consent of the impact the
 // server showed (DEC-158). A review opens, and is confirmed, only when no
 // sign-up update on the event began, ended or is in flight since the request
-// it comes from was sent; while one is in flight Save waits.
+// it comes from was sent; while one is in flight Save waits. The save names the
+// read the control opened with and a refusal is the shared protocol's (DEC-163).
 export function EventVisibilityControl({
   eventId,
   groupName,
@@ -34,7 +49,9 @@ export function EventVisibilityControl({
   visibility,
   leaderOpened,
   churchWide,
+  revision,
   onSaved,
+  onConflict,
   action: shared,
   locked = false,
 }: {
@@ -44,7 +61,11 @@ export function EventVisibilityControl({
   visibility: Visibility;
   leaderOpened?: boolean;
   churchWide?: boolean;
+  // The event page's revision when this control opened.
+  revision?: string;
   onSaved: () => void;
+  // The save was refused and not sent again: the page shows the event as it is now.
+  onConflict?: (why: RevisionConflict) => void;
   // The page's run for this control, so it can lock what shares the panel (the series editor) while it runs.
   action?: Action;
   // Another run in the same panel is on its way.
@@ -83,6 +104,29 @@ export function EventVisibilityControl({
 
     return () => { live = false; };
   }, [eventId, visibility]);
+
+  // What this save can write: the audience and whether it is leader-opened, which follows the group's. The page's
+  // read lists 90 days of dates and a reset reaches every later one, so a refused reset is always a conflict, also
+  // when an earlier press stored it and its answer was lost (a reset that leaves both the visibility and the
+  // leader-opened mark as they were leaves the revision, so only one that changed either is refused).
+  const opened: Audience = { visibility, leaderOpened, groupVisibility };
+
+  const send = useRevisionSave<Audience, { visibility: Visibility; leaderOpened: boolean; groupVisibility: Visibility | null; unverified: boolean }>({
+    opened,
+    revision,
+    read: async () => {
+      const stored = await Events.get(eventId);
+
+      return { allowed: stored.canSetVisibility, revision: stored.event.revision, value: stored.event };
+    },
+    fields: (a) => (resetOverrides ? null : { visibility: a.visibility, leaderOpened: a.leaderOpened ?? false, groupVisibility: a.groupVisibility ?? null, unverified: a.unverified ?? false }),
+    onConflict,
+  });
+
+  // The reason an earlier press sent when its answer never arrived. The reason goes to the audit row and the notice
+  // and no read returns it, so a later press counts as already stored only when it carries that same reason.
+  const unanswered = useRef<string | null>(null);
+
   // `mark` is the session roster sequence the request behind the review was sent at.
   const [review, setReview] = useState<{ impact: VisibilityImpact; mark: number } | null>(null);
 
@@ -148,6 +192,13 @@ export function EventVisibilityControl({
       try {
         impact = await Events.visibilityImpact(eventId, value, resetOverrides);
       } catch (err) {
+        // The preview is refused like the save would be: the page closes the panel and says so.
+        if (err instanceof ApiError && lostAuthority(err)) {
+          onConflict?.("gone");
+
+          return false;
+        }
+
         setError(errorText(err, "We couldn't check this event."));
 
         return false;
@@ -180,8 +231,31 @@ export function EventVisibilityControl({
     const mark = activity.mark();
     setError(null);
 
+    const why = reason.trim();
+
     try {
-      await Events.setVisibility(eventId, { visibility: value, reason: reason.trim() || undefined, consent, resetOverrides });
+      const sent = await send(
+        async (rev) => {
+          try {
+            return await Events.setVisibility(eventId, { visibility: value, reason: why || undefined, consent, resetOverrides, revision: rev });
+          } catch (err) {
+            // Only a save with no answer may have been stored: a refusal was not, and a failed read says nothing.
+            if (!(err instanceof ApiError) || err.status >= 500) unanswered.current = why;
+
+            throw err;
+          }
+        },
+        { visibility: value, leaderOpened: opensWider(value, groupVisibility, churchWide), groupVisibility, unverified: why !== (unanswered.current ?? "") },
+      );
+
+      if (sent === "refused") {
+        setError("We couldn't change who can see this. Please try again.");
+
+        return false;
+      }
+
+      if (sent !== "saved") return false;
+      unanswered.current = null;
       setReview(null);
       onSaved();
     } catch (err) {
@@ -283,7 +357,7 @@ export function VisibilityField({
   reason: string;
   onReason: (v: string) => void;
 }) {
-  const opening = !churchWide && groupVisibility != null && visibilityRank(value) > visibilityRank(groupVisibility);
+  const opening = opensWider(value, groupVisibility, churchWide);
   const choices = churchWide ? CHOICES.filter((c) => c.value !== "invite_only") : CHOICES;
 
   return (

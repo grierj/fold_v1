@@ -1266,6 +1266,27 @@ crossing_visibility_state() { # database event-ids(comma list)
     UNION ALL SELECT 'events in group ' || group_id || ' ' || count(*) FROM events WHERE group_id IN (SELECT group_id FROM events WHERE id IN ($2)) GROUP BY group_id) s"
 }
 
+# body with the revision the event page's visibility control sends, read just before from the binary at base: a
+# visibility save names the read it was made from (DEC-163), and a stale or missing one is refused before the fence is
+# reached. The pinned older binaries (prior, landing, lane, archive) predate the event revision: their read has none
+# and they ignore the field. A read refused once per
+# connection by a plan prepared before a migration (0A000) is asked again, up to five times; then it fails. Any request
+# but an event's visibility keeps its body.
+crossing_with_revision() { # jar base path body
+  local id out status="" attempt rev
+  [[ "$3" =~ ^/events/([0-9]+)/visibility$ ]] || { printf '%s\n' "$4"; return 0; }
+  id="${BASH_REMATCH[1]}"
+  out="$(mktemp)"
+  for ((attempt = 1; attempt <= 5; attempt++)); do
+    status="$(crossing_http "$1" "$2" GET "/events/$id" '' "$out")" || status=000
+    [[ "$status" == 200 ]] && break
+  done
+  if [[ "$status" != 200 ]]; then echo "crossing: GET /events/$id answered $status, want 200: $(head -c 300 "$out")" >&2; rm -f "$out"; return 1; fi
+  rev="$(jq -r '.event.revision // ""' "$out")" || { rm -f "$out"; return 1; }
+  rm -f "$out"
+  jq -c --arg r "$rev" '. + {revision: $r}' <<<"$4"
+}
+
 crossing_make_date_private() { # jar base occurrence-path writer
   local jar="$1" base="$2" path="$3" writer="$4" occurrence id revision attempt body
   case "$writer" in
@@ -1291,7 +1312,7 @@ crossing_make_date_private() { # jar base occurrence-path writer
 # a private event, and a group whose one event nobody signed up for.
 # Prints "group reg reset stale private group3 event3" as ids.
 crossing_visibility_fixtures() { # jar mjar base writer
-  local jar="$1" mjar="$2" base="$3" writer="$4" g g3 e5 e6 r s p
+  local jar="$1" mjar="$2" base="$3" writer="$4" g g3 e5 e6 r s p body
   g="$(crossing_http_want "$jar" "$base" POST /groups '{"name":"Crossing group","visibility":"public","location":"Hall"}' 201 | jq -er .group.id)"
   g3="$(crossing_http_want "$jar" "$base" POST /groups '{"name":"Crossing quiet group","visibility":"public","location":"Hall"}' 201 | jq -er .group.id)"
   e5="$(crossing_http_want "$jar" "$base" POST "/groups/$g/events" "$(jq -nc --arg d "$(crossing_day 6)" '{title:"Crossing E5",startsLocal:($d+"T19:00"),durationMinutes:60,tzid:"UTC"}')" 201 | jq -er .event.id)"
@@ -1302,7 +1323,8 @@ crossing_visibility_fixtures() { # jar mjar base writer
   s="$(crossing_http_want "$jar" "$base" POST /events "$(jq -nc --arg d "$(crossing_day 4)" '{title:"Crossing stale reset",startsLocal:($d+"T19:00"),durationMinutes:60,tzid:"UTC",recurrenceRule:"FREQ=WEEKLY;COUNT=3"}')" 201 | jq -er .event.id)"
   crossing_make_date_private "$jar" "$base" "/events/$s/occurrences/$(crossing_day 4)" "$writer" || return 1
   p="$(crossing_http_want "$jar" "$base" POST /events "$(jq -nc --arg d "$(crossing_day 5)" '{title:"Crossing private",startsLocal:($d+"T19:00"),durationMinutes:60,tzid:"UTC"}')" 201 | jq -er .event.id)"
-  crossing_http_want "$jar" "$base" PUT "/events/$p/visibility" '{"visibility":"private"}' 200 >/dev/null
+  body="$(crossing_with_revision "$jar" "$base" "/events/$p/visibility" '{"visibility":"private"}')" || return 1
+  crossing_http_want "$jar" "$base" PUT "/events/$p/visibility" "$body" 200 >/dev/null
   printf '%s %s %s %s %s %s %s\n' "$g" "$e5" "$r" "$s" "$p" "$g3" "$e6"
 }
 
@@ -1340,6 +1362,7 @@ real_level0_started_by_hand() {
   crossing_http_login "$ljar" "$lbase" crossing-admin@example.invalid
   out="$cdir/l4-answer.json"
   while read -r -u 3 label method path body; do
+    body="$(crossing_with_revision "$ljar" "$lbase" "$path" "$body")" || { docker logs "$cid" >&2 || true; docker rm -f "$cid" >/dev/null; return 1; }
     before="$(crossing_visibility_state fold_l4 "$e5,$r,$p")"
     status="$(crossing_http "$ljar" "$lbase" "$method" "$path" "$body" "$out")"
     results="$(jq -c --arg l "$label" --arg s "$status" --argjson same "$([[ "$(crossing_visibility_state fold_l4 "$e5,$r,$p")" == "$before" ]] && echo true || echo false)" \
@@ -1439,11 +1462,14 @@ real_prior_running_across_upgrade() {
   cbase=http://127.0.0.1:18093; cjar="$cdir/running-candidate.jar"
   crossing_http_login "$cjar" "$cbase" crossing-admin@example.invalid
   consent="$(crossing_http_want "$cjar" "$cbase" GET "/events/$s/visibility-impact?visibility=private&resetOverrides=1" '' 200 | jq -er .consent)"
-  crossing_http_want "$cjar" "$cbase" PUT "/events/$s/visibility" "$(jq -nc --arg c "$consent" '{visibility:"private",resetOverrides:true,consent:$c}')" 200 >/dev/null
+  body="$(crossing_with_revision "$cjar" "$cbase" "/events/$s/visibility" "$(jq -nc --arg c "$consent" '{visibility:"private",resetOverrides:true,consent:$c}')")" || return 1
+  crossing_http_want "$cjar" "$cbase" PUT "/events/$s/visibility" "$body" 200 >/dev/null
   [[ "$(crossing_cpg fold -c "SELECT visibility || ' ' || (SELECT count(*) FROM event_occurrences WHERE event_id = $s AND visibility_override IS NOT NULL) FROM events WHERE id = $s")" == 'private 0' ]]
   drill_step prior-running/refusals
   out="$cdir/running-answer.json"
   while read -r -u 3 label method path body; do
+    # Read from the prior itself, before t0 and the log window of the refusal.
+    body="$(crossing_with_revision "$jar" "$base" "$path" "$body")" || return 1
     before="$(crossing_visibility_state fold "$e5,$r,$s,$p,$e6")"
     t0="$(crossing_cpg fold -c 'SELECT now()')"
     ok=false; fenced=false; stale=0
@@ -1478,7 +1504,7 @@ group-event-own-visibility POST /groups/$g3/events {"title":"Crossing E7","start
 zero-loser-group-tightening PUT /groups/$g3 {"visibility":"private"}
 EOF
   # The positive control: a write that changes no visibility still saves.
-  # A series save names the read it was made from (DEC-162); a binary from before it ignores the field.
+  # A series save names the read it was made from (DEC-162); the pinned older binaries have no revision and ignore it.
   rev="$(crossing_http_want "$jar" "$base" GET "/events/$e6" '' 200 | jq -r '.event.revision // ""')"
   crossing_http_want "$jar" "$base" PUT "/events/$e6" "$(jq -nc --arg d "$(crossing_day 7)" --arg r "$rev" '{title:"Crossing E6 renamed",startsLocal:($d+"T19:00"),durationMinutes:60,tzid:"UTC",revision:$r}')" 200 >/dev/null
   [[ "$(crossing_cpg fold -c "SELECT title FROM events WHERE id = $e6")" == 'Crossing E6 renamed' ]]

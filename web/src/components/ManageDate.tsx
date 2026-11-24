@@ -1,7 +1,8 @@
+import { outcomeOf, useRosterGate } from "../lib/rosterWrites";
 import { lazy, Suspense, useCallback, useEffect, useId, useLayoutEffect, useRef, useState, type MutableRefObject } from "react";
 import { useLocation } from "react-router-dom";
 import { Events } from "../api/events";
-import { outcomeOf, useDateAttempts, useEditBase, useRosterGate, type DateAttempts } from "../lib/dateWrites";
+import { useDateAttempts, useEditBase, type DateAttempts } from "../lib/dateWrites";
 import { dateKey, editBaseOf, editReadRefused, useEditRefresh } from "../lib/editBase";
 import { useFocusHome, useKeepFocusHome } from "../lib/focusHome";
 import type { ManageAuthority } from "../lib/manageAuthority";

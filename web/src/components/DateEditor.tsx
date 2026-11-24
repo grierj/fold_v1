@@ -1,3 +1,4 @@
+import { useRosterActivity } from "../lib/rosterWrites";
 import { Form } from "./ui/Form";
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore, type MutableRefObject } from "react";
 import { bootstrapCredential } from "../api/core";
@@ -12,7 +13,7 @@ import { Button } from "./ui/Button";
 import { VisibilityField } from "./EventVisibility";
 import { RoomField } from "./RoomField";
 import { useConfirm, type PendingAction } from "./ui/ConfirmDialog";
-import { useRosterActivity, type ConsentRound, type DateAttempts, type EditVerdict, type ReadPermit } from "../lib/dateWrites";
+import type { ConsentRound, DateAttempts, EditVerdict, ReadPermit } from "../lib/dateWrites";
 import { dateKey, type EditBase } from "../lib/editBase";
 import { KeptDates } from "./KeptDates";
 import { useKeptRefusal } from "./keptRefusal";

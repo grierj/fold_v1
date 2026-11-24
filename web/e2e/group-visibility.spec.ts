@@ -33,7 +33,7 @@ test("making a group invite-only reviews its events before saving", async ({ pag
 
   const soup = await make("Soup night");
   const bake = await make("Bake sale");
-  await admin("PUT", `/events/${bake}/visibility`, { visibility: "public", reason: "neighbors welcome" });
+  await admin("PUT", `/events/${bake}/visibility`, { visibility: "public", reason: "neighbors welcome", revision: (await admin("GET", `/events/${bake}`)).event.revision });
   // apiAs signs this request context in, so sign Quinn in last and Grier again.
   await (await apiAs(request, "quinn"))("PUT", `/events/${soup}/registrations`, { status: "going", date });
   const grier = await apiAs(request, "grier");

@@ -172,7 +172,7 @@ func TestPublicFeedVisibilityAndCaching(t *testing.T) {
 	createFeedEvent(t, admin, hidden, "Hidden Night", start, "")
 	opened := createFeedEvent(t, admin, hidden, "Opened Night", start.AddDate(0, 0, 1), "")
 	apiDo(t, admin, "PUT", fmt.Sprintf("/api/v1/events/%d/visibility", opened.ID),
-		map[string]any{"visibility": "public"}, http.StatusOK)
+		visibilityBody(t, admin, fmt.Sprintf("/api/v1/events/%d/visibility", opened.ID), map[string]any{"visibility": "public"}), http.StatusOK)
 
 	w := admin.do("POST", "/api/v1/events", map[string]any{
 		"title": "Church Picnic", "startsLocal": start.Format("2006-01-02T15:04"),
@@ -224,7 +224,7 @@ func TestGroupFeedOnlyForPublicGroups(t *testing.T) {
 	createFeedEvent(t, admin, open, "Open Rehearsal", start, "")
 	quiet := createFeedEvent(t, admin, open, "Quiet Rehearsal", start.AddDate(0, 0, 2), "")
 	apiDo(t, admin, "PUT", fmt.Sprintf("/api/v1/events/%d/visibility", quiet.ID),
-		map[string]any{"visibility": "private"}, http.StatusOK)
+		visibilityBody(t, admin, fmt.Sprintf("/api/v1/events/%d/visibility", quiet.ID), map[string]any{"visibility": "private"}), http.StatusOK)
 	priv := createFeedGroup(t, admin, "Staff Circle", models.VisibilityPrivate, "Office")
 	hidden := createFeedGroup(t, admin, "Hidden Circle", models.VisibilityInviteOnly, "Barn")
 

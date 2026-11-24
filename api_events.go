@@ -4,7 +4,6 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"log"
 	"net/http"
 	"reflect"
@@ -709,8 +708,8 @@ type eventBody struct {
 	// Create only: the room for every date (M2.1c). A series edit changes
 	// it through PUT /events/:id/room.
 	RoomID *uint `json:"roomId"`
-	// Update only, and required there: the series token (seriesToken) of the
-	// read the edit was made from.
+	// Update only, and required there: the event's token (eventRevision) of
+	// the read the edit was made from.
 	Revision string `json:"revision"`
 }
 
@@ -1118,30 +1117,6 @@ func (a *App) apiCreateEvent(c *gin.Context) {
 	c.JSON(http.StatusCreated, eventSeriesResponseJSON{Event: j})
 }
 
-// errEventChanged refuses a series save made from an older read of the event
-// than the one it would change (DEC-162). Nothing is written.
-var errEventChanged = apiErr(http.StatusConflict, "event_changed", "the event changed since this edit was based on it")
-
-// seriesToken is the revision a series editor based on ev holds:
-// 1.<generation>.<event id>.<event revision>. The generation is the guarded
-// date edit's (dateGeneration), so a token from before a restart, and so
-// before any restore, never matches. The trigger of migration 00010 raises
-// the revision on every change to a tracked column of the event row.
-func (a *App) seriesToken(ev *models.Event) string {
-	return fmt.Sprintf("1.%s.%d.%d", a.dateGeneration(), ev.ID, ev.EditRevision)
-}
-
-// checkSeriesBase refuses base unless it is the token of locked, the event as
-// read under its row lock. There are no attempt receipts for a series save,
-// so equality is the whole rule: a missing, malformed, older, other event's or
-// other generation's token is refused alike.
-func (a *App) checkSeriesBase(locked *models.Event, base string) error {
-	if base != a.seriesToken(locked) {
-		return errEventChanged
-	}
-	return nil
-}
-
 func (a *App) loadManagedEvent(c *gin.Context) (*models.Event, bool) {
 	ev, _, err := a.loadManagedEventFor(c)
 	if err != nil {
@@ -1168,16 +1143,18 @@ func (a *App) apiUpdateEvent(c *gin.Context) {
 	me := apiUser(c)
 	now := a.now().UTC()
 	var locked models.Event
+	var group *models.Group
 	// Everything that depends on the stored row is read from the locked row
 	// inside the transaction, so a concurrent edit is never overwritten with
 	// values built from a stale copy. A validation failure is returned as its
 	// answer and rolls back (nothing is written yet).
 	err = a.contactMutation(contactChange{EventID: ev.ID}, func(tx *gorm.DB) error {
-		actor, lockedEv, _, err := lockManagedEventIn(tx, me, ev.ID)
+		actor, lockedEv, fresh, err := lockManagedEventIn(tx, me, ev.ID)
 		if err != nil {
 			return err
 		}
-		if err := a.checkSeriesBase(lockedEv, body.Revision); err != nil {
+		group = fresh.group
+		if err := a.checkEventRevision(lockedEv, group, body.Revision); err != nil {
 			return err
 		}
 		me = actor
@@ -1417,9 +1394,7 @@ func (a *App) apiUpdateEvent(c *gin.Context) {
 				}
 			}
 		}
-		// The answer's token: edit_revision is the trigger's, never written by
-		// Save, so it is read back after the last write.
-		return tx.Raw("SELECT edit_revision FROM events WHERE id = ?", locked.ID).Row().Scan(&locked.EditRevision)
+		return readEventRevision(tx, &locked)
 	})
 	if err != nil {
 		switch {
@@ -1435,7 +1410,7 @@ func (a *App) apiUpdateEvent(c *gin.Context) {
 	ev = &locked
 	j := toEventJSON(ev)
 	applyEventVideoReveal(&j, ev, false, true) // the locked row was re-checked: only managers reach here
-	j.Revision = a.seriesToken(ev)
+	j.Revision = a.eventRevision(ev, group)
 	c.JSON(http.StatusOK, eventSeriesResponseJSON{Event: j})
 }
 
@@ -1927,9 +1902,9 @@ type eventJSON struct {
 	VideoURL      string `json:"videoUrl,omitempty"`
 	VideoReveal   string `json:"videoReveal"`
 	VideoHidden   bool   `json:"videoHidden,omitempty"`
-	// Revision is the series token (seriesToken) a series save names, only
-	// for the event's managers and only on the event page's read and the
-	// save's answer.
+	// Revision is the event's token (eventRevision) a series save and a
+	// visibility save name, only for the event's managers and only on the
+	// event page's read and those saves' answers.
 	Revision string `json:"revision,omitempty"`
 }
 

@@ -5,6 +5,7 @@ import { AddPeople } from "../components/AddPeople";
 import { RequestContactButton } from "../components/RequestContactButton";
 import { ContactDetails } from "../components/ContactDetails";
 import { Badge } from "../components/ui/Badge";
+import { useRosterActivityOf } from "../lib/rosterWrites";
 import { useHousehold } from "../lib/useHousehold";
 import { canDemoteLeader, canMakeLeader, canAskForContact, canRegisterAsGuest, canRemoveMember, groupCanSchedule, isActiveAdult } from "../lib/can";
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
@@ -46,7 +47,7 @@ import { FormError, HiddenFileInput } from "../components/ui/Field";
 import { Button, ButtonLink } from "../components/ui/Button";
 import { applyActorRsvpResults, type ActorRsvpResult, type SeriesFeedbackSignal } from "../lib/rsvpFeedback";
 import { useRsvpMutationGate, type RsvpMutationGate } from "../lib/useRsvpMutationGate";
-import { useDateAttempts, useDateWrites, useRosterActivityOf } from "../lib/dateWrites";
+import { useDateAttempts, useDateWrites } from "../lib/dateWrites";
 import { dateKey, useEditRefresh } from "../lib/editBase";
 import { seriesSchedules } from "../lib/registration";
 

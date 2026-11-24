@@ -1,5 +1,5 @@
 import type { CancelledEventDate, EventDate } from "../types";
-import { outcomeOf } from "./dateWrites";
+import { outcomeOf } from "./rosterWrites";
 
 // What the date page's latest load says about managing this date. "granted": the latest settled answer is a
 // scheduled date with canManage. "checking": a load is in flight. "unknown": the latest attempt failed without

@@ -248,7 +248,7 @@ func (a *App) apiGetEvent(c *gin.Context) {
 			return err
 		}
 		if f.canManage(me) {
-			event.Revision = a.seriesToken(&ev)
+			event.Revision = a.eventRevision(&ev, f.group)
 		}
 		out = gin.H{
 			"event":            event,
@@ -398,6 +398,9 @@ func (a *App) apiSetEventVisibility(c *gin.Context) {
 		// the token of the impact as the write finds it (DEC-158).
 		Consent        *string `json:"consent"`
 		ResetOverrides bool    `json:"resetOverrides"`
+		// Revision is the event's token (eventRevision) of the read the
+		// control opened with; required (DEC-163).
+		Revision string `json:"revision"`
 	}
 	if err := c.ShouldBindJSON(&body); err != nil {
 		jsonError(c, http.StatusBadRequest, "invalid body")
@@ -427,6 +430,9 @@ func (a *App) apiSetEventVisibility(c *gin.Context) {
 		me, f = actor, fresh
 		if !policy.CanSetEventVisibility(asPerson(me), f.view, f.rel, vis) {
 			return errVisibilityNotAllowed
+		}
+		if err := a.checkEventRevision(locked, f.group, body.Revision); err != nil {
+			return err
 		}
 		opened := leaderOpens(f, vis)
 		if locked.Visibility == vis && locked.LeaderOpened == opened && !body.ResetOverrides {
@@ -513,6 +519,9 @@ func (a *App) apiSetEventVisibility(c *gin.Context) {
 				return err
 			}
 		}
+		if err := readEventRevision(tx, ev); err != nil {
+			return err
+		}
 		return plan.Done()
 	})
 	if errors.Is(err, errNeedDecision) {
@@ -528,7 +537,13 @@ func (a *App) apiSetEventVisibility(c *gin.Context) {
 		return
 	}
 	f.view.Visibility = vis
-	a.respondEvent(c, http.StatusOK, ev, me, f)
+	j, err := a.presentEvent(ev, me, f)
+	if err != nil {
+		fail(c, err)
+		return
+	}
+	j.Revision = a.eventRevision(ev, f.group) // the locked row was re-checked: only managers reach here
+	c.JSON(http.StatusOK, eventSeriesResponseJSON{Event: j})
 }
 
 func (a *App) loadChurchEvent(c *gin.Context) (*models.Event, bool) {

@@ -7,6 +7,7 @@ import (
 	"fold/internal/notify"
 	"fold/models"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -519,12 +520,12 @@ func TestEventVisibilityRechecksAfterHeldBody(t *testing.T) {
 			t.Run(fmt.Sprintf("%s/no-op=%v", change, noOp), func(t *testing.T) {
 				f := newEventWriterRace(t, change == "demoted admin")
 				path := "/api/v1/events/" + itoa(f.event.ID) + "/visibility"
-				apiDo(t, f.admin, "PUT", path, map[string]any{"visibility": models.VisibilityInviteOnly}, http.StatusOK)
+				apiDo(t, f.admin, "PUT", path, visibilityBody(t, f.admin, path, map[string]any{"visibility": models.VisibilityInviteOnly}), http.StatusOK)
 				vis := models.VisibilityPublic
 				if noOp {
 					vis = models.VisibilityInviteOnly
 				}
-				held := f.actor.doHeld("PUT", path, map[string]any{"visibility": vis, "consent": ""})
+				held := f.actor.doHeld("PUT", path, visibilityBody(t, f.actor, path, map[string]any{"visibility": vis, "consent": ""}))
 				f.revoke(t, change)
 				before := eventWriterState(t, f.app, f.event.ID)
 				held.release()
@@ -547,9 +548,20 @@ func TestEventVisibilityRechecksAfterHeldBody(t *testing.T) {
 func TestEventVisibilityUsesGroupAfterHeldBody(t *testing.T) {
 	f := newEventWriterRace(t, false)
 	path := "/api/v1/events/" + itoa(f.event.ID) + "/visibility"
-	held := f.actor.doHeld("PUT", path, map[string]any{"visibility": models.VisibilityPrivate, "consent": "", "reason": "Welcome friends"})
+	// Already invite only, so the group's tightening leaves the event row as
+	// it was. The token covers the group's audience (DEC-163), so the held body
+	// carries the one the page reads after the tightening: the handler loads
+	// its first facts before the group changes and only the locked ones are
+	// fresh.
+	apiDo(t, f.admin, "PUT", path, confirmVisibility(t, f.admin, path, map[string]any{"visibility": models.VisibilityInviteOnly}), http.StatusOK)
+	stored := eventRow(t, f.app, f.event.ID)
+	after := f.app.eventRevision(&stored, &models.Group{Visibility: models.VisibilityInviteOnly})
+	held := f.actor.doHeld("PUT", path, map[string]any{"visibility": models.VisibilityPrivate, "consent": "", "reason": "Welcome friends", "revision": after})
 	groupPath := "/api/v1/groups/" + itoa(f.group.ID)
 	apiDo(t, f.admin, "PUT", groupPath, confirmVisibility(t, f.admin, groupPath, map[string]any{"visibility": models.VisibilityInviteOnly}), http.StatusOK)
+	if read := seriesRevisionOf(t, f.actor, f.event.ID); read != after {
+		t.Fatalf("the page reads %q after the tightening, the held body carries %q", read, after)
+	}
 	held.release()
 	w := held.wait(t)
 	if w.Code != http.StatusOK {
@@ -596,7 +608,7 @@ func TestEventVisibilityImpactIncludesHeldBodyRegistrants(t *testing.T) {
 			path := "/api/v1/events/" + itoa(f.event.ID) + "/visibility"
 			// confirm: the person reviewed the one registrant there was; a
 			// review is never stretched over the second (DEC-158).
-			body := map[string]any{"visibility": models.VisibilityInviteOnly, "consent": ""}
+			body := visibilityBody(t, f.actor, path, map[string]any{"visibility": models.VisibilityInviteOnly, "consent": ""})
 			if confirm {
 				body = confirmVisibility(t, f.actor, path, body)
 			}
@@ -619,7 +631,7 @@ func TestEventVisibilityImpactIncludesHeldBodyRegistrants(t *testing.T) {
 			if !confirm {
 				return
 			}
-			w = f.actor.do("PUT", path, map[string]any{"visibility": models.VisibilityInviteOnly, "consent": answer.Impact.Consent}, true)
+			w = f.actor.do("PUT", path, visibilityBody(t, f.actor, path, map[string]any{"visibility": models.VisibilityInviteOnly, "consent": answer.Impact.Consent}), true)
 			if w.Code != http.StatusOK {
 				t.Fatalf("confirmed tightening: %d %s", w.Code, w.Body.String())
 			}
@@ -648,7 +660,8 @@ func TestChurchEventVisibilityRechecksRemovedHostAfterHeldBody(t *testing.T) {
 	body := createEventBodyForTest()
 	body["hosts"] = []string{owner.Email, host.Email}
 	ev := requireCreatedEvent(t, app, admin.do("POST", "/api/v1/events", body, true))
-	held := client.doHeld("PUT", "/api/v1/events/"+itoa(ev.ID)+"/visibility", map[string]any{"visibility": models.VisibilityPrivate, "consent": ""})
+	path := "/api/v1/events/" + itoa(ev.ID) + "/visibility"
+	held := client.doHeld("PUT", path, visibilityBody(t, client, path, map[string]any{"visibility": models.VisibilityPrivate, "consent": ""}))
 	apiDo(t, admin, "DELETE", "/api/v1/events/"+itoa(ev.ID)+"/hosts/"+itoa(host.ID), nil, http.StatusOK)
 	before := eventWriterState(t, app, ev.ID)
 	held.release()
@@ -849,4 +862,242 @@ func TestEventPageReadsOneSnapshotAndAcknowledgesIt(t *testing.T) {
 			}
 		}
 	})
+}
+
+// eventChanged requires w to be the event_changed refusal (DEC-163).
+func eventChanged(t *testing.T, w *httptest.ResponseRecorder, what string) {
+	t.Helper()
+	if w.Code != http.StatusConflict || !strings.Contains(w.Body.String(), `"code":"event_changed"`) || strings.Contains(w.Body.String(), "needsDecision") {
+		t.Fatalf("%s: %d %s, want event_changed", what, w.Code, w.Body.String())
+	}
+}
+
+// TestVisibilitySaveNamesTheReadItWasMadeFrom (DEC-163): a visibility save,
+// a plain change and a reset alike, carries the event page's revision; any
+// other token is refused with nothing written, even with the right consent.
+func TestVisibilitySaveNamesTheReadItWasMadeFrom(t *testing.T) {
+	f := newVCFixture(t, models.VisibilityPublic)
+	f.outsider(t, "outsider", 0)
+	f.setOverride(t, 1, strp(models.VisibilityPrivate))
+	path, series := f.eventPath(), "/api/v1/events/"+itoa(f.ev.ID)
+	stale := seriesRevisionOf(t, f.admin, f.ev.ID)
+	apiDo(t, f.admin, "PUT", series, seriesBody(t, f.admin, series, map[string]any{"title": "A newer title"}), http.StatusOK)
+	current := seriesRevisionOf(t, f.admin, f.ev.ID)
+	if stale == current {
+		t.Fatal("a series save left the revision as it was")
+	}
+	other := scheduleGroupEvent(t, f.admin, f.gid, "Another evening")
+	parts := strings.Split(current, ".")
+	parts[1] = strings.Repeat("f", 16)
+	missing := struct{}{}
+	tokens := map[string]any{
+		"stale": stale, "missing": missing, "null": nil, "empty": "", "garbled": "garbled",
+		"another event's": seriesRevisionOf(t, f.admin, other.ID), "another generation's": strings.Join(parts, "."),
+	}
+	changes := map[string]map[string]any{
+		"a tightening": {"visibility": models.VisibilityInviteOnly},
+		"a reset":      {"visibility": models.VisibilityPublic, "resetOverrides": true},
+	}
+	for change, body := range changes {
+		for name, token := range tokens {
+			t.Run(change+"/"+name, func(t *testing.T) {
+				sent := with(body, "consent", f.preview(t, path, body).Consent)
+				if token == missing {
+					delete(sent, "revision")
+				} else {
+					sent["revision"] = token
+				}
+				before := f.everything(t)
+				eventChanged(t, f.admin.do("PUT", path, sent, true), name)
+				if after := f.everything(t); after != before {
+					t.Fatalf("a refused save wrote:\n%s\nwant\n%s", after, before)
+				}
+			})
+		}
+	}
+	apiDo(t, f.admin, "PUT", path, map[string]any{"visibility": models.VisibilityPrivate, "consent": "", "revision": 7}, http.StatusBadRequest)
+	// The current token saves, and the answer carries the next one.
+	body := map[string]any{"visibility": models.VisibilityInviteOnly}
+	w := f.admin.do("PUT", path, with(with(body, "consent", f.preview(t, path, body).Consent), "revision", current), true)
+	if w.Code != http.StatusOK {
+		t.Fatalf("the current token: %d %s", w.Code, w.Body.String())
+	}
+	var answer eventPage
+	decodeJSON(t, w, &answer)
+	if next := seriesRevisionOf(t, f.admin, f.ev.ID); answer.Event.Revision != next || next == current {
+		t.Fatalf("the answer's revision %q, the page's %q, the sent one %q", answer.Event.Revision, next, current)
+	}
+	eventChanged(t, f.admin.do("PUT", path, map[string]any{"visibility": models.VisibilityPrivate, "consent": "", "revision": current}, true), "the token a save used")
+}
+
+// TestStaleWideningAfterAnotherManagersTighteningIsRefused (#454): a manager
+// whose page was read before another manager tightened the event cannot save
+// an older, wider audience over it.
+func TestStaleWideningAfterAnotherManagersTighteningIsRefused(t *testing.T) {
+	f := newEventWriterRace(t, false)
+	path := "/api/v1/events/" + itoa(f.event.ID) + "/visibility"
+	opened := seriesRevisionOf(t, f.actor, f.event.ID)
+	apiDo(t, f.admin, "PUT", path, confirmVisibility(t, f.admin, path, map[string]any{"visibility": models.VisibilityInviteOnly}), http.StatusOK)
+	before := eventWriterState(t, f.app, f.event.ID)
+	for _, vis := range []string{models.VisibilityPublic, models.VisibilityPrivate} {
+		eventChanged(t, f.actor.do("PUT", path, map[string]any{"visibility": vis, "reason": "Open house", "consent": "", "revision": opened}, true), "a stale widening to "+vis)
+	}
+	if after := eventWriterState(t, f.app, f.event.ID); after != before {
+		t.Fatalf("a stale widening wrote:\n%s\nwant\n%s", after, before)
+	}
+	if ev := eventRow(t, f.app, f.event.ID); ev.Visibility != models.VisibilityInviteOnly {
+		t.Fatalf("the event is %s, want invite_only", ev.Visibility)
+	}
+	// Read again, the same widening saves.
+	apiDo(t, f.actor, "PUT", path, visibilityBody(t, f.actor, path, map[string]any{"visibility": models.VisibilityPublic, "reason": "Open house", "consent": ""}), http.StatusOK)
+}
+
+// The event's revision covers its group's audience (DEC-163): with the event
+// row untouched, a group change makes an earlier token stale for both saves,
+// so a widening chosen against the old group is never saved without the
+// leader-opened review. A church-wide event's token follows no group.
+func TestGroupAudienceChangeMakesTheEventTokenStale(t *testing.T) {
+	f := newEventWriterRace(t, false)
+	path := "/api/v1/events/" + itoa(f.event.ID) + "/visibility"
+	series := "/api/v1/events/" + itoa(f.event.ID)
+	group := "/api/v1/groups/" + itoa(f.group.ID)
+	apiDo(t, f.admin, "PUT", path, confirmVisibility(t, f.admin, path, map[string]any{"visibility": models.VisibilityInviteOnly}), http.StatusOK)
+	opened := seriesRevisionOf(t, f.actor, f.event.ID)
+	row := eventRow(t, f.app, f.event.ID).EditRevision
+	apiDo(t, f.admin, "PUT", group, map[string]any{"visibility": models.VisibilityPrivate}, http.StatusOK)
+	if got := eventRow(t, f.app, f.event.ID).EditRevision; got != row {
+		t.Fatalf("the group change wrote the event row: revision %d, was %d", got, row)
+	}
+	before := eventWriterState(t, f.app, f.event.ID)
+	eventChanged(t, f.actor.do("PUT", path, map[string]any{"visibility": models.VisibilityPublic, "consent": "", "revision": opened}, true), "a widening chosen against the public group")
+	eventChanged(t, f.actor.do("PUT", series, map[string]any{"title": "Renamed", "revision": opened}, true), "a series save read before the group change")
+	if after := eventWriterState(t, f.app, f.event.ID); after != before {
+		t.Fatalf("a refused save wrote:\n%s\nwant\n%s", after, before)
+	}
+	if ev := eventRow(t, f.app, f.event.ID); ev.Visibility != models.VisibilityInviteOnly || ev.LeaderOpened {
+		t.Fatalf("the event is %s (leader-opened %t), want invite_only", ev.Visibility, ev.LeaderOpened)
+	}
+	// Read again, the same widening saves as the leader-opened override it now is.
+	apiDo(t, f.actor, "PUT", path, visibilityBody(t, f.actor, path, map[string]any{"visibility": models.VisibilityPublic, "consent": ""}), http.StatusOK)
+	if ev := eventRow(t, f.app, f.event.ID); ev.Visibility != models.VisibilityPublic || !ev.LeaderOpened {
+		t.Fatalf("the event is %s (leader-opened %t), want a leader-opened public event", ev.Visibility, ev.LeaderOpened)
+	}
+
+	church := churchEvent(t, f.admin, "Church supper")
+	token := seriesRevisionOf(t, f.admin, church.ID)
+	apiDo(t, f.admin, "PUT", group, map[string]any{"visibility": models.VisibilityPublic}, http.StatusOK)
+	if got := seriesRevisionOf(t, f.admin, church.ID); got != token {
+		t.Fatalf("a group change moved a church-wide event's token: %q, was %q", got, token)
+	}
+	apiDo(t, f.admin, "PUT", "/api/v1/events/"+itoa(church.ID), map[string]any{"title": "Church supper renamed", "revision": token}, http.StatusOK)
+}
+
+func TestConcurrentVisibilitySavesFromOneReadExactlyOneWins(t *testing.T) {
+	f := newEventWriterRace(t, false)
+	path := "/api/v1/events/" + itoa(f.event.ID) + "/visibility"
+	opened := seriesRevisionOf(t, f.actor, f.event.ID)
+	type answer struct {
+		code      int
+		body, vis string
+	}
+	answers := make(chan answer, 2)
+	start := make(chan struct{})
+	for _, save := range []struct {
+		c   *apiClient
+		vis string
+	}{{f.actor, models.VisibilityPrivate}, {f.admin, models.VisibilityInviteOnly}} {
+		go func() {
+			<-start
+			w := save.c.do("PUT", path, map[string]any{"visibility": save.vis, "consent": "", "revision": opened}, true)
+			answers <- answer{w.Code, w.Body.String(), save.vis}
+		}()
+	}
+	close(start)
+	var won []string
+	for range 2 {
+		a := <-answers
+		switch {
+		case a.code == http.StatusOK:
+			won = append(won, a.vis)
+		case a.code != http.StatusConflict || !strings.Contains(a.body, `"event_changed"`):
+			t.Fatalf("a save answered %d %s", a.code, a.body)
+		}
+	}
+	if ev := eventRow(t, f.app, f.event.ID); len(won) != 1 || ev.Visibility != won[0] {
+		t.Fatalf("stored %q; saves that won: %v", ev.Visibility, won)
+	}
+	var audits int64
+	gormMust(t, f.app.DB.Model(&models.AuditLog{}).Where("target_type = 'event' AND target_id = ? AND action LIKE 'event.visibility%'", f.event.ID).Count(&audits))
+	if audits != 1 {
+		t.Fatalf("visibility audit rows = %d, want 1", audits)
+	}
+}
+
+// A person who may not manage the event gets the answer they always got,
+// whatever revision they send; event_changed is only for a manager.
+func TestVisibilityRevisionIsJudgedOnlyForAManager(t *testing.T) {
+	f := newEventWriterRace(t, false)
+	path := "/api/v1/events/" + itoa(f.event.ID) + "/visibility"
+	member := newTestUser(t, f.app, "member", "password1234", models.RoleMember)
+	addMember(t, f.app, member, f.group, models.MembershipMember)
+	mc := loginHeld(t, f.app, member.Email, "password1234")
+	outsider := newTestUser(t, f.app, "outsider", "password1234", models.RoleMember)
+	oc := loginHeld(t, f.app, outsider.Email, "password1234")
+	current := seriesRevisionOf(t, f.admin, f.event.ID)
+	apiDo(t, f.admin, "PUT", path, confirmVisibility(t, f.admin, path, map[string]any{"visibility": models.VisibilityInviteOnly}), http.StatusOK)
+	before := eventWriterState(t, f.app, f.event.ID)
+	for _, rev := range []any{nil, "", "garbled", current, seriesRevisionOf(t, f.admin, f.event.ID)} {
+		body := map[string]any{"visibility": models.VisibilityPublic, "consent": ""}
+		if rev != nil {
+			body["revision"] = rev
+		}
+		if w := mc.do("PUT", path, body, true); w.Code != http.StatusForbidden || strings.Contains(w.Body.String(), "event_changed") {
+			t.Fatalf("a member with revision %v: %d %s, want 403", rev, w.Code, w.Body.String())
+		}
+		if w := oc.do("PUT", path, body, true); w.Code != http.StatusNotFound || strings.Contains(w.Body.String(), "event_changed") {
+			t.Fatalf("someone who cannot see it, with revision %v: %d %s, want 404", rev, w.Code, w.Body.String())
+		}
+	}
+	if after := eventWriterState(t, f.app, f.event.ID); after != before {
+		t.Fatal("a refused save wrote")
+	}
+}
+
+// A save that changes nothing stays a no-op under a current token and is
+// refused under a stale one; a current token whose consent is out of date
+// still gets the decision, not event_changed.
+func TestVisibilityRevisionNoChangeAndDecision(t *testing.T) {
+	f := newVCFixture(t, models.VisibilityPublic)
+	f.outsider(t, "outsider", 0)
+	path, series := f.eventPath(), "/api/v1/events/"+itoa(f.ev.ID)
+	stale := seriesRevisionOf(t, f.admin, f.ev.ID)
+	apiDo(t, f.admin, "PUT", series, seriesBody(t, f.admin, series, map[string]any{"title": "A newer title"}), http.StatusOK)
+	current := seriesRevisionOf(t, f.admin, f.ev.ID)
+	same := map[string]any{"visibility": models.VisibilityPublic, "consent": ""}
+	before := f.everything(t)
+	eventChanged(t, f.admin.do("PUT", path, with(same, "revision", stale), true), "a stale no-change save")
+	w := f.admin.do("PUT", path, with(same, "revision", current), true)
+	if w.Code != http.StatusOK {
+		t.Fatalf("a current no-change save: %d %s", w.Code, w.Body.String())
+	}
+	var answer eventPage
+	decodeJSON(t, w, &answer)
+	if after := f.everything(t); after != before || answer.Event.Revision != current {
+		t.Fatalf("a no-change save wrote or moved the revision (%q, was %q)", answer.Event.Revision, current)
+	}
+	// A reset that leaves the visibility as it is changes only the dates, so
+	// the event's revision stays.
+	f.setOverride(t, 1, strp(models.VisibilityPrivate))
+	reset := map[string]any{"visibility": models.VisibilityPublic, "resetOverrides": true}
+	apiDo(t, f.admin, "PUT", path, with(with(reset, "consent", f.preview(t, path, reset).Consent), "revision", current), http.StatusOK)
+	if f.override(t, 1) != "series" || seriesRevisionOf(t, f.admin, f.ev.ID) != current {
+		t.Fatalf("a reset-only save: override %q, revision %q, want series and %q", f.override(t, 1), seriesRevisionOf(t, f.admin, f.ev.ID), current)
+	}
+	before = f.everything(t)
+	tighten := map[string]any{"visibility": models.VisibilityInviteOnly, "consent": "", "revision": current}
+	impact := wantDecision(t, f.admin.do("PUT", path, tighten, true))
+	if after := f.everything(t); after != before {
+		t.Fatal("an unreviewed tightening wrote")
+	}
+	apiDo(t, f.admin, "PUT", path, with(tighten, "consent", impact.Consent), http.StatusOK)
 }
