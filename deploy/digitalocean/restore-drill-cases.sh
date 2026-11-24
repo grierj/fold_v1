@@ -1692,8 +1692,10 @@ backup_exclusion_cases() {
       terminal-cleanup)
         restore --dump "$DB_DUMP"
         delete_listed
+        # restore.sh's after-drop fault fires once the old database is dropped and before it
+        # records pre-dropped, so the lock still says pre-drop-intent.
         kill_at after-drop --reopen --checked-church-records
-        [[ "$(phase)" == pre-dropped ]] ;;
+        [[ "$(phase)" == pre-drop-intent ]] ;;
     esac
     before="$(volume_snapshot)"
     rc=0; backup_attempt now >"$WORK/refused-now.log" 2>&1 || rc=$?
