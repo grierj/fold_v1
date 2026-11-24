@@ -21,7 +21,7 @@ import { useUnsavedChanges } from "../lib/unsavedChanges";
 import { changeSentence } from "../lib/visibilityChange";
 import { count as plural } from "../lib/plural";
 import { dateDecision, reviewOutdated } from "../lib/visibilityConsent";
-import { answerNames, useRevisionSave, type RevisionConflict } from "../lib/useRevisionSave";
+import { answerNames, useRevisionSave, type LostSend, type RevisionConflict } from "../lib/useRevisionSave";
 
 const STALE_QUESTION = "The page changed while we were asking, so your changes could not be saved. You can save again.";
 
@@ -93,7 +93,7 @@ export interface DateDraftHold {
   unsent: boolean;
   kept: KeptDateCount[] | null;
   notice: string | null;
-  lost: { current: boolean };
+  lost: LostSend;
 }
 
 interface DateEditorProps {
@@ -307,7 +307,7 @@ export function DateEditor({ opener, base, hold, onSaved, onSaving, pending = fa
     setError(null);
 
     try {
-      const sent = await send(write, intendedDateFields(openedFields, changes));
+      const sent = await send(write, intendedDateFields(openedFields, changes), reasonSent ?? "");
 
       if (sent === "saved") {
         // The answer may land while the host has this editor off the screen: the draft it holds is this one.
@@ -426,7 +426,7 @@ export function DateEditor({ opener, base, hold, onSaved, onSaving, pending = fa
       </fieldset>
       <FormActions>
         <Button ref={submit} variant="primary" layout="w-full sm:w-auto" type="submit" disabled={busy || roster.writing}>
-          {saving ? "Saving…" : "Save this date"}
+          {busy ? "Saving…" : "Save this date"}
         </Button>
         <Button variant="secondary" layout="w-full sm:w-auto" disabled={busy} onClick={onClose}>
           Close

@@ -120,9 +120,8 @@ export function erasureCases(host: () => ErasureHost) {
     expect(h.drafted()).toBeChecked();
     await userEvent.click(within(dialog).getByRole("button", { name: "Save and notify" }));
     await waitFor(() => expect(h.sent()).toHaveLength(2));
-    // The same save with the question's token added, under a new attempt id: no send is ever replayed.
+    // The same save with the question's token added.
     expect(h.sent()[1]).toMatchObject({ revision: h.sent()[0].revision, changes: h.sent()[0].changes, consent: expect.stringMatching(/^[0-9a-f]{32}$/) });
-    expect(h.sent()[1].attempt).not.toBe(h.sent()[0].attempt);
   });
 
   it("asks the server nothing when the window gets focus back while no question is open", async () => {

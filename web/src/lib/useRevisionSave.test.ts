@@ -28,7 +28,7 @@ function deferred<T>() {
 function setup(read: () => Promise<RevisionRead<Value>>, options: { fields?: (v: Value) => ReturnType<typeof fields> | null; intended?: Value; lost?: { current: boolean } } = {}) {
   const onConflict = vi.fn();
   const view = renderHook(() => useRevisionSave({ opened: { title: "Supper" }, revision: "r1", read, fields: options.fields ?? fields, answers, lost: options.lost, onConflict }));
-  const send = <R>(write: (revision: string | undefined) => Promise<R>, onUnanswered?: () => void) => view.result.current(write, options.intended ?? { title: "Supper night" }, onUnanswered);
+  const send = <R>(write: (revision: string | undefined) => Promise<R>, unseen?: string) => view.result.current(write, options.intended ?? { title: "Supper night" }, unseen);
 
   return { send, view, onConflict };
 }
@@ -307,14 +307,42 @@ describe("useRevisionSave", () => {
       expect(write).toHaveBeenCalledExactlyOnceWith("r1");
     });
 
-    it("tells the press of each send that got no answer, never of a failed read or a readable refusal", async () => {
-      const onUnanswered = vi.fn();
-      const { send } = setup(vi.fn().mockRejectedValue(new TypeError("Failed to fetch")));
-      await expect(send(vi.fn().mockRejectedValue(new ApiError(400, "no", { code: "invalid" })), onUnanswered)).rejects.toBeInstanceOf(ApiError);
-      await expect(send(vi.fn().mockRejectedValue(changed()), onUnanswered)).rejects.toBeInstanceOf(TypeError);
-      expect(onUnanswered).not.toHaveBeenCalled();
-      await expect(send(vi.fn().mockResolvedValue({}), onUnanswered)).rejects.toBeInstanceOf(ApiError);
-      expect(onUnanswered).toHaveBeenCalledOnce();
+    // What a save carries that no read shows (a reason): only a send that got no answer may have stored it.
+    it.each([
+      ["a dropped connection", () => Promise.reject(new TypeError("Failed to fetch"))],
+      ["an unreadable answer", () => Promise.resolve({})],
+    ])("after %s, what is stored counts as this save only when that send carried the same unseen part", async (_, lose) => {
+      const stored = () => vi.fn().mockResolvedValue(readOf({ title: "Supper night" }, "r2"));
+      const kept = setup(stored());
+      const write = vi.fn().mockImplementationOnce(lose).mockRejectedValue(changed());
+      await expect(kept.send(write, "Choir")).rejects.toBeDefined();
+      expect(await kept.send(write, "Choir")).toBe("saved");
+      expect(kept.onConflict).not.toHaveBeenCalled();
+
+      // The reason was edited between the presses: the stored save went out with the first one.
+      const edited = setup(stored());
+      const again = vi.fn().mockImplementationOnce(lose).mockRejectedValue(changed());
+      await expect(edited.send(again, "Choir")).rejects.toBeDefined();
+      expect(await edited.send(again, "Choir and friends")).toBe("conflict");
+      expect(edited.onConflict).toHaveBeenCalledExactlyOnceWith("changed");
+      expect(again.mock.calls).toEqual([["r1"], ["r1"]]);
+    });
+
+    it("never counts an unseen part as stored when no send carried it unanswered: a refusal was not stored, and a failed read says nothing", async () => {
+      // Someone else stored the same value; this save's reason went nowhere.
+      const first = setup(vi.fn().mockResolvedValue(readOf({ title: "Supper night" }, "r2")));
+      expect(await first.send(vi.fn().mockRejectedValue(changed()), "Choir")).toBe("conflict");
+
+      // Refused, and the read failed: the next press finds the value stored by someone else.
+      const read = vi.fn().mockRejectedValueOnce(new TypeError("Failed to fetch")).mockResolvedValue(readOf({ title: "Supper night" }, "r2"));
+      const second = setup(read);
+      const write = vi.fn().mockRejectedValue(changed());
+      await expect(second.send(write, "Choir")).rejects.toBeInstanceOf(TypeError);
+      expect(await second.send(write, "Choir")).toBe("conflict");
+
+      // With nothing unseen, the same read is the save.
+      const plain = setup(vi.fn().mockResolvedValue(readOf({ title: "Supper night" }, "r2")));
+      expect(await plain.send(vi.fn().mockRejectedValue(changed()))).toBe("saved");
     });
 
     it.each([

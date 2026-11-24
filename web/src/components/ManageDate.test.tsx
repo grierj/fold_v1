@@ -18,7 +18,7 @@ import { ConfirmProvider, useConfirm } from "./ui/ConfirmDialog";
 import { ManageDate } from "./ManageDate";
 import { KEPT, kept409, keptForbiddenNow, keptRead, observeKept } from "../test/keptPanel";
 import { endsFor, removedRow, ROSTER_ENDS, ROSTER_OPS, startHeld } from "../test/rosterOps";
-import { stubEditSends, verifiedCredential, type EditSends } from "../test/guardedEdits";
+import { storedEdit, stubEditSends, verifiedCredential, type EditSends } from "../test/guardedEdits";
 import { setMarkerCookie } from "../test/credential";
 import { erasureCases, SignedInSession } from "../test/session";
 import { ERROR_COPY } from "../lib/errors";
@@ -207,7 +207,6 @@ it("(p) an authority recheck closes the writer's question as no and brings the d
   await userEvent.click(screen.getByRole("button", { name: "Save this date" }));
   await waitFor(() => expect(edits.sent).toHaveLength(2));
   expect(edits.sent[1].consent).toBeUndefined();
-  expect(edits.sent[1].attempt).not.toBe(edits.sent[0].attempt);
 });
 
 it("(p) Save and notify adds only the writer's token to the same save, once", async () => {
@@ -611,6 +610,45 @@ describe("ManageDate: a roster write on the date holds the editor's Save", () =>
   }
 });
 
+// As on the event and group pages (useDateEditorToggle): closing the editor under a save would leave the page
+// showing the date as it was before a save that stored.
+describe("ManageDate: a save on its way", () => {
+  async function saveHeld() {
+    const stored = deferred<OccurrenceResponse>();
+    edits.answer(stored.promise);
+    const mounted = mount();
+    await typeMinutes("75");
+    await userEvent.click(screen.getByRole("button", { name: "Save this date" }));
+    await waitFor(() => expect(edits.sent).toHaveLength(1));
+
+    return { ...mounted, land: () => act(async () => { stored.resolve(storedEdit(1, "r1")); await stored.promise; }) };
+  }
+
+  it("turns the toggle off until the save ends, then closes the editor and reads the page again", async () => {
+    const { callbacks, land } = await saveHeld();
+    expect(screen.getByRole("button", { name: "Edit this date" })).toBeDisabled();
+    await land();
+    await waitFor(() => expect(callbacks.onDateChanged).toHaveBeenCalledOnce());
+    expect(screen.getByRole("button", { name: "Edit this date" })).toBeEnabled();
+    expect(screen.queryByRole("spinbutton", { name: "Minutes" })).not.toBeInTheDocument();
+  });
+
+  it("an editor that comes back from an authority check stays as it was until the save ends", async () => {
+    const { callbacks, setAuthority, land } = await saveHeld();
+    setAuthority("checking");
+    expect(screen.queryByRole("spinbutton", { name: "Minutes" })).not.toBeInTheDocument();
+    setAuthority("granted");
+    const minutes = await screen.findByRole("spinbutton", { name: "Minutes" });
+    expect(minutes).toHaveValue(75);
+    expect(minutes).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Saving…" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Edit this date" })).toBeDisabled();
+    await land();
+    await waitFor(() => expect(callbacks.onDateChanged).toHaveBeenCalledOnce());
+    expect(screen.queryByRole("spinbutton", { name: "Minutes" })).not.toBeInTheDocument();
+  });
+});
+
 describe("ManageDate's owner: the route visit, the date and the row", () => {
   const PATH = `/events/7/dates/${DATE}`;
 
@@ -843,7 +881,6 @@ describe("ManageDate: the date question is bound to what asked it", () => {
     await userEvent.click(again);
     await waitFor(() => expect(edits.sent).toHaveLength(3));
     expect(edits.sent.map((s) => s.consent)).toEqual([undefined, undefined, T2]);
-    expect(edits.sent[2].attempt).not.toBe(edits.sent[1].attempt);
   });
 
   // An administrator erasing this manager from their own browser (not a sign-out in another tab), in App's session.

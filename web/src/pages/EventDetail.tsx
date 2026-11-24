@@ -11,7 +11,7 @@ import { OccurrenceCard } from "../components/OccurrenceCard";
 import { EventIntro } from "../components/EventIntro";
 import { CompactDates } from "../components/CompactDates";
 import { Attendance } from "../components/Attendance";
-import { ManagedDateEditor, useListedDateEditor } from "../components/ManagedDateEditor";
+import { ManagedDateEditor, useDateEditorToggle } from "../components/ManagedDateEditor";
 import { NeedsRoomList } from "../components/NeedsRoomList";
 import { Menu } from "../components/ui/Menu";
 import { composePath, EMAIL_GOING } from "../components/messages/composeLinks";
@@ -431,7 +431,7 @@ function DateRow({
 }) {
   const navigate = useNavigate();
   const { canCompose } = useAuth();
-  const dateEditor = useListedDateEditor({ onEditDate, onChanged, onDateConflict, onTerminalRefresh });
+  const dateEditor = useDateEditorToggle({ onEditDate, onChanged, onDateConflict, onTerminalRefresh });
   const [managing, setManaging] = useState(manageRequested);
   const manageRef = useRef<HTMLDivElement>(null);
   useEffect(() => {

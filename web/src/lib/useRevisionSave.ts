@@ -38,6 +38,12 @@ interface SavedThing {
   revision: string;
 }
 
+// A send of this draft got no answer (`current`), and what it carried that no read shows (`unseen`).
+export interface LostSend {
+  current: boolean;
+  unseen?: string;
+}
+
 // What a save that landed answers: the thing it saved, with its new revision.
 type SavedAnswer = { event: SavedThing } | { occurrence: SavedThing };
 
@@ -62,6 +68,9 @@ export const answerNames = (key: "event" | "occurrence", id: number) => (answer:
 // this form got no answer, until a save lands, a refusal ends only as already stored or as a conflict: the form never
 // sends again under a newer revision, which could re-apply a change someone deliberately undid after the lost send
 // stored it (issue 455). `lost` keeps that for a form that may be unmounted and mounted again with the same draft.
+// A save may carry what no read shows (`unseen`: the reason a visibility change is recorded and announced with). What
+// is stored then counts as this save only when the send that got no answer carried the same: a reason typed since
+// was never stored, so that is a conflict, not a save.
 // Repeated refusals alone are never a conflict. Only the form and the sign-in that pressed Save send again: an answer
 // that lands after the form went away, or after this tab took another account, sends nothing more. A 403 or 404 to
 // any send or to the read says the person may no longer manage or see what they were editing: that is `onConflict`
@@ -89,13 +98,13 @@ export function useRevisionSave<T, F>({
   read: () => Promise<RevisionRead<T>>;
   fields: (value: T) => F | null;
   answers: (answer: unknown) => answer is SavedAnswer;
-  lost?: { current: boolean };
+  lost?: LostSend;
   onConflict?: (why: RevisionConflict) => void;
   changedCode?: "event_changed" | "date_changed";
 }) {
   const [base] = useState(() => ({ opened, revision }));
-  const own = useRef(false);
-  const lost = kept ?? own;
+  const own = useRef<LostSend>({ current: false });
+  const lost = kept ?? own.current;
   const mounted = useRef(true);
 
   useEffect(() => {
@@ -104,8 +113,7 @@ export function useRevisionSave<T, F>({
     return () => { mounted.current = false; };
   }, []);
 
-  // `onUnanswered` hears of each send of this press that got no answer.
-  return async function send<R>(write: (revision: string | undefined) => Promise<R>, intended: T, onUnanswered?: () => void): Promise<RevisionSent> {
+  return async function send<R>(write: (revision: string | undefined) => Promise<R>, intended: T, unseen = ""): Promise<RevisionSent> {
     const conflict = (why: RevisionConflict): RevisionSent => {
       onConflict?.(why);
 
@@ -121,7 +129,12 @@ export function useRevisionSave<T, F>({
 
     const noAnswer = () => {
       lost.current = true;
-      onUnanswered?.();
+      lost.unseen = unseen;
+    };
+
+    const landed = () => {
+      lost.current = false;
+      lost.unseen = undefined;
     };
 
     for (let sends = 1; ; sends++) {
@@ -147,7 +160,7 @@ export function useRevisionSave<T, F>({
           throw unreadableAnswer();
         }
 
-        lost.current = false;
+        landed();
 
         return "saved";
       }
@@ -173,7 +186,9 @@ export function useRevisionSave<T, F>({
       const now = fields(stored.value);
 
       if (same(now, goal)) {
-        lost.current = false;
+        if (unseen !== (lost.unseen ?? "")) return conflict("changed");
+
+        landed();
 
         return "saved";
       }

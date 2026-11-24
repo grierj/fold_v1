@@ -1387,8 +1387,7 @@ describe("GroupDetail: the date question in the app's dialog", () => {
     const again = await screen.findByRole("dialog", { name: "Save this date?" });
     expect(again).toHaveAccessibleDescription(`We checked again before saving. ${question}`);
     expect(edits.sent).toHaveLength(2);
-    expect(edits.sent[1]).toEqual({ ...edits.sent[0], attempt: expect.any(String), consent: T1 });
-    expect(edits.sent[1].attempt).not.toBe(edits.sent[0].attempt);
+    expect(edits.sent[1]).toEqual({ ...edits.sent[0], consent: T1 });
     // The first question's Yes is gone with it: it answers nothing now.
     await userEvent.click(yes);
     expect(edits.sent).toHaveLength(2);
@@ -1415,7 +1414,6 @@ describe("GroupDetail: the date question in the app's dialog", () => {
     await userEvent.click(within(reopened).getByRole("button", { name: "Save and notify" }));
     await waitFor(() => expect(edits.sent).toHaveLength(3));
     expect(edits.sent[2]).toMatchObject({ revision: edits.sent[1].revision, consent: T2 });
-    expect(edits.sent[1].attempt).not.toBe(edits.sent[0].attempt);
   });
 
   // Each retires the route, the row, the roster or the sign-in the question was asked under.
@@ -1533,7 +1531,6 @@ describe("GroupDetail: the date question in the app's dialog", () => {
     await userEvent.click(save());
     await waitFor(() => expect(edits.sent).toHaveLength(2));
     expect(edits.sent[1].consent).toBeUndefined();
-    expect(edits.sent[1].attempt).not.toBe(edits.sent[0].attempt);
   });
 
   it.each([

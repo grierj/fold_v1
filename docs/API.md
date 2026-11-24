@@ -1435,6 +1435,11 @@ How it decides, under the contact gate, the event lock and the date lock:
   under a still-running process is the one exception, the same limit the
   restore barrier states (docs/agents/erasure.md); no Fold tool restores that
   way.
+- **After a rollback to a release whose manager read has no `own`**, a tab
+  still running the newer page cannot open "Edit this date" (the editor stays
+  closed, or the date page says the date can't be edited now) until the page
+  is loaded again, which brings the older release's page. Nothing is saved
+  wrongly meanwhile.
 
 **Cutover (M8.1).** The SPA edits a date only through the guarded edit. The
 old `PUT /events/:id/occurrences/:date` stays registered to refuse saves from tabs

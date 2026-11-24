@@ -11,6 +11,7 @@ import { useLoad } from "../lib/useLoad";
 import type { RevisionConflict } from "../lib/useRevisionSave";
 import { isObject } from "../lib/wireValues";
 import { DateEditor, type DateDraftHold } from "./DateEditor";
+import { useDateEditorToggle } from "./ManagedDateEditor";
 import { ErrorNotice } from "./ErrorNotice";
 import { Button, ButtonLink } from "./ui/Button";
 import { ConfirmProvider, usePageFacts } from "./ui/ConfirmDialog";
@@ -52,7 +53,18 @@ function ManageDateTools({ eventId, date, occurrenceId, authority, onDateChanged
   const headingId = useId();
   const home = useFocusHome<HTMLElement>();
   const location = useLocation();
-  const [editing, setEditing] = useState(false);
+
+  // The toggle and the editor's endings, as on the event and group pages: while the date's save is on its way (also
+  // with the editor off the screen for an authority check) the toggle is off and an editor shown again stays as it was.
+  const dateEditor = useDateEditorToggle({
+    onEditDate: onOpenEditor,
+    // A stored save reads the date and the page again, as after any change made here.
+    onChanged: () => { refresh(); onDateChanged(); },
+    onDateConflict: onConflict,
+    onTerminalRefresh: onGone,
+  });
+
+  const editing = dateEditor.open;
   const [managing, setManaging] = useState(false);
   const granted = authority === "granted";
   // The managed read never stands in for authority: it loads only while granted, and leaving granted drops it.
@@ -112,46 +124,36 @@ function ManageDateTools({ eventId, date, occurrenceId, authority, onDateChanged
   // A credential the server no longer recognizes is not a refusal of the date: the tab checks its credential.
   const refused = failure != null && outcomeOf(failure) === "refused" && editReadRefused(failure);
 
+  const closeEditorRow = dateEditor.close;
+
   useEffect(() => {
     if (!refused) return;
-    setEditing(false);
+    closeEditorRow();
     setManaging(false);
     onGone();
-  }, [refused, onGone]);
+  }, [refused, onGone, closeEditorRow]);
 
   const recheck = useCallback(() => {
     gate.clearNote();
     void managed.retry();
   }, [gate.clearNote, managed.retry]);
 
-  const closeEditor = () => {
-    hold.current = null;
-    setEditing(false);
+  // Closing ends the draft. Opening reads the date again even when the roster already shows it: the form is the read's.
+  const toggleEditor = () => {
+    if (editing) hold.current = null;
+    else if (managing) refresh();
+
+    dateEditor.toggle();
   };
 
-  // Opening the editor reads the date again even when the roster already shows it: the form is the read's.
-  const openEditor = () => {
-    onOpenEditor();
-    setEditing(true);
-
-    if (managing) refresh();
+  const closeEditor = () => {
+    hold.current = null;
+    dateEditor.editor.onClose();
   };
 
   const closeRoster = () => {
     gate.clearNote();
     setManaging(false);
-  };
-
-  // A stored save closes the editor and reads the date and the page again, as after any change made here.
-  const savedEditor = () => {
-    closeEditor();
-    refresh();
-    onDateChanged();
-  };
-
-  const conflict = (why: RevisionConflict) => {
-    closeEditor();
-    onConflict(why);
   };
 
   const data = current?.occurrence;
@@ -170,7 +172,7 @@ function ManageDateTools({ eventId, date, occurrenceId, authority, onDateChanged
       <p className="text-text-muted">Change this date or who's signed up. Series changes are on the event page.</p>
       <div className="flex flex-wrap items-center gap-2">
         <ButtonLink variant="link" to={`/events/${eventId}`}>Open the event page</ButtonLink>
-        <Button variant="secondary" aria-expanded={editing} onClick={() => (editing ? closeEditor() : openEditor())}>Edit this date</Button>
+        <Button variant="secondary" aria-expanded={editing} disabled={dateEditor.saving} onClick={toggleEditor}>Edit this date</Button>
         <Button variant="secondary" aria-expanded={managing} onClick={() => (managing ? closeRoster() : setManaging(true))}>Manage sign-ups</Button>
       </div>
       {(editing || managing) && (failure != null
@@ -183,8 +185,10 @@ function ManageDateTools({ eventId, date, occurrenceId, authority, onDateChanged
                 opener={opener}
                 base={base}
                 hold={hold}
-                onSaved={savedEditor}
-                onConflict={conflict}
+                onSaved={dateEditor.editor.onSaved}
+                onSaving={dateEditor.editor.onSaving}
+                pending={dateEditor.saving}
+                onConflict={dateEditor.editor.onConflict}
                 onRoomChanged={refresh}
                 onClose={closeEditor}
                 onAuthorityLost={onGone}

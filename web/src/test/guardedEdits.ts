@@ -16,11 +16,10 @@ export async function verifiedCredential(userId = 5): Promise<Credential> {
   return (await bootstrapCredential(true)).credential;
 }
 
-// One date save as it reached the transport (Events.editDate), with the attempt id the transport adds.
+// One date save as it reached the transport (Events.editDate).
 export interface SentEdit {
   eventId: number | string;
   date: string;
-  attempt: string;
   revision: string;
   changes: DateEditChanges;
   reason?: string;
@@ -35,8 +34,6 @@ export interface EditSends {
   answer: (...answers: Answer[]) => void;
 }
 
-let attempts = 0;
-
 // Stands in for the date save's transport (Events.editDate) for a test: it records each send, then answers as queued,
 // or as date `occurrenceId` stored. Call it in each test (or its beforeEach), after any vi.resetAllMocks.
 export function stubEditSends(occurrenceId = 1): EditSends {
@@ -45,8 +42,7 @@ export function stubEditSends(occurrenceId = 1): EditSends {
   const spy = vi.isMockFunction(Events.editDate) ? vi.mocked(Events.editDate) : vi.spyOn(Events, "editDate");
 
   spy.mockImplementation(async (eventId, date, body) => {
-    const attempt = (++attempts).toString(16).padStart(32, "0");
-    sent.push(JSON.parse(JSON.stringify({ eventId, date, attempt, ...body })));
+    sent.push(JSON.parse(JSON.stringify({ eventId, date, ...body })));
     const next = queued.shift() ?? storedEdit(occurrenceId, `r-stored-${sent.length}`);
 
     if (next instanceof Error) throw next;

@@ -302,7 +302,6 @@ describe("a save refused as stale (date_changed)", () => {
     await save();
     await waitFor(() => expect(onSaved).toHaveBeenCalledOnce());
     expect(edits.sent.map((s) => [s.revision, s.changes])).toEqual([["r0", { title: "Carols" }], ["r1", { title: "Carols" }]]);
-    expect(edits.sent[1].attempt).not.toBe(edits.sent[0].attempt);
     expect(onConflict).not.toHaveBeenCalled();
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
   });
@@ -443,7 +442,6 @@ describe("a lost reply", () => {
     await save();
     await waitFor(() => expect(onSaved).toHaveBeenCalledOnce());
     expect(edits.sent.map((s) => s.revision)).toEqual(["r0", "r0"]);
-    expect(edits.sent[1].attempt).not.toBe(edits.sent[0].attempt);
     expect(onConflict).not.toHaveBeenCalled();
   });
 
@@ -495,6 +493,42 @@ describe("a lost reply", () => {
     await waitFor(() => expect(onConflict).toHaveBeenCalledExactlyOnceWith("changed"));
     expect(edits.sent.map((s) => s.revision)).toEqual(["r0", "r0"]);
     expect(onSaved).not.toHaveBeenCalled();
+  });
+
+  // The reason goes to the audit row and the notice, and no read returns it.
+  it("a visibility change stored with its answer lost, then a new reason: the next press is a conflict, never a save that drops the reason", async () => {
+    const onSaved = vi.fn();
+    const onConflict = vi.fn();
+    edits.answer(new TypeError("Failed to fetch"), changed());
+    base = occurrence({ revision: "r0", visibility: "private", seriesVisibility: "private", groupId: 4, groupVisibility: "invite_only", groupName: "Hidden fellowship" });
+    const view = render(editor({ onSaved, onConflict }));
+    await ready();
+    await userEvent.click(screen.getByRole("radio", { name: /^Public/ }));
+    await userEvent.type(screen.getByRole("textbox", { name: /^Reason/ }), "Choir");
+    await save();
+    expect(await screen.findByText(NETWORK)).toBeInTheDocument();
+    base = { ...base, visibility: "public", own: { visibility: "public" }, revision: "r1" };
+    await userEvent.type(screen.getByRole("textbox", { name: /^Reason/ }), " and friends");
+    await save();
+    await waitFor(() => expect(onConflict).toHaveBeenCalledExactlyOnceWith("changed"));
+    expect(edits.sent.map((s) => s.reason)).toEqual(["Choir", "Choir and friends"]);
+    expect(onSaved).not.toHaveBeenCalled();
+    view.unmount();
+
+    // The same reason both times: the first press stored it, and the second is done.
+    edits = stubEditSends();
+    edits.answer(new TypeError("Failed to fetch"), changed());
+    base = occurrence({ revision: "r0", visibility: "private", seriesVisibility: "private", groupId: 4, groupVisibility: "invite_only", groupName: "Hidden fellowship" });
+    render(editor({ onSaved, onConflict }));
+    await ready();
+    await userEvent.click(screen.getByRole("radio", { name: /^Public/ }));
+    await userEvent.type(screen.getByRole("textbox", { name: /^Reason/ }), "Choir");
+    await save();
+    expect(await screen.findByText(NETWORK)).toBeInTheDocument();
+    base = { ...base, visibility: "public", own: { visibility: "public" }, revision: "r1" };
+    await save();
+    await waitFor(() => expect(onSaved).toHaveBeenCalledOnce());
+    expect(onConflict).toHaveBeenCalledOnce();
   });
 
   it("remembers a lost reply across a remount from the hold", async () => {
@@ -922,9 +956,8 @@ describe("visibility consent", () => {
     await waitFor(() => expect(edits.sent).toHaveLength(2));
     expect(confirm).toHaveBeenCalledExactlyOnceWith("Tuesday, December 1, 2026. This date is public now. Saving makes it invite-only, so fewer people will be able to see it. This cancels and notifies 2 registered people who can no longer see this date. Save this date?");
     expect(edits.sent[0].consent).toBeUndefined();
-    expect(edits.sent[1]).toEqual({ ...edits.sent[0], attempt: expect.any(String), consent: T1 });
+    expect(edits.sent[1]).toEqual({ ...edits.sent[0], consent: T1 });
     expect(edits.sent[1]).toMatchObject({ revision: "r0", changes: { visibility: "series" } });
-    expect(edits.sent[1].attempt).not.toBe(edits.sent[0].attempt);
     expect(Events.dateVisibilityImpact).not.toHaveBeenCalled();
   });
 

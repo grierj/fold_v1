@@ -1,5 +1,5 @@
 import { Tabs } from "../components/ui/Tabs";
-import { ManagedDateEditor, useListedDateEditor } from "../components/ManagedDateEditor";
+import { ManagedDateEditor, useDateEditorToggle } from "../components/ManagedDateEditor";
 import { ConfirmProvider } from "../components/ui/ConfirmDialog";
 import { AddPeople } from "../components/AddPeople";
 import { RequestContactButton } from "../components/RequestContactButton";
@@ -110,7 +110,7 @@ function EventRow({
   const { canCompose } = useAuth();
   const [cancelling, setCancelling] = useState(false);
   const [cancelError, setCancelError] = useState<string | null>(null);
-  const dateEditor = useListedDateEditor({ onEditDate, onChanged, onDateConflict, onTerminalRefresh });
+  const dateEditor = useDateEditorToggle({ onEditDate, onChanged, onDateConflict, onTerminalRefresh });
   const time = formatTime(instance.startsAt);
   const loc = placeLine(instance.room, instance.location);
   const name = instance.title || groupName;

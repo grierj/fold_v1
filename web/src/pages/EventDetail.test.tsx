@@ -1266,7 +1266,6 @@ describe("EventDetail asks every question in the app's dialog", () => {
     await userEvent.click(within(await screen.findByRole("dialog", { name: "Save this date?" })).getByRole("button", { name: "Save and notify" }));
     await waitFor(() => expect(edits.sent).toHaveLength(3));
     expect(edits.sent[2]).toMatchObject({ revision: edits.sent[1].revision, changes: { visibility: "series" }, consent: token });
-    expect(edits.sent[1].attempt).not.toBe(edits.sent[0].attempt);
     expect(Events.dateVisibilityImpact).not.toHaveBeenCalled();
   });
 
@@ -1467,11 +1466,10 @@ describe("EventDetail asks every question in the app's dialog", () => {
     await act(() => router.navigate(-1));
     expect(router.state.location.key).toBe(key);
     // Another address read the date afresh, without the draft; the save on its way belongs to the editor that went away.
-    expect(await screen.findByRole("button", { name: "Save this date" })).toBeInTheDocument();
+    // The earlier save's answer could close this editor, so nothing can change until it lands, and the button says why.
+    expect(await screen.findByRole("button", { name: "Saving…" })).toBeDisabled();
     expect(screen.getByRole("radio", { name: "Same as series (private)" })).not.toBeChecked();
-    // The earlier save's answer could close this editor, so nothing can change until it lands.
-    await waitFor(() => expect(screen.getByRole("radio", { name: "Same as series (private)" })).toBeDisabled());
-    expect(screen.getByRole("button", { name: "Save this date" })).toBeDisabled();
+    expect(screen.getByRole("radio", { name: "Same as series (private)" })).toBeDisabled();
     await act(async () => { answer.reject(challenge(2)); await answer.promise.catch(() => {}); });
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
     expect(edits.sent).toHaveLength(1);
@@ -2395,8 +2393,6 @@ describe("EventDetail: the date question is bound to what asked it", () => {
     await userEvent.click(within(third).getByRole("button", { name: "Save and notify" }));
     await waitFor(() => expect(edits.sent).toHaveLength(4));
     expect(edits.sent.map((s) => s.consent)).toEqual([undefined, undefined, T1, T2]);
-    // Each send has its own attempt id; none is ever replayed.
-    expect(new Set(edits.sent.map((s) => s.attempt)).size).toBe(4);
   });
 
   const invalidations: Array<[string, (h: ReturnType<typeof host>, store: RosterWrites) => Promise<void> | void]> = [

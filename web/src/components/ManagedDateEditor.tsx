@@ -1,4 +1,4 @@
-import { useRef, useState, type MutableRefObject } from "react";
+import { useCallback, useRef, useState, type MutableRefObject } from "react";
 import { useLocation } from "react-router-dom";
 import { DateEditor, type DateDraftHold } from "./DateEditor";
 import { Button } from "./ui/Button";
@@ -10,10 +10,10 @@ import type { RevisionConflict } from "../lib/useRevisionSave";
 import { useFocusHome, useKeepFocusHome } from "../lib/focusHome";
 import { useKeptDraft } from "../lib/unsavedChanges";
 
-// A listed date's "Edit this date" toggle and its editor's endings, the same on the event and group pages. The toggle is
-// off while the date's save is on its way, as the editor's own Close is: closing and opening it again would show a new
-// draft that the earlier save's answer then closes.
-export function useListedDateEditor({ onEditDate, onChanged, onDateConflict, onTerminalRefresh }: {
+// A date's "Edit this date" toggle and its editor's endings, the same on the event, group and date pages. The toggle is
+// off while the date's save is on its way, as the editor's own Close is: closing it would leave the page showing the
+// date as it was before a save that stored, and opening it again would show a new draft that the save's answer closes.
+export function useDateEditorToggle({ onEditDate, onChanged, onDateConflict, onTerminalRefresh }: {
   // The editor opened, which clears what the page said about the date's last refused save.
   onEditDate: () => void;
   // Saved, or the room changed: the host reads its page again.
@@ -24,10 +24,11 @@ export function useListedDateEditor({ onEditDate, onChanged, onDateConflict, onT
 }) {
   // `saving` can outlast `open`: an editor closed while its save is on its way still answers it.
   const [row, setRow] = useState({ open: false, saving: false });
-  const close = () => setRow((r) => ({ ...r, open: false }));
+  const close = useCallback(() => setRow((r) => ({ ...r, open: false })), []);
 
   return {
     open: row.open,
+    close,
     saving: row.saving,
     toggle: () => { onEditDate(); setRow((r) => ({ ...r, open: !r.open })); },
     show: () => { onEditDate(); setRow((r) => ({ ...r, open: true })); },
