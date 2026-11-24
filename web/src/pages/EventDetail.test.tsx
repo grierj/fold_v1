@@ -65,7 +65,7 @@ const page: EventDetailResponse = {
   canManage: true, canSetVisibility: false,
 };
 
-// The session's credential and its guarded date edits, as App provides them around every route.
+// The tab's credential and the date saves the page sends.
 let credential: Credential;
 let edits: EditSends;
 
@@ -2838,6 +2838,7 @@ describe("EventDetail when a date's save meets someone else's change", () => {
   it("saves twice in a row: each opens from a read of its own", async () => {
     vi.mocked(Events.managedDate).mockResolvedValueOnce({ occurrence: { ...listed, revision: "r0" } }).mockResolvedValue({ occurrence: { ...listed, title: "Supper night", revision: "r1" } });
     renderPage();
+
     for (const [typed, revision] of [[" night", "r0"], ["!", "r1"]] as const) {
       await userEvent.click(await screen.findByRole("button", { name: "More for 2026-12-01" }));
       await userEvent.click(screen.getByRole("menuitem", { name: "Edit this date" }));

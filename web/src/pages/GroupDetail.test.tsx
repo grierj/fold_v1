@@ -2041,6 +2041,7 @@ describe("GroupDetail when a date's save meets someone else's change", () => {
   it("saves twice in a row: the first save closes the editor, and the second opens from a read of its own", async () => {
     vi.mocked(Events.managedDate).mockResolvedValueOnce(forGroup({ occurrence: { ...listed, revision: "r0" } })).mockResolvedValue(forGroup({ occurrence: { ...listed, title: "Supper night", revision: "r1" } }));
     render(<MemoryRouter initialEntries={["/groups/1"]}><RosterWritesProvider><Routes><Route path="/groups/:id" element={<GroupDetail />} /></Routes></RosterWritesProvider></MemoryRouter>);
+
     for (const [typed, revision] of [[" night", "r0"], ["!", "r1"]] as const) {
       await userEvent.click(await screen.findByRole("button", { name: "More for Supper on 2026-12-01" }));
       await userEvent.click(screen.getByRole("menuitem", { name: "Edit this date" }));

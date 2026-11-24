@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { occurrence } from "../test/occurrence";
 import type { EventOccurrence } from "../types";
-import { dateFields, editBaseOf, intendedDateFields, type EditBase } from "./editBase";
+import { dateFields, editBaseOf, intendedDateFields, type DateFields, type EditBase } from "./editBase";
 import type { DateEditChanges } from "../api/events";
 import type { JsonValue } from "./wireValues";
 
@@ -94,7 +94,7 @@ describe("dateFields and intendedDateFields", () => {
     return base;
   };
 
-  const same = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b);
+  const same = (a: DateFields, b: DateFields) => JSON.stringify(a) === JSON.stringify(b);
   // Opened inherited everywhere (the date shows the event's values), then saved with `changes`; `stored` is what a
   // later read shows: whether the read counts as "already stored", and whether it counts as "as it opened".
   const opened = read();

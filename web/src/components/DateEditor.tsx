@@ -197,6 +197,7 @@ export function DateEditor({ opener, base, hold, onSaved, onConflict, onClose, o
   });
 
   const openedFields = dateFields(opened);
+
   const send = useRevisionSave<DateFields | null, DateFields>({
     opened: openedFields,
     revision: opened.revision,
@@ -245,12 +246,14 @@ export function DateEditor({ opener, base, hold, onSaved, onConflict, onClose, o
     const credential = currentCredential();
     const live = () => mounted.current && roster.changes() === at && sameSignIn(credential);
     const reasonSent = changes.visibility !== undefined ? reason.trim() || undefined : undefined;
+
     // The question must be about this save: the date's row, the visibility the opened read showed, and the value
     // asked for ("same as the series" resolved from that read). A save that changes no visibility is never asked.
     const expected = changes.visibility === undefined ? null : {
       eventId: opened.eventId, occurrenceId: opened.id, current: opened.visibility,
       target: changes.visibility === "series" || changes.visibility === null ? opened.seriesVisibility : changes.visibility,
     };
+
     let consent: string | undefined;
     let asked = 0;
 

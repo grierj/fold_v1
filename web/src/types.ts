@@ -1950,14 +1950,14 @@ export interface OccurrenceResponse {
 }
 
 // What a 409 date_needs_consent carries beside error and code.
-/** @public Go JSON contract, checked by TestWebTypesMatchGoJSON; the guarded date editor reads it once the cutover slice lands. */
+/** @public Go JSON contract, checked by TestWebTypesMatchGoJSON; the date editor reads the impact through lib/visibilityConsent dateDecision. */
 export interface DateNeedsConsentResponse {
   impact: VisibilityImpact;
 }
 
 // What a 409 date_changed from the guarded date edit may carry: baseSuperseded only when the base sent is
 // proved older than the date, so an earlier send of it can never apply.
-/** @public Go JSON contract, checked by TestWebTypesMatchGoJSON; lib/dateWrites reads the key from the error's data. */
+/** @public Go JSON contract, checked by TestWebTypesMatchGoJSON; the web client ignores it and reads the date again (DEC-164). */
 export interface DateChangedResponse {
   baseSuperseded?: boolean;
 }

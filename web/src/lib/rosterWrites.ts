@@ -129,7 +129,7 @@ export function RosterWritesProvider({ children, rosterWrites }: { children: Rea
   return createElement(RosterWritesContext.Provider, { value: rosterWrites ?? own }, children);
 }
 
-export const rosterKey = (eventId: number, date: string) => `${eventId}:${date}`;
+const rosterKey = (eventId: number, date: string) => `${eventId}:${date}`;
 
 // What ManageRoster uses: whether any roster write on this date is in flight, and how to start one.
 export interface RosterGate {

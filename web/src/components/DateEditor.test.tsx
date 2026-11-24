@@ -595,6 +595,7 @@ it("two managers on one date: the second save, made from the read before the fir
     <section aria-label="First editor"><ManagedDateEditor opener={OPENER} onSaved={saves.first} onConflict={conflicts.first} onClose={() => {}} onRefused={() => {}} /></section>
     <section aria-label="Second editor"><ManagedDateEditor opener={OPENER} onSaved={saves.second} onConflict={conflicts.second} onClose={() => {}} onRefused={() => {}} /></section>
   </>));
+
   // Both editors give their fields the date's ids, so each is found inside its own editor.
   const editorOf = (name: string) => {
     const region = screen.getByRole("region", { name });
