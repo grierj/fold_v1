@@ -57,14 +57,14 @@ describe("useRefusedSave and RefusedSaveLine", () => {
     expect(screen.queryByRole("status")).not.toBeInTheDocument();
     await page.answer();
     const line = screen.getByRole("status");
-    expect(line).toHaveTextContent("This widget changed while you were editing, so your changes weren't saved. This is the widget as it is now.");
+    expect(line).toHaveTextContent("This widget changed while you were editing, so your changes could not be saved. This is the widget as it is now.");
     expect(line).toHaveFocus();
   });
 
   it.each([
-    ["changed", false, "This widget changed while you were editing, so your changes weren't saved. This is the widget as it is now."],
-    ["gone", true, "Your changes weren't saved. This is the widget as it is now."],
-    ["gone", false, "You can no longer manage this widget, so your changes weren't saved."],
+    ["changed", false, "This widget changed while you were editing, so your changes could not be saved. This is the widget as it is now."],
+    ["gone", true, "Your changes could not be saved. This is the widget as it is now."],
+    ["gone", false, "You can no longer manage this widget, so your changes could not be saved."],
   ] as const)("on the loaded screen, says the %s refusal for a viewer who may manage it: %s", async (why, canManage, text) => {
     const page = setup("loaded", canManage);
     await page.answer();
@@ -79,7 +79,7 @@ describe("useRefusedSave and RefusedSaveLine", () => {
     page.refused(why);
     await page.answer();
     const line = screen.getByRole("status");
-    expect(line).toHaveTextContent(/^Your changes weren't saved\.$/);
+    expect(line).toHaveTextContent(/^Your changes could not be saved\.$/);
     expect(line).toHaveFocus();
   });
 

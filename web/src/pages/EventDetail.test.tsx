@@ -2476,8 +2476,8 @@ describe("EventDetail: the date question is bound to what asked it", () => {
 // DEC-162: a series save refused because someone else changed the event closes the editor on its own (DEC-161) and
 // reads the page from nothing, which then says the changes were not saved.
 describe("EventDetail when a series save meets someone else's change", () => {
-  const NOTICE = "This event changed while you were editing, so your changes weren't saved. This is the event as it is now.";
-  const UNSAVED = "Your changes weren't saved.";
+  const NOTICE = "This event changed while you were editing, so your changes could not be saved. This is the event as it is now.";
+  const UNSAVED = "Your changes could not be saved.";
   const opened: EventDetailResponse = { ...page, canSetVisibility: true, event: { ...page.event, groupId: 3, groupName: "Family group", groupVisibility: "public", revision: "r1" } };
   const theirs: EventDetailResponse = { ...opened, event: { ...opened.event, title: "Bible study", revision: "r2" } };
   const changed = () => new ApiError(409, "changed", { code: "event_changed" });
@@ -2555,7 +2555,7 @@ describe("EventDetail when a series save meets someone else's change", () => {
     expect(Events.update).toHaveBeenCalledOnce();
     showsNothingOfTheEvent();
     await act(async () => { after.resolve(demoted); await after.promise; });
-    const notice = await screen.findByText("You can no longer manage this event, so your changes weren't saved.");
+    const notice = await screen.findByText("You can no longer manage this event, so your changes could not be saved.");
     expect(notice).toHaveAttribute("role", "status");
     await waitFor(() => expect(notice).toHaveFocus());
     expect(screen.queryByText(NOTICE)).not.toBeInTheDocument();
@@ -2593,7 +2593,7 @@ describe("EventDetail when a series save meets someone else's change", () => {
     expect(await screen.findByRole("heading", { level: 1, name: "Hybrid study night" })).toBeInTheDocument();
     await waitFor(() => expect(screen.queryByRole("button", { name: "Save series" })).not.toBeInTheDocument());
     expect(screen.getByRole("button", { name: "Edit event" })).toHaveAttribute("aria-expanded", "false");
-    expect(screen.queryByText(/weren't saved/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/could not be saved/)).not.toBeInTheDocument();
     expect(Events.update).toHaveBeenCalledTimes(2);
     // The page's first read, the editor's read after the refusal, and the page's read after the save.
     expect(Events.get).toHaveBeenCalledTimes(3);
@@ -2610,8 +2610,8 @@ describe("EventDetail when a series save meets someone else's change", () => {
 
 // DEC-163: the visibility control takes the same closing path as the series editor.
 describe("EventDetail when a visibility save meets someone else's change", () => {
-  const NOTICE = "This event changed while you were editing, so your changes weren't saved. This is the event as it is now.";
-  const UNSAVED = "Your changes weren't saved.";
+  const NOTICE = "This event changed while you were editing, so your changes could not be saved. This is the event as it is now.";
+  const UNSAVED = "Your changes could not be saved.";
   const opened: EventDetailResponse = { ...page, canSetVisibility: true, event: { ...page.event, groupId: 3, groupName: "Family group", groupVisibility: "public", revision: "r1" } };
   const theirs: EventDetailResponse = { ...opened, event: { ...opened.event, visibility: "invite_only", revision: "r2" } };
   const changed = () => new ApiError(409, "changed", { code: "event_changed" });
@@ -2747,7 +2747,7 @@ describe("EventDetail when a visibility save meets someone else's change", () =>
     const after = await saveIntoRefusal(async () => demoted);
     panelClosed();
     await act(async () => { after.resolve(demoted); await after.promise; });
-    const notice = await screen.findByText("You can no longer manage this event, so your changes weren't saved.");
+    const notice = await screen.findByText("You can no longer manage this event, so your changes could not be saved.");
     await waitFor(() => expect(notice).toHaveFocus());
     expect(screen.queryByText(NOTICE)).not.toBeInTheDocument();
     expect(Events.setVisibility).toHaveBeenCalledOnce();

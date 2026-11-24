@@ -42,12 +42,12 @@ export function RefusedSaveLine({ save, noun, canManage, about }: { save: Return
   if (!save.why) return null;
 
   const text = canManage === undefined
-    ? "Your changes weren't saved."
+    ? "Your changes could not be saved."
     : save.why === "changed"
-      ? `This ${noun} changed while you were editing, so your changes weren't saved. This is the ${noun} as it is now.`
+      ? `This ${noun} changed while you were editing, so your changes could not be saved. This is the ${noun} as it is now.`
       : canManage
-        ? `Your changes weren't saved. This is the ${noun} as it is now.`
-        : `You can no longer manage this ${noun}, so your changes weren't saved.`;
+        ? `Your changes could not be saved. This is the ${noun} as it is now.`
+        : `You can no longer manage this ${noun}, so your changes could not be saved.`;
 
   return (
     <p ref={save.line} role="status" tabIndex={-1} className="mb-4 scroll-mt-4 rounded-lg border border-border bg-sunken px-4 py-3 text-sm outline-none">
