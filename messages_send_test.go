@@ -55,7 +55,7 @@ func (f composeFixture) scheduleNow(t *testing.T, c *apiClient, subject, body st
 		t.Fatalf("draft: %d %s", w.Code, w.Body.String())
 	}
 	decodeJSON(t, w, &out)
-	if w := c.do("POST", "/api/v1/messages/"+itoa(out.Message.ID)+"/schedule", map[string]any{}, true); w.Code != http.StatusOK {
+	if w := c.do("POST", "/api/v1/messages/"+itoa(out.Message.ID)+"/schedule", confirmedSend(c, "/api/v1/messages/"+itoa(out.Message.ID), map[string]any{}), true); w.Code != http.StatusOK {
 		t.Fatalf("schedule: %d %s", w.Code, w.Body.String())
 	}
 	return out.Message.ID
@@ -297,12 +297,12 @@ func TestMessageDailyLimit(t *testing.T) {
 		Message messageJSON `json:"message"`
 	}
 	decodeJSON(t, f.leader.do("POST", "/api/v1/messages", map[string]any{"subject": "Sixth", "bodyHtml": "<p>Hi</p>", "audience": aud}, true), &out)
-	if w := f.leader.do("POST", "/api/v1/messages/"+itoa(out.Message.ID)+"/schedule", map[string]any{}, true); w.Code != http.StatusBadRequest ||
+	if w := f.leader.do("POST", "/api/v1/messages/"+itoa(out.Message.ID)+"/schedule", confirmedSend(f.leader, "/api/v1/messages/"+itoa(out.Message.ID), map[string]any{}), true); w.Code != http.StatusBadRequest ||
 		!strings.Contains(w.Body.String(), "message_daily_limit") {
 		t.Fatalf("sixth: %d %s", w.Code, w.Body.String())
 	}
 	// Another day is fine, and an admin isn't limited.
-	if w := f.leader.do("POST", "/api/v1/messages/"+itoa(out.Message.ID)+"/schedule", map[string]any{"scheduledAt": time.Now().Add(49 * time.Hour)}, true); w.Code != http.StatusOK {
+	if w := f.leader.do("POST", "/api/v1/messages/"+itoa(out.Message.ID)+"/schedule", confirmedSend(f.leader, "/api/v1/messages/"+itoa(out.Message.ID), map[string]any{"scheduledAt": time.Now().Add(49 * time.Hour)}), true); w.Code != http.StatusOK {
 		t.Fatalf("another day: %d %s", w.Code, w.Body.String())
 	}
 	for range dailyMessagesPerGroup + 1 {
@@ -1159,7 +1159,7 @@ func (f composeFixture) countedOn(t *testing.T, gid uint, when time.Time) int64 
 func (f composeFixture) scheduleAt(t *testing.T, c *apiClient, gid uint, when time.Time) uint {
 	t.Helper()
 	path := f.draft(t, c, "Later", "<p>Hi</p>", map[string]any{"type": "group", "groupId": gid})
-	if w := c.do("POST", path+"/schedule", map[string]any{"scheduledAt": when}, true); w.Code != http.StatusOK {
+	if w := c.do("POST", path+"/schedule", confirmedSend(c, path, map[string]any{"scheduledAt": when}), true); w.Code != http.StatusOK {
 		t.Fatalf("schedule: %d %s", w.Code, w.Body.String())
 	}
 	return idOfPath(t, path)
@@ -1230,7 +1230,7 @@ func TestMessageDailyLimitSerializesConcurrentSchedules(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			defer slots.enter()()
-			w := clients[i].do("POST", paths[i]+"/schedule", map[string]any{}, true)
+			w := clients[i].do("POST", paths[i]+"/schedule", confirmedSend(clients[i], paths[i], map[string]any{}), true)
 			results[i] = httpResult{w.Code, w.Body.String()}
 		}()
 	}
@@ -1289,13 +1289,13 @@ func TestMessageDailyLimitWaitsForTheAuthorLock(t *testing.T) {
 		once.Do(func() { close(reached) })
 		<-release
 	}
-	a := bgDo(f.leader, "POST", pathA+"/schedule", map[string]any{})
+	a := bgDo(f.leader, "POST", pathA+"/schedule", confirmedSend(f.leader, pathA, map[string]any{}))
 	select {
 	case <-reached:
 	case <-time.After(10 * time.Second):
 		t.Fatal("request A never reached its count")
 	}
-	b := bgDo(other, "POST", pathB+"/schedule", map[string]any{})
+	b := bgDo(other, "POST", pathB+"/schedule", confirmedSend(other, pathB, map[string]any{}))
 	waitForAuthorLock(t, f.app)
 	close(release)
 	if r := awaitResult(t, a); r.code != http.StatusOK {
@@ -1331,8 +1331,8 @@ func TestMessageDailyLimitEditAndScheduleRace(t *testing.T) {
 	moving := f.scheduleNow(t, f.leader, "Moving", "<p>Hi</p>", map[string]any{"type": "group", "groupId": second.ID})
 	path := f.draft(t, f.leader, "New", "<p>Hi</p>", aud)
 	editor := loginAPI(t, f.app, "leader", "password1234")
-	edit := bgDo(editor, "PUT", "/api/v1/messages/"+itoa(moving), map[string]any{"subject": "Moving", "bodyHtml": "<p>Hi</p>", "audience": aud})
-	schedule := bgDo(f.leader, "POST", path+"/schedule", map[string]any{})
+	edit := bgDo(editor, "PUT", "/api/v1/messages/"+itoa(moving), namedEdit(editor, "/api/v1/messages/"+itoa(moving), map[string]any{"subject": "Moving", "bodyHtml": "<p>Hi</p>", "audience": aud}))
+	schedule := bgDo(f.leader, "POST", path+"/schedule", confirmedSend(f.leader, path, map[string]any{}))
 	results := []httpResult{awaitResult(t, edit), awaitResult(t, schedule)}
 	ok, full := 0, 0
 	for _, r := range results {
@@ -1365,7 +1365,7 @@ func TestMessageScheduleRefusesAudienceChangedUnderLock(t *testing.T) {
 	path := f.draft(t, f.leader, "Fifth", "<p>Hi</p>", aud)
 	id := idOfPath(t, path)
 	hold := holdUserRow(t, f.app, f.leaderUser.ID)
-	res := bgDo(loginAPI(t, f.app, "leader", "password1234"), "POST", path+"/schedule", map[string]any{})
+	res := bgDo(loginAPI(t, f.app, "leader", "password1234"), "POST", path+"/schedule", confirmedSend(f.leader, path, map[string]any{}))
 	waitForAuthorLock(t, f.app)
 	if err := f.app.DB.Exec(`UPDATE messages SET audience = ?::jsonb WHERE id = ?`,
 		`{"type":"group","groupId":`+itoa(second.ID)+`}`, id).Error; err != nil {
@@ -1399,7 +1399,7 @@ func TestMessageEditRecountsUnderLock(t *testing.T) {
 		f := newComposeFixture(t)
 		id := f.scheduleNow(t, f.leader, "Later", "<p>Hi</p>", map[string]any{"type": "group", "groupId": f.group.ID})
 		hold := holdUserRow(t, f.app, f.leaderUser.ID)
-		res := bgDo(loginAPI(t, f.app, "leader", "password1234"), "PUT", "/api/v1/messages/"+itoa(id), body(f.group.ID))
+		res := bgDo(loginAPI(t, f.app, "leader", "password1234"), "PUT", "/api/v1/messages/"+itoa(id), namedEdit(f.leader, "/api/v1/messages/"+itoa(id), body(f.group.ID)))
 		waitForAuthorLock(t, f.app)
 		if w := f.leader.do("POST", "/api/v1/messages/"+itoa(id)+"/cancel", nil, true); w.Code != http.StatusOK {
 			t.Fatalf("cancel: %d %s", w.Code, w.Body.String())
@@ -1416,7 +1416,9 @@ func TestMessageEditRecountsUnderLock(t *testing.T) {
 			t.Fatalf("message %+v", m)
 		}
 	})
-	t.Run("moved to a full day", func(t *testing.T) {
+	// A move of the date while the edit waits changes the message's revision,
+	// so the edit is refused as made from an older read, writing nothing.
+	t.Run("moved meanwhile", func(t *testing.T) {
 		f := newComposeFixture(t)
 		second := f.secondGroup(t)
 		tomorrow := time.Now().Add(24 * time.Hour)
@@ -1425,7 +1427,7 @@ func TestMessageEditRecountsUnderLock(t *testing.T) {
 		}
 		moving := f.scheduleNow(t, f.leader, "Moving", "<p>Hi</p>", map[string]any{"type": "group", "groupId": second.ID})
 		hold := holdUserRow(t, f.app, f.leaderUser.ID)
-		res := bgDo(loginAPI(t, f.app, "leader", "password1234"), "PUT", "/api/v1/messages/"+itoa(moving), body(f.group.ID))
+		res := bgDo(loginAPI(t, f.app, "leader", "password1234"), "PUT", "/api/v1/messages/"+itoa(moving), namedEdit(f.leader, "/api/v1/messages/"+itoa(moving), body(f.group.ID)))
 		waitForAuthorLock(t, f.app)
 		if err := f.app.DB.Exec("UPDATE messages SET scheduled_at = scheduled_at + interval '24 hours' WHERE id = ?", moving).Error; err != nil {
 			t.Fatal(err)
@@ -1433,7 +1435,7 @@ func TestMessageEditRecountsUnderLock(t *testing.T) {
 		if err := hold.Rollback().Error; err != nil {
 			t.Fatal(err)
 		}
-		if r := awaitResult(t, res); r.code != http.StatusBadRequest || !strings.Contains(r.body, "message_daily_limit") {
+		if r := awaitResult(t, res); r.code != http.StatusConflict || !strings.Contains(r.body, "message_changed") {
 			t.Fatalf("edit: %d %s", r.code, r.body)
 		}
 		var m models.Message
@@ -1451,7 +1453,7 @@ func TestMessageScheduleStaleActorUnderLock(t *testing.T) {
 	f := newComposeFixture(t)
 	path := f.draft(t, f.leader, "Stale", "<p>Hi</p>", map[string]any{"type": "group", "groupId": f.group.ID})
 	hold := holdUserRow(t, f.app, f.leaderUser.ID)
-	res := bgDo(loginAPI(t, f.app, "leader", "password1234"), "POST", path+"/schedule", map[string]any{})
+	res := bgDo(loginAPI(t, f.app, "leader", "password1234"), "POST", path+"/schedule", confirmedSend(f.leader, path, map[string]any{}))
 	waitForAuthorLock(t, f.app)
 	if err := hold.Exec("UPDATE users SET session_version = session_version + 1 WHERE id = ?", f.leaderUser.ID).Error; err != nil {
 		t.Fatal(err)
@@ -1511,7 +1513,7 @@ func TestMessagePipelineLinksPicturesByAddress(t *testing.T) {
 	f.app.DB.Create(&models.GuardianLink{GuardianUserID: parent.ID, TeenUserID: &f.teen.ID, Status: models.GuardianConfirmed})
 	f.app.DB.Create(&models.Setting{Key: settingGuardianCopies, Value: "true"})
 	id, url := f.pictureDraft(t, "Our picnic table")
-	if w := f.leader.do("POST", "/api/v1/messages/"+itoa(id)+"/schedule", map[string]any{}, true); w.Code != http.StatusOK {
+	if w := f.leader.do("POST", "/api/v1/messages/"+itoa(id)+"/schedule", confirmedSend(f.leader, "/api/v1/messages/"+itoa(id), map[string]any{}), true); w.Code != http.StatusOK {
 		t.Fatalf("schedule: %d %s", w.Code, w.Body.String())
 	}
 	runMessageJobs(t, f.app)

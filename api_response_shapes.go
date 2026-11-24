@@ -263,6 +263,28 @@ type audienceSummaryResponseJSON struct {
 	Summary audienceSummaryJSON `json:"summary"`
 }
 
+// messageReviewJSON is a review of who a message reaches (DEC-169): the
+// summary the picker shows, and the sealed token the send confirmation names.
+type messageReviewJSON struct {
+	Summary audienceSummaryJSON `json:"summary"`
+	Token   string              `json:"token"`
+}
+
+type messageReviewResponseJSON struct {
+	Review messageReviewJSON `json:"review"`
+}
+
+// audienceChangeJSON is how who a message reaches changed since the review a
+// confirmation named: who it now reaches and did not (named, with AddedMore
+// past the first 100), and who it no longer reaches (named while the audience
+// still lists them, the rest only counted). It never says why.
+type audienceChangeJSON struct {
+	Added          []string `json:"added"`
+	AddedMore      int      `json:"addedMore"`
+	Dropped        []string `json:"dropped"`
+	DroppedUnnamed int      `json:"droppedUnnamed"`
+}
+
 type groupListResponseJSON struct {
 	Groups []groupSummaryJSON `json:"groups"`
 }

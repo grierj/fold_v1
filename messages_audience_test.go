@@ -239,7 +239,7 @@ func TestEventAudienceLeavesOutADateTheyCannotSee(t *testing.T) {
 		t.Fatalf("draft: %d %s", w.Code, w.Body.String())
 	}
 	decodeJSON(t, w, &draft)
-	if w := f.admin.do("POST", "/api/v1/messages/"+itoa(draft.Message.ID)+"/schedule", map[string]any{}, true); w.Code != http.StatusOK {
+	if w := f.admin.do("POST", "/api/v1/messages/"+itoa(draft.Message.ID)+"/schedule", confirmedSend(f.admin, "/api/v1/messages/"+itoa(draft.Message.ID), map[string]any{}), true); w.Code != http.StatusOK {
 		t.Fatalf("schedule: %d %s", w.Code, w.Body.String())
 	}
 	runMessageJobs(t, f.app)

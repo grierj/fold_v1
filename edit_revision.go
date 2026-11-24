@@ -232,3 +232,26 @@ func (a *App) checkDateRoomRevision(tx *gorm.DB, occurrenceID uint, given string
 	}
 	return checkEditRevision(given, current, errDateRoomChanged)
 }
+
+// messageRevisionRows is a message: the composer's edit and send name it.
+// Besides its fields, the token moves with a schedule, a claim, a settle and
+// a cancel, since each stamps updated_at. created_at never changes.
+var messageRevisionRows = revisionRows{table: "messages", kind: "m", key: "id",
+	instants: []string{"scheduled_at", "sent_at", "updated_at"}, omit: []string{"created_at"}}
+
+// messageRevisionIn is the token the composer holds for the message row as tx
+// sees it (rowRevisionIn): a reader calls it in the snapshot that read the
+// fields it shows, a writer under the message's row lock.
+func (a *App) messageRevisionIn(tx *gorm.DB, id uint) (string, error) {
+	return a.rowRevisionIn(tx, messageRevisionRows, id)
+}
+
+// checkMessageRevision refuses given unless it is the token of the message as
+// tx reads it under its row lock.
+func (a *App) checkMessageRevision(tx *gorm.DB, id uint, given string) error {
+	current, err := a.messageRevisionIn(tx, id)
+	if err != nil {
+		return err
+	}
+	return checkEditRevision(given, current, errMessageChanged)
+}

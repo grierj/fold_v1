@@ -445,22 +445,44 @@ const maxAudiencePreview = 100
 // all-members audience stays within Postgres's parameter limit.
 // reasons: show each person's reason (admins).
 func (a *App) summarizeAudience(db *gorm.DB, ids []uint, reasons bool) (audienceSummaryJSON, error) {
+	s, _, err := a.audienceReachIn(db, ids, reasons, false)
+	return s, err
+}
+
+// audienceReach is who a message reaches by the rows its preparation would
+// write (preparedRowsIn): reached holds, in id order, each person with an
+// email row that goes out and, when the message asks for push, each with a
+// push row; a person is in it once, whatever the channels. named is the name
+// of everyone the summary lists.
+type audienceReach struct {
+	reached []uint
+	named   map[uint]string
+}
+
+// audienceReachIn is summarizeAudience with who it reaches; pushAlert is the
+// message's "Push notification too".
+func (a *App) audienceReachIn(db *gorm.DB, ids []uint, reasons, pushAlert bool) (audienceSummaryJSON, audienceReach, error) {
 	out := audienceSummaryJSON{Skipped: map[string]int{}, Recipients: []audienceRecipientJSON{}}
+	reach := audienceReach{reached: []uint{}, named: map[uint]string{}}
 	facts, err := recipientFacts(db, ids, notify.CatMessages)
 	if err != nil {
-		return out, err
+		return out, reach, err
 	}
 	pushOn := map[uint]bool{}
 	if on, err := boolSettingErrIn(db, settingPushEnabled, true); err != nil {
-		return out, err
+		return out, reach, err
 	} else if on {
 		if pushOn, err = pushReady(db, pushCandidates(facts), notify.CatMessages); err != nil {
-			return out, err
+			return out, reach, err
 		}
 	}
 	for _, f := range facts {
 		r := audienceRecipientJSON{Name: f.User.PublicName(), Teen: f.User.AccountType == models.AccountTeen, Skipped: f.Skip}
 		out.People++
+		reach.named[f.User.ID] = r.Name
+		if r.Skipped == "" || (pushAlert && pushOn[f.User.ID]) {
+			reach.reached = append(reach.reached, f.User.ID)
+		}
 		// Push follows push consent, not the email (DEC-122): someone
 		// skipped for an email reason may still get the push.
 		if pushOn[f.User.ID] {
@@ -486,7 +508,7 @@ func (a *App) summarizeAudience(db *gorm.DB, ids []uint, reasons bool) (audience
 	if len(out.Recipients) > maxAudiencePreview {
 		out.Recipients, out.More = out.Recipients[:maxAudiencePreview], true
 	}
-	return out, nil
+	return out, reach, nil
 }
 
 // recipientFact is one person an audience names, and why they won't get

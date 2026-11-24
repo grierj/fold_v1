@@ -1332,6 +1332,8 @@ export interface Message {
   // A push reminder's rows still to go (M3.13d3); 0 otherwise. Optional
   // in fixtures; the API always sends it.
   pushWaiting?: number;
+  // The message's token as these fields were read, which an edit and a send name; only when the viewer may edit it.
+  revision?: string;
 }
 
 // GET /messages/:id/read: an announcement as its reader got it (the page a
@@ -1932,6 +1934,25 @@ export interface GuardianTeensResponse {
 
 export interface AudienceSummaryResponse {
   summary: AudienceSummary;
+}
+
+// A review of who a message reaches (DEC-169): the picker's summary, and the sealed token the send confirmation names.
+export interface MessageReview {
+  summary: AudienceSummary;
+  token: string;
+}
+
+export interface MessageReviewResponse {
+  review: MessageReview;
+}
+
+// How who a message reaches changed since the confirmed review: named people it now reaches (addedMore past the first
+// 100) and people it no longer reaches, named while the audience still lists them and otherwise only counted. Never why.
+export interface AudienceChange {
+  added: string[];
+  addedMore: number;
+  dropped: string[];
+  droppedUnnamed: number;
 }
 
 export interface SelfSignupResponse {
