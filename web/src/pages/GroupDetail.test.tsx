@@ -1131,7 +1131,7 @@ describe("GroupDetail and the kept-dates panel (DEC-156)", () => {
 // stops the save before anything is sent and closes the question. A write that may have stored
 // something asks for the page again, and the next Save counts afresh; an answered one turns Save back on at once.
 describe("GroupDetail: a roster write on the date holds its editor's Save", () => {
-  const STALE = "The page changed while we were asking, so your changes weren't saved. You can save again.";
+  const STALE = "The page changed while we were asking, so your changes could not be saved. You can save again.";
   const FRESH = "ffffffffffffffffffffffffffffffff";
   // The writer's question for a tightening of the date that cancels `registrants` people (DEC-158).
   const challenge = (registrants: number, consent = "c".repeat(32)) => new ApiError(409, "x", { code: "date_needs_consent", impact: { visibility: "private", currentVisibility: "public", tightened: [{ id: 7, title: "Supper", visibility: "public", registrants, occurrenceId: 1 }], leaderOpened: [], consent } });
@@ -1524,7 +1524,7 @@ describe("GroupDetail: the date question in the app's dialog", () => {
     await userEvent.click(within(dialog).getByRole("button", { name: "Save and notify" }));
     expect(asked()).not.toBeInTheDocument();
     expect(edits.sent).toHaveLength(1);
-    expect(await screen.findByText("The page changed while we were asking, so your changes weren't saved. You can save again.")).toBeInTheDocument();
+    expect(await screen.findByText("The page changed while we were asking, so your changes could not be saved. You can save again.")).toBeInTheDocument();
     await verifiedCredential();
     act(() => rerender());
     // The same person: the draft stays; the server judges the new press under the new credential.
@@ -1984,7 +1984,7 @@ describe("the group visibility review and sign-up updates", () => {
 // takes focus: a group page lists many dates, and a long one may hide any row.
 describe("GroupDetail when a date's save meets someone else's change", () => {
   const DAY = "Tuesday, December 1, 2026";
-  const NOTICE = `${DAY}. This date changed while you were editing, so your changes weren't saved. This is the date as it is now.`;
+  const NOTICE = `${DAY}. This date changed while you were editing, so your changes could not be saved. This is the date as it is now.`;
   const changed = () => new ApiError(409, "x", { code: "date_changed" });
   const listed = occurrence({ groupId: 1 });
   const managing = { ...page, canManage: true, upcomingEvents: [listed] };
@@ -2008,14 +2008,14 @@ describe("GroupDetail when a date's save meets someone else's change", () => {
     await saveTitleInto({});
     await waitFor(() => expect(screen.queryByLabelText("Title")).not.toBeInTheDocument());
     expect(edits.sent.map((s) => s.revision)).toEqual(["r0", "r1"]);
-    expect(screen.queryByText(/weren't saved/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/could not be saved/)).not.toBeInTheDocument();
   });
 
   it("closes as a save does, with no line, when the read shows the save already stored", async () => {
     await saveTitleInto({ title: "Supper night" });
     await waitFor(() => expect(screen.queryByLabelText("Title")).not.toBeInTheDocument());
     expect(edits.sent).toHaveLength(1);
-    expect(screen.queryByText(/weren't saved/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/could not be saved/)).not.toBeInTheDocument();
   });
 
   it("closes the editor over another change, reads the page from nothing and says so above the dates, focused; opening the editor clears it", async () => {
@@ -2041,7 +2041,7 @@ describe("GroupDetail when a date's save meets someone else's change", () => {
   it("says the person can no longer manage the date when a send is refused 403 and the page still shows the group", async () => {
     vi.mocked(Groups.get).mockResolvedValueOnce(managing).mockResolvedValue({ ...managing, canManage: false });
     await saveTitleInto({}, new ApiError(403, "SECRET", { code: "forbidden" }));
-    const line = await screen.findByText(`${DAY}. You can no longer manage this date, so your changes weren't saved.`);
+    const line = await screen.findByText(`${DAY}. You can no longer manage this date, so your changes could not be saved.`);
     await waitFor(() => expect(line).toHaveFocus());
     expect(screen.queryByRole("button", { name: "More for Supper on 2026-12-01" })).not.toBeInTheDocument();
     expect(edits.sent).toHaveLength(1);
@@ -2054,7 +2054,7 @@ describe("GroupDetail when a date's save meets someone else's change", () => {
     vi.mocked(Groups.get).mockResolvedValueOnce(managing).mockRejectedValue(failure());
     await saveTitleInto({}, new ApiError(404, "SECRET", { code: "not_found" }));
     expect(await screen.findByRole("heading", { level: 1, name: heading })).toBeInTheDocument();
-    const line = await screen.findByText(`${DAY}. Your changes weren't saved.`);
+    const line = await screen.findByText(`${DAY}. Your changes could not be saved.`);
     await waitFor(() => expect(line).toHaveFocus());
     expect(document.body.textContent).not.toContain("SECRET");
   });

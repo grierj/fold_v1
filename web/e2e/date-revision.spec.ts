@@ -10,7 +10,7 @@ const managed = schema.looseObject({ occurrence: schema.looseObject({ title: sch
 
 const dateIn = (days: number) => new Date(Date.now() + days * 864e5).toISOString().slice(0, 10);
 const fullDay = (d: string) => new Date(`${d}T12:00:00Z`).toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric", year: "numeric", timeZone: "UTC" });
-const CHANGED = "This date changed while you were editing, so your changes weren't saved. This is the date as it is now.";
+const CHANGED = "This date changed while you were editing, so your changes could not be saved. This is the date as it is now.";
 
 const idOf = schema.looseObject({ id: schema.number() });
 
@@ -119,7 +119,7 @@ test("pressing Save again after a stored save's answer was lost closes the edito
 
   await page.getByRole("button", { name: "Save this date" }).click();
   await expect(page.getByRole("button", { name: "Save this date" })).toHaveCount(0);
-  await expect(page.getByText(/weren't saved/)).toHaveCount(0);
+  await expect(page.getByText(/could not be saved/)).toHaveCount(0);
   // The second press named the first's read, so it was refused, the date read and found stored.
   expect(saves).toEqual([409]);
   expect((await series.read()).title).toBe(`${series.title} night`);

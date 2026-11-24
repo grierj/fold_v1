@@ -531,7 +531,7 @@ describe("the hold", () => {
     // Leaving the page while the editor is off the screen asks first: the change was never saved.
     expect(hold.current?.unsent).toBe(true);
     render(session(<ConfirmProvider><HoldHarness hold={hold} /></ConfirmProvider>));
-    expect(await screen.findByText("The page changed while we were asking, so your changes weren't saved. You can save again.")).toBeInTheDocument();
+    expect(await screen.findByText("The page changed while we were asking, so your changes could not be saved. You can save again.")).toBeInTheDocument();
     expect(screen.getByRole("radio", { name: /^Private/ })).toBeChecked();
     expect(edits.sent).toHaveLength(1);
   });
@@ -919,7 +919,7 @@ describe("visibility consent", () => {
 // roster or kept-dates panel in the session) holds Save from its begin to its end, and a begin closes an open
 // question as no.
 describe("roster writes on the date", () => {
-  const STALE = "The page changed while we were asking, so your changes weren't saved. You can save again.";
+  const STALE = "The page changed while we were asking, so your changes could not be saved. You can save again.";
   const T = "33333333333333333333333333333333";
   const challenge = () => new ApiError(409, "x", { code: "date_needs_consent", impact: { visibility: "private", currentVisibility: "public", tightened: [{ id: 7, title: "One date", visibility: "public", registrants: 2, occurrenceId: 1 }], leaderOpened: [], consent: T } });
 

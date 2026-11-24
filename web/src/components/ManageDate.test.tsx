@@ -517,7 +517,7 @@ describe("ManageDate and the kept-dates panel (DEC-156)", () => {
 // have stored something rereads the managed date fail-closed, and the next Save counts afresh with that answer's
 // consent; an answered one turns Save back on at once, with no read.
 describe("ManageDate: a roster write on the date holds the editor's Save", () => {
-  const STALE = "The page changed while we were asking, so your changes weren't saved. You can save again.";
+  const STALE = "The page changed while we were asking, so your changes could not be saved. You can save again.";
   const FRESH = "ffffffffffffffffffffffffffffffff";
   const removed = { removedRegistrations: [removedRow()] };
   const save = () => screen.getByRole("button", { name: "Save this date" });
@@ -898,7 +898,7 @@ describe("ManageDate: the date question is bound to what asked it", () => {
     setMarkerCookie("m-another-tab");
     await userEvent.click(yes);
     expect(asked()).not.toBeInTheDocument();
-    expect(await screen.findByText("The page changed while we were asking, so your changes weren't saved. You can save again.")).toBeInTheDocument();
+    expect(await screen.findByText("The page changed while we were asking, so your changes could not be saved. You can save again.")).toBeInTheDocument();
     expect(edits.sent).toHaveLength(1);
   });
 

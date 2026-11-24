@@ -39,7 +39,7 @@ describe("useRefusedSave and RefusedSaveLine", () => {
     await page.answer();
     page.refused("changed");
     await page.answer();
-    expect(screen.getByRole("status")).toHaveTextContent("Tuesday, December 1, 2026. This widget changed while you were editing, so your changes weren't saved. This is the widget as it is now.");
+    expect(screen.getByRole("status")).toHaveTextContent("Tuesday, December 1, 2026. This widget changed while you were editing, so your changes could not be saved. This is the widget as it is now.");
     expect(screen.getByRole("status")).toHaveFocus();
   });
 

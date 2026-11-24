@@ -1178,7 +1178,7 @@ describe("the manager section", () => {
 // editor closes, the page reads again from nothing (failing closed, as any recheck) and the line above the manager
 // tools takes focus.
 describe("the date page when a date's save meets someone else's change", () => {
-  const NOTICE = "This date changed while you were editing, so your changes weren't saved. This is the date as it is now.";
+  const NOTICE = "This date changed while you were editing, so your changes could not be saved. This is the date as it is now.";
   const changed = () => new ApiError(409, "x", { code: "date_changed" });
   const managerAnswer = () => ({ occurrence: occurrence({ canManage: true, canDecline: false, canBlock: false, myRegistration: null }) });
 
@@ -1203,14 +1203,14 @@ describe("the date page when a date's save meets someone else's change", () => {
     await saveInto({});
     await waitFor(() => expect(screen.queryByRole("spinbutton", { name: "Minutes" })).not.toBeInTheDocument());
     expect(edits.sent.map((s) => [s.revision, s.changes])).toEqual([["r0", { durationMinutes: 150 }], ["r1", { durationMinutes: 150 }]]);
-    expect(screen.queryByText(/weren't saved/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/could not be saved/)).not.toBeInTheDocument();
   });
 
   it("closes as a save does, with no line, when the read shows the save already stored", async () => {
     await saveInto({ durationMinutes: 150 });
     await waitFor(() => expect(screen.queryByRole("spinbutton", { name: "Minutes" })).not.toBeInTheDocument());
     expect(edits.sent).toHaveLength(1);
-    expect(screen.queryByText(/weren't saved/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/could not be saved/)).not.toBeInTheDocument();
   });
 
   it("closes the editor over another change, reads the page from nothing and says so above the tools, focused; opening the editor clears it", async () => {
@@ -1234,7 +1234,7 @@ describe("the date page when a date's save meets someone else's change", () => {
     vi.mocked(Dates.get).mockResolvedValueOnce(managerAnswer()).mockResolvedValue({ occurrence: { cancelled: true, date: "2026-12-01", title: "One invited date" } });
     await saveInto({ cancelled: true });
     expect(await screen.findByText("This date was cancelled. Your calendar shows the dates that are still on.")).toBeInTheDocument();
-    const line = await screen.findByText("Your changes weren't saved.");
+    const line = await screen.findByText("Your changes could not be saved.");
     await waitFor(() => expect(line).toHaveFocus());
     expect(edits.sent).toHaveLength(1);
   });
@@ -1242,7 +1242,7 @@ describe("the date page when a date's save meets someone else's change", () => {
   it("says the person can no longer manage the date when a send is refused 403 and the page agrees", async () => {
     vi.mocked(Dates.get).mockResolvedValueOnce(managerAnswer()).mockResolvedValue({ occurrence: occurrence({ canManage: false, canDecline: false, canBlock: false, myRegistration: null }) });
     await saveInto({}, new ApiError(403, "SECRET", { code: "forbidden" }));
-    const line = await screen.findByText("You can no longer manage this date, so your changes weren't saved.");
+    const line = await screen.findByText("You can no longer manage this date, so your changes could not be saved.");
     await waitFor(() => expect(line).toHaveFocus());
     expect(screen.queryByRole("heading", { name: "Manage this date" })).not.toBeInTheDocument();
     expect(document.body.textContent).not.toContain("SECRET");

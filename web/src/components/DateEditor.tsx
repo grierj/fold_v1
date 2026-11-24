@@ -23,7 +23,7 @@ import { count as plural } from "../lib/plural";
 import { dateDecision, reviewOutdated } from "../lib/visibilityConsent";
 import { useRevisionSave, type RevisionConflict } from "../lib/useRevisionSave";
 
-const STALE_QUESTION = "The page changed while we were asking, so your changes weren't saved. You can save again.";
+const STALE_QUESTION = "The page changed while we were asking, so your changes could not be saved. You can save again.";
 
 // The fields a save can change, written the way the inputs hold them.
 interface Fields {
