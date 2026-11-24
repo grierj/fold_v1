@@ -21,7 +21,7 @@ import { useUnsavedChanges } from "../lib/unsavedChanges";
 import { changeSentence } from "../lib/visibilityChange";
 import { count as plural } from "../lib/plural";
 import { dateDecision, reviewOutdated } from "../lib/visibilityConsent";
-import { useRevisionSave, type RevisionConflict } from "../lib/useRevisionSave";
+import { answerNames, useRevisionSave, type RevisionConflict } from "../lib/useRevisionSave";
 
 const STALE_QUESTION = "The page changed while we were asking, so your changes could not be saved. You can save again.";
 
@@ -46,7 +46,7 @@ function fieldsOf(base: EditBase): Fields {
     location: base.location,
     capacity: base.capacity === null ? "" : String(base.capacity),
     remoteCapacity: base.remoteCapacity === null ? "" : String(base.remoteCapacity),
-    visibility: base.visibilityOverride ?? "series",
+    visibility: base.own.visibility ?? "series",
   };
 }
 
@@ -84,7 +84,8 @@ function changesOf(draft: Fields, base: EditBase): DateEditChanges {
 // still manages the date, or reads the page again): the read the draft opened from, with its revision, the draft
 // and the reason, and the dates its last save was refused for because someone who left kept them (DEC-156), which a
 // remount opens again, with the form's last error line. `unsent` says the draft holds a change no save has taken: the
-// host asks before the page is left while the editor is off the screen.
+// host asks before the page is left while the editor is off the screen. `lost` says a send of this draft got no answer
+// (useRevisionSave), shared with the editor so an answer that lands while it is off the screen still counts.
 export interface DateDraftHold {
   opened: EditBase;
   draft: Fields;
@@ -92,6 +93,7 @@ export interface DateDraftHold {
   unsent: boolean;
   kept: KeptDateCount[] | null;
   notice: string | null;
+  lost: { current: boolean };
 }
 
 interface DateEditorProps {
@@ -104,6 +106,11 @@ interface DateEditorProps {
   hold?: MutableRefObject<DateDraftHold | null>;
   // The update was stored: the host closes the editor and reads its page again, as after any save.
   onSaved: () => void;
+  // A save is on its way (true) or ended (false), also while the editor is off the screen.
+  onSaving?: (saving: boolean) => void;
+  // A save of this draft from before the host remounted the editor is still on its way: nothing can change until it
+  // ends, since its answer may close the editor.
+  pending?: boolean;
   // The save was refused and not sent again: the host closes the editor and shows the date as it is now (DEC-164).
   onConflict: (why: RevisionConflict) => void;
   onClose: () => void;
@@ -122,11 +129,12 @@ const WITHDRAWN = Symbol("withdrawn");
 // DateEditor changes one occurrence only (time, duration, title, location, caps, visibility). Later series changes
 // leave an edited date alone. Its save is the one conflict protocol (useRevisionSave, DEC-164): it names the read the
 // draft opened with, and a refusal reads the date once and either is done, sends again or closes the editor.
-export function DateEditor({ opener, base, hold, onSaved, onConflict, onClose, onRoomChanged, focusRoom, onAuthorityLost }: DateEditorProps) {
+export function DateEditor({ opener, base, hold, onSaved, onSaving, pending = false, onConflict, onClose, onRoomChanged, focusRoom, onAuthorityLost }: DateEditorProps) {
   // The read this draft opened from: its values and its revision, for as long as the draft lives.
   const [opened] = useState(() => hold?.current?.opened ?? base);
   const [draft, setDraft] = useState(() => hold?.current?.draft ?? fieldsOf(opened));
   const [reason, setReason] = useState(() => hold?.current?.reason ?? "");
+  const [lost] = useState(() => hold?.current?.lost ?? { current: false });
   const edit = <K extends keyof Fields>(k: K) => (value: Fields[K]) => setDraft((d) => ({ ...d, [k]: value }));
   const [remoteError, setRemoteError] = useState<string | null>(null);
   const remotePrefix = `date-${opened.id}`;
@@ -135,7 +143,8 @@ export function DateEditor({ opener, base, hold, onSaved, onConflict, onClose, o
   const home = useFocusHome<HTMLFormElement>();
   const root = home.ref;
   useKeepFocusHome(home);
-  const [busy, setBusy] = useState(false);
+  const [saving, setBusy] = useState(false);
+  const busy = saving || pending;
   const sending = useRef(false);
   // A stored save or a conflict ends the draft: nothing is written back to the hold after it.
   const ended = useRef(false);
@@ -203,6 +212,8 @@ export function DateEditor({ opener, base, hold, onSaved, onConflict, onClose, o
     revision: opened.revision,
     read: () => readDateFields(opener),
     fields: (value) => value,
+    answers: answerNames("occurrence", opened.id),
+    lost,
     onConflict: (why) => {
       ended.current = true;
 
@@ -216,7 +227,7 @@ export function DateEditor({ opener, base, hold, onSaved, onConflict, onClose, o
   const unsent = !busy && !ended.current && changesNow !== "{}";
 
   useLayoutEffect(() => {
-    if (hold && !ended.current) hold.current = { opened, draft, reason, unsent, kept: kept.refusal?.dates ?? null, notice: error };
+    if (hold && !ended.current) hold.current = { opened, draft, reason, unsent, kept: kept.refusal?.dates ?? null, notice: error, lost };
   });
 
   async function save(e: React.FormEvent) {
@@ -238,7 +249,7 @@ export function DateEditor({ opener, base, hold, onSaved, onConflict, onClose, o
       return;
     }
 
-    if (sending.current || roster.writing) return;
+    if (sending.current || pending || roster.writing) return;
     sending.current = true;
     const action = beginSave();
     // Every send of this press (the first, the consent answer's and any the protocol sends again) goes only while
@@ -292,6 +303,7 @@ export function DateEditor({ opener, base, hold, onSaved, onConflict, onClose, o
     };
 
     setBusy(true);
+    onSaving?.(true);
     setError(null);
 
     try {
@@ -324,6 +336,7 @@ export function DateEditor({ opener, base, hold, onSaved, onConflict, onClose, o
           // The fields take focus again before the refused one is focused.
           showFieldErrors(root.current, () => {
             setBusy(false);
+            onSaving?.(false);
             setError(msg);
             setRemoteError(msg);
           });
@@ -333,6 +346,7 @@ export function DateEditor({ opener, base, hold, onSaved, onConflict, onClose, o
       }
     } finally {
       sending.current = false;
+      onSaving?.(false);
 
       if (mounted.current) setBusy(false);
       // A press that ended unsaved while the host had this editor off the screen leaves its change unsent: leaving the
@@ -412,7 +426,7 @@ export function DateEditor({ opener, base, hold, onSaved, onConflict, onClose, o
       </fieldset>
       <FormActions>
         <Button ref={submit} variant="primary" layout="w-full sm:w-auto" type="submit" disabled={busy || roster.writing}>
-          {busy ? "Saving…" : "Save this date"}
+          {saving ? "Saving…" : "Save this date"}
         </Button>
         <Button variant="secondary" layout="w-full sm:w-auto" disabled={busy} onClick={onClose}>
           Close

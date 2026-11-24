@@ -1,5 +1,5 @@
 import { Tabs } from "../components/ui/Tabs";
-import { ManagedDateEditor } from "../components/ManagedDateEditor";
+import { ManagedDateEditor, useListedDateEditor } from "../components/ManagedDateEditor";
 import { ConfirmProvider } from "../components/ui/ConfirmDialog";
 import { AddPeople } from "../components/AddPeople";
 import { RequestContactButton } from "../components/RequestContactButton";
@@ -110,7 +110,7 @@ function EventRow({
   const { canCompose } = useAuth();
   const [cancelling, setCancelling] = useState(false);
   const [cancelError, setCancelError] = useState<string | null>(null);
-  const [editingDate, setEditingDate] = useState(false);
+  const dateEditor = useListedDateEditor({ onEditDate, onChanged, onDateConflict, onTerminalRefresh });
   const time = formatTime(instance.startsAt);
   const loc = placeLine(instance.room, instance.location);
   const name = instance.title || groupName;
@@ -138,7 +138,7 @@ function EventRow({
         tone="quiet"
         label={`More for ${name} on ${instance.date}`}
         items={[
-          { label: "Edit this date", onSelect: () => { onEditDate(); setEditingDate(!editingDate); }, disabled: settlingDate },
+          { label: "Edit this date", onSelect: dateEditor.toggle, disabled: settlingDate || dateEditor.saving },
           // The event page opens its Manage sign-ups panel for this date (DEC-99).
           { label: "Manage sign-ups", onSelect: () => navigate(`/events/${instance.eventId}?manage=${instance.date}`) },
           ...(canCompose ? [{ label: EMAIL_GOING, onSelect: () => navigate(composePath({ occurrence: instance.id })) }] : []),
@@ -171,14 +171,8 @@ function EventRow({
           </Link>
         )}
         {/* The date's own question asks in the app's dialog; every other question on this page stays the browser's. */}
-        {canManage && editingDate && <ConfirmProvider><ManagedDateEditor opener={{ eventId: instance.eventId, date: instance.date, occurrenceId: instance.id, groupId }} pageFailed={pageFailed}
-          onSaved={() => { setEditingDate(false); onChanged(); }}
-          onConflict={(why) => { setEditingDate(false); onDateConflict(why); }}
-          onRoomChanged={onChanged} onClose={() => setEditingDate(false)}
-          onRefused={() => {
-            setEditingDate(false);
-            onTerminalRefresh();
-          }} /></ConfirmProvider>}
+        {canManage && dateEditor.open && <ConfirmProvider><ManagedDateEditor opener={{ eventId: instance.eventId, date: instance.date, occurrenceId: instance.id, groupId }} pageFailed={pageFailed}
+          {...dateEditor.editor} /></ConfirmProvider>}
     </OccurrenceCard>
   );
 }

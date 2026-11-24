@@ -1,9 +1,9 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { ApiError, currentCredential } from "../api/core";
 import { Events, type DateEditChanges } from "../api/events";
-import type { EventOccurrence, Visibility } from "../types";
+import type { DateOwn, EventOccurrence, Visibility } from "../types";
 import type { RevisionRead } from "./useRevisionSave";
-import { isBoolean, isNumber, isString, type JsonValue } from "./wireValues";
+import { isBoolean, isNumber, isObject, isString, type JsonValue } from "./wireValues";
 
 // What a listed date names to open its editor (M8.1): which date, never what it says. Nothing here is shown,
 // sent as a change or taken as the right to edit; the exact manager read decides all of that.
@@ -16,9 +16,20 @@ export interface DateOpener {
   groupId?: number;
 }
 
-// The one date a manager edits, from a fresh manager read: its own form inputs and token, the event's values the date
-// falls back to (null where the read does not carry one), and nothing else (no roster, counts or other people). Each
-// host's editor is built from this alone.
+// What a date holds of its own (the manager read's `own`, DEC-164), each null while the date falls back to the event's
+// value (or, for the place, the group's). Every key is always present, in this order, so two of them compare as JSON.
+interface OwnValues {
+  startsLocal: string | null;
+  durationMinutes: number | null;
+  title: string | null;
+  location: string | null;
+  capacity: number | null;
+  remoteCapacity: number | null;
+  visibility: Visibility | null;
+}
+
+// The one date a manager edits, from a fresh manager read: its form inputs and token, what it holds of its own, and
+// nothing else (no roster, counts or other people). Each host's editor is built from this alone.
 export interface EditBase {
   id: number;
   eventId: number;
@@ -33,15 +44,11 @@ export interface EditBase {
   remoteCapacity: number | null;
   remoteAvailable: boolean;
   visibility: Visibility;
-  visibilityOverride?: Visibility;
   seriesVisibility: Visibility;
   churchWide: boolean;
   groupName?: string;
   groupVisibility?: Visibility;
-  seriesStartsLocal: string | null;
-  seriesDurationMinutes: number | null;
-  seriesTitle: string | null;
-  seriesLocation: string | null;
+  own: OwnValues;
 }
 
 // The read's fields are checked here, where its JSON enters the editor, whatever its static type says: the
@@ -74,8 +81,30 @@ function isWallMinute(value: JsonValue | undefined): value is string {
   return !!m && isDay(m[1]) && Number(m[2]) < 24 && Number(m[3]) < 60;
 }
 
+// The date's own values, each absent or well formed; a read without them, or with one malformed, is null. Never read
+// as "everything falls back": a save that clears a value would then look stored.
+function ownOf(value: DateOwn | undefined): OwnValues | null {
+  if (!isObject(value) || Array.isArray(value)) return null;
+  const { startsLocal, durationMinutes, title, location, capacityOverride, remoteCapacityOverride, visibility } = value;
+  const absentOr = (v: JsonValue | undefined, ok: (v: JsonValue) => boolean) => v === undefined || ok(v);
+
+  if (!absentOr(startsLocal, isWallMinute) || !absentOr(durationMinutes, (v) => atLeast(v, 1)) || !absentOr(title, isString) ||
+    !absentOr(location, isString) || !absentOr(capacityOverride, (v) => atLeast(v, 1)) || !absentOr(remoteCapacityOverride, (v) => atLeast(v, 0)) ||
+    !absentOr(visibility, isVisibility)) return null;
+
+  return {
+    startsLocal: isString(startsLocal) ? startsLocal : null,
+    durationMinutes: isNumber(durationMinutes) ? durationMinutes : null,
+    title: isString(title) ? title : null,
+    location: isString(location) ? location : null,
+    capacity: isNumber(capacityOverride) ? capacityOverride : null,
+    remoteCapacity: isNumber(remoteCapacityOverride) ? remoteCapacityOverride : null,
+    visibility: isVisibility(visibility) ? visibility : null,
+  };
+}
+
 // The read answers the date the opener names, scheduled, on the expected row and (on the group page) still in
-// that group, with a token and every form field well formed; anything else is null and opens nothing.
+// that group, with a token, its own values and every form field well formed; anything else is null and opens nothing.
 export function editBaseOf(o: EventOccurrence | undefined, opener: DateOpener): EditBase | null {
   if (!o || o.cancelled === true) return null;
 
@@ -89,7 +118,7 @@ export function editBaseOf(o: EventOccurrence | undefined, opener: DateOpener): 
 
   if (!(o.capacity === null || atLeast(o.capacity, 1)) || !isSeats(o.remoteCapacity) || !isBoolean(o.remoteAvailable) || !isBoolean(o.churchWide)) return null;
 
-  if (!isVisibility(o.visibility) || !optionalVisibility(o.visibilityOverride) || !isVisibility(o.seriesVisibility) || !optionalVisibility(o.groupVisibility)) return null;
+  if (!isVisibility(o.visibility) || !isVisibility(o.seriesVisibility) || !optionalVisibility(o.groupVisibility)) return null;
 
   if (o.groupName !== undefined && !isString(o.groupName)) return null;
 
@@ -99,17 +128,17 @@ export function editBaseOf(o: EventOccurrence | undefined, opener: DateOpener): 
   const group = [o.groupId, o.groupName, o.groupVisibility].filter((v) => v !== undefined).length;
 
   if (group !== 0 && (group !== 3 || o.churchWide)) return null;
+  const own = ownOf(o.own);
+
+  if (!own) return null;
 
   return {
     id: o.id, eventId: o.eventId, date: o.date, revision: o.revision,
     startsLocal: o.startsLocal, durationMinutes: o.durationMinutes, tzid: o.tzid, title: o.title, location: o.location,
     capacity: o.capacity, remoteCapacity: o.remoteCapacity, remoteAvailable: o.remoteAvailable,
-    visibility: o.visibility, visibilityOverride: o.visibilityOverride, seriesVisibility: o.seriesVisibility,
+    visibility: o.visibility, seriesVisibility: o.seriesVisibility,
     churchWide: o.churchWide, groupName: o.groupName, groupVisibility: o.groupVisibility,
-    seriesStartsLocal: isWallMinute(o.seriesStartsLocal) ? o.seriesStartsLocal : null,
-    seriesDurationMinutes: atLeast(o.seriesDurationMinutes, 1) ? o.seriesDurationMinutes : null,
-    seriesTitle: isString(o.seriesTitle) ? o.seriesTitle : null,
-    seriesLocation: isString(o.seriesLocation) ? o.seriesLocation : null,
+    own,
   };
 }
 
@@ -167,24 +196,9 @@ export function useEditRead(opener: DateOpener, owner: string, open: boolean, on
   return refused ? { kind: "denied" } : { kind: "failed", retry: () => setAsked((n) => n + 1) };
 }
 
-// One field a date save can write, as a read shows it: its value as the form reads it, and whether the read proves the
-// value is the date's own rather than one it falls back to (the event's, or the group's place), which a later series
-// change would move.
-interface Held<V> {
-  value: V;
-  own: boolean;
-}
-
 /** @public what a single-date save can write, as dateFields reads it; its test compares one field at a time. */
 export interface DateFields {
-  startsLocal: Held<string>;
-  durationMinutes: Held<number>;
-  title: Held<string>;
-  location: Held<string>;
-  // "event": a cleared limit, which falls back to the event's, a value this read cannot show.
-  capacity: Held<number | null | "event">;
-  remoteCapacity: Held<number | null | "event">;
-  visibility: Visibility | "series";
+  own: OwnValues;
   // What gives the values above their meaning: the clock they are on, what "same as the series" is, and whether the
   // date has remote seats at all.
   tzid: string;
@@ -192,54 +206,34 @@ export interface DateFields {
   remoteAvailable: boolean;
 }
 
-const held = <V,>(value: V, own: boolean): Held<V> => ({ value, own });
-
 // The one normaliser over everything a single-date save can write (DEC-164), for the read the editor opened with and
-// for the read after a refusal, so useRevisionSave can tell "already stored", "as it opened" and "changed" apart. A date
-// field is either the date's own or the value it falls back to, and the manager's read shows only the value that
-// applies, beside some of the fallbacks: a field counts as the date's own only where the read proves it (the value
-// differs from the fallback it shows). The capacities have no fallback in the read, so they never count as own.
+// for the read after a refusal, so useRevisionSave can tell "already stored", "as it opened" and "changed" apart: the
+// date's own values as the read gives them. A value the date falls back to is not the save's to keep: a save leaves it
+// falling back, so a change to the event's own value is not this save's conflict.
 export function dateFields(b: EditBase): DateFields {
-  const seriesTime = b.seriesStartsLocal?.slice(11);
-
-  return {
-    startsLocal: held(b.startsLocal, seriesTime !== undefined && b.startsLocal !== `${b.date}T${seriesTime}`),
-    durationMinutes: held(b.durationMinutes, b.seriesDurationMinutes !== null && b.durationMinutes !== b.seriesDurationMinutes),
-    title: held(b.title, b.seriesTitle !== null && b.title !== b.seriesTitle),
-    // An event with no place of its own falls back to its group's, which the read does not show.
-    location: held(b.location, !!b.seriesLocation && b.location !== b.seriesLocation),
-    capacity: held(b.capacity, false),
-    remoteCapacity: held(b.remoteCapacity, false),
-    visibility: b.visibilityOverride ?? "series",
-    tzid: b.tzid,
-    seriesVisibility: b.seriesVisibility,
-    remoteAvailable: b.remoteAvailable,
-  };
+  return { own: b.own, tzid: b.tzid, seriesVisibility: b.seriesVisibility, remoteAvailable: b.remoteAvailable };
 }
 
-// What dateFields reads once `changes` is stored over the date the editor opened with: each value the save writes is
-// the date's own (the server trims text, as the form sends it); a cleared limit falls back to the event's, which no read
-// shows. A value a read cannot prove own never reads back as this save stored, so a lost answer is never claimed
-// saved by mistake: the refusal path sends again or closes instead.
+// What dateFields reads once `changes` is stored over the date the editor opened with: each value the save writes
+// becomes the date's own, as the server stores it (text trimmed); a cleared limit, and "same as the series", fall back.
 export function intendedDateFields(opened: DateFields, changes: DateEditChanges): DateFields {
-  const out = { ...opened };
-  const limit = (value: number | null) => (value === null ? held<number | null | "event">("event", false) : held(value, true));
+  const own = { ...opened.own };
 
-  if (changes.startsLocal !== undefined) out.startsLocal = held(changes.startsLocal, true);
+  if (changes.startsLocal !== undefined) own.startsLocal = changes.startsLocal;
 
-  if (changes.durationMinutes !== undefined) out.durationMinutes = held(changes.durationMinutes, true);
+  if (changes.durationMinutes !== undefined) own.durationMinutes = changes.durationMinutes;
 
-  if (changes.title !== undefined) out.title = held(changes.title.trim(), true);
+  if (changes.title !== undefined) own.title = changes.title.trim();
 
-  if (changes.location !== undefined) out.location = held(changes.location.trim(), true);
+  if (changes.location !== undefined) own.location = changes.location.trim();
 
-  if (changes.capacityOverride !== undefined) out.capacity = limit(changes.capacityOverride);
+  if (changes.capacityOverride !== undefined) own.capacity = changes.capacityOverride;
 
-  if (changes.remoteCapacityOverride !== undefined) out.remoteCapacity = limit(changes.remoteCapacityOverride);
+  if (changes.remoteCapacityOverride !== undefined) own.remoteCapacity = changes.remoteCapacityOverride;
 
-  if (changes.visibility !== undefined) out.visibility = changes.visibility ?? "series";
+  if (changes.visibility !== undefined) own.visibility = changes.visibility === "series" ? null : changes.visibility;
 
-  return out;
+  return { ...opened, own };
 }
 
 // The manager's read again after a refused save, as useRevisionSave compares it: null for a read that opens no editor

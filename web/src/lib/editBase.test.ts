@@ -20,11 +20,13 @@ describe("editBaseOf", () => {
     expect(base).toEqual({
       id: 1, eventId: 7, date: "2026-12-01", revision: "r0", startsLocal: "2026-12-01T19:00", durationMinutes: 60, tzid: "UTC",
       title: "Supper", location: "Hall", capacity: 1, remoteCapacity: 0, remoteAvailable: true, visibility: "public",
-      visibilityOverride: undefined, seriesVisibility: "public", churchWide: false, groupName: "Choir", groupVisibility: "public",
-      seriesStartsLocal: "2026-12-01T19:00", seriesDurationMinutes: 60, seriesTitle: "Supper", seriesLocation: "Hall",
+      seriesVisibility: "public", churchWide: false, groupName: "Choir", groupVisibility: "public",
+      own: { startsLocal: null, durationMinutes: null, title: null, location: null, capacity: null, remoteCapacity: null, visibility: null },
     });
-    // A fallback the read does not carry well formed is unknown, never a refusal.
-    expect(editBaseOf(wire({ seriesTitle: undefined, seriesStartsLocal: "soon", seriesDurationMinutes: 0 }), opener)).toMatchObject({ seriesTitle: null, seriesStartsLocal: null, seriesDurationMinutes: null });
+    const own = { startsLocal: "2026-12-02T18:30", durationMinutes: 45, title: "Carols", location: "", capacityOverride: 12, remoteCapacityOverride: 0, visibility: "private" as const };
+    expect(editBaseOf(good({ own }), opener)?.own).toEqual({
+      startsLocal: "2026-12-02T18:30", durationMinutes: 45, title: "Carols", location: "", capacity: 12, remoteCapacity: 0, visibility: "private",
+    });
     expect(editBaseOf(good({ capacity: 100000, durationMinutes: 10080, startsLocal: "2028-02-29T23:59" }), opener)).not.toBeNull();
     // Limits the writer enforces now, which a date stored earlier may exceed, still open it.
     expect(editBaseOf(good({ capacity: 250000, remoteCapacity: 250000, durationMinutes: 20160 }), opener)).not.toBeNull();
@@ -66,7 +68,16 @@ describe("editBaseOf", () => {
     ["a missing visibility", { visibility: undefined }],
     ["a missing series visibility", { seriesVisibility: undefined }],
     ["an unknown series visibility", { seriesVisibility: "secret" }],
-    ["an unknown override", { visibilityOverride: "secret" }],
+    ["no own values", { own: undefined }],
+    ["own values that are not an object", { own: "none" }],
+    ["own values as a list", { own: [] }],
+    ["an own start with seconds", { own: { startsLocal: "2026-12-01T19:00:00" } }],
+    ["an own duration of zero", { own: { durationMinutes: 0 } }],
+    ["an own title that is not text", { own: { title: 5 } }],
+    ["an own place given as null", { own: { location: null } }],
+    ["an own capacity of zero", { own: { capacityOverride: 0 } }],
+    ["a negative own remote seat limit", { own: { remoteCapacityOverride: -1 } }],
+    ["an unknown own visibility", { own: { visibility: "secret" } }],
     ["a group name that is not text", { groupName: 7 }],
     ["no time zone", { tzid: "" }],
     ["an overlong time zone", { tzid: "x".repeat(65) }],
@@ -81,10 +92,8 @@ describe("editBaseOf", () => {
   });
 });
 
-// DEC-164: the one comparison over what a single-date save can write. A read shows each field's value that applies;
-// the field counts as the date's own only where the read proves it (the value differs from the fallback the read
-// shows beside it). What a save would leave counts as own for each field it writes, so a read can match it only
-// where the read proves the value own: anything else fails safe (never "already stored").
+// DEC-164: the one comparison over what a single-date save can write: the date's own values, as the manager's read
+// gives them (each null while the date falls back), and what gives them their meaning.
 describe("dateFields and intendedDateFields", () => {
   const read = (over: Partial<EventOccurrence> = {}): EditBase => {
     const base = editBaseOf(good(over), opener);
@@ -95,52 +104,57 @@ describe("dateFields and intendedDateFields", () => {
   };
 
   const same = (a: DateFields, b: DateFields) => JSON.stringify(a) === JSON.stringify(b);
-  // Opened inherited everywhere (the date shows the event's values), then saved with `changes`; `stored` is what a
-  // later read shows: whether the read counts as "already stored", and whether it counts as "as it opened".
-  const opened = read();
 
-  it.each<[string, DateEditChanges, Partial<EventOccurrence>, boolean]>([
-    ["an own title", { title: "Carols" }, { title: "Carols" }, true],
-    ["an own title equal to the series title", { title: "Supper" }, { title: "Supper" }, false],
-    ["an own title the server trimmed", { title: "  Carols " }, { title: "Carols" }, true],
-    ["an own place", { location: "Annex" }, { location: "Annex" }, true],
-    ["a place where the event has none (the group's may show)", { location: "Annex" }, { location: "Annex", seriesLocation: "" }, false],
-    ["an own duration", { durationMinutes: 90 }, { durationMinutes: 90 }, true],
-    ["a duration equal to the series duration", { durationMinutes: 60 }, { durationMinutes: 60 }, false],
-    ["an own start", { startsLocal: "2026-12-02T18:00" }, { startsLocal: "2026-12-02T18:00" }, true],
-    ["a start back on the series clock", { startsLocal: "2026-12-01T19:00" }, { startsLocal: "2026-12-01T19:00" }, false],
-    ["a seat limit (the read shows no fallback)", { capacityOverride: 12 }, { capacity: 12 }, false],
-    ["a cleared seat limit", { capacityOverride: null }, { capacity: 20 }, false],
-    ["a cleared seat limit that reads as none", { capacityOverride: null }, { capacity: null }, false],
-    ["a remote seat limit", { remoteCapacityOverride: 5 }, { remoteAvailable: true, remoteCapacity: 5 }, false],
-    ["a visibility of its own", { visibility: "private" }, { visibilityOverride: "private", visibility: "private" }, true],
-    ["same as the series", { visibility: "series" }, {}, true],
-  ])("%s: a read showing it counts as stored only where it proves it", (_label, changes, stored, done) => {
-    const goal = intendedDateFields(dateFields(opened), changes);
+  // Opened with `opened` (its own values), saved with `changes`; `stored` is a later read: whether it counts as
+  // "already stored", true only when the read's own values are what the save would leave.
+  it.each<[string, Partial<EventOccurrence>, DateEditChanges, Partial<EventOccurrence>, boolean]>([
+    ["an own start", {}, { startsLocal: "2026-12-02T18:00" }, { startsLocal: "2026-12-02T18:00", own: { startsLocal: "2026-12-02T18:00" } }, true],
+    // A rule's own hour gives the date a clock that differs from the series start, with no start of its own.
+    ["a start a rule gives the date, not its own", {}, { startsLocal: "2026-12-01T20:00" }, { startsLocal: "2026-12-01T20:00", own: {} }, false],
+    ["an own duration", {}, { durationMinutes: 90 }, { durationMinutes: 90, own: { durationMinutes: 90 } }, true],
+    ["an own duration equal to the event's", {}, { durationMinutes: 60 }, { own: { durationMinutes: 60 } }, true],
+    ["the event's duration, not its own", { own: { durationMinutes: 90 } }, { durationMinutes: 60 }, { own: {} }, false],
+    ["an own title", {}, { title: "Carols" }, { title: "Carols", own: { title: "Carols" } }, true],
+    ["an own title the server trimmed", {}, { title: "  Carols " }, { title: "Carols", own: { title: "Carols" } }, true],
+    ["an own title equal to the event's", {}, { title: "Supper" }, { own: { title: "Supper" } }, true],
+    ["the event's title, not its own", { own: { title: "Carols" } }, { title: "Supper" }, { own: {} }, false],
+    ["an own place", {}, { location: "Annex" }, { location: "Annex", own: { location: "Annex" } }, true],
+    ["an own empty place", {}, { location: "" }, { location: "", own: { location: "" } }, true],
+    ["no place shown, none of its own", {}, { location: "" }, { location: "", own: {} }, false],
+    ["an own seat limit", {}, { capacityOverride: 12 }, { capacity: 12, own: { capacityOverride: 12 } }, true],
+    ["the event's seat limit, not its own", {}, { capacityOverride: 12 }, { capacity: 12, own: {} }, false],
+    ["a seat limit cleared back to the event's", { own: { capacityOverride: 12 } }, { capacityOverride: null }, { capacity: 20, own: {} }, true],
+    ["a seat limit still its own after a clear", { own: { capacityOverride: 12 } }, { capacityOverride: null }, { capacity: 12, own: { capacityOverride: 12 } }, false],
+    ["an own remote seat limit of zero", {}, { remoteCapacityOverride: 0 }, { remoteCapacity: 0, own: { remoteCapacityOverride: 0 } }, true],
+    ["a remote seat limit cleared back to the event's", { own: { remoteCapacityOverride: 5 } }, { remoteCapacityOverride: null }, { own: {} }, true],
+    ["an own visibility", {}, { visibility: "private" }, { visibility: "private", own: { visibility: "private" } }, true],
+    ["the same visibility inherited", {}, { visibility: "private" }, { visibility: "private", seriesVisibility: "private", own: {} }, false],
+    ["same as the series again", { own: { visibility: "private" } }, { visibility: "series" }, { own: {} }, true],
+    ["an own value the save leaves alone, kept", { own: { title: "Carols" } }, { durationMinutes: 90 }, { own: { title: "Carols", durationMinutes: 90 } }, true],
+    ["an own value the save leaves alone, cleared meanwhile", { own: { title: "Carols" } }, { durationMinutes: 90 }, { own: { durationMinutes: 90 } }, false],
+  ])("%s: already stored is %s", (_label, opened, changes, stored, done) => {
+    const goal = intendedDateFields(dateFields(read(opened)), changes);
     expect(same(dateFields(read(stored)), goal)).toBe(done);
   });
 
-  it("a visibility of its own is told apart from the same value inherited", () => {
-    const own = intendedDateFields(dateFields(read({ visibility: "private", seriesVisibility: "private" })), { visibility: "private" });
-    expect(same(dateFields(read({ visibility: "private", seriesVisibility: "private" })), own)).toBe(false);
-    expect(same(dateFields(read({ visibility: "private", seriesVisibility: "private", visibilityOverride: "private" })), own)).toBe(true);
-  });
-
+  // Against the read the form opened with (nothing of its own): which reads count as unchanged, and which as changed by
+  // someone else.
   it.each<[string, Partial<EventOccurrence>, boolean]>([
     ["only the revision", { revision: "r9" }, true],
-    ["another manager's own title equal to the shown one", { title: "Supper" }, true],
-    ["a new title", { title: "Potluck" }, false],
-    ["a new place", { location: "Annex" }, false],
-    ["a new duration", { durationMinutes: 90 }, false],
-    ["a new start", { startsLocal: "2026-12-01T18:00" }, false],
-    ["a new seat limit", { capacity: 20 }, false],
-    ["a new remote seat limit", { remoteCapacity: 3 }, false],
-    ["an own visibility over the inherited one", { visibilityOverride: "public" }, false],
+    ["the event's own title, which the date falls back to", { title: "Potluck", seriesTitle: "Potluck" }, true],
+    ["a clock a rule gives the date", { startsLocal: "2026-12-01T20:00" }, true],
+    ["the room, the roster or the counts (not written by the save)", { seatsUsed: 9, room: { id: 1, name: "Hall", building: "Main" } }, true],
+    ["an own start", { own: { startsLocal: "2026-12-01T18:00" } }, false],
+    ["an own duration", { own: { durationMinutes: 90 } }, false],
+    ["an own title, even the shown one", { own: { title: "Supper" } }, false],
+    ["an own place", { own: { location: "Annex" } }, false],
+    ["an own seat limit", { own: { capacityOverride: 20 } }, false],
+    ["an own remote seat limit", { own: { remoteCapacityOverride: 3 } }, false],
+    ["an own visibility", { own: { visibility: "public" } }, false],
     ["what the series visibility is", { seriesVisibility: "private", visibility: "private" }, false],
     ["the time zone", { tzid: "America/Boise" }, false],
     ["remote seats offered", { remoteAvailable: true }, false],
-    ["the room, the roster or the counts (not written by the save)", { seatsUsed: 9, room: { id: 1, name: "Hall", building: "Main" } }, true],
-  ])("against the read the form opened with, %s reads as %s", (_label, over, asOpened) => {
-    expect(same(dateFields(read(over)), dateFields(opened))).toBe(asOpened);
+  ])("against the read the form opened with, %s reads as unchanged: %s", (_label, over, asOpened) => {
+    expect(same(dateFields(read(over)), dateFields(read()))).toBe(asOpened);
   });
 });

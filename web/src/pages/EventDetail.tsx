@@ -11,7 +11,7 @@ import { OccurrenceCard } from "../components/OccurrenceCard";
 import { EventIntro } from "../components/EventIntro";
 import { CompactDates } from "../components/CompactDates";
 import { Attendance } from "../components/Attendance";
-import { ManagedDateEditor } from "../components/ManagedDateEditor";
+import { ManagedDateEditor, useListedDateEditor } from "../components/ManagedDateEditor";
 import { NeedsRoomList } from "../components/NeedsRoomList";
 import { Menu } from "../components/ui/Menu";
 import { composePath, EMAIL_GOING } from "../components/messages/composeLinks";
@@ -431,7 +431,7 @@ function DateRow({
 }) {
   const navigate = useNavigate();
   const { canCompose } = useAuth();
-  const [editingDate, setEditingDate] = useState(false);
+  const dateEditor = useListedDateEditor({ onEditDate, onChanged, onDateConflict, onTerminalRefresh });
   const [managing, setManaging] = useState(manageRequested);
   const manageRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
@@ -446,17 +446,16 @@ function DateRow({
   const [focusRoom, setFocusRoom] = useState(false);
   useEffect(() => {
     if (editRequest > 0 && editRequest !== handledRequest.current) {
-      onEditDate();
-      setEditingDate(true);
+      dateEditor.show();
       setFocusRoom(true);
     }
   }, [editRequest]);
   useEffect(() => {
-    if (editRequest === 0 || editRequest === handledRequest.current || !editingDate) return;
+    if (editRequest === 0 || editRequest === handledRequest.current || !dateEditor.open) return;
     handledRequest.current = editRequest;
     const editor = editorRef.current;
     editor?.scrollIntoView?.({ block: "start" });
-  }, [editRequest, editingDate]);
+  }, [editRequest, dateEditor.open]);
   // "asking" from the first ask, "cancelling" while the request runs: either way the menu cannot start another.
   const [cancelStep, setCancelStep] = useState<"asking" | "cancelling" | null>(null);
   const cancelNow = useRef(false);
@@ -511,7 +510,7 @@ function DateRow({
         tone="quiet"
         label={`More for ${instance.date}`}
         items={[
-          { label: "Edit this date", onSelect: () => { setFocusRoom(false); onEditDate(); setEditingDate((v) => !v); }, disabled: settlingDate },
+          { label: "Edit this date", onSelect: () => { setFocusRoom(false); dateEditor.toggle(); }, disabled: settlingDate || dateEditor.saving },
           { label: "Manage sign-ups", onSelect: () => setManaging((v) => !v) },
           // A single date's people are the event's: the header's menu has it.
           ...(canCompose && !single ? [{ label: EMAIL_GOING, onSelect: () => navigate(composePath({ occurrence: instance.id })) }] : []),
@@ -554,26 +553,13 @@ function DateRow({
             </Button>
           )}
         </div>
-        {canManage && editingDate && (
+        {canManage && dateEditor.open && (
           <div ref={editorRef} className="scroll-mt-4">
           <ManagedDateEditor
             opener={{ eventId: instance.eventId, date: instance.date, occurrenceId: instance.id }}
             pageFailed={pageFailed}
-            onRoomChanged={onChanged}
             focusRoom={focusRoom}
-            onSaved={() => {
-              setEditingDate(false);
-              onChanged();
-            }}
-            onConflict={(why) => {
-              setEditingDate(false);
-              onDateConflict(why);
-            }}
-            onClose={() => setEditingDate(false)}
-            onRefused={() => {
-              setEditingDate(false);
-              onTerminalRefresh();
-            }}
+            {...dateEditor.editor}
           />
           </div>
         )}

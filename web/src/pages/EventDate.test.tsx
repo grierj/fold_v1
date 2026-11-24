@@ -792,7 +792,7 @@ async function openManagerTools({ minutes = true, roster = true } = {}) {
 describe("the manager section", () => {
   beforeEach(async () => {
     await verifiedCredential();
-    edits = stubEditSends();
+    edits = stubEditSends(51);
     invalidateSite();
     vi.spyOn(Site, "get").mockResolvedValue({ name: "Grace", timezone: "UTC", selfSignup: "off", roomsEnabled: false, pushEnabled: true });
     vi.mocked(Dates.get).mockResolvedValue({ occurrence: occurrence({ canManage: true, canDecline: false, canBlock: false, myRegistration: null }) });
@@ -1184,7 +1184,7 @@ describe("the date page when a date's save meets someone else's change", () => {
 
   beforeEach(async () => {
     await verifiedCredential();
-    edits = stubEditSends();
+    edits = stubEditSends(51);
     invalidateSite();
     vi.spyOn(Site, "get").mockResolvedValue({ name: "Grace", timezone: "UTC", selfSignup: "off", roomsEnabled: false, pushEnabled: true });
     vi.mocked(Dates.get).mockResolvedValue(managerAnswer());
@@ -1207,7 +1207,7 @@ describe("the date page when a date's save meets someone else's change", () => {
   });
 
   it("closes as a save does, with no line, when the read shows the save already stored", async () => {
-    await saveInto({ durationMinutes: 150 });
+    await saveInto({ durationMinutes: 150, own: { durationMinutes: 150 } });
     await waitFor(() => expect(screen.queryByRole("spinbutton", { name: "Minutes" })).not.toBeInTheDocument());
     expect(edits.sent).toHaveLength(1);
     expect(screen.queryByText(/could not be saved/)).not.toBeInTheDocument();
@@ -1216,7 +1216,7 @@ describe("the date page when a date's save meets someone else's change", () => {
   it("closes the editor over another change, reads the page from nothing and says so above the tools, focused; opening the editor clears it", async () => {
     const after = later<{ occurrence: EventDate }>();
     vi.mocked(Dates.get).mockResolvedValueOnce(managerAnswer()).mockReturnValueOnce(after.promise);
-    await saveInto({ location: "Annex" });
+    await saveInto({ location: "Annex", own: { location: "Annex" } });
     expect(await screen.findByText("Loading this date…")).toBeInTheDocument();
     expect(screen.queryByRole("spinbutton", { name: "Minutes" })).not.toBeInTheDocument();
     expect(screen.queryByText(NOTICE)).not.toBeInTheDocument();

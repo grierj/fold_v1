@@ -283,8 +283,7 @@ describe("a save refused as stale (date_changed)", () => {
     edits.answer(changed());
     render(editor({ onSaved, onConflict }));
     await typeTitle();
-    // The title is the date's own: it differs from the series title the read shows beside it.
-    base = { ...base, title: "Carols", revision: "r1" };
+    base = { ...base, title: "Carols", own: { title: "Carols" }, revision: "r1" };
     await save();
     await waitFor(() => expect(onSaved).toHaveBeenCalledOnce());
     expect(edits.sent).toHaveLength(1);
@@ -309,11 +308,12 @@ describe("a save refused as stale (date_changed)", () => {
   });
 
   it.each([
-    ["the place", { location: "Annex" }],
+    ["the place", { location: "Annex", own: { location: "Annex" } }],
+    ["the seat limit", { capacity: 12, own: { capacityOverride: 12 } }],
     ["the visibility the date follows", { seriesVisibility: "private" as const, visibility: "private" as const }],
     ["the time zone its clock is on", { tzid: "America/Boise" }],
     ["whether it has remote seats", { remoteAvailable: true }],
-    ["another manager's own title over the inherited one", { title: "Potluck" }],
+    ["another manager's own title over the inherited one", { title: "Potluck", own: { title: "Potluck" } }],
   ])("closes as a conflict when %s changed, and sends nothing more", async (_label, over) => {
     const onSaved = vi.fn();
     const onConflict = vi.fn();
@@ -339,22 +339,31 @@ describe("a save refused as stale (date_changed)", () => {
     expect(edits.sent).toHaveLength(1);
   });
 
-  // A capacity's fallback is not in the read, so the read cannot show that a limit is the date's own: a stored
-  // change would read the same as another manager's or the event's. It fails safe, as a conflict.
-  it("fails safe on a seat limit the read cannot prove is the date's own: a stored change found on the next press is a conflict", async () => {
+  // A rule's own hour can give a date a clock that differs from the series start with no start of its own: that is not
+  // this save's start stored, so the save goes again and the start becomes the date's own.
+  it("sends a start change again when the read shows the start only as a clock the rule gives the date", async () => {
     const onSaved = vi.fn();
     const onConflict = vi.fn();
-    edits.answer(new TypeError("Failed to fetch"), changed());
+    edits.answer(changed());
     render(editor({ onSaved, onConflict }));
     await ready();
-    await userEvent.type(screen.getByRole("spinbutton", { name: /^Capacity for this date/ }), "12");
+    fireEvent.change(screen.getByLabelText("Start time"), { target: { value: "20:00" } });
+    base = { ...base, startsLocal: "2026-12-01T20:00", startsAt: "2026-12-01T20:00:00Z", revision: "r1" };
     await save();
-    expect(await screen.findByText(NETWORK)).toBeInTheDocument();
-    base = { ...base, capacity: 12, revision: "r1" };
+    await waitFor(() => expect(onSaved).toHaveBeenCalledOnce());
+    expect(edits.sent.map((s) => [s.revision, s.changes])).toEqual([["r0", { startsLocal: "2026-12-01T20:00" }], ["r1", { startsLocal: "2026-12-01T20:00" }]]);
+    expect(onConflict).not.toHaveBeenCalled();
+  });
+
+  it("sends a change to the event's own value again: the date still falls back to it, and the save leaves it so", async () => {
+    const onSaved = vi.fn();
+    edits.answer(changed());
+    render(editor({ onSaved }));
+    await typeTitle();
+    base = { ...base, location: "New hall", seriesLocation: "New hall", revision: "r1" };
     await save();
-    await waitFor(() => expect(onConflict).toHaveBeenCalledExactlyOnceWith("changed"));
-    expect(onSaved).not.toHaveBeenCalled();
-    expect(edits.sent).toHaveLength(2);
+    await waitFor(() => expect(onSaved).toHaveBeenCalledOnce());
+    expect(edits.sent.map((s) => s.revision)).toEqual(["r0", "r1"]);
   });
 
   it.each([403, 404])("the read after the refusal answering %i: this person may no longer manage the date", async (status) => {
@@ -430,7 +439,7 @@ describe("a lost reply", () => {
     expect(screen.getByRole("button", { name: "Save this date" })).toBeEnabled();
     expect(onSaved).not.toHaveBeenCalled();
     // The first press was stored; its answer was lost.
-    base = { ...base, title: "Carols", revision: "r1" };
+    base = { ...base, title: "Carols", own: { title: "Carols" }, revision: "r1" };
     await save();
     await waitFor(() => expect(onSaved).toHaveBeenCalledOnce());
     expect(edits.sent.map((s) => s.revision)).toEqual(["r0", "r0"]);
@@ -449,6 +458,79 @@ describe("a lost reply", () => {
     await waitFor(() => expect(onSaved).toHaveBeenCalledOnce());
     expect(edits.sent.map((s) => s.revision)).toEqual(["r0", "r0"]);
     expect(editorReads()).toBe(1);
+  });
+
+  it.each([
+    ["a seat limit", async () => { await userEvent.type(screen.getByRole("spinbutton", { name: /^Capacity for this date/ }), "12"); }, { capacity: 12, own: { capacityOverride: 12 } }],
+    ["a start time", async () => { fireEvent.change(screen.getByLabelText("Start time"), { target: { value: "20:00" } }); },
+      { startsLocal: "2026-12-01T20:00", startsAt: "2026-12-01T20:00:00Z", own: { startsLocal: "2026-12-01T20:00" } }],
+  ])("%s stored with its answer lost: the next press finds it stored and is done", async (_label, change, stored) => {
+    const onSaved = vi.fn();
+    const onConflict = vi.fn();
+    edits.answer(new TypeError("Failed to fetch"), changed());
+    render(editor({ onSaved, onConflict }));
+    await ready();
+    await change();
+    await save();
+    expect(await screen.findByText(NETWORK)).toBeInTheDocument();
+    base = { ...base, ...stored, revision: "r1" };
+    await save();
+    await waitFor(() => expect(onSaved).toHaveBeenCalledOnce());
+    expect(edits.sent.map((s) => s.revision)).toEqual(["r0", "r0"]);
+    expect(onConflict).not.toHaveBeenCalled();
+  });
+
+  // #455: a lost send may have been stored and then undone by someone else; sending again would redo it.
+  it("after a lost reply, a refusal finding the date as it opened closes as a conflict, sending the opened revision only", async () => {
+    const onSaved = vi.fn();
+    const onConflict = vi.fn();
+    edits.answer(new TypeError("Failed to fetch"), changed());
+    render(editor({ onSaved, onConflict }));
+    await typeTitle();
+    await save();
+    expect(await screen.findByText(NETWORK)).toBeInTheDocument();
+    // Stored at r1, then another manager put the opening title back (r2).
+    base = { ...base, revision: "r2" };
+    await save();
+    await waitFor(() => expect(onConflict).toHaveBeenCalledExactlyOnceWith("changed"));
+    expect(edits.sent.map((s) => s.revision)).toEqual(["r0", "r0"]);
+    expect(onSaved).not.toHaveBeenCalled();
+  });
+
+  it("remembers a lost reply across a remount from the hold", async () => {
+    const hold = createRef<DateDraftHold>();
+    const onConflict = vi.fn();
+    edits.answer(new TypeError("Failed to fetch"), changed());
+    const view = render(session(<HoldHarness hold={hold} onConflict={onConflict} />));
+    await typeTitle();
+    await save();
+    expect(await screen.findByText(NETWORK)).toBeInTheDocument();
+    view.unmount();
+    base = { ...base, revision: "r2" };
+    render(session(<HoldHarness hold={hold} onConflict={onConflict} />));
+    await ready();
+    await save();
+    await waitFor(() => expect(onConflict).toHaveBeenCalledExactlyOnceWith("changed"));
+    expect(edits.sent.map((s) => s.revision)).toEqual(["r0", "r0"]);
+  });
+
+  it.each([
+    ["an empty object (a page from something in between)", {}],
+    ["another date's answer", { occurrence: occurrence({ id: 2, revision: "r1" }) }],
+    ["an answer with no revision", { occurrence: occurrence({ id: 1 }) }],
+  ])("keeps the draft and says the ordinary error, closing nothing, when the answer is %s", async (_label, answer) => {
+    const onSaved = vi.fn();
+    const onConflict = vi.fn();
+    // SAFETY: a wire answer the static type would not allow, as something in between could send it.
+    edits.answer(answer as OccurrenceResponse);
+    render(editor({ onSaved, onConflict }));
+    await typeTitle();
+    await save();
+    expect(await screen.findByText("We couldn't update this date. Please try again in a minute.")).toBeInTheDocument();
+    expect(screen.getByRole("textbox", { name: "Title" })).toHaveValue("Carols");
+    expect(screen.getByRole("button", { name: "Save this date" })).toBeEnabled();
+    expect(onSaved).not.toHaveBeenCalled();
+    expect(onConflict).not.toHaveBeenCalled();
   });
 });
 
@@ -485,7 +567,7 @@ describe("the hold", () => {
     await userEvent.clear(screen.getByRole("spinbutton", { name: "Minutes" }));
     await userEvent.type(screen.getByRole("spinbutton", { name: "Minutes" }), "150");
     view.unmount();
-    base = occurrence({ revision: "r1", title: "Stored rename", location: "New hall" });
+    base = occurrence({ revision: "r1", title: "Stored rename", location: "New hall", own: { title: "Stored rename", location: "New hall" } });
     render(session(<HoldHarness hold={hold} onConflict={onConflict} />));
     await ready();
     expect(screen.getByRole("spinbutton", { name: "Minutes" })).toHaveValue(150);
@@ -612,7 +694,7 @@ it("two managers on one date: the second save, made from the read before the fir
   await userEvent.type(first.title(), "!");
   await userEvent.click(first.getByRole("button", { name: "Save this date" }));
   await waitFor(() => expect(saves.first).toHaveBeenCalledOnce());
-  base = { ...base, title: "Supper!", revision: "r1" };
+  base = { ...base, title: "Supper!", own: { title: "Supper!" }, revision: "r1" };
   edits.answer(changed());
   await userEvent.type(second.place(), " annex");
   await userEvent.click(second.getByRole("button", { name: "Save this date" }));
@@ -630,14 +712,14 @@ it("says nothing about closing, reopening, reloading or refreshing, and claims n
   await screen.findByRole("button", { name: "Retry loading" });
   lines.push(...said());
   await userEvent.click(screen.getByRole("button", { name: "Retry loading" }));
-  edits.answer(new TypeError("Failed to fetch"), changed(), changed(), changed());
+  edits.answer(changed(), changed(), changed(), new TypeError("Failed to fetch"));
   await typeTitle();
-  await save();
-  await screen.findByText(NETWORK);
-  lines.push(...said());
   base = { ...base, revision: "r1" };
   await save();
   await screen.findByText("We couldn't update this date. Please try again.");
+  lines.push(...said());
+  await save();
+  await screen.findByText(NETWORK);
   lines.push(...said());
   view.rerender(editor({ dialog: true, pageFailed: true }));
   lines.push(...said());
@@ -844,6 +926,18 @@ describe("visibility consent", () => {
     expect(edits.sent[1]).toMatchObject({ revision: "r0", changes: { visibility: "series" } });
     expect(edits.sent[1].attempt).not.toBe(edits.sent[0].attempt);
     expect(Events.dateVisibilityImpact).not.toHaveBeenCalled();
+  });
+
+  it("a no is not a lost reply: the next press, refused after a room booking, sends again", async () => {
+    edits.answer(decision(tighten(1, "public", T1)), changed());
+    vi.spyOn(window, "confirm").mockReturnValueOnce(false).mockReturnValue(true);
+    await open();
+    await waitFor(() => expect(window.confirm).toHaveBeenCalledOnce());
+    await ready();
+    base = { ...base, revision: "r1" };
+    await save();
+    await waitFor(() => expect(edits.sent).toHaveLength(3));
+    expect(edits.sent.map((s) => s.revision)).toEqual(["r0", "r0", "r1"]);
   });
 
   it("a second question in the same save says it checked again, from the new answer", async () => {

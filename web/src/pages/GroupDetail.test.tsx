@@ -1993,7 +1993,7 @@ describe("GroupDetail when a date's save meets someone else's change", () => {
     vi.mocked(Groups.get).mockResolvedValue(managing);
   });
 
-  async function saveTitleInto(stored: Partial<EventOccurrence>, answer: Error = changed()) {
+  async function saveTitleInto(stored: Partial<EventOccurrence>, answer: Error | Promise<OccurrenceResponse> = changed()) {
     vi.mocked(Events.managedDate).mockResolvedValueOnce(forGroup({ occurrence: { ...listed, revision: "r0" } })).mockResolvedValue(forGroup({ occurrence: { ...listed, revision: "r1", ...stored } }));
     edits.answer(answer);
     render(<MemoryRouter initialEntries={["/groups/1"]}><RosterWritesProvider><Routes><Route path="/groups/:id" element={<GroupDetail />} /></Routes></RosterWritesProvider></MemoryRouter>);
@@ -2004,6 +2004,20 @@ describe("GroupDetail when a date's save meets someone else's change", () => {
     await userEvent.click(screen.getByRole("button", { name: "Save this date" }));
   }
 
+  // An earlier save's answer closes the editor: opening it again meanwhile would show a draft that answer then closes.
+  it("keeps the row's Edit this date off while the date's save is on its way", async () => {
+    const sent = deferred<OccurrenceResponse>();
+    await saveTitleInto({}, sent.promise);
+    await waitFor(() => expect(edits.sent).toHaveLength(1));
+    await userEvent.click(screen.getByRole("button", { name: "More for Supper on 2026-12-01" }));
+    expect(screen.getByRole("menuitem", { name: "Edit this date" })).toBeDisabled();
+    await userEvent.keyboard("{Escape}");
+    await act(async () => { sent.resolve({ occurrence: { ...listed, revision: "r1" } }); await sent.promise; });
+    await waitFor(() => expect(screen.queryByLabelText("Title")).not.toBeInTheDocument());
+    await userEvent.click(screen.getByRole("button", { name: "More for Supper on 2026-12-01" }));
+    expect(screen.getByRole("menuitem", { name: "Edit this date" })).toBeEnabled();
+  });
+
   it("sends the save again under the new revision when nothing it can write changed, and closes as a save does", async () => {
     await saveTitleInto({});
     await waitFor(() => expect(screen.queryByLabelText("Title")).not.toBeInTheDocument());
@@ -2012,7 +2026,7 @@ describe("GroupDetail when a date's save meets someone else's change", () => {
   });
 
   it("closes as a save does, with no line, when the read shows the save already stored", async () => {
-    await saveTitleInto({ title: "Supper night" });
+    await saveTitleInto({ title: "Supper night", own: { title: "Supper night" } });
     await waitFor(() => expect(screen.queryByLabelText("Title")).not.toBeInTheDocument());
     expect(edits.sent).toHaveLength(1);
     expect(screen.queryByText(/could not be saved/)).not.toBeInTheDocument();
@@ -2022,7 +2036,7 @@ describe("GroupDetail when a date's save meets someone else's change", () => {
     const after = deferred<GroupDetailResponse>();
     const reads = vi.mocked(Groups.get).mock.calls.length;
     vi.mocked(Groups.get).mockResolvedValueOnce(managing).mockReturnValueOnce(after.promise);
-    await saveTitleInto({ location: "Annex" });
+    await saveTitleInto({ location: "Annex", own: { location: "Annex" } });
     await waitFor(() => expect(vi.mocked(Groups.get).mock.calls.length).toBe(reads + 2));
     expect(screen.queryByLabelText("Title")).not.toBeInTheDocument();
     const theirs = { ...managing, upcomingEvents: [{ ...listed, location: "Annex" }] };

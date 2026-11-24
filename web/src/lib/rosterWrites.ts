@@ -4,7 +4,7 @@ import type { LoadOutcome } from "./useLoad";
 
 // How a date's update ended. "refused": the server answered no, so nothing was stored. "unsure": the answer
 // never arrived or could not be read (the connection dropped, a server or proxy failure), so it may have been.
-export type WriteOutcome = "stored" | "refused" | "unsure";
+export type WriteOutcome = "refused" | "unsure";
 
 // Only an answer the server gave and we could read says nothing was stored.
 export function outcomeOf(cause: unknown): WriteOutcome {

@@ -39,6 +39,8 @@ export function occurrence(over: Partial<EventOccurrence>): EventOccurrence {
     videoProvider: "none",
     videoReveal: "registered_only",
     ...over,
+    // A manager's read carries the date's own values; an own visibility is the override.
+    own: over.own ?? (over.visibilityOverride ? { visibility: over.visibilityOverride } : {}),
   };
 }
 

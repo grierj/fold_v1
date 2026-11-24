@@ -37,9 +37,9 @@ export interface EditSends {
 
 let attempts = 0;
 
-// Stands in for the date save's transport (Events.editDate) for a test: it records each send, then answers as queued.
-// Call it in each test (or its beforeEach), after any vi.resetAllMocks.
-export function stubEditSends(): EditSends {
+// Stands in for the date save's transport (Events.editDate) for a test: it records each send, then answers as queued,
+// or as date `occurrenceId` stored. Call it in each test (or its beforeEach), after any vi.resetAllMocks.
+export function stubEditSends(occurrenceId = 1): EditSends {
   const sent: SentEdit[] = [];
   const queued: Answer[] = [];
   const spy = vi.isMockFunction(Events.editDate) ? vi.mocked(Events.editDate) : vi.spyOn(Events, "editDate");
@@ -47,7 +47,7 @@ export function stubEditSends(): EditSends {
   spy.mockImplementation(async (eventId, date, body) => {
     const attempt = (++attempts).toString(16).padStart(32, "0");
     sent.push(JSON.parse(JSON.stringify({ eventId, date, attempt, ...body })));
-    const next = queued.shift() ?? { occurrence: occurrence({ revision: `r-stored-${sent.length}` }) };
+    const next = queued.shift() ?? storedEdit(occurrenceId, `r-stored-${sent.length}`);
 
     if (next instanceof Error) throw next;
 

@@ -1,4 +1,4 @@
-import { useRef, type MutableRefObject } from "react";
+import { useRef, useState, type MutableRefObject } from "react";
 import { useLocation } from "react-router-dom";
 import { DateEditor, type DateDraftHold } from "./DateEditor";
 import { Button } from "./ui/Button";
@@ -10,10 +10,46 @@ import type { RevisionConflict } from "../lib/useRevisionSave";
 import { useFocusHome, useKeepFocusHome } from "../lib/focusHome";
 import { useKeptDraft } from "../lib/unsavedChanges";
 
+// A listed date's "Edit this date" toggle and its editor's endings, the same on the event and group pages. The toggle is
+// off while the date's save is on its way, as the editor's own Close is: closing and opening it again would show a new
+// draft that the earlier save's answer then closes.
+export function useListedDateEditor({ onEditDate, onChanged, onDateConflict, onTerminalRefresh }: {
+  // The editor opened, which clears what the page said about the date's last refused save.
+  onEditDate: () => void;
+  // Saved, or the room changed: the host reads its page again.
+  onChanged: () => void;
+  onDateConflict: (why: RevisionConflict) => void;
+  // The read was refused: the host checks its page.
+  onTerminalRefresh: () => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const close = () => setOpen(false);
+
+  return {
+    open,
+    saving,
+    toggle: () => { onEditDate(); setOpen((v) => !v); },
+    show: () => { onEditDate(); setOpen(true); },
+    editor: {
+      saving,
+      onSaving: setSaving,
+      onSaved: () => { close(); onChanged(); },
+      onConflict: (why: RevisionConflict) => { close(); onDateConflict(why); },
+      onClose: close,
+      onRoomChanged: onChanged,
+      onRefused: () => { close(); onTerminalRefresh(); },
+    },
+  };
+}
+
 interface ManagedDateEditorProps {
   opener: DateOpener;
   // The host's latest read of its page failed: nothing of the date is shown until a read succeeds.
   pageFailed?: boolean;
+  // This date's save is on its way, also from an editor the host has since taken off the screen.
+  saving?: boolean;
+  onSaving?: (saving: boolean) => void;
   onSaved: () => void;
   onConflict: (why: RevisionConflict) => void;
   onClose: () => void;
@@ -26,7 +62,7 @@ interface ManagedDateEditorProps {
 // A listed date's editor on the event and group pages (M8.1). The list names the date; a fresh manager read supplies
 // the form and its revision, once for the host's route and the date. While the row is hidden or the page's read has
 // failed the editor is off the screen and its draft is kept here; a new route or date ends the draft, and so does Close.
-export function ManagedDateEditor({ opener, pageFailed = false, onSaved, onConflict, onClose, onRoomChanged, focusRoom, onRefused }: ManagedDateEditorProps) {
+export function ManagedDateEditor({ opener, pageFailed = false, saving = false, onSaving, onSaved, onConflict, onClose, onRoomChanged, focusRoom, onRefused }: ManagedDateEditorProps) {
   const location = useLocation();
   const shown = useShownInList();
   const owner = `${location.key}|${opener.eventId}|${opener.date}|${opener.occurrenceId}|${opener.groupId ?? ""}`;
@@ -53,7 +89,7 @@ export function ManagedDateEditor({ opener, pageFailed = false, onSaved, onConfl
         <Button variant="secondary" layout="w-full sm:w-auto" onClick={onClose}>Close</Button>
       </div>
       : read.kind === "ready"
-      ? <DateEditor opener={opener} base={read.base} hold={hold} onSaved={onSaved} onConflict={onConflict} onClose={onClose}
+      ? <DateEditor opener={opener} base={read.base} hold={hold} onSaved={onSaved} onSaving={onSaving} pending={saving} onConflict={onConflict} onClose={onClose}
         onRoomChanged={onRoomChanged} focusRoom={focusRoom} />
       : read.kind === "loading"
         ? <Skeleton kind="lines" label="Loading this date…" />

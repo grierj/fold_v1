@@ -19,7 +19,7 @@ import { videoBody } from "./VideoField";
 import { remoteBody, remoteFrom } from "./RemoteField";
 import { errorText, keptDatesOf } from "../lib/errors";
 import { useAction, type Action } from "../lib/useAction";
-import { useRevisionSave, type RevisionConflict } from "../lib/useRevisionSave";
+import { answerNames, useRevisionSave, type RevisionConflict } from "../lib/useRevisionSave";
 import { useFocusHome, useLockedFocus } from "../lib/focusHome";
 import { KeptDates } from "./KeptDates";
 import { useKeptRefusal } from "./keptRefusal";
@@ -182,6 +182,7 @@ export function SeriesEditor({
       return { allowed: stored.canManage, revision: stored.event.revision, value: stored.event };
     },
     fields: savedFields,
+    answers: answerNames("event", instance.eventId),
     onConflict,
   });
 

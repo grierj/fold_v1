@@ -76,7 +76,8 @@ function stubEditorReads() {
     const latest = shown[shown.length - 1] ?? page;
     const listed = latest.occurrences.find((o) => o.date === date) ?? page.occurrences[0];
 
-    return { occurrence: { ...listed, revision: "r0" } };
+    // The date's own visibility is its override, as the server reads both from one column.
+    return { occurrence: { ...listed, revision: "r0", own: { ...listed.own, visibility: listed.visibilityOverride } } };
   });
 }
 
@@ -706,7 +707,7 @@ describe("EventDetail header actions and ?manage (DEC-99)", () => {
     expect(screen.getByRole("button", { name: "Edit event" })).toBeDisabled();
     const again = deferred<typeof page>();
     vi.mocked(Events.get).mockReturnValueOnce(again.promise);
-    await act(async () => { put.resolve({ event: page.event }); await put.promise; });
+    await act(async () => { put.resolve({ event: { ...page.event, revision: "e2" } }); await put.promise; });
     expect(document.activeElement).toBe(document.getElementById("main"));
     await act(async () => { again.resolve(page); await again.promise; });
     const edit = await screen.findByRole("button", { name: "Edit event" });
@@ -733,7 +734,7 @@ describe("EventDetail header actions and ?manage (DEC-99)", () => {
     await userEvent.type(screen.getByLabelText("Title"), "{Enter}");
     const elsewhere = screen.getByRole("button", { name: "Elsewhere" });
     elsewhere.focus();
-    await act(async () => { put.resolve({ event: page.event }); await put.promise; });
+    await act(async () => { put.resolve({ event: { ...page.event, revision: "e2" } }); await put.promise; });
     await waitFor(() => expect(screen.getByRole("button", { name: "Edit event" })).toHaveAttribute("aria-expanded", "false"));
     expect(document.activeElement).toBe(elsewhere);
   });
@@ -746,7 +747,7 @@ describe("EventDetail header actions and ?manage (DEC-99)", () => {
     await userEvent.click(await screen.findByRole("button", { name: "Edit event" }));
     await userEvent.type(screen.getByLabelText("Title"), "{Enter}");
     screen.getByRole("button", { name: "More event actions" }).focus();
-    await act(async () => { put.resolve({ event: page.event }); await put.promise; });
+    await act(async () => { put.resolve({ event: { ...page.event, revision: "e2" } }); await put.promise; });
     const edit = await screen.findByRole("button", { name: "Edit event" });
     await waitFor(() => expect(edit).toHaveAttribute("aria-expanded", "false"));
     await waitFor(() => expect(document.activeElement).toBe(screen.getByRole("button", { name: "Edit event" })));
@@ -845,7 +846,7 @@ describe("EventDetail ?edit=series (DEC-161)", () => {
 
   it("stays closed after a save, when the page has been read again", async () => {
     vi.mocked(Events.get).mockResolvedValue(groupEvent);
-    vi.mocked(Events.update).mockResolvedValue({ event: groupEvent.event });
+    vi.mocked(Events.update).mockResolvedValue({ event: { ...groupEvent.event, revision: "e2" } });
     renderPage(link);
     await userEvent.type(await screen.findByLabelText("Title"), " night{Enter}");
     await waitFor(() => expect(Events.get).toHaveBeenCalledTimes(2));
@@ -2302,7 +2303,7 @@ describe("EventDetail: the event visibility review and the date row's roster", (
       await userEvent.click(save());
       const review = await screen.findByRole("dialog", { name: "Making this event invite-only" });
       expect(review).toHaveTextContent("2 people registered will be cancelled and notified");
-      vi.mocked(Events.setVisibility).mockResolvedValueOnce({ event: managing.event });
+      vi.mocked(Events.setVisibility).mockResolvedValueOnce({ event: { ...managing.event, revision: "e2" } });
       await userEvent.click(within(review).getByRole("button", { name: "Make this event invite-only" }));
       await waitFor(() => expect(Events.setVisibility).toHaveBeenCalledExactlyOnceWith(7, { visibility: "invite_only", reason: undefined, consent: B, resetOverrides: false }));
     });
@@ -2771,7 +2772,7 @@ describe("EventDetail when a date's save meets someone else's change", () => {
   });
 
   // The editor's read opens at r0; the read after a refusal shows `stored`.
-  async function saveTitleInto(stored: Partial<EventOccurrence>, answer: Error = changed()) {
+  async function saveTitleInto(stored: Partial<EventOccurrence>, answer: Error | Promise<OccurrenceResponse> = changed()) {
     vi.mocked(Events.managedDate).mockResolvedValueOnce({ occurrence: { ...listed, revision: "r0" } }).mockResolvedValue({ occurrence: { ...listed, revision: "r1", ...stored } });
     edits.answer(answer);
     render(<main id="main" tabIndex={-1}><MemoryRouter initialEntries={["/events/7"]}><RosterWritesProvider><Routes><Route path="/events/:id" element={<EventDetail />} /></Routes></RosterWritesProvider></MemoryRouter></main>);
@@ -2782,6 +2783,20 @@ describe("EventDetail when a date's save meets someone else's change", () => {
     await userEvent.click(screen.getByRole("button", { name: "Save this date" }));
   }
 
+  // An earlier save's answer closes the editor: opening it again meanwhile would show a draft that answer then closes.
+  it("keeps the row's Edit this date off while the date's save is on its way", async () => {
+    const sent = deferred<OccurrenceResponse>();
+    await saveTitleInto({}, sent.promise);
+    await waitFor(() => expect(edits.sent).toHaveLength(1));
+    await userEvent.click(screen.getByRole("button", { name: "More for 2026-12-01" }));
+    expect(screen.getByRole("menuitem", { name: "Edit this date" })).toBeDisabled();
+    await userEvent.keyboard("{Escape}");
+    await act(async () => { sent.resolve({ occurrence: { ...listed, revision: "r1" } }); await sent.promise; });
+    await waitFor(() => expect(screen.queryByLabelText("Title")).not.toBeInTheDocument());
+    await userEvent.click(screen.getByRole("button", { name: "More for 2026-12-01" }));
+    expect(screen.getByRole("menuitem", { name: "Edit this date" })).toBeEnabled();
+  });
+
   it("sends the save again under the new revision when nothing it can write changed, and closes as a save does", async () => {
     await saveTitleInto({});
     await waitFor(() => expect(screen.queryByLabelText("Title")).not.toBeInTheDocument());
@@ -2790,7 +2805,7 @@ describe("EventDetail when a date's save meets someone else's change", () => {
   });
 
   it("closes as a save does, with no line, when the read shows the save already stored", async () => {
-    await saveTitleInto({ title: "Supper night" });
+    await saveTitleInto({ title: "Supper night", own: { title: "Supper night" } });
     await waitFor(() => expect(screen.queryByLabelText("Title")).not.toBeInTheDocument());
     expect(edits.sent).toHaveLength(1);
     expect(screen.queryByText(/could not be saved/)).not.toBeInTheDocument();
@@ -2800,7 +2815,7 @@ describe("EventDetail when a date's save meets someone else's change", () => {
     const after = deferred<EventDetailResponse>();
     const reads = vi.mocked(Events.get).mock.calls.length;
     vi.mocked(Events.get).mockResolvedValueOnce(page).mockReturnValueOnce(after.promise);
-    await saveTitleInto({ location: "Annex" });
+    await saveTitleInto({ location: "Annex", own: { location: "Annex" } });
     await waitFor(() => expect(vi.mocked(Events.get).mock.calls.length).toBe(reads + 2));
     expect(screen.queryByLabelText("Title")).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "More for 2026-12-01" })).not.toBeInTheDocument();

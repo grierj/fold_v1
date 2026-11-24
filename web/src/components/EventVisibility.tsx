@@ -11,7 +11,7 @@ import { decisionImpact, reviewOutdated } from "../lib/visibilityConsent";
 import { ROSTER_STALE, ROSTER_WAITING, visibilityRank } from "../lib/visibilityChange";
 import { useFocusHome, useKeepFocusHome, useLockedFocus } from "../lib/focusHome";
 import { useAction, type Action } from "../lib/useAction";
-import { lostAuthority, useRevisionSave, type RevisionConflict } from "../lib/useRevisionSave";
+import { answerNames, lostAuthority, useRevisionSave, type RevisionConflict } from "../lib/useRevisionSave";
 import { Checkbox, Choices, Field, FormError, Input, Radio } from "./ui/Field";
 import { Button } from "./ui/Button";
 
@@ -120,6 +120,7 @@ export function EventVisibilityControl({
       return { allowed: stored.canSetVisibility, revision: stored.event.revision, value: stored.event };
     },
     fields: (a) => (resetOverrides ? null : { visibility: a.visibility, leaderOpened: a.leaderOpened ?? false, groupVisibility: a.groupVisibility ?? null, unverified: a.unverified ?? false }),
+    answers: answerNames("event", eventId),
     onConflict,
   });
 
@@ -235,17 +236,10 @@ export function EventVisibilityControl({
 
     try {
       const sent = await send(
-        async (rev) => {
-          try {
-            return await Events.setVisibility(eventId, { visibility: value, reason: why || undefined, consent, resetOverrides, revision: rev });
-          } catch (err) {
-            // Only a save with no answer may have been stored: a refusal was not, and a failed read says nothing.
-            if (!(err instanceof ApiError) || err.status >= 500) unanswered.current = why;
-
-            throw err;
-          }
-        },
+        (rev) => Events.setVisibility(eventId, { visibility: value, reason: why || undefined, consent, resetOverrides, revision: rev }),
         { visibility: value, leaderOpened: opensWider(value, groupVisibility, churchWide), groupVisibility, unverified: why !== (unanswered.current ?? "") },
+        // Only a save with no answer may have been stored: a refusal was not, and a failed read says nothing.
+        () => { unanswered.current = why; },
       );
 
       if (sent === "refused") {
