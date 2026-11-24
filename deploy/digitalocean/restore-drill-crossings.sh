@@ -1325,7 +1325,7 @@ real_l1_pre_upgrade_dump() {
     sleep 1
   done
   docker logs "$cid" >"$cdir/l1-prior-on-pre-upgrade-dump.log" 2>&1 || true
-  docker rm -f "$cid" >/dev/null
+  docker rm -fv "$cid" >/dev/null
   crossing_cpg postgres -c 'DROP DATABASE fold_l1' >/dev/null
   [[ "$started" == true ]] || { echo 'crossing: the prior did not start on its own pre-upgrade dump, which L1 says it does' >&2; return 1; }
   crossing_emit cases.jsonl --arg acceptance M-l1-pre-upgrade-dump --arg site "$CX_SITE" --arg dump "$dump" \
@@ -1436,12 +1436,12 @@ real_level0_started_by_hand() {
     [[ "$(docker inspect --format '{{.State.Running}}' "$cid")" == true ]] || break
     sleep 1
   done
-  [[ "$started" == true ]] || { docker logs "$cid" >&2 || true; docker rm -f "$cid" >/dev/null; echo 'crossing: the lane image did not start by hand on the upgraded copy, which L4 says it does' >&2; return 1; }
+  [[ "$started" == true ]] || { docker logs "$cid" >&2 || true; docker rm -fv "$cid" >/dev/null; echo 'crossing: the lane image did not start by hand on the upgraded copy, which L4 says it does' >&2; return 1; }
   lbase="http://127.0.0.1:$port"; ljar="$cdir/l4-lane.jar"
   crossing_http_login "$ljar" "$lbase" crossing-admin@example.invalid
   out="$cdir/l4-answer.json"
   while read -r -u 3 label method path body; do
-    body="$(crossing_with_revision "$ljar" "$lbase" "$path" "$body")" || { docker logs "$cid" >&2 || true; docker rm -f "$cid" >/dev/null; return 1; }
+    body="$(crossing_with_revision "$ljar" "$lbase" "$path" "$body")" || { docker logs "$cid" >&2 || true; docker rm -fv "$cid" >/dev/null; return 1; }
     before="$(crossing_visibility_state fold_l4 "$e5,$r,$p")"
     status="$(crossing_http "$ljar" "$lbase" "$method" "$path" "$body" "$out")"
     results="$(jq -c --arg l "$label" --arg s "$status" --argjson same "$([[ "$(crossing_visibility_state fold_l4 "$e5,$r,$p")" == "$before" ]] && echo true || echo false)" \
@@ -1452,7 +1452,7 @@ zero-registration-reset PUT /events/$r/visibility {"visibility":"public","resetO
 series-opening PUT /events/$p/visibility {"visibility":"public"}
 EOF
   docker logs "$cid" >"$cdir/l4-lane-by-hand.log" 2>&1 || true
-  docker rm -f "$cid" >/dev/null
+  docker rm -fv "$cid" >/dev/null
   crossing_cpg postgres -c 'DROP DATABASE fold_l4' >/dev/null
   crossing_emit cases.jsonl --arg acceptance M-level0-started-by-hand --arg site "$CX_SITE" --argjson requests "$results" \
     '{kind:"measured", acceptance:$acceptance, id:"level0-started-by-hand", site:$site, fixture:false, laneStarted:true, requests:$requests,
@@ -1591,7 +1591,7 @@ EOF
     '{kind:"positive", acceptance:$acceptance, id:"prior-running-across-upgrade", site:$site, fixture:false, requests:$requests, titleEdit:200,
       proof:"protocol: curl against the prior process and the database while the candidate container ran beside it",
       pass:($requests | length == 7 and all(.[]; .pass))}'
-  docker rm -f "$cid" >/dev/null
+  docker rm -fv "$cid" >/dev/null
   crossing_refused_start running-restart "$(crossing_last_version "$REVISION")"
   crossing_site_end
   crossing_use_main
