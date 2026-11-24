@@ -143,7 +143,7 @@ export function DateEditor({ opener, base, hold, onSaved, onSaving, pending = fa
   const home = useFocusHome<HTMLFormElement>();
   const root = home.ref;
   useKeepFocusHome(home);
-  const [saving, setBusy] = useState(false);
+  const [saving, setSaving] = useState(false);
   const busy = saving || pending;
   const sending = useRef(false);
   // A stored save or a conflict ends the draft: nothing is written back to the hold after it.
@@ -302,7 +302,7 @@ export function DateEditor({ opener, base, hold, onSaved, onSaving, pending = fa
       }
     };
 
-    setBusy(true);
+    setSaving(true);
     onSaving?.(true);
     setError(null);
 
@@ -335,7 +335,7 @@ export function DateEditor({ opener, base, hold, onSaved, onSaving, pending = fa
         if (msg && isRemoteError(err)) {
           // The fields take focus again before the refused one is focused.
           showFieldErrors(root.current, () => {
-            setBusy(false);
+            setSaving(false);
             onSaving?.(false);
             setError(msg);
             setRemoteError(msg);
@@ -348,7 +348,7 @@ export function DateEditor({ opener, base, hold, onSaved, onSaving, pending = fa
       sending.current = false;
       onSaving?.(false);
 
-      if (mounted.current) setBusy(false);
+      if (mounted.current) setSaving(false);
       // A press that ended unsaved while the host had this editor off the screen leaves its change unsent: leaving the
       // page asks first (DEC-98).
       else if (!ended.current && hold?.current?.opened === opened) hold.current.unsent = true;

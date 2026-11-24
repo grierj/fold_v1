@@ -22,18 +22,18 @@ export function useListedDateEditor({ onEditDate, onChanged, onDateConflict, onT
   // The read was refused: the host checks its page.
   onTerminalRefresh: () => void;
 }) {
-  const [open, setOpen] = useState(false);
-  const [saving, setSaving] = useState(false);
-  const close = () => setOpen(false);
+  // `saving` can outlast `open`: an editor closed while its save is on its way still answers it.
+  const [row, setRow] = useState({ open: false, saving: false });
+  const close = () => setRow((r) => ({ ...r, open: false }));
 
   return {
-    open,
-    saving,
-    toggle: () => { onEditDate(); setOpen((v) => !v); },
-    show: () => { onEditDate(); setOpen(true); },
+    open: row.open,
+    saving: row.saving,
+    toggle: () => { onEditDate(); setRow((r) => ({ ...r, open: !r.open })); },
+    show: () => { onEditDate(); setRow((r) => ({ ...r, open: true })); },
     editor: {
-      saving,
-      onSaving: setSaving,
+      saving: row.saving,
+      onSaving: (saving: boolean) => setRow((r) => ({ ...r, saving })),
       onSaved: () => { close(); onChanged(); },
       onConflict: (why: RevisionConflict) => { close(); onDateConflict(why); },
       onClose: close,

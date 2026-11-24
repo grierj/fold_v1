@@ -61,7 +61,7 @@ export const answerNames = (key: "event" | "occurrence", id: number) => (answer:
 // dropped connection or a 5xx, leaves the outcome unknown and is thrown for the form's ordinary error. Once a send from
 // this form got no answer, until a save lands, a refusal ends only as already stored or as a conflict: the form never
 // sends again under a newer revision, which could re-apply a change someone deliberately undid after the lost send
-// stored it (#455). `lost` keeps that for a form that may be unmounted and mounted again with the same draft.
+// stored it (issue 455). `lost` keeps that for a form that may be unmounted and mounted again with the same draft.
 // Repeated refusals alone are never a conflict. Only the form and the sign-in that pressed Save send again: an answer
 // that lands after the form went away, or after this tab took another account, sends nothing more. A 403 or 404 to
 // any send or to the read says the person may no longer manage or see what they were editing: that is `onConflict`

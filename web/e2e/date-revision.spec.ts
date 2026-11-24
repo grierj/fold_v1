@@ -6,7 +6,9 @@ import { apiAs, email, PASSWORD, saveDate, signInTo } from "./helpers";
 // and the server refuses an older one, writing nothing. The editor reads the date once: when another manager changed
 // it, the editor closes on its own and the page says the changes weren't saved, with the line in view and focused;
 // when the date shows the save already stored (an earlier press whose answer was lost), it closes as a save does.
-const managed = schema.looseObject({ occurrence: schema.looseObject({ title: schema.string(), location: schema.string(), durationMinutes: schema.number() }) });
+const managed = schema.looseObject({ occurrence: schema.looseObject({
+  title: schema.string(), location: schema.string(), durationMinutes: schema.number(), startsLocal: schema.string(), capacity: schema.nullable(schema.number()),
+}) });
 
 const dateIn = (days: number) => new Date(Date.now() + days * 864e5).toISOString().slice(0, 10);
 const fullDay = (d: string) => new Date(`${d}T12:00:00Z`).toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric", year: "numeric", timeZone: "UTC" });
@@ -95,22 +97,30 @@ test.describe("at 390px", () => {
   }
 });
 
-test("pressing Save again after a stored save's answer was lost closes the editor as a save does", async ({ page, request }) => {
-  const series = await newSeries(request, `Lost date answer ${Date.now().toString(36)}`);
-  await hosts[2].open(page, series);
-  await expect(page.getByRole("spinbutton", { name: "Minutes" })).toBeVisible();
+// The first save on this page reaches the server and is stored; its answer never reaches the page. Returns the
+// statuses of the saves that did answer.
+async function dropFirstAnswer(page: Page, s: Series) {
   const saves: number[] = [];
+  const path = `/api/v1/events/${s.id}/occurrences/${s.date}/edits`;
   page.on("response", (res) => {
-    if (res.request().method() === "POST" && new URL(res.url()).pathname === `/api/v1/events/${series.id}/occurrences/${series.date}/edits`) saves.push(res.status());
+    if (res.request().method() === "POST" && new URL(res.url()).pathname === path) saves.push(res.status());
   });
-  // The first save reaches the server and is stored; its answer never reaches the page.
   let dropped = false;
-  await page.route(`**/api/v1/events/${series.id}/occurrences/${series.date}/edits`, async (route) => {
+  await page.route(`**${path}`, async (route) => {
     if (dropped) return route.fallback();
     dropped = true;
     await route.fetch();
     await route.abort();
   });
+
+  return saves;
+}
+
+test("pressing Save again after a stored save's answer was lost closes the editor as a save does", async ({ page, request }) => {
+  const series = await newSeries(request, `Lost date answer ${Date.now().toString(36)}`);
+  await hosts[2].open(page, series);
+  await expect(page.getByRole("spinbutton", { name: "Minutes" })).toBeVisible();
+  const saves = await dropFirstAnswer(page, series);
   await page.getByRole("textbox", { name: "Title" }).fill(`  ${series.title} night  `);
   await page.getByRole("button", { name: "Save this date" }).click();
   await expect(page.getByText("We couldn't reach Fold. Check your connection and try again.")).toBeVisible();
@@ -124,3 +134,40 @@ test("pressing Save again after a stored save's answer was lost closes the edito
   expect(saves).toEqual([409]);
   expect((await series.read()).title).toBe(`${series.title} night`);
 });
+
+// The read's own values tell a stored change from the event's value: a seat limit, and a start put back on the series'
+// clock after the date had a start of its own.
+const ownChanges: Array<{ name: string; before?: (date: string) => Record<string, string>; change: (page: Page) => Promise<void>; stored: (date: string) => Record<string, number | string> }> = [
+  {
+    name: "a seat limit",
+    change: (page) => page.getByRole("spinbutton", { name: /^Capacity for this date/ }).fill("12"),
+    stored: () => ({ capacity: 12 }),
+  },
+  {
+    name: "a start time back on the series' clock",
+    before: (date) => ({ startsLocal: `${date}T20:00` }),
+    change: (page) => page.getByLabel("Start time").fill("19:00"),
+    stored: (date) => ({ startsLocal: `${date}T19:00` }),
+  },
+];
+
+for (const c of ownChanges) {
+  test(`${c.name} stored with its answer lost: Save again closes the editor as a save does`, async ({ page, request }) => {
+    const series = await newSeries(request, `Lost own ${Date.now().toString(36)}`);
+
+    if (c.before) await saveDate(await apiAs(request, "grier"), series.id, series.date, c.before(series.date));
+    await hosts[2].open(page, series);
+    await expect(page.getByRole("spinbutton", { name: "Minutes" })).toBeVisible();
+    const saves = await dropFirstAnswer(page, series);
+    await c.change(page);
+    await page.getByRole("button", { name: "Save this date" }).click();
+    await expect(page.getByText("We couldn't reach Fold. Check your connection and try again.")).toBeVisible();
+    expect(await series.read()).toMatchObject(c.stored(series.date));
+
+    await page.getByRole("button", { name: "Save this date" }).click();
+    await expect(page.getByRole("button", { name: "Save this date" })).toHaveCount(0);
+    await expect(page.getByText(/could not be saved/)).toHaveCount(0);
+    expect(saves).toEqual([409]);
+    expect(await series.read()).toMatchObject(c.stored(series.date));
+  });
+}

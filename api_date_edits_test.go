@@ -3682,7 +3682,7 @@ func TestManagedDateCarriesItsRoster(t *testing.T) {
 		})
 		t.Run(c.name+"/cancelled", func(t *testing.T) {
 			got, raw := managedRead(t, c.c, f.event.ID, models.FormatCalendarDate(cancelled.OriginalDate))
-			want := strings.Fields("attendeesVisible cancelled capacity childcareAges childcareAvailable childcareCapacity childcareFull childcareNotes churchWide date description durationMinutes endsAt endsLocal eventId guestsAllowed id leaderOpened location myHouseholdRegistrations myRegistration overridden recurrenceRule registrations reminderEmailMinutes reminderPush remoteAvailable remoteCapacity remoteSeatsUsed remoteSpotsLeft revision seatsUsed seriesDurationMinutes seriesLocation seriesStartsLocal seriesTitle seriesVisibility spotsLeft startsAt startsLocal title tzid videoProvider videoReveal visibility waitlistEnabled")
+			want := strings.Fields("attendeesVisible cancelled capacity childcareAges childcareAvailable childcareCapacity childcareFull childcareNotes churchWide date description durationMinutes endsAt endsLocal eventId guestsAllowed id leaderOpened location myHouseholdRegistrations myRegistration overridden own recurrenceRule registrations reminderEmailMinutes reminderPush remoteAvailable remoteCapacity remoteSeatsUsed remoteSpotsLeft revision seatsUsed seriesDurationMinutes seriesLocation seriesStartsLocal seriesTitle seriesVisibility spotsLeft startsAt startsLocal title tzid videoProvider videoReveal visibility waitlistEnabled")
 			if keys := managedKeys(t, raw); !slices.Equal(keys, want) {
 				t.Fatalf("a cancelled date's edit base keys:\n%v\nwant\n%v", keys, want)
 			}
