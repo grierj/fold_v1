@@ -100,23 +100,22 @@ var errGroupChanged = apiErr(http.StatusConflict, "group_changed", "the group ch
 // groupRevisionIn is the token the group form holds for the group row as tx
 // sees it: 1.<generation>.g<group id>.<digest>. The "g" and the part count
 // keep it apart from an event's or a date's token. The digest covers every
-// column but updated_at, which GORM stamps on each write, and created_at,
-// which never changes: every writer of the row changes it, the cover
-// endpoints and a previous binary included, and there is no list of fields to
-// keep. Leaving both timestamps out also keeps a live row's digest the same
-// in every session (a timestamp's text follows the session's time zone, and
-// deleted_at is null). It is the row's value, not a counter: a
-// group changed and changed back matches again, as revisionAudience does. The
-// group has no counter column because adding one fails the statements an
-// older process still serving had prepared (0A000), which the restore drill's
-// running-prior case does not retry on its last read.
+// column, so every writer of the row changes it, the cover endpoints and a
+// previous binary included, and there is no list of fields to keep.
+// updated_at, which GORM stamps on each write, goes in as its instant: a save
+// that put the row back as it was still moves the token, so a send whose
+// answer was lost is never applied again over the change that undid it
+// (DEC-164). The two timestamps are left out of the JSON because a
+// timestamp's text follows the session's time zone (deleted_at is null on a
+// live row). The group has no counter column: adding one fails the statements
+// an older process still serving had prepared (0A000).
 //
 // A reader must call it in the snapshot that read the fields it shows, and a
 // writer under the group's row lock: a token newer than the fields beside it
 // would let a stale form pass.
 func (a *App) groupRevisionIn(tx *gorm.DB, id uint) (string, error) {
 	var digest string
-	if err := tx.Raw("SELECT md5((to_jsonb(g) - ARRAY['updated_at','created_at'])::text) FROM groups g WHERE g.id = ?", id).Row().Scan(&digest); err != nil {
+	if err := tx.Raw("SELECT md5((to_jsonb(g) - ARRAY['updated_at','created_at'])::text || coalesce(extract(epoch FROM g.updated_at)::text, '')) FROM groups g WHERE g.id = ?", id).Row().Scan(&digest); err != nil {
 		return "", err
 	}
 	return a.editRevision(fmt.Sprintf("g%d", id), digest), nil

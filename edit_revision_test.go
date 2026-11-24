@@ -43,7 +43,7 @@ func TestEditRevisionTokensKeepTheirBytes(t *testing.T) {
 	if err := a.checkEventRevision(grouped, private, "1."+gen+".7.3.pub"); !errors.Is(err, errEventChanged) {
 		t.Fatalf("a token from before the group's change: %v, want errEventChanged", err)
 	}
-	// The group's last part is a digest of its row (TestGroupRevisionIsTheRowsValue).
+	// The group's last part is a digest of its row (TestGroupRevisionMovesWithEveryWrite).
 	const digest = "0123456789abcdef0123456789abcdef"
 	group := a.editRevision("g7", digest)
 	if want := "1." + gen + ".g7." + digest; group != want {

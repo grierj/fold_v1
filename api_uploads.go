@@ -204,10 +204,12 @@ func (a *App) apiUploadGroupCover(c *gin.Context) {
 	// The new image's focal point travels with it: sent with the details
 	// instead, a failed upload would leave the old photo cropped for the new.
 	updates := map[string]any{}
-	if fx, fy := c.PostForm("focalX"), c.PostForm("focalY"); fx != "" || fy != "" {
+	fx, hasX := c.GetPostForm("focalX")
+	fy, hasY := c.GetPostForm("focalY")
+	if hasX || hasY {
 		x, errX := strconv.ParseFloat(fx, 64)
 		y, errY := strconv.ParseFloat(fy, 64)
-		if errX != nil || errY != nil || math.IsNaN(x) || math.IsNaN(y) {
+		if errX != nil || errY != nil || math.IsNaN(x) || math.IsNaN(y) || math.IsInf(x, 0) || math.IsInf(y, 0) {
 			jsonError(c, http.StatusBadRequest, "invalid body")
 			return
 		}

@@ -604,8 +604,9 @@ an `imageUrl` in this body is ignored, so `imageUrl` is always empty or an
 the file is its own action, and the last one wins. Each changes the group's
 revision like any other change, so a group form opened before it is refused
 (the form shows the cover). An upload may carry the new image's focal point as
-the text fields `focalX` and `focalY` (both or neither, 0-100, clamped; anything
-else is a 400 and stores nothing), stored with the image in one write: the group
+the text fields `focalX` and `focalY` (both or neither; finite numbers, clamped
+to 0-100; an empty, missing-partner, non-numeric or infinite value is a 400 and
+stores nothing), stored with the image in one write: the group
 form sends a replacement's focal point this way, never with the details, so a
 failed upload cannot leave the old photo cropped for the new one. `coverFocal`
 in the update body is for moving the focal point of the cover the group has.
@@ -648,10 +649,13 @@ tightening, cancellation, notice, audit row or job. It comes before any field is
 applied and before the consent work. The 200 answer's `group.revision` is the
 token after the save, read again once the write is done.
 
-The token is a digest of the group row (every column but its two timestamps),
-not a counter, so it adds no column: a group changed and then changed back to
-what a form opened with matches that form again. The read gives it from the same
-snapshot as the fields beside it.
+The token is a digest of the group row (every column, with the time it was last
+written), not a counter, so it adds no column, and any write of the row moves
+it: a save that put the group back as it was still does. The read gives it from
+the same snapshot as the fields beside it. When the token moved and nothing the
+form writes changed, the form sends again by itself, as above; after a send
+that got no answer it does not, so a save that was stored and then undone by
+someone else is never applied again.
 
 A tab opened before a server that requires `revision` sends none: its save is
 refused with `group_changed` until the page is loaded again. That older page

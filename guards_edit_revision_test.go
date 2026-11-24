@@ -23,6 +23,9 @@ import (
 // contactMutation or Transaction. The guard does not see a check reached
 // through a helper the handler calls, a transaction opened another way, or
 // whether the call comes after the row lock; the handlers' tests cover that.
+// checkGroupRevision reads the group itself, so its first argument must be
+// that function literal's transaction: the handle outside it would read a
+// row the lock does not hold.
 // ---------------------------------------------------------------------------
 
 // editRevisionCheckers is every handler that checks a save's revision, exactly.
@@ -50,6 +53,9 @@ func editRevisionCensus(p *guardkit.Parsed) (checkers, bad []string) {
 				if !ok || !editRevisionChecks[guardkit.Callee(call)] {
 					return true
 				}
+				if guardkit.Callee(call) == "checkGroupRevision" && !readsThroughItsTransaction(call, stack) {
+					bad = append(bad, fmt.Sprintf("%s:%d: %s reads the group for its revision check outside the transaction's handle", f.Path, p.Fset.Position(call.Pos()).Line, fd.Name.Name))
+				}
 				if inWriteTransaction(stack) {
 					if !slices.Contains(checkers, fd.Name.Name) {
 						checkers = append(checkers, fd.Name.Name)
@@ -75,6 +81,24 @@ func inWriteTransaction(stack []ast.Node) bool {
 		}
 		outer, ok := stack[i-1].(*ast.CallExpr)
 		return ok && editRevisionTransactions[guardkit.Callee(outer)] && slices.Contains(outer.Args, ast.Expr(lit))
+	}
+	return false
+}
+
+// readsThroughItsTransaction is whether call's first argument is the first
+// parameter of the nearest function literal around it.
+func readsThroughItsTransaction(call *ast.CallExpr, stack []ast.Node) bool {
+	for i := len(stack) - 2; i >= 0; i-- {
+		lit, ok := stack[i].(*ast.FuncLit)
+		if !ok {
+			continue
+		}
+		params := lit.Type.Params.List
+		if len(call.Args) == 0 || len(params) == 0 || len(params[0].Names) == 0 {
+			return false
+		}
+		arg, ok := call.Args[0].(*ast.Ident)
+		return ok && arg.Name == params[0].Names[0].Name
 	}
 	return false
 }
@@ -114,7 +138,7 @@ func (a *App) apiUpdateEvent(c *gin.Context) {
 	const group = `package main
 func (a *App) apiUpdateGroup(c *gin.Context) {
 	err := a.contactMutation(contactChange{}, func(tx *gorm.DB) error {
-		if err := a.checkGroupRevision(&locked, body.Revision); err != nil {
+		if err := a.checkGroupRevision(tx, locked.ID, body.Revision); err != nil {
 			return err
 		}
 		return nil
@@ -157,10 +181,18 @@ func (a *App) apiSetEventVisibility(c *gin.Context) {
 	a.contactMutation(contactChange{}, func(tx *gorm.DB) error { return a.checkEventRevision(locked, body.Revision) })
 }
 func (a *App) apiUpdateGroup(c *gin.Context) {
-	if err := a.checkGroupRevision(g, body.Revision); err != nil {
+	if err := a.checkGroupRevision(a.DB, g.ID, body.Revision); err != nil {
 		return
 	}
 	a.contactMutation(contactChange{}, func(tx *gorm.DB) error { return nil })
+}
+`,
+		"a group check that reads outside its transaction's handle": `package main
+func (a *App) apiSetEventVisibility(c *gin.Context) {
+	a.contactMutation(contactChange{}, func(tx *gorm.DB) error { return a.checkEventRevision(locked, body.Revision) })
+}
+func (a *App) apiUpdateGroup(c *gin.Context) {
+	a.contactMutation(contactChange{}, func(tx *gorm.DB) error { return a.checkGroupRevision(a.DB, locked.ID, body.Revision) })
 }
 `,
 		"an unlisted handler that checks": `package main

@@ -2851,21 +2851,20 @@ func storedGroupRevision(t *testing.T, app *App, id uint) string {
 	return revision
 }
 
-// The group's token is its row's value (groupRevisionIn): any column another
-// writer changes moves it, a write that only stamps updated_at does not, a
-// value changed and changed back matches again, and a session in another time
-// zone reads the same token.
-func TestGroupRevisionIsTheRowsValue(t *testing.T) {
+// The group's token moves with every write of its row (groupRevisionIn): any
+// column another writer changes, and a write that only stamps updated_at; a
+// session in another time zone reads the same token.
+func TestGroupRevisionMovesWithEveryWrite(t *testing.T) {
 	f, _ := groupRevisionFixture(t, models.VisibilityPublic)
 	opened := storedGroupRevision(t, f.app, f.gid)
 	if !regexp.MustCompile(`^1\.[0-9a-f]{16}\.g` + itoa(f.gid) + `\.[0-9a-f]{32}$`).MatchString(opened) {
 		t.Fatalf("group token %q", opened)
 	}
-	gormMust(t, f.app.DB.Exec("UPDATE groups SET updated_at = now() + interval '1 hour' WHERE id = ?", f.gid))
-	if now := storedGroupRevision(t, f.app, f.gid); now != opened {
-		t.Fatalf("a write of updated_at alone moved the token: %q to %q", opened, now)
+	if again := storedGroupRevision(t, f.app, f.gid); again != opened {
+		t.Fatalf("two reads of an untouched row: %q and %q", opened, again)
 	}
 	for _, change := range []string{
+		"updated_at = updated_at + interval '1 second'",
 		"visibility = 'private'", "status = 'archived'", "deletion_requested = true", "image_url = '/uploads/covers/1/a.jpg'",
 		"cover_focal_x = 12", "member_limit = 9", "name = 'Other'", "description = 'x'", "tags = 'a'", "location = 'Hall'",
 	} {
@@ -2875,23 +2874,41 @@ func TestGroupRevisionIsTheRowsValue(t *testing.T) {
 			t.Errorf("%s left the token at %q", change, now)
 		}
 	}
-	before := storedGroupRevision(t, f.app, f.gid)
-	gormMust(t, f.app.DB.Exec("UPDATE groups SET name = 'There' WHERE id = ?", f.gid))
-	gormMust(t, f.app.DB.Exec("UPDATE groups SET name = 'Other' WHERE id = ?", f.gid))
-	if now := storedGroupRevision(t, f.app, f.gid); now != before {
-		t.Fatalf("a name changed and changed back: %q, want %q again", now, before)
-	}
+	here := storedGroupRevision(t, f.app, f.gid)
 	if err := f.app.DB.Transaction(func(tx *gorm.DB) error {
 		if err := tx.Exec("SET LOCAL TIME ZONE 'Asia/Tokyo'").Error; err != nil {
 			return err
 		}
 		elsewhere, err := f.app.groupRevisionIn(tx, f.gid)
-		if err == nil && elsewhere != before {
-			err = fmt.Errorf("a session in another time zone read %q, want %q", elsewhere, before)
+		if err == nil && elsewhere != here {
+			err = fmt.Errorf("a session in another time zone read %q, want %q", elsewhere, here)
 		}
 		return err
 	}); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// A save whose answer was lost is not applied again over the change that undid
+// it (DEC-164): another manager putting the group back exactly as it was still
+// moves the token, so the first form's resend is refused and writes nothing.
+func TestGroupSaveResentAfterItWasUndoneIsRefused(t *testing.T) {
+	f, lead := groupRevisionFixture(t, models.VisibilityPublic)
+	path := f.groupPath()
+	var opened models.Group
+	gormMust(t, f.app.DB.First(&opened, f.gid))
+	form := groupBody(t, f.admin, path, map[string]any{"name": "Renamed", "visibility": models.VisibilityPrivate})
+	apiDo(t, f.admin, "PUT", path, form, http.StatusOK)
+	apiDo(t, lead, "PUT", path, groupBody(t, lead, path, map[string]any{"name": opened.Name, "visibility": opened.Visibility}), http.StatusOK)
+	before := wholeState(t, f.app)
+	wantCode(t, "the first form sent again", f.admin.do("PUT", path, form, true), http.StatusConflict, "group_changed")
+	if after := wholeState(t, f.app); after != before {
+		t.Fatalf("the refused resend wrote:\n%s\nwant\n%s", after, before)
+	}
+	var now models.Group
+	gormMust(t, f.app.DB.First(&now, f.gid))
+	if now.Name != opened.Name || now.Visibility != opened.Visibility {
+		t.Fatalf("after the resend the group is %q, %s; want it as the second manager left it", now.Name, now.Visibility)
 	}
 }
 
@@ -2945,8 +2962,11 @@ func TestGroupCoverUploadTakesItsFocalPoint(t *testing.T) {
 	}
 	for name, fields := range map[string]map[string]string{
 		"one axis":     {"focalX": "30"},
+		"one empty":    {"focalX": ""},
+		"both empty":   {"focalX": "", "focalY": ""},
 		"not a number": {"focalX": "left", "focalY": "40"},
 		"NaN":          {"focalX": "NaN", "focalY": "40"},
+		"infinite":     {"focalX": "+Inf", "focalY": "40"},
 	} {
 		if w := f.admin.doMultipartWith("POST", path, "cover", "b.png", tinyPNG(t), fields); w.Code != http.StatusBadRequest {
 			t.Fatalf("%s: %d %s", name, w.Code, w.Body.String())
@@ -2971,11 +2991,6 @@ func TestGroupCoverMovesTheRevision(t *testing.T) {
 	path := f.groupPath()
 	var g models.Group
 	gormMust(t, f.app.DB.First(&g, f.gid))
-	was := storedGroupRevision(t, f.app, f.gid)
-	apiDo(t, f.admin, "DELETE", path+"/cover", nil, http.StatusOK)
-	if now := storedGroupRevision(t, f.app, f.gid); now != was {
-		t.Fatalf("removing a cover the group never had moved the revision from %q to %q", was, now)
-	}
 	gormMust(t, f.app.DB.Model(&g).Update("image_url", "/uploads/covers/1/old.jpg"))
 	stale := groupBody(t, f.admin, path, map[string]any{"name": "After the cover"})
 	apiDo(t, f.admin, "DELETE", path+"/cover", nil, http.StatusOK)
