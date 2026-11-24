@@ -235,7 +235,16 @@ export function EventVisibilityControl({
 
     try {
       const sent = await send(
-        (rev) => Events.setVisibility(eventId, { visibility: value, reason: why || undefined, consent, resetOverrides, revision: rev }),
+        async (rev) => {
+          try {
+            return await Events.setVisibility(eventId, { visibility: value, reason: why || undefined, consent, resetOverrides, revision: rev });
+          } catch (err) {
+            // Only a save with no answer may have been stored: a refusal was not, and a failed read says nothing.
+            if (!(err instanceof ApiError) || err.status >= 500) unanswered.current = why;
+
+            throw err;
+          }
+        },
         { visibility: value, leaderOpened: opensWider(value, groupVisibility, churchWide), groupVisibility, unverified: why !== (unanswered.current ?? "") },
       );
 
@@ -250,7 +259,6 @@ export function EventVisibilityControl({
       setReview(null);
       onSaved();
     } catch (err) {
-      if (!(err instanceof ApiError) || err.status >= 500) unanswered.current = why;
       const fresh = decisionImpact(err);
 
       if (fresh && moved(mark)) {

@@ -725,6 +725,22 @@ describe("EventVisibilityControl and the read it opened with", () => {
       expect(onConflict).not.toHaveBeenCalled();
     });
 
+    it("does not take a refused save for a lost one when the read after the refusal fails", async () => {
+      setVisibility.mockReset().mockRejectedValue(changed());
+      get.mockRejectedValueOnce(new TypeError("Failed to fetch")).mockResolvedValue(readOf({ visibility: "public", groupVisibility: "private", leaderOpened: true, revision: "r3" }));
+      const onSaved = vi.fn();
+      const onConflict = vi.fn();
+      render(<EventVisibilityControl eventId={7} groupName="Garden" groupVisibility="private" visibility="private" revision="r1" onSaved={onSaved} onConflict={onConflict} />);
+      await userEvent.click(screen.getByRole("radio", { name: /^Public/ }));
+      await userEvent.type(screen.getByRole("textbox", { name: /^Reason/ }), "Neighbours welcome");
+      await userEvent.click(screen.getByRole("button", { name: "Save visibility" }));
+      expect(await screen.findByText(offline)).toBeInTheDocument();
+      // The first save was refused, never stored: the audience the read now shows is someone else's, with their reason.
+      await userEvent.click(screen.getByRole("button", { name: "Save visibility" }));
+      await waitFor(() => expect(onConflict).toHaveBeenCalledExactlyOnceWith("changed"));
+      expect(onSaved).not.toHaveBeenCalled();
+    });
+
     it("hands the page a conflict when the read shows Public with a leader-opened mark the save would not leave", async () => {
       get.mockResolvedValue(readOf({ visibility: "public", leaderOpened: true, revision: "r3" }));
       const { onSaved, onConflict } = open();
