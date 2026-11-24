@@ -3,7 +3,6 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import * as core from "../api/core";
 import { ApiError } from "../api/core";
 import { answerNames, useRevisionSave, type RevisionRead } from "./useRevisionSave";
-import { isObject } from "./wireValues";
 
 interface Value {
   title: string;
@@ -370,9 +369,15 @@ describe("useRevisionSave", () => {
 
   // A form that stays open after an outcome and is used again (a room control).
   describe("with stays", () => {
-    // The answer says what was stored: here its title, which the server may store unlike the form sent it.
-    const stays = (answer: unknown): Value => ({ title: isObject(answer) && "title" in answer && typeof answer.title === "string" ? answer.title : "?" });
-    const answered = (revision: string, title: string) => ({ event: { id: 7, revision }, title });
+    // The answer says what was stored: here a title, which the server may store unlike the form sent it.
+    let storedTitle = "";
+    const stays = (): Value => ({ title: storedTitle });
+
+    const answered = (revision: string, title: string) => async () => {
+      storedTitle = title;
+
+      return { event: { id: 7, revision } };
+    };
 
     function open(read: () => Promise<RevisionRead<Value>>, gone?: (err: ApiError) => boolean) {
       const onConflict = vi.fn();
@@ -384,13 +389,13 @@ describe("useRevisionSave", () => {
 
     it("names the revision a landed save answered on the next save, from the value the answer says was stored", async () => {
       const read = vi.fn().mockResolvedValue(readOf({ title: "Picnic" }, "r5"));
-      const write = vi.fn().mockResolvedValueOnce(answered("r2", "Supper night")).mockResolvedValueOnce(answered("r3", "Brunch"));
+      const write = vi.fn().mockImplementationOnce(answered("r2", "Supper night")).mockImplementationOnce(answered("r3", "Brunch"));
       const { send, onConflict } = open(read);
       expect(await send(write, { title: "Supper night" })).toBe("saved");
       expect(await send(write, { title: "Brunch" })).toBe("saved");
       expect(write.mock.calls).toEqual([["r1"], ["r2"]]);
       // A refusal of the third finds the second as it was stored: nothing it writes changed, so it goes again.
-      const third = vi.fn().mockRejectedValueOnce(changed()).mockResolvedValueOnce(answered("r6", "Picnic"));
+      const third = vi.fn().mockRejectedValueOnce(changed()).mockImplementationOnce(answered("r6", "Picnic"));
       read.mockResolvedValueOnce(readOf({ title: "Brunch" }, "r5"));
       expect(await send(third, { title: "Picnic" })).toBe("saved");
       expect(third.mock.calls).toEqual([["r3"], ["r5"]]);
@@ -400,7 +405,7 @@ describe("useRevisionSave", () => {
     it("takes the stored value from the answer, not from what was sent", async () => {
       // The server stored "Supper night" for a send of "supper night " (it normalises): the base is what it stored.
       const read = vi.fn().mockResolvedValue(readOf({ title: "Supper night" }, "r4"));
-      const write = vi.fn().mockResolvedValueOnce(answered("r2", "Supper night")).mockRejectedValueOnce(changed()).mockResolvedValueOnce(answered("r5", "Brunch"));
+      const write = vi.fn().mockImplementationOnce(answered("r2", "Supper night")).mockRejectedValueOnce(changed()).mockImplementationOnce(answered("r5", "Brunch"));
       const { send, onConflict } = open(read);
       expect(await send(write, { title: "supper night " })).toBe("saved");
       expect(await send(write, { title: "Brunch" })).toBe("saved");
@@ -410,7 +415,7 @@ describe("useRevisionSave", () => {
 
     it("bases a new pick after a conflict on what the read found, with its revision", async () => {
       const read = vi.fn().mockResolvedValue(readOf({ title: "Brunch" }, "r3"));
-      const write = vi.fn().mockRejectedValueOnce(changed()).mockResolvedValueOnce(answered("r4", "Picnic"));
+      const write = vi.fn().mockRejectedValueOnce(changed()).mockImplementationOnce(answered("r4", "Picnic"));
       const { send, onConflict } = open(read);
       expect(await send(write, { title: "Supper night" })).toBe("conflict");
       expect(onConflict).toHaveBeenCalledExactlyOnceWith("changed");
@@ -420,7 +425,7 @@ describe("useRevisionSave", () => {
 
     it("bases the next save on the read that found a save already stored", async () => {
       const read = vi.fn().mockResolvedValue(readOf({ title: "Supper night" }, "r3"));
-      const write = vi.fn().mockRejectedValueOnce(changed()).mockResolvedValueOnce(answered("r4", "Brunch"));
+      const write = vi.fn().mockRejectedValueOnce(changed()).mockImplementationOnce(answered("r4", "Brunch"));
       const { send } = open(read);
       expect(await send(write, { title: "Supper night" })).toBe("saved");
       expect(await send(write, { title: "Brunch" })).toBe("saved");
@@ -429,10 +434,12 @@ describe("useRevisionSave", () => {
 
     it("moves nothing on a send with no answer: a later refusal that finds the value as it was is a conflict, never a resend", async () => {
       const read = vi.fn().mockResolvedValue(readOf({ title: "Supper night" }, "r3"));
+
       const write = vi.fn()
-        .mockResolvedValueOnce(answered("r2", "Supper night"))
+        .mockImplementationOnce(answered("r2", "Supper night"))
         .mockRejectedValueOnce(new TypeError("Failed to fetch"))
         .mockRejectedValueOnce(changed());
+
       const { send, onConflict } = open(read);
       expect(await send(write, { title: "Supper night" })).toBe("saved");
       await expect(send(write, { title: "Brunch" })).rejects.toBeInstanceOf(TypeError);

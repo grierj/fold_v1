@@ -1,6 +1,6 @@
 import * as schema from "valibot";
 import { expect, test } from "@playwright/test";
-import { apiAs, signIn } from "./helpers";
+import { apiAs, pickDateRoom, signIn } from "./helpers";
 
 // M2.2a: a member opens Rooms from the calendar and sees each room's
 // bookings; a booking for a date they can't see is a grey "Reserved" block
@@ -20,7 +20,7 @@ test("a member sees the room calendar, with a hidden date as Reserved", async ({
     title: "Hidden room meeting", startsLocal: `${day}T09:00`, durationMinutes: 60, tzid: "America/Boise",
   })));
 
-  await admin("PUT", `/events/${secret.id}/dates/${day}/room`, { roomId: hall.id });
+  await pickDateRoom(admin, secret.id, day, { roomId: hall.id });
 
   // apiAs clients share this request context's cookie jar: each sign-in
   // replaces the session and rotates its CSRF token, so finish with one user
@@ -31,7 +31,7 @@ test("a member sees the room calendar, with a hidden date as Reserved", async ({
     title: "Room calendar night", startsLocal: `${day}T19:00`, durationMinutes: 60, tzid: "America/Boise",
   })));
 
-  await lee("PUT", `/events/${event.id}/dates/${day}/room`, { roomId: hall.id });
+  await pickDateRoom(lee, event.id, day, { roomId: hall.id });
 
   await signIn(page, "sam");
   await page.goto(`/calendar?view=week&date=${day}`);

@@ -1,5 +1,6 @@
 import { useEffect, useRef } from "react";
 import { ApiError, credentialCurrent, currentCredential } from "../api/core";
+import type { RevisionRef } from "../types";
 import { errorCode } from "./errors";
 import { outcomeOf } from "./rosterWrites";
 import { isNumber, isObject, isString } from "./wireValues";
@@ -33,10 +34,6 @@ const unanswered = (cause: unknown) => cause instanceof Error && outcomeOf(cause
 // What the transport throws for a body it cannot read (api/core.ts), so the form says what it always says then.
 const unreadableAnswer = () => new ApiError(502, "unreadable answer", {}, true);
 
-interface SavedThing {
-  id: number;
-  revision: string;
-}
 
 // A send of this draft got no answer (`current`), and what it carried that no read shows (`unseen`).
 export interface LostSend {
@@ -48,31 +45,30 @@ export interface LostSend {
 type AnswerKey = "event" | "occurrence" | "group" | "dateRoom";
 
 // What a save that landed answers: the thing it saved, with its new revision.
-type SavedAnswer = { [K in AnswerKey]: Record<K, SavedThing> }[AnswerKey];
-
-const ANSWER_KEYS: readonly AnswerKey[] = ["event", "occurrence", "group", "dateRoom"];
-
-const thingAt = (answer: object, key: AnswerKey): unknown => (key in answer ? Reflect.get(answer, key) : undefined);
+type SavedAnswer = { [K in AnswerKey]: Record<K, RevisionRef> }[AnswerKey];
 
 // A save's answer names the thing saved: `{ [key]: { id, revision } }` with this id and a revision. Anything else (a
 // page from something in between, which reads as {}, or another thing's answer) is no answer.
 export const answerNames = (key: AnswerKey, id: number) => (answer: unknown): answer is SavedAnswer => {
   if (!isObject(answer)) return false;
 
-  const thing = thingAt(answer, key);
+  const thing = key === "event" ? "event" in answer && answer.event
+    : key === "occurrence" ? "occurrence" in answer && answer.occurrence
+      : key === "group" ? "group" in answer && answer.group
+        : "dateRoom" in answer && answer.dateRoom;
 
   return isObject(thing) && "id" in thing && "revision" in thing && isNumber(thing.id) && thing.id === id && isString(thing.revision) && thing.revision !== "";
 };
 
 // The revision a landed save's answer names.
 function answeredRevision(answer: SavedAnswer): string {
-  for (const key of ANSWER_KEYS) {
-    const thing = thingAt(answer, key);
+  if ("event" in answer) return answer.event.revision;
 
-    if (isObject(thing) && "revision" in thing && isString(thing.revision)) return thing.revision;
-  }
+  if ("occurrence" in answer) return answer.occurrence.revision;
 
-  return "";
+  if ("group" in answer) return answer.group.revision;
+
+  return answer.dateRoom.revision;
 }
 
 // useRevisionSave is the one conflict protocol for a manager's save (DEC-162, DEC-163, DEC-164, DEC-166). The save names

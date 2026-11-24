@@ -26,8 +26,10 @@ const booked = (over: Partial<RoomBooking> = {}): RoomBooking => ({ roomId: 1, r
 const busy = () => new ApiError(409, "busy", { code: "room_busy" });
 const changed = () => new ApiError(409, "changed", { code: "date_room_changed" });
 const onGone = vi.fn();
+
 // A read of the date's room control: the date (occurrence 70) and its booking's revision.
 const listed = (read: Omit<DateRoomsResponse, "dateRoom">, revision = "r1"): DateRoomsResponse => ({ ...read, dateRoom: { id: 70, revision } });
+
 // A pick's answer: the booking stored and the revision the next pick sends.
 const answer = (booking: RoomBooking | null, revision = "r2"): RoomBookingResponse => ({ booking, dateRoom: { id: 70, revision } });
 const waitForStatus = (text: string | RegExp) => waitFor(() => expect(screen.getAllByRole("status")[0]).toHaveTextContent(text));

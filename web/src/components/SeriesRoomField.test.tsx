@@ -350,7 +350,7 @@ it("counts a series pick whose answer was lost as saved when the read shows it s
 });
 
 it("hands over to the host when the person may no longer manage the event, and starts no second pick while one is on its way", async () => {
-  let fail!: (err: unknown) => void;
+  let fail!: (err: ApiError) => void;
   vi.mocked(SeriesRooms.set).mockReturnValueOnce(new Promise((_, reject) => { fail = reject; }));
   show();
   await pickAndBook("1");

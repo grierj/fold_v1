@@ -126,6 +126,7 @@ function SeriesRoomControl({ eventId, id, read, show, onChanged, onGone }: {
     refusal.clear();
     void action.run(async () => {
       lastAnswer.current = null;
+
       const sent = await save(async (revision) => {
         const res = await SeriesRooms.set(eventId, overlapReason ? { roomId, overlapReason } : { roomId }, revision);
         lastAnswer.current = res;

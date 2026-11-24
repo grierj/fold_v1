@@ -90,6 +90,17 @@ export async function apiAs(request: APIRequestContext, name: string) {
   };
 }
 
+// pickDateRoom is a manager's pick of a date's room as the Room control sends it (DEC-167): the revision from that
+// manager's own read of the date's room control.
+export async function pickDateRoom(api: Awaited<ReturnType<typeof apiAs>>, eventId: number, date: string, body: { roomId: number | null }) {
+  const read = await api("GET", `/events/${eventId}/dates/${date}/rooms`);
+  const revision = read?.dateRoom?.revision;
+
+  if (!isString(revision) || !revision) throw new Error(`The room control's read of ${date} carried no revision`);
+
+  return api("PUT", `/events/${eventId}/dates/${date}/room`, { ...body, revision });
+}
+
 // saveDate is a manager's ordinary save of one date through the guarded edit, as the date editor sends
 // it: the revision from the manager's own read of that date and only the changed fields (null clears
 // one). It expects the save itself: any refusal, a consent question included, fails.
