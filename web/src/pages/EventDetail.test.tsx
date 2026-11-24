@@ -2826,6 +2826,25 @@ describe("EventDetail when a series save meets someone else's change", () => {
     await waitFor(() => expect(screen.getByText(UNSAVED)).toHaveFocus());
   });
 
+  it("closes the editor as after a normal save, with no line, when the second press finds the first one stored", async () => {
+    const mine: EventDetailResponse = { ...opened, event: { ...opened.event, title: "Hybrid study night", revision: "r2" } };
+    vi.mocked(Events.get).mockResolvedValueOnce(opened).mockResolvedValue(mine);
+    vi.mocked(Events.update).mockRejectedValueOnce(new TypeError("Failed to fetch")).mockRejectedValueOnce(changed());
+    renderInMain();
+    await userEvent.click(await screen.findByRole("button", { name: "Edit event" }));
+    await userEvent.type(screen.getByLabelText("Title"), " night");
+    await userEvent.click(screen.getByRole("button", { name: "Save series" }));
+    expect(await screen.findByText("We couldn't reach Fold. Check your connection and try again.")).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "Save series" }));
+    expect(await screen.findByRole("heading", { level: 1, name: "Hybrid study night" })).toBeInTheDocument();
+    await waitFor(() => expect(screen.queryByRole("button", { name: "Save series" })).not.toBeInTheDocument());
+    expect(screen.getByRole("button", { name: "Edit event" })).toHaveAttribute("aria-expanded", "false");
+    expect(screen.queryByText(/weren't saved/)).not.toBeInTheDocument();
+    expect(Events.update).toHaveBeenCalledTimes(2);
+    // The page's first read, the editor's read after the refusal, and the page's read after the save.
+    expect(Events.get).toHaveBeenCalledTimes(3);
+  });
+
   it("says nothing about changes on an ordinary visit to a missing event", async () => {
     vi.mocked(Events.get).mockRejectedValue(new ApiError(404, "gone", { code: "not_found" }));
     renderInMain();

@@ -19,7 +19,13 @@ interface Audience {
   visibility: Visibility;
   leaderOpened?: boolean;
   groupVisibility?: Visibility;
+  // The save carries a reason no read can show to be the stored one: the read never counts it done.
+  unverified?: boolean;
 }
+
+// A group event wider than its group is leader-opened, as the server decides it on save (`leaderOpens`, DEC-17/28).
+const opensWider = (value: Visibility, groupVisibility?: Visibility, churchWide?: boolean) =>
+  !churchWide && groupVisibility != null && visibilityRank(value) > visibilityRank(groupVisibility);
 
 const CHOICES: { value: Visibility; label: string; description: string }[] = [
   { value: "public", label: "Public", description: "Anyone can see it." },
@@ -100,10 +106,12 @@ export function EventVisibilityControl({
   }, [eventId, visibility]);
 
   // What this save can write: the audience and whether it is leader-opened, which follows the group's. The page's
-  // read lists 90 days of dates and a reset reaches every later one, so a refused reset is always a conflict.
+  // read lists 90 days of dates and a reset reaches every later one, so a refused reset is always a conflict, also
+  // when an earlier press stored it and its answer was lost (a reset that leaves both the visibility and the
+  // leader-opened mark as they were leaves the revision, so only one that changed either is refused).
   const opened: Audience = { visibility, leaderOpened, groupVisibility };
 
-  const send = useRevisionSave({
+  const send = useRevisionSave<Audience, { visibility: Visibility; leaderOpened: boolean; groupVisibility: Visibility | null; unverified: boolean }>({
     opened,
     revision,
     read: async () => {
@@ -111,9 +119,13 @@ export function EventVisibilityControl({
 
       return { allowed: stored.canSetVisibility, revision: stored.event.revision, value: stored.event };
     },
-    fields: (a) => (resetOverrides ? null : { visibility: a.visibility, leaderOpened: a.leaderOpened ?? false, groupVisibility: a.groupVisibility ?? null }),
+    fields: (a) => (resetOverrides ? null : { visibility: a.visibility, leaderOpened: a.leaderOpened ?? false, groupVisibility: a.groupVisibility ?? null, unverified: a.unverified ?? false }),
     onConflict,
   });
+
+  // The reason an earlier press sent when its answer never arrived. The reason goes to the audit row and the notice
+  // and no read returns it, so a later press counts as already stored only when it carries that same reason.
+  const unanswered = useRef<string | null>(null);
 
   // `mark` is the session roster sequence the request behind the review was sent at.
   const [review, setReview] = useState<{ impact: VisibilityImpact; mark: number } | null>(null);
@@ -219,8 +231,22 @@ export function EventVisibilityControl({
     const mark = activity.mark();
     setError(null);
 
+    const why = reason.trim();
+
     try {
-      const sent = await send((rev) => Events.setVisibility(eventId, { visibility: value, reason: reason.trim() || undefined, consent, resetOverrides, revision: rev }));
+      const sent = await send(
+        async (rev) => {
+          try {
+            return await Events.setVisibility(eventId, { visibility: value, reason: why || undefined, consent, resetOverrides, revision: rev });
+          } catch (err) {
+            // Only a save with no answer may have been stored: a refusal was not, and a failed read says nothing.
+            if (!(err instanceof ApiError) || err.status >= 500) unanswered.current = why;
+
+            throw err;
+          }
+        },
+        { visibility: value, leaderOpened: opensWider(value, groupVisibility, churchWide), groupVisibility, unverified: why !== (unanswered.current ?? "") },
+      );
 
       if (sent === "refused") {
         setError("We couldn't change who can see this. Please try again.");
@@ -229,6 +255,7 @@ export function EventVisibilityControl({
       }
 
       if (sent !== "saved") return false;
+      unanswered.current = null;
       setReview(null);
       onSaved();
     } catch (err) {
@@ -330,7 +357,7 @@ export function VisibilityField({
   reason: string;
   onReason: (v: string) => void;
 }) {
-  const opening = !churchWide && groupVisibility != null && visibilityRank(value) > visibilityRank(groupVisibility);
+  const opening = opensWider(value, groupVisibility, churchWide);
   const choices = churchWide ? CHOICES.filter((c) => c.value !== "invite_only") : CHOICES;
 
   return (
