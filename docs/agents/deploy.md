@@ -254,7 +254,17 @@ The drill runs directly, as root, on a disposable droplet created for it and dec
 `FOLD_DRILL_ISOLATED_DAEMON=1`, after `deploy/digitalocean/qc1/browser-prepare.sh` has prepared the
 browser (`docs/agents/testing.md`). It refuses an undeclared host, a remote or non-default Docker
 daemon, a daemon that already holds a container, and any host path its provisioners would write,
-before it creates anything. Never point it at a machine that runs anything you keep.
+before it creates anything. Never point it at a machine that runs anything you keep. A stock Ubuntu
+image's `/etc/apt/apt.conf.d/20auto-upgrades` (the two lines it ships, owned by no package) is not
+refused, since the drill never hardens; any other content is, including the three lines
+`provision.sh`'s hardening writes.
+
+The crossings run each release's stock `docker-compose.yml`, which pulls
+`ghcr.io/grierj/fold-backup:${FOLD_VERSION}` beside the app, and `--image` relocates only the app.
+So for the run they write `/etc/docker/certs.d/ghcr.io/hosts.toml`, a registry mirror that serves
+the backup images they build from each release's own `deploy/backup` and passes anything else on to
+ghcr.io. That needs Docker's containerd image store (a new install's default); the crossings prove
+the mirror before any site runs and remove the file when the drill ends, `--keep` or not.
 
 Two rules keep a drill's checks honest on Docker's containerd image store, where a container's
 `.Image` is a config digest and an image's id is an index. Whether a container runs an image is

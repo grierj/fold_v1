@@ -105,7 +105,7 @@ drill_case_begin bootstrap
 handoff_cleanup() {
   local rc=$?
   trap - EXIT
-  if [[ -f "$WORK/site/docker-compose.yml" ]]; then compose_in "$WORK/site" down -v --remove-orphans || rc=1; fi
+  if [[ -f "$WORK/site/docker-compose.yml" ]]; then drill_down "$WORK/site" || rc=1; fi
   exit "$rc"
 }
 trap handoff_cleanup EXIT
@@ -160,7 +160,9 @@ cleanup() {
   fi
   # Level-0 lineage sites and the host files their provisioner writes.
   if (( ! KEEP )); then crossing_cleanup_all || rc=1; else crossing_cleanup_host || rc=1; fi
-  if (( ! KEEP )); then compose_in "$DIR" down -v --remove-orphans || rc=1; fi
+  # Host configuration, so --keep does not retain it.
+  crossing_unmirror || rc=1
+  if (( ! KEEP )); then drill_down "$DIR" || rc=1; fi
   drill_emit result "$rc" || rc=1
   echo "restore drill result=$rc artifacts=$WORK retained_stack=$KEEP"
   [[ "$MODE" == full ]] || drill_mode_finish "$rc"

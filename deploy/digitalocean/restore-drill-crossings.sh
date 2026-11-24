@@ -176,6 +176,16 @@ CROSSING_FORBID_UP='^\++ (run_backup|write_release|restore_dump|run_provision|ne
 # Steps that must never appear in a refused restore.sh. stage_tools alone is
 # allowed: an image check runs in a temporary frozen copy that is deleted.
 CROSSING_FORBID_RESTORE='^\++ (publish_tools|close_site|create_database|collect|pin|swap|recovery_start|record|store|finish_reopen)( |$)|pg_restore -U|^\++ docker compose .* (stop|up|build|down)( |$)'
+# A crossing site runs a release's stock docker-compose.yml, whose backup line
+# names ghcr.io/grierj/fold-backup:${FOLD_VERSION} and which provision.sh pulls
+# with the app. --image relocates only the app, so the drill serves the backup
+# images it builds through a registry mirror for ghcr.io (containerd's
+# hosts.toml): the stock name resolves to the drill registry first and anything
+# the registry lacks goes on to ghcr.io. isolation.sh refuses a host that
+# already has this directory; the crossings remove what they created.
+CROSSING_MIRROR_DIR=/etc/docker/certs.d/ghcr.io
+CROSSING_BACKUP_REPO=ghcr.io/grierj/fold-backup
+CROSSING_MIRROR_CREATED=()
 CROSSING_CASE=0
 CROSSING_PROJECTS=()
 CROSSING_HOST_FILES=(/etc/cron.d/fold-health /etc/cron.d/fold-backup /etc/logrotate.d/fold-backup)
@@ -575,10 +585,12 @@ crossing_prepare() {
   for f in "${CROSSING_HOST_FILES[@]}"; do [[ ! -e "$f" ]] || CROSSING_HOST_BEFORE+=("$f"); done
   CROSSING_HOST_RECORDED=1
   crossing_expose_objects
+  crossing_mirror_ghcr || return 1
   # The candidate is the committed head, built from its own archive. A --image
   # given to the runner serves only the fixture stack; it is never used here.
   CROSSING_CAND_IMG="$(crossing_build_image candidate "$REVISION" "$CROSSING_CANDIDATE_LEVEL" 1)"
   CROSSING_CAND_TAG="${CROSSING_CAND_IMG##*:}"
+  crossing_prove_mirror "$CROSSING_CAND_TAG" || return 1
   CROSSING_LANE_IMG="$(crossing_build_image lane "$LANE_REVISION" 0 1)"
   CROSSING_LANE_TAG="${CROSSING_LANE_IMG##*:}"
   CROSSING_LANDING_IMG="$(crossing_build_image landing "$LANDING_REVISION" 1 1)"
@@ -633,12 +645,74 @@ crossing_build_image() {
   ref="$REGISTRY/fold:$tag"
   docker build --label "org.opencontainers.image.revision=$sha" --build-arg "FOLD_VERSION=$tag" -t "$ref" "$src" >"$cdir/build-$role.log" 2>&1 \
     || { tail -n 40 "$cdir/build-$role.log" >&2; return 1; }
+  crossing_build_backup "$role" "$sha" "$tag" "$src" "$push" >&2 || return 1
   rm -rf "$src" || return 1
   crossing_image_facts "$role" "$sha" "$ref" "$want" built >&2 || return 1
   if (( push )); then
     docker push "$ref" >"$cdir/push-$role.log" 2>&1 || { tail -n 20 "$cdir/push-$role.log" >&2; return 1; }
   fi
   printf '%s\n' "$ref"
+}
+
+# role sha tag src push: when the revision's stock Compose names the backup
+# image, its own deploy/backup built under the tag that Compose will ask for
+# (FOLD_VERSION is the app's tag), in the mirror's repository path.
+crossing_build_backup() {
+  local role="$1" sha="$2" tag="$3" src="$4" push="$5" cdir ref id
+  grep -qF "image: $CROSSING_BACKUP_REPO:" "$src/docker-compose.yml" || return 0
+  cdir="$(crossing_dir)"
+  [[ -f "$src/deploy/backup/Dockerfile" ]] \
+    || { echo "crossing: the $role release ($sha) names $CROSSING_BACKUP_REPO but has no deploy/backup to build it from" >&2; return 1; }
+  ref="$REGISTRY/${CROSSING_BACKUP_REPO#ghcr.io/}:$tag"
+  docker build --label "org.opencontainers.image.revision=$sha" -t "$ref" "$src/deploy/backup" >"$cdir/build-$role-backup.log" 2>&1 \
+    || { tail -n 40 "$cdir/build-$role-backup.log" >&2; return 1; }
+  if (( push )); then
+    docker push "$ref" >"$cdir/push-$role-backup.log" 2>&1 || { tail -n 20 "$cdir/push-$role-backup.log" >&2; return 1; }
+  fi
+  id="$(docker image inspect --format '{{.Id}}' "$ref")" || return 1
+  crossing_emit tools.jsonl --arg role "$role" --arg sha "$sha" --arg image "$ref" --arg imageId "$id" --arg pulledAs "$CROSSING_BACKUP_REPO:$tag" \
+    '{label:"environment", file:"backup image", role:$role, sha:$sha, image:$image, imageId:$imageId, pulledAs:$pulledAs, builtByDrill:true}'
+}
+
+crossing_mirror_ghcr() {
+  local d
+  [[ ! -e "$CROSSING_MIRROR_DIR" && ! -L "$CROSSING_MIRROR_DIR" ]] \
+    || { echo "crossing: $CROSSING_MIRROR_DIR already exists; the drill will not replace a host's registry configuration" >&2; return 1; }
+  for d in /etc/docker /etc/docker/certs.d "$CROSSING_MIRROR_DIR"; do
+    [[ -d "$d" ]] && continue
+    mkdir -m 755 "$d" || return 1
+    CROSSING_MIRROR_CREATED=("$d" "${CROSSING_MIRROR_CREATED[@]}")
+  done
+  printf 'server = "https://ghcr.io"\n\n[host."http://%s"]\n  capabilities = ["pull", "resolve"]\n' "$REGISTRY" >"$CROSSING_MIRROR_DIR/hosts.toml" || return 1
+  crossing_emit tools.jsonl --arg file "$CROSSING_MIRROR_DIR/hosts.toml" --arg mirror "$REGISTRY" \
+    '{label:"environment", file:$file, mirror:$mirror, writtenByDrill:true}'
+}
+
+# The candidate's backup image, pulled by its stock name, must be the bytes the
+# drill pushed: a daemon that ignores hosts.toml (the classic image store)
+# refuses here, before any site runs.
+crossing_prove_mirror() { # tag
+  local tag="$1" local_repo pushed pulled
+  local_repo="$REGISTRY/${CROSSING_BACKUP_REPO#ghcr.io/}"
+  docker image inspect "$local_repo:$tag" >/dev/null 2>&1 || return 0
+  pushed="$(crossing_repo_digest "$local_repo" "$local_repo:$tag")"
+  [[ -n "$pushed" ]] || { echo "crossing: $local_repo:$tag has no pushed digest" >&2; return 1; }
+  docker pull -q "$CROSSING_BACKUP_REPO:$tag" >/dev/null || { echo "crossing: $CROSSING_BACKUP_REPO:$tag did not resolve through the drill registry; the daemon must use the containerd image store" >&2; return 1; }
+  pulled="$(crossing_repo_digest "$CROSSING_BACKUP_REPO" "$CROSSING_BACKUP_REPO:$tag")"
+  docker image rm "$CROSSING_BACKUP_REPO:$tag" >/dev/null || return 1
+  [[ "$pulled" == "$pushed" ]] || { echo "crossing: $CROSSING_BACKUP_REPO:$tag pulled ${pulled:-no digest}, not the pushed $pushed" >&2; return 1; }
+  crossing_emit tools.jsonl --arg image "$CROSSING_BACKUP_REPO:$tag" --arg digest "$pulled" '{label:"environment", file:"backup image", mirrorProof:true, pulledAs:$image, digest:$digest}'
+}
+crossing_repo_digest() { # repo ref -> the ref's manifest digest in that repository
+  docker image inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' "$2" | awk -F@ -v repo="$1" '$1 == repo { print $2; exit }'
+}
+
+crossing_unmirror() {
+  local d
+  (( ${#CROSSING_MIRROR_CREATED[@]} )) || return 0
+  rm -f "$CROSSING_MIRROR_DIR/hosts.toml" || return 1
+  for d in "${CROSSING_MIRROR_CREATED[@]}"; do rmdir "$d" || return 1; done
+  CROSSING_MIRROR_CREATED=()
 }
 
 # Records an image and fails unless it reports the level the role needs, the
@@ -903,13 +977,14 @@ ENV
 }
 
 crossing_site_end() {
-  crossing_cdc down -v --remove-orphans >"$(crossing_dir)/sites/down-$CX_PROJECT.log" 2>&1 || true
+  drill_down "$CX_DIR" >"$(crossing_dir)/sites/down-$CX_PROJECT.log" 2>&1 || true
   crossing_force_project "$CX_PROJECT"
   crossing_cleanup_host
 }
 
 crossing_force_project() {
-  local p="$1" ids
+  local p="$1" ids volumes
+  volumes="$(drill_anonymous_volumes "$p" 2>/dev/null || true)"
   ids="$(docker ps -aq --filter "label=com.docker.compose.project=$p" 2>/dev/null || true)"
   # shellcheck disable=SC2086 # a whitespace list of ids
   [[ -z "$ids" ]] || docker rm -fv $ids >/dev/null 2>&1 || true
@@ -919,6 +994,7 @@ crossing_force_project() {
   ids="$(docker volume ls -q --filter "label=com.docker.compose.project=$p" 2>/dev/null || true)"
   # shellcheck disable=SC2086
   [[ -z "$ids" ]] || docker volume rm -f $ids >/dev/null 2>&1 || true
+  [[ -z "$volumes" ]] || xargs docker volume rm -f <<<"$volumes" >/dev/null 2>&1 || true
 }
 
 # LANE_BASE's own provisioner writes cron and logrotate entries into the host.
