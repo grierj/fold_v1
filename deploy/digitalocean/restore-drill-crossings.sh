@@ -1081,7 +1081,7 @@ crossing_lineage_site() {
     img_bin="$(crossing_binary_sha "$cid")"
     cid="$(docker create "$CROSSING_CAND_IMG")"
     cand_bin="$(crossing_binary_sha "$cid")"
-    docker rm "$cid" >/dev/null
+    docker rm -v "$cid" >/dev/null
     jq -n --arg built "$built_id" --arg head "$REVISION" --arg onBox "$img_bin" --arg registry "$cand_bin" --argjson origin "$origin" \
       '{origin:$origin, commit:$head, builtImageId:$built, onBoxBinarySha256:$onBox, registryCandidateBinarySha256:$registry,
         note:"the registry candidate reports its own FOLD_VERSION and the on-box build reports dev, so equal hashes are not required"}' \
@@ -1260,6 +1260,8 @@ crossing_prior_site() {
     || { echo "crossing: the prior-origin host is not the real prior at level 2: $json" >&2; return 1; }
   [[ "$(cat "$CX_DIR/recovery-policy-floor")" == 2 ]]
   [[ "$(crossing_goose)" == "$(crossing_last_version "$PRIOR_REVISION")" ]]
+  # snapshot_state, which every refusal on this site takes, reads it.
+  crossing_cpg fold -c "CREATE TABLE drill_sentinel(id integer PRIMARY KEY, value text); INSERT INTO drill_sentinel VALUES (1, 'original')" >/dev/null
 }
 crossing_require_prior_site() {
   [[ -n "$CROSSING_PRIOR_SITE" && "${CX_SITE:-}" == "$CROSSING_PRIOR_SITE" ]] \
