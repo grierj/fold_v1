@@ -1023,7 +1023,7 @@ PUT  /api/v1/events/:id/occurrences/:date   → 409 date_page_outdated  (leader,
      edit payload: ignored after standard CSRF processing; writes nothing (see Cutover under Guarded date edit)
 GET  /api/v1/events/:id/occurrences/:date   → 200 {occurrence}  (leader, host, or admin; the date's edit base, scheduled or cancelled)
 POST /api/v1/events/:id/occurrences/:date/edits → 200 {occurrence}  (leader, host, or admin; the guarded date edit)
-     body: {attempt, revision, changes: {startsLocal?, durationMinutes?, title?, location?, capacityOverride?, remoteCapacityOverride?, visibility?}, reason?, consent?}
+     body: {revision, changes: {startsLocal?, durationMinutes?, title?, location?, capacityOverride?, remoteCapacityOverride?, visibility?}, reason?, consent?}
 GET  /api/v1/calendar?from=&to=&tz=&mine=1&group=&deleted=1&remote=1&childcare=1
   → {occurrences: [calendarOccurrence], truncated}   (slim rows, no attendance;
      each row has only the viewer's myStatus and an ownScope presentation flag;
@@ -1430,6 +1430,10 @@ How it decides, under the contact gate, the event lock and the date lock:
   under a still-running process is the one exception, the same limit the
   restore barrier states (docs/agents/erasure.md); no Fold tool restores that
   way.
+- **After a rollback to a build that still requires `attempt`**, a tab still
+  running the newer page sends none, so its save gets 400 `date_edit_invalid`,
+  whose message says to refresh the page; that brings the older build's page.
+  Nothing is saved meanwhile.
 - **After a rollback to a release whose manager read has no `own`**, a tab
   still running the newer page cannot open "Edit this date" (the editor stays
   closed, or the date page says the date can't be edited now) until the page
@@ -3560,7 +3564,7 @@ is visible, `groupVisibility` for the shared visibility editor.
 
 ```
 POST /api/v1/events/:id/occurrences/:date/edits
-    {attempt, revision, changes: {visibility?: "public"|"private"|"invite_only"|"series"|null,
+    {revision, changes: {visibility?: "public"|"private"|"invite_only"|"series"|null,
      ...other date changes}, reason?: string, consent?: string}
 GET /api/v1/events/:id/occurrences/:date/visibility-impact?visibility=series
     [&startsLocal=YYYY-MM-DDTHH:MM][&durationMinutes=n]
