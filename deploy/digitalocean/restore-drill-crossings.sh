@@ -1391,21 +1391,22 @@ crossing_make_date_private() { # jar base occurrence-path writer
 # (jar) and member (mjar): a group with an event a member signed up for, two
 # public church-wide series each with one private date and nobody registered,
 # a private event, and a group whose one event nobody signed up for.
-# Prints "group reg reset stale private group3 event3" as ids.
+# Prints "group reg reset stale private group3 event3" as ids. Called inside
+# $( ) with || return, where errexit is off: every step answers for itself.
 crossing_visibility_fixtures() { # jar mjar base writer
   local jar="$1" mjar="$2" base="$3" writer="$4" g g3 e5 e6 r s p body
-  g="$(crossing_http_want "$jar" "$base" POST /groups '{"name":"Crossing group","visibility":"public","location":"Hall"}' 201 | jq -er .group.id)"
-  g3="$(crossing_http_want "$jar" "$base" POST /groups '{"name":"Crossing quiet group","visibility":"public","location":"Hall"}' 201 | jq -er .group.id)"
-  e5="$(crossing_http_want "$jar" "$base" POST "/groups/$g/events" "$(jq -nc --arg d "$(crossing_day 6)" '{title:"Crossing E5",startsLocal:($d+"T19:00"),durationMinutes:60,tzid:"UTC"}')" 201 | jq -er .event.id)"
-  e6="$(crossing_http_want "$jar" "$base" POST "/groups/$g3/events" "$(jq -nc --arg d "$(crossing_day 7)" '{title:"Crossing E6",startsLocal:($d+"T19:00"),durationMinutes:60,tzid:"UTC"}')" 201 | jq -er .event.id)"
-  crossing_http_want "$mjar" "$base" PUT "/events/$e5/registrations" "$(jq -nc --arg d "$(crossing_day 6)" '{status:"going",date:$d}')" 200 >/dev/null
-  r="$(crossing_http_want "$jar" "$base" POST /events "$(jq -nc --arg d "$(crossing_day 3)" '{title:"Crossing reset",startsLocal:($d+"T19:00"),durationMinutes:60,tzid:"UTC",recurrenceRule:"FREQ=WEEKLY;COUNT=3"}')" 201 | jq -er .event.id)"
+  g="$(crossing_http_want "$jar" "$base" POST /groups '{"name":"Crossing group","visibility":"public","location":"Hall"}' 201 | jq -er .group.id)" || return 1
+  g3="$(crossing_http_want "$jar" "$base" POST /groups '{"name":"Crossing quiet group","visibility":"public","location":"Hall"}' 201 | jq -er .group.id)" || return 1
+  e5="$(crossing_http_want "$jar" "$base" POST "/groups/$g/events" "$(jq -nc --arg d "$(crossing_day 6)" '{title:"Crossing E5",startsLocal:($d+"T19:00"),durationMinutes:60,tzid:"UTC"}')" 201 | jq -er .event.id)" || return 1
+  e6="$(crossing_http_want "$jar" "$base" POST "/groups/$g3/events" "$(jq -nc --arg d "$(crossing_day 7)" '{title:"Crossing E6",startsLocal:($d+"T19:00"),durationMinutes:60,tzid:"UTC"}')" 201 | jq -er .event.id)" || return 1
+  crossing_http_want "$mjar" "$base" PUT "/events/$e5/registrations" "$(jq -nc --arg d "$(crossing_day 6)" '{status:"going",date:$d}')" 200 >/dev/null || return 1
+  r="$(crossing_http_want "$jar" "$base" POST /events "$(jq -nc --arg d "$(crossing_day 3)" '{title:"Crossing reset",startsLocal:($d+"T19:00"),durationMinutes:60,tzid:"UTC",recurrenceRule:"FREQ=WEEKLY;COUNT=3"}')" 201 | jq -er .event.id)" || return 1
   crossing_make_date_private "$jar" "$base" "/events/$r/occurrences/$(crossing_day 3)" "$writer" || return 1
-  s="$(crossing_http_want "$jar" "$base" POST /events "$(jq -nc --arg d "$(crossing_day 4)" '{title:"Crossing stale reset",startsLocal:($d+"T19:00"),durationMinutes:60,tzid:"UTC",recurrenceRule:"FREQ=WEEKLY;COUNT=3"}')" 201 | jq -er .event.id)"
+  s="$(crossing_http_want "$jar" "$base" POST /events "$(jq -nc --arg d "$(crossing_day 4)" '{title:"Crossing stale reset",startsLocal:($d+"T19:00"),durationMinutes:60,tzid:"UTC",recurrenceRule:"FREQ=WEEKLY;COUNT=3"}')" 201 | jq -er .event.id)" || return 1
   crossing_make_date_private "$jar" "$base" "/events/$s/occurrences/$(crossing_day 4)" "$writer" || return 1
-  p="$(crossing_http_want "$jar" "$base" POST /events "$(jq -nc --arg d "$(crossing_day 5)" '{title:"Crossing private",startsLocal:($d+"T19:00"),durationMinutes:60,tzid:"UTC"}')" 201 | jq -er .event.id)"
+  p="$(crossing_http_want "$jar" "$base" POST /events "$(jq -nc --arg d "$(crossing_day 5)" '{title:"Crossing private",startsLocal:($d+"T19:00"),durationMinutes:60,tzid:"UTC"}')" 201 | jq -er .event.id)" || return 1
   body="$(crossing_with_revision "$jar" "$base" "/events/$p/visibility" '{"visibility":"private"}')" || return 1
-  crossing_http_want "$jar" "$base" PUT "/events/$p/visibility" "$body" 200 >/dev/null
+  crossing_http_want "$jar" "$base" PUT "/events/$p/visibility" "$body" 200 >/dev/null || return 1
   printf '%s %s %s %s %s %s %s\n' "$g" "$e5" "$r" "$s" "$p" "$g3" "$e6"
 }
 
