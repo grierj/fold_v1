@@ -1037,6 +1037,15 @@ func TestVisibilityRevisionNoChangeAndDecision(t *testing.T) {
 	if after := f.everything(t); after != before || answer.Event.Revision != current {
 		t.Fatalf("a no-change save wrote or moved the revision (%q, was %q)", answer.Event.Revision, current)
 	}
+	// A reset that leaves the visibility as it is changes only the dates, so
+	// the event's revision stays.
+	f.setOverride(t, 1, strp(models.VisibilityPrivate))
+	reset := map[string]any{"visibility": models.VisibilityPublic, "resetOverrides": true}
+	apiDo(t, f.admin, "PUT", path, with(with(reset, "consent", f.preview(t, path, reset).Consent), "revision", current), http.StatusOK)
+	if f.override(t, 1) != "series" || seriesRevisionOf(t, f.admin, f.ev.ID) != current {
+		t.Fatalf("a reset-only save: override %q, revision %q, want series and %q", f.override(t, 1), seriesRevisionOf(t, f.admin, f.ev.ID), current)
+	}
+	before = f.everything(t)
 	tighten := map[string]any{"visibility": models.VisibilityInviteOnly, "consent": "", "revision": current}
 	impact := wantDecision(t, f.admin.do("PUT", path, tighten, true))
 	if after := f.everything(t); after != before {

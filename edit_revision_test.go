@@ -8,8 +8,8 @@ import (
 	"fold/models"
 )
 
-// The tokens keep the bytes they had before edit_revision.go, so a page open
-// across the deploy still saves.
+// The token formats: the date edit reads the generation at base[2:18], and a
+// token from another purpose string would never match a running process's.
 func TestEditRevisionTokensKeepTheirBytes(t *testing.T) {
 	a := &App{}
 	gen := hex.EncodeToString(a.processKey("date-edit-generation:v1")[:8])

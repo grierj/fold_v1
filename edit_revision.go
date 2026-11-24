@@ -20,10 +20,9 @@ import (
 // than the one it would change. Nothing is written.
 var errEventChanged = apiErr(http.StatusConflict, "event_changed", "the event changed since this edit was based on it")
 
-// editGeneration is this process's generation, 16 hex characters. A token
-// from before a restart, and so before any restore, never matches. The
-// purpose string is the one the date edit has always used, so tokens keep
-// their bytes across this file's move.
+// editGeneration is this process's generation, 16 hex characters, which the
+// date edit reads at base[2:18]. A token from before a restart, and so before
+// any restore, never matches.
 func (a *App) editGeneration() string {
 	return hex.EncodeToString(a.processKey("date-edit-generation:v1")[:8])
 }
