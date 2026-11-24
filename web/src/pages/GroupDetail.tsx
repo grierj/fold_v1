@@ -650,7 +650,9 @@ function GroupDetailContent() {
                         disabled: groupSaveAction.running || coverAction.running,
                       },
                       ...(canCompose && group.status === "active" ? [{ label: EMAIL_MEMBERS, onSelect: () => navigate(composePath({ group: group.id })) }] : []),
-                      { label: coverAction.running ? "Uploading cover…" : "Change cover photo", onSelect: () => coverRef.current?.click(), disabled: coverAction.running || groupSaveAction.running },
+                      // Off while the editor is open: the form has its own cover field, and this one reads the page again,
+                      // which would drop the draft or run over the cover step of the form's save.
+                      { label: coverAction.running ? "Uploading cover…" : "Change cover photo", onSelect: () => coverRef.current?.click(), disabled: editing || coverAction.running || groupSaveAction.running },
                       ...(isMember ? [{ label: "Leave group", onSelect: () => void toggleJoin(), disabled: !!departureTarget || groupSaveAction.running }] : []),
                     ]}
                   /></div>

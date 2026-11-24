@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"reflect"
+	"regexp"
 	"slices"
 	"sort"
 	"strings"
@@ -1403,8 +1404,8 @@ func TestUpdateGroupNamePatchPreservesConcurrentState(t *testing.T) {
 	if result.Group.Name != saved.Name || result.Group.Status != saved.Status || result.Group.Visibility != saved.Visibility || result.Group.LeaderID != saved.LeaderID {
 		t.Fatalf("response did not reflect committed state: %+v", result.Group)
 	}
-	if result.Group.Revision != app.groupRevision(&saved) {
-		t.Fatalf("the answer's revision %q, want the stored group's %q", result.Group.Revision, app.groupRevision(&saved))
+	if want := storedGroupRevision(t, app, saved.ID); result.Group.Revision != want {
+		t.Fatalf("the answer's revision %q, want the stored group's %q", result.Group.Revision, want)
 	}
 	// A leader can edit an archived group but cannot explicitly reactivate it.
 	if w := client.do("PUT", "/api/v1/groups/"+itoa(g.ID), groupBody(t, client, "/api/v1/groups/"+itoa(g.ID), map[string]any{"status": models.GroupActive}), true); w.Code != http.StatusForbidden {
@@ -2751,10 +2752,8 @@ func TestGroupSaveNamesTheReadItWasMadeFrom(t *testing.T) {
 	if err := json.Unmarshal([]byte(apiDo(t, f.admin, "PUT", path, adminForm, http.StatusOK)), &won); err != nil {
 		t.Fatal(err)
 	}
-	var stored models.Group
-	gormMust(t, f.app.DB.First(&stored, f.gid))
-	if won.Group.Revision == adminForm["revision"] || won.Group.Revision != f.app.groupRevision(&stored) {
-		t.Fatalf("the save answered revision %q (stored %d), want the stored group's new token", won.Group.Revision, stored.EditRevision)
+	if want := storedGroupRevision(t, f.app, f.gid); won.Group.Revision == adminForm["revision"] || won.Group.Revision != want {
+		t.Fatalf("the save answered revision %q, want the stored group's new token %q", won.Group.Revision, want)
 	}
 	before := wholeState(t, f.app)
 	wantCode(t, "the second manager's save", lead.do("PUT", path, leadForm, true), http.StatusConflict, "group_changed")
@@ -2762,6 +2761,7 @@ func TestGroupSaveNamesTheReadItWasMadeFrom(t *testing.T) {
 		t.Fatalf("a refused save wrote:\n%s\nwant\n%s", after, before)
 	}
 	apiDo(t, lead, "PUT", path, groupBody(t, lead, path, map[string]any{"location": "Lead's place"}), http.StatusOK)
+	var stored models.Group
 	gormMust(t, f.app.DB.First(&stored, f.gid))
 	if stored.Name != "Admin's name" || stored.Location != "Lead's place" {
 		t.Fatalf("after both saves: %q at %q", stored.Name, stored.Location)
@@ -2841,6 +2841,60 @@ func TestStaleGroupTighteningCancelsNobody(t *testing.T) {
 	}
 }
 
+// storedGroupRevision is the token of the group row as the database holds it now.
+func storedGroupRevision(t *testing.T, app *App, id uint) string {
+	t.Helper()
+	revision, err := app.groupRevisionIn(app.DB, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return revision
+}
+
+// The group's token is its row's value (groupRevisionIn): any column another
+// writer changes moves it, a write that only stamps updated_at does not, a
+// value changed and changed back matches again, and a session in another time
+// zone reads the same token.
+func TestGroupRevisionIsTheRowsValue(t *testing.T) {
+	f, _ := groupRevisionFixture(t, models.VisibilityPublic)
+	opened := storedGroupRevision(t, f.app, f.gid)
+	if !regexp.MustCompile(`^1\.[0-9a-f]{16}\.g` + itoa(f.gid) + `\.[0-9a-f]{32}$`).MatchString(opened) {
+		t.Fatalf("group token %q", opened)
+	}
+	gormMust(t, f.app.DB.Exec("UPDATE groups SET updated_at = now() + interval '1 hour' WHERE id = ?", f.gid))
+	if now := storedGroupRevision(t, f.app, f.gid); now != opened {
+		t.Fatalf("a write of updated_at alone moved the token: %q to %q", opened, now)
+	}
+	for _, change := range []string{
+		"visibility = 'private'", "status = 'archived'", "deletion_requested = true", "image_url = '/uploads/covers/1/a.jpg'",
+		"cover_focal_x = 12", "member_limit = 9", "name = 'Other'", "description = 'x'", "tags = 'a'", "location = 'Hall'",
+	} {
+		before := storedGroupRevision(t, f.app, f.gid)
+		gormMust(t, f.app.DB.Exec("UPDATE groups SET "+change+" WHERE id = ?", f.gid))
+		if now := storedGroupRevision(t, f.app, f.gid); now == before {
+			t.Errorf("%s left the token at %q", change, now)
+		}
+	}
+	before := storedGroupRevision(t, f.app, f.gid)
+	gormMust(t, f.app.DB.Exec("UPDATE groups SET name = 'There' WHERE id = ?", f.gid))
+	gormMust(t, f.app.DB.Exec("UPDATE groups SET name = 'Other' WHERE id = ?", f.gid))
+	if now := storedGroupRevision(t, f.app, f.gid); now != before {
+		t.Fatalf("a name changed and changed back: %q, want %q again", now, before)
+	}
+	if err := f.app.DB.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Exec("SET LOCAL TIME ZONE 'Asia/Tokyo'").Error; err != nil {
+			return err
+		}
+		elsewhere, err := f.app.groupRevisionIn(tx, f.gid)
+		if err == nil && elsewhere != before {
+			err = fmt.Errorf("a session in another time zone read %q, want %q", elsewhere, before)
+		}
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
 // Only the group's managers read its revision: a member, a signed-in
 // non-member and a visitor get none, on the group page or in a list.
 func TestGroupRevisionIsReadOnlyByItsManagers(t *testing.T) {
@@ -2852,7 +2906,7 @@ func TestGroupRevisionIsReadOnlyByItsManagers(t *testing.T) {
 	newTestUser(t, f.app, "neighbour", "password1234", models.RoleMember)
 	detail := groupDetailPath(f.gid)
 	for label, c := range map[string]*apiClient{"admin": f.admin, "leader": lead} {
-		if !strings.Contains(apiDo(t, c, "GET", detail, nil, http.StatusOK), `"revision":"`+f.app.groupRevision(&g)+`"`) {
+		if !strings.Contains(apiDo(t, c, "GET", detail, nil, http.StatusOK), `"revision":"`+storedGroupRevision(t, f.app, f.gid)+`"`) {
 			t.Errorf("the %s's read carries no current revision", label)
 		}
 	}
@@ -2880,11 +2934,10 @@ func TestGroupCoverMovesTheRevision(t *testing.T) {
 	path := f.groupPath()
 	var g models.Group
 	gormMust(t, f.app.DB.First(&g, f.gid))
-	was := g.EditRevision
+	was := storedGroupRevision(t, f.app, f.gid)
 	apiDo(t, f.admin, "DELETE", path+"/cover", nil, http.StatusOK)
-	gormMust(t, f.app.DB.First(&g, f.gid))
-	if g.EditRevision != was {
-		t.Fatalf("removing a cover the group never had moved the revision from %d to %d", was, g.EditRevision)
+	if now := storedGroupRevision(t, f.app, f.gid); now != was {
+		t.Fatalf("removing a cover the group never had moved the revision from %q to %q", was, now)
 	}
 	gormMust(t, f.app.DB.Model(&g).Update("image_url", "/uploads/covers/1/old.jpg"))
 	stale := groupBody(t, f.admin, path, map[string]any{"name": "After the cover"})

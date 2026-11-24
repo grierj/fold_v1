@@ -184,15 +184,6 @@ it is for.
   changes no row. Direct reuse with an earlier binary is still ruled out by `00015`.
   `TestGroupStatusCheckMigration`, `TestGroupStatusCheckRefusesAnUnknownStoredValue` and
   `TestGroupStatusCheckWaitsAtMostFiveSeconds` prove it.
-- `00017` adds `groups.edit_revision` for the group form's save (DEC-166), with a BEFORE UPDATE
-  trigger that adds one when any column but `updated_at` and the counter changes and keeps the
-  stored value otherwise, overwriting what a writer supplies. The counter is kept in SQL so a
-  previous binary's writes, and the cover endpoints' `image_url` writes, count too. Up backfills
-  nothing (existing groups read 1). Down drops only the counter and its trigger, even when
-  populated; counters then restart at 1, which is safe because the server binds every token to its
-  own process, so no token from before the Down can match. Direct reuse with an earlier binary is
-  still ruled out by `00015`. `TestGroupEditRevisionMigration` proves it with raw SQL standing in
-  for each writer.
 - A development database migrated by the pre-squash chain must be recreated before a new binary
   runs on it; there is no converter.
 - `scripts/baseline-proof.sh proof` re-proves a tree against the frozen pre-squash chain with a

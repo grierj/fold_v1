@@ -2144,6 +2144,20 @@ describe("the group form's refused save", () => {
     expect(await screen.findByText("Your changes could not be saved.")).toBeInTheDocument();
   });
 
+  it("keeps Change cover photo off while the editor is open, so the page is not read again under a draft", async () => {
+    vi.mocked(Groups.get).mockResolvedValue(managed);
+    openPage();
+    await userEvent.click(await screen.findByRole("button", { name: "More group actions" }));
+    expect(screen.getByRole("menuitem", { name: "Change cover photo" })).toBeEnabled();
+    await userEvent.click(screen.getByRole("menuitem", { name: "Edit group" }));
+    await userEvent.type(await screen.findByLabelText("Group name"), " renamed");
+    await userEvent.click(screen.getByRole("button", { name: "More group actions" }));
+    expect(screen.getByRole("menuitem", { name: "Change cover photo" })).toBeDisabled();
+    await userEvent.keyboard("{Escape}");
+    expect(screen.getByLabelText("Group name")).toHaveValue(`${managed.group.name} renamed`);
+    expect(GroupCover.upload).not.toHaveBeenCalled();
+  });
+
   it("keeps Edit group, Change cover photo and Leave group off while the save is on its way", async () => {
     vi.mocked(Groups.get).mockResolvedValue({ ...managed, isMember: true });
     const saving = deferred<Awaited<ReturnType<typeof Groups.update>>>();

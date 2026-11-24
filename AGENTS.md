@@ -229,8 +229,8 @@ section or decision; check it still exists.
   `changeBookings` or `moveRoomRequest`/`moveRoomRequestsWhere` (`room_status.go`).
 - An event's series and visibility saves and the group form's save name their read (DEC-162, DEC-163, DEC-166): the
   token is built and compared only in `edit_revision.go` (`eventRevision`/`checkEventRevision`,
-  `groupRevision`/`checkGroupRevision`, inside the write transaction under the row lock; the group's counter is
-  `groups.edit_revision`, kept by migration `00017`'s trigger). The single-date edit names its read too, with its own
+  `groupRevisionIn`/`checkGroupRevision`, inside the write transaction under the row lock; the group's token is a
+  digest of its row, read in the snapshot that read the fields beside it, with no counter column). The single-date edit names its read too, with its own
   token (`dateToken`, `api_date_edits.go`, DEC-164). All four forms send it through `web/src/lib/useRevisionSave.ts`,
   which owns the read-and-compare after a refusal; the date editor's comparison is `dateFields`
   (`web/src/lib/editBase.ts`), the group form's `groupFields` (`web/src/components/GroupEditor.tsx`, which mounts once

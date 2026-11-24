@@ -97,23 +97,37 @@ func readEventRevision(tx *gorm.DB, ev *models.Event) error {
 // group than the one it would change. Nothing is written.
 var errGroupChanged = apiErr(http.StatusConflict, "group_changed", "the group changed since this edit was based on it")
 
-// groupRevision is the token the group form based on g holds:
-// 1.<generation>.g<group id>.<group revision>. The "g" and the part count keep
-// it apart from an event's or a date's token. The trigger of migration 00017
-// raises the revision on every change to a tracked column of the group row,
-// the cover endpoints' image_url included.
-func (a *App) groupRevision(g *models.Group) string {
-	return a.editRevision(fmt.Sprintf("g%d", g.ID), g.EditRevision)
+// groupRevisionIn is the token the group form holds for the group row as tx
+// sees it: 1.<generation>.g<group id>.<digest>. The "g" and the part count
+// keep it apart from an event's or a date's token. The digest covers every
+// column but updated_at, which GORM stamps on each write, and created_at,
+// which never changes: every writer of the row changes it, the cover
+// endpoints and a previous binary included, and there is no list of fields to
+// keep. Leaving both timestamps out also keeps a live row's digest the same
+// in every session (a timestamp's text follows the session's time zone, and
+// deleted_at is null). It is the row's value, not a counter: a
+// group changed and changed back matches again, as revisionAudience does. The
+// group has no counter column because adding one fails the statements an
+// older process still serving had prepared (0A000), which the restore drill's
+// running-prior case does not retry on its last read.
+//
+// A reader must call it in the snapshot that read the fields it shows, and a
+// writer under the group's row lock: a token newer than the fields beside it
+// would let a stale form pass.
+func (a *App) groupRevisionIn(tx *gorm.DB, id uint) (string, error) {
+	var digest string
+	if err := tx.Raw("SELECT md5((to_jsonb(g) - ARRAY['updated_at','created_at'])::text) FROM groups g WHERE g.id = ?", id).Row().Scan(&digest); err != nil {
+		return "", err
+	}
+	return a.editRevision(fmt.Sprintf("g%d", id), digest), nil
 }
 
-// checkGroupRevision refuses given unless it is the token of locked, the group
-// as read under its row lock.
-func (a *App) checkGroupRevision(locked *models.Group, given string) error {
-	return checkEditRevision(given, a.groupRevision(locked), errGroupChanged)
-}
-
-// readGroupRevision reads g's revision back into it after the transaction's
-// last write: edit_revision is the trigger's, never written by GORM.
-func readGroupRevision(tx *gorm.DB, g *models.Group) error {
-	return tx.Raw("SELECT edit_revision FROM groups WHERE id = ?", g.ID).Row().Scan(&g.EditRevision)
+// checkGroupRevision refuses given unless it is the token of the group as tx
+// reads it under its row lock.
+func (a *App) checkGroupRevision(tx *gorm.DB, id uint, given string) error {
+	current, err := a.groupRevisionIn(tx, id)
+	if err != nil {
+		return err
+	}
+	return checkEditRevision(given, current, errGroupChanged)
 }

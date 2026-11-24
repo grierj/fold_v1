@@ -186,10 +186,7 @@ subprocess on its own `testdb.Fresh` database (`APP_ENV=dev`, an explicit `SESSI
 temporary `UPLOAD_DIR`, a free `PORT`) and waits up to 60 s for `/healthz` or an exit. v0.1.0 is
 started on a schema already at `00014` before `00015` lands under it: a process that prepared its
 `SELECT *` statements before `00008`–`00014` changed columns fails them with 0A000 ("cached plan
-must not change result type") before it reaches the audit fence. `00017` adds a `groups` column
-while it serves, so a group statement it prepared before fails that way once per connection; the
-test sends such a request again, up to five times, as the restore drill does, until the fence
-refuses it.
+must not change result type") before it reaches the audit fence.
 
 ### Restore tests
 

@@ -267,13 +267,9 @@ type Group struct {
 	// DeletionRequested is set by the leader when they are the only member.
 	// An admin approves it by deleting the group.
 	DeletionRequested bool `gorm:"not null;default:false"`
-	// EditRevision counts changes to the group's tracked columns, kept by a
-	// trigger (migration 00017) so every writer advances it; GORM only reads
-	// it. A group form save is refused when it moved (groupRevision).
-	EditRevision int64 `gorm:"->;not null;default:1"`
-	CreatedAt    time.Time
-	UpdatedAt    time.Time
-	DeletedAt    gorm.DeletedAt `gorm:"index"`
+	CreatedAt         time.Time
+	UpdatedAt         time.Time
+	DeletedAt         gorm.DeletedAt `gorm:"index"`
 }
 
 // Event is a series (or a one-time event). GroupID is nil for a church-wide

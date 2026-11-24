@@ -304,7 +304,9 @@ func (a *App) apiGetGroup(c *gin.Context) {
 		}
 		out.Group, out.UpcomingEvents = summaries[0], upcoming
 		if manager {
-			out.Group.Revision = a.groupRevision(r.group)
+			if out.Group.Revision, err = a.groupRevisionIn(r.tx, r.group.ID); err != nil {
+				return err
+			}
 		}
 		out.Truncated, out.HasMore, out.NextCursor = hasMore, hasMore, nextGroupUpcomingCursor(r.group.ID, upcoming, hasMore)
 		return nil
@@ -407,7 +409,7 @@ func (a *App) apiUpdateGroup(c *gin.Context) {
 		// MemberLimit: a number sets it, null clears it (DEC-39). Lowering it
 		// below the current count is fine; nobody is removed.
 		MemberLimit json.RawMessage `json:"memberLimit"`
-		// Revision is the group's token (groupRevision) of the read the form
+		// Revision is the group's token (groupRevisionIn) of the read the form
 		// opened with; required, whatever the body changes (DEC-166).
 		Revision string `json:"revision"`
 	}
@@ -489,6 +491,7 @@ func (a *App) apiUpdateGroup(c *gin.Context) {
 	errHidden := errors.New("group not found")
 	errForbidden := errors.New("group edit forbidden")
 	var impact visibilityImpactJSON
+	var revision string
 	err := a.contactMutation(contactChange{GroupID: g.ID}, func(tx *gorm.DB) error {
 		// Contact gate -> actor -> group -> membership, before domain writes.
 		actor, err := lockActorIn(tx, u, actorNoKeyUpdate)
@@ -522,7 +525,7 @@ func (a *App) apiUpdateGroup(c *gin.Context) {
 		}
 		// Before any field is applied, the tightening and its consent check
 		// included: a refusal writes nothing.
-		if err := a.checkGroupRevision(&locked, body.Revision); err != nil {
+		if err := a.checkGroupRevision(tx, locked.ID, body.Revision); err != nil {
 			return err
 		}
 		// Downstream visibility/audit helpers use the same fresh actor.
@@ -588,13 +591,14 @@ func (a *App) apiUpdateGroup(c *gin.Context) {
 				return err
 			}
 		}
-		if len(columns) == 0 {
-			return nil
+		if len(columns) != 0 {
+			if err := tx.Model(g).Select(columns).Updates(g).Error; err != nil {
+				return err
+			}
 		}
-		if err := tx.Model(g).Select(columns).Updates(g).Error; err != nil {
-			return err
-		}
-		return readGroupRevision(tx, g)
+		// After the last write, for the answer.
+		revision, err = a.groupRevisionIn(tx, g.ID)
+		return err
 	})
 	if answerStaleSession(c, err) {
 		return
@@ -628,7 +632,7 @@ func (a *App) apiUpdateGroup(c *gin.Context) {
 		jsonError(c, http.StatusInternalServerError, "could not load group")
 		return
 	}
-	summary.Revision = a.groupRevision(g)
+	summary.Revision = revision
 	c.JSON(http.StatusOK, groupResponseJSON{Group: summary})
 }
 
@@ -1183,7 +1187,7 @@ type groupSummaryJSON struct {
 	// MyRole is the viewer's own active role, "leader" or "member", on the
 	// directory and My groups lists only (DEC-94); absent otherwise.
 	MyRole string `json:"myRole,omitempty"`
-	// Revision is the group's token (groupRevision) the group form's save
+	// Revision is the group's token (groupRevisionIn) the group form's save
 	// names, only for the group's managers and only on the group page's read
 	// and that save's answer (DEC-166).
 	Revision string `json:"revision,omitempty"`

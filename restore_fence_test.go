@@ -3378,12 +3378,9 @@ func TestPriorProcessRunningAcrossTheUpgrade(t *testing.T) {
 	// 00008-00014 change columns v0.1.0 reads with SELECT *, and a process
 	// that prepared those statements before they changed fails them with
 	// 0A000 (cached plan must not change result type) before it reaches any
-	// audit row. So v0.1.0 starts on the schema at 14. 00015 must land while
-	// it serves (it keeps v0.1.0 from starting), and 00017 adds
-	// groups.edit_revision then too, so a group statement v0.1.0 prepared
-	// before fails once per connection with 0A000 and rolls back; such a
-	// request is sent again, as the restore drill does, until the audit fence
-	// refuses it. Every final refusal below is the fence's.
+	// audit row. So v0.1.0 starts on the schema at 14, and only 00015, which
+	// changes no column, lands while it serves: every refusal below is the
+	// audit fence's.
 	sqlDB, err := db.DB()
 	if err != nil {
 		t.Fatal(err)
@@ -3461,26 +3458,21 @@ func TestPriorProcessRunningAcrossTheUpgrade(t *testing.T) {
 		{"a group tightening with nobody to cancel", "PUT", fmt.Sprintf("/api/v1/groups/%d", g3.Group.ID), map[string]any{"visibility": "private"}},
 		{"a tightening that cancels", "PUT", fmt.Sprintf("/api/v1/events/%d/visibility", e5.Event.ID), map[string]any{"visibility": "invite_only", "confirm": true}},
 	} {
-		fenced := false
-		for attempt := 1; attempt <= 5 && !fenced; attempt++ {
-			mark := len(old.out.String())
-			code, body := admin.call(r.method, r.path, r.body, nil)
-			if code != http.StatusInternalServerError {
-				t.Errorf("v0.1.0 %s: %d %s, want 500", r.label, code, body)
-			}
-			// Each refusal is the audit fence's own, in v0.1.0's log, or a
-			// stale plan's (0A000) that rolled back before any write.
-			testdb.WaitUntil(t, "v0.1.0 to log the refusal", 5*time.Second, func() bool {
-				logged := old.out.String()[mark:]
-				return strings.Contains(logged, "0A000") || strings.Contains(logged, "checks visibility consent (DEC-158)") && strings.Contains(logged, "SQLSTATE 23514")
-			})
-			fenced = !strings.Contains(old.out.String()[mark:], "0A000")
-			if after := snapshot(); after != before {
-				t.Fatalf("v0.1.0 %s changed rows:\n%s\nwant\n%s", r.label, after, before)
-			}
+		mark := len(old.out.String())
+		code, body := admin.call(r.method, r.path, r.body, nil)
+		if code != http.StatusInternalServerError {
+			t.Errorf("v0.1.0 %s: %d %s, want 500", r.label, code, body)
 		}
-		if !fenced {
-			t.Errorf("v0.1.0 %s failed on a stale plan five times and never reached the fence", r.label)
+		// Each refusal is the audit fence's own, in v0.1.0's log.
+		testdb.WaitUntil(t, "v0.1.0 to log the refusal", 5*time.Second, func() bool {
+			logged := old.out.String()[mark:]
+			return strings.Contains(logged, "checks visibility consent (DEC-158)") && strings.Contains(logged, "SQLSTATE 23514")
+		})
+		if logged := old.out.String()[mark:]; strings.Contains(logged, "0A000") {
+			t.Errorf("v0.1.0 %s failed on a stale plan, not the fence:\n%s", r.label, logged)
+		}
+		if after := snapshot(); after != before {
+			t.Fatalf("v0.1.0 %s changed rows:\n%s\nwant\n%s", r.label, after, before)
 		}
 	}
 	out := old.out.String()

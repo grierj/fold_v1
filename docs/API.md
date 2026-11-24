@@ -636,12 +636,22 @@ session, the authority and the status move are judged (so a person who may no
 longer manage the group, or a move back to `pending`, gets that answer, never
 `group_changed`), any revision but the group's current token is refused with 409
 `group_changed`: missing, empty, garbled, another group's, an event's, one from
-before the server restarted, or one read before any later change to the group
-row (a cover change, an approval, a leader handoff, a deletion request and
-another manager's save included). Nothing is written: no group column,
+before the server restarted, or one read before a change that the group row
+still holds (a cover change, an approval, a leader handoff, a deletion request
+and another manager's save included). Nothing is written: no group column,
 tightening, cancellation, notice, audit row or job. It comes before any field is
 applied and before the consent work. The 200 answer's `group.revision` is the
 token after the save, read again once the write is done.
+
+The token is a digest of the group row (every column but its two timestamps),
+not a counter, so it adds no column: a group changed and then changed back to
+what a form opened with matches that form again. The read gives it from the same
+snapshot as the fields beside it.
+
+A tab opened before a server that requires `revision` sends none: its save is
+refused with `group_changed` until the page is loaded again. That older page
+changed the cover before the details, so a cover picked in it may already be
+saved when the details are refused.
 
 Refused with `group_changed`, the web form reads the group once
 (`GET /api/v1/groups/:id`) and compares what the save can write, as the server

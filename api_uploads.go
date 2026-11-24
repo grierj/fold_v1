@@ -185,9 +185,9 @@ func uploadKeyFromURL(raw string) (string, bool) {
 }
 
 // The cover endpoints take no revision: replacing or removing the file is its
-// own action, and the last one wins. Their image_url write raises
-// groups.edit_revision through migration 00017's trigger like any other
-// column, so a group form opened before it is refused (DEC-166).
+// own action, and the last one wins. Their image_url write changes the group's
+// token like any other column (groupRevisionIn), so a group form opened before
+// it is refused (DEC-166).
 func (a *App) apiUploadGroupCover(c *gin.Context) {
 	g, ok := a.loadManagedGroup(c)
 	if !ok {
