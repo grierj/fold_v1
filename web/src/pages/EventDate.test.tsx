@@ -1,16 +1,15 @@
-import { createRosterWrites } from "../lib/rosterWrites";
+import { createRosterWrites, RosterWritesProvider } from "../lib/rosterWrites";
 import { renderWithAuth } from "../test/auth";
 import { stubService } from "../test/service";
 import { act, cleanup, fireEvent, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter, Outlet, Route, RouterProvider, Routes, createMemoryRouter } from "react-router-dom";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { ApiError, type Credential } from "../api/core";
+import { ApiError } from "../api/core";
 import { Dates, Events } from "../api/events";
 import { Site } from "../api/site";
 import type { Attendee, EventDate, EventDateRead, EventDateAttendee, EventDateSeries, EventDateUsual, EventOccurrence, OccurrenceResponse, RegistrationResponse, SeriesRegistrationResponse } from "../types";
 import { coverSrc } from "../lib/covers";
-import { DateWritesProvider } from "../lib/dateWrites";
 import { invalidateSite } from "../lib/useSite";
 import { occurrence as rosterOccurrence } from "../test/occurrence";
 import { Messages } from "../api/messages";
@@ -764,13 +763,12 @@ function expectNone(words: string[]) {
   for (const w of words) expect(document.body.textContent).not.toContain(w);
 }
 
-// The session's credential and guarded edits, as App provides them (set up by the manager section).
-let credential: Credential | null = null;
+// The date saves the manager section sends.
 let edits: EditSends;
 
 function mountManager() {
   const store = createRosterWrites();
-  const view = render(<DateWritesProvider rosterWrites={store} credential={credential}>{page()}</DateWritesProvider>);
+  const view = render(<RosterWritesProvider rosterWrites={store}>{page()}</RosterWritesProvider>);
 
   return { store, view };
 }
@@ -793,8 +791,8 @@ async function openManagerTools({ minutes = true, roster = true } = {}) {
 
 describe("the manager section", () => {
   beforeEach(async () => {
-    credential = await verifiedCredential();
-    edits = stubEditSends();
+    await verifiedCredential();
+    edits = stubEditSends(51);
     invalidateSite();
     vi.spyOn(Site, "get").mockResolvedValue({ name: "Grace", timezone: "UTC", selfSignup: "off", roomsEnabled: false, pushEnabled: true });
     vi.mocked(Dates.get).mockResolvedValue({ occurrence: occurrence({ canManage: true, canDecline: false, canBlock: false, myRegistration: null }) });
@@ -930,7 +928,7 @@ describe("the manager section", () => {
     const managedReads = vi.mocked(Events.managedDate).mock.calls.length;
     await userEvent.click(screen.getByRole("button", { name: "Save this date" }));
     await waitFor(() => expect(screen.queryByRole("spinbutton", { name: "Minutes" })).not.toBeInTheDocument());
-    expect(edits.sent.map((sent) => [sent.url, sent.revision, sent.changes])).toEqual([["/events/7/occurrences/2026-12-01/edits", "r0", { durationMinutes: 150 }]]);
+    expect(edits.sent.map((sent) => [sent.eventId, sent.date, sent.revision, sent.changes])).toEqual([[7, "2026-12-01", "r0", { durationMinutes: 150 }]]);
     expect(vi.mocked(Dates.get).mock.calls.length).toBe(pageReads + 1);
     await userEvent.click(screen.getByRole("button", { name: "Edit this date" }));
     expect(await screen.findByRole("spinbutton", { name: "Minutes" })).toHaveValue(60);
@@ -1173,6 +1171,81 @@ describe("the manager section", () => {
       texts.stop();
       expect(texts.sawAny(OLD)).toBe(false);
     } finally { vi.useRealTimers(); }
+  });
+});
+
+// DEC-164: the date page's "Edit this date" uses the one conflict protocol. Refused as stale over another change, the
+// editor closes, the page reads again from nothing (failing closed, as any recheck) and the line above the manager
+// tools takes focus.
+describe("the date page when a date's save meets someone else's change", () => {
+  const NOTICE = "This date changed while you were editing, so your changes could not be saved. This is the date as it is now.";
+  const changed = () => new ApiError(409, "x", { code: "date_changed" });
+  const managerAnswer = () => ({ occurrence: occurrence({ canManage: true, canDecline: false, canBlock: false, myRegistration: null }) });
+
+  beforeEach(async () => {
+    await verifiedCredential();
+    edits = stubEditSends(51);
+    invalidateSite();
+    vi.spyOn(Site, "get").mockResolvedValue({ name: "Grace", timezone: "UTC", selfSignup: "off", roomsEnabled: false, pushEnabled: true });
+    vi.mocked(Dates.get).mockResolvedValue(managerAnswer());
+  });
+
+  // Minutes 150, saved into date_changed; the read after it shows `stored`.
+  async function saveInto(stored: Partial<EventOccurrence>, answer: Error = changed()) {
+    vi.mocked(Events.managedDate).mockResolvedValueOnce(managedRead()).mockResolvedValue(managedRead({ revision: "r1", ...stored }));
+    edits.answer(answer);
+    mountManager();
+    await openManagerTools({ roster: false });
+    await userEvent.click(screen.getByRole("button", { name: "Save this date" }));
+  }
+
+  it("sends the save again under the new revision when nothing it can write changed, and closes as a save does", async () => {
+    await saveInto({});
+    await waitFor(() => expect(screen.queryByRole("spinbutton", { name: "Minutes" })).not.toBeInTheDocument());
+    expect(edits.sent.map((s) => [s.revision, s.changes])).toEqual([["r0", { durationMinutes: 150 }], ["r1", { durationMinutes: 150 }]]);
+    expect(screen.queryByText(/could not be saved/)).not.toBeInTheDocument();
+  });
+
+  it("closes as a save does, with no line, when the read shows the save already stored", async () => {
+    await saveInto({ durationMinutes: 150, own: { durationMinutes: 150 } });
+    await waitFor(() => expect(screen.queryByRole("spinbutton", { name: "Minutes" })).not.toBeInTheDocument());
+    expect(edits.sent).toHaveLength(1);
+    expect(screen.queryByText(/could not be saved/)).not.toBeInTheDocument();
+  });
+
+  it("closes the editor over another change, reads the page from nothing and says so above the tools, focused; opening the editor clears it", async () => {
+    const after = later<{ occurrence: EventDate }>();
+    vi.mocked(Dates.get).mockResolvedValueOnce(managerAnswer()).mockReturnValueOnce(after.promise);
+    await saveInto({ location: "Annex", own: { location: "Annex" } });
+    expect(await screen.findByText("Loading this date…")).toBeInTheDocument();
+    expect(screen.queryByRole("spinbutton", { name: "Minutes" })).not.toBeInTheDocument();
+    expect(screen.queryByText(NOTICE)).not.toBeInTheDocument();
+    await act(async () => { after.resolve(managerAnswer()); await after.promise; });
+    const notice = await screen.findByText(NOTICE);
+    await waitFor(() => expect(notice).toHaveFocus());
+    expect(screen.getByRole("region", { name: "Manage this date" }).contains(notice)).toBe(false);
+    expect(edits.sent).toHaveLength(1);
+    await userEvent.click(screen.getByRole("button", { name: "Edit this date" }));
+    expect(screen.queryByText(NOTICE)).not.toBeInTheDocument();
+    expect(await screen.findByRole("textbox", { name: /^Location/ })).toHaveValue("Annex");
+  });
+
+  it("says only that the changes weren't saved, on the cancelled date's page, when the date was cancelled meanwhile", async () => {
+    vi.mocked(Dates.get).mockResolvedValueOnce(managerAnswer()).mockResolvedValue({ occurrence: { cancelled: true, date: "2026-12-01", title: "One invited date" } });
+    await saveInto({ cancelled: true });
+    expect(await screen.findByText("This date was cancelled. Your calendar shows the dates that are still on.")).toBeInTheDocument();
+    const line = await screen.findByText("Your changes could not be saved.");
+    await waitFor(() => expect(line).toHaveFocus());
+    expect(edits.sent).toHaveLength(1);
+  });
+
+  it("says the person can no longer manage the date when a send is refused 403 and the page agrees", async () => {
+    vi.mocked(Dates.get).mockResolvedValueOnce(managerAnswer()).mockResolvedValue({ occurrence: occurrence({ canManage: false, canDecline: false, canBlock: false, myRegistration: null }) });
+    await saveInto({}, new ApiError(403, "SECRET", { code: "forbidden" }));
+    const line = await screen.findByText("You can no longer manage this date, so your changes could not be saved.");
+    await waitFor(() => expect(line).toHaveFocus());
+    expect(screen.queryByRole("heading", { name: "Manage this date" })).not.toBeInTheDocument();
+    expect(document.body.textContent).not.toContain("SECRET");
   });
 });
 

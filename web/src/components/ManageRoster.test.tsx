@@ -1,4 +1,4 @@
-import { createRosterWrites, useRosterWrites, type RosterGate, type RosterWriteEnd, type RosterWrites } from "../lib/rosterWrites";
+import { createRosterWrites, useRosterWrites, RosterWritesProvider, type RosterGate, type RosterWriteEnd, type RosterWrites } from "../lib/rosterWrites";
 import { renderWithAuth } from "../test/auth";
 import { stubService } from "../test/service";
 import { act, screen, waitFor, within } from "@testing-library/react";
@@ -10,7 +10,6 @@ import { Events } from "../api/events";
 import { People } from "../api/people";
 import { occurrence } from "../test/occurrence";
 import type { Attendee, EventOccurrence, User } from "../types";
-import { DateWritesProvider } from "../lib/dateWrites";
 import { ConfirmProvider, usePageFacts } from "./ui/ConfirmDialog";
 import { ManageRoster, type RosterRecheck } from "./ManageRoster";
 
@@ -212,7 +211,7 @@ function renderGated(instance = rosterWith(), store = createRosterWrites()) {
   const onRecheck = vi.fn<(why: RosterRecheck) => void>();
 
   for (const name of REQUESTS) vi.mocked(Events[name]).mockClear();
-  const view = render(<DateWritesProvider rosterWrites={store}><GatedRoster store={store} spies={spies} instance={instance} onRecheck={onRecheck} /></DateWritesProvider>);
+  const view = render(<RosterWritesProvider rosterWrites={store}><GatedRoster store={store} spies={spies} instance={instance} onRecheck={onRecheck} /></RosterWritesProvider>);
 
   return { log: () => logOf(spies), onRecheck, store, view };
 }
@@ -327,7 +326,7 @@ it("begins nothing for a declined question, a stale question or a restore with n
 
  return null; }
 
-  const ui = (facts: string) => <MemoryRouter><ConfirmProvider><Facts value={facts} /><DateWritesProvider rosterWrites={store}><GatedRoster store={store} spies={spies} instance={rosterWith()} onRecheck={() => {}} /></DateWritesProvider></ConfirmProvider></MemoryRouter>;
+  const ui = (facts: string) => <MemoryRouter><ConfirmProvider><Facts value={facts} /><RosterWritesProvider rosterWrites={store}><GatedRoster store={store} spies={spies} instance={rosterWith()} onRecheck={() => {}} /></RosterWritesProvider></ConfirmProvider></MemoryRouter>;
   const view = render(ui("first"));
   await userEvent.click(screen.getByRole("button", { name: "More for Sam" }));
   await userEvent.click(screen.getByRole("menuitem", { name: "Remove Sam" }));
@@ -368,7 +367,7 @@ it("without a gate, rechecks and a success call onChanged as before, failures on
     const onChanged = vi.fn();
     const soon = new Date(Date.now() + 60_000).toISOString();
     const instance = rosterWith({ attendees: [{ ...child, householdPerson: { ...child.householdPerson!, careNotes: "Note", careNotesVisibleUntil: soon } }, sam] });
-    render(<DateWritesProvider rosterWrites={store}><ManageRoster instance={instance} onChanged={onChanged} onClose={() => {}} /></DateWritesProvider>);
+    render(<RosterWritesProvider rosterWrites={store}><ManageRoster instance={instance} onChanged={onChanged} onClose={() => {}} /></RosterWritesProvider>);
     act(() => { window.dispatchEvent(new Event("focus")); });
     expect(onChanged).toHaveBeenCalledTimes(1);
     act(() => { vi.advanceTimersByTime(61_000); });

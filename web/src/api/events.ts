@@ -65,10 +65,12 @@ export const Events = {
     api<VisibilityImpact>(`${path`/events/${id}/occurrences/${date}/visibility-impact`}${query({ visibility, startsLocal: time?.startsLocal, durationMinutes: time?.durationMinutes })}`),
   // The manager's edit base for one date. A scheduled date that has not ended carries its roster (attendeesVisible).
   managedDate: (id: Id, date: string, pinned?: Credential) => api<OccurrenceResponse>(path`/events/${id}/occurrences/${date}`, { pinned }),
+  editDate: (id: Id, date: string, body: DateEditBody) =>
+    api<OccurrenceResponse>(path`/events/${id}/occurrences/${date}/edits`, { method: "POST", body: { attempt: attemptId(), ...body } }),
   delete: (id: Id) => api<unknown>(path`/events/${id}`, { method: "DELETE" }),
 };
 
-/** @public what a guarded date edit may change (POST .../occurrences/:date/edits); the guarded editor sends it once a host adopts it. */
+// What one "Edit this date" save may change (POST .../occurrences/:date/edits).
 export interface DateEditChanges {
   startsLocal?: string;
   durationMinutes?: number;
@@ -79,49 +81,20 @@ export interface DateEditChanges {
   visibility?: Visibility | "series" | null;
 }
 
-const changeKeys = ["startsLocal", "durationMinutes", "title", "location", "capacityOverride", "remoteCapacityOverride", "visibility"] as const;
-
-/** @public one guarded date edit attempt as it may have been sent: its exact address and body, and the fields the person submitted. */
-export interface DateEditEnvelope {
-  readonly url: string;
-  readonly body: string;
-  readonly attempt: string;
-  readonly revision: string;
-  readonly occurrenceId: number;
-  readonly changes: Readonly<DateEditChanges>;
-  readonly reason?: string;
+// One save: the revision of the read the editor opened with (DEC-164), the changes, the reason (sent only with a
+// visibility change) and, after the writer's question, its consent token.
+interface DateEditBody {
+  revision: string;
+  changes: DateEditChanges;
+  reason?: string;
+  consent?: string;
 }
 
+// The server still takes an attempt id: each send makes a new one and none is ever sent twice, so a send is never
+// matched to an earlier one.
 function attemptId(): string {
   return Array.from(crypto.getRandomValues(new Uint8Array(16)), (b) => b.toString(16).padStart(2, "0")).join("");
 }
-
-// A guarded date edit's request, frozen once (DateWritesProvider keeps it in memory only): a replay sends these
-// bytes again, and an answered consent question adds only its token.
-export const DateEdits = {
-  // null when nothing would change or the base is not a manager read's (no occurrence id or revision). The
-  // reason is trimmed and sent only with a visibility change.
-  freeze: (eventId: Id, date: string, occurrenceId: number, revision: string, changes: DateEditChanges, reason?: string): DateEditEnvelope | null => {
-    const kept: DateEditChanges = {};
-
-    for (const key of changeKeys) if (changes[key] !== undefined) Object.assign(kept, { [key]: changes[key] });
-    const why = "visibility" in kept ? reason?.trim() || undefined : undefined;
-
-    if (!Object.keys(kept).length || !revision || !Number.isSafeInteger(occurrenceId) || occurrenceId <= 0) return null;
-    const attempt = attemptId();
-
-    return Object.freeze({
-      url: path`/events/${eventId}/occurrences/${date}/edits`,
-      body: JSON.stringify({ attempt, revision, changes: kept, reason: why }),
-      attempt, revision, occurrenceId, changes: Object.freeze(kept), reason: why,
-    });
-  },
-  withConsent: (sent: DateEditEnvelope, consent: string): DateEditEnvelope =>
-    Object.freeze({ ...sent, body: JSON.stringify({ attempt: sent.attempt, revision: sent.revision, changes: sent.changes, reason: sent.reason, consent }) }),
-  // Pinned to the credential the attempt belongs to; permit, onDispatch and signal as in core's RequestOptions.
-  send: (sent: DateEditEnvelope, pinned: Credential, gate: { permit: () => boolean; onDispatch: () => void; signal: AbortSignal }) =>
-    api<OccurrenceResponse>(sent.url, { method: "POST", json: sent.body, pinned, ...gate }),
-};
 
 // One date of an event: /events/:id/dates/:date, where :date is the
 // occurrence's original YYYY-MM-DD.

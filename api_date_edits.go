@@ -761,6 +761,20 @@ func poolMoved(series, old, next *int) bool {
 	return !intPtrEqual(old, next) && !intPtrEqual(events.EffectiveCapacity(series, old), events.EffectiveCapacity(series, next))
 }
 
+// dateOwn is the date's own values, the columns the guarded edit writes.
+func dateOwn(ev *models.Event, o *models.EventOccurrence) *dateOwnJSON {
+	own := &dateOwnJSON{
+		DurationMinutes: o.DurationOverride, Title: o.TitleOverride, Location: o.LocationOverride,
+		CapacityOverride: o.CapacityOverride, RemoteCapacityOverride: o.RemoteCapacityOverride, Visibility: o.VisibilityOverride,
+	}
+	if o.StartsAtOverride != nil {
+		loc := eventZone(ev.TZID)
+		start := events.FormatWall(o.StartsAtOverride.In(loc), loc)
+		own.StartsLocal = &start
+	}
+	return own
+}
+
 // managedDateIn reads the date a manager edits, including seats, childcare and
 // their own answer. A cancelled date carries no group label.
 func (a *App) managedDateIn(tx *gorm.DB, me *models.User, ev *models.Event, o *models.EventOccurrence, shown *models.Group, revision string) (occurrenceJSON, error) {
@@ -770,6 +784,7 @@ func (a *App) managedDateIn(tx *gorm.DB, me *models.User, ev *models.Event, o *m
 	}
 	inst := occurrenceToJSON(ev, o, shownPlace)
 	inst.Revision = revision
+	inst.Own = dateOwn(ev, o)
 	inst.Cancelled = o.Status == models.OccurrenceCancelled
 	if o.Status == models.OccurrenceScheduled {
 		l := labelGroup(shown, true, &siteNameOnce{a: a, db: tx})

@@ -1,4 +1,4 @@
-import { createRosterWrites, type RosterWrites } from "../lib/rosterWrites";
+import { createRosterWrites, RosterWritesProvider, type RosterWrites } from "../lib/rosterWrites";
 import { renderWithAuth } from "../test/auth";
 import { stubService } from "../test/service";
 import { act, fireEvent, screen, waitFor, within } from "@testing-library/react";
@@ -11,7 +11,6 @@ import { Events } from "../api/events";
 import { People } from "../api/people";
 import { DateRooms } from "../api/rooms";
 import { Site } from "../api/site";
-import { DateWritesProvider } from "../lib/dateWrites";
 import { ERROR_COPY, errorText } from "../lib/errors";
 import { invalidateSite } from "../lib/useSite";
 import { formatDayFull } from "../lib/when";
@@ -87,7 +86,7 @@ function mount(dates: string[] = [A], wrap: (panel: React.ReactNode) => React.Re
   const store = createRosterWrites();
   const onRefused = vi.fn();
   const onClose = vi.fn();
-  render(<MemoryRouter><DateWritesProvider rosterWrites={store}>{wrap(<KeptDatesPanel eventId={7} keptDates={dates.map((date) => ({ date, keptCount: 1 }))} onRefused={onRefused} onClose={onClose} />)}</DateWritesProvider></MemoryRouter>);
+  render(<MemoryRouter><RosterWritesProvider rosterWrites={store}>{wrap(<KeptDatesPanel eventId={7} keptDates={dates.map((date) => ({ date, keptCount: 1 }))} onRefused={onRefused} onClose={onClose} />)}</RosterWritesProvider></MemoryRouter>);
 
   return { store, onRefused, onClose };
 }
@@ -731,11 +730,11 @@ describe("W4k: keyboard focus", () => {
   function Editor({ onAuthorityLost }: { onAuthorityLost: () => void }) {
     const read = useEditRead({ eventId: 7, date: A, occurrenceId: 1 }, "panel", true, () => {});
 
-    return read.kind === "ready" ? <DateEditor base={read.base} permit={read.permit} attempts={read.attempts} onSaved={() => {}} onClose={() => {}} onAuthorityLost={onAuthorityLost} /> : null;
+    return read.kind === "ready" ? <DateEditor opener={{ eventId: 7, date: A, occurrenceId: 1 }} base={read.base} onSaved={() => {}} onConflict={() => {}} onClose={() => {}} onAuthorityLost={onAuthorityLost} /> : null;
   }
 
   it("(d) B refusing closes the panel and focuses the editor's Save; with focus elsewhere it stays there", async () => {
-    const credential = await verifiedCredential();
+    await verifiedCredential();
     const edits = stubEditSends();
     // The editor's own read is pinned to the credential; the panel's reads are not.
     vi.mocked(Events.managedDate).mockImplementation((_id, date, pinned) => Promise.resolve(pinned ? { occurrence: occurrence({ revision: "r0", attendeesVisible: true }) } : read(date)));
@@ -743,7 +742,7 @@ describe("W4k: keyboard focus", () => {
     for (const inside of [true, false]) {
       edits.answer(new ApiError(409, "SECRET", { code: "date_kept_after_leaving", keptDates: [{ date: A, keptCount: 1 }, { date: B, keptCount: 1 }] }));
       const onAuthorityLost = vi.fn();
-      const view = render(<MemoryRouter><DateWritesProvider credential={credential}><Editor onAuthorityLost={onAuthorityLost} /></DateWritesProvider></MemoryRouter>);
+      const view = render(<MemoryRouter><RosterWritesProvider><Editor onAuthorityLost={onAuthorityLost} /></RosterWritesProvider></MemoryRouter>);
       const minutes = await screen.findByRole("spinbutton", { name: "Minutes" });
       await waitFor(() => expect(screen.getByRole("button", { name: "Save this date" })).toBeEnabled());
       await userEvent.clear(minutes);

@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 import { ApiError, credentialCurrent, currentCredential } from "../api/core";
 import { errorCode } from "./errors";
+import { outcomeOf } from "./rosterWrites";
+import { isNumber, isObject, isString } from "./wireValues";
 
 // changed: what is stored differs from what the form opened with and from what the save would leave. gone: this
 // person may no longer make this save.
@@ -24,12 +26,51 @@ const MAX_SENDS = 3;
 // The server says the person may no longer manage or see what they were editing.
 export const lostAuthority = (err: ApiError) => err.status === 403 || err.status === 404;
 
-// useRevisionSave is the one conflict protocol for a manager's save (DEC-162, DEC-163). The save names the read the
-// form opened with (`revision`, kept from the first render, like `opened`). On a refusal (`event_changed`) the value
-// is read once and compared, in this order: what is stored is what this save would leave (`intended`: an earlier
-// press stored it and its answer was lost), so the save is done and nothing more is sent; nothing the save can write
-// has changed since the form opened (the person's own room booking, a restart), so the same save goes again under the
-// new revision; anything else goes to `onConflict`, and the page shows what is stored.
+// A send that may have been stored with its answer lost (outcomeOf's "unsure"). A form's own reason to stop, which is
+// no Error (a question answered no), sent nothing.
+const unanswered = (cause: unknown) => cause instanceof Error && outcomeOf(cause) === "unsure";
+
+// What the transport throws for a body it cannot read (api/core.ts), so the form says what it always says then.
+const unreadableAnswer = () => new ApiError(502, "unreadable answer", {}, true);
+
+interface SavedThing {
+  id: number;
+  revision: string;
+}
+
+// A send of this draft got no answer (`current`), and what it carried that no read shows (`unseen`).
+export interface LostSend {
+  current: boolean;
+  unseen?: string;
+}
+
+// What a save that landed answers: the thing it saved, with its new revision.
+type SavedAnswer = { event: SavedThing } | { occurrence: SavedThing };
+
+// A save's answer names the thing saved: `{ [key]: { id, revision } }` with this id and a revision. Anything else (a
+// page from something in between, which reads as {}, or another thing's answer) is no answer.
+export const answerNames = (key: "event" | "occurrence", id: number) => (answer: unknown): answer is SavedAnswer => {
+  if (!isObject(answer)) return false;
+  const thing = key === "event" ? "event" in answer && answer.event : "occurrence" in answer && answer.occurrence;
+
+  return isObject(thing) && "id" in thing && "revision" in thing && isNumber(thing.id) && thing.id === id && isString(thing.revision) && thing.revision !== "";
+};
+
+// useRevisionSave is the one conflict protocol for a manager's save (DEC-162, DEC-163, DEC-164). The save names the read
+// the form opened with (`revision`, kept from the first render, like `opened`). On a refusal (`changedCode`: an event's
+// `event_changed`, a single date's `date_changed`) the value is read once and compared, in this order: what is stored
+// is what this save would leave (`intended`: an earlier press stored it and its answer was lost), so the save is done
+// and nothing more is sent; nothing the save can write has changed since the form opened (the person's own room
+// booking, a restart), so the same save goes again under the new revision; anything else goes to `onConflict`, and
+// the page shows what is stored.
+// A save counts only when its answer names the thing saved (`answers`, usually `answerNames`); any other answer, like a
+// dropped connection or a 5xx, leaves the outcome unknown and is thrown for the form's ordinary error. Once a send from
+// this form got no answer, until a save lands, a refusal ends only as already stored or as a conflict: the form never
+// sends again under a newer revision, which could re-apply a change someone deliberately undid after the lost send
+// stored it (issue 455). `lost` keeps that for a form that may be unmounted and mounted again with the same draft.
+// A save may carry what no read shows (`unseen`: the reason a visibility change is recorded and announced with). What
+// is stored then counts as this save only when the send that got no answer carried the same: a reason typed since
+// was never stored, so that is a conflict, not a save.
 // Repeated refusals alone are never a conflict. Only the form and the sign-in that pressed Save send again: an answer
 // that lands after the form went away, or after this tab took another account, sends nothing more. A 403 or 404 to
 // any send or to the read says the person may no longer manage or see what they were editing: that is `onConflict`
@@ -47,15 +88,23 @@ export function useRevisionSave<T, F>({
   revision,
   read,
   fields,
+  answers,
+  lost: kept,
   onConflict,
+  changedCode = "event_changed",
 }: {
   opened: T;
   revision: string | undefined;
   read: () => Promise<RevisionRead<T>>;
   fields: (value: T) => F | null;
+  answers: (answer: unknown) => answer is SavedAnswer;
+  lost?: LostSend;
   onConflict?: (why: RevisionConflict) => void;
+  changedCode?: "event_changed" | "date_changed";
 }) {
   const [base] = useState(() => ({ opened, revision }));
+  const own = useRef<LostSend>({ current: false });
+  const lost = kept ?? own.current;
   const mounted = useRef(true);
 
   useEffect(() => {
@@ -64,7 +113,7 @@ export function useRevisionSave<T, F>({
     return () => { mounted.current = false; };
   }, []);
 
-  return async function send<R>(write: (revision: string | undefined) => Promise<R>, intended: T): Promise<RevisionSent> {
+  return async function send<R>(write: (revision: string | undefined) => Promise<R>, intended: T, unseen = ""): Promise<RevisionSent> {
     const conflict = (why: RevisionConflict): RevisionSent => {
       onConflict?.(why);
 
@@ -78,15 +127,42 @@ export function useRevisionSave<T, F>({
     const sameSignIn = () => (credential === null ? currentCredential() === null : credentialCurrent(credential));
     let current = base.revision;
 
-    for (let sends = 1; ; sends++) {
-      try {
-        await write(current);
+    const noAnswer = () => {
+      lost.current = true;
+      lost.unseen = unseen;
+    };
 
-        return "saved";
+    const landed = () => {
+      lost.current = false;
+      lost.unseen = undefined;
+    };
+
+    for (let sends = 1; ; sends++) {
+      let answer: R | undefined;
+      let refused = false;
+
+      try {
+        answer = await write(current);
       } catch (err) {
+        if (unanswered(err)) noAnswer();
+
         if (err instanceof ApiError && lostAuthority(err)) return conflict("gone");
 
-        if (errorCode(err) !== "event_changed") throw err;
+        if (errorCode(err) !== changedCode) throw err;
+
+        refused = true;
+      }
+
+      if (!refused) {
+        if (!answers(answer)) {
+          noAnswer();
+
+          throw unreadableAnswer();
+        }
+
+        landed();
+
+        return "saved";
       }
 
       if (!mounted.current) return "left";
@@ -109,9 +185,15 @@ export function useRevisionSave<T, F>({
 
       const now = fields(stored.value);
 
-      if (same(now, goal)) return "saved";
+      if (same(now, goal)) {
+        if (unseen !== (lost.unseen ?? "")) return conflict("changed");
 
-      if (!same(now, was)) return conflict("changed");
+        landed();
+
+        return "saved";
+      }
+
+      if (!same(now, was) || lost.current) return conflict("changed");
 
       if (sends === MAX_SENDS) return "refused";
 

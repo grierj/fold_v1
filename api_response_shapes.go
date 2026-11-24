@@ -311,6 +311,21 @@ type occurrenceResponseJSON struct {
 	Occurrence occurrenceJSON `json:"occurrence"`
 }
 
+// dateOwnJSON is what a date holds of its own, as the guarded edit writes it
+// (the names are its changes'), each absent while the date falls back to the
+// event's value (or the group's place). Only the manager's read of the date
+// carries it (managedDateIn): the editor compares these after a refused save
+// (DEC-164). The start is the wall clock in the event's zone, as the save sends it.
+type dateOwnJSON struct {
+	StartsLocal            *string `json:"startsLocal,omitempty"`
+	DurationMinutes        *int    `json:"durationMinutes,omitempty"`
+	Title                  *string `json:"title,omitempty"`
+	Location               *string `json:"location,omitempty"`
+	CapacityOverride       *int    `json:"capacityOverride,omitempty"`
+	RemoteCapacityOverride *int    `json:"remoteCapacityOverride,omitempty"`
+	Visibility             *string `json:"visibility,omitempty"`
+}
+
 // impactResetDateJSON is one date an event reset would change, as its review
 // shows it: the date's own visibility before the reset (DEC-158).
 type impactResetDateJSON struct {

@@ -301,9 +301,6 @@ interface SendOptions {
   anonymousOK?: boolean;
   rotatesCsrf?: boolean;
   pinned?: Credential | true | null;
-  permit?: () => boolean;
-  onDispatch?: () => void;
-  signal?: AbortSignal;
   // A 304 is an answer, not a failure (the badge's ETag poll).
   notModifiedOK?: boolean;
 }
@@ -334,9 +331,7 @@ async function send(url: string, opts: SendOptions = {}): Promise<Response> {
   const pin = opts.pinned === true ? current : opts.pinned;
 
   if (pin !== undefined) {
-    while (rotation && !opts.signal?.aborted) await untilEither(rotation, opts.signal);
-
-    if (opts.signal?.aborted) throw new NotSent();
+    while (rotation) await rotation;
 
     if (!pin || !pin.verified || !credentialCurrent(pin)) throw new CredentialLost(false);
     headers["Fold-Session-Check"] = "v2";
@@ -345,7 +340,7 @@ async function send(url: string, opts: SendOptions = {}): Promise<Response> {
     headers["X-CSRF-Token"] = await ensureCsrf();
   }
 
-  const init: RequestInit = { method, headers, body: opts.body, credentials: "include", cache: opts.cache, signal: opts.signal };
+  const init: RequestInit = { method, headers, body: opts.body, credentials: "include", cache: opts.cache };
   let res: Response;
   // Whether the lifetime that sent this request is still the tab's: asked once
   // a 401's body is decoded, since its headers can arrive long before it.
@@ -369,14 +364,10 @@ async function send(url: string, opts: SendOptions = {}): Promise<Response> {
   } else {
     if (pin && !credentialCurrent(pin)) throw new CredentialLost(false);
 
-    // Asked after every await, so nothing can change between it and the fetch.
-    if (opts.permit && !opts.permit()) throw new NotSent();
     const sentAt = invalidations;
     const sentWith = current;
     const sentMarker = liveMarker();
-    const sending = fetch(`/api/v1${url}`, init);
-    opts.onDispatch?.();
-    res = await sending;
+    res = await fetch(`/api/v1${url}`, init);
     ownLifetime = () => sentAt === invalidations && current === sentWith && liveMarker() === sentMarker;
   }
 
@@ -457,34 +448,9 @@ async function rotate<T>(request: () => Promise<T>): Promise<T> {
   }
 }
 
-// A request its permit withheld: nothing was sent.
-class NotSent extends Error {}
-
-// A rotation can hang on its own fetch; an aborted request must not wait for it holding its body.
-function untilEither(rotating: Promise<void>, signal: AbortSignal | undefined): Promise<void> {
-  if (!signal) return rotating;
-
-  return new Promise((resolve) => {
-    if (signal.aborted) return resolve();
-    signal.addEventListener("abort", () => resolve(), { once: true });
-    void rotating.then(resolve);
-  });
-}
-
 export interface RequestOptions {
   method?: string;
   body?: unknown;
-  // json: a body already serialized, sent byte for byte (a guarded date edit's frozen request). Only on a
-  // pinned request that rotates nothing.
-  json?: string;
-  // permit: asked once more immediately before the fetch, after every await (a credential change, the CSRF
-  // token); false sends nothing. onDispatch: told as the request is handed to fetch, so the caller knows it
-  // may have arrived.
-  permit?: () => boolean;
-  onDispatch?: () => void;
-  // signal: aborting it before the fetch sends nothing; after, the fetch is cancelled, which cannot recall what
-  // already reached the server.
-  signal?: AbortSignal;
   // anonymousOK: a 401 just means "not signed in" (the boot-time session
   // check), so don't send the visitor to /login; public pages stay public.
   anonymousOK?: boolean;
@@ -504,15 +470,13 @@ export async function api<T>(url: string, opts: RequestOptions = {}): Promise<T>
   const headers: RequestHeaders = { Accept: "application/json" };
   let body: string | undefined;
 
-  if (opts.body !== undefined || opts.json !== undefined) {
+  if (opts.body !== undefined) {
     headers["Content-Type"] = "application/json";
-    body = opts.json ?? JSON.stringify(opts.body);
+    body = JSON.stringify(opts.body);
   }
 
   const pin = opts.pinned === true ? current : opts.pinned;
-
-  if ((opts.json !== undefined || opts.permit) && (!opts.pinned || opts.rotatesCsrf || opts.body !== undefined)) throw new NotSent();
-  const res = await send(url, { method: opts.method, headers, body, anonymousOK: opts.anonymousOK, rotatesCsrf: opts.rotatesCsrf, pinned: pin, permit: opts.permit, onDispatch: opts.onDispatch, signal: opts.signal });
+  const res = await send(url, { method: opts.method, headers, body, anonymousOK: opts.anonymousOK, rotatesCsrf: opts.rotatesCsrf, pinned: pin });
   const { data, readable } = await readBody(res);
 
   if (pin !== undefined) {

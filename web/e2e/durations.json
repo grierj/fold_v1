@@ -14,6 +14,7 @@
   "contact-history.spec.ts": 8.1,
   "contact-requests.spec.ts": 16.3,
   "csp.spec.ts": 3.2,
+  "date-revision.spec.ts": 12.0,
   "date-viewport.spec.ts": 55,
   "deeplink.spec.ts": 1.6,
   "departure.spec.ts": 22.3,

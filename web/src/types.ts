@@ -213,6 +213,18 @@ export interface Attendee {
   childcareAgesNote?: string;
 }
 
+// What a date holds of its own, as the guarded date edit writes it (its changes' names); a field is absent while the
+// date falls back to the event's value (or the group's place). startsLocal is the wall clock in the event's zone.
+export interface DateOwn {
+  startsLocal?: string;
+  durationMinutes?: number;
+  title?: string;
+  location?: string;
+  capacityOverride?: number;
+  remoteCapacityOverride?: number;
+  visibility?: Visibility;
+}
+
 // One date of an event. date is the series date and stays put when a
 // per-date edit moves the clock. startsAt/endsAt are UTC; startsLocal and
 // endsLocal are the wall clock in tzid.
@@ -220,6 +232,8 @@ export interface EventOccurrence {
  dateUrl?: string;
  // The date's edit token, only for its managers (the guarded date edit names it).
  revision?: string;
+ // What the date holds of its own, only on a manager's edit base (DEC-164).
+ own?: DateOwn;
  // Set only on a manager's edit base, which also answers a cancelled date.
  cancelled?: boolean;
  groupVisibility?: Visibility;
@@ -1950,14 +1964,14 @@ export interface OccurrenceResponse {
 }
 
 // What a 409 date_needs_consent carries beside error and code.
-/** @public Go JSON contract, checked by TestWebTypesMatchGoJSON; the guarded date editor reads it once the cutover slice lands. */
+/** @public Go JSON contract, checked by TestWebTypesMatchGoJSON; the date editor reads the impact through lib/visibilityConsent dateDecision. */
 export interface DateNeedsConsentResponse {
   impact: VisibilityImpact;
 }
 
 // What a 409 date_changed from the guarded date edit may carry: baseSuperseded only when the base sent is
 // proved older than the date, so an earlier send of it can never apply.
-/** @public Go JSON contract, checked by TestWebTypesMatchGoJSON; lib/dateWrites reads the key from the error's data. */
+/** @public Go JSON contract, checked by TestWebTypesMatchGoJSON; the web client ignores it and reads the date again (DEC-164). */
 export interface DateChangedResponse {
   baseSuperseded?: boolean;
 }

@@ -1,8 +1,8 @@
-import { createRosterWrites, type RosterWrites } from "../lib/rosterWrites";
+import { createRosterWrites, RosterWritesProvider, type RosterWrites } from "../lib/rosterWrites";
 import { requiredElement } from "../test/dom";
 import { renderWithAuth } from "../test/auth";
 import { stubService } from "../test/service";
-import { act, cleanup, fireEvent, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter, Outlet, Route, RouterProvider, Routes, createMemoryRouter } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -14,7 +14,6 @@ import { Site } from "../api/site";
 import { Adds } from "../api/adds";
 import { People } from "../api/people";
 import { UnsavedChangesBlocker } from "../lib/unsavedChanges";
-import { DateWritesProvider } from "../lib/dateWrites";
 import { addRequest } from "../test/addRequest";
 import type { EventDetailResponse, EventOccurrence, NeedsRoom, OccurrenceResponse } from "../types";
 import { occurrence } from "../test/occurrence";
@@ -23,7 +22,7 @@ import { endsFor, removedRow, ROSTER_ENDS, ROSTER_OPS, startHeld } from "../test
 import { EventDetail } from "./EventDetail";
 import { ERROR_COPY } from "../lib/errors";
 import { storedEdit, stubEditSends, verifiedCredential, type EditSends } from "../test/guardedEdits";
-import { setMarkerCookie } from "../test/credential";
+import { clearMarkerCookie, setMarkerCookie } from "../test/credential";
 import { erasureCases, SignedInSession } from "../test/session";
 
 const composer = vi.hoisted(() => ({ on: false, admin: false }));
@@ -66,7 +65,7 @@ const page: EventDetailResponse = {
   canManage: true, canSetVisibility: false,
 };
 
-// The session's credential and its guarded date edits, as App provides them around every route.
+// The tab's credential and the date saves the page sends.
 let credential: Credential;
 let edits: EditSends;
 
@@ -77,7 +76,8 @@ function stubEditorReads() {
     const latest = shown[shown.length - 1] ?? page;
     const listed = latest.occurrences.find((o) => o.date === date) ?? page.occurrences[0];
 
-    return { occurrence: { ...listed, revision: "r0" } };
+    // The date's own visibility is its override, as the server reads both from one column.
+    return { occurrence: { ...listed, revision: "r0", own: { ...listed.own, visibility: listed.visibilityOverride } } };
   });
 }
 
@@ -96,7 +96,7 @@ beforeEach(async () => {
 const challenge = (registrants: number, consent = "c".repeat(32), current: "public" | "private" = "public", target: "private" | "invite_only" = "private") => new ApiError(409, "x", { code: "date_needs_consent", impact: { visibility: target, currentVisibility: current, tightened: [{ id: 7, title: "One date", visibility: current, registrants, occurrenceId: 1 }], leaderOpened: [], consent } });
 
 function renderPage(path = "/events/7") {
-  render(<MemoryRouter initialEntries={[path]}><DateWritesProvider credential={credential}><Routes><Route path="/events/:id" element={<EventDetail />} /></Routes></DateWritesProvider></MemoryRouter>);
+  render(<MemoryRouter initialEntries={[path]}><RosterWritesProvider><Routes><Route path="/events/:id" element={<EventDetail />} /></Routes></RosterWritesProvider></MemoryRouter>);
 }
 
 function deferred<T>() {
@@ -698,7 +698,7 @@ describe("EventDetail header actions and ?manage (DEC-99)", () => {
     vi.mocked(Events.get).mockResolvedValue(page);
     const put = deferred<{ event: typeof page.event }>();
     vi.mocked(Events.update).mockReturnValueOnce(put.promise);
-    render(<main id="main" tabIndex={-1}><MemoryRouter initialEntries={["/events/7"]}><DateWritesProvider credential={credential}><Routes><Route path="/events/:id" element={<EventDetail />} /></Routes></DateWritesProvider></MemoryRouter></main>);
+    render(<main id="main" tabIndex={-1}><MemoryRouter initialEntries={["/events/7"]}><RosterWritesProvider><Routes><Route path="/events/:id" element={<EventDetail />} /></Routes></RosterWritesProvider></MemoryRouter></main>);
     await userEvent.click(await screen.findByRole("button", { name: "Edit event" }));
     const title = screen.getByLabelText("Title");
     await userEvent.type(title, "{Enter}");
@@ -707,7 +707,7 @@ describe("EventDetail header actions and ?manage (DEC-99)", () => {
     expect(screen.getByRole("button", { name: "Edit event" })).toBeDisabled();
     const again = deferred<typeof page>();
     vi.mocked(Events.get).mockReturnValueOnce(again.promise);
-    await act(async () => { put.resolve({ event: page.event }); await put.promise; });
+    await act(async () => { put.resolve({ event: { ...page.event, revision: "e2" } }); await put.promise; });
     expect(document.activeElement).toBe(document.getElementById("main"));
     await act(async () => { again.resolve(page); await again.promise; });
     const edit = await screen.findByRole("button", { name: "Edit event" });
@@ -717,7 +717,7 @@ describe("EventDetail header actions and ?manage (DEC-99)", () => {
 
   it("gives focus back to Edit event when the editor is closed", async () => {
     vi.mocked(Events.get).mockResolvedValue(page);
-    render(<main id="main" tabIndex={-1}><MemoryRouter initialEntries={["/events/7"]}><DateWritesProvider credential={credential}><Routes><Route path="/events/:id" element={<EventDetail />} /></Routes></DateWritesProvider></MemoryRouter></main>);
+    render(<main id="main" tabIndex={-1}><MemoryRouter initialEntries={["/events/7"]}><RosterWritesProvider><Routes><Route path="/events/:id" element={<EventDetail />} /></Routes></RosterWritesProvider></MemoryRouter></main>);
     await userEvent.click(await screen.findByRole("button", { name: "Edit event" }));
     await userEvent.click(screen.getByRole("button", { name: "Close" }));
     const edit = screen.getByRole("button", { name: "Edit event" });
@@ -729,12 +729,12 @@ describe("EventDetail header actions and ?manage (DEC-99)", () => {
     vi.mocked(Events.get).mockResolvedValue(page);
     const put = deferred<{ event: typeof page.event }>();
     vi.mocked(Events.update).mockReturnValueOnce(put.promise);
-    render(<main id="main" tabIndex={-1}><button>Elsewhere</button><MemoryRouter initialEntries={["/events/7"]}><DateWritesProvider credential={credential}><Routes><Route path="/events/:id" element={<EventDetail />} /></Routes></DateWritesProvider></MemoryRouter></main>);
+    render(<main id="main" tabIndex={-1}><button>Elsewhere</button><MemoryRouter initialEntries={["/events/7"]}><RosterWritesProvider><Routes><Route path="/events/:id" element={<EventDetail />} /></Routes></RosterWritesProvider></MemoryRouter></main>);
     await userEvent.click(await screen.findByRole("button", { name: "Edit event" }));
     await userEvent.type(screen.getByLabelText("Title"), "{Enter}");
     const elsewhere = screen.getByRole("button", { name: "Elsewhere" });
     elsewhere.focus();
-    await act(async () => { put.resolve({ event: page.event }); await put.promise; });
+    await act(async () => { put.resolve({ event: { ...page.event, revision: "e2" } }); await put.promise; });
     await waitFor(() => expect(screen.getByRole("button", { name: "Edit event" })).toHaveAttribute("aria-expanded", "false"));
     expect(document.activeElement).toBe(elsewhere);
   });
@@ -743,11 +743,11 @@ describe("EventDetail header actions and ?manage (DEC-99)", () => {
     vi.mocked(Events.get).mockResolvedValue(page);
     const put = deferred<{ event: typeof page.event }>();
     vi.mocked(Events.update).mockReturnValueOnce(put.promise);
-    render(<main id="main" tabIndex={-1}><MemoryRouter initialEntries={["/events/7"]}><DateWritesProvider credential={credential}><Routes><Route path="/events/:id" element={<EventDetail />} /></Routes></DateWritesProvider></MemoryRouter></main>);
+    render(<main id="main" tabIndex={-1}><MemoryRouter initialEntries={["/events/7"]}><RosterWritesProvider><Routes><Route path="/events/:id" element={<EventDetail />} /></Routes></RosterWritesProvider></MemoryRouter></main>);
     await userEvent.click(await screen.findByRole("button", { name: "Edit event" }));
     await userEvent.type(screen.getByLabelText("Title"), "{Enter}");
     screen.getByRole("button", { name: "More event actions" }).focus();
-    await act(async () => { put.resolve({ event: page.event }); await put.promise; });
+    await act(async () => { put.resolve({ event: { ...page.event, revision: "e2" } }); await put.promise; });
     const edit = await screen.findByRole("button", { name: "Edit event" });
     await waitFor(() => expect(edit).toHaveAttribute("aria-expanded", "false"));
     await waitFor(() => expect(document.activeElement).toBe(screen.getByRole("button", { name: "Edit event" })));
@@ -846,7 +846,7 @@ describe("EventDetail ?edit=series (DEC-161)", () => {
 
   it("stays closed after a save, when the page has been read again", async () => {
     vi.mocked(Events.get).mockResolvedValue(groupEvent);
-    vi.mocked(Events.update).mockResolvedValue({ event: groupEvent.event });
+    vi.mocked(Events.update).mockResolvedValue({ event: { ...groupEvent.event, revision: "e2" } });
     renderPage(link);
     await userEvent.type(await screen.findByLabelText("Title"), " night{Enter}");
     await waitFor(() => expect(Events.get).toHaveBeenCalledTimes(2));
@@ -1012,44 +1012,6 @@ describe("EventDetail dates that need a room", () => {
     await screen.findAllByRole("article");
     expect(screen.queryByRole("heading", { name: /Dates that need a room/ })).not.toBeInTheDocument();
     expect(SeriesRooms.list).not.toHaveBeenCalled();
-  });
-
-  it("asks again for them when a move saved before leaving the event and coming back answers", async () => {
-    const list = needs();
-    const answer = deferred<OccurrenceResponse>();
-    edits.answer(answer.promise);
-
-    const router = createMemoryRouter([
-      { path: "/events/:id", element: <EventDetail /> },
-      { path: "/", element: <p>Home page</p> },
-    ], { initialEntries: ["/events/7"] });
-
-    render(<DateWritesProvider credential={credential}><RouterProvider router={router} /></DateWritesProvider>);
-    await userEvent.click(await screen.findByRole("button", { name: "More for 2026-12-08" }));
-    await userEvent.click(screen.getByRole("menuitem", { name: "Edit this date" }));
-    await screen.findByLabelText("Title");
-    const editor = within(requiredElement(screen.getByLabelText("Title").closest("form"), HTMLFormElement));
-    fireEvent.change(editor.getByLabelText("Date"), { target: { value: "2026-12-09" } });
-    await waitFor(() => expect(editor.getByRole("button", { name: "Save this date" })).toBeEnabled());
-    await userEvent.click(editor.getByRole("button", { name: "Save this date" }));
-    await waitFor(() => expect(edits.sent).toHaveLength(1));
-    expect(edits.sent[0]).toMatchObject({ url: "/events/7/occurrences/2026-12-08/edits", changes: { startsLocal: "2026-12-09T19:00" } });
-
-    await act(() => router.navigate("/"));
-    expect(await screen.findByText("Home page")).toBeInTheDocument();
-    // A new page for the event, with the room list as it was before the move reached the server.
-    await act(() => router.navigate("/events/7"));
-    expect(await screen.findByRole("button", { name: "More for 2026-12-08" })).toBeInTheDocument();
-    await waitFor(() => expect(list.mock.calls.length).toBeGreaterThanOrEqual(2));
-    expect(screen.queryByRole("heading", { name: /Dates that need a room/ })).not.toBeInTheDocument();
-    const asked = list.mock.calls.length;
-
-    // The move lost the date's booking; its answer, held for the session, asks the new page again.
-    list.mockResolvedValue({ rooms: [], dates: 2, defaultRoom: null, needsRoom: [{ date: "2026-12-08", roomName: "Fellowship Hall", status: "requested" }], pending: 0 });
-    await act(async () => answer.resolve({ occurrence: { ...series.occurrences[1], revision: "r1" } }));
-    expect(await screen.findByRole("heading", { name: /Dates that need a room/ })).toBeInTheDocument();
-    expect(screen.getByText("Fellowship Hall isn't free then.")).toBeInTheDocument();
-    expect(list).toHaveBeenCalledTimes(asked + 1);
   });
 
   it("asks nothing and shows nothing while rooms are off", async () => {
@@ -1303,8 +1265,7 @@ describe("EventDetail asks every question in the app's dialog", () => {
     await userEvent.click(save);
     await userEvent.click(within(await screen.findByRole("dialog", { name: "Save this date?" })).getByRole("button", { name: "Save and notify" }));
     await waitFor(() => expect(edits.sent).toHaveLength(3));
-    expect(edits.sent[2]).toMatchObject({ attempt: edits.sent[1].attempt, changes: { visibility: "series" }, consent: token });
-    expect(edits.sent[1].attempt).not.toBe(edits.sent[0].attempt);
+    expect(edits.sent[2]).toMatchObject({ revision: edits.sent[1].revision, changes: { visibility: "series" }, consent: token });
     expect(Events.dateVisibilityImpact).not.toHaveBeenCalled();
   });
 
@@ -1365,30 +1326,6 @@ describe("EventDetail asks every question in the app's dialog", () => {
     expect(screen.getByText("Elsewhere page")).toBeInTheDocument();
   });
 
-  it.each([2, 0])("never asks the question of a save whose editor closed while it was on its way (%i shut out)", async (registrants) => {
-    vi.mocked(Events.get).mockResolvedValue({ ...page, occurrences: [{ ...page.occurrences[0], visibility: "public", visibilityOverride: "public", seriesVisibility: "private" }] });
-    const answer = deferred<OccurrenceResponse>();
-    edits.answer(answer.promise);
-    renderPage();
-    await userEvent.click(await screen.findByRole("button", { name: "More for 2026-12-01" }));
-    await userEvent.click(screen.getByRole("menuitem", { name: "Edit this date" }));
-    await userEvent.click(await screen.findByRole("radio", { name: "Same as series (private)" }));
-    await waitFor(() => expect(screen.getByRole("button", { name: "Save this date" })).toBeEnabled());
-    await userEvent.click(screen.getByRole("button", { name: "Save this date" }));
-    await waitFor(() => expect(edits.sent).toHaveLength(1));
-    // The draft being saved cannot change under it.
-    expect(screen.getByLabelText("Title")).toBeDisabled();
-    await userEvent.click(screen.getByRole("button", { name: "Close" }));
-
-    await act(async () => {
-      if (registrants) answer.reject(challenge(registrants));
-      else answer.resolve(storedEdit(1, "r1"));
-      await answer.promise.catch(() => {});
-    });
-    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
-    expect(edits.sent).toHaveLength(1);
-  });
-
   it("closes the impact question when a refresh keeps the ids and rights but changes the visibility the date inherits", async () => {
     const shown = { ...page, occurrences: [{ ...page.occurrences[0], visibility: "public" as const, visibilityOverride: "public" as const, seriesVisibility: "private" as const }] };
     vi.mocked(Events.get).mockResolvedValue(shown);
@@ -1407,7 +1344,7 @@ describe("EventDetail asks every question in the app's dialog", () => {
     act(() => { window.dispatchEvent(new Event("focus")); });
     await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
     act(() => { yes.click(); });
-    await waitFor(() => expect(screen.getByText("This date changed while you were saving. Check it and save again.")).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByText("The page changed while we were asking, so your changes could not be saved. You can save again.")).toBeInTheDocument());
     await waitFor(() => expect(screen.getByRole("button", { name: "Save this date" })).toBeEnabled());
     expect(edits.sent).toHaveLength(1);
   });
@@ -1516,7 +1453,7 @@ describe("EventDetail asks every question in the app's dialog", () => {
     const answer = deferred<OccurrenceResponse>();
     edits.answer(answer.promise);
     const router = createMemoryRouter([{ path: "/events/:id", element: <EventDetail /> }], { initialEntries: ["/events/7"] });
-    render(<DateWritesProvider credential={credential}><RouterProvider router={router} /></DateWritesProvider>);
+    render(<RosterWritesProvider><RouterProvider router={router} /></RosterWritesProvider>);
     const key = router.state.location.key;
     await userEvent.click(await screen.findByRole("button", { name: "More for 2026-12-01" }));
     await userEvent.click(screen.getByRole("menuitem", { name: "Edit this date" }));
@@ -1528,9 +1465,11 @@ describe("EventDetail asks every question in the app's dialog", () => {
     await act(() => router.navigate("/events/7?manage=2026-12-01"));
     await act(() => router.navigate(-1));
     expect(router.state.location.key).toBe(key);
-    // Another address read the date afresh, without the draft; the save stays on its way for the session.
+    // Another address read the date afresh, without the draft; the save on its way belongs to the editor that went away.
+    // The earlier save's answer could close this editor, so nothing can change until it lands, and the button says why.
     expect(await screen.findByRole("button", { name: "Saving…" })).toBeDisabled();
     expect(screen.getByRole("radio", { name: "Same as series (private)" })).not.toBeChecked();
+    expect(screen.getByRole("radio", { name: "Same as series (private)" })).toBeDisabled();
     await act(async () => { answer.reject(challenge(2)); await answer.promise.catch(() => {}); });
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
     expect(edits.sent).toHaveLength(1);
@@ -1600,7 +1539,7 @@ describe("EventDetail asks every question in the app's dialog", () => {
     act(() => { window.dispatchEvent(new Event("focus")); });
     await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
     act(() => { yes.click(); });
-    await waitFor(() => expect(screen.getByText("This date changed while you were saving. Check it and save again.")).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByText("The page changed while we were asking, so your changes could not be saved. You can save again.")).toBeInTheDocument());
     await waitFor(() => expect(screen.getByRole("button", { name: "Save this date" })).toBeEnabled());
     expect(edits.sent).toHaveLength(1);
   });
@@ -1629,7 +1568,7 @@ describe("EventDetail asks every question in the app's dialog", () => {
     expect(people.getByRole("button", { name: "Add" })).toBeEnabled();
   });
 
-  it("holds a date while its save is on its way, also after its editor closes, so no second save can start, and the answer frees it", async () => {
+  it("keeps Close and the fields off while a save is on its way, and closes the editor once it is stored", async () => {
     const answer = deferred<OccurrenceResponse>();
     edits.answer(answer.promise);
     renderPage();
@@ -1643,19 +1582,16 @@ describe("EventDetail asks every question in the app's dialog", () => {
     await userEvent.click(screen.getByRole("button", { name: "Save this date" }));
     await waitFor(() => expect(edits.sent).toHaveLength(1));
     expect(screen.getByRole("button", { name: "Saving…" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Close" })).toBeDisabled();
     expect(title).toBeDisabled();
 
-    // Closing never ends a save already sent: the date stays closed to another.
-    await userEvent.click(screen.getByRole("button", { name: "Close" }));
-    await userEvent.click(more);
-    expect(screen.getByRole("menuitem", { name: "Edit this date" })).toBeDisabled();
-    await userEvent.keyboard("{Escape}");
-
+    const pageReads = vi.mocked(Events.get).mock.calls.length;
     await act(async () => answer.resolve(storedEdit(1, "r1")));
+    await waitFor(() => expect(screen.queryByLabelText("Title")).not.toBeInTheDocument());
     expect(edits.sent).toHaveLength(1);
-
-    if (!screen.queryByRole("menuitem", { name: "Edit this date" })) await userEvent.click(more);
-    await waitFor(() => expect(screen.getByRole("menuitem", { name: "Edit this date" })).toBeEnabled());
+    expect(vi.mocked(Events.get).mock.calls.length).toBe(pageReads + 1);
+    await userEvent.click(more);
+    expect(screen.getByRole("menuitem", { name: "Edit this date" })).toBeEnabled();
   });
 
   it("shows nothing of a saved date while the page's refresh fails, and opens it on the stored title once the page loads", async () => {
@@ -1705,52 +1641,11 @@ describe("EventDetail asks every question in the app's dialog", () => {
     expect(await screen.findByLabelText("Title")).toBeEnabled();
     await waitFor(() => expect(screen.getByRole("button", { name: "Save this date" })).toBeEnabled());
 
-    // The page's answer reads the date again for the editor, which comes back ready.
+    // The page's answer leaves the editor as it is.
     await act(async () => refresh.resolve(page));
     expect(await screen.findByLabelText("Title")).toBeEnabled();
     await waitFor(() => expect(screen.getByRole("button", { name: "Save this date" })).toBeEnabled());
     expect(edits.sent).toHaveLength(0);
-  });
-
-  it("lets a late update close nothing when its editor went away and came back meanwhile, and the new editor cannot start a second one", async () => {
-    const answer = deferred<OccurrenceResponse>();
-    edits.answer(answer.promise);
-    vi.mocked(Events.register).mockResolvedValue({ registration: {
-      registrationId: 12, userId: 2, eventId: 7, occurrenceId: 1, date: "2026-12-01", status: "going",
-      guestCount: 0, childcareCount: 0, childcareAgesNote: "", waitlistPosition: null, attendanceMode: "in_person",
-    }, people: [] });
-    renderPage();
-    await roster();
-    await userEvent.click(screen.getByRole("button", { name: "More for 2026-12-01" }));
-    await userEvent.click(screen.getByRole("menuitem", { name: "Edit this date" }));
-    await userEvent.clear(await screen.findByLabelText("Title"));
-    await userEvent.type(screen.getByLabelText("Title"), "Carols");
-    await waitFor(() => expect(screen.getByRole("button", { name: "Save this date" })).toBeEnabled());
-    await userEvent.click(screen.getByRole("button", { name: "Save this date" }));
-    await waitFor(() => expect(edits.sent).toHaveLength(1));
-
-    // Managing rights go (the editor unmounts) and come back (a fresh editor for the same date) while the update is held.
-    vi.mocked(Events.get).mockResolvedValue({ ...page, canManage: false });
-    act(() => { window.dispatchEvent(new Event("focus")); });
-    await waitFor(() => expect(screen.queryByLabelText("Title")).not.toBeInTheDocument());
-    vi.mocked(Events.get).mockResolvedValue(page);
-    await userEvent.click(within(screen.getByRole("group", { name: "Your answer" })).getByRole("button", { name: "Going" }));
-    const reopened = await screen.findByLabelText("Title");
-    const editor = within(requiredElement(reopened.closest("form"), HTMLFormElement));
-    expect(editor.getByRole("button", { name: "Saving…" })).toBeDisabled();
-    expect(reopened).toBeDisabled();
-    // The reopened editor read the date as it was before the update.
-    expect(reopened).toHaveValue("Supper");
-
-    const stored = { ...page.occurrences[0], title: "Carols" };
-    vi.mocked(Events.get).mockResolvedValue({ ...page, occurrences: [stored] });
-    await act(async () => answer.resolve({ occurrence: { ...stored, revision: "r1" } }));
-    // The late answer closes nothing; the page's answer reads the date again, so the editor that missed the
-    // update shows the stored title and a save cannot send the old one back.
-    await waitFor(() => expect(screen.getByRole("button", { name: "Save this date" })).toBeEnabled());
-    expect(screen.getByLabelText("Title")).toHaveValue("Carols");
-    expect(screen.getByLabelText("Title")).toBeEnabled();
-    expect(edits.sent).toHaveLength(1);
   });
 
   it.each([["hidden", false], ["hidden and shown again", true]] as const)("asks nothing when seats fill after a long list's date was %s during an add: the draft and the refusal stay", async (_label, reshow) => {
@@ -1799,118 +1694,11 @@ describe("EventDetail asks every question in the app's dialog", () => {
     if (!reshow) {
       await showFirstDate();
       // The withdrawn question's line comes back with the draft.
-      await waitFor(() => expect(screen.getByText("This date changed while you were saving. Check it and save again.")).toBeInTheDocument());
+      await waitFor(() => expect(screen.getByText("The page changed while we were asking, so your changes could not be saved. You can save again.")).toBeInTheDocument());
       expect(screen.getByRole("radio", { name: "Same as series (private)" })).toBeChecked();
     }
 
     await waitFor(() => expect(screen.getByRole("button", { name: "Save this date" })).toBeEnabled());
-  });
-
-  it("keeps a date closed to a second save while its update is on its way, across a reload that remounts every date", async () => {
-    composer.admin = true;
-    const churchWide: EventDetailResponse = { ...page, event: { ...page.event, churchWide: true, hosts: [] } };
-    vi.mocked(Events.get).mockResolvedValue(churchWide);
-    vi.mocked(Events.addHost).mockResolvedValue({ hosts: [] });
-    const answer = deferred<OccurrenceResponse>();
-    edits.answer(answer.promise);
-    renderPage();
-    await userEvent.click(await screen.findByRole("button", { name: "More for 2026-12-01" }));
-    await userEvent.click(screen.getByRole("menuitem", { name: "Edit this date" }));
-    await userEvent.clear(await screen.findByLabelText("Title"));
-    await userEvent.type(screen.getByLabelText("Title"), "Carols");
-    await waitFor(() => expect(screen.getByRole("button", { name: "Save this date" })).toBeEnabled());
-    await userEvent.click(screen.getByRole("button", { name: "Save this date" }));
-    await waitFor(() => expect(edits.sent).toHaveLength(1));
-
-    // Adding a host reloads the whole page (load.retry): every date row goes away and comes back new.
-    const refresh = deferred<EventDetailResponse>();
-    vi.mocked(Events.get).mockReturnValueOnce(refresh.promise);
-    await userEvent.type(screen.getByLabelText("Host email", { exact: false }), "ana@example.com");
-    await userEvent.click(screen.getByRole("button", { name: "Add host" }));
-    await waitFor(() => expect(screen.queryByRole("button", { name: "More for 2026-12-01" })).not.toBeInTheDocument());
-    await act(async () => refresh.resolve(churchWide));
-
-    const more = await screen.findByRole("button", { name: "More for 2026-12-01" });
-    expect(screen.queryByLabelText("Title")).not.toBeInTheDocument();
-    await userEvent.click(more);
-    expect(screen.getByRole("menuitem", { name: "Edit this date" })).toBeDisabled();
-    expect(edits.sent).toHaveLength(1);
-
-    await act(async () => answer.resolve(storedEdit(1, "r1")));
-    expect(edits.sent).toHaveLength(1);
-
-    if (!screen.queryByRole("menuitem", { name: "Edit this date" })) await userEvent.click(more);
-    await waitFor(() => expect(screen.getByRole("menuitem", { name: "Edit this date" })).toBeEnabled());
-  });
-
-  it("keeps a date whose answer never arrived closed on every editor, and its own opener resends the same bytes once", async () => {
-    edits.answer(new TypeError("Failed to fetch"));
-    renderPage();
-    const more = await screen.findByRole("button", { name: "More for 2026-12-01" });
-    await userEvent.click(more);
-    await userEvent.click(screen.getByRole("menuitem", { name: "Edit this date" }));
-    await userEvent.clear(await screen.findByLabelText("Title"));
-    await userEvent.type(screen.getByLabelText("Title"), "Carols");
-    await waitFor(() => expect(screen.getByRole("button", { name: "Save this date" })).toBeEnabled());
-    await userEvent.click(screen.getByRole("button", { name: "Save this date" }));
-    await waitFor(() => expect(screen.getByText("We couldn't tell whether this date saved. Check it below, and try again if you need to.")).toBeInTheDocument());
-    // The page's answer reads the date again, and the doubt shows beside that read.
-    await screen.findByRole("button", { name: "Try again" });
-    await userEvent.click(screen.getByRole("button", { name: "Close" }));
-
-    // Edit stays closed; the doubt is reached through its own opener, outside the menu.
-    await userEvent.click(more);
-    expect(screen.getByRole("menuitem", { name: "Edit this date" })).toBeDisabled();
-    await userEvent.keyboard("{Escape}");
-    await userEvent.click(screen.getByRole("button", { name: "Check your last change to this date" }));
-    const again = await screen.findByRole("button", { name: "Try again" });
-    expect(screen.getByText("Title: Carols")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Save this date" })).toBeDisabled();
-    await waitFor(() => expect(again).toBeEnabled());
-    await userEvent.click(again);
-    await waitFor(() => expect(edits.sent).toHaveLength(2));
-    expect(edits.sent[1].body).toBe(edits.sent[0].body);
-    await waitFor(() => expect(screen.queryByRole("button", { name: "Check your last change to this date" })).not.toBeInTheDocument());
-  });
-
-  it("keeps a date closed to a second update after leaving the event and coming back while the first is on its way, and loads the event again once it answers", async () => {
-    const answer = deferred<OccurrenceResponse>();
-    edits.answer(answer.promise);
-
-    const router = createMemoryRouter([
-      { path: "/events/:id", element: <EventDetail /> },
-      { path: "/", element: <p>Home page</p> },
-    ], { initialEntries: ["/events/7"] });
-
-    // App holds the date updates for the signed-in session, outside every route.
-    render(<DateWritesProvider credential={credential}><RouterProvider router={router} /></DateWritesProvider>);
-    await userEvent.click(await screen.findByRole("button", { name: "More for 2026-12-01" }));
-    await userEvent.click(screen.getByRole("menuitem", { name: "Edit this date" }));
-    await userEvent.clear(await screen.findByLabelText("Title"));
-    await userEvent.type(screen.getByLabelText("Title"), "Carols");
-    await waitFor(() => expect(screen.getByRole("button", { name: "Save this date" })).toBeEnabled());
-    await userEvent.click(screen.getByRole("button", { name: "Save this date" }));
-    await waitFor(() => expect(edits.sent).toHaveLength(1));
-
-    await act(() => router.navigate("/"));
-    expect(await screen.findByText("Home page")).toBeInTheDocument();
-    // A new page for the event, loaded before the update reached the server.
-    await act(() => router.navigate("/events/7"));
-    await userEvent.click(await screen.findByRole("button", { name: "More for 2026-12-01" }));
-    expect(screen.getByRole("menuitem", { name: "Edit this date" })).toBeDisabled();
-    await userEvent.keyboard("{Escape}");
-    expect(screen.getByRole("heading", { level: 2, name: "Supper" })).toBeInTheDocument();
-    const loads = vi.mocked(Events.get).mock.calls.length;
-
-    const stored = { ...page.occurrences[0], title: "Carols" };
-    vi.mocked(Events.get).mockResolvedValue({ ...page, occurrences: [stored] });
-    await act(async () => answer.resolve({ occurrence: { ...stored, revision: "r1" } }));
-    expect(await screen.findByRole("heading", { level: 2, name: "Carols" })).toBeInTheDocument();
-    expect(Events.get).toHaveBeenCalledTimes(loads + 1);
-    expect(edits.sent).toHaveLength(1);
-
-    if (!screen.queryByRole("menuitem", { name: "Edit this date" })) await userEvent.click(screen.getByRole("button", { name: "More for 2026-12-01" }));
-    await waitFor(() => expect(screen.getByRole("menuitem", { name: "Edit this date" })).toBeEnabled());
   });
 
   it.each([["Going", "Just this date"], ["Can't go", "All future dates"]] as const)("closes the %s scope picker when a same-event address change hides its date: %s sends nothing and the draft stays", async (answer, scope) => {
@@ -2090,38 +1878,6 @@ describe("EventDetail asks every question in the app's dialog", () => {
     expect(Events.registerSeries).toHaveBeenCalledWith(7, expect.objectContaining({ status: "going", scope: "all_future" }));
   });
 
-  it("lets an editor that a same-event address change kept open save again once its update answers, sending only what changed since", async () => {
-    const answer = deferred<OccurrenceResponse>();
-    edits.answer(answer.promise);
-    const router = createMemoryRouter([{ path: "/events/:id", element: <EventDetail /> }], { initialEntries: ["/events/7"] });
-    render(<DateWritesProvider credential={credential}><RouterProvider router={router} /></DateWritesProvider>);
-    await userEvent.click(await screen.findByRole("button", { name: "More for 2026-12-01" }));
-    await userEvent.click(screen.getByRole("menuitem", { name: "Edit this date" }));
-    const title = await screen.findByLabelText("Title");
-    await userEvent.clear(title);
-    await userEvent.type(title, "Carols");
-    await waitFor(() => expect(screen.getByRole("button", { name: "Save this date" })).toBeEnabled());
-    await userEvent.click(screen.getByRole("button", { name: "Save this date" }));
-    await act(() => router.navigate("/events/7?manage=2026-12-01"));
-    expect(await screen.findByRole("button", { name: "Saving…" })).toBeDisabled();
-
-    // Another manager moved the date while the title was being saved.
-    const stored = { ...page.occurrences[0], title: "Carols", location: "Annex" };
-    vi.mocked(Events.get).mockResolvedValue({ ...page, occurrences: [stored] });
-    await act(async () => answer.resolve({ occurrence: { ...stored, revision: "r1" } }));
-    expect(edits.sent).toHaveLength(1);
-    // The address it saved from is gone, so the editor stays open, read afresh on the stored date.
-    await waitFor(() => expect(screen.getByRole("button", { name: "Save this date" })).toBeEnabled());
-    expect(screen.getByLabelText("Title")).toBeEnabled();
-    expect(screen.getByLabelText("Title")).toHaveValue("Carols");
-    expect(screen.getByRole("textbox", { name: /^Location/ })).toHaveValue("Annex");
-
-    await userEvent.type(screen.getByLabelText(/^Capacity for this date/), "12");
-    await userEvent.click(screen.getByRole("button", { name: "Save this date" }));
-    await waitFor(() => expect(edits.sent).toHaveLength(2));
-    expect(edits.sent.map((sent) => sent.changes)).toEqual([{ title: "Carols" }, { capacityOverride: 12 }]);
-  });
-
   it("enables the fields and focuses the remote limit when the server refuses it", async () => {
     edits.answer(new ApiError(422, "SECRET", { code: "invalid_remote_capacity_override" }));
     const input = await editDate();
@@ -2153,7 +1909,7 @@ describe("EventDetail and the kept-dates panel (DEC-156)", () => {
   afterEach(() => { vi.useRealTimers(); });
 
   function renderInSession() {
-    render(<MemoryRouter initialEntries={["/events/7"]}><DateWritesProvider credential={credential}><Routes><Route path="/events/:id" element={<EventDetail />} /></Routes></DateWritesProvider></MemoryRouter>);
+    render(<MemoryRouter initialEntries={["/events/7"]}><RosterWritesProvider><Routes><Route path="/events/:id" element={<EventDetail />} /></Routes></RosterWritesProvider></MemoryRouter>);
   }
 
   async function openAndSave() {
@@ -2170,7 +1926,7 @@ describe("EventDetail and the kept-dates panel (DEC-156)", () => {
   for (const event of HOST_EVENTS) {
     for (const outcome of READ_OUTCOMES) {
       it(`event (${event}) settled ${outcome}`, async () => {
-        await runHostCase(event, outcome, { openAndSave, pageLoads: () => vi.mocked(Events.get).mock.calls.length, edits, base: () => keptRead("2026-12-01"), remounts: true });
+        await runHostCase(event, outcome, { openAndSave, pageLoads: () => vi.mocked(Events.get).mock.calls.length, edits, base: () => keptRead("2026-12-01") });
         // A recheck leaves the page alone; a Remove that ended stored or lost asks for it again, once.
         expect(Events.get).toHaveBeenCalledTimes(event === "iv" || event.startsWith("lost-") ? 2 : 1);
       });
@@ -2221,8 +1977,8 @@ describe("EventDetail and the kept-dates panel (DEC-156)", () => {
     const reads = panelReads();
     await act(async () => { write.resolve({}); await write.promise; });
     await waitFor(() => expect(within(rowRoster()).getByRole("textbox", { name: /^Add someone/ })).toBeEnabled());
-    // The panel's own read after the write, and the one its editor's remount makes once the page answers.
-    await waitFor(() => expect(panelReads()).toBe(reads + 2));
+    // The panel's own read after the write: the editor and its panel stay mounted while the page answers.
+    await waitFor(() => expect(panelReads()).toBe(reads + 1));
     expect(Events.removeRegistration).toHaveBeenCalledTimes(1);
   });
 });
@@ -2230,10 +1986,10 @@ describe("EventDetail and the kept-dates panel (DEC-156)", () => {
 // A roster write on a date (Add, restore or Remove, from the date row's roster, the date editor's kept-dates panel
 // or the series editor's) holds its editor's Save from its begin to its end (DEC-158, VC2): nothing is previewed or
 // sent while it is on its way, a begin closes an open question as no, and a begin during the count's read opens
-// nothing. A write that may have stored something asks for the page again, and the next Save counts afresh; an
-// answered one turns Save back on at once, with no reread. The editor keeps its draft throughout.
+// nothing. Its end turns Save back on at once; one that may have stored something also asks for the page again, and
+// the next Save is counted afresh by the writer. The editor keeps its draft throughout.
 describe("EventDetail: a roster write on the date holds its editor's Save", () => {
-  const STALE = "This date changed while you were saving. Check it and save again.";
+  const STALE = "The page changed while we were asking, so your changes could not be saved. You can save again.";
   const FRESH = "ffffffffffffffffffffffffffffffff";
   const roster = { removedRegistrations: [removedRow()] };
   const rowPage: EventDetailResponse = { ...page, occurrences: [{ ...page.occurrences[0], ...roster }] };
@@ -2260,7 +2016,7 @@ describe("EventDetail: a roster write on the date holds its editor's Save", () =
   const rosterOf = (name: string) => () => requiredElement(screen.getByText(name, { selector: "p, span, div, strong" }).closest("section[aria-label='Manage sign-ups']"), HTMLElement);
 
   function renderInSession(store?: RosterWrites) {
-    render(<MemoryRouter initialEntries={["/events/7"]}><DateWritesProvider rosterWrites={store} credential={credential}><Routes><Route path="/events/:id" element={<EventDetail />} /></Routes></DateWritesProvider></MemoryRouter>);
+    render(<MemoryRouter initialEntries={["/events/7"]}><RosterWritesProvider rosterWrites={store}><Routes><Route path="/events/:id" element={<EventDetail />} /></Routes></RosterWritesProvider></MemoryRouter>);
   }
 
   async function openDateEditor(date = "2026-12-01") {
@@ -2317,7 +2073,7 @@ describe("EventDetail: a roster write on the date holds its editor's Save", () =
       const ends = endsFor(op);
 
       for (const end of ends) {
-        it(`${source}: a held ${op} disables Save and sends nothing; ending ${end} ${end === "answered" || end === "event_full" ? "turns Save on with no reread" : "rereads, then one save asks the writer's fresh question"}`, async () => {
+        it(`${source}: a held ${op} disables Save and sends nothing; ending ${end} turns Save on${end === "answered" || end === "event_full" ? "" : " and asks for the page once"}, and one save asks the writer's fresh question`, async () => {
           renderInSession();
           const { scope, name } = await editorBeside(source);
           const puts = edits.sent.length;
@@ -2338,20 +2094,11 @@ describe("EventDetail: a roster write on the date holds its editor's Save", () =
 
           if (!answered) vi.mocked(Events.get).mockReturnValueOnce(reread.promise);
           await act(async () => { ROSTER_ENDS[end](write); await write.promise.catch(() => {}); });
+          expect(save()).toBeEnabled();
+          expect(Events.get).toHaveBeenCalledTimes(answered ? loads : loads + 1);
+          expectDraft(source);
 
-          if (answered) {
-            expect(save()).toBeEnabled();
-            expect(Events.get).toHaveBeenCalledTimes(loads);
-          } else {
-            expect(Events.get).toHaveBeenCalledTimes(loads + 1);
-            expect(save()).toBeDisabled();
-            expectDraft(source);
-            await act(async () => { reread.resolve(rowPage); await reread.promise; });
-            // The page's answer reads the date again for the editor, which comes back with the draft.
-            await waitFor(() => expect(save()).toBeEnabled());
-            expect(Events.get).toHaveBeenCalledTimes(loads + 1);
-          }
-
+          if (!answered) await act(async () => { reread.resolve(rowPage); await reread.promise; });
           expectDraft(source);
           expect(edits.sent).toHaveLength(puts);
           edits.answer(challenge(3, FRESH));
@@ -2360,7 +2107,7 @@ describe("EventDetail: a roster write on the date holds its editor's Save", () =
           expect(asked).toHaveTextContent("This cancels and notifies 3 registered people");
           await userEvent.click(within(asked).getByRole("button", { name: "Save and notify" }));
           await waitFor(() => expect(edits.sent).toHaveLength(puts + 2));
-          expect(edits.sent[puts + 1]).toMatchObject({ attempt: edits.sent[puts].attempt, changes: { durationMinutes: 150, visibility: "private" }, consent: FRESH });
+          expect(edits.sent[puts + 1]).toMatchObject({ revision: edits.sent[puts].revision, changes: { durationMinutes: 150, visibility: "private" }, consent: FRESH });
         });
       }
 
@@ -2412,7 +2159,7 @@ describe("EventDetail: a roster write on the date holds its editor's Save", () =
     await userEvent.click(save());
     await userEvent.click(within(await screen.findByRole("dialog", { name: "Save this date?" })).getByRole("button", { name: "Save and notify" }));
     await waitFor(() => expect(edits.sent).toHaveLength(3));
-    expect(edits.sent[2]).toMatchObject({ attempt: edits.sent[1].attempt, changes: { durationMinutes: 150, visibility: "private" }, consent: FRESH });
+    expect(edits.sent[2]).toMatchObject({ revision: edits.sent[1].revision, changes: { durationMinutes: 150, visibility: "private" }, consent: FRESH });
   });
 
   it("a page answer that no longer lets this person manage the event takes the editor away, and nothing is sent", async () => {
@@ -2526,7 +2273,7 @@ describe("EventDetail: the event visibility review and the date row's roster", (
   const sam = () => requiredElement(screen.getByRole("button", { name: "More for Sam" }).closest("section[aria-label='Manage sign-ups']"), HTMLElement);
 
   async function openBoth() {
-    render(<MemoryRouter initialEntries={["/events/7"]}><DateWritesProvider credential={credential}><Routes><Route path="/events/:id" element={<EventDetail />} /></Routes></DateWritesProvider></MemoryRouter>);
+    render(<MemoryRouter initialEntries={["/events/7"]}><RosterWritesProvider><Routes><Route path="/events/:id" element={<EventDetail />} /></Routes></RosterWritesProvider></MemoryRouter>);
     await userEvent.click(await screen.findByRole("button", { name: "Edit event" }));
     await userEvent.click(screen.getByRole("radio", { name: /^Invite only/ }));
     await userEvent.click(screen.getByRole("button", { name: "More for 2026-12-01" }));
@@ -2557,7 +2304,7 @@ describe("EventDetail: the event visibility review and the date row's roster", (
       await userEvent.click(save());
       const review = await screen.findByRole("dialog", { name: "Making this event invite-only" });
       expect(review).toHaveTextContent("2 people registered will be cancelled and notified");
-      vi.mocked(Events.setVisibility).mockResolvedValueOnce({ event: managing.event });
+      vi.mocked(Events.setVisibility).mockResolvedValueOnce({ event: { ...managing.event, revision: "e2" } });
       await userEvent.click(within(review).getByRole("button", { name: "Make this event invite-only" }));
       await waitFor(() => expect(Events.setVisibility).toHaveBeenCalledExactlyOnceWith(7, { visibility: "invite_only", reason: undefined, consent: B, resetOverrides: false }));
     });
@@ -2610,10 +2357,11 @@ describe("EventDetail: the date question is bound to what asked it", () => {
       { path: "/elsewhere", element: <p>Elsewhere</p> },
     ], { initialEntries: ["/events/7"] });
 
-    const tree = (c: Credential | null) => <DateWritesProvider rosterWrites={store} credential={c}><RouterProvider router={router} /></DateWritesProvider>;
-    const view = render(tree(credential));
+    const tree = () => <RosterWritesProvider rosterWrites={store}><RouterProvider router={router} /></RosterWritesProvider>;
+    const view = render(tree());
 
-    return { router, swap: (c: Credential | null) => view.rerender(tree(c)) };
+    // Renders the page again, as a new credential reaching the session does.
+    return { router, rerender: () => view.rerender(tree()) };
   }
 
   async function ask(answer: Error = challenge(2, T1)) {
@@ -2645,23 +2393,17 @@ describe("EventDetail: the date question is bound to what asked it", () => {
     await userEvent.click(within(third).getByRole("button", { name: "Save and notify" }));
     await waitFor(() => expect(edits.sent).toHaveLength(4));
     expect(edits.sent.map((s) => s.consent)).toEqual([undefined, undefined, T1, T2]);
-    expect(new Set(edits.sent.slice(1).map((s) => s.attempt)).size).toBe(1);
   });
 
   const invalidations: Array<[string, (h: ReturnType<typeof host>, store: RosterWrites) => Promise<void> | void]> = [
     ["the same address again", async ({ router }) => { await act(() => router.navigate("/events/7")); }],
     ["another page and back", async ({ router }) => { await act(() => router.navigate("/elsewhere")); await act(() => router.navigate("/events/7")); }],
-    ["the page's answer after a sign-up update on another date", async (_, store) => { await act(async () => store.begin("7:2026-12-08")("stored")); }],
     ["the page's answer that this person no longer manages the event", async (_, store) => {
       vi.mocked(Events.get).mockResolvedValue({ ...twoDates, canManage: false });
       await act(async () => store.begin("7:2026-12-08")("stored"));
     }],
-    ["this tab's marker changing, once the session hears of anything", (_, store) => {
-      setMarkerCookie("m-another-tab");
-      act(() => { store.begin("7:2026-12-08"); });
-    }],
-    ["another credential", async ({ swap }) => { const next = await verifiedCredential(); act(() => swap(next)); }],
-    ["signing out", ({ swap }) => { act(() => swap(null)); }],
+    ["another credential", async ({ rerender }) => { await verifiedCredential(); act(() => rerender()); }],
+    ["signing out in another tab", ({ rerender }) => { clearMarkerCookie(); act(() => rerender()); }],
   ];
 
   for (const [name, invalidate] of invalidations) {
@@ -2677,6 +2419,17 @@ describe("EventDetail: the date question is bound to what asked it", () => {
       expect(window.confirm).not.toHaveBeenCalled();
     });
   }
+
+  it("a Yes after this tab's marker changed sends nothing, and says the changes weren't saved", async () => {
+    host();
+    const yes = await ask();
+    setMarkerCookie("m-another-tab");
+    await userEvent.click(yes);
+    expect(asked()).not.toBeInTheDocument();
+    expect(await screen.findByText("The page changed while we were asking, so your changes could not be saved. You can save again.")).toBeInTheDocument();
+    expect(edits.sent).toHaveLength(1);
+    expect(screen.getByRole("radio", { name: /^Private/ })).toBeChecked();
+  });
 
   // An administrator erasing this manager from their own browser (not a sign-out in another tab), in App's session.
   describe("when an administrator erases this manager from their own browser", () => {
@@ -2737,7 +2490,7 @@ describe("EventDetail when a series save meets someone else's change", () => {
   });
 
   function renderInMain() {
-    render(<main id="main" tabIndex={-1}><MemoryRouter initialEntries={["/events/7"]}><DateWritesProvider credential={credential}><Routes><Route path="/events/:id" element={<EventDetail />} /></Routes></DateWritesProvider></MemoryRouter></main>);
+    render(<main id="main" tabIndex={-1}><MemoryRouter initialEntries={["/events/7"]}><RosterWritesProvider><Routes><Route path="/events/:id" element={<EventDetail />} /></Routes></RosterWritesProvider></MemoryRouter></main>);
   }
 
   // Opens the editor, types, and saves into a refusal whose read shows `editorRead`; the page's read after it is held.
@@ -2875,7 +2628,7 @@ describe("EventDetail when a visibility save meets someone else's change", () =>
   // Opens the panel and saves Private into a refusal whose read shows `controlRead`; the page's read after it is held.
   async function saveIntoRefusal(controlRead: () => Promise<EventDetailResponse>, review = false) {
     vi.mocked(Events.get).mockResolvedValueOnce(opened).mockImplementationOnce(controlRead);
-    render(<main id="main" tabIndex={-1}><MemoryRouter initialEntries={["/events/7"]}><DateWritesProvider credential={credential}><Routes><Route path="/events/:id" element={<EventDetail />} /></Routes></DateWritesProvider></MemoryRouter></main>);
+    render(<main id="main" tabIndex={-1}><MemoryRouter initialEntries={["/events/7"]}><RosterWritesProvider><Routes><Route path="/events/:id" element={<EventDetail />} /></Routes></RosterWritesProvider></MemoryRouter></main>);
     await userEvent.click(await screen.findByRole("button", { name: "Edit event" }));
     await userEvent.click(screen.getByRole("radio", { name: /^Private/ }));
     const after = deferred<EventDetailResponse>();
@@ -2923,7 +2676,7 @@ describe("EventDetail when a visibility save meets someone else's change", () =>
       guestCount: 0, childcareCount: 0, childcareAgesNote: "", waitlistPosition: null, attendanceMode: "in_person",
     }, people: [] });
     vi.mocked(Events.setVisibility).mockReset().mockResolvedValue({ event: after.event });
-    render(<main id="main" tabIndex={-1}><MemoryRouter initialEntries={["/events/7"]}><DateWritesProvider credential={credential}><Routes><Route path="/events/:id" element={<EventDetail />} /></Routes></DateWritesProvider></MemoryRouter></main>);
+    render(<main id="main" tabIndex={-1}><MemoryRouter initialEntries={["/events/7"]}><RosterWritesProvider><Routes><Route path="/events/:id" element={<EventDetail />} /></Routes></RosterWritesProvider></MemoryRouter></main>);
     await userEvent.click(await screen.findByRole("button", { name: "Edit event" }));
     expect(screen.getByRole("radio", { name: /^Public/ })).not.toHaveAccessibleName(/same as the group/);
     // An answer to the date reads the page again, quietly, with the panel open.
@@ -2938,7 +2691,7 @@ describe("EventDetail when a visibility save meets someone else's change", () =>
   it.each([403, 404])("closes the panel and stops showing the event when the first save answers %i", async (status) => {
     vi.mocked(Events.get).mockResolvedValueOnce(opened).mockRejectedValue(new ApiError(404, "gone", { code: "not_found" }));
     vi.mocked(Events.setVisibility).mockReset().mockRejectedValue(new ApiError(status, "no", { code: "x" }));
-    render(<main id="main" tabIndex={-1}><MemoryRouter initialEntries={["/events/7"]}><DateWritesProvider credential={credential}><Routes><Route path="/events/:id" element={<EventDetail />} /></Routes></DateWritesProvider></MemoryRouter></main>);
+    render(<main id="main" tabIndex={-1}><MemoryRouter initialEntries={["/events/7"]}><RosterWritesProvider><Routes><Route path="/events/:id" element={<EventDetail />} /></Routes></RosterWritesProvider></MemoryRouter></main>);
     await userEvent.click(await screen.findByRole("button", { name: "Edit event" }));
     await userEvent.click(screen.getByRole("radio", { name: /^Private/ }));
     await userEvent.click(screen.getByRole("button", { name: "Save visibility" }));
@@ -2998,5 +2751,118 @@ describe("EventDetail when a visibility save meets someone else's change", () =>
     await waitFor(() => expect(notice).toHaveFocus());
     expect(screen.queryByText(NOTICE)).not.toBeInTheDocument();
     expect(Events.setVisibility).toHaveBeenCalledOnce();
+  });
+});
+
+// DEC-164: "Edit this date" on the event page uses the one conflict protocol. Refused as stale, the editor reads the
+// date once: already stored, it closes as a save does; as it opened, it sends again unseen; otherwise it closes, the
+// page reads from nothing and the line above the dates names the day and takes focus.
+describe("EventDetail when a date's save meets someone else's change", () => {
+  const DAY = "Tuesday, December 1, 2026";
+  const NOTICE = `${DAY}. This date changed while you were editing, so your changes could not be saved. This is the date as it is now.`;
+  const changed = () => new ApiError(409, "x", { code: "date_changed" });
+  const listed = page.occurrences[0];
+
+  beforeEach(() => {
+    vi.resetAllMocks();
+    guarded();
+    vi.mocked(Households.mine).mockResolvedValue({ household: null });
+    vi.mocked(Events.get).mockResolvedValue(page);
+  });
+
+  // The editor's read opens at r0; the read after a refusal shows `stored`.
+  async function saveTitleInto(stored: Partial<EventOccurrence>, answer: Error | Promise<OccurrenceResponse> = changed()) {
+    vi.mocked(Events.managedDate).mockResolvedValueOnce({ occurrence: { ...listed, revision: "r0" } }).mockResolvedValue({ occurrence: { ...listed, revision: "r1", ...stored } });
+    edits.answer(answer);
+    render(<main id="main" tabIndex={-1}><MemoryRouter initialEntries={["/events/7"]}><RosterWritesProvider><Routes><Route path="/events/:id" element={<EventDetail />} /></Routes></RosterWritesProvider></MemoryRouter></main>);
+    await userEvent.click(await screen.findByRole("button", { name: "More for 2026-12-01" }));
+    await userEvent.click(screen.getByRole("menuitem", { name: "Edit this date" }));
+    await userEvent.type(await screen.findByLabelText("Title"), " night");
+    await waitFor(() => expect(screen.getByRole("button", { name: "Save this date" })).toBeEnabled());
+    await userEvent.click(screen.getByRole("button", { name: "Save this date" }));
+  }
+
+  // An earlier save's answer closes the editor: opening it again meanwhile would show a draft that answer then closes.
+  it("keeps the row's Edit this date off while the date's save is on its way", async () => {
+    const sent = deferred<OccurrenceResponse>();
+    await saveTitleInto({}, sent.promise);
+    await waitFor(() => expect(edits.sent).toHaveLength(1));
+    await userEvent.click(screen.getByRole("button", { name: "More for 2026-12-01" }));
+    expect(screen.getByRole("menuitem", { name: "Edit this date" })).toBeDisabled();
+    await userEvent.keyboard("{Escape}");
+    await act(async () => { sent.resolve({ occurrence: { ...listed, revision: "r1" } }); await sent.promise; });
+    await waitFor(() => expect(screen.queryByLabelText("Title")).not.toBeInTheDocument());
+    await userEvent.click(screen.getByRole("button", { name: "More for 2026-12-01" }));
+    expect(screen.getByRole("menuitem", { name: "Edit this date" })).toBeEnabled();
+  });
+
+  it("sends the save again under the new revision when nothing it can write changed, and closes as a save does", async () => {
+    await saveTitleInto({});
+    await waitFor(() => expect(screen.queryByLabelText("Title")).not.toBeInTheDocument());
+    expect(edits.sent.map((s) => [s.revision, s.changes])).toEqual([["r0", { title: "Supper night" }], ["r1", { title: "Supper night" }]]);
+    expect(screen.queryByText(/could not be saved/)).not.toBeInTheDocument();
+  });
+
+  it("closes as a save does, with no line, when the read shows the save already stored", async () => {
+    await saveTitleInto({ title: "Supper night", own: { title: "Supper night" } });
+    await waitFor(() => expect(screen.queryByLabelText("Title")).not.toBeInTheDocument());
+    expect(edits.sent).toHaveLength(1);
+    expect(screen.queryByText(/could not be saved/)).not.toBeInTheDocument();
+  });
+
+  it("closes the editor over another change, reads the page from nothing and says so above the dates, focused; opening the editor clears it", async () => {
+    const after = deferred<EventDetailResponse>();
+    const reads = vi.mocked(Events.get).mock.calls.length;
+    vi.mocked(Events.get).mockResolvedValueOnce(page).mockReturnValueOnce(after.promise);
+    await saveTitleInto({ location: "Annex", own: { location: "Annex" } });
+    await waitFor(() => expect(vi.mocked(Events.get).mock.calls.length).toBe(reads + 2));
+    expect(screen.queryByLabelText("Title")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "More for 2026-12-01" })).not.toBeInTheDocument();
+    const theirs = { ...page, occurrences: [{ ...listed, location: "Annex" }] };
+    vi.mocked(Events.get).mockResolvedValue(theirs);
+    await act(async () => { after.resolve(theirs); await after.promise; });
+    const notice = await screen.findByText(NOTICE);
+    expect(notice).toHaveAttribute("role", "status");
+    await waitFor(() => expect(notice).toHaveFocus());
+    expect(edits.sent).toHaveLength(1);
+    // The line sits above the dates, never inside a row a long list may hide.
+    expect(notice.closest("article")).toBeNull();
+    await userEvent.click(screen.getByRole("button", { name: "More for 2026-12-01" }));
+    await userEvent.click(screen.getByRole("menuitem", { name: "Edit this date" }));
+    expect(screen.queryByText(NOTICE)).not.toBeInTheDocument();
+    expect(await screen.findByRole("textbox", { name: /^Location/ })).toHaveValue("Annex");
+  });
+
+  it("says the person can no longer manage the date when a send is refused 403 and the page agrees", async () => {
+    vi.mocked(Events.get).mockResolvedValueOnce(page).mockResolvedValue({ ...page, canManage: false });
+    await saveTitleInto({}, new ApiError(403, "SECRET", { code: "forbidden" }));
+    const line = await screen.findByText(`${DAY}. You can no longer manage this date, so your changes could not be saved.`);
+    await waitFor(() => expect(line).toHaveFocus());
+    expect(edits.sent).toHaveLength(1);
+    expect(screen.queryByRole("button", { name: "More for 2026-12-01" })).not.toBeInTheDocument();
+  });
+
+  it("says only that the changes weren't saved, naming the day, when the page no longer lists the date", async () => {
+    vi.mocked(Events.get).mockResolvedValueOnce(page).mockResolvedValue({ ...page, occurrences: [] });
+    await saveTitleInto({}, new ApiError(404, "SECRET", { code: "not_found" }));
+    const line = await screen.findByText(`${DAY}. Your changes could not be saved.`);
+    await waitFor(() => expect(line).toHaveFocus());
+  });
+
+  it("saves twice in a row: each opens from a read of its own", async () => {
+    vi.mocked(Events.managedDate).mockResolvedValueOnce({ occurrence: { ...listed, revision: "r0" } }).mockResolvedValue({ occurrence: { ...listed, title: "Supper night", revision: "r1" } });
+    renderPage();
+
+    for (const [typed, revision] of [[" night", "r0"], ["!", "r1"]] as const) {
+      await userEvent.click(await screen.findByRole("button", { name: "More for 2026-12-01" }));
+      await userEvent.click(screen.getByRole("menuitem", { name: "Edit this date" }));
+      await userEvent.type(await screen.findByLabelText("Title"), typed);
+      await waitFor(() => expect(screen.getByRole("button", { name: "Save this date" })).toBeEnabled());
+      await userEvent.click(screen.getByRole("button", { name: "Save this date" }));
+      await waitFor(() => expect(screen.queryByLabelText("Title")).not.toBeInTheDocument());
+      expect(edits.sent[edits.sent.length - 1].revision).toBe(revision);
+    }
+
+    expect(edits.sent.map((s) => s.changes)).toEqual([{ title: "Supper night" }, { title: "Supper night!" }]);
   });
 });

@@ -1,5 +1,5 @@
 import { afterEach, expect, it, vi } from "vitest";
-import { DateEdits, Dates, Events } from "./events";
+import { Dates, Events } from "./events";
 import { bootstrapCredential } from "./core";
 import { bootstrapAnswer, participatingAnswers, sentChecks } from "../test/credential";
 
@@ -63,38 +63,19 @@ it("refuses a pinned date answer with no acknowledgment as the credential's loss
   await expect(Dates.get(7, "2026-12-01", credential)).rejects.toMatchObject({ code: "session_expired", unreadable: true });
 });
 
-it("freezes a guarded date edit once: fixed key order, only submitted fields, a trimmed reason only with visibility", () => {
-  expect(DateEdits.freeze(7, "2026-12-01", 41, "r0", {})).toBeNull();
-  expect(DateEdits.freeze(7, "2026-12-01", 0, "r0", { title: "x" })).toBeNull();
-  expect(DateEdits.freeze(7, "2026-12-01", 41, "", { title: "x" })).toBeNull();
-  const sent = DateEdits.freeze("7/8", "2026-12-01/#", 41, "r0", { visibility: "series", title: "Supper", capacityOverride: null, location: undefined }, "  Too many  ");
-
-  if (!sent) throw new Error("not frozen");
-  expect(sent.url).toBe("/events/7%2F8/occurrences/2026-12-01%2F%23/edits");
-  expect(sent.attempt).toMatch(/^[0-9a-f]{32}$/);
-  expect(sent.body).toBe(`{"attempt":"${sent.attempt}","revision":"r0","changes":{"title":"Supper","capacityOverride":null,"visibility":"series"},"reason":"Too many"}`);
-  expect(Object.isFrozen(sent) && Object.isFrozen(sent.changes)).toBe(true);
-  expect(DateEdits.freeze(7, "2026-12-01", 41, "r0", { title: "x" }, "a reason")?.body).not.toContain("reason");
-  expect(DateEdits.freeze(7, "2026-12-01", 41, "r0", { visibility: null }, "   ")?.body).not.toContain("reason");
-  expect(DateEdits.freeze(7, "2026-12-01", 41, "r0", { title: "x" })?.attempt).not.toBe(sent.attempt);
-
-  const consented = DateEdits.withConsent(sent, "0123456789abcdef0123456789abcdef");
-  expect(consented.body).toBe(`${sent.body.slice(0, -1)},"consent":"0123456789abcdef0123456789abcdef"}`);
-  expect(DateEdits.withConsent(consented, "fedcba9876543210fedcba9876543210").body).toBe(`${sent.body.slice(0, -1)},"consent":"fedcba9876543210fedcba9876543210"}`);
-  expect({ ...consented, body: sent.body }).toEqual(sent);
-});
-
-it("sends the frozen bytes to the edits address, pinned, and nowhere else", async () => {
-  const fetcher = vi.fn<typeof fetch>(participatingAnswers("edit-csrf", "v2 m-edit-csrf anon"));
+it("sends each date save to the edits address with a fresh attempt id, never pinned", async () => {
+  const fetcher = vi.fn<typeof fetch>(async (url) => String(url).endsWith("/auth/bootstrap") ? bootstrapAnswer({ token: "edit-csrf" }) : new Response(JSON.stringify({ occurrence: {} })));
   vi.stubGlobal("fetch", fetcher);
-  const { credential } = await bootstrapCredential(true);
-  const sent = DateEdits.freeze(7, "2026-12-01", 41, "r0", { title: "x" });
-
-  if (!sent) throw new Error("not frozen");
-  const { signal } = new AbortController();
-  await DateEdits.send(sent, credential, { permit: () => true, onDispatch: () => {}, signal });
+  await bootstrapCredential(true);
+  const body = { revision: "r0", changes: { title: "Supper", capacityOverride: null }, reason: undefined };
+  await Events.editDate("7/8", "2026-12-01/#", body);
+  await Events.editDate(7, "2026-12-01", { ...body, consent: "0123456789abcdef0123456789abcdef" });
   const calls = fetcher.mock.calls.filter(([url]) => !String(url).endsWith("/auth/bootstrap"));
-  expect(sentChecks(calls)).toEqual([["/api/v1/events/7/occurrences/2026-12-01/edits", "v2", "edit-csrf"]]);
-  // The caller's signal reaches fetch, so ending the attempt's lifetime can cancel the request.
-  expect(calls[0][1]).toMatchObject({ method: "POST", body: sent.body, signal });
+  expect(calls.map(([url]) => String(url))).toEqual(["/api/v1/events/7%2F8/occurrences/2026-12-01%2F%23/edits", "/api/v1/events/7/occurrences/2026-12-01/edits"]);
+  const sent = calls.map(([, init]) => JSON.parse(String(init?.body)));
+  expect(sent[0]).toEqual({ attempt: expect.stringMatching(/^[0-9a-f]{32}$/), revision: "r0", changes: { title: "Supper", capacityOverride: null } });
+  expect(sent[1]).toMatchObject({ revision: "r0", consent: "0123456789abcdef0123456789abcdef" });
+  expect(sent[1].attempt).not.toBe(sent[0].attempt);
+  expect(calls.map(([, init]) => new Headers(init?.headers).get("Fold-Session-Check"))).toEqual([null, null]);
 });
+

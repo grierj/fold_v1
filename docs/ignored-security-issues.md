@@ -7,17 +7,18 @@ credentials, personal data, or exploit instructions.
 
 ## Request body retained by a non-cooperating transport
 
-- Date: 2026-11-21. Reviewed revision: `c2796148513f9f19d23bd44f764633a2554c4b58`
-  with the uncommitted B1 in-flight disposal changes. The reviewed seven-file manifest has
-  SHA-256 `9ed577736cb5642a5c4013082c77ff7775f3ac142495977c379ea2e8d0e5d5b5`.
-- A transport that ignores cancellation and never settles can retain a serialized date-edit
-  request in its pending frames after the attempt store is disposed. The retained string can
-  contain private text. The review found no cross-user disclosure or continuing authority.
-- Likelihood: **1/10**. The browser fetch path receives an abort signal; this case requires a
-  transport that ignores it indefinitely.
-- Severity: **4/10**. Private text may remain in the same browser process, but the review found
-  no publication or replay path. Product: **4**. The issue is intentionally not fixed.
-- Evidence: `web/src/lib/dateWrites.tsx`, `web/src/api/events.ts`, and `web/src/api/core.ts`.
+- Date: 2026-11-23 (first recorded 2026-11-21). Reviewed revision:
+  `74a31f4b34715056167cf6e7e508c80f52fc692f` (PR #467; this entry was added in the commit after it, which changes
+  nothing else).
+- A `fetch` that never settles can keep the serialized date-edit body (`Events.editDate`) in its pending frames for as
+  long as the page lives. The body can contain private text (a title, a place, a visibility reason). No abort signal is
+  supplied now, so nothing asks the transport to drop it. The attempts store and the cross-page recovery the first
+  record described are gone (DEC-164), so nothing else in the app keeps or resends the body. The review found no
+  cross-user disclosure or continuing authority.
+- Likelihood: **1/10**. A browser's own fetch settles or fails; this needs a transport that holds a request forever.
+- Severity: **4/10**. Private text may remain in the same browser process, but there is no publication or replay path.
+  Product: **4**. The issue is intentionally not fixed.
+- Evidence: `web/src/api/events.ts` (`editDate`) and `web/src/api/core.ts` (`api`, `send`).
 
 ## A redundant group status is accepted from a leader
 

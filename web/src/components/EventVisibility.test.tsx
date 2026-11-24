@@ -1,4 +1,4 @@
-import { createRosterWrites, type RosterWriteEnd, type RosterWrites } from "../lib/rosterWrites";
+import { createRosterWrites, RosterWritesProvider, type RosterWriteEnd, type RosterWrites } from "../lib/rosterWrites";
 import { stubService } from "../test/service";
 import { Events } from "../api/events";
 import { ApiError } from "../api/core";
@@ -8,7 +8,6 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { EventVisibilityControl } from "./EventVisibility";
 import type { EventDetailResponse, EventSeries, VisibilityImpact } from "../types";
 import { testEvent } from "../test/fixtures";
-import { DateWritesProvider } from "../lib/dateWrites";
 import { watchChecks, writeAfterTheCheck } from "../test/rosterOps";
 
 const { setVisibility, visibilityImpact } = vi.hoisted(() => ({ setVisibility: vi.fn(), visibilityImpact: vi.fn() }));
@@ -17,6 +16,10 @@ stubService(Events, () => ({ setVisibility, visibilityImpact }));
 
 const A = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const B = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+
+// The answer of a save that landed: the event, by id, with its new revision.
+const answer = (id: number) => ({ event: { ...testEvent(id), revision: "r9" } });
+const saved = async (id: number) => answer(id);
 const decision = (impact: VisibilityImpact) => new ApiError(409, "Review this change before saving", { needsDecision: true, impact: JSON.parse(JSON.stringify(impact)) });
 
 beforeEach(() => {
@@ -35,7 +38,7 @@ describe("event tightening", () => {
       leaderOpened: [],
       consent: A,
     });
-    setVisibility.mockResolvedValue({});
+    setVisibility.mockImplementation(saved);
     const onSaved = vi.fn();
     render(<EventVisibilityControl eventId={7} groupName="Garden" groupVisibility="public" visibility="public" onSaved={onSaved} />);
     await userEvent.click(screen.getByRole("radio", { name: /^Invite only/ }));
@@ -51,7 +54,7 @@ describe("event tightening", () => {
 
   it("opening an event up saves without a preview, with an empty consent", async () => {
     visibilityImpact.mockResolvedValue({ visibility: "private", currentVisibility: "private", tightened: [], leaderOpened: [] });
-    setVisibility.mockResolvedValue({});
+    setVisibility.mockImplementation(saved);
     render(<EventVisibilityControl eventId={8} groupName="Garden" groupVisibility="private" visibility="private" onSaved={() => {}} />);
     await userEvent.click(screen.getByRole("radio", { name: /^Public/ }));
     await userEvent.click(screen.getByRole("button", { name: "Save visibility" }));
@@ -104,7 +107,7 @@ describe("event tightening", () => {
     });
 
     it("gives focus back to Save when there is nothing to review and the save fails or succeeds", async () => {
-      setVisibility.mockRejectedValueOnce(new ApiError(500, "private", { code: "server_error" })).mockResolvedValueOnce({});
+      setVisibility.mockRejectedValueOnce(new ApiError(500, "private", { code: "server_error" })).mockImplementationOnce(saved);
       const { save, answer } = await pressSave();
       await act(async () => { answer({ ...tightening, tightened: [] }); });
       expect(await screen.findByRole("alert")).toBeInTheDocument();
@@ -127,7 +130,7 @@ describe("event tightening", () => {
     const first = { visibility: "invite_only" as const, currentVisibility: "public" as const, tightened: [{ id: 7, title: "Picnic", visibility: "public" as const, registrants: 1 }], leaderOpened: [], consent: A };
     const fresh = { ...first, tightened: [{ ...first.tightened[0], registrants: 3 }], consent: B };
     visibilityImpact.mockResolvedValue(first);
-    setVisibility.mockRejectedValueOnce(decision(fresh)).mockResolvedValueOnce({});
+    setVisibility.mockRejectedValueOnce(decision(fresh)).mockImplementationOnce(saved);
     render(<EventVisibilityControl eventId={7} groupVisibility="public" visibility="public" onSaved={() => {}} />);
     await userEvent.click(screen.getByRole("radio", { name: /^Invite only/ }));
     await userEvent.click(screen.getByRole("button", { name: "Save visibility" }));
@@ -192,7 +195,7 @@ describe("a reset of the event's dates", () => {
   it("shows the authoritative future-date count, and a reset that cancels nobody is reviewed first", async () => {
     visibilityImpact.mockResolvedValueOnce({ visibility: "public", currentVisibility: "public", futureOverrides: 2, tightened: [], leaderOpened: [] })
       .mockResolvedValueOnce({ visibility: "public", currentVisibility: "public", futureOverrides: 2, tightened: [], leaderOpened: [], resetDates, consent: A });
-    setVisibility.mockResolvedValue({});
+    setVisibility.mockImplementation(saved);
     render(<EventVisibilityControl eventId={19} visibility="public" groupVisibility="public" onSaved={() => {}} />);
     expect(await screen.findByText("2 dates have their own visibility and won't change.")).toBeInTheDocument();
     await userEvent.click(screen.getByLabelText("Also reset those dates to the series setting"));
@@ -210,7 +213,7 @@ describe("a reset of the event's dates", () => {
   it("a preview that changes nothing at all commits at once with its consent", async () => {
     visibilityImpact.mockResolvedValueOnce({ visibility: "private", currentVisibility: "private", futureOverrides: 1, tightened: [], leaderOpened: [] })
       .mockResolvedValueOnce({ visibility: "private", currentVisibility: "private", tightened: [], leaderOpened: [], resetDates: [], consent: A });
-    setVisibility.mockResolvedValue({});
+    setVisibility.mockImplementation(saved);
     render(<EventVisibilityControl eventId={19} visibility="private" groupVisibility="private" onSaved={() => {}} />);
     await userEvent.click(await screen.findByLabelText("Also reset those dates to the series setting"));
     await userEvent.click(screen.getByRole("button", { name: "Save visibility" }));
@@ -234,7 +237,7 @@ describe("a reset of the event's dates", () => {
     visibilityImpact.mockResolvedValueOnce({ visibility: "invite_only", currentVisibility: "invite_only", futureOverrides: 1, tightened: [], leaderOpened: [] })
       .mockResolvedValueOnce({ visibility: "invite_only", currentVisibility: "invite_only", tightened: [], leaderOpened: [], resetDates: [], consent: A });
     setVisibility.mockRejectedValueOnce(decision({ visibility: "invite_only", currentVisibility: "invite_only", futureOverrides: 0, tightened: [], leaderOpened: [], resetDates: [], consent: B }))
-      .mockResolvedValueOnce({});
+      .mockImplementationOnce(saved);
     render(<EventVisibilityControl eventId={19} visibility="invite_only" groupVisibility="invite_only" onSaved={() => {}} />);
     await userEvent.click(await screen.findByLabelText("Also reset those dates to the series setting"));
     await userEvent.click(screen.getByRole("button", { name: "Save visibility" }));
@@ -259,7 +262,7 @@ describe("a reset of the event's dates", () => {
     expect(screen.getByText("3 dates have their own visibility and won't change.")).toBeInTheDocument();
     await userEvent.click(screen.getByRole("button", { name: "Make this event private" }));
     expect(await screen.findByText("This resets 1 date to the series setting (private):")).toBeInTheDocument();
-    setVisibility.mockResolvedValueOnce({});
+    setVisibility.mockImplementationOnce(saved);
     await userEvent.click(screen.getByRole("button", { name: "Make this event private" }));
     expect(setVisibility).toHaveBeenLastCalledWith(19, { visibility: "private", reason: undefined, consent: B, resetOverrides: true });
   });
@@ -285,7 +288,7 @@ describe("sign-up updates on the event", () => {
 
   function mount(store: RosterWrites, eventId = 7) {
     const onSaved = vi.fn();
-    render(<DateWritesProvider rosterWrites={store}><EventVisibilityControl eventId={eventId} groupName="Garden" groupVisibility="public" visibility="public" onSaved={onSaved} /></DateWritesProvider>);
+    render(<RosterWritesProvider rosterWrites={store}><EventVisibilityControl eventId={eventId} groupName="Garden" groupVisibility="public" visibility="public" onSaved={onSaved} /></RosterWritesProvider>);
 
     return onSaved;
   }
@@ -359,7 +362,7 @@ describe("sign-up updates on the event", () => {
       await userEvent.click(save());
       expect(await screen.findByRole("dialog")).toHaveTextContent("3 people registered will be cancelled and notified");
       expect(screen.queryByText(STALE)).not.toBeInTheDocument();
-      setVisibility.mockResolvedValueOnce({});
+      setVisibility.mockImplementationOnce(saved);
       await userEvent.click(screen.getByRole("button", { name: "Make this event invite-only" }));
       expect(setVisibility).toHaveBeenCalledExactlyOnceWith(7, { visibility: "invite_only", reason: undefined, consent: B, resetOverrides: false });
     });
@@ -400,7 +403,7 @@ describe("sign-up updates on the event", () => {
       await userEvent.click(save());
       expect(await screen.findByRole("dialog")).toHaveTextContent("3 people registered will be cancelled and notified");
       expect(screen.queryByText(STALE)).not.toBeInTheDocument();
-      setVisibility.mockResolvedValueOnce({});
+      setVisibility.mockImplementationOnce(saved);
       await userEvent.click(screen.getByRole("button", { name: "Make this event invite-only" }));
       expect(setVisibility).toHaveBeenCalledExactlyOnceWith(7, { visibility: "invite_only", reason: undefined, consent: B, resetOverrides: false });
     });
@@ -430,7 +433,7 @@ describe("sign-up updates on the event", () => {
     const store = createRosterWrites();
     const checks = watchChecks(store);
     const preview = holdPreview();
-    render(<DateWritesProvider rosterWrites={store}><button type="button">Roster</button><EventVisibilityControl eventId={7} groupName="Garden" groupVisibility="public" visibility="public" onSaved={() => {}} /></DateWritesProvider>);
+    render(<RosterWritesProvider rosterWrites={store}><button type="button">Roster</button><EventVisibilityControl eventId={7} groupName="Garden" groupVisibility="public" visibility="public" onSaved={() => {}} /></RosterWritesProvider>);
     await choose();
     await userEvent.click(save());
     const roster = screen.getByRole("button", { name: "Roster" });
@@ -495,7 +498,7 @@ describe("sign-up updates on the event", () => {
     await userEvent.click(save());
     await userEvent.click(await screen.findByRole("button", { name: "Make this event invite-only" }));
     act(() => { store.begin(KEY); });
-    await act(async () => { put.resolve({}); await put.promise; });
+    await act(async () => { put.resolve(answer(7)); await put.promise; });
     expect(onSaved).toHaveBeenCalledOnce();
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
     expect(screen.queryByText(STALE)).not.toBeInTheDocument();
@@ -573,7 +576,7 @@ describe("EventVisibilityControl and the read it opened with", () => {
   }
 
   it("sends the revision it opened with", async () => {
-    setVisibility.mockResolvedValue({});
+    setVisibility.mockImplementation(saved);
     const { onSaved } = open();
     await makePublic();
     expect(setVisibility).toHaveBeenCalledExactlyOnceWith(7, { visibility: "public", reason: undefined, consent: "", resetOverrides: false, revision: "r1" });
@@ -582,7 +585,7 @@ describe("EventVisibilityControl and the read it opened with", () => {
   });
 
   it("reads once and saves again under the new revision, showing nothing, when the audience is as it opened", async () => {
-    setVisibility.mockRejectedValueOnce(changed()).mockResolvedValueOnce({});
+    setVisibility.mockRejectedValueOnce(changed()).mockImplementationOnce(saved);
     // A room booking moved the revision; leaderOpened absent on one side reads as false.
     get.mockResolvedValue(readOf({ leaderOpened: false, location: "Room 201" }));
     const { onSaved, onConflict } = open();
@@ -666,6 +669,48 @@ describe("EventVisibilityControl and the read it opened with", () => {
     expect(onConflict).not.toHaveBeenCalled();
     expect(onSaved).not.toHaveBeenCalled();
     expect(screen.getByRole("radio", { name: /^Public/ })).toBeChecked();
+  });
+
+  it.each([
+    ["an empty object (a page from something in between)", {}],
+    ["another event's answer", answer(8)],
+    ["an answer with no revision", { event: testEvent(7) }],
+  ])("keeps the choice and says the ordinary error, closing nothing, when the answer is %s", async (_, wrong) => {
+    setVisibility.mockResolvedValue(wrong);
+    const { onSaved, onConflict } = open();
+    await makePublic();
+    expect(await screen.findByText("We couldn't change who can see this. Please try again in a minute.")).toBeInTheDocument();
+    expect(onSaved).not.toHaveBeenCalled();
+    expect(onConflict).not.toHaveBeenCalled();
+    expect(screen.getByRole("radio", { name: /^Public/ })).toBeChecked();
+  });
+
+  // #455: a send with no answer may have been stored, and someone may have put the opening audience back since.
+  it("after a send with no answer, a refusal finding the audience as it opened is a conflict, sending the opened revision only", async () => {
+    setVisibility.mockRejectedValueOnce(new TypeError("Failed to fetch")).mockRejectedValueOnce(changed()).mockImplementation(saved);
+    get.mockResolvedValue(readOf({ revision: "r3" }));
+    const { onSaved, onConflict } = open();
+    await makePublic();
+    expect(await screen.findByText("We couldn't reach Fold. Check your connection and try again.")).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "Save visibility" }));
+    await waitFor(() => expect(onConflict).toHaveBeenCalledExactlyOnceWith("changed"));
+    expect(setVisibility.mock.calls.map(([, body]) => body.revision)).toEqual(["r1", "r1"]);
+    expect(onSaved).not.toHaveBeenCalled();
+  });
+
+  it("counts an unreadable answer as one that may have stored the reason it carried", async () => {
+    setVisibility.mockResolvedValueOnce({}).mockRejectedValueOnce(changed());
+    get.mockResolvedValue(readOf({ visibility: "public", groupVisibility: "private", leaderOpened: true, revision: "r3" }));
+    const onSaved = vi.fn();
+    const onConflict = vi.fn();
+    render(<EventVisibilityControl eventId={7} groupName="Garden" groupVisibility="private" visibility="private" revision="r1" onSaved={onSaved} onConflict={onConflict} />);
+    await userEvent.click(screen.getByRole("radio", { name: /^Public/ }));
+    await userEvent.type(screen.getByRole("textbox", { name: /^Reason/ }), "Neighbours welcome");
+    await userEvent.click(screen.getByRole("button", { name: "Save visibility" }));
+    expect(await screen.findByText("We couldn't change who can see this. Please try again in a minute.")).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "Save visibility" }));
+    await waitFor(() => expect(onSaved).toHaveBeenCalledOnce());
+    expect(onConflict).not.toHaveBeenCalled();
   });
 
   // DEC-163: the first press was stored and its answer lost; the second is refused and its read shows the save done.

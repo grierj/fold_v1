@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"reflect"
 	"slices"
 	"strings"
 	"sync/atomic"
@@ -1074,6 +1075,93 @@ func TestDateEditTokenFromEveryManagerSurface(t *testing.T) {
 		t.Fatalf("the host's page: %+v", page.Occurrences)
 	}
 	wantDateEdit(t, hc, cw.ID, page.Occurrences[0].Date, dateEditBody(newDateAttempt(t), page.Occurrences[0].Revision, map[string]any{"location": "Lake"}), http.StatusOK, "")
+}
+
+// TestManagedDateReadCarriesTheDatesOwnValues: the manager's read of a date,
+// and the edit's answer, carry what the date holds of its own (DEC-164),
+// exactly as the edit writes it: each field absent while the date falls back,
+// present once set (also to the event's own value, and an empty place), and
+// absent again once cleared. A clock that differs from the series start with
+// no start of the date's own carries none. No other read, a manager's list
+// included, carries it.
+func TestManagedDateReadCarriesTheDatesOwnValues(t *testing.T) {
+	f := newDateEditFixture(t)
+	gormMust(t, f.app.DB.Model(&models.Event{}).Where("id = ?", f.event.ID).Update("remote_available", true))
+	date := f.date(0)
+	none := dateOwnJSON{}
+	ownOf := func(o occurrenceJSON) dateOwnJSON {
+		t.Helper()
+		if o.Own == nil {
+			t.Fatalf("the manager's read of %s has no own values", o.Date)
+		}
+		return *o.Own
+	}
+	if got := ownOf(editBaseOf(t, f.admin, f.event.ID, date)); got != none {
+		t.Fatalf("an unedited date's own values = %+v", got)
+	}
+	w := f.admin.do("GET", managedDatePath(f.event.ID, date), nil, false)
+	if !strings.Contains(w.Body.String(), `"own":{}`) {
+		t.Fatalf("an unedited date's read: %s", w.Body.String())
+	}
+
+	str := func(s string) *string { return &s }
+	num := func(n int) *int { return &n }
+	moved := f.dates[0].StartsAt.Add(90 * time.Minute).Format("2006-01-02T15:04")
+	vis := models.VisibilityPrivate
+	for _, step := range []struct {
+		name    string
+		changes map[string]any
+		want    dateOwnJSON
+	}{
+		{"start", map[string]any{"startsLocal": moved}, dateOwnJSON{StartsLocal: &moved}},
+		{"duration", map[string]any{"durationMinutes": 75}, dateOwnJSON{StartsLocal: &moved, DurationMinutes: num(75)}},
+		{"title equal to the event's", map[string]any{"title": f.event.Title}, dateOwnJSON{StartsLocal: &moved, DurationMinutes: num(75), Title: str(f.event.Title)}},
+		{"empty place", map[string]any{"location": ""}, dateOwnJSON{StartsLocal: &moved, DurationMinutes: num(75), Title: str(f.event.Title), Location: str("")}},
+		{"seat limits and visibility", map[string]any{"capacityOverride": 12, "remoteCapacityOverride": 0, "visibility": vis},
+			dateOwnJSON{StartsLocal: &moved, DurationMinutes: num(75), Title: str(f.event.Title), Location: str(""), CapacityOverride: num(12), RemoteCapacityOverride: num(0), Visibility: &vis}},
+		{"cleared", map[string]any{"capacityOverride": nil, "remoteCapacityOverride": nil, "visibility": "series"},
+			dateOwnJSON{StartsLocal: &moved, DurationMinutes: num(75), Title: str(f.event.Title), Location: str("")}},
+	} {
+		answer := wantEditedDate(t, saveDate(t, f.admin, f.event.ID, date, step.changes, http.StatusOK, ""), editBaseOf(t, f.admin, f.event.ID, date))
+		for name, got := range map[string]dateOwnJSON{"answer": ownOf(answer), "read": ownOf(editBaseOf(t, f.admin, f.event.ID, date))} {
+			if !reflect.DeepEqual(got, step.want) {
+				t.Fatalf("%s: the %s's own values = %s, want %s", step.name, name, ownString(got), ownString(step.want))
+			}
+		}
+	}
+
+	// A clock of the date's that is not its own (as a rule's own hour gives it) is not an own start.
+	gormMust(t, f.app.DB.Model(&models.EventOccurrence{}).Where("id = ?", f.dates[1].ID).
+		Updates(map[string]any{"starts_at": f.dates[1].StartsAt.Add(time.Hour), "ends_at": f.dates[1].EndsAt.Add(time.Hour)}))
+	other := editBaseOf(t, f.admin, f.event.ID, f.date(1))
+	if other.StartsLocal[11:] == other.SeriesStartsLocal[11:] {
+		t.Fatalf("the shifted date starts at the series time: %s", other.StartsLocal)
+	}
+	if got := ownOf(other); got != none {
+		t.Fatalf("a date whose clock differs from the series start with no own start has own values %s", ownString(got))
+	}
+
+	from, to := f.date(0), f.date(3)
+	gid := itoa(f.group)
+	reads := []string{
+		fmt.Sprintf("/api/v1/events/%d", f.event.ID), groupDetailPath(f.group), "/api/v1/groups/" + gid + "/events?from=" + from + "&to=" + to,
+		fmt.Sprintf("/api/v1/events/%d/dates/%s", f.event.ID, date), "/api/v1/calendar?from=" + from + "&to=" + to,
+	}
+	for _, c := range []*apiClient{f.admin, f.leader, f.member, anonClient(t, f.app, "10.9.9.8")} {
+		for _, path := range reads {
+			if raw := c.do("GET", path, nil, false).Body.String(); strings.Contains(raw, `"own":`) {
+				t.Fatalf("%s carries a date's own values: %s", path, raw)
+			}
+		}
+	}
+	if raw := f.member.do("GET", managedDatePath(f.event.ID, date), nil, false); raw.Code != http.StatusForbidden || strings.Contains(raw.Body.String(), `"own":`) {
+		t.Fatalf("a member's manager read: %d %s", raw.Code, raw.Body.String())
+	}
+}
+
+func ownString(o dateOwnJSON) string {
+	b, _ := json.Marshal(o)
+	return string(b)
 }
 
 // TestDateEditPendingGroupLeader: the leader of a group still waiting for
@@ -3594,7 +3682,7 @@ func TestManagedDateCarriesItsRoster(t *testing.T) {
 		})
 		t.Run(c.name+"/cancelled", func(t *testing.T) {
 			got, raw := managedRead(t, c.c, f.event.ID, models.FormatCalendarDate(cancelled.OriginalDate))
-			want := strings.Fields("attendeesVisible cancelled capacity childcareAges childcareAvailable childcareCapacity childcareFull childcareNotes churchWide date description durationMinutes endsAt endsLocal eventId guestsAllowed id leaderOpened location myHouseholdRegistrations myRegistration overridden recurrenceRule registrations reminderEmailMinutes reminderPush remoteAvailable remoteCapacity remoteSeatsUsed remoteSpotsLeft revision seatsUsed seriesDurationMinutes seriesLocation seriesStartsLocal seriesTitle seriesVisibility spotsLeft startsAt startsLocal title tzid videoProvider videoReveal visibility waitlistEnabled")
+			want := strings.Fields("attendeesVisible cancelled capacity childcareAges childcareAvailable childcareCapacity childcareFull childcareNotes churchWide date description durationMinutes endsAt endsLocal eventId guestsAllowed id leaderOpened location myHouseholdRegistrations myRegistration overridden own recurrenceRule registrations reminderEmailMinutes reminderPush remoteAvailable remoteCapacity remoteSeatsUsed remoteSpotsLeft revision seatsUsed seriesDurationMinutes seriesLocation seriesStartsLocal seriesTitle seriesVisibility spotsLeft startsAt startsLocal title tzid videoProvider videoReveal visibility waitlistEnabled")
 			if keys := managedKeys(t, raw); !slices.Equal(keys, want) {
 				t.Fatalf("a cancelled date's edit base keys:\n%v\nwant\n%v", keys, want)
 			}
@@ -4365,12 +4453,13 @@ func TestDateEditHeldOriginalAcrossAnInheritedPlaceABA(t *testing.T) {
 	}
 }
 
-// TestDateEditTakesTheBrowsersFrozenBytes: the body the SPA freezes
-// (DateEdits.freeze in web/src/api/events.ts, pinned byte for byte in
-// events.test.ts), sent as those bytes, is read by the handler; the same bytes
-// with the challenge's token appended apply; and a settlement and its replay
-// name the edited occurrence with a revision, which is what the browser checks
-// before it counts a send as stored.
+// TestDateEditTakesTheBrowsersFrozenBytes keeps a tab still running the
+// earlier release's client working: that client froze its body
+// (DateEdits.freeze, since removed from web/src/api/events.ts), sent those
+// bytes, appended the challenge's token to them, and replayed them byte for
+// byte from "Try again". The handler reads them, they apply, and a settlement
+// and its replay name the edited occurrence with a revision, which is what
+// that client checked before it counted a send as stored.
 func TestDateEditTakesTheBrowsersFrozenBytes(t *testing.T) {
 	f := newDateEditFixture(t)
 	admin := pinnedAs(t, f.admin)

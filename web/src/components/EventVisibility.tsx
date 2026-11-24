@@ -11,7 +11,7 @@ import { decisionImpact, reviewOutdated } from "../lib/visibilityConsent";
 import { ROSTER_STALE, ROSTER_WAITING, visibilityRank } from "../lib/visibilityChange";
 import { useFocusHome, useKeepFocusHome, useLockedFocus } from "../lib/focusHome";
 import { useAction, type Action } from "../lib/useAction";
-import { lostAuthority, useRevisionSave, type RevisionConflict } from "../lib/useRevisionSave";
+import { answerNames, lostAuthority, useRevisionSave, type RevisionConflict } from "../lib/useRevisionSave";
 import { Checkbox, Choices, Field, FormError, Input, Radio } from "./ui/Field";
 import { Button } from "./ui/Button";
 
@@ -19,8 +19,6 @@ interface Audience {
   visibility: Visibility;
   leaderOpened?: boolean;
   groupVisibility?: Visibility;
-  // The save carries a reason no read can show to be the stored one: the read never counts it done.
-  unverified?: boolean;
 }
 
 // A group event wider than its group is leader-opened, as the server decides it on save (`leaderOpens`, DEC-17/28).
@@ -111,7 +109,7 @@ export function EventVisibilityControl({
   // leader-opened mark as they were leaves the revision, so only one that changed either is refused).
   const opened: Audience = { visibility, leaderOpened, groupVisibility };
 
-  const send = useRevisionSave<Audience, { visibility: Visibility; leaderOpened: boolean; groupVisibility: Visibility | null; unverified: boolean }>({
+  const send = useRevisionSave<Audience, { visibility: Visibility; leaderOpened: boolean; groupVisibility: Visibility | null }>({
     opened,
     revision,
     read: async () => {
@@ -119,13 +117,10 @@ export function EventVisibilityControl({
 
       return { allowed: stored.canSetVisibility, revision: stored.event.revision, value: stored.event };
     },
-    fields: (a) => (resetOverrides ? null : { visibility: a.visibility, leaderOpened: a.leaderOpened ?? false, groupVisibility: a.groupVisibility ?? null, unverified: a.unverified ?? false }),
+    fields: (a) => (resetOverrides ? null : { visibility: a.visibility, leaderOpened: a.leaderOpened ?? false, groupVisibility: a.groupVisibility ?? null }),
+    answers: answerNames("event", eventId),
     onConflict,
   });
-
-  // The reason an earlier press sent when its answer never arrived. The reason goes to the audit row and the notice
-  // and no read returns it, so a later press counts as already stored only when it carries that same reason.
-  const unanswered = useRef<string | null>(null);
 
   // `mark` is the session roster sequence the request behind the review was sent at.
   const [review, setReview] = useState<{ impact: VisibilityImpact; mark: number } | null>(null);
@@ -235,17 +230,10 @@ export function EventVisibilityControl({
 
     try {
       const sent = await send(
-        async (rev) => {
-          try {
-            return await Events.setVisibility(eventId, { visibility: value, reason: why || undefined, consent, resetOverrides, revision: rev });
-          } catch (err) {
-            // Only a save with no answer may have been stored: a refusal was not, and a failed read says nothing.
-            if (!(err instanceof ApiError) || err.status >= 500) unanswered.current = why;
-
-            throw err;
-          }
-        },
-        { visibility: value, leaderOpened: opensWider(value, groupVisibility, churchWide), groupVisibility, unverified: why !== (unanswered.current ?? "") },
+        (rev) => Events.setVisibility(eventId, { visibility: value, reason: why || undefined, consent, resetOverrides, revision: rev }),
+        { visibility: value, leaderOpened: opensWider(value, groupVisibility, churchWide), groupVisibility },
+        // The reason goes to the audit row and the notice, and no read returns it.
+        why,
       );
 
       if (sent === "refused") {
@@ -255,7 +243,6 @@ export function EventVisibilityControl({
       }
 
       if (sent !== "saved") return false;
-      unanswered.current = null;
       setReview(null);
       onSaved();
     } catch (err) {

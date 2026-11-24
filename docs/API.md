@@ -708,13 +708,17 @@ visibility, the leader-opened state and the group's visibility it follows. When
 the read already shows what the save would leave (an earlier press stored it and
 its answer was lost), the save is done: it sends nothing more and the control
 does what it does after any save. The same as it opened with, it sends the same
-save with the new revision, up to three sends in all,
+save with the new revision, up to three sends in all, unless a send from the
+control got no answer since its last save landed (a dropped connection, a 5xx,
+an unreadable body, or a 200 that is not this event's `{event}` with a
+`revision`, which is itself that error, nothing closed): then it is a conflict,
+as below,
 and the server judges the consent again, so a save sent again that now needs a
 review opens the review. Different, or a read that no longer lets the person set
 the visibility (a 403 or 404 on the preview, on the read or on any save, the
 first included),
 and the panel closes on its own, with any open review, and the page reads the
-event from nothing and says the changes weren't saved, as after a refused
+event from nothing and says the changes could not be saved, as after a refused
 series save. A reset is always treated as different, also one an earlier press
 stored: the page's read lists 90 days of dates and a reset reaches every later
 one, so the read cannot show it is still the same decision or already done
@@ -1121,7 +1125,10 @@ says decides: when it shows what the save would leave, as the server stores it
 (an earlier press stored it and its answer was lost), the save is done and the
 editor closes as after a save, sending nothing more; when nothing the editor can
 save differs from the read it opened with, it sends the same save with the new
-revision, up to three sends in all, and after a third refusal whose read still
+revision, up to three sends in all (unless a send from the editor got no answer
+since: a dropped connection, a 5xx, an unreadable body, or a 200 that is not
+this event's `{event}` with a `revision`, which is itself that error; then it is
+the conflict below), and after a third refusal whose read still
 shows no difference it shows its ordinary save error and stays open; when
 something else differs, it closes and the page shows the event as stored,
 saying the changes were not saved; when any save or the read answers 403 or
@@ -1249,7 +1256,11 @@ the list. The group detail's `upcomingEvents` instead use the bounded
 ### Guarded date edit
 
 A manager edits one date from a revision token, and the edit is refused when
-the date, its series or the group place it shows changed since (M8.1).
+the date, its series or the group place it shows changed since (M8.1). DEC-164
+changed the web client, which settles a refusal with the one conflict protocol
+every manager save uses (DEC-163, DEC-164; "The web client" below), and added
+the date's own values (`own`) to the manager's read; the edit itself is
+unchanged.
 
 ```
 GET  /api/v1/events/:id/occurrences/:date        → 200 {occurrence}
@@ -1288,6 +1299,16 @@ POST /api/v1/events/:id/occurrences/:date/edits  → 200 {occurrence}
     care notes are decided on the read's one clock and the church's zone read
     in its snapshot; a church zone that cannot be read, or is no zone, answers
     500 and no roster.
+  - *Every date* carries `own`: what the date holds of its own, exactly what
+    the edit's `changes` write, under the same names: `startsLocal` (the
+    date's own start, in the event's zone as the edit sends it),
+    `durationMinutes`, `title`, `location` (an empty own place is `""`,
+    distinct from none), `capacityOverride`, `remoteCapacityOverride` (0
+    included) and `visibility`. A key is absent while the date falls back to
+    the event's value (or the group's place); `own` is `{}` when everything
+    falls back. A clock a rule gives the date is not an own start. Only the
+    edit base and the edit's answer carry `own`: no list, page or other
+    viewer's read does.
   - *A cancelled date* answers the edit base unchanged: no group label, no
     roster, `attendeesVisible: false`, and `registrations` with zero counts.
     *An ended scheduled date* adds only the group label. Neither carries a
@@ -1309,24 +1330,63 @@ POST /api/v1/events/:id/occurrences/:date/edits  → 200 {occurrence}
   duration ends that many minutes later: the date's own duration, else the
   event's, as the date is shown. The date's `visibility-impact` preview does
   the same.
-- **`attempt`** is 16 random bytes per Save press. Try again resends the same
-  body byte for byte.
+- **`attempt`** is 16 random bytes. The web client makes a new one for every
+  send and never sends one twice (DEC-164), so it never matches a receipt;
+  a tab from an earlier release may still resend a body it is unsure of,
+  which the receipt below still recognises.
 
 Answers:
 
 | Status | Body | When |
 |---|---|---|
-| 200 | `{occurrence}` with `revision` | Applied. Also a retry of an attempt that already applied, and a change equal to what is stored; neither writes anything, and the answer's `revision` is the date's current token. |
+| 200 | `{occurrence}` with `revision` and `own` | Applied. Also a retry of an attempt that already applied, and a change equal to what is stored; neither writes anything, and the answer's `revision` is the date's current token. |
 | 400 | `date_edit_invalid` | A malformed attempt, token or body: empty `changes`, an unknown key, a field of the wrong type, `reason` without `visibility`, `consent` not a token (the old `confirmCount` is an unknown key). |
 | 400 | field codes | `invalid_duration`, `invalid_capacity`, `invalid_remote_capacity_override`, `visibility_not_allowed`, `too_long` (the reason), the event text limits, an invalid `startsLocal` in the event's zone. |
 | 403 | | The caller sees the event but does not manage it. |
 | 404 | | A missing or hidden event, a date not on it, management lost while the body arrived, or the event deleted meanwhile. |
-| 409 | `date_changed` | The token is from another server process, or the date, its series or its shown group place changed since. Also, rarely, a save made just as the date ends, when its old and its new end both pass during the save. Read the date again and save again. |
+| 409 | `date_changed` | The token is from another server process, or the date, its series or its shown group place changed since. Also, rarely, a save made just as the date ends, when its old and its new end both pass during the save. Nothing was written; the web client reads the date again and decides (below). |
 | 409 | `date_changed` + `baseSuperseded: true` | The same refusal, when the locked check also proves the token older than the date: the same process and occurrence, neither counter ahead of the date's, one behind. Those counters only rise, so no earlier send of this token can still apply in this process (a database restored under it is the stated limit below). The key is absent, never `false`, for a token another process issued, a change to the shown group place alone (it can change back and match again), the end crossing above, and every refusal before the writer. |
 | 409 | `date_kept_after_leaving` + `keptDates` | The change makes the date end later (a later start, a longer duration, or both) while someone who left the group still holds it: a live exact-date grant of any origin but a leader's add (DEC-156). `keptDates` is `[{date: "YYYY-MM-DD", keptCount}]`, counts only. Nothing is written and no consent is asked first; a manager removes those people (`POST /events/:id/registrations/remove`), then the same save applies. |
-| 409 | `date_needs_consent` + `impact` | Tightening would cancel sign-ups and `consent` is not the token of the impact as the write finds it. `impact` is the visibility-impact shape with one `tightened` row and a fresh `consent`; send the same attempt again with it. |
+| 409 | `date_needs_consent` + `impact` | Tightening would cancel sign-ups and `consent` is not the token of the impact as the write finds it. `impact` is the visibility-impact shape with one `tightened` row and a fresh `consent`; send the same save again with it. |
 | 503 | `restore_detected` | The database was restored under this process, which is about to restart. Checked again under the contact gate on each attempt, so a rerun after a detection writes nothing. |
-| 500 | | The outcome is unknown. Try again with the same body: it never applies twice. |
+| 500 | | The outcome is unknown. The web client treats it as any lost answer (below). The same attempt and body sent again never apply twice. |
+
+**The web client (DEC-164).** "Edit this date" on the event, group and date
+pages saves through `useRevisionSave`, as the series editor and an event's
+visibility do:
+
+- Each save sends the revision of the read the editor opened with, kept with
+  the draft for as long as the draft lives, and a fresh `attempt`.
+- A save counts only when its 200 names the date saved, by `id`, with a
+  `revision`; then the editor closes on all three pages and the page reads
+  again. Any other 200 (a page from something in between, another date's
+  answer) is a lost answer (below).
+- On `date_changed` it reads the date once (`GET .../occurrences/:date`) and
+  compares the date's `own` values, with the zone, the series visibility and
+  whether it has remote seats. The read's `own` already what the save would
+  leave (each value it writes as its own, a cleared one absent): done, as
+  after any save. The same as the form opened with: it sends the same save
+  again with the new token, by itself. Anything else: the editor closes on
+  its own, the page reads again from nothing and says the changes could not
+  be saved. A 403 or 404 to any send or to that read closes it the same way
+  and says the person may no longer manage the date. It sends again at most
+  three times in all, and only while the editor that pressed Save is open
+  under the same sign-in. A change to an event value the date falls back to
+  is not a conflict: the save leaves that field falling back.
+- A lost answer (a dropped connection, a 5xx, an unreadable body, or a 200
+  that is not the date's) is the ordinary save error, with the editor open
+  and the draft kept. The next Save names the same revision, so if the first
+  was stored it is refused with `date_changed` and settled as above, except
+  that once a send got no answer, until a save lands, the editor never sends
+  again under a newer revision (#455): a refusal then ends as done or as the
+  conflict above, so a change someone undid after a lost save stored it is
+  never applied again. Nothing follows the person to another page. While a
+  save is on its way, the row's "Edit this date" on the event and group pages
+  is off, as the editor's Close is.
+- A `date_needs_consent` asks the question in the app's dialog and, on yes,
+  sends the same save with the `consent`; a second question needs its own
+  yes. A roster write on the date that begins or ends while the save or its
+  question is on its way stops it, with nothing more sent.
 
 How it decides, under the contact gate, the event lock and the date lock:
 
@@ -1369,11 +1429,17 @@ How it decides, under the contact gate, the event lock and the date lock:
 - A replay, a no-op and every refusal roll the whole transaction back,
   including the routine reconciliation of contact and exact-date grants.
 - **After any restart** (a deploy, a crash, a restore or a rollback), an open
-  editor's next save gets one `date_changed`. That is what keeps a restored
+  editor's next save gets one `date_changed`, which the web client settles by
+  itself when the date is as the editor opened it. That is what keeps a restored
   database from being matched against an older token. A database restored
   under a still-running process is the one exception, the same limit the
   restore barrier states (docs/agents/erasure.md); no Fold tool restores that
   way.
+- **After a rollback to a release whose manager read has no `own`**, a tab
+  still running the newer page cannot open "Edit this date" (the editor stays
+  closed, or the date page says the date can't be edited now) until the page
+  is loaded again, which brings the older release's page. Nothing is saved
+  wrongly meanwhile.
 
 **Cutover (M8.1).** The SPA edits a date only through the guarded edit. The
 old `PUT /events/:id/occurrences/:date` stays registered to refuse saves from tabs
@@ -1427,7 +1493,7 @@ gains its group's audience in this release, so one of the older shape is
 refused the same way. The current editor or control then reads the event,
 compares and sends again by itself when nothing it saves has changed, with one
 exception: a refused reset of the dates' visibility is always a conflict, so
-the panel closes and the page says the changes weren't saved.
+the panel closes and the page says the changes could not be saved.
 
 ### Registration
 
@@ -3514,7 +3580,7 @@ optional, at most 500 characters. Tightening, including clearing an open date,
 previews newly inaccessible registrations on that date. A save that would
 cancel anyone needs the `consent` of the impact as the write finds it: absent
 or another token answers 409 `date_needs_consent` with a fresh `impact`
-(Guarded date edit above), and the same attempt sent again with that
+(Guarded date edit above), and the same save sent again with that
 `impact.consent` applies.
 
 Consent is counted on the date as the save would store it. The guarded edit
