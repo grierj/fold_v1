@@ -67,9 +67,10 @@ func TestEditRevisionTokensKeepTheirBytes(t *testing.T) {
 
 // The row token (rowRevisionIn) of a date's booking moves with every column
 // and with a write that only stamps updated_at; a session in another time zone
-// reads the same token; no booking reads a fixed token bound to the date. The
-// group's digest keeps the bytes the group form's tokens had before the
-// helper (TestGroupRevisionMovesWithEveryWrite covers its row).
+// reads the same token; no booking reads a token bound to the date that moves
+// with every booking made since. The group's digest keeps the bytes the group
+// form's tokens had before the helper (TestGroupRevisionMovesWithEveryWrite
+// covers its row).
 func TestRowRevisionCoversTheWholeRow(t *testing.T) {
 	f := newBookingFixture(t)
 	var occ models.EventOccurrence
@@ -83,8 +84,19 @@ func TestRowRevisionCoversTheWholeRow(t *testing.T) {
 		return got
 	}
 	empty := token()
-	if want := f.app.editRevision("b"+itoa(occ.ID), "none"); empty != want {
-		t.Fatalf("no booking: %q, want %q", empty, want)
+	if !regexp.MustCompile(`^1\.[0-9a-f]{16}\.b`+itoa(occ.ID)+`\.none-[0-9]+-(true|false)$`).MatchString(empty) || token() != empty {
+		t.Fatalf("no booking: %q", empty)
+	}
+	// A booking made and released on another date since moves it: a release
+	// after a lost answer is never taken for the state the pick was read from.
+	if code, body := f.book(t, f.leader, f.eventB, map[string]any{"roomId": f.hall.ID}); code != http.StatusOK {
+		t.Fatalf("book B: %d %s", code, body)
+	}
+	if code, body := f.book(t, f.leader, f.eventB, map[string]any{"roomId": nil}); code != http.StatusOK {
+		t.Fatalf("release B: %d %s", code, body)
+	}
+	if again := token(); again == empty {
+		t.Fatalf("a booking made and released elsewhere left the empty token at %q", again)
 	}
 	if code, body := f.book(t, f.leader, f.eventA, map[string]any{"roomId": f.hall.ID}); code != http.StatusOK {
 		t.Fatalf("book: %d %s", code, body)

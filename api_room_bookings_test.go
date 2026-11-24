@@ -719,3 +719,21 @@ func TestDateRoomRevisionIsReadOnlyByManagers(t *testing.T) {
 		t.Fatal("the leader read no revision")
 	}
 }
+
+// A pick whose answer was lost is not applied again over the release that
+// undid it (DEC-164): the date has no booking again, but its token moved.
+func TestDatePickResentAfterItWasReleasedIsRefused(t *testing.T) {
+	f := newBookingFixture(t)
+	co, _ := f.coLeader(t)
+	path := f.path(f.eventA, "/room")
+	pick := withRevision(map[string]any{"roomId": f.hall.ID}, roomRevision(t, f.leader, path))
+	if w := f.leader.do("PUT", path, pick, true); w.Code != http.StatusOK {
+		t.Fatalf("the pick whose answer is lost: %d %s", w.Code, w.Body.String())
+	}
+	roomPickOK(t, co, path, map[string]any{"roomId": nil})
+	before := roomState(t, f.app)
+	wantCode(t, "the same pick sent again", f.leader.do("PUT", path, pick, true), http.StatusConflict, "date_room_changed")
+	if after := roomState(t, f.app); after != before {
+		t.Fatalf("the resend wrote:\n%s\nwant\n%s", after, before)
+	}
+}

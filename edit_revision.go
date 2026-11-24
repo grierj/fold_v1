@@ -118,8 +118,8 @@ type revisionRows struct {
 	omit []string
 	// also is an expression over the row (alias r) the token covers besides it.
 	also string
-	// absent is the digest when no row has the key; empty makes a missing row
-	// an error.
+	// absent is a query for the digest when no row has the key; empty makes a
+	// missing row an error.
 	absent string
 }
 
@@ -159,7 +159,11 @@ func (a *App) rowRevisionIn(tx *gorm.DB, t revisionRows, key uint) (string, erro
 	case len(digests) == 1:
 		return a.editRevision(fmt.Sprintf("%s%d", t.kind, key), digests[0]), nil
 	case len(digests) == 0 && t.absent != "":
-		return a.editRevision(fmt.Sprintf("%s%d", t.kind, key), t.absent), nil
+		var absent string
+		if err := tx.Raw(t.absent).Row().Scan(&absent); err != nil {
+			return "", err
+		}
+		return a.editRevision(fmt.Sprintf("%s%d", t.kind, key), absent), nil
 	case len(digests) == 0:
 		return "", gorm.ErrRecordNotFound
 	}
@@ -192,10 +196,14 @@ var errDateRoomChanged = apiErr(http.StatusConflict, "date_room_changed", "the d
 // token. Beside the row, the token covers the status of the request it waits
 // on, which decides whether the control says it is waiting for an admin.
 // padded_range is the CHECK's formula over the other columns; created_at
-// never changes. With no booking the digest is "none".
+// never changes. With no booking the digest is "none" and the position of the
+// bookings' id sequence: a booking made and released since the read took an
+// id, even rolled back, so a pick whose answer was lost is not applied again
+// over the release that undid it (DEC-164). A booking anywhere moves it, which
+// costs a silent resend at most.
 var bookingRevisionRows = revisionRows{table: "room_bookings", kind: "b", key: "occurrence_id",
 	instants: []string{"starts_at", "ends_at", "updated_at"}, omit: []string{"created_at", "padded_range"},
-	also: "coalesce((SELECT q.status FROM room_requests q WHERE q.id = r.request_id), '')", absent: "none"}
+	also: "coalesce((SELECT q.status FROM room_requests q WHERE q.id = r.request_id), '')", absent: "SELECT 'none-' || last_value || '-' || is_called FROM room_bookings_id_seq"}
 
 // dateRoomRevisionIn is the token a date's room control holds for the date's
 // booking. Every writer of a date's booking holds its event's row lock, which
