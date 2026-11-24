@@ -68,9 +68,10 @@ func (a *App) roomPickerOn() gin.HandlerFunc {
 	}
 }
 
-// roomsOnIn reads the rooms switch on tx, a room control's snapshot: the
-// route's gate let the request through, and what the read shows comes from a
-// state the switch was on in.
+// roomsOnIn reads the rooms switch on tx: the room controls' gate
+// (roomPickerOn), and again in a control's snapshot, so what the read shows
+// comes from a state the switch was on in. A failed read is its error, never
+// errRoomsOff.
 func roomsOnIn(tx *gorm.DB) error {
 	on, err := boolSettingErrIn(tx, settingRoomsEnabled, false)
 	if err == nil && !on {

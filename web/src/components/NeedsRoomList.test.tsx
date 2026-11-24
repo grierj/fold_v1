@@ -97,6 +97,30 @@ it("says a pick that waits for an admin's approval is waiting, not that the date
   expect(screen.queryByText(/has a room|Booked/)).not.toBeInTheDocument();
 });
 
+it("says a date released from its inline control was released, never that it has a room", async () => {
+  vi.mocked(DateRooms.list).mockResolvedValue({ rooms: [hall], booking: null, dateRoom: { id: 70, revision: "r1" } });
+  vi.mocked(DateRooms.set).mockResolvedValue({ booking: null, dateRoom: { id: 70, revision: "r2" } });
+  show({ hasDate: () => false });
+  await userEvent.click(await screen.findByRole("button", { name: "Pick a room for Tuesday, December 15" }));
+  vi.mocked(SeriesRooms.list).mockResolvedValue({ revision: "r1", rooms: [], dates: 10, defaultRoom: null, needsRoom: [needs[0]], pending: 0 });
+  await userEvent.selectOptions(await screen.findByRole("combobox", { name: /^Room/ }), "none");
+  expect(await screen.findByText("Room released for Tuesday, December 15.")).toBeInTheDocument();
+  expect(screen.queryByText(/has a room|Booked/)).not.toBeInTheDocument();
+});
+
+it("says only that an open row left the list when something else took it off", async () => {
+  vi.mocked(DateRooms.list).mockResolvedValue({ rooms: [hall], booking: null, dateRoom: { id: 70, revision: "r1" } });
+  const hasDate = () => false;
+  const { rerender } = show({ hasDate });
+  await userEvent.click(await screen.findByRole("button", { name: "Pick a room for Tuesday, December 15" }));
+  await screen.findByRole("combobox", { name: /^Room/ });
+  vi.mocked(SeriesRooms.list).mockResolvedValue({ revision: "r1", rooms: [], dates: 10, defaultRoom: null, needsRoom: [needs[0]], pending: 0 });
+  // Another tab booked it: the page's revision moves and the list asks again.
+  rerender(<MemoryRouter><NeedsRoomList eventId={7} revision={1} hasDate={hasDate} onPick={vi.fn()} onGone={vi.fn()} /></MemoryRouter>);
+  expect(await screen.findByText("Tuesday, December 15. It is no longer listed under “Dates that need a room”.")).toBeInTheDocument();
+  expect(screen.queryByText(/has a room|Booked/)).not.toBeInTheDocument();
+});
+
 // A pick refused because someone else gave the date a room: the list asks again and the date leaves it, saying the
 // choice could not be saved, never that the date has the room this person picked.
 it("asks again after the inline control's pick is refused, and says the choice could not be saved", async () => {
