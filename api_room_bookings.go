@@ -452,7 +452,7 @@ func pickDateRoom(tx *gorm.DB, p datePick) error {
 	}
 	room, err := lockRoom(tx, *p.roomID)
 	if errors.Is(err, gorm.ErrRecordNotFound) || (err == nil && !room.Active) {
-		return errRoomGone
+		return errPickedRoomGone
 	}
 	if err != nil {
 		return err

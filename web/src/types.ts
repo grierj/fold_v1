@@ -1206,8 +1206,9 @@ export interface NeedsRoom {
   status: "requested" | "rejected";
 }
 
-// What booking a whole series did (M2.1c).
+// What booking a whole series did (M2.1c), and the event's revision the next pick sends.
 export interface SeriesBooking {
+  event: RevisionRef;
   defaultRoom: OccurrenceRoom | null;
   booked: number;
   lost: string[];
@@ -1738,15 +1739,24 @@ export interface RoomRequestConfirmation {
   lost: string[];
 }
 
-// GET /events/:id/dates/:date/rooms (M2.1b).
+// GET /events/:id/dates/:date/rooms (M2.1b). `dateRoom` names the date and the booking's revision a pick sends.
 export interface DateRoomsResponse {
   rooms: RoomPickerItem[];
   booking: RoomBooking | null;
+  dateRoom: RevisionRef;
   suggestions?: RoomSuggestions;
 }
 
-// GET /events/:id/rooms (M2.1c).
+// What a manager's pick was made from or stored: the thing's id and its revision. A date's room is named by its
+// date's (occurrence's) id.
+export interface RevisionRef {
+  id: number;
+  revision: string;
+}
+
+// GET /events/:id/rooms (M2.1c). `revision` is the event's, which a series pick sends.
 export interface SeriesRoomsResponse {
+  revision: string;
   rooms: SeriesRoom[];
   dates: number;
   defaultRoom: OccurrenceRoom | null;
@@ -2074,8 +2084,10 @@ export interface EmailChangeCancelledResponse {
   cancelled: true;
 }
 
+// PUT /events/:id/dates/:date/room: the booking stored, and the revision the next pick sends.
 export interface RoomBookingResponse {
   booking: RoomBooking | null;
+  dateRoom: RevisionRef;
 }
 
 // ---- Deleted-accounts review list (GET /admin/erasure-reasons/legacy and its

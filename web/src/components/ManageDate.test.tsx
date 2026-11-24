@@ -177,8 +177,8 @@ it("with the roster open, a save empties the roster in the render it starts, clo
 it("with the roster open, a room change empties the roster in the render it starts", async () => {
   invalidateSite();
   vi.mocked(Site.get).mockResolvedValue({ name: "Fold", timezone: "UTC", selfSignup: "off", roomsEnabled: true, pushEnabled: true });
-  vi.mocked(DateRooms.list).mockResolvedValue({ rooms: [{ id: 1, name: "Fellowship Hall", building: "Main", capacity: 80, features: "", restricted: false, busy: false, tooSmall: false }], booking: null });
-  vi.mocked(DateRooms.set).mockResolvedValue({ booking: null });
+  vi.mocked(DateRooms.list).mockResolvedValue({ rooms: [{ id: 1, name: "Fellowship Hall", building: "Main", capacity: 80, features: "", restricted: false, busy: false, tooSmall: false }], booking: null, dateRoom: { id: 70, revision: "r1" } });
+  vi.mocked(DateRooms.set).mockResolvedValue({ booking: null, dateRoom: { id: 70, revision: "r2" } });
   mount();
   await openEditor();
   await openRoster();

@@ -21,7 +21,7 @@ import { forgetSite } from "../lib/useSite";
 
 stubService(DateRooms, () => ({ list: vi.fn() }));
 
-stubService(SeriesRooms, () => ({ list: vi.fn() }));
+stubService(SeriesRooms, () => ({ list: vi.fn(), set: vi.fn() }));
 
 stubService(Events, () => ({ update: vi.fn(), generateJitsi: vi.fn().mockResolvedValue({ url: "https://meet.jit.si/fold-abc123def4" }), managedDate: vi.fn(), removeRegistration: vi.fn() }));
 
@@ -389,7 +389,7 @@ describe("SeriesEditor form layout (DEC-95)", () => {
 
     const roomsOn = () => {
       vi.mocked(Site.get).mockResolvedValue({ name: "Fold", timezone: "UTC", selfSignup: "off", roomsEnabled: true, pushEnabled: true });
-      vi.mocked(DateRooms.list).mockResolvedValue({ rooms: [], booking: null });
+      vi.mocked(DateRooms.list).mockResolvedValue({ rooms: [], booking: null, dateRoom: { id: 70, revision: "r1" } });
     };
 
     it("sits with Location for a single-date event, outside More options", async () => {
@@ -404,7 +404,7 @@ describe("SeriesEditor form layout (DEC-95)", () => {
 
     it("has no one-date Room for a series, whatever the date", async () => {
       roomsOn();
-      vi.mocked(SeriesRooms.list).mockResolvedValue({ rooms: [], dates: 3, defaultRoom: null, needsRoom: [], pending: 0 });
+      vi.mocked(SeriesRooms.list).mockResolvedValue({ revision: "r1", rooms: [], dates: 3, defaultRoom: null, needsRoom: [], pending: 0 });
       vi.mocked(DateRooms.list).mockClear();
       render(<SeriesEditor series={{ ...single, recurrenceRule: "FREQ=WEEKLY;BYDAY=TU" }} roomDate="2026-12-01" idPrefix="room-series" onSaved={() => {}} />);
       await screen.findByRole("button", { name: "Save series" });
@@ -414,7 +414,7 @@ describe("SeriesEditor form layout (DEC-95)", () => {
 
     it("gives a series Room for every date beside Location, only while rooms are on", async () => {
       roomsOn();
-      vi.mocked(SeriesRooms.list).mockResolvedValue({ rooms: [], dates: 10, defaultRoom: null, needsRoom: [], pending: 0 });
+      vi.mocked(SeriesRooms.list).mockResolvedValue({ revision: "r1", rooms: [], dates: 10, defaultRoom: null, needsRoom: [], pending: 0 });
       const series = { ...single, recurrenceRule: "FREQ=WEEKLY;BYDAY=TU" };
       const { unmount } = render(<SeriesEditor series={series} idPrefix="room-hint" onSaved={() => {}} />);
       const room = await screen.findByRole("combobox", { name: /^Room for every date/ });
@@ -609,7 +609,7 @@ describe("SeriesEditor after a save", () => {
 
   it("keeps the room field it opened with when a read makes the event a series", async () => {
     vi.mocked(Site.get).mockResolvedValue({ name: "Fold", timezone: "UTC", selfSignup: "off", roomsEnabled: true, pushEnabled: true });
-    vi.mocked(DateRooms.list).mockResolvedValue({ rooms: [], booking: null });
+    vi.mocked(DateRooms.list).mockResolvedValue({ rooms: [], booking: null, dateRoom: { id: 70, revision: "r1" } });
     const onSaved = vi.fn();
     const view = render(<SeriesEditor series={single} roomDate="2026-12-01" idPrefix="weekly" onSaved={onSaved} onClose={() => {}} />);
     expect(await screen.findByRole("combobox", { name: /^Room/ })).toBeInTheDocument();
@@ -670,6 +670,29 @@ describe("SeriesEditor and the read it opened with", () => {
     expect(second).toEqual({ ...first, revision: "r2" });
     expect(onConflict).not.toHaveBeenCalled();
     expect(screen.queryByText(/couldn't/)).not.toBeInTheDocument();
+  });
+
+  // DEC-162, DEC-167: the series room moves the event's revision, and is not a field this editor writes.
+  it("saves by itself after its own series room pick moved the event's revision", async () => {
+    forgetSite();
+    vi.mocked(Site.get).mockResolvedValue({ name: "Fold", timezone: "UTC", selfSignup: "off", roomsEnabled: true, pushEnabled: true });
+    const hall = { id: 1, name: "Fellowship Hall", building: "Main", capacity: 80, features: "", restricted: false, busyDates: 0, tooSmall: false };
+    vi.mocked(SeriesRooms.list).mockResolvedValue({ revision: "r1", rooms: [hall], dates: 10, defaultRoom: null, needsRoom: [], pending: 0 });
+    vi.mocked(SeriesRooms.set).mockResolvedValue({ event: { id: 7, revision: "r2" }, defaultRoom: { id: 1, name: "Fellowship Hall", building: "Main" }, booked: 10, lost: [], kept: 0, pending: 0 });
+    vi.mocked(Events.update).mockRejectedValueOnce(changed()).mockResolvedValueOnce({ event: stored });
+    vi.mocked(Events.get).mockResolvedValue(readOf(stored));
+    const onSaved = vi.fn();
+    const onConflict = vi.fn();
+    render(<SeriesEditor series={opened} idPrefix="own-room" onSaved={onSaved} onConflict={onConflict} />);
+    await userEvent.type(screen.getByRole("textbox", { name: "Title" }), " night");
+    await userEvent.selectOptions(await screen.findByRole("combobox", { name: /^Room for every date/ }), "1");
+    await userEvent.click(screen.getByRole("button", { name: "Book for every date" }));
+    await waitFor(() => expect(SeriesRooms.set).toHaveBeenCalledExactlyOnceWith(7, { roomId: 1 }, "r1"));
+    expect(await screen.findByText("Booked for 10 dates.")).toBeInTheDocument();
+    await userEvent.click(saveButton());
+    await waitFor(() => expect(onSaved).toHaveBeenCalledOnce());
+    expect(vi.mocked(Events.update).mock.calls.map(([, body]) => body.revision)).toEqual(["r1", "r2"]);
+    expect(onConflict).not.toHaveBeenCalled();
   });
 
   it.each([

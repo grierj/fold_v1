@@ -50,7 +50,7 @@ describe("busyDatesNote", () => {
 });
 
 describe("seriesBookingMessage", () => {
-  const res = (over: Partial<SeriesBooking>): SeriesBooking => ({ defaultRoom: hall, booked: 0, pending: 0, lost: [], kept: 0, ...over });
+  const res = (over: Partial<SeriesBooking>): SeriesBooking => ({ event: { id: 7, revision: "r2" }, defaultRoom: hall, booked: 0, pending: 0, lost: [], kept: 0, ...over });
   it("tells what happened", () => {
     expect(seriesBookingMessage(res({ booked: 1 }))).toBe("Booked for 1 date.");
     expect(seriesBookingMessage(res({ booked: 8 }), 2)).toBe("Booked for 8 dates, 2 of them over another booking.");

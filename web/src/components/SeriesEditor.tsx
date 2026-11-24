@@ -354,9 +354,9 @@ export function SeriesEditor({
         <Field id={`s-loc-${idPrefix}`} label="Location" optional hint={locationHint}>
           <Input value={location} onChange={(e) => setLocation(e.target.value)} />
         </Field>
-        {instance.recurrenceRule !== "" && <SeriesRoomField eventId={instance.eventId} idPrefix={idPrefix} onChanged={onRoomChanged} />}
+        {instance.recurrenceRule !== "" && <SeriesRoomField eventId={instance.eventId} idPrefix={idPrefix} onChanged={onRoomChanged} onGone={() => onConflict?.("gone")} />}
         {openedRoomDate && instance.recurrenceRule === "" && (
-          <RoomField eventId={instance.eventId} date={openedRoomDate} idPrefix={idPrefix} onChanged={onRoomChanged} />
+          <RoomField eventId={instance.eventId} date={openedRoomDate} idPrefix={idPrefix} onChanged={onRoomChanged} onGone={() => onConflict?.("gone")} />
         )}
         <EventOptions
           idPrefix={idPrefix}

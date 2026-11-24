@@ -193,11 +193,41 @@ it("a credential the server no longer knows is not a refusal: the read can be as
 
 it("puts the Room control beside Location when rooms are on, and not otherwise", async () => {
   vi.mocked(Site.get).mockResolvedValue({ name: "Fold", timezone: "UTC", selfSignup: "off", roomsEnabled: true, pushEnabled: true });
-  vi.mocked(DateRooms.list).mockResolvedValue({ rooms: [], booking: null });
+  vi.mocked(DateRooms.list).mockResolvedValue({ rooms: [], booking: null, dateRoom: { id: 70, revision: "r1" } });
   render(editor());
   expect(await screen.findByRole("combobox", { name: /^Room/ })).toBeInTheDocument();
   expect(DateRooms.list).toHaveBeenCalledWith(7, DATE);
   expect(screen.getByRole("textbox", { name: /^Location/ })).toBeInTheDocument();
+});
+
+// DEC-167: the Room control is its own action. When the date's room changed under a pick, the control shows the room
+// as it is now and says so at the field; the editor stays open with its draft.
+it("keeps the editor and its draft when the date's room changed under a pick, and says so at the Room field", async () => {
+  vi.mocked(Site.get).mockResolvedValue({ name: "Fold", timezone: "UTC", selfSignup: "off", roomsEnabled: true, pushEnabled: true });
+  const hall = { id: 1, name: "Fellowship Hall", building: "Main", capacity: 80, features: "", restricted: false, busy: false, tooSmall: false };
+  const chapel = { ...hall, id: 2, name: "Chapel", building: "" };
+  vi.mocked(DateRooms.list)
+    .mockResolvedValueOnce({ rooms: [hall, chapel], booking: null, dateRoom: { id: 70, revision: "r1" } })
+    .mockResolvedValueOnce({
+      rooms: [hall, chapel], dateRoom: { id: 70, revision: "r3" },
+      booking: { roomId: 2, roomName: "Chapel", building: "", status: "confirmed", setupMinutes: 0, teardownMinutes: 0, doubleBooked: false, tooSmall: false, pending: false },
+    });
+  vi.mocked(DateRooms.set).mockRejectedValueOnce(new ApiError(409, "changed", { code: "date_room_changed" })).mockRejectedValueOnce(new ApiError(403, "no", { code: "not_allowed" }));
+  const onConflict = vi.fn();
+  render(editor({ onConflict }));
+  const title = await screen.findByRole("textbox", { name: /^Title/ });
+  await userEvent.clear(title);
+  await userEvent.type(title, "Supper night");
+  await userEvent.selectOptions(await screen.findByRole("combobox", { name: /^Room/ }), "1");
+  const line = await screen.findByText("This date's room changed while you were choosing, so your choice could not be saved. This is the room as it is now.");
+  await waitFor(() => expect(line).toHaveFocus());
+  expect(screen.getByRole("combobox", { name: /^Room/ })).toHaveValue("2");
+  expect(screen.getByRole("textbox", { name: /^Title/ })).toHaveValue("Supper night");
+  expect(screen.getByRole("button", { name: /^Save/ })).toBeInTheDocument();
+  expect(onConflict).not.toHaveBeenCalled();
+  // A pick refused because this person may no longer manage the date closes the editor the way its own save does.
+  await userEvent.selectOptions(screen.getByRole("combobox", { name: /^Room/ }), "1");
+  await waitFor(() => expect(onConflict).toHaveBeenCalledExactlyOnceWith("gone"));
 });
 
 it("leaves the Room control out while rooms are off", async () => {

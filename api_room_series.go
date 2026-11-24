@@ -25,8 +25,12 @@ import (
 // on the event page as needing a room (DEC-103). Dates the daily extender or
 // a series edit adds later are booked in the series room the same way.
 
-// errRoomGone: the room picked was removed or turned off since it was listed.
-var errRoomGone = apiErr(http.StatusNotFound, "room_gone", "room not found")
+var errRoomGone = apiErr(http.StatusNotFound, "", "room not found")
+
+// errPickedRoomGone: the room a pick named was turned off since the picker
+// listed it. Its own code, so the picker tells it from the event's or the
+// date's 404, which say the person may no longer manage them.
+var errPickedRoomGone = apiErr(http.StatusNotFound, "room_gone", "that room is no longer available")
 
 type seriesRoomJSON struct {
 	ID         uint   `json:"id"`
@@ -255,7 +259,7 @@ func bookWholeSeries(tx *gorm.DB, ev *models.Event, roomID *uint, user *models.U
 	if roomID != nil {
 		r, err := lockRoom(tx, *roomID)
 		if errors.Is(err, gorm.ErrRecordNotFound) || (err == nil && !r.Active) {
-			return out, errRoomGone
+			return out, errPickedRoomGone
 		}
 		if err != nil {
 			return out, err

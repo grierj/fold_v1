@@ -8,15 +8,18 @@ import type { RevisionConflict } from "./useRevisionSave";
 // again). No live region outlasts a read from nothing, so the line takes focus, which reads it out and brings it into
 // view whatever else the page scrolled to. Focus follows the reason, not the line: a later read that shows the line
 // again does not move focus.
-export function useRefusedSave(load: Pick<Load<unknown>, "loading" | "data" | "retry">) {
+//
+// A control that stays on screen (a room control) passes no `load`: it already shows what its own read found when it
+// calls `refused`, so the line comes at once.
+export function useRefusedSave(load?: Pick<Load<unknown>, "loading" | "data" | "retry">) {
   const pending = useRef<RevisionConflict | null>(null);
   const [why, setWhy] = useState<RevisionConflict | null>(null);
   const line = useRef<HTMLParagraphElement>(null);
   useEffect(() => {
-    if (!pending.current || load.loading) return;
+    if (!pending.current || load?.loading) return;
     setWhy(pending.current);
     pending.current = null;
-  }, [load.loading, load.data]);
+  }, [load?.loading, load?.data]);
   useLayoutEffect(() => {
     if (why) line.current?.focus();
   }, [why]);
@@ -25,6 +28,12 @@ export function useRefusedSave(load: Pick<Load<unknown>, "loading" | "data" | "r
     why,
     line,
     refused(reason: RevisionConflict) {
+      if (!load) {
+        setWhy(reason);
+
+        return;
+      }
+
       pending.current = reason;
       void load.retry();
     },
@@ -37,17 +46,20 @@ export function useRefusedSave(load: Pick<Load<unknown>, "loading" | "data" | "r
 
 // The line for the screen the page shows: `canManage` is whether the viewer may still manage the `noun` shown; leave it
 // out on a screen that shows none (not found, unavailable), where the line says nothing about it. `about` names which
-// one, on a page that lists several (a date's day on the event and group pages).
-export function RefusedSaveLine({ save, noun, canManage, about }: { save: ReturnType<typeof useRefusedSave>; noun: string; canManage?: boolean; about?: string }) {
+// one, on a page that lists several (a date's day on the event and group pages). A control that stays on screen and
+// shows what changed under a choice names it (`choosing`, as "This date's room"); its host handles "gone".
+export function RefusedSaveLine({ save, noun, canManage, about, choosing }: { save: ReturnType<typeof useRefusedSave>; noun: string; canManage?: boolean; about?: string; choosing?: string }) {
   if (!save.why) return null;
 
-  const text = canManage === undefined
-    ? "Your changes could not be saved."
-    : save.why === "changed"
-      ? `This ${noun} changed while you were editing, so your changes could not be saved. This is the ${noun} as it is now.`
-      : canManage
-        ? `Your changes could not be saved. This is the ${noun} as it is now.`
-        : `You can no longer manage this ${noun}, so your changes could not be saved.`;
+  const text = choosing
+    ? `${choosing} changed while you were choosing, so your choice could not be saved. This is the ${noun} as it is now.`
+    : canManage === undefined
+      ? "Your changes could not be saved."
+      : save.why === "changed"
+        ? `This ${noun} changed while you were editing, so your changes could not be saved. This is the ${noun} as it is now.`
+        : canManage
+          ? `Your changes could not be saved. This is the ${noun} as it is now.`
+          : `You can no longer manage this ${noun}, so your changes could not be saved.`;
 
   return (
     <p ref={save.line} role="status" tabIndex={-1} className="mb-4 scroll-mt-4 rounded-lg border border-border bg-sunken px-4 py-3 text-sm outline-none">

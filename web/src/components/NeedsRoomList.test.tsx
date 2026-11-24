@@ -24,7 +24,7 @@ const needs: NeedsRoom[] = [{ date: "2026-12-08", roomName: "Fellowship Hall", s
 beforeEach(() => {
   vi.resetAllMocks();
   vi.mocked(Site.get).mockResolvedValue({ name: "Fold", timezone: "UTC", selfSignup: "off", roomsEnabled: true, pushEnabled: true });
-  vi.mocked(SeriesRooms.list).mockResolvedValue({ rooms: [], dates: 10, defaultRoom: null, needsRoom: needs, pending: 0 });
+  vi.mocked(SeriesRooms.list).mockResolvedValue({ revision: "r1", rooms: [], dates: 10, defaultRoom: null, needsRoom: needs, pending: 0 });
 });
 
 function show(props: Partial<Parameters<typeof NeedsRoomList>[0]> = {}) {
@@ -32,7 +32,7 @@ function show(props: Partial<Parameters<typeof NeedsRoomList>[0]> = {}) {
 
   const view = render(
     <MemoryRouter>
-      <NeedsRoomList eventId={7} revision={0} hasDate={() => true} onPick={onPick} {...props} />
+      <NeedsRoomList eventId={7} revision={0} hasDate={() => true} onPick={onPick} onGone={vi.fn()} {...props} />
     </MemoryRouter>,
   );
 
@@ -51,7 +51,7 @@ it("lists each date with the room it lost and a Pick a room action", async () =>
 });
 
 it("opens the one-date Room control under a date the page doesn't list, and not for one it does", async () => {
-  vi.mocked(DateRooms.list).mockResolvedValue({ rooms: [hall], booking: null });
+  vi.mocked(DateRooms.list).mockResolvedValue({ rooms: [hall], booking: null, dateRoom: { id: 70, revision: "r1" } });
   const { onPick } = show({ hasDate: (d) => d === "2026-12-08" });
   const far = await screen.findByRole("button", { name: "Pick a room for Tuesday, December 15" });
   expect(screen.queryByRole("link")).not.toBeInTheDocument();
@@ -73,11 +73,11 @@ it("opens the one-date Room control under a date the page doesn't list, and not 
 });
 
 it("asks again after the inline control books, and says the date has a room now", async () => {
-  vi.mocked(DateRooms.list).mockResolvedValue({ rooms: [hall], booking: null });
-  vi.mocked(DateRooms.set).mockResolvedValue({ booking: { roomId: 1, roomName: "Fellowship Hall", building: "Main", status: "confirmed", setupMinutes: 0, teardownMinutes: 0, doubleBooked: false, tooSmall: false, pending: false } });
+  vi.mocked(DateRooms.list).mockResolvedValue({ rooms: [hall], booking: null, dateRoom: { id: 70, revision: "r1" } });
+  vi.mocked(DateRooms.set).mockResolvedValue({ booking: { roomId: 1, roomName: "Fellowship Hall", building: "Main", status: "confirmed", setupMinutes: 0, teardownMinutes: 0, doubleBooked: false, tooSmall: false, pending: false }, dateRoom: { id: 70, revision: "r2" } });
   show({ hasDate: () => false });
   await userEvent.click(await screen.findByRole("button", { name: "Pick a room for Tuesday, December 15" }));
-  vi.mocked(SeriesRooms.list).mockResolvedValue({ rooms: [], dates: 10, defaultRoom: null, needsRoom: [needs[0]], pending: 0 });
+  vi.mocked(SeriesRooms.list).mockResolvedValue({ revision: "r1", rooms: [], dates: 10, defaultRoom: null, needsRoom: [needs[0]], pending: 0 });
   await userEvent.selectOptions(await screen.findByRole("combobox", { name: /^Room/ }), "1");
   await waitFor(() => expect(screen.queryByText("Chapel isn't free then.")).not.toBeInTheDocument());
   expect(SeriesRooms.list).toHaveBeenCalledTimes(2);
@@ -86,7 +86,7 @@ it("asks again after the inline control books, and says the date has a room now"
 
 it("shows the first 10 dates with the count in the heading, and the rest on request", async () => {
   const many: NeedsRoom[] = Array.from({ length: 14 }, (_, i) => ({ date: `2027-01-${`${i + 1}`.padStart(2, "0")}`, roomName: "Chapel", status: "requested" }));
-  vi.mocked(SeriesRooms.list).mockResolvedValue({ rooms: [], dates: 30, defaultRoom: null, needsRoom: many, pending: 0 });
+  vi.mocked(SeriesRooms.list).mockResolvedValue({ revision: "r1", rooms: [], dates: 30, defaultRoom: null, needsRoom: many, pending: 0 });
   show();
   expect(await screen.findByRole("heading", { name: /Dates that need a room \(14\)/ })).toBeInTheDocument();
   expect(screen.getAllByRole("button", { name: /^Pick a room/ })).toHaveLength(10);
@@ -96,7 +96,7 @@ it("shows the first 10 dates with the count in the heading, and the rest on requ
 });
 
 it("shows nothing when every date has its room", async () => {
-  vi.mocked(SeriesRooms.list).mockResolvedValue({ rooms: [], dates: 10, defaultRoom: null, needsRoom: [], pending: 0 });
+  vi.mocked(SeriesRooms.list).mockResolvedValue({ revision: "r1", rooms: [], dates: 10, defaultRoom: null, needsRoom: [], pending: 0 });
   const { container } = show();
   await waitFor(() => expect(SeriesRooms.list).toHaveBeenCalled());
   expect(container).toBeEmptyDOMElement();
@@ -113,8 +113,8 @@ it("shows nothing, and asks for no rooms, while rooms are off", async () => {
 it("asks again when a room changed, and drops a date that now has one", async () => {
   const { rerender } = show();
   await screen.findByText("Chapel isn't free then.");
-  vi.mocked(SeriesRooms.list).mockResolvedValue({ rooms: [], dates: 10, defaultRoom: null, needsRoom: [needs[0]], pending: 0 });
-  rerender(<MemoryRouter><NeedsRoomList eventId={7} revision={1} hasDate={() => true} onPick={() => {}} /></MemoryRouter>);
+  vi.mocked(SeriesRooms.list).mockResolvedValue({ revision: "r1", rooms: [], dates: 10, defaultRoom: null, needsRoom: [needs[0]], pending: 0 });
+  rerender(<MemoryRouter><NeedsRoomList eventId={7} revision={1} hasDate={() => true} onPick={() => {}} onGone={vi.fn()} /></MemoryRouter>);
   await waitFor(() => expect(screen.queryByText("Chapel isn't free then.")).not.toBeInTheDocument());
   expect(screen.getByText("Fellowship Hall isn't free then.")).toBeInTheDocument();
 });
@@ -128,6 +128,7 @@ it("offers a retry when the list fails to load", async () => {
 
 it("words a date an admin didn't approve differently from one that lost its room", async () => {
   vi.mocked(SeriesRooms.list).mockResolvedValue({
+    revision: "r1",
     rooms: [], dates: 10, defaultRoom: null, pending: 0,
     needsRoom: [{ date: "2026-12-08", roomName: "Fellowship Hall", status: "rejected" }, { date: "2026-12-15", roomName: "Chapel", status: "requested" }],
   });

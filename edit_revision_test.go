@@ -90,7 +90,7 @@ func TestRowRevisionCoversTheWholeRow(t *testing.T) {
 		t.Fatalf("book: %d %s", code, body)
 	}
 	booked := token()
-	if !regexp.MustCompile(`^1\.[0-9a-f]{16}\.b` + itoa(occ.ID) + `\.[0-9a-f]{32}$`).MatchString(booked) || booked == empty {
+	if !regexp.MustCompile(`^1\.[0-9a-f]{16}\.b`+itoa(occ.ID)+`\.[0-9a-f]{32}$`).MatchString(booked) || booked == empty {
 		t.Fatalf("booked token %q", booked)
 	}
 	gormMust(t, f.app.DB.Exec("UPDATE room_bookings SET status = 'requested' WHERE occurrence_id = ?", occ.ID))

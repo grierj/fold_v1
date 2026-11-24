@@ -207,6 +207,14 @@ export function DateEditor({ opener, base, hold, onSaved, onSaving, pending = fa
 
   const openedFields = dateFields(opened);
 
+  // The editor's own save, or its room control, can no longer go ahead: the draft ends and the host closes the editor.
+  const handOver = (why: RevisionConflict) => {
+    ended.current = true;
+
+    if (hold?.current?.opened === opened) hold.current = null;
+    onConflict(why);
+  };
+
   const send = useRevisionSave<DateFields | null, DateFields>({
     opened: openedFields,
     revision: opened.revision,
@@ -214,12 +222,7 @@ export function DateEditor({ opener, base, hold, onSaved, onSaving, pending = fa
     fields: (value) => value,
     answers: answerNames("occurrence", opened.id),
     lost,
-    onConflict: (why) => {
-      ended.current = true;
-
-      if (hold?.current?.opened === opened) hold.current = null;
-      onConflict(why);
-    },
+    onConflict: handOver,
     changedCode: "date_changed",
   });
 
@@ -391,7 +394,7 @@ export function DateEditor({ opener, base, hold, onSaved, onSaving, pending = fa
           <Input value={draft.location} onChange={(e) => edit("location")(e.target.value)} />
         </Field>
       </div>
-      <RoomField eventId={opened.eventId} date={opened.date} idPrefix={`cev-${opened.id}`} onChanged={onRoomChanged} focusOnLoad={focusRoom} />
+      <RoomField eventId={opened.eventId} date={opened.date} idPrefix={`cev-${opened.id}`} onChanged={onRoomChanged} onGone={() => handOver("gone")} focusOnLoad={focusRoom} />
       <Field id={`cev-cap-${opened.id}`} label="Capacity for this date" optional hint="Leave it blank to use the event’s capacity.">
         <Input
           type="number"

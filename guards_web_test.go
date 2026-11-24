@@ -154,6 +154,7 @@ var tsContracts = []struct {
 	{matchLocationJSON{}, "MatchLocationResponse"},
 	{roomRequestConfirmationJSON{}, "RoomRequestConfirmation"},
 	{dateRoomsJSON{}, "DateRoomsResponse"},
+	{revisionRefJSON{}, "RevisionRef"},
 	{seriesRoomsJSON{}, "SeriesRoomsResponse"},
 	{roomsCheckJSON{}, "RoomsCheckResponse"},
 	{badgeJSON{}, "Badge"},

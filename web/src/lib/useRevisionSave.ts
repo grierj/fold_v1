@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef } from "react";
 import { ApiError, credentialCurrent, currentCredential } from "../api/core";
 import { errorCode } from "./errors";
 import { outcomeOf } from "./rosterWrites";
@@ -44,20 +44,36 @@ export interface LostSend {
   unseen?: string;
 }
 
+// What a save names in its answer: an event, a single date, a group, or a date's room (named by its date's id).
+type AnswerKey = "event" | "occurrence" | "group" | "dateRoom";
+
 // What a save that landed answers: the thing it saved, with its new revision.
-type SavedAnswer = { event: SavedThing } | { occurrence: SavedThing } | { group: SavedThing };
+type SavedAnswer = { [K in AnswerKey]: Record<K, SavedThing> }[AnswerKey];
+
+const ANSWER_KEYS: readonly AnswerKey[] = ["event", "occurrence", "group", "dateRoom"];
+
+const thingAt = (answer: object, key: AnswerKey): unknown => (key in answer ? Reflect.get(answer, key) : undefined);
 
 // A save's answer names the thing saved: `{ [key]: { id, revision } }` with this id and a revision. Anything else (a
 // page from something in between, which reads as {}, or another thing's answer) is no answer.
-export const answerNames = (key: "event" | "occurrence" | "group", id: number) => (answer: unknown): answer is SavedAnswer => {
+export const answerNames = (key: AnswerKey, id: number) => (answer: unknown): answer is SavedAnswer => {
   if (!isObject(answer)) return false;
 
-  const thing = key === "event" ? "event" in answer && answer.event
-    : key === "occurrence" ? "occurrence" in answer && answer.occurrence
-      : "group" in answer && answer.group;
+  const thing = thingAt(answer, key);
 
   return isObject(thing) && "id" in thing && "revision" in thing && isNumber(thing.id) && thing.id === id && isString(thing.revision) && thing.revision !== "";
 };
+
+// The revision a landed save's answer names.
+function answeredRevision(answer: SavedAnswer): string {
+  for (const key of ANSWER_KEYS) {
+    const thing = thingAt(answer, key);
+
+    if (isObject(thing) && "revision" in thing && isString(thing.revision)) return thing.revision;
+  }
+
+  return "";
+}
 
 // useRevisionSave is the one conflict protocol for a manager's save (DEC-162, DEC-163, DEC-164, DEC-166). The save names
 // the read the form opened with (`revision`, kept from the first render, like `opened`). On a refusal (`changedCode`: an
@@ -87,6 +103,15 @@ export const answerNames = (key: "event" | "occurrence" | "group", id: number) =
 // what that is, it must differ from any read, so a stored save is never claimed by mistake.
 //
 // Every other answer, on the first send or a later one, is thrown for the form to handle as it always has.
+//
+// A form that stays open after an outcome and is used again (a room control) passes `stays`, which reads the value a
+// landed save's answer says was stored. Each outcome then moves the base the next save names: a save that landed to
+// that value and the answer's revision; one already stored, a conflict, or refusals with nothing changed to what the
+// read found and its revision. A send with no answer moves nothing, so the lost-answer rule above holds across sends.
+// Without it, the base is the read the form opened with, for as long as the form lives.
+//
+// `gone` says which refusals of a send mean the person may no longer make it (by default every 403 and 404); a 403 or
+// 404 to the read is always "gone".
 export function useRevisionSave<T, F>({
   opened,
   revision,
@@ -96,6 +121,8 @@ export function useRevisionSave<T, F>({
   lost: kept,
   onConflict,
   changedCode = "event_changed",
+  stays,
+  gone = lostAuthority,
 }: {
   opened: T;
   revision: string | undefined;
@@ -104,9 +131,11 @@ export function useRevisionSave<T, F>({
   answers: (answer: unknown) => answer is SavedAnswer;
   lost?: LostSend;
   onConflict?: (why: RevisionConflict) => void;
-  changedCode?: "event_changed" | "date_changed" | "group_changed";
+  changedCode?: "event_changed" | "date_changed" | "group_changed" | "date_room_changed";
+  stays?: (answer: SavedAnswer) => T;
+  gone?: (err: ApiError) => boolean;
 }) {
-  const [base] = useState(() => ({ opened, revision }));
+  const base = useRef({ opened, revision });
   const own = useRef<LostSend>({ current: false });
   const lost = kept ?? own.current;
   const mounted = useRef(true);
@@ -125,11 +154,15 @@ export function useRevisionSave<T, F>({
     };
 
     const same = (a: F | null, b: F | null) => a !== null && b !== null && JSON.stringify(a) === JSON.stringify(b);
-    const was = fields(base.opened);
+    const was = fields(base.current.opened);
     const goal = fields(intended);
     const credential = currentCredential();
     const sameSignIn = () => (credential === null ? currentCredential() === null : credentialCurrent(credential));
-    let current = base.revision;
+    let current = base.current.revision;
+
+    const rebase = (value: T, revision: string) => {
+      if (stays) base.current = { opened: value, revision };
+    };
 
     const noAnswer = () => {
       lost.current = true;
@@ -150,7 +183,7 @@ export function useRevisionSave<T, F>({
       } catch (err) {
         if (unanswered(err)) noAnswer();
 
-        if (err instanceof ApiError && lostAuthority(err)) return conflict("gone");
+        if (err instanceof ApiError && gone(err)) return conflict("gone");
 
         if (errorCode(err) !== changedCode) throw err;
 
@@ -165,6 +198,8 @@ export function useRevisionSave<T, F>({
         }
 
         landed();
+
+        if (stays) rebase(stays(answer), answeredRevision(answer));
 
         return "saved";
       }
@@ -190,6 +225,8 @@ export function useRevisionSave<T, F>({
       const now = fields(stored.value);
 
       if (same(now, goal)) {
+        rebase(stored.value, stored.revision);
+
         if (unseen !== (lost.unseen ?? "")) return conflict("changed");
 
         landed();
@@ -197,9 +234,17 @@ export function useRevisionSave<T, F>({
         return "saved";
       }
 
-      if (!same(now, was) || lost.current) return conflict("changed");
+      if (!same(now, was) || lost.current) {
+        rebase(stored.value, stored.revision);
 
-      if (sends === MAX_SENDS) return "refused";
+        return conflict("changed");
+      }
+
+      if (sends === MAX_SENDS) {
+        rebase(stored.value, stored.revision);
+
+        return "refused";
+      }
 
       current = stored.revision;
     }

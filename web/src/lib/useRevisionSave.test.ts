@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import * as core from "../api/core";
 import { ApiError } from "../api/core";
 import { answerNames, useRevisionSave, type RevisionRead } from "./useRevisionSave";
+import { isObject } from "./wireValues";
 
 interface Value {
   title: string;
@@ -364,6 +365,92 @@ describe("useRevisionSave", () => {
       await expect(send(write)).rejects.toBe(stop);
       expect(await send(write)).toBe("saved");
       expect(write.mock.calls).toEqual([["r1"], ["r1"], ["r3"]]);
+    });
+  });
+
+  // A form that stays open after an outcome and is used again (a room control).
+  describe("with stays", () => {
+    // The answer says what was stored: here its title, which the server may store unlike the form sent it.
+    const stays = (answer: unknown): Value => ({ title: isObject(answer) && "title" in answer && typeof answer.title === "string" ? answer.title : "?" });
+    const answered = (revision: string, title: string) => ({ event: { id: 7, revision }, title });
+
+    function open(read: () => Promise<RevisionRead<Value>>, gone?: (err: ApiError) => boolean) {
+      const onConflict = vi.fn();
+      const view = renderHook(() => useRevisionSave({ opened: { title: "Supper" }, revision: "r1", read, fields, answers, onConflict, stays, gone }));
+      const send = <R>(write: (revision: string | undefined) => Promise<R>, intended: Value) => view.result.current(write, intended);
+
+      return { send, onConflict };
+    }
+
+    it("names the revision a landed save answered on the next save, from the value the answer says was stored", async () => {
+      const read = vi.fn().mockResolvedValue(readOf({ title: "Picnic" }, "r5"));
+      const write = vi.fn().mockResolvedValueOnce(answered("r2", "Supper night")).mockResolvedValueOnce(answered("r3", "Brunch"));
+      const { send, onConflict } = open(read);
+      expect(await send(write, { title: "Supper night" })).toBe("saved");
+      expect(await send(write, { title: "Brunch" })).toBe("saved");
+      expect(write.mock.calls).toEqual([["r1"], ["r2"]]);
+      // A refusal of the third finds the second as it was stored: nothing it writes changed, so it goes again.
+      const third = vi.fn().mockRejectedValueOnce(changed()).mockResolvedValueOnce(answered("r6", "Picnic"));
+      read.mockResolvedValueOnce(readOf({ title: "Brunch" }, "r5"));
+      expect(await send(third, { title: "Picnic" })).toBe("saved");
+      expect(third.mock.calls).toEqual([["r3"], ["r5"]]);
+      expect(onConflict).not.toHaveBeenCalled();
+    });
+
+    it("takes the stored value from the answer, not from what was sent", async () => {
+      // The server stored "Supper night" for a send of "supper night " (it normalises): the base is what it stored.
+      const read = vi.fn().mockResolvedValue(readOf({ title: "Supper night" }, "r4"));
+      const write = vi.fn().mockResolvedValueOnce(answered("r2", "Supper night")).mockRejectedValueOnce(changed()).mockResolvedValueOnce(answered("r5", "Brunch"));
+      const { send, onConflict } = open(read);
+      expect(await send(write, { title: "supper night " })).toBe("saved");
+      expect(await send(write, { title: "Brunch" })).toBe("saved");
+      expect(write.mock.calls).toEqual([["r1"], ["r2"], ["r4"]]);
+      expect(onConflict).not.toHaveBeenCalled();
+    });
+
+    it("bases a new pick after a conflict on what the read found, with its revision", async () => {
+      const read = vi.fn().mockResolvedValue(readOf({ title: "Brunch" }, "r3"));
+      const write = vi.fn().mockRejectedValueOnce(changed()).mockResolvedValueOnce(answered("r4", "Picnic"));
+      const { send, onConflict } = open(read);
+      expect(await send(write, { title: "Supper night" })).toBe("conflict");
+      expect(onConflict).toHaveBeenCalledExactlyOnceWith("changed");
+      expect(await send(write, { title: "Picnic" })).toBe("saved");
+      expect(write.mock.calls).toEqual([["r1"], ["r3"]]);
+    });
+
+    it("bases the next save on the read that found a save already stored", async () => {
+      const read = vi.fn().mockResolvedValue(readOf({ title: "Supper night" }, "r3"));
+      const write = vi.fn().mockRejectedValueOnce(changed()).mockResolvedValueOnce(answered("r4", "Brunch"));
+      const { send } = open(read);
+      expect(await send(write, { title: "Supper night" })).toBe("saved");
+      expect(await send(write, { title: "Brunch" })).toBe("saved");
+      expect(write.mock.calls).toEqual([["r1"], ["r3"]]);
+    });
+
+    it("moves nothing on a send with no answer: a later refusal that finds the value as it was is a conflict, never a resend", async () => {
+      const read = vi.fn().mockResolvedValue(readOf({ title: "Supper night" }, "r3"));
+      const write = vi.fn()
+        .mockResolvedValueOnce(answered("r2", "Supper night"))
+        .mockRejectedValueOnce(new TypeError("Failed to fetch"))
+        .mockRejectedValueOnce(changed());
+      const { send, onConflict } = open(read);
+      expect(await send(write, { title: "Supper night" })).toBe("saved");
+      await expect(send(write, { title: "Brunch" })).rejects.toBeInstanceOf(TypeError);
+      // The read shows the first save as it was: the lost send may have been stored and undone since.
+      expect(await send(write, { title: "Picnic" })).toBe("conflict");
+      expect(write.mock.calls).toEqual([["r1"], ["r2"], ["r2"]]);
+      expect(onConflict).toHaveBeenCalledExactlyOnceWith("changed");
+    });
+
+    it("hands over \"gone\" only for the refusals the form names, and throws the others for its own error", async () => {
+      const read = vi.fn();
+      const restricted = new ApiError(403, "no", { code: "room_restricted" });
+      const { send, onConflict } = open(read, (err) => err.status === 403 && err.code === "not_allowed");
+      await expect(send(vi.fn().mockRejectedValue(restricted), { title: "Brunch" })).rejects.toBe(restricted);
+      expect(onConflict).not.toHaveBeenCalled();
+      expect(await send(vi.fn().mockRejectedValue(new ApiError(403, "no", { code: "not_allowed" })), { title: "Brunch" })).toBe("conflict");
+      expect(onConflict).toHaveBeenCalledExactlyOnceWith("gone");
+      expect(read).not.toHaveBeenCalled();
     });
   });
 });

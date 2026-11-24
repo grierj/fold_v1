@@ -335,6 +335,7 @@ function EventDetailContent() {
           revision={roomsRevision}
           hasDate={(d) => occurrences.some((o) => o.date === d)}
           onPick={(d) => setPickRequest((r) => ({ date: d, seq: (r?.seq ?? 0) + 1 }))}
+          onGone={() => closeOnConflict("gone")}
         />
       )}
 

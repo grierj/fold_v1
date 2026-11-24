@@ -19,13 +19,15 @@ const SHOWN = 10;
 // date, and otherwise the one-date Room control right under the row (the page
 // lists only the next few months; this list reaches further). It shows
 // nothing while rooms are off or when every date has its room.
-export function NeedsRoomList({ eventId, revision, hasDate, onPick }: {
+export function NeedsRoomList({ eventId, revision, hasDate, onPick, onGone }: {
   eventId: number;
   // Changes whenever a room or date on the page changes, to ask again.
   revision: number;
   // Whether the page lists this date, so its editor can open there.
   hasDate: (date: string) => boolean;
   onPick: (date: string) => void;
+  // A row's Room control found this person may no longer manage the date: the page does what it does then.
+  onGone: () => void;
 }) {
   // Null until the site settings are read; they don't change while this is open.
   // A church with rooms off, or a site we can't read, sees no list at all.
@@ -125,7 +127,12 @@ export function NeedsRoomList({ eventId, revision, hasDate, onPick }: {
                 </div>
                 {inline && open === n.date && (
                   <div id={panel} className="rounded-md border border-border bg-surface p-3">
-                    <RoomField eventId={eventId} date={n.date} idPrefix={`needs-${n.date}`} focusOnLoad onChanged={() => setOwn((c) => c + 1)} />
+                    <RoomField eventId={eventId} date={n.date} idPrefix={`needs-${n.date}`} focusOnLoad onChanged={() => setOwn((c) => c + 1)}
+                      onGone={() => {
+                        watching.current = null;
+                        setOpen(null);
+                        onGone();
+                      }} />
                   </div>
                 )}
               </li>

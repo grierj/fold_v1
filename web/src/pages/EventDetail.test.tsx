@@ -969,7 +969,7 @@ describe("EventDetail dates that need a room", () => {
   };
 
   const needs = (...rows: NeedsRoom[]) =>
-    vi.spyOn(SeriesRooms, "list").mockResolvedValue({ rooms: [], dates: 2, defaultRoom: null, needsRoom: rows, pending: 0 });
+    vi.spyOn(SeriesRooms, "list").mockResolvedValue({ revision: "r1", rooms: [], dates: 2, defaultRoom: null, needsRoom: rows, pending: 0 });
 
   beforeEach(() => {
     vi.resetAllMocks();
@@ -978,7 +978,7 @@ describe("EventDetail dates that need a room", () => {
     vi.mocked(Households.mine).mockResolvedValue({ household: null });
     vi.mocked(Events.get).mockResolvedValue(series);
     vi.spyOn(Site, "get").mockResolvedValue({ name: "Fold", timezone: "UTC", selfSignup: "off", roomsEnabled: true, pushEnabled: true });
-    vi.spyOn(DateRooms, "list").mockResolvedValue({ rooms: [], booking: null });
+    vi.spyOn(DateRooms, "list").mockResolvedValue({ rooms: [], booking: null, dateRoom: { id: 70, revision: "r1" } });
   });
 
   it("lists them for a manager and opens that date's editor from Pick a room", async () => {
