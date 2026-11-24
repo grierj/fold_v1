@@ -4,6 +4,7 @@ import (
 	"errors"
 	"log"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -94,30 +95,31 @@ func roomChoices(db *gorm.DB, p *policy.Person, windows []rooms.Window, eventID 
 }
 
 // apiSeriesRooms is the series' room control: the rooms its manager may book
-// over the upcoming dates, the series room, the dates that need a room, and
-// the event's token (eventRevision) the series pick sends, all from one
-// snapshot.
+// over the upcoming dates, the series room, the dates that need a room, the
+// event's token (eventRevision) the series pick sends and the suggestions.
+// One read-only snapshot decides everything (docs/agents/snapshots.md): the
+// rooms switch, the viewer and their authority over the event
+// (managedEventTargetIn), and every row the answer shows, on one clock.
 func (a *App) apiSeriesRooms(c *gin.Context) {
-	ev, ok := a.loadManagedEvent(c)
-	if !ok {
-		return
-	}
-	me := apiUser(c)
+	id, _ := strconv.Atoi(c.Param("id"))
 	var out seriesRoomsJSON
-	var occs []models.EventOccurrence
-	err := a.DB.Transaction(func(tx *gorm.DB) error {
-		if err := tx.First(ev, ev.ID).Error; err != nil {
+	var judged sessionJudgment
+	err := decidingSnapshot(a.DB.WithContext(c.Request.Context()), func(tx *gorm.DB) error {
+		if err := roomsOnIn(tx); err != nil {
 			return err
 		}
-		f, err := eventFactsIn(tx, me, ev)
+		t, err := a.managedEventTargetIn(tx, apiUser(c), id, &judged)
 		if err != nil {
 			return err
 		}
-		if !f.canManage(me) {
-			return errCannotChangeEvent
+		if a.hooks.readerAuthorized != nil {
+			a.hooks.readerAuthorized("series rooms")
 		}
-		out.Revision = a.eventRevision(ev, f.group)
-		if err := tx.Where("event_id = ? AND status = ? AND starts_at > ?", ev.ID, models.OccurrenceScheduled, time.Now()).
+		now := a.now().UTC()
+		me, ev := asPerson(t.me), &t.ev
+		out.Revision = a.eventRevision(ev, t.f.group)
+		var occs []models.EventOccurrence
+		if err := tx.Where("event_id = ? AND status = ? AND starts_at > ?", ev.ID, models.OccurrenceScheduled, now).
 			Order("starts_at").Find(&occs).Error; err != nil {
 			return err
 		}
@@ -125,7 +127,7 @@ func (a *App) apiSeriesRooms(c *gin.Context) {
 		for i, o := range occs {
 			windows[i] = rooms.Window{Start: o.StartsAt, End: o.EndsAt}
 		}
-		if out.Rooms, err = roomChoices(tx, asPerson(me), windows, ev.ID, ev.Capacity); err != nil {
+		if out.Rooms, err = roomChoices(tx, me, windows, ev.ID, ev.Capacity); err != nil {
 			return err
 		}
 		var held []struct {
@@ -136,7 +138,7 @@ func (a *App) apiSeriesRooms(c *gin.Context) {
 				EXISTS (SELECT 1 FROM room_requests q WHERE q.id = b.request_id AND q.status = ?) AS waiting
 			FROM room_bookings b JOIN event_occurrences o ON o.id = b.occurrence_id JOIN rooms r ON r.id = b.room_id
 			WHERE o.event_id = ? AND o.status = ? AND o.starts_at > ? AND b.status IN ?
-			ORDER BY o.starts_at`, models.RoomRequestPending, ev.ID, models.OccurrenceScheduled, time.Now(),
+			ORDER BY o.starts_at`, models.RoomRequestPending, ev.ID, models.OccurrenceScheduled, now,
 			[]string{models.BookingRequested, models.BookingRejected}).Scan(&held).Error; err != nil {
 			return err
 		}
@@ -149,15 +151,20 @@ func (a *App) apiSeriesRooms(c *gin.Context) {
 			}
 		}
 		out.Dates = len(occs)
-		out.DefaultRoom, err = seriesRoomIn(tx, ev)
-		return err
-	}, readSnapshot)
+		if out.DefaultRoom, err = seriesRoomIn(tx, ev); err != nil {
+			return err
+		}
+		out.Suggestions = roomSuggestions(tx, now, suggestFor{person: me, eventID: ev.ID, groupID: ev.GroupID,
+			visibility: ev.Visibility, capacity: ev.Capacity, windows: windowsOf(occs)}, offeredRooms(out.Rooms))
+		return nil
+	})
+	if ackErr := a.acknowledgeDecision(c, judged, err == nil || decidedRefusal(err)); ackErr != nil {
+		err = ackErr
+	}
 	if err != nil {
-		answerEventWrite(c, err, "could not list rooms")
+		fail(c, err)
 		return
 	}
-	out.Suggestions = a.roomSuggestions(suggestFor{person: asPerson(me), eventID: ev.ID, groupID: ev.GroupID,
-		visibility: ev.Visibility, capacity: ev.Capacity, windows: windowsOf(occs)}, offeredRooms(out.Rooms))
 	c.JSON(http.StatusOK, out)
 }
 
@@ -560,7 +567,7 @@ func (a *App) apiCheckRooms(c *gin.Context) {
 	}
 	// A new event has no dates of its own yet; Rule 1 uses the visibility
 	// picked on the form (DEC-110).
-	suggestions := a.roomSuggestions(suggestFor{person: asPerson(me), groupID: body.GroupID,
+	suggestions := roomSuggestions(a.DB, time.Now(), suggestFor{person: asPerson(me), groupID: body.GroupID,
 		visibility: createVisibility(body.Visibility, group), capacity: ed.cap, windows: upcoming, tags: groupTags(group)}, offeredRooms(list))
 	c.JSON(http.StatusOK, roomsCheckJSON{Rooms: list, Dates: len(upcoming), Suggestions: suggestions})
 }

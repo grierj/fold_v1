@@ -83,6 +83,7 @@ export const ERROR_COPY = {
   room_restricted: "Only an admin can book that room.",
   room_gone: "That room isn't available anymore. Pick another room.",
   booking_admin_only: "Only an admin can change this date's room. Ask an admin if it needs to change.",
+  rooms_off: "Room booking has been turned off, so rooms can't be picked here now.",
   job_handled: "Someone already handled this task. Refresh to see the latest.",
   church_address_long: "Keep the address to 6 lines and 300 characters.",
   church_address_characters: "Take out any special characters, like tabs or symbols that don't print, and try again.",

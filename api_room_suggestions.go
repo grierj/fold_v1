@@ -9,6 +9,8 @@ import (
 	"fold/internal/policy"
 	"fold/internal/rooms"
 	"fold/models"
+
+	"gorm.io/gorm"
 )
 
 // Room suggestions (M2.3b, 9.3, DEC-110) ride along with each room picker's
@@ -47,34 +49,40 @@ type suggestFor struct {
 	tags       *string
 }
 
-// roomSuggestions runs the engine for a picker. A failed read leaves the
-// picker without suggestions rather than failing it: the full list still
+// roomSuggestions runs the engine for a picker on db at now: a picker's
+// snapshot, so the suggestions come from the state its list does. A failed
+// read leaves the picker without suggestions rather than failing it (inside a
+// transaction it runs in a savepoint, lenientReadIn): the full list still
 // works. Only rooms the picker offers are kept.
-func (a *App) roomSuggestions(s suggestFor, offered map[uint]bool) roomSuggestionsJSON {
+func roomSuggestions(db *gorm.DB, now time.Time, s suggestFor, offered map[uint]bool) roomSuggestionsJSON {
 	out := roomSuggestionsJSON{Rooms: []roomSuggestionJSON{}}
 	subject := rooms.Subject{
 		EventID: s.eventID, GroupID: s.groupID, Visibility: s.visibility, Capacity: s.capacity,
-		IncludeRestricted: policy.CanBookRoom(s.person, true, true), Windows: s.windows, Now: time.Now().UTC(),
+		IncludeRestricted: policy.CanBookRoom(s.person, true, true), Windows: s.windows, Now: now.UTC(),
 	}
-	if s.tags != nil {
-		subject.Tags = grouptags.Parse(*s.tags)
-	} else if s.groupID != nil {
-		var g models.Group
-		if err := a.DB.Select("tags").First(&g, *s.groupID).Error; err == nil {
+	lenientReadIn(db, func(db *gorm.DB) {
+		if s.tags != nil {
+			subject.Tags = grouptags.Parse(*s.tags)
+		} else if s.groupID != nil {
+			var g models.Group
+			if err := db.Select("tags").First(&g, *s.groupID).Error; err != nil {
+				log.Printf("room suggestions: %v", err)
+				return
+			}
 			subject.Tags = grouptags.Parse(g.Tags)
 		}
-	}
-	res, err := rooms.Suggest(a.DB, subject)
-	if err != nil {
-		log.Printf("room suggestions: %v", err)
-		return out
-	}
-	out.OtherKinds, out.Dates = res.OtherKinds, res.Dates
-	for _, r := range res.Suggestions {
-		if offered[r.RoomID] {
-			out.Rooms = append(out.Rooms, roomSuggestionJSON{RoomID: r.RoomID, Uses: r.Uses, Reason: r.Reason, BusyDates: r.BusyDates})
+		res, err := rooms.Suggest(db, subject)
+		if err != nil {
+			log.Printf("room suggestions: %v", err)
+			return
 		}
-	}
+		out.OtherKinds, out.Dates = res.OtherKinds, res.Dates
+		for _, r := range res.Suggestions {
+			if offered[r.RoomID] {
+				out.Rooms = append(out.Rooms, roomSuggestionJSON{RoomID: r.RoomID, Uses: r.Uses, Reason: r.Reason, BusyDates: r.BusyDates})
+			}
+		}
+	})
 	return out
 }
 

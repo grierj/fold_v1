@@ -1,11 +1,15 @@
 package main
 
 import (
+	"crypto/hmac"
+	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
 
+	"fold/internal/audit"
 	"fold/models"
 
 	"gorm.io/gorm"
@@ -118,9 +122,6 @@ type revisionRows struct {
 	omit []string
 	// also is an expression over the row (alias r) the token covers besides it.
 	also string
-	// absent is a query for the digest when no row has the key; empty makes a
-	// missing row an error.
-	absent string
 }
 
 // groupRevisionRows: created_at never changes.
@@ -149,22 +150,17 @@ func (t revisionRows) digestSQL() string {
 // every writer of the row moves it, a previous binary included, and there is
 // no list of fields to keep. A reader calls it in the snapshot that read the
 // fields it shows, and a writer under the lock every writer of the row holds:
-// a token newer than the fields beside it would let a stale form pass.
+// a token newer than the fields beside it would let a stale form pass. No row
+// with the key is gorm.ErrRecordNotFound.
 func (a *App) rowRevisionIn(tx *gorm.DB, t revisionRows, key uint) (string, error) {
 	var digests []string
 	if err := tx.Raw("SELECT "+t.digestSQL()+" FROM "+t.table+" r WHERE r."+t.key+" = ?", key).Scan(&digests).Error; err != nil {
 		return "", err
 	}
-	switch {
-	case len(digests) == 1:
+	switch len(digests) {
+	case 1:
 		return a.editRevision(fmt.Sprintf("%s%d", t.kind, key), digests[0]), nil
-	case len(digests) == 0 && t.absent != "":
-		var absent string
-		if err := tx.Raw(t.absent).Row().Scan(&absent); err != nil {
-			return "", err
-		}
-		return a.editRevision(fmt.Sprintf("%s%d", t.kind, key), absent), nil
-	case len(digests) == 0:
+	case 0:
 		return "", gorm.ErrRecordNotFound
 	}
 	return "", fmt.Errorf("%s: %d rows with %s %d", t.table, len(digests), t.key, key)
@@ -196,20 +192,35 @@ var errDateRoomChanged = apiErr(http.StatusConflict, "date_room_changed", "the d
 // token. Beside the row, the token covers the status of the request it waits
 // on, which decides whether the control says it is waiting for an admin.
 // padded_range is the CHECK's formula over the other columns; created_at
-// never changes. With no booking the digest is "none" and the position of the
-// bookings' id sequence: a booking made and released since the read took an
-// id, even rolled back, so a pick whose answer was lost is not applied again
-// over the release that undid it (DEC-164). A booking anywhere moves it, which
-// costs a silent resend at most.
+// never changes.
 var bookingRevisionRows = revisionRows{table: "room_bookings", kind: "b", key: "occurrence_id",
 	instants: []string{"starts_at", "ends_at", "updated_at"}, omit: []string{"created_at", "padded_range"},
-	also: "coalesce((SELECT q.status FROM room_requests q WHERE q.id = r.request_id), '')", absent: "SELECT 'none-' || last_value || '-' || is_called FROM room_bookings_id_seq"}
+	also: "coalesce((SELECT q.status FROM room_requests q WHERE q.id = r.request_id), '')"}
 
 // dateRoomRevisionIn is the token a date's room control holds for the date's
 // booking. Every writer of a date's booking holds its event's row lock, which
 // the pick takes before it compares.
+//
+// With no booking the token is bound to the date's last room-booking audit
+// row instead (0 before the first): every date pick that stores a booking or
+// releases one writes it, so a pick whose answer was lost is never applied
+// again over a release that undid it (DEC-164), while a booking of another
+// date leaves the token alone. The id goes in as a keyed digest under this
+// process's key: it counts audit rows across the church, which a manager must
+// not read.
 func (a *App) dateRoomRevisionIn(tx *gorm.DB, occurrenceID uint) (string, error) {
-	return a.rowRevisionIn(tx, bookingRevisionRows, occurrenceID)
+	token, err := a.rowRevisionIn(tx, bookingRevisionRows, occurrenceID)
+	if !errors.Is(err, gorm.ErrRecordNotFound) {
+		return token, err
+	}
+	var last uint
+	if err := tx.Raw(`SELECT coalesce(max(id), 0) FROM audit_logs WHERE target_type = 'occurrence' AND target_id = ? AND action IN ?`,
+		occurrenceID, []string{audit.RoomBookingBooked, audit.RoomBookingOverlap, audit.RoomBookingReleased}).Row().Scan(&last); err != nil {
+		return "", err
+	}
+	m := hmac.New(sha256.New, a.processKey("date-room-absent:v1"))
+	fmt.Fprintf(m, "%d.%d", occurrenceID, last)
+	return a.editRevision(fmt.Sprintf("%s%d", bookingRevisionRows.kind, occurrenceID), "none-"+hex.EncodeToString(m.Sum(nil)[:16])), nil
 }
 
 // checkDateRoomRevision refuses given unless it is the token of the date's

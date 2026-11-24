@@ -763,12 +763,34 @@ type managedDateTarget struct {
 }
 
 // managedDateTargetIn decides, on tx (a read-only snapshot), whether viewer
-// reaches one date of event id as its manager, in the edit's order: the
-// viewer re-read in the snapshot and judged (401 when no longer signed in),
-// a hidden or missing event (the same 404), a viewer who can't manage it
-// (403), a malformed date (400), then a date the event doesn't have (404).
-// Only a manager learns whether the date exists.
+// reaches one date of event id as its manager, in the edit's order: the event
+// (managedEventTargetIn), a malformed date (400), then a date the event
+// doesn't have (404). Only a manager learns whether the date exists.
 func (a *App) managedDateTargetIn(tx *gorm.DB, viewer *models.User, id int, date string, judged *sessionJudgment) (managedDateTarget, error) {
+	t, err := a.managedEventTargetIn(tx, viewer, id, judged)
+	if err != nil {
+		return t, err
+	}
+	if !isCalendarDate(date) {
+		return t, errSeriesDateInvalid
+	}
+	if a.hooks.managedDateStep != nil {
+		a.hooks.managedDateStep("authorized")
+	}
+	if err := tx.Where("event_id = ? AND original_date = ?", t.ev.ID, date).First(&t.o).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return t, errOccurrenceNotFound
+		}
+		return t, err
+	}
+	return t, nil
+}
+
+// managedEventTargetIn decides, on tx (a read-only snapshot), whether viewer
+// reaches event id as its manager: the viewer re-read in the snapshot and
+// judged (401 when no longer signed in), a hidden or missing event (the same
+// 404), then a viewer who can't manage it (403).
+func (a *App) managedEventTargetIn(tx *gorm.DB, viewer *models.User, id int, judged *sessionJudgment) (managedDateTarget, error) {
 	var t managedDateTarget
 	me, err := snapshotViewerIn(tx, viewer)
 	if err != nil {
@@ -793,18 +815,6 @@ func (a *App) managedDateTargetIn(tx *gorm.DB, viewer *models.User, id int, date
 	}
 	if !t.f.canManage(me) {
 		return t, errCannotChangeEvent
-	}
-	if !isCalendarDate(date) {
-		return t, errSeriesDateInvalid
-	}
-	if a.hooks.managedDateStep != nil {
-		a.hooks.managedDateStep("authorized")
-	}
-	if err := tx.Where("event_id = ? AND original_date = ?", t.ev.ID, date).First(&t.o).Error; err != nil {
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return t, errOccurrenceNotFound
-		}
-		return t, err
 	}
 	return t, nil
 }

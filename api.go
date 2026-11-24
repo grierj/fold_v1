@@ -251,10 +251,10 @@ func (a *App) registerAPIRoutes(r *gin.Engine) {
 	v1.POST("/admin/rooms", a.roomsOn(), a.apiAuth(), a.roomManager(), a.apiAdminCreateRoom)
 	v1.PUT("/admin/rooms/:id", a.roomsOn(), a.apiAuth(), a.roomManager(), a.apiAdminUpdateRoom)
 	// Room bookings (M2.1b): whoever runs the event books its dates.
-	v1.GET("/events/:id/dates/:date/rooms", a.roomsOn(), a.apiAuth(), a.apiDateRooms)
-	v1.PUT("/events/:id/dates/:date/room", a.roomsOn(), a.apiAuth(), a.apiSetDateRoom)
-	v1.GET("/events/:id/rooms", a.roomsOn(), a.apiAuth(), a.apiSeriesRooms)
-	v1.PUT("/events/:id/room", a.roomsOn(), a.apiAuth(), a.apiSetSeriesRoom)
+	v1.GET("/events/:id/dates/:date/rooms", a.roomPickerOn(), a.apiAuth(), a.apiDateRooms)
+	v1.PUT("/events/:id/dates/:date/room", a.roomPickerOn(), a.apiAuth(), a.apiSetDateRoom)
+	v1.GET("/events/:id/rooms", a.roomPickerOn(), a.apiAuth(), a.apiSeriesRooms)
+	v1.PUT("/events/:id/room", a.roomPickerOn(), a.apiAuth(), a.apiSetSeriesRoom)
 	v1.POST("/rooms/check", a.roomsOn(), a.apiAuth(), a.apiCheckRooms)
 	// Approval (M2.1d, DEC-102).
 	v1.PUT("/admin/settings/room-approval", a.roomsOn(), a.apiAuth(), a.roomManager(), a.apiSetRoomApproval)

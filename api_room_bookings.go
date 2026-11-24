@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -190,8 +191,8 @@ func (a *App) managedOccurrence(c *gin.Context) (*models.Event, *models.EventOcc
 		return nil, nil, false
 	}
 	date := c.Param("date")
-	if _, err := models.ParseCalendarDate(date); err != nil {
-		fail(c, errOccurrenceNotFound)
+	if !isCalendarDate(date) {
+		fail(c, errSeriesDateInvalid)
 		return nil, nil, false
 	}
 	var occ models.EventOccurrence
@@ -232,30 +233,46 @@ func activeRoomsBusy(db *gorm.DB, windows []rooms.Window, exceptEvent uint) ([]m
 	return list, busy, err
 }
 
-// apiDateRooms is a date's room control: the rooms its manager may book, and
-// the date's booking with its token (dateRoomRevisionIn), both from one
-// snapshot.
+// apiDateRooms is a date's room control: the rooms its manager may book, the
+// date's booking with its token (dateRoomRevisionIn) and the suggestions. One
+// read-only snapshot decides everything (docs/agents/snapshots.md): the rooms
+// switch, the viewer and their authority over the event (managedDateTargetIn),
+// the scheduled date, and every row the answer shows, on one clock.
 func (a *App) apiDateRooms(c *gin.Context) {
-	ev, occ, ok := a.managedOccurrence(c)
-	if !ok {
-		return
-	}
-	me := asPerson(apiUser(c))
+	id, _ := strconv.Atoi(c.Param("id"))
 	var out dateRoomsJSON
-	var want int
-	err := a.DB.Transaction(func(tx *gorm.DB) error {
+	var judged sessionJudgment
+	err := decidingSnapshot(a.DB.WithContext(c.Request.Context()), func(tx *gorm.DB) error {
+		if err := roomsOnIn(tx); err != nil {
+			return err
+		}
+		t, err := a.managedDateTargetIn(tx, apiUser(c), id, c.Param("date"), &judged)
+		if err != nil {
+			return err
+		}
+		if t.o.Status != models.OccurrenceScheduled {
+			return errOccurrenceNotFound
+		}
+		if a.hooks.readerAuthorized != nil {
+			a.hooks.readerAuthorized("date rooms")
+		}
+		now := a.now().UTC()
+		me, ev, occ := asPerson(t.me), &t.ev, &t.o
 		list, busy, err := activeRoomsBusy(tx, []rooms.Window{{Start: occ.StartsAt, End: occ.EndsAt, OccurrenceID: occ.ID}}, 0)
 		if err != nil {
 			return err
 		}
-		if want, err = seatsWanted(tx, ev, occ); err != nil {
+		want, err := seatsWanted(tx, ev, occ)
+		if err != nil {
 			return err
 		}
 		out.Rooms = []roomPickerJSON{}
+		offered := map[uint]bool{}
 		for _, r := range list {
 			if !policy.CanBookRoom(me, true, r.Restricted) {
 				continue
 			}
+			offered[r.ID] = true
 			out.Rooms = append(out.Rooms, roomPickerJSON{ID: r.ID, Name: r.Name, Building: r.Building, Capacity: r.Capacity,
 				Features: r.Features, Restricted: r.Restricted, Busy: busy[r.ID] > 0, TooSmall: tooSmall(r.Capacity, want)})
 		}
@@ -263,25 +280,26 @@ func (a *App) apiDateRooms(c *gin.Context) {
 			return err
 		}
 		out.DateRoom.ID = occ.ID
-		out.DateRoom.Revision, err = a.dateRoomRevisionIn(tx, occ.ID)
-		return err
-	}, readSnapshot)
+		if out.DateRoom.Revision, err = a.dateRoomRevisionIn(tx, occ.ID); err != nil {
+			return err
+		}
+		// Rule 4's capacity tiebreak uses the same seats as the too-small note.
+		var seats *int
+		if want > 0 {
+			seats = &want
+		}
+		out.Suggestions = roomSuggestions(tx, now, suggestFor{person: me, eventID: ev.ID, groupID: ev.GroupID,
+			visibility: policy.EffectiveVisibility(ev.Visibility, occ.VisibilityOverride), capacity: seats,
+			windows: windowsOf([]models.EventOccurrence{*occ})}, offered)
+		return nil
+	})
+	if ackErr := a.acknowledgeDecision(c, judged, err == nil || decidedRefusal(err)); ackErr != nil {
+		err = ackErr
+	}
 	if err != nil {
-		jsonError(c, http.StatusInternalServerError, "could not list rooms")
+		fail(c, err)
 		return
 	}
-	offered := map[uint]bool{}
-	for _, r := range out.Rooms {
-		offered[r.ID] = true
-	}
-	// Rule 4's capacity tiebreak uses the same seats as the too-small note.
-	var seats *int
-	if want > 0 {
-		seats = &want
-	}
-	out.Suggestions = a.roomSuggestions(suggestFor{person: me, eventID: ev.ID, groupID: ev.GroupID,
-		visibility: policy.EffectiveVisibility(ev.Visibility, occ.VisibilityOverride), capacity: seats,
-		windows: windowsOf([]models.EventOccurrence{*occ})}, offered)
 	c.JSON(http.StatusOK, out)
 }
 
@@ -351,10 +369,11 @@ func (a *App) apiSetDateRoom(c *gin.Context) {
 	err := a.DB.Transaction(func(tx *gorm.DB) error {
 		// The event first: every writer of a date's booking holds it, so the
 		// booking compared below stays as read until this commits.
-		user, _, _, err := lockManagedEventIn(tx, apiUser(c), ev.ID)
+		user, lockedEv, _, err := lockManagedEventIn(tx, apiUser(c), ev.ID)
 		if err != nil {
 			return err
 		}
+		ev = lockedEv
 		// Book against the date as it is under the lock: a reschedule or a
 		// cancel that committed since it was read must win.
 		locked, err := lockOccurrence(tx, occ.ID)
