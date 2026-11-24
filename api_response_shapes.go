@@ -133,11 +133,22 @@ type roomRequestConfirmationJSON struct {
 type dateRoomsJSON struct {
 	Rooms       []roomPickerJSON    `json:"rooms"`
 	Booking     *roomBookingJSON    `json:"booking"`
+	DateRoom    revisionRefJSON     `json:"dateRoom"`
 	Suggestions roomSuggestionsJSON `json:"suggestions"`
 }
 
-// seriesRoomsJSON is GET /events/:id/rooms.
+// revisionRefJSON names what a manager's pick was made from or stored: the
+// thing's id and its token. A date's room (dateRoom) is named by its date's
+// occurrence id and the booking's token (dateRoomRevisionIn).
+type revisionRefJSON struct {
+	ID       uint   `json:"id"`
+	Revision string `json:"revision"`
+}
+
+// seriesRoomsJSON is GET /events/:id/rooms. Revision is the event's token
+// (eventRevision) a series pick sends.
 type seriesRoomsJSON struct {
+	Revision    string              `json:"revision"`
 	Rooms       []seriesRoomJSON    `json:"rooms"`
 	Dates       int                 `json:"dates"`
 	DefaultRoom *occurrenceRoomJSON `json:"defaultRoom"`
@@ -536,8 +547,11 @@ type roomRequestsResponseJSON struct {
 	Requests []roomRequestJSON `json:"requests"`
 }
 
+// roomBookingResponseJSON answers PUT /events/:id/dates/:date/room: the
+// booking it stored and the token the next pick sends.
 type roomBookingResponseJSON struct {
-	Booking *roomBookingJSON `json:"booking"`
+	Booking  *roomBookingJSON `json:"booking"`
+	DateRoom revisionRefJSON  `json:"dateRoom"`
 }
 
 type guardianLinkResponseJSON struct {

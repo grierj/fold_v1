@@ -1,5 +1,6 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef } from "react";
 import { ApiError, credentialCurrent, currentCredential } from "../api/core";
+import type { RevisionRef } from "../types";
 import { errorCode } from "./errors";
 import { outcomeOf } from "./rosterWrites";
 import { isNumber, isObject, isString } from "./wireValues";
@@ -33,10 +34,6 @@ const unanswered = (cause: unknown) => cause instanceof Error && outcomeOf(cause
 // What the transport throws for a body it cannot read (api/core.ts), so the form says what it always says then.
 const unreadableAnswer = () => new ApiError(502, "unreadable answer", {}, true);
 
-interface SavedThing {
-  id: number;
-  revision: string;
-}
 
 // A send of this draft got no answer (`current`), and what it carried that no read shows (`unseen`).
 export interface LostSend {
@@ -44,20 +41,35 @@ export interface LostSend {
   unseen?: string;
 }
 
+// What a save names in its answer: an event, a single date, a group, or a date's room (named by its date's id).
+type AnswerKey = "event" | "occurrence" | "group" | "dateRoom";
+
 // What a save that landed answers: the thing it saved, with its new revision.
-type SavedAnswer = { event: SavedThing } | { occurrence: SavedThing } | { group: SavedThing };
+type SavedAnswer = { [K in AnswerKey]: Record<K, RevisionRef> }[AnswerKey];
 
 // A save's answer names the thing saved: `{ [key]: { id, revision } }` with this id and a revision. Anything else (a
 // page from something in between, which reads as {}, or another thing's answer) is no answer.
-export const answerNames = (key: "event" | "occurrence" | "group", id: number) => (answer: unknown): answer is SavedAnswer => {
+export const answerNames = (key: AnswerKey, id: number) => (answer: unknown): answer is SavedAnswer => {
   if (!isObject(answer)) return false;
 
   const thing = key === "event" ? "event" in answer && answer.event
     : key === "occurrence" ? "occurrence" in answer && answer.occurrence
-      : "group" in answer && answer.group;
+      : key === "group" ? "group" in answer && answer.group
+        : "dateRoom" in answer && answer.dateRoom;
 
   return isObject(thing) && "id" in thing && "revision" in thing && isNumber(thing.id) && thing.id === id && isString(thing.revision) && thing.revision !== "";
 };
+
+// The revision a landed save's answer names.
+function answeredRevision(answer: SavedAnswer): string {
+  if ("event" in answer) return answer.event.revision;
+
+  if ("occurrence" in answer) return answer.occurrence.revision;
+
+  if ("group" in answer) return answer.group.revision;
+
+  return answer.dateRoom.revision;
+}
 
 // useRevisionSave is the one conflict protocol for a manager's save (DEC-162, DEC-163, DEC-164, DEC-166). The save names
 // the read the form opened with (`revision`, kept from the first render, like `opened`). On a refusal (`changedCode`: an
@@ -87,6 +99,21 @@ export const answerNames = (key: "event" | "occurrence" | "group", id: number) =
 // what that is, it must differ from any read, so a stored save is never claimed by mistake.
 //
 // Every other answer, on the first send or a later one, is thrown for the form to handle as it always has.
+//
+// A form that stays open after an outcome and is used again (a room control) passes `stays`, which reads the value a
+// landed save's answer says was stored. Each outcome then moves the base the next save names: a save that landed to
+// that value and the answer's revision; one already stored, a conflict, or refusals with nothing changed to what the
+// read found and its revision. A send with no answer moves nothing, so the lost-answer rule above holds across sends.
+// Without it, the base is the read the form opened with, for as long as the form lives.
+//
+// `gone` says which refusals of a send or of the read mean the person may no longer make it (by default every 403 and
+// 404). A control that stays (`stays`) and is no longer on screen when such a refusal arrives hands nothing over: it
+// returns "left", so a late answer never reaches whatever its host shows now.
+//
+// A save that writes more than `fields` can show (`writesMore`: the series room pick books every date, and its read
+// shows the series room) counts a read that shows what it would leave as this save only when a send of it got no
+// answer. Otherwise someone else stored that value, and the same save goes again under the new revision, so its own
+// answer says what it did.
 export function useRevisionSave<T, F>({
   opened,
   revision,
@@ -96,6 +123,9 @@ export function useRevisionSave<T, F>({
   lost: kept,
   onConflict,
   changedCode = "event_changed",
+  stays,
+  gone = lostAuthority,
+  writesMore = false,
 }: {
   opened: T;
   revision: string | undefined;
@@ -104,9 +134,12 @@ export function useRevisionSave<T, F>({
   answers: (answer: unknown) => answer is SavedAnswer;
   lost?: LostSend;
   onConflict?: (why: RevisionConflict) => void;
-  changedCode?: "event_changed" | "date_changed" | "group_changed";
+  changedCode?: "event_changed" | "date_changed" | "group_changed" | "date_room_changed";
+  stays?: (answer: SavedAnswer) => T;
+  gone?: (err: ApiError) => boolean;
+  writesMore?: boolean;
 }) {
-  const [base] = useState(() => ({ opened, revision }));
+  const base = useRef({ opened, revision });
   const own = useRef<LostSend>({ current: false });
   const lost = kept ?? own.current;
   const mounted = useRef(true);
@@ -125,11 +158,15 @@ export function useRevisionSave<T, F>({
     };
 
     const same = (a: F | null, b: F | null) => a !== null && b !== null && JSON.stringify(a) === JSON.stringify(b);
-    const was = fields(base.opened);
+    const was = fields(base.current.opened);
     const goal = fields(intended);
     const credential = currentCredential();
     const sameSignIn = () => (credential === null ? currentCredential() === null : credentialCurrent(credential));
-    let current = base.revision;
+    let current = base.current.revision;
+
+    const rebase = (value: T, revision: string) => {
+      if (stays) base.current = { opened: value, revision };
+    };
 
     const noAnswer = () => {
       lost.current = true;
@@ -150,7 +187,7 @@ export function useRevisionSave<T, F>({
       } catch (err) {
         if (unanswered(err)) noAnswer();
 
-        if (err instanceof ApiError && lostAuthority(err)) return conflict("gone");
+        if (err instanceof ApiError && gone(err)) return stays && !mounted.current ? "left" : conflict("gone");
 
         if (errorCode(err) !== changedCode) throw err;
 
@@ -166,6 +203,8 @@ export function useRevisionSave<T, F>({
 
         landed();
 
+        if (stays) rebase(stays(answer), answeredRevision(answer));
+
         return "saved";
       }
 
@@ -178,7 +217,7 @@ export function useRevisionSave<T, F>({
       try {
         stored = await read();
       } catch (err) {
-        if (err instanceof ApiError && lostAuthority(err)) return conflict("gone");
+        if (err instanceof ApiError && gone(err)) return stays && !mounted.current ? "left" : conflict("gone");
 
         throw err;
       }
@@ -188,8 +227,11 @@ export function useRevisionSave<T, F>({
       if (!sameSignIn() || !stored.allowed || !stored.revision) return conflict("gone");
 
       const now = fields(stored.value);
+      const storedGoal = same(now, goal);
 
-      if (same(now, goal)) {
+      if (storedGoal && (lost.current || !writesMore)) {
+        rebase(stored.value, stored.revision);
+
         if (unseen !== (lost.unseen ?? "")) return conflict("changed");
 
         landed();
@@ -197,9 +239,17 @@ export function useRevisionSave<T, F>({
         return "saved";
       }
 
-      if (!same(now, was) || lost.current) return conflict("changed");
+      if (!storedGoal && (!same(now, was) || lost.current)) {
+        rebase(stored.value, stored.revision);
 
-      if (sends === MAX_SENDS) return "refused";
+        return conflict("changed");
+      }
+
+      if (sends === MAX_SENDS) {
+        rebase(stored.value, stored.revision);
+
+        return "refused";
+      }
 
       current = stored.revision;
     }

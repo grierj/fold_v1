@@ -1397,7 +1397,7 @@ func TestRoomDecisionSerializesWithSoleHostErasure(t *testing.T) {
 				deleter.holdNotices = true
 				_ = deleterUser
 				path := "/api/v1/events/" + itoa(ev.ID) + "/dates/" + feedDate(f.startOn) + "/room"
-				if w := hostClient.do("PUT", path, map[string]any{"roomId": f.hall.ID}, true); w.Code != http.StatusOK {
+				if w := roomPick(t, hostClient, path, map[string]any{"roomId": f.hall.ID}); w.Code != http.StatusOK {
 					t.Fatalf("the host requests the room: %d %s", w.Code, w.Body.String())
 				}
 				reqs := listRequests(t, f.admin)

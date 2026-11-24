@@ -58,7 +58,7 @@ func TestRoomPickersSuggest(t *testing.T) {
 	}
 	// An admin uses the nursery for the group: only admins get it suggested.
 	ev := createFeedEvent(t, f.leader, f.group, "Kids night", f.startOn.AddDate(0, 0, 1), "")
-	if w := f.admin.do("PUT", "/api/v1/events/"+itoa(ev.ID)+"/dates/"+feedDate(f.startOn.AddDate(0, 0, 1))+"/room", map[string]any{"roomId": f.nursery.ID}, true); w.Code != http.StatusOK {
+	if w := roomPick(t, f.admin, "/api/v1/events/"+itoa(ev.ID)+"/dates/"+feedDate(f.startOn.AddDate(0, 0, 1))+"/room", map[string]any{"roomId": f.nursery.ID}); w.Code != http.StatusOK {
 		t.Fatalf("admin books the nursery: %d %s", w.Code, w.Body.String())
 	}
 
@@ -144,14 +144,14 @@ func TestDatePickerSuggestionsUseTheDatesVisibility(t *testing.T) {
 	// The group's other event used the hall on a date made invite-only.
 	other := createFeedEvent(t, f.leader, f.group, "Quiet night", f.startOn.AddDate(0, 0, 2), "")
 	day := feedDate(f.startOn.AddDate(0, 0, 2))
-	if w := f.leader.do("PUT", "/api/v1/events/"+itoa(other.ID)+"/dates/"+day+"/room", map[string]any{"roomId": f.hall.ID}, true); w.Code != http.StatusOK {
+	if w := roomPick(t, f.leader, "/api/v1/events/"+itoa(other.ID)+"/dates/"+day+"/room", map[string]any{"roomId": f.hall.ID}); w.Code != http.StatusOK {
 		t.Fatalf("book: %d %s", w.Code, w.Body.String())
 	}
 	f.app.DB.Model(&models.EventOccurrence{}).Where("event_id = ?", other.ID).Update("visibility_override", models.VisibilityInviteOnly)
 	// An admin's nursery booking for another of the group's events: a
 	// restricted room is suggested to admins only.
 	kids := createFeedEvent(t, f.leader, f.group, "Kids night", f.startOn.AddDate(0, 0, 3), "")
-	if w := f.admin.do("PUT", "/api/v1/events/"+itoa(kids.ID)+"/dates/"+feedDate(f.startOn.AddDate(0, 0, 3))+"/room", map[string]any{"roomId": f.nursery.ID}, true); w.Code != http.StatusOK {
+	if w := roomPick(t, f.admin, "/api/v1/events/"+itoa(kids.ID)+"/dates/"+feedDate(f.startOn.AddDate(0, 0, 3))+"/room", map[string]any{"roomId": f.nursery.ID}); w.Code != http.StatusOK {
 		t.Fatalf("admin books the nursery: %d %s", w.Code, w.Body.String())
 	}
 

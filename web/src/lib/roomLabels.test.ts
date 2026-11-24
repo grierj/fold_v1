@@ -50,12 +50,14 @@ describe("busyDatesNote", () => {
 });
 
 describe("seriesBookingMessage", () => {
-  const res = (over: Partial<SeriesBooking>): SeriesBooking => ({ defaultRoom: hall, booked: 0, pending: 0, lost: [], kept: 0, ...over });
+  const res = (over: Partial<SeriesBooking>): SeriesBooking => ({ event: { id: 7, revision: "r2" }, defaultRoom: hall, booked: 0, pending: 0, lost: [], kept: 0, doubleBooked: 0, ...over });
   it("tells what happened", () => {
     expect(seriesBookingMessage(res({ booked: 1 }))).toBe("Booked for 1 date.");
-    expect(seriesBookingMessage(res({ booked: 8 }), 2)).toBe("Booked for 8 dates, 2 of them over another booking.");
+    expect(seriesBookingMessage(res({ booked: 8, doubleBooked: 2 }))).toBe("Booked for 8 dates, 2 of them over another booking.");
     expect(seriesBookingMessage(res({ defaultRoom: null }))).toBe("Series room released.");
-    expect(seriesBookingMessage(res({}))).toBe("There are no upcoming dates to book.");
+    // A confirmation sent again after its answer was lost finds every date already in the room.
+    expect(seriesBookingMessage(res({}))).toBe("The series room is saved.");
+    expect(seriesBookingMessage(res({ booked: 1, lost: ["2026-12-08"] }))).toBe("Booked for 1 date. 1 date still needs a room; pick one for it under “Dates that need a room” on the event page.");
     expect(seriesBookingMessage(res({ booked: 3, pending: 2, kept: 1 }))).toBe("Booked for 3 dates. Sent to an admin for approval: 2 dates. 1 date keeps the room picked for it.");
   });
 });

@@ -1901,7 +1901,9 @@ func TestReasonReviewCensus(t *testing.T) {
 // cancelEvidenceIn (the cancelled-date tombstone's evidence) filters to
 // occurrence_access.ended on its registration and event.dates_restored on its
 // event, scans only the audit row's own id into a uint, and reads meta ids as
-// signed numbers it checks before use.
+// signed numbers it checks before use; dateRoomRevisionIn (an unbooked date's
+// room token) filters to the room_booking.booked, .overlap and .released rows
+// of one occurrence and scans only the latest audit row's own id into a uint.
 //
 // legacySavePlanIn (T-301) is the deleted-accounts save's one row locker: inside
 // apiAdminLegacyReasonSave's fenced callback, under the exclusive gate, it locks
@@ -1943,6 +1945,7 @@ var reasonCensusPinned = map[string][]string{
 		"api_push.go:apiPushSubscribe",
 		"api_push.go:apiPushTest",
 		"api_registrations.go:previouslyRegisteredPerson",
+		"edit_revision.go:dateRoomRevisionIn",
 		"registration_access.go:loadAccessHistory",
 		"registration_subjects.go:appendRecoverableRegistrations",
 		"throttle.go:inviteSendAllowed",

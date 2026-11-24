@@ -85,7 +85,7 @@ func TestExtendedDatesNoticesSurviveCrash(t *testing.T) {
 		t.Fatal(err)
 	}
 	other := createFeedEvent(t, f.leader, f.group, "Other", f.startOn.AddDate(0, 0, 22), "")
-	if w := f.leader.do("PUT", "/api/v1/events/"+itoa(other.ID)+"/dates/"+fourth+"/room", map[string]any{"roomId": f.hall.ID}, true); w.Code != http.StatusOK {
+	if w := roomPick(t, f.leader, "/api/v1/events/"+itoa(other.ID)+"/dates/"+fourth+"/room", map[string]any{"roomId": f.hall.ID}); w.Code != http.StatusOK {
 		t.Fatalf("book the other event: %d %s", w.Code, w.Body.String())
 	}
 	drainNotices(t, f.app) // the setup's own notices are not under test

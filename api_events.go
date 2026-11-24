@@ -1474,16 +1474,24 @@ func recordSeriesClocks(tx *gorm.DB, ev *models.Event, x events.Expansion, occs 
 	return eventdates.ClearDirty(tx, ev.ID)
 }
 
-// lockManagedEventIn requires the contact gate, which serializes role and
-// relationship revocations. A plain actor read keeps the event as the first
-// row lock: locking the actor could cycle with ungated registration writers.
+// lockManagedEventIn locks the event, then reads the actor and judges the
+// actor's authority, both after the lock: an actor disabled, demoted or
+// signed out while the request waited for the event is refused. The actor read
+// takes no row lock, so the event stays the first row lock: locking the actor
+// could cycle with ungated registration writers. Under the contact gate, which
+// serializes role and relationship revocations, the judgment holds until
+// commit; the room picks take no gate, so a revocation committing while one
+// runs is seen by the next request. The transaction must be Read Committed
+// (contactMutation's, or readCommitted): at Repeatable Read the snapshot is
+// fixed when the event lock is asked for, and the actor read after the wait
+// misses a revocation that committed during it.
 func lockManagedEventIn(tx *gorm.DB, session *models.User, eventID uint) (*models.User, *models.Event, eventFacts, error) {
-	actor, err := lockActorIn(tx, session, actorRead)
-	if err != nil {
-		return nil, nil, eventFacts{}, err
-	}
 	var locked models.Event
 	if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&locked, eventID).Error; err != nil {
+		return nil, nil, eventFacts{}, err
+	}
+	actor, err := lockActorIn(tx, session, actorRead)
+	if err != nil {
 		return nil, nil, eventFacts{}, err
 	}
 	f, err := eventFactsIn(tx, actor, &locked)

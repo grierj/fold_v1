@@ -388,7 +388,7 @@ func TestGroupReadsUseOneConnection(t *testing.T) {
 		Room roomJSON `json:"room"`
 	}
 	decodeJSON(t, w, &room)
-	apiDo(t, f.admin, "PUT", fmt.Sprintf("/api/v1/events/%d/dates/%s/room", f.event.ID, day), map[string]any{"roomId": room.Room.ID}, http.StatusOK)
+	roomPickOK(t, f.admin, fmt.Sprintf("/api/v1/events/%d/dates/%s/room", f.event.ID, day), map[string]any{"roomId": room.Room.ID})
 
 	// The leader is the roster teen's confirmed guardian: a teen's contact
 	// shows only through that link, on the roster and on the date.
@@ -692,7 +692,7 @@ func TestGroupReadFailuresStayWhole(t *testing.T) {
 		Room roomJSON `json:"room"`
 	}
 	decodeJSON(t, w, &room)
-	apiDo(t, f.admin, "PUT", fmt.Sprintf("/api/v1/events/%d/dates/%s/room", f.event.ID, models.FormatCalendarDate(first.OriginalDate)), map[string]any{"roomId": room.Room.ID}, http.StatusOK)
+	roomPickOK(t, f.admin, fmt.Sprintf("/api/v1/events/%d/dates/%s/room", f.event.ID, models.FormatCalendarDate(first.OriginalDate)), map[string]any{"roomId": room.Room.ID})
 
 	date := func(t *testing.T) (occurrenceJSON, string) {
 		t.Helper()

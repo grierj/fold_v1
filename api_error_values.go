@@ -107,7 +107,7 @@ var (
 	errNeedsSuccessor                         = apiErr(http.StatusBadRequest, "needs_successor", "every group this person leads alone needs a new leader")
 	errNoAccount                              = apiErr(http.StatusNotFound, "no_account", "no account with that email")
 	errBookingSetupAdminOnly                  = apiErr(http.StatusForbidden, "not_allowed", "only an admin can change a booking's setup and cleanup time")
-	errBookingAdminOnly                       = apiErr(http.StatusForbidden, "not_allowed", "only an admin can change this booking")
+	errBookingAdminOnly                       = apiErr(http.StatusForbidden, "booking_admin_only", "only an admin can change this booking")
 	errCannotDeleteSelf                       = apiErr(http.StatusBadRequest, "not_yourself", "you cannot delete your own account")
 	errCannotDemoteSelf                       = apiErr(http.StatusBadRequest, "not_yourself", "you cannot demote yourself")
 	errCannotDisableSelf                      = apiErr(http.StatusBadRequest, "not_yourself", "you cannot disable your own account")

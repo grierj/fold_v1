@@ -114,8 +114,9 @@ interface DateEditorProps {
   // The save was refused and not sent again: the host closes the editor and shows the date as it is now (DEC-164).
   onConflict: (why: RevisionConflict) => void;
   onClose: () => void;
-  // The room was booked or released (its own action, not part of Save).
-  onRoomChanged?: () => void;
+  // The date's room may have changed (its own action, not part of Save): a pick landed, or someone else's change
+  // refused it (`refused`). The host reads again quietly.
+  onRoomChanged?: (refused?: boolean) => void;
   // Opened by "Pick a room": the cursor goes to the Room control.
   focusRoom?: boolean;
   // The kept-dates panel's read was refused: this person may no longer manage the event's sign-ups.
@@ -207,6 +208,14 @@ export function DateEditor({ opener, base, hold, onSaved, onSaving, pending = fa
 
   const openedFields = dateFields(opened);
 
+  // The editor's own save, or its room control, can no longer go ahead: the draft ends and the host closes the editor.
+  const handOver = (why: RevisionConflict) => {
+    ended.current = true;
+
+    if (hold?.current?.opened === opened) hold.current = null;
+    onConflict(why);
+  };
+
   const send = useRevisionSave<DateFields | null, DateFields>({
     opened: openedFields,
     revision: opened.revision,
@@ -214,12 +223,7 @@ export function DateEditor({ opener, base, hold, onSaved, onSaving, pending = fa
     fields: (value) => value,
     answers: answerNames("occurrence", opened.id),
     lost,
-    onConflict: (why) => {
-      ended.current = true;
-
-      if (hold?.current?.opened === opened) hold.current = null;
-      onConflict(why);
-    },
+    onConflict: handOver,
     changedCode: "date_changed",
   });
 
@@ -391,7 +395,7 @@ export function DateEditor({ opener, base, hold, onSaved, onSaving, pending = fa
           <Input value={draft.location} onChange={(e) => edit("location")(e.target.value)} />
         </Field>
       </div>
-      <RoomField eventId={opened.eventId} date={opened.date} idPrefix={`cev-${opened.id}`} onChanged={onRoomChanged} focusOnLoad={focusRoom} />
+      <RoomField eventId={opened.eventId} date={opened.date} idPrefix={`cev-${opened.id}`} onChanged={onRoomChanged} onGone={() => handOver("gone")} focusOnLoad={focusRoom} />
       <Field id={`cev-cap-${opened.id}`} label="Capacity for this date" optional hint="Leave it blank to use the event’s capacity.">
         <Input
           type="number"

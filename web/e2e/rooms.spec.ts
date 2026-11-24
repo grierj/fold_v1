@@ -1,6 +1,6 @@
 import * as schema from "valibot";
 import { expect, test } from "@playwright/test";
-import { apiAs, pickRoom, signIn } from "./helpers";
+import { apiAs, pickDateRoom, pickRoom, signIn } from "./helpers";
 
 // M2.1b: a leader books a room for one date from the event editor, the room
 // becomes the date's place, and releasing it brings the typed location back.
@@ -87,7 +87,7 @@ test("a series room busy on one date lists it, and Pick a room books another roo
     title: "Hall holder", startsLocal: `${day}T09:00`, durationMinutes: 30, tzid: "America/Boise",
   })));
 
-  await lee("PUT", `/events/${other.id}/dates/${day}/room`, { roomId: hall.id });
+  await pickDateRoom(lee, other.id, day, { roomId: hall.id });
 
   const { event } = schema.parse(schema.looseObject({ event: schema.looseObject({ id: schema.number() }) }), (await lee("POST", `/groups/${group.id}/events`, {
     title: "Busy first date", startsLocal: `${day}T09:00`, durationMinutes: 30, tzid: "America/Boise",
@@ -103,7 +103,7 @@ test("a series room busy on one date lists it, and Pick a room books another roo
   await room.selectOption((await hallOption.getAttribute("value"))!);
   await expect(page.getByRole("status").filter({ hasText: "will be listed under" })).toBeVisible();
   await page.getByRole("button", { name: "Book for every date" }).click();
-  await expect(page.getByRole("status").filter({ hasText: "1 date is busy" })).toBeVisible();
+  await expect(page.getByRole("status").filter({ hasText: "1 date still needs a room" })).toBeVisible();
 
   const list = page.getByRole("region", { name: /^Dates that need a room \(1\)/ });
   await expect(list).toBeVisible();
@@ -131,7 +131,7 @@ test("a leader sees the room their group used before under Suggested", async ({ 
     title: "Earlier prayer night", startsLocal: `${day(44)}T06:00`, durationMinutes: 30, tzid: "America/Boise",
   })));
 
-  await lee("PUT", `/events/${before.id}/dates/${day(44)}/room`, { roomId: prayer.id });
+  await pickDateRoom(lee, before.id, day(44), { roomId: prayer.id });
 
   const { event } = schema.parse(schema.looseObject({ event: schema.looseObject({ id: schema.number() }) }), (await lee("POST", `/groups/${group.id}/events`, {
     title: "Next prayer night", startsLocal: `${day(45)}T06:00`, durationMinutes: 30, tzid: "America/Boise",

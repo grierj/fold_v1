@@ -2,6 +2,7 @@ package main
 
 import (
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -14,7 +15,7 @@ import (
 
 func (f bookingFixture) seriesRoom(t *testing.T, c *apiClient, ev eventJSON, body map[string]any) (int, seriesBookingJSON) {
 	t.Helper()
-	w := c.do("PUT", "/api/v1/events/"+itoa(ev.ID)+"/room", body, true)
+	w := roomPick(t, c, "/api/v1/events/"+itoa(ev.ID)+"/room", body)
 	var out seriesBookingJSON
 	if w.Code == http.StatusOK {
 		decodeJSON(t, w, &out)
@@ -46,7 +47,7 @@ func TestRoomSeriesBooksFreeDatesAndFlagsBusyOnes(t *testing.T) {
 	}()
 	// The third date gets its own room first; the series room leaves it.
 	third := feedDate(f.startOn.AddDate(0, 0, 14))
-	if w := f.leader.do("PUT", "/api/v1/events/"+itoa(series.ID)+"/dates/"+third+"/room", map[string]any{"roomId": chapel.ID}, true); w.Code != http.StatusOK {
+	if w := roomPick(t, f.leader, "/api/v1/events/"+itoa(series.ID)+"/dates/"+third+"/room", map[string]any{"roomId": chapel.ID}); w.Code != http.StatusOK {
 		t.Fatalf("book the chapel on one date: %d %s", w.Code, w.Body.String())
 	}
 
@@ -202,7 +203,7 @@ func TestRoomSeriesExtenderBooksNewDates(t *testing.T) {
 		t.Fatal(err)
 	}
 	other := createFeedEvent(t, f.leader, f.group, "Other", f.startOn.AddDate(0, 0, 22), "")
-	if w := f.leader.do("PUT", "/api/v1/events/"+itoa(other.ID)+"/dates/"+fourth+"/room", map[string]any{"roomId": f.hall.ID}, true); w.Code != http.StatusOK {
+	if w := roomPick(t, f.leader, "/api/v1/events/"+itoa(other.ID)+"/dates/"+fourth+"/room", map[string]any{"roomId": f.hall.ID}); w.Code != http.StatusOK {
 		t.Fatalf("book the other event: %d %s", w.Code, w.Body.String())
 	}
 
@@ -246,7 +247,7 @@ func TestRoomSeriesEditsBookAddedAndRestoredDates(t *testing.T) {
 	edit("FREQ=WEEKLY;COUNT=2")
 	third := start.AddDate(0, 0, 14)
 	other := createFeedEvent(t, f.leader, f.group, "Other", third, "")
-	if w := f.leader.do("PUT", "/api/v1/events/"+itoa(other.ID)+"/dates/"+feedDate(third)+"/room", map[string]any{"roomId": f.hall.ID}, true); w.Code != http.StatusOK {
+	if w := roomPick(t, f.leader, "/api/v1/events/"+itoa(other.ID)+"/dates/"+feedDate(third)+"/room", map[string]any{"roomId": f.hall.ID}); w.Code != http.StatusOK {
 		t.Fatalf("book the other event: %d %s", w.Code, w.Body.String())
 	}
 	// Lengthening restores the third date (busy: requested, and the leader
@@ -280,11 +281,11 @@ func TestRoomSeriesSwitchRooms(t *testing.T) {
 	}
 	// The second date gets the annex on its own; the chapel is busy on the third.
 	second, third := feedDate(start.AddDate(0, 0, 7)), start.AddDate(0, 0, 14)
-	if w := f.leader.do("PUT", "/api/v1/events/"+itoa(series.ID)+"/dates/"+second+"/room", map[string]any{"roomId": annex.Room.ID}, true); w.Code != http.StatusOK {
+	if w := roomPick(t, f.leader, "/api/v1/events/"+itoa(series.ID)+"/dates/"+second+"/room", map[string]any{"roomId": annex.Room.ID}); w.Code != http.StatusOK {
 		t.Fatalf("annex on one date: %d", w.Code)
 	}
 	other := createFeedEvent(t, f.leader, f.group, "Other", third, "")
-	if w := f.leader.do("PUT", "/api/v1/events/"+itoa(other.ID)+"/dates/"+feedDate(third)+"/room", map[string]any{"roomId": chapel.Room.ID}, true); w.Code != http.StatusOK {
+	if w := roomPick(t, f.leader, "/api/v1/events/"+itoa(other.ID)+"/dates/"+feedDate(third)+"/room", map[string]any{"roomId": chapel.Room.ID}); w.Code != http.StatusOK {
 		t.Fatalf("chapel for the other event: %d", w.Code)
 	}
 
@@ -375,7 +376,7 @@ func TestRoomLostNoticeFromExtenderSerializesWithLeaderErasure(t *testing.T) {
 			t.Fatal(err)
 		}
 		other := createFeedEvent(t, f.leader, f.group, "Other", f.startOn.AddDate(0, 0, 22), "")
-		if w := f.leader.do("PUT", "/api/v1/events/"+itoa(other.ID)+"/dates/"+fourth+"/room", map[string]any{"roomId": f.hall.ID}, true); w.Code != http.StatusOK {
+		if w := roomPick(t, f.leader, "/api/v1/events/"+itoa(other.ID)+"/dates/"+fourth+"/room", map[string]any{"roomId": f.hall.ID}); w.Code != http.StatusOK {
 			t.Fatalf("book the other event: %d %s", w.Code, w.Body.String())
 		}
 		return erasureScene{app: f.app, victim: victim,
@@ -404,7 +405,7 @@ func TestSeriesRoomNeedsActiveGroup(t *testing.T) {
 	decodeJSON(t, w, &chapel)
 
 	for name, c := range map[string]*apiClient{"leader": f.leader, "admin": f.admin} {
-		w := c.do("PUT", "/api/v1/events/"+itoa(series.ID)+"/room", map[string]any{"roomId": chapel.Room.ID}, true)
+		w := roomPick(t, c, "/api/v1/events/"+itoa(series.ID)+"/room", map[string]any{"roomId": chapel.Room.ID})
 		if w.Code != http.StatusConflict || !strings.Contains(w.Body.String(), `"code":"group_rooms_not_approved"`) {
 			t.Fatalf("%s setting a series room for an archived group: %d %s", name, w.Code, w.Body.String())
 		}
@@ -489,5 +490,150 @@ func TestRoomSeriesEditsSkipInactiveGroup(t *testing.T) {
 	}
 	if contactCount(t, f.app, &models.Notification{}, "kind = ?", notify.RoomLost) != 0 {
 		t.Fatal("no room.lost notice for a group that isn't active")
+	}
+}
+
+// DEC-167: a series pick names the event's read. The series room moves the
+// event's revision (default_room_id), so a second manager's pick from an
+// older read is refused with nothing written, and the series editor's own
+// save from before the pick is refused as event_changed with every field it
+// shows as it was (the editor then sends it again by itself, DEC-162).
+func TestSeriesPickFromAnOlderReadIsRefused(t *testing.T) {
+	f := newBookingFixture(t)
+	co, _ := f.coLeader(t)
+	series := createFeedEvent(t, f.leader, f.group, "Weekly", f.startOn.AddDate(0, 0, 1), "FREQ=WEEKLY;COUNT=4")
+	path := "/api/v1/events/" + itoa(series.ID) + "/room"
+	var chapel struct {
+		Room roomJSON `json:"room"`
+	}
+	decodeJSON(t, f.admin.do("POST", "/api/v1/admin/rooms", map[string]any{"name": "Chapel"}, true), &chapel)
+	editorOpened := seriesRevisionOf(t, f.leader, series.ID)
+	first, second := roomRevision(t, f.leader, path), roomRevision(t, co, path)
+	if first == "" || first != second || first != editorOpened {
+		t.Fatalf("the series reads: %q, %q; the editor's %q", first, second, editorOpened)
+	}
+	w := f.leader.do("PUT", path, withRevision(map[string]any{"roomId": f.hall.ID}, first), true)
+	if w.Code != http.StatusOK {
+		t.Fatalf("the first pick: %d %s", w.Code, w.Body.String())
+	}
+	var landed seriesBookingJSON
+	decodeJSON(t, w, &landed)
+	if landed.Event.ID != series.ID || landed.Event.Revision == first || landed.Event.Revision != roomRevision(t, f.leader, path) || landed.Booked != 4 {
+		t.Fatalf("the first pick's answer %+v", landed)
+	}
+	before := roomState(t, f.app)
+	wantCode(t, "the second pick from the older read", co.do("PUT", path, withRevision(map[string]any{"roomId": chapel.Room.ID}, second), true), http.StatusConflict, "event_changed")
+	wantCode(t, "a pick with no revision", co.do("PUT", path, map[string]any{"roomId": chapel.Room.ID}, true), http.StatusConflict, "event_changed")
+	if after := roomState(t, f.app); after != before {
+		t.Fatalf("a refused series pick wrote:\n%s\nwant\n%s", after, before)
+	}
+	// The editor opened before the pick: its save is refused, and the read it
+	// then makes shows every field it compares as it opened.
+	events := "/api/v1/events/" + itoa(series.ID)
+	wantCode(t, "the editor's save from before the pick", f.leader.do("PUT", events, map[string]any{"title": "Weekly supper", "revision": editorOpened}, true), http.StatusConflict, "event_changed")
+	var page struct {
+		Event eventJSON `json:"event"`
+	}
+	decodeJSON(t, f.leader.do("GET", events, nil, false), &page)
+	if page.Event.Title != series.Title || page.Event.RecurrenceRule != series.RecurrenceRule || page.Event.StartsLocal != series.StartsLocal {
+		t.Fatalf("the series pick changed what the editor shows: %+v", page.Event)
+	}
+	apiDo(t, f.leader, "PUT", events, map[string]any{"title": "Weekly supper", "revision": page.Event.Revision}, http.StatusOK)
+	// And the series pick from the answer's revision is stale now too; a fresh read goes through.
+	wantCode(t, "a pick from before the editor's save", f.leader.do("PUT", path, withRevision(map[string]any{"roomId": chapel.Room.ID}, landed.Event.Revision), true), http.StatusConflict, "event_changed")
+	if code, out := f.seriesRoom(t, co, series, map[string]any{"roomId": chapel.Room.ID}); code != http.StatusOK || out.DefaultRoom == nil || out.DefaultRoom.ID != chapel.Room.ID {
+		t.Fatalf("the second leader's pick from a fresh read: %d %+v", code, out)
+	}
+}
+
+// A leader demoted while their series pick waits for the event's lock gets
+// the refusal of someone who may not manage the event, and nothing is written.
+func TestSeriesPickByALeaderDemotedWhileItWaitsWritesNothing(t *testing.T) {
+	f := newBookingFixture(t)
+	co, coUser := f.coLeader(t)
+	series := createFeedEvent(t, f.leader, f.group, "Weekly", f.startOn.AddDate(0, 0, 1), "FREQ=WEEKLY;COUNT=4")
+	path := "/api/v1/events/" + itoa(series.ID) + "/room"
+	pick := withRevision(map[string]any{"roomId": f.hall.ID}, roomRevision(t, co, path))
+	before := roomState(t, f.app)
+	holder := f.app.DB.Begin()
+	defer holder.Rollback()
+	gormMust(t, holder.Exec("SELECT 1 FROM events WHERE id = ? FOR UPDATE", series.ID))
+	answer := make(chan *httptest.ResponseRecorder, 1)
+	go func() { answer <- co.do("PUT", path, pick, true) }()
+	waitForLockedUsersQuery(t, f.app, "%events%FOR UPDATE%")
+	gormMust(t, holder.Exec("UPDATE memberships SET role = ? WHERE user_id = ? AND group_id = ?", models.MembershipMember, coUser.ID, f.group))
+	gormMust(t, holder.Commit())
+	wantCode(t, "the demoted leader's series pick", <-answer, http.StatusForbidden, "")
+	if after := roomState(t, f.app); after != before {
+		t.Fatalf("the demoted leader's series pick wrote:\n%s\nwant\n%s", after, before)
+	}
+}
+
+// What a series pick leaves (kept): a date whose confirmed booking is in a room
+// other than the old series room keeps it, and so does an admin's booking a
+// leader picks over. A date's own pick still waiting on an admin is replaced,
+// whenever it was made: the event's revision does not see a date's booking.
+func TestSeriesPickKeepsConfirmedDatePicksAndReplacesWaitingOnes(t *testing.T) {
+	f := newBookingFixture(t)
+	series := createFeedEvent(t, f.leader, f.group, "Weekly", f.startOn.AddDate(0, 0, 1), "FREQ=WEEKLY;COUNT=3")
+	var chapel struct {
+		Room roomJSON `json:"room"`
+	}
+	decodeJSON(t, f.admin.do("POST", "/api/v1/admin/rooms", map[string]any{"name": "Chapel"}, true), &chapel)
+	datePath := func(day int) string {
+		return "/api/v1/events/" + itoa(series.ID) + "/dates/" + feedDate(f.startOn.AddDate(0, 0, day)) + "/room"
+	}
+	roomPickOK(t, f.leader, datePath(1), map[string]any{"roomId": chapel.Room.ID})
+	opened := roomRevision(t, f.leader, "/api/v1/events/"+itoa(series.ID)+"/room")
+	approvalOn(t, f)
+	roomPickOK(t, f.leader, datePath(8), map[string]any{"roomId": chapel.Room.ID})
+	w := f.leader.do("PUT", "/api/v1/events/"+itoa(series.ID)+"/room", withRevision(map[string]any{"roomId": f.hall.ID}, opened), true)
+	if w.Code != http.StatusOK {
+		t.Fatalf("the series pick from the read before the date's request: %d %s", w.Code, w.Body.String())
+	}
+	var out seriesBookingJSON
+	decodeJSON(t, w, &out)
+	if out.Kept != 1 || out.Pending != 2 {
+		t.Fatalf("series pick: %+v, want 1 kept and 2 waiting", out)
+	}
+	var second models.RoomBooking
+	gormMust(t, f.app.DB.Joins("JOIN event_occurrences o ON o.id = room_bookings.occurrence_id").
+		Where("o.event_id = ? AND o.original_date = ?", series.ID, feedDate(f.startOn.AddDate(0, 0, 8))).First(&second))
+	if second.RoomID != f.hall.ID {
+		t.Fatalf("the date's waiting chapel request is in room %d, want the series room %d", second.RoomID, f.hall.ID)
+	}
+}
+
+// Picking the series room it already has books every date that has no booking
+// (a date released on its own since), without asking for approval again, and
+// the answer counts only what this pick did: the dates it booked, and of them
+// the ones an admin's reason booked over another booking.
+func TestSeriesPickOfItsOwnRoomBooksBareDatesAndCountsOverlaps(t *testing.T) {
+	f := newBookingFixture(t)
+	// A holds the hall on the series' first date.
+	roomPickOK(t, f.leader, f.path(f.eventA, "/room"), map[string]any{"roomId": f.hall.ID})
+	series := createFeedEvent(t, f.leader, f.group, "Weekly", f.startOn.Add(30*time.Minute), "FREQ=WEEKLY;COUNT=4")
+	if code, out := f.seriesRoom(t, f.admin, series, map[string]any{"roomId": f.hall.ID}); code != http.StatusOK || out.Booked != 3 || len(out.Lost) != 1 || out.DoubleBooked != 0 {
+		t.Fatalf("book the series: %d %+v", code, out)
+	}
+	if code, out := f.seriesRoom(t, f.admin, series, map[string]any{"roomId": f.hall.ID, "overlapReason": "Choir moved"}); code != http.StatusOK ||
+		out.Booked != 1 || out.DoubleBooked != 1 || len(out.Lost) != 0 {
+		t.Fatalf("book the busy date anyway: %d %+v", code, out)
+	}
+	if w := f.admin.do("PUT", "/api/v1/admin/settings/room-approval", map[string]any{"enabled": true}, true); w.Code != http.StatusOK {
+		t.Fatalf("approval on: %d", w.Code)
+	}
+	second := feedDate(f.startOn.AddDate(0, 0, 7))
+	roomPickOK(t, f.leader, "/api/v1/events/"+itoa(series.ID)+"/dates/"+second+"/room", map[string]any{"roomId": nil})
+	requests := contactCount(t, f.app, &models.RoomRequest{}, "event_id = ?", series.ID)
+	if code, out := f.seriesRoom(t, f.leader, series, map[string]any{"roomId": f.hall.ID}); code != http.StatusOK ||
+		out.Booked != 1 || out.Pending != 0 || out.DoubleBooked != 0 || len(out.Lost) != 0 {
+		t.Fatalf("pick the series room again: %d %+v", code, out)
+	}
+	if n := seriesBookings(t, f.app, series.ID, models.BookingConfirmed); n != 4 {
+		t.Fatalf("%d confirmed bookings, want every date", n)
+	}
+	if n := contactCount(t, f.app, &models.RoomRequest{}, "event_id = ?", series.ID); n != requests {
+		t.Fatalf("picking the approved series room again opened a request: %d, was %d", n, requests)
 	}
 }

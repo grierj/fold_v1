@@ -49,6 +49,7 @@
   "returns.spec.ts": 1.5,
   "room-approval.spec.ts": 2.2,
   "room-calendar.spec.ts": 1.3,
+  "room-revision.spec.ts": 4.0,
   "room-feed.spec.ts": 1.7,
   "room-match.spec.ts": 3.2,
   "rooms.spec.ts": 4.6,

@@ -1,11 +1,13 @@
 import { useEffect, useRef, useState } from "react";
 import { SeriesRooms } from "../api/rooms";
 import { errorText } from "../lib/errors";
+import { choiceRefused } from "../lib/refusedSave";
 import { useLoad } from "../lib/useLoad";
 import { useRoomsEnabled } from "../lib/useSite";
 import { formatDayLong } from "../lib/when";
-import type { NeedsRoom } from "../types";
+import type { NeedsRoom, RoomBooking } from "../types";
 import { RoomField } from "./RoomField";
+import { roomsTurnedOff } from "./useRoomPicker";
 import { Button } from "./ui/Button";
 import { FormError } from "./ui/Field";
 import { AlertCircleIcon } from "./icons";
@@ -13,19 +15,39 @@ import { AlertCircleIcon } from "./icons";
 // A long list shows its first rows; the rest wait behind one button.
 const SHOWN = 10;
 
+const OFF_LIST = "It is no longer listed under “Dates that need a room”.";
+
+// What a row whose Room control was open says when it leaves the list: what the last pick there left, or only that it
+// left, when that pick was refused or none was made.
+function leftList(day: string, pick: { refused: boolean; stored: RoomBooking | null } | null): string {
+  if (pick?.refused) return `${day}. ${choiceRefused("This date's room")} ${OFF_LIST}`;
+
+  const b = pick?.stored;
+
+  if (pick && b === null) return `Room released for ${day}.`;
+
+  if (b?.pending) return `${day} is waiting for an admin to approve ${b.roomName}.`;
+
+  if (b?.status === "confirmed") return `Booked ${b.roomName} for ${day}.`;
+
+  return `${day}. ${OFF_LIST}`;
+}
+
 // "Dates that need a room" on the event page (M2.1c, DEC-103): dates whose
 // room was taken when they moved, or was busy when the series was booked.
 // "Pick a room" opens that date's "Edit this date" when the page lists the
 // date, and otherwise the one-date Room control right under the row (the page
 // lists only the next few months; this list reaches further). It shows
 // nothing while rooms are off or when every date has its room.
-export function NeedsRoomList({ eventId, revision, hasDate, onPick }: {
+export function NeedsRoomList({ eventId, revision, hasDate, onPick, onGone }: {
   eventId: number;
   // Changes whenever a room or date on the page changes, to ask again.
   revision: number;
   // Whether the page lists this date, so its editor can open there.
   hasDate: (date: string) => boolean;
   onPick: (date: string) => void;
+  // A row's Room control found this person may no longer manage the date: the page does what it does then.
+  onGone: () => void;
 }) {
   // Null until the site settings are read; they don't change while this is open.
   // A church with rooms off, or a site we can't read, sees no list at all.
@@ -37,6 +59,9 @@ export function NeedsRoomList({ eventId, revision, hasDate, onPick }: {
   // What the inline control just did, so the row that leaves the list is not silent.
   const [notice, setNotice] = useState("");
   const watching = useRef<string | null>(null);
+  // What the open row's last pick did: refused by someone else's change, or the booking it left. A row that leaves the
+  // list says what that was, never that the date has a room it does not hold.
+  const lastPick = useRef<{ refused: boolean; stored: RoomBooking | null } | null>(null);
   const noticeRef = useRef<HTMLParagraphElement>(null);
 
   const list = useLoad(() => SeriesRooms.list(eventId), [eventId], { enabled });
@@ -51,7 +76,8 @@ export function NeedsRoomList({ eventId, revision, hasDate, onPick }: {
     if (enabled) reload();
   }, [stamp, enabled, reload]);
   const needs: NeedsRoom[] = list.data?.needsRoom ?? [];
-  const error = list.error ? errorText(list.error, "We couldn't load the dates that need a room.") : null;
+  // Room booking turned off since the page read the site settings: no list, as with rooms off.
+  const error = list.error && !roomsTurnedOff(list.error) ? errorText(list.error, "We couldn't load the dates that need a room.") : null;
   const loaded = list.data;
   useEffect(() => {
     if (!loaded) return;
@@ -60,7 +86,7 @@ export function NeedsRoomList({ eventId, revision, hasDate, onPick }: {
     if (was && !loaded.needsRoom.some((n) => n.date === was)) {
       watching.current = null;
       setOpen(null);
-      setNotice(`${formatDayLong(was)} has a room now.`);
+      setNotice(leftList(formatDayLong(was), lastPick.current));
     }
   }, [loaded]);
 
@@ -69,6 +95,8 @@ export function NeedsRoomList({ eventId, revision, hasDate, onPick }: {
   }, [notice]);
 
   const notes = notice && <p ref={noticeRef} tabIndex={-1} role="status" className="mt-6 text-sm text-text-muted outline-none">{notice}</p>;
+
+  if (roomsTurnedOff(list.error)) return <>{notes}</>;
 
   if (error) {
     return (
@@ -116,6 +144,7 @@ export function NeedsRoomList({ eventId, revision, hasDate, onPick }: {
                       }
 
                       setNotice("");
+                      lastPick.current = null;
                       watching.current = open === n.date ? null : n.date;
                       setOpen(open === n.date ? null : n.date);
                     }}
@@ -125,7 +154,17 @@ export function NeedsRoomList({ eventId, revision, hasDate, onPick }: {
                 </div>
                 {inline && open === n.date && (
                   <div id={panel} className="rounded-md border border-border bg-surface p-3">
-                    <RoomField eventId={eventId} date={n.date} idPrefix={`needs-${n.date}`} focusOnLoad onChanged={() => setOwn((c) => c + 1)} />
+                    <RoomField eventId={eventId} date={n.date} idPrefix={`needs-${n.date}`} focusOnLoad onChanged={(refused, stored) => {
+                      // An earlier date's answer can land after another date's picker opened: it is not that date's pick.
+                      if (watching.current === n.date) lastPick.current = { refused: refused === true, stored: stored ?? null };
+
+                      setOwn((c) => c + 1);
+                    }}
+                      onGone={() => {
+                        watching.current = null;
+                        setOpen(null);
+                        onGone();
+                      }} />
                   </div>
                 )}
               </li>

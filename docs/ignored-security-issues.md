@@ -32,3 +32,17 @@ credentials, personal data, or exploit instructions.
   Product: **1**. The issue is intentionally not fixed.
 - Evidence: `policy.DecideGroupStatus` in `internal/policy/policy.go` and `apiUpdateGroup` in
   `api_groups.go`.
+
+## Custom booking times accepted from an admin demoted while the pick waits
+
+- Date: 2026-11-24. Reviewed revision: `bee5ff83b539e4a52c42b86a1a0c5bfee2b95c43` (PR #483).
+- `apiSetDateRoom` judges `policy.CanAdjustBookingPadding` on the request's actor before it waits for the
+  event's lock. An admin who is demoted during that wait and still leads or hosts the event keeps
+  event-management authority under the lock, so the setup and cleanup minutes already accepted are written
+  for that one booking.
+- Likelihood: **1/10**. It needs a demotion committed while a custom-times pick is waiting on the lock, and
+  the person must remain a leader or host of that event.
+- Severity: **3/10**. One booking's setup and cleanup window; no disclosure, and the person may still manage
+  the date's room. Product: **3**. The issue is intentionally not fixed.
+- Evidence: `apiSetDateRoom` in `api_room_bookings.go`; `lockManagedEventIn` in `api_events.go` reads the
+  actor after the lock for the authority decision only.

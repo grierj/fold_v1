@@ -366,4 +366,157 @@ describe("useRevisionSave", () => {
       expect(write.mock.calls).toEqual([["r1"], ["r1"], ["r3"]]);
     });
   });
+
+  // A form that stays open after an outcome and is used again (a room control).
+  describe("with stays", () => {
+    // The answer says what was stored: here a title, which the server may store unlike the form sent it.
+    let storedTitle = "";
+    const stays = (): Value => ({ title: storedTitle });
+
+    const answered = (revision: string, title: string) => async () => {
+      storedTitle = title;
+
+      return { event: { id: 7, revision } };
+    };
+
+    function open(read: () => Promise<RevisionRead<Value>>, gone?: (err: ApiError) => boolean) {
+      const onConflict = vi.fn();
+      const view = renderHook(() => useRevisionSave({ opened: { title: "Supper" }, revision: "r1", read, fields, answers, onConflict, stays, gone }));
+      const send = <R>(write: (revision: string | undefined) => Promise<R>, intended: Value) => view.result.current(write, intended);
+
+      return { send, onConflict, view };
+    }
+
+    it("hands nothing over when a send's \"gone\" refusal arrives after the control went away", async () => {
+      let refuse!: (err: ApiError) => void;
+      const write = vi.fn().mockReturnValue(new Promise((_, reject) => { refuse = reject; }));
+      const { send, onConflict, view } = open(vi.fn());
+      const sent = send(write, { title: "Brunch" });
+      view.unmount();
+      refuse(new ApiError(403, "no", { code: "not_allowed" }));
+      expect(await sent).toBe("left");
+      expect(onConflict).not.toHaveBeenCalled();
+    });
+
+    it("hands nothing over when the read's \"gone\" refusal arrives after the control went away", async () => {
+      let refuse!: (err: ApiError) => void;
+      const read = vi.fn().mockReturnValue(new Promise((_, reject) => { refuse = reject; }));
+      const { send, onConflict, view } = open(read);
+      const sent = send(vi.fn().mockRejectedValue(changed()), { title: "Brunch" });
+      await vi.waitFor(() => expect(read).toHaveBeenCalledOnce());
+      view.unmount();
+      refuse(new ApiError(404, "gone", { code: "not_found" }));
+      expect(await sent).toBe("left");
+      expect(onConflict).not.toHaveBeenCalled();
+    });
+
+    it("takes the read's refusal as \"gone\" only when the form names it", async () => {
+      const off = new ApiError(404, "off", { code: "rooms_off" });
+      const { send, onConflict } = open(vi.fn().mockRejectedValue(off), (err) => err.status === 404 && err.code === "not_found");
+      await expect(send(vi.fn().mockRejectedValue(changed()), { title: "Brunch" })).rejects.toBe(off);
+      expect(onConflict).not.toHaveBeenCalled();
+    });
+
+    it("names the revision a landed save answered on the next save, from the value the answer says was stored", async () => {
+      const read = vi.fn().mockResolvedValue(readOf({ title: "Picnic" }, "r5"));
+      const write = vi.fn().mockImplementationOnce(answered("r2", "Supper night")).mockImplementationOnce(answered("r3", "Brunch"));
+      const { send, onConflict } = open(read);
+      expect(await send(write, { title: "Supper night" })).toBe("saved");
+      expect(await send(write, { title: "Brunch" })).toBe("saved");
+      expect(write.mock.calls).toEqual([["r1"], ["r2"]]);
+      // A refusal of the third finds the second as it was stored: nothing it writes changed, so it goes again.
+      const third = vi.fn().mockRejectedValueOnce(changed()).mockImplementationOnce(answered("r6", "Picnic"));
+      read.mockResolvedValueOnce(readOf({ title: "Brunch" }, "r5"));
+      expect(await send(third, { title: "Picnic" })).toBe("saved");
+      expect(third.mock.calls).toEqual([["r3"], ["r5"]]);
+      expect(onConflict).not.toHaveBeenCalled();
+    });
+
+    it("takes the stored value from the answer, not from what was sent", async () => {
+      // The server stored "Supper night" for a send of "supper night " (it normalises): the base is what it stored.
+      const read = vi.fn().mockResolvedValue(readOf({ title: "Supper night" }, "r4"));
+      const write = vi.fn().mockImplementationOnce(answered("r2", "Supper night")).mockRejectedValueOnce(changed()).mockImplementationOnce(answered("r5", "Brunch"));
+      const { send, onConflict } = open(read);
+      expect(await send(write, { title: "supper night " })).toBe("saved");
+      expect(await send(write, { title: "Brunch" })).toBe("saved");
+      expect(write.mock.calls).toEqual([["r1"], ["r2"], ["r4"]]);
+      expect(onConflict).not.toHaveBeenCalled();
+    });
+
+    it("bases a new pick after a conflict on what the read found, with its revision", async () => {
+      const read = vi.fn().mockResolvedValue(readOf({ title: "Brunch" }, "r3"));
+      const write = vi.fn().mockRejectedValueOnce(changed()).mockImplementationOnce(answered("r4", "Picnic"));
+      const { send, onConflict } = open(read);
+      expect(await send(write, { title: "Supper night" })).toBe("conflict");
+      expect(onConflict).toHaveBeenCalledExactlyOnceWith("changed");
+      expect(await send(write, { title: "Picnic" })).toBe("saved");
+      expect(write.mock.calls).toEqual([["r1"], ["r3"]]);
+    });
+
+    it("bases the next save on the read that found a save already stored", async () => {
+      const read = vi.fn().mockResolvedValue(readOf({ title: "Supper night" }, "r3"));
+      const write = vi.fn().mockRejectedValueOnce(changed()).mockImplementationOnce(answered("r4", "Brunch"));
+      const { send } = open(read);
+      expect(await send(write, { title: "Supper night" })).toBe("saved");
+      expect(await send(write, { title: "Brunch" })).toBe("saved");
+      expect(write.mock.calls).toEqual([["r1"], ["r3"]]);
+    });
+
+    it("moves nothing on a send with no answer: a later refusal that finds the value as it was is a conflict, never a resend", async () => {
+      const read = vi.fn().mockResolvedValue(readOf({ title: "Supper night" }, "r3"));
+
+      const write = vi.fn()
+        .mockImplementationOnce(answered("r2", "Supper night"))
+        .mockRejectedValueOnce(new TypeError("Failed to fetch"))
+        .mockRejectedValueOnce(changed());
+
+      const { send, onConflict } = open(read);
+      expect(await send(write, { title: "Supper night" })).toBe("saved");
+      await expect(send(write, { title: "Brunch" })).rejects.toBeInstanceOf(TypeError);
+      // The read shows the first save as it was: the lost send may have been stored and undone since.
+      expect(await send(write, { title: "Picnic" })).toBe("conflict");
+      expect(write.mock.calls).toEqual([["r1"], ["r2"], ["r2"]]);
+      expect(onConflict).toHaveBeenCalledExactlyOnceWith("changed");
+    });
+
+    it("hands over \"gone\" only for the refusals the form names, and throws the others for its own error", async () => {
+      const read = vi.fn();
+      const restricted = new ApiError(403, "no", { code: "room_restricted" });
+      const { send, onConflict } = open(read, (err) => err.status === 403 && err.code === "not_allowed");
+      await expect(send(vi.fn().mockRejectedValue(restricted), { title: "Brunch" })).rejects.toBe(restricted);
+      expect(onConflict).not.toHaveBeenCalled();
+      expect(await send(vi.fn().mockRejectedValue(new ApiError(403, "no", { code: "not_allowed" })), { title: "Brunch" })).toBe("conflict");
+      expect(onConflict).toHaveBeenCalledExactlyOnceWith("gone");
+      expect(read).not.toHaveBeenCalled();
+    });
+  });
+
+  // A save that writes more than its fields show (the series room pick, which books every date).
+  describe("with writesMore", () => {
+    function open(read: () => Promise<RevisionRead<Value>>) {
+      const onConflict = vi.fn();
+      const view = renderHook(() => useRevisionSave({ opened: { title: "Supper" }, revision: "r1", read, fields, answers, onConflict, writesMore: true }));
+
+      return { send: <R>(write: (revision: string | undefined) => Promise<R>) => view.result.current(write, { title: "Supper night" }), onConflict };
+    }
+
+    it("sends again under the new revision when someone else stored what it would leave, and counts the answer", async () => {
+      const read = vi.fn().mockResolvedValue(readOf({ title: "Supper night" }, "r3"));
+      const write = vi.fn().mockRejectedValueOnce(changed()).mockResolvedValueOnce(landed);
+      const { send, onConflict } = open(read);
+      expect(await send(write)).toBe("saved");
+      expect(write.mock.calls).toEqual([["r1"], ["r3"]]);
+      expect(onConflict).not.toHaveBeenCalled();
+    });
+
+    it("counts what is stored as its own, sending nothing more, after a send of it got no answer", async () => {
+      const read = vi.fn().mockResolvedValue(readOf({ title: "Supper night" }, "r3"));
+      const write = vi.fn().mockRejectedValueOnce(new TypeError("Failed to fetch")).mockRejectedValueOnce(changed());
+      const { send, onConflict } = open(read);
+      await expect(send(write)).rejects.toBeInstanceOf(TypeError);
+      expect(await send(write)).toBe("saved");
+      expect(write.mock.calls).toEqual([["r1"], ["r1"]]);
+      expect(onConflict).not.toHaveBeenCalled();
+    });
+  });
 });

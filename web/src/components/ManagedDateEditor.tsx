@@ -54,7 +54,7 @@ interface ManagedDateEditorProps {
   onSaved: () => void;
   onConflict: (why: RevisionConflict) => void;
   onClose: () => void;
-  onRoomChanged?: () => void;
+  onRoomChanged?: (refused?: boolean) => void;
   focusRoom?: boolean;
   // The read was refused, or answered another date than the list named: the host checks its page.
   onRefused: () => void;

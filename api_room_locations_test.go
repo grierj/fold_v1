@@ -35,7 +35,7 @@ func TestRoomLocationMatching(t *testing.T) {
 	// Another event already holds the hall on the weekly series' second date.
 	second := start.AddDate(0, 0, 7)
 	holder := create("Holder", second, "", "")
-	if w := f.leader.do("PUT", "/api/v1/events/"+itoa(holder.ID)+"/dates/"+feedDate(second)+"/room", map[string]any{"roomId": f.hall.ID}, true); w.Code != http.StatusOK {
+	if w := roomPick(t, f.leader, "/api/v1/events/"+itoa(holder.ID)+"/dates/"+feedDate(second)+"/room", map[string]any{"roomId": f.hall.ID}); w.Code != http.StatusOK {
 		t.Fatalf("holder booking: %d", w.Code)
 	}
 

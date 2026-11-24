@@ -40,7 +40,7 @@ func newRoomCalendarFixture(t *testing.T) roomCalendarFixture {
 	hidden := newTestGroup(t, f.app, f.leaderUser, "Quiet circle", models.GroupActive)
 	f.app.DB.Model(hidden).Update("visibility", models.VisibilityInviteOnly)
 	f.secret = createFeedEvent(t, f.leader, hidden.ID, "Quiet circle night", f.startOn.Add(2*time.Hour), "")
-	w := f.leader.do("PUT", "/api/v1/events/"+itoa(f.secret.ID)+"/dates/"+feedDate(f.startOn)+"/room", map[string]any{"roomId": f.hall.ID}, true)
+	w := roomPick(t, f.leader, "/api/v1/events/"+itoa(f.secret.ID)+"/dates/"+feedDate(f.startOn)+"/room", map[string]any{"roomId": f.hall.ID})
 	if w.Code != http.StatusOK {
 		t.Fatalf("book the secret event: %d %s", w.Code, w.Body.String())
 	}
@@ -267,7 +267,7 @@ func TestRoomCalendarReadsAreBatched(t *testing.T) {
 	before := count()
 	for i := 0; i < 5; i++ {
 		ev := createFeedEvent(t, f.leader, f.group, "Extra "+itoa(uint(i)), f.startOn.Add(-time.Duration(2*(i+1))*time.Hour), "")
-		w := f.leader.do("PUT", "/api/v1/events/"+itoa(ev.ID)+"/dates/"+feedDate(f.startOn)+"/room", map[string]any{"roomId": f.hall.ID}, true)
+		w := roomPick(t, f.leader, "/api/v1/events/"+itoa(ev.ID)+"/dates/"+feedDate(f.startOn)+"/room", map[string]any{"roomId": f.hall.ID})
 		if w.Code != http.StatusOK {
 			t.Fatalf("book extra: %d %s", w.Code, w.Body.String())
 		}

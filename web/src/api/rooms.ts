@@ -62,6 +62,8 @@ export const RoomRequests = {
 // Booking a room for one date (M2.1b). `:date` is the occurrence's original
 // YYYY-MM-DD. Every route answers 404 while rooms are off. Only an admin may
 // send overlapReason (to book over a conflict) or the two padding overrides.
+// A pick names the read it was made from (`revision`, the read's dateRoom
+// revision); an older one is refused with date_room_changed (DEC-167).
 export interface DateRoomInput {
   roomId: number | null;
   overlapReason?: string;
@@ -71,14 +73,16 @@ export interface DateRoomInput {
 
 export const DateRooms = {
   list: (eventId: Id, date: string) => api<DateRoomsResponse>(path`/events/${eventId}/dates/${date}/rooms`),
-  set: (eventId: Id, date: string, body: DateRoomInput) =>
-    api<RoomBookingResponse>(path`/events/${eventId}/dates/${date}/room`, { method: "PUT", body }),
+  set: (eventId: Id, date: string, body: DateRoomInput, revision: string | undefined) =>
+    api<RoomBookingResponse>(path`/events/${eventId}/dates/${date}/room`, { method: "PUT", body: { ...body, revision } }),
 };
 
 // A room for the whole series (M2.1c). Booking it books every scheduled
 // future date; dates the room is busy on come back in `lost` and in the
 // event's needsRoom list (DEC-103). roomId null stops the series room. Only
-// an admin's overlapReason double-books busy dates instead.
+// an admin's overlapReason double-books busy dates instead. A pick names the
+// event's read it was made from (`revision`); an older one is refused with
+// event_changed (DEC-167).
 interface RoomAvailabilityInput {
   startsLocal: string;
   durationMinutes: number;
@@ -91,8 +95,8 @@ interface RoomAvailabilityInput {
 
 export const SeriesRooms = {
   list: (eventId: Id) => api<SeriesRoomsResponse>(path`/events/${eventId}/rooms`),
-  set: (eventId: Id, body: { roomId: number | null; overlapReason?: string }) =>
-    api<SeriesBooking>(path`/events/${eventId}/room`, { method: "PUT", body }),
+  set: (eventId: Id, body: { roomId: number | null; overlapReason?: string }, revision: string | undefined) =>
+    api<SeriesBooking>(path`/events/${eventId}/room`, { method: "PUT", body: { ...body, revision } }),
   // Rooms for an event not yet created: the create form sends its date
   // fields (and groupId for a group event, and the visibility chosen, which
   // room suggestions use) and books with roomId on create.

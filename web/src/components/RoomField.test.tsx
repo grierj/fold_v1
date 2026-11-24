@@ -7,7 +7,7 @@ import { beforeEach, expect, it, vi } from "vitest";
 import { ApiError } from "../api/core";
 import { DateRooms } from "../api/rooms";
 import { Site } from "../api/site";
-import type { RoomBooking, RoomPickerItem } from "../types";
+import type { DateRoomsResponse, RoomBooking, RoomBookingResponse, RoomPickerItem } from "../types";
 import { Form } from "./ui/Form";
 import { RoomField } from "./RoomField";
 
@@ -24,17 +24,26 @@ const chapel: RoomPickerItem = { id: 2, name: "Chapel", building: "", capacity: 
 const closet: RoomPickerItem = { id: 3, name: "Closet", building: "Annex", capacity: 1, features: "", restricted: false, busy: false, tooSmall: true };
 const booked = (over: Partial<RoomBooking> = {}): RoomBooking => ({ roomId: 1, roomName: "Fellowship Hall", building: "Main", status: "confirmed", setupMinutes: 30, teardownMinutes: 0, doubleBooked: false, tooSmall: false, pending: false, ...over });
 const busy = () => new ApiError(409, "busy", { code: "room_busy" });
+const changed = () => new ApiError(409, "changed", { code: "date_room_changed" });
+const onGone = vi.fn();
+
+// A read of the date's room control: the date (occurrence 70) and its booking's revision.
+const listed = (read: Omit<DateRoomsResponse, "dateRoom">, revision = "r1"): DateRoomsResponse => ({ ...read, dateRoom: { id: 70, revision } });
+
+// A pick's answer: the booking stored and the revision the next pick sends.
+const answer = (booking: RoomBooking | null, revision = "r2"): RoomBookingResponse => ({ booking, dateRoom: { id: 70, revision } });
+const waitForStatus = (text: string | RegExp) => waitFor(() => expect(screen.getAllByRole("status")[0]).toHaveTextContent(text));
 
 beforeEach(() => {
   vi.resetAllMocks();
   actor.isAdmin = false;
   vi.mocked(Site.get).mockResolvedValue({ name: "Fold", timezone: "UTC", selfSignup: "off", roomsEnabled: true, pushEnabled: true });
-  vi.mocked(DateRooms.list).mockResolvedValue({ rooms: [hall, chapel, closet], booking: null });
+  vi.mocked(DateRooms.list).mockResolvedValue(listed({ rooms: [hall, chapel, closet], booking: null }));
 });
 
 // Inside a Form, as in both editors, so nothing here can submit it by accident.
 function show(onChanged = vi.fn()) {
-  render(<Form noValidate onSubmit={(e) => e.preventDefault()}><RoomField eventId={7} date="2026-12-01" idPrefix="t" onChanged={onChanged} /></Form>);
+  render(<Form noValidate onSubmit={(e) => e.preventDefault()}><RoomField eventId={7} date="2026-12-01" idPrefix="t" onChanged={onChanged} onGone={onGone} /></Form>);
 
   return onChanged;
 }
@@ -58,11 +67,11 @@ it("loads the rooms for the date and words each option", async () => {
 });
 
 it("shows a loading line, not a blocked editor, until the rooms arrive", async () => {
-  let release!: (v: { rooms: RoomPickerItem[]; booking: null }) => void;
+  let release!: (v: DateRoomsResponse) => void;
   vi.mocked(DateRooms.list).mockReturnValue(new Promise((r) => { release = r; }));
   show();
   expect(await screen.findByText("Loading rooms…")).toBeInTheDocument();
-  release({ rooms: [hall], booking: null });
+  release(listed({ rooms: [hall], booking: null }));
   expect(await select()).toBeInTheDocument();
 });
 
@@ -82,24 +91,24 @@ it("lets an admin pick a busy room", async () => {
 });
 
 it("books the chosen room at once and says so", async () => {
-  vi.mocked(DateRooms.set).mockResolvedValue({ booking: booked() });
+  vi.mocked(DateRooms.set).mockResolvedValue(answer(booked()));
   const onChanged = show();
   await userEvent.selectOptions(await select(), "1");
-  expect(DateRooms.set).toHaveBeenCalledWith(7, "2026-12-01", { roomId: 1 });
-  expect(await screen.findByRole("status")).toHaveTextContent("Booked Fellowship Hall.");
+  expect(DateRooms.set).toHaveBeenCalledWith(7, "2026-12-01", { roomId: 1 }, "r1");
+  await waitForStatus("Booked Fellowship Hall.");
   expect(await select()).toHaveValue("1");
   expect(onChanged).toHaveBeenCalledTimes(1);
 });
 
 it("releases the room when No room is chosen", async () => {
-  vi.mocked(DateRooms.list).mockResolvedValue({ rooms: [hall], booking: booked() });
-  vi.mocked(DateRooms.set).mockResolvedValue({ booking: null });
+  vi.mocked(DateRooms.list).mockResolvedValue(listed({ rooms: [hall], booking: booked() }));
+  vi.mocked(DateRooms.set).mockResolvedValue(answer(null));
   show();
   const box = await select();
   expect(box).toHaveValue("1");
   await userEvent.selectOptions(box, "none");
-  expect(DateRooms.set).toHaveBeenCalledWith(7, "2026-12-01", { roomId: null });
-  expect(await screen.findByRole("status")).toHaveTextContent("Room released.");
+  expect(DateRooms.set).toHaveBeenCalledWith(7, "2026-12-01", { roomId: null }, "r1");
+  await waitForStatus("Room released.");
 });
 
 it("shows a leader the error for a room that is taken, with no way around it", async () => {
@@ -114,7 +123,7 @@ it("shows a leader the error for a room that is taken, with no way around it", a
 
 it("offers an admin Book anyway with a required reason, and resends it", async () => {
   actor.isAdmin = true;
-  vi.mocked(DateRooms.set).mockRejectedValueOnce(busy()).mockResolvedValueOnce({ booking: booked({ roomId: 2, roomName: "Chapel", building: "", doubleBooked: true }) });
+  vi.mocked(DateRooms.set).mockRejectedValueOnce(busy()).mockResolvedValueOnce(answer(booked({ roomId: 2, roomName: "Chapel", building: "", doubleBooked: true })));
   show();
   await userEvent.selectOptions(await select(), "2");
   const reason = await screen.findByRole("textbox", { name: /^Reason for double-booking/ });
@@ -127,13 +136,13 @@ it("offers an admin Book anyway with a required reason, and resends it", async (
   expect(DateRooms.set).toHaveBeenCalledTimes(1);
   await userEvent.type(reason, "Choir moved");
   await userEvent.click(screen.getByRole("button", { name: "Book anyway" }));
-  await waitFor(() => expect(DateRooms.set).toHaveBeenLastCalledWith(7, "2026-12-01", { roomId: 2, overlapReason: "Choir moved" }));
-  expect(await screen.findByRole("status")).toHaveTextContent("Booked Chapel over another booking.");
+  await waitFor(() => expect(DateRooms.set).toHaveBeenLastCalledWith(7, "2026-12-01", { roomId: 2, overlapReason: "Choir moved" }, "r1"));
+  await waitForStatus("Booked Chapel over another booking.");
   expect(screen.queryByRole("textbox", { name: /^Reason/ })).not.toBeInTheDocument();
 });
 
 it("warns, in words, when a date lost its room by moving", async () => {
-  vi.mocked(DateRooms.list).mockResolvedValue({ rooms: [hall], booking: booked({ status: "requested" }) });
+  vi.mocked(DateRooms.list).mockResolvedValue(listed({ rooms: [hall], booking: booked({ status: "requested" }) }));
   show();
   const box = await select();
   expect(screen.getByText(/Fellowship Hall was taken at the new time, so this date has no room\. Pick another room\./)).toBeInTheDocument();
@@ -143,8 +152,8 @@ it("warns, in words, when a date lost its room by moving", async () => {
 });
 
 it("lets an admin, and only an admin, override setup and cleanup minutes", async () => {
-  vi.mocked(DateRooms.list).mockResolvedValue({ rooms: [hall], booking: booked() });
-  vi.mocked(DateRooms.set).mockResolvedValue({ booking: booked({ setupMinutes: 45, teardownMinutes: 15 }) });
+  vi.mocked(DateRooms.list).mockResolvedValue(listed({ rooms: [hall], booking: booked() }));
+  vi.mocked(DateRooms.set).mockResolvedValue(answer(booked({ setupMinutes: 45, teardownMinutes: 15 })));
   actor.isAdmin = true;
   show();
   await select();
@@ -160,19 +169,19 @@ it("lets an admin, and only an admin, override setup and cleanup minutes", async
   await userEvent.clear(cleanup);
   await userEvent.type(cleanup, "15");
   await userEvent.click(screen.getByRole("button", { name: "Save times" }));
-  expect(DateRooms.set).toHaveBeenCalledWith(7, "2026-12-01", { roomId: 1, setupMinutes: 45, teardownMinutes: 15 });
-  expect(await screen.findByRole("status")).toHaveTextContent("Setup and cleanup times saved.");
+  expect(DateRooms.set).toHaveBeenCalledWith(7, "2026-12-01", { roomId: 1, setupMinutes: 45, teardownMinutes: 15 }, "r1");
+  await waitForStatus("Setup and cleanup times saved.");
 });
 
 it("never shows a leader the padding override", async () => {
-  vi.mocked(DateRooms.list).mockResolvedValue({ rooms: [hall], booking: booked() });
+  vi.mocked(DateRooms.list).mockResolvedValue(listed({ rooms: [hall], booking: booked() }));
   show();
   await select();
   expect(screen.queryByRole("button", { name: "Setup and cleanup times" })).not.toBeInTheDocument();
 });
 
 it("refuses minutes outside 0 to 240 without asking the server", async () => {
-  vi.mocked(DateRooms.list).mockResolvedValue({ rooms: [hall], booking: booked() });
+  vi.mocked(DateRooms.list).mockResolvedValue(listed({ rooms: [hall], booking: booked() }));
   actor.isAdmin = true;
   show();
   await select();
@@ -187,22 +196,22 @@ it("refuses minutes outside 0 to 240 without asking the server", async () => {
 });
 
 it("saves the times on Enter without submitting the editor around them", async () => {
-  vi.mocked(DateRooms.list).mockResolvedValue({ rooms: [hall], booking: booked() });
-  vi.mocked(DateRooms.set).mockResolvedValue({ booking: booked({ setupMinutes: 45 }) });
+  vi.mocked(DateRooms.list).mockResolvedValue(listed({ rooms: [hall], booking: booked() }));
+  vi.mocked(DateRooms.set).mockResolvedValue(answer(booked({ setupMinutes: 45 })));
   actor.isAdmin = true;
   const onSubmit = vi.fn((e: { preventDefault: () => void }) => e.preventDefault());
-  render(<Form noValidate onSubmit={onSubmit}><RoomField eventId={7} date="2026-12-01" idPrefix="t" /></Form>);
+  render(<Form noValidate onSubmit={onSubmit}><RoomField eventId={7} date="2026-12-01" idPrefix="t" onGone={onGone} /></Form>);
   await select();
   await userEvent.click(screen.getByRole("button", { name: "Setup and cleanup times" }));
   const setup = screen.getByRole("spinbutton", { name: "Setup minutes" });
   await userEvent.clear(setup);
   await userEvent.type(setup, "45{Enter}");
-  expect(DateRooms.set).toHaveBeenCalledWith(7, "2026-12-01", { roomId: 1, setupMinutes: 45, teardownMinutes: 0 });
+  expect(DateRooms.set).toHaveBeenCalledWith(7, "2026-12-01", { roomId: 1, setupMinutes: 45, teardownMinutes: 0 }, "r1");
   expect(onSubmit).not.toHaveBeenCalled();
 });
 
 it("announces the too-small warning in the status region", async () => {
-  vi.mocked(DateRooms.set).mockResolvedValue({ booking: booked({ roomId: 3, roomName: "Closet", tooSmall: true }) });
+  vi.mocked(DateRooms.set).mockResolvedValue(answer(booked({ roomId: 3, roomName: "Closet", tooSmall: true })));
   show();
   await userEvent.selectOptions(await select(), "3");
   await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent("This room seats fewer people than this date allows."));
@@ -211,7 +220,7 @@ it("announces the too-small warning in the status region", async () => {
 
 it("shows nothing, and asks for no rooms, while rooms are off", async () => {
   vi.mocked(Site.get).mockResolvedValue({ name: "Fold", timezone: "UTC", selfSignup: "off", roomsEnabled: false, pushEnabled: true });
-  const { container } = render(<RoomField eventId={7} date="2026-12-01" idPrefix="t" />);
+  const { container } = render(<RoomField eventId={7} date="2026-12-01" idPrefix="t" onGone={onGone} />);
   await waitFor(() => expect(Site.get).toHaveBeenCalled());
   expect(container).toBeEmptyDOMElement();
   expect(DateRooms.list).not.toHaveBeenCalled();
@@ -219,7 +228,7 @@ it("shows nothing, and asks for no rooms, while rooms are off", async () => {
 
 it("shows nothing, not an error, when the site settings fail to load", async () => {
   vi.mocked(Site.get).mockRejectedValue(new ApiError(500, "down", { code: "server_error" }));
-  const { container } = render(<RoomField eventId={7} date="2026-12-01" idPrefix="t" />);
+  const { container } = render(<RoomField eventId={7} date="2026-12-01" idPrefix="t" onGone={onGone} />);
   await waitFor(() => expect(Site.get).toHaveBeenCalled());
   expect(container).toBeEmptyDOMElement();
 });
@@ -233,11 +242,11 @@ it("offers a retry when the rooms fail to load", async () => {
 });
 
 it("puts the cursor in the Room select once the rooms load, only when asked", async () => {
-  let release!: (v: { rooms: RoomPickerItem[]; booking: null }) => void;
+  let release!: (v: DateRoomsResponse) => void;
   vi.mocked(DateRooms.list).mockReturnValue(new Promise((r) => { release = r; }));
-  render(<RoomField eventId={7} date="2026-12-01" idPrefix="t" focusOnLoad />);
+  render(<RoomField eventId={7} date="2026-12-01" idPrefix="t" onGone={onGone} focusOnLoad />);
   expect(await screen.findByText("Loading rooms…")).toBeInTheDocument();
-  release({ rooms: [hall], booking: null });
+  release(listed({ rooms: [hall], booking: null }));
   const box = await select();
   await waitFor(() => expect(box).toHaveFocus());
 });
@@ -248,7 +257,7 @@ it("leaves focus alone without focusOnLoad", async () => {
 });
 
 it("says an admin didn't approve a date, keeps No room chosen, and asks for another room", async () => {
-  vi.mocked(DateRooms.list).mockResolvedValue({ rooms: [hall], booking: booked({ status: "rejected" }) });
+  vi.mocked(DateRooms.list).mockResolvedValue(listed({ rooms: [hall], booking: booked({ status: "rejected" }) }));
   show();
   const box = await select();
   expect(box).toHaveValue("none");
@@ -256,7 +265,7 @@ it("says an admin didn't approve a date, keeps No room chosen, and asks for anot
 });
 
 it("says in words that a booking waits for an admin, and shows its room", async () => {
-  vi.mocked(DateRooms.list).mockResolvedValue({ rooms: [hall], booking: booked({ status: "requested", pending: true }) });
+  vi.mocked(DateRooms.list).mockResolvedValue(listed({ rooms: [hall], booking: booked({ status: "requested", pending: true }) }));
   show();
   const box = await select();
   expect(box).toHaveValue("1");
@@ -266,7 +275,7 @@ it("says in words that a booking waits for an admin, and shows its room", async 
 });
 
 it("shows the waiting line, not Booked, after choosing a room that needs approval", async () => {
-  vi.mocked(DateRooms.set).mockResolvedValue({ booking: booked({ status: "requested", pending: true }) });
+  vi.mocked(DateRooms.set).mockResolvedValue(answer(booked({ status: "requested", pending: true })));
   show();
   await userEvent.selectOptions(await select(), "1");
   await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent("Waiting for an admin to approve Fellowship Hall."));
@@ -283,10 +292,10 @@ function groupsOf(box: HTMLElement) {
 }
 
 it("lists suggested rooms first with why, then every other room once", async () => {
-  vi.mocked(DateRooms.list).mockResolvedValue({
+  vi.mocked(DateRooms.list).mockResolvedValue(listed({
     rooms: [hall, chapel, closet], booking: null,
     suggestions: { rooms: [{ roomId: 3, uses: 6, reason: "Used by this group 6 times", busyDates: 0 }, { roomId: 2, uses: 1, reason: "Used once", busyDates: 1 }], otherKinds: false, dates: 1 },
-  });
+  }));
   show();
   const box = await select();
   expect(requiredElement(box, HTMLSelectElement).options[0].textContent).toBe("No room");
@@ -297,18 +306,301 @@ it("lists suggested rooms first with why, then every other room once", async () 
   // A busy suggestion is still only an admin's to book.
   expect(screen.getByRole("option", { name: /^Chapel/ })).toBeDisabled();
   await userEvent.selectOptions(box, "3");
-  expect(DateRooms.set).toHaveBeenCalledWith(7, "2026-12-01", { roomId: 3 });
+  expect(DateRooms.set).toHaveBeenCalledWith(7, "2026-12-01", { roomId: 3 }, "r1");
 });
 
 it("labels suggestions from other kinds of events, and shows no groups without suggestions", async () => {
-  vi.mocked(DateRooms.list).mockResolvedValue({
+  vi.mocked(DateRooms.list).mockResolvedValue(listed({
     rooms: [hall, chapel], booking: null,
     suggestions: { rooms: [{ roomId: 1, uses: 2, reason: "Used 2 times", busyDates: 0 }], otherKinds: true, dates: 1 },
-  });
-  const { unmount } = render(<Form noValidate onSubmit={(e) => e.preventDefault()}><RoomField eventId={7} date="2026-12-01" idPrefix="t" /></Form>);
+  }));
+  const { unmount } = render(<Form noValidate onSubmit={(e) => e.preventDefault()}><RoomField eventId={7} date="2026-12-01" idPrefix="t" onGone={onGone} /></Form>);
   expect(groupsOf(await select()).map((g) => g.label)).toEqual(["Used by other kinds of events", "Other rooms"]);
   unmount();
-  vi.mocked(DateRooms.list).mockResolvedValue({ rooms: [hall, chapel], booking: null, suggestions: { rooms: [], otherKinds: false, dates: 1 } });
+  vi.mocked(DateRooms.list).mockResolvedValue(listed({ rooms: [hall, chapel], booking: null, suggestions: { rooms: [], otherKinds: false, dates: 1 } }));
   show();
   expect(groupsOf(await select())).toEqual([]);
+});
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((r) => { resolve = r; });
+
+  return { promise, resolve };
+}
+
+const conflictLine = () => screen.queryByText(/changed while you were choosing/);
+
+// DEC-167: each pick names the read it was made from, and the control stays on screen to be used again.
+it("sends the read's revision, then the revision each answer names", async () => {
+  vi.mocked(DateRooms.set).mockResolvedValueOnce(answer(booked(), "r2")).mockResolvedValueOnce(answer(booked({ roomId: 3, roomName: "Closet" }), "r3"));
+  show();
+  await userEvent.selectOptions(await select(), "1");
+  await waitForStatus("Booked Fellowship Hall.");
+  await userEvent.selectOptions(await select(), "3");
+  await waitForStatus("Booked Closet.");
+  expect(vi.mocked(DateRooms.set).mock.calls.map((c) => c[3])).toEqual(["r1", "r2"]);
+  expect(DateRooms.list).toHaveBeenCalledOnce();
+  expect(onGone).not.toHaveBeenCalled();
+});
+
+it("shows the room as it is now and says so at the field when someone else picked another one", async () => {
+  vi.mocked(DateRooms.list)
+    .mockResolvedValueOnce(listed({ rooms: [hall, chapel, closet], booking: null }))
+    .mockResolvedValueOnce(listed({ rooms: [hall, chapel, closet], booking: booked({ roomId: 3, roomName: "Closet" }) }, "r3"));
+  vi.mocked(DateRooms.set).mockRejectedValueOnce(changed()).mockResolvedValueOnce(answer(null, "r4"));
+  const onChanged = show();
+  await userEvent.selectOptions(await select(), "1");
+  const line = await screen.findByText("This date's room changed while you were choosing, so your choice could not be saved. This is the room as it is now.");
+  expect(line).toHaveAttribute("role", "status");
+  await waitFor(() => expect(line).toHaveFocus());
+  expect(await select()).toHaveValue("3");
+  expect(DateRooms.set).toHaveBeenCalledOnce();
+  // The page behind reads again quietly, so its place shows the room too.
+  expect(onChanged).toHaveBeenCalledExactlyOnceWith(true);
+  expect(onGone).not.toHaveBeenCalled();
+  // A new pick names the read that found the change, and the line goes.
+  await userEvent.selectOptions(await select(), "none");
+  await waitForStatus("Room released.");
+  expect(vi.mocked(DateRooms.set).mock.calls[1][3]).toBe("r3");
+  expect(conflictLine()).not.toBeInTheDocument();
+});
+
+it("sends the pick again by itself when what changed is not the room (an admin approved the request)", async () => {
+  vi.mocked(DateRooms.list)
+    .mockResolvedValueOnce(listed({ rooms: [hall, closet], booking: booked({ status: "requested", pending: true }) }))
+    .mockResolvedValueOnce(listed({ rooms: [hall, closet], booking: booked() }, "r3"));
+  vi.mocked(DateRooms.set).mockRejectedValueOnce(changed()).mockResolvedValueOnce(answer(booked({ roomId: 3, roomName: "Closet" }), "r4"));
+  show();
+  await userEvent.selectOptions(await select(), "3");
+  await waitForStatus("Booked Closet.");
+  expect(vi.mocked(DateRooms.set).mock.calls.map((c) => c[3])).toEqual(["r1", "r3"]);
+  expect(conflictLine()).not.toBeInTheDocument();
+});
+
+it("counts a pick whose answer was lost as saved when the read shows it stored, and never resends after one", async () => {
+  vi.mocked(DateRooms.list)
+    .mockResolvedValueOnce(listed({ rooms: [hall, closet], booking: null }))
+    .mockResolvedValue(listed({ rooms: [hall, closet], booking: booked() }, "r3"));
+  vi.mocked(DateRooms.set).mockRejectedValueOnce(new TypeError("Failed to fetch")).mockRejectedValue(changed());
+  show();
+  await userEvent.selectOptions(await select(), "1");
+  expect(await screen.findByRole("alert")).toBeInTheDocument();
+  // The same pick again: the read shows it stored.
+  await userEvent.selectOptions(await select(), "1");
+  await waitForStatus("Booked Fellowship Hall.");
+  expect(await select()).toHaveValue("1");
+  expect(DateRooms.set).toHaveBeenCalledTimes(2);
+  expect(conflictLine()).not.toBeInTheDocument();
+});
+
+it("ends a different pick after a lost answer as the conflict, never a resend", async () => {
+  vi.mocked(DateRooms.list)
+    .mockResolvedValueOnce(listed({ rooms: [hall, closet], booking: null }))
+    .mockResolvedValue(listed({ rooms: [hall, closet], booking: null }, "r3"));
+  vi.mocked(DateRooms.set).mockRejectedValueOnce(new TypeError("Failed to fetch")).mockRejectedValue(changed());
+  show();
+  await userEvent.selectOptions(await select(), "1");
+  expect(await screen.findByRole("alert")).toBeInTheDocument();
+  await userEvent.selectOptions(await select(), "3");
+  expect(await screen.findByText(/This date's room changed while you were choosing/)).toBeInTheDocument();
+  expect(DateRooms.set).toHaveBeenCalledTimes(2);
+});
+
+it("hands over to the host when the person may no longer manage the date, and not for a room they may not book", async () => {
+  vi.mocked(DateRooms.set)
+    .mockRejectedValueOnce(new ApiError(403, "restricted", { code: "room_restricted" }))
+    .mockRejectedValueOnce(new ApiError(404, "gone", { code: "room_gone" }))
+    .mockRejectedValueOnce(new ApiError(403, "no", { code: "not_allowed" }));
+  show();
+  await userEvent.selectOptions(await select(), "1");
+  expect(await screen.findByRole("alert")).toHaveTextContent("Only an admin can book that room.");
+  await userEvent.selectOptions(await select(), "3");
+  await waitFor(() => expect(screen.getByRole("alert")).toHaveTextContent("That room isn't available anymore. Pick another room."));
+  expect(onGone).not.toHaveBeenCalled();
+  await userEvent.selectOptions(await select(), "1");
+  await waitFor(() => expect(onGone).toHaveBeenCalledOnce());
+});
+
+it("says it is saving and starts no second pick while one is on its way", async () => {
+  const landed = deferred<RoomBookingResponse>();
+  vi.mocked(DateRooms.set).mockReturnValueOnce(landed.promise);
+  show();
+  const box = await select();
+  await userEvent.selectOptions(box, "1");
+  await waitForStatus("Saving…");
+  expect(box).toHaveAttribute("aria-busy", "true");
+  await userEvent.selectOptions(box, "3");
+  expect(DateRooms.set).toHaveBeenCalledOnce();
+  landed.resolve(answer(booked()));
+  await waitForStatus("Booked Fellowship Hall.");
+  expect(DateRooms.set).toHaveBeenCalledOnce();
+});
+
+// A restricted room a leader cannot list: the date's place names it, and so does the control, by name and building
+// only.
+const nurseryBooking = (over: Partial<RoomBooking> = {}) => booked({ roomId: 9, roomName: "Nursery", building: "Wing", setupMinutes: 0, ...over });
+
+it("shows a leader the restricted room an admin booked, by name, not No room", async () => {
+  vi.mocked(DateRooms.list).mockResolvedValue(listed({ rooms: [hall, closet], booking: nurseryBooking() }));
+  show();
+  const box = await select();
+  expect(box).toHaveValue("9");
+  expect(screen.getByRole("option", { name: "Nursery · Wing" })).toBeInTheDocument();
+  const labels = Array.from(requiredElement(box, HTMLSelectElement).options).map((o) => o.textContent);
+  expect(labels).toEqual(["No room", "Nursery · Wing", "Fellowship Hall · Main (80 seats)", "Closet · Annex (1 seat) — may be too small"]);
+});
+
+it("after a conflict shows the restricted room an admin booked meanwhile, not No room", async () => {
+  vi.mocked(DateRooms.list)
+    .mockResolvedValueOnce(listed({ rooms: [hall, closet], booking: null }))
+    .mockResolvedValueOnce(listed({ rooms: [hall, closet], booking: nurseryBooking() }, "r3"));
+  vi.mocked(DateRooms.set).mockRejectedValueOnce(changed());
+  show();
+  await userEvent.selectOptions(await select(), "1");
+  await screen.findByText(/This date's room changed while you were choosing/);
+  expect(await select()).toHaveValue("9");
+  expect(screen.getByRole("option", { name: "Nursery · Wing" })).toBeInTheDocument();
+});
+
+it("never calls a rejected request a release: No room over a rejection is the conflict", async () => {
+  vi.mocked(DateRooms.list)
+    .mockResolvedValueOnce(listed({ rooms: [hall, closet], booking: booked({ status: "requested", pending: true }) }))
+    .mockResolvedValue(listed({ rooms: [hall, closet], booking: booked({ status: "rejected" }) }, "r3"));
+  vi.mocked(DateRooms.set).mockRejectedValue(changed());
+  show();
+  await userEvent.selectOptions(await select(), "none");
+  await screen.findByText(/This date's room changed while you were choosing/);
+  expect(screen.queryByText("Room released.")).not.toBeInTheDocument();
+  expect(screen.getByText(/An admin didn't approve Fellowship Hall for this date/)).toBeInTheDocument();
+});
+
+it("hands nothing to the host when a refusal arrives after the control closed", async () => {
+  let refuse!: (err: ApiError) => void;
+  vi.mocked(DateRooms.set).mockReturnValueOnce(new Promise((_, reject) => { refuse = reject; }));
+  const { unmount } = render(<RoomField eventId={7} date="2026-12-01" idPrefix="t" onGone={onGone} />);
+  await userEvent.selectOptions(await select(), "1");
+  unmount();
+  refuse(new ApiError(403, "no", { code: "not_allowed" }));
+  await new Promise((r) => setTimeout(r, 20));
+  expect(onGone).not.toHaveBeenCalled();
+});
+
+it("hands over to the host when the read after a refusal says the person may no longer manage the date", async () => {
+  vi.mocked(DateRooms.list)
+    .mockResolvedValueOnce(listed({ rooms: [hall, closet], booking: null }))
+    .mockRejectedValueOnce(new ApiError(404, "gone", { code: "not_found" }));
+  vi.mocked(DateRooms.set).mockRejectedValue(changed());
+  show();
+  await userEvent.selectOptions(await select(), "1");
+  await waitFor(() => expect(onGone).toHaveBeenCalledOnce());
+});
+
+it("says rooms were turned off, keeps the host's editor, and does not hand over", async () => {
+  const onChanged = show();
+  vi.mocked(DateRooms.set).mockRejectedValue(new ApiError(404, "off", { code: "rooms_off" }));
+  await userEvent.selectOptions(await select(), "1");
+  expect(await screen.findByText("Room booking has been turned off, so your choice could not be saved.")).toBeInTheDocument();
+  expect(screen.queryByRole("combobox", { name: /^Room/ })).not.toBeInTheDocument();
+  expect(onGone).not.toHaveBeenCalled();
+  expect(onChanged).not.toHaveBeenCalled();
+});
+
+it("says rooms were turned off when its first read finds them off, with nothing to retry", async () => {
+  vi.mocked(DateRooms.list).mockRejectedValue(new ApiError(404, "off", { code: "rooms_off" }));
+  show();
+  expect(await screen.findByText("Room booking has been turned off, so rooms can't be picked here now.")).toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "Try again" })).not.toBeInTheDocument();
+  expect(onGone).not.toHaveBeenCalled();
+});
+
+// An admin's pick of another room leaves the padding to the server (that room's usual minutes): a pick whose answer
+// was lost counts as stored when the read shows that room, whatever padding it got.
+it("counts an admin's lost pick of another room as booked at the room's usual padding", async () => {
+  actor.isAdmin = true;
+  vi.mocked(DateRooms.list)
+    .mockResolvedValueOnce(listed({ rooms: [hall, chapel, closet], booking: booked({ setupMinutes: 45, teardownMinutes: 15 }) }))
+    .mockResolvedValue(listed({ rooms: [hall, chapel, closet], booking: booked({ roomId: 3, roomName: "Closet", building: "Annex", setupMinutes: 10, teardownMinutes: 5 }) }, "r3"));
+  vi.mocked(DateRooms.set).mockRejectedValueOnce(new TypeError("Failed to fetch")).mockRejectedValue(changed());
+  show();
+  await userEvent.selectOptions(await select(), "3");
+  expect(await screen.findByRole("alert")).toBeInTheDocument();
+  await userEvent.selectOptions(await select(), "3");
+  await waitForStatus("Booked Closet.");
+  expect(conflictLine()).not.toBeInTheDocument();
+  expect(DateRooms.set).toHaveBeenCalledTimes(2);
+});
+
+it("counts an admin's lost Save times as saved only when the read shows those times", async () => {
+  actor.isAdmin = true;
+  vi.mocked(DateRooms.list)
+    .mockResolvedValueOnce(listed({ rooms: [hall, closet], booking: booked() }))
+    .mockResolvedValueOnce(listed({ rooms: [hall, closet], booking: booked({ setupMinutes: 20, teardownMinutes: 5 }) }, "r3"))
+    .mockResolvedValue(listed({ rooms: [hall, closet], booking: booked({ setupMinutes: 40, teardownMinutes: 5 }) }, "r4"));
+  vi.mocked(DateRooms.set).mockRejectedValueOnce(new TypeError("Failed to fetch")).mockRejectedValue(changed());
+  show();
+  await userEvent.click(await screen.findByRole("button", { name: "Setup and cleanup times" }));
+  const setupBox = screen.getByRole("spinbutton", { name: "Setup minutes" });
+  const teardownBox = screen.getByRole("spinbutton", { name: "Cleanup minutes" });
+  await userEvent.clear(setupBox);
+  await userEvent.type(setupBox, "20");
+  await userEvent.clear(teardownBox);
+  await userEvent.type(teardownBox, "5");
+  await userEvent.click(screen.getByRole("button", { name: "Save times" }));
+  expect(await screen.findByRole("alert")).toBeInTheDocument();
+  await userEvent.click(screen.getByRole("button", { name: "Save times" }));
+  await waitForStatus("Setup and cleanup times saved.");
+  expect(conflictLine()).not.toBeInTheDocument();
+  // Times someone else saved since are not this person's: the next Save times is the conflict.
+  await userEvent.clear(setupBox);
+  await userEvent.type(setupBox, "25");
+  await userEvent.click(screen.getByRole("button", { name: "Save times" }));
+  expect(await screen.findByText(/This date's room changed while you were choosing/)).toBeInTheDocument();
+});
+
+// An admin's "Book anyway" whose answer was lost keeps its prompt and reason, so the next press settles it: already
+// stored, the double-booking is called booked, never "could not be saved".
+it("keeps an admin's Book anyway and its reason when the answer was lost, and the next press finds it booked", async () => {
+  actor.isAdmin = true;
+  vi.mocked(DateRooms.list)
+    .mockResolvedValueOnce(listed({ rooms: [hall, chapel, closet], booking: null }))
+    .mockResolvedValue(listed({ rooms: [hall, chapel, closet], booking: booked({ roomId: 2, roomName: "Chapel", building: "", doubleBooked: true }) }, "r3"));
+  vi.mocked(DateRooms.set).mockRejectedValueOnce(busy()).mockRejectedValueOnce(new TypeError("Failed to fetch")).mockRejectedValue(changed());
+  show();
+  await userEvent.selectOptions(await select(), "2");
+  await userEvent.type(await screen.findByRole("textbox", { name: /^Reason for double-booking/ }), "Choir moved");
+  await userEvent.click(screen.getByRole("button", { name: "Book anyway" }));
+  await waitFor(() => expect(DateRooms.set).toHaveBeenCalledTimes(2));
+  await waitFor(() => expect(screen.getByRole("button", { name: "Book anyway" })).toBeEnabled());
+  expect(screen.getByRole("textbox", { name: /^Reason for double-booking/ })).toHaveValue("Choir moved");
+  await userEvent.click(screen.getByRole("button", { name: "Book anyway" }));
+  await waitForStatus("Booked Chapel over another booking.");
+  expect(vi.mocked(DateRooms.set).mock.calls[2][2]).toEqual({ roomId: 2, overlapReason: "Choir moved" });
+  expect(conflictLine()).not.toBeInTheDocument();
+  expect(screen.queryByText(/could not be saved/)).not.toBeInTheDocument();
+});
+
+it("carries Save times' minutes into a Book anyway it opened, so a lost answer is found stored", async () => {
+  actor.isAdmin = true;
+  vi.mocked(DateRooms.list)
+    .mockResolvedValueOnce(listed({ rooms: [hall, closet], booking: booked() }))
+    .mockResolvedValue(listed({ rooms: [hall, closet], booking: booked({ setupMinutes: 45, teardownMinutes: 15, doubleBooked: true }) }, "r3"));
+  vi.mocked(DateRooms.set).mockRejectedValueOnce(busy()).mockRejectedValueOnce(new TypeError("Failed to fetch")).mockRejectedValue(changed());
+  show();
+  await userEvent.click(await screen.findByRole("button", { name: "Setup and cleanup times" }));
+  const setupBox = screen.getByRole("spinbutton", { name: "Setup minutes" });
+  const teardownBox = screen.getByRole("spinbutton", { name: "Cleanup minutes" });
+  await userEvent.clear(setupBox);
+  await userEvent.type(setupBox, "45");
+  await userEvent.clear(teardownBox);
+  await userEvent.type(teardownBox, "15");
+  await userEvent.click(screen.getByRole("button", { name: "Save times" }));
+  await userEvent.type(await screen.findByRole("textbox", { name: /^Reason for double-booking/ }), "Long setup");
+  await userEvent.click(screen.getByRole("button", { name: "Book anyway" }));
+  await waitFor(() => expect(DateRooms.set).toHaveBeenCalledTimes(2));
+  await waitFor(() => expect(screen.getByRole("button", { name: "Book anyway" })).toBeEnabled());
+  await userEvent.click(screen.getByRole("button", { name: "Book anyway" }));
+  await waitForStatus("Booked Fellowship Hall over another booking.");
+  expect(vi.mocked(DateRooms.set).mock.calls[2][2]).toEqual({ roomId: 1, setupMinutes: 45, teardownMinutes: 15, overlapReason: "Long setup" });
+  expect(conflictLine()).not.toBeInTheDocument();
 });

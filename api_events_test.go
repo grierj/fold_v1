@@ -3303,7 +3303,7 @@ func TestDateEditEndPassingDuringARoomWaitReruns(t *testing.T) {
 		Room roomJSON `json:"room"`
 	}
 	gormMust(t, &gorm.DB{Error: json.Unmarshal([]byte(apiDo(t, f.admin, "POST", "/api/v1/admin/rooms", map[string]any{"name": "Held hall", "capacity": 40}, http.StatusCreated)), &room)})
-	apiDo(t, f.admin, "PUT", "/api/v1/events/"+itoa(f.event.ID)+"/dates/"+date+"/room", map[string]any{"roomId": room.Room.ID}, http.StatusOK)
+	roomPickOK(t, f.admin, "/api/v1/events/"+itoa(f.event.ID)+"/dates/"+date+"/room", map[string]any{"roomId": room.Room.ID})
 	member := goingMember(t, f, target.ID)
 	mark := markNotices(t, f.app).notice
 	clock := newMutableClock(f.app, target.EndsAt.Add(-2*time.Minute))
