@@ -130,8 +130,8 @@ milestones until a first church is live (DEC-145) — that freeze was rescinded 
   [#312](https://github.com/grierj/fold/issues/312) (deletion e2e helper) and
   [#313](https://github.com/grierj/fold/issues/313) (recovery level docs).
 - Still by hand, not blocking (DEC-128): the real-phone, real-restore, real-domain TLS and mail-provider
-  checks in `docs/FIRST-CHURCH-CHECKS.md`, now including the on-box build upgrade row. No release at
-  `recoveryPolicy >= 1` is published before they pass.
+  checks in `docs/FIRST-CHURCH-CHECKS.md`, now including the on-box build upgrade row. The next
+  release does not wait for the remaining real-droplet restore checks, which stay owed (DEC-165).
 - Brief: [`R2-R3-R4-people.md`](../briefs/audit-2026-11/R2-R3-R4-people.md) (R4).
 
 **M7.5 Notification delivery outbox (R6)**
