@@ -190,6 +190,36 @@ it("with the roster open, a room change empties the roster in the render it star
   expect(Events.managedDate).toHaveBeenCalledTimes(2);
 });
 
+// The date page's place shows the room: a pick that lands reads the page again too, and one refused by someone else's
+// change reads only the page, quietly, so the line, the draft and the roster on screen stay.
+it("reads the page again after a room pick lands or is refused, and keeps the editor's draft and line", async () => {
+  invalidateSite();
+  vi.mocked(Site.get).mockResolvedValue({ name: "Fold", timezone: "UTC", selfSignup: "off", roomsEnabled: true, pushEnabled: true });
+  const hall = { id: 1, name: "Fellowship Hall", building: "Main", capacity: 80, features: "", restricted: false, busy: false, tooSmall: false };
+  const chapel = { ...hall, id: 2, name: "Chapel", building: "" };
+  const inChapel = { roomId: 2, roomName: "Chapel", building: "", status: "confirmed" as const, setupMinutes: 0, teardownMinutes: 0, doubleBooked: false, tooSmall: false, pending: false };
+  vi.mocked(DateRooms.list)
+    .mockResolvedValueOnce({ rooms: [hall, chapel], booking: null, dateRoom: { id: 70, revision: "r1" } })
+    .mockResolvedValue({ rooms: [hall, chapel], booking: inChapel, dateRoom: { id: 70, revision: "r3" } });
+  vi.mocked(DateRooms.set)
+    .mockRejectedValueOnce(new ApiError(409, "changed", { code: "date_room_changed" }))
+    .mockResolvedValueOnce({ booking: null, dateRoom: { id: 70, revision: "r4" } });
+  const { callbacks } = mount();
+  await typeMinutes("150");
+  await openRoster();
+  const managedReads = vi.mocked(Events.managedDate).mock.calls.length;
+  await userEvent.selectOptions(await screen.findByRole("combobox", { name: /^Room/ }), "1");
+  expect(await screen.findByText(/This date's room changed while you were choosing/)).toBeInTheDocument();
+  await waitFor(() => expect(callbacks.onDateChanged).toHaveBeenCalledOnce());
+  expect(Events.managedDate).toHaveBeenCalledTimes(managedReads);
+  expect(screen.getByText("Old Name")).toBeInTheDocument();
+  expect(screen.getByRole("spinbutton", { name: "Minutes" })).toHaveValue(150);
+  // A pick that lands reads the date and the page.
+  await userEvent.selectOptions(screen.getByRole("combobox", { name: /^Room/ }), "none");
+  await waitFor(() => expect(callbacks.onDateChanged).toHaveBeenCalledTimes(2));
+  expect(vi.mocked(Events.managedDate).mock.calls.length).toBeGreaterThan(managedReads);
+});
+
 it("(p) an authority recheck closes the writer's question as no and brings the draft back", async () => {
   edits.answer(challenge(2));
   const { setAuthority } = mount();

@@ -4,7 +4,8 @@ import { apiAs, checkState, email, PASSWORD, signInTo } from "./helpers";
 
 // DEC-167: a pick of a date's room names the read it was made from. Two leaders have "Edit this date" open on the
 // same date; the first picks a room, the second then picks another. The second's pick is refused: its Room control
-// shows the first's room, says so in one focused line at the field, and the editor stays open with its draft.
+// shows the first's room, says so in one focused line at the field, the page's place reads again and names that room,
+// and the editor stays open with its draft.
 const idOf = schema.looseObject({ id: schema.number() });
 const dateIn = (days: number) => new Date(Date.now() + days * 864e5).toISOString().slice(0, 10);
 const LINE = "This date's room changed while you were choosing, so your choice could not be saved. This is the room as it is now.";
@@ -44,6 +45,8 @@ test("two leaders pick rooms for the same date: the second is told, sees the fir
   }
 
   const [first, second] = pages;
+  const where = second.locator("[data-date-answer=where]");
+  await expect(where).not.toContainText(`Loft ${suffix}`);
   await second.getByRole("textbox", { name: /^Title/ }).fill("Typed while choosing");
   await first.getByRole("combobox", { name: /^Room/ }).selectOption(String(rooms[0].id));
   await expect(first.getByText(`Booked Loft ${suffix}.`)).toBeVisible();
@@ -55,6 +58,9 @@ test("two leaders pick rooms for the same date: the second is told, sees the fir
   await expect(second.getByRole("combobox", { name: /^Room/ })).toHaveValue(String(rooms[0].id));
   await expect(second.getByRole("textbox", { name: /^Title/ })).toHaveValue("Typed while choosing");
   await expect(second.getByRole("button", { name: /^Save/ })).toBeVisible();
+  // The page around the editor reads again: the date's place names the first leader's room, and the draft stays.
+  await expect(where).toContainText(`Loft ${suffix}`);
+  await expect(second.getByRole("textbox", { name: /^Title/ })).toHaveValue("Typed while choosing");
   await checkState(second, "room-revision", "conflict");
 
   // The first leader's room is the one stored.

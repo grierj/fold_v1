@@ -116,6 +116,16 @@ function ManageDateTools({ eventId, date, occurrenceId, authority, onDateChanged
   // While the roster is on screen no refresh of the managed read is quiet: the old names, contacts and care
   // notes go in the render the refresh starts.
   const refresh = useCallback(() => void (rosterOpen.current ? managed.retry() : managed.reload()), [managed.retry, managed.reload]);
+
+  // A room pick that landed reads the date and the page again, as after any change made here, so the page's place
+  // shows the room. One refused by someone else's change wrote nothing: the page reads again quietly and the managed
+  // read, with any roster on screen, stays under the line that says so.
+  const roomChanged = useCallback((refused?: boolean) => {
+    if (!refused) refresh();
+
+    onDateChanged();
+  }, [refresh, onDateChanged]);
+
   // The one facts call under this provider: a question started under one answer never submits under another.
   usePageFacts(JSON.stringify({ authority, owner, data: current?.occurrence ?? null }));
   // A recheck, the gate closing or a write's retry removes the focused control in this component's render.
@@ -189,7 +199,7 @@ function ManageDateTools({ eventId, date, occurrenceId, authority, onDateChanged
                 onSaving={dateEditor.editor.onSaving}
                 pending={dateEditor.saving}
                 onConflict={dateEditor.editor.onConflict}
-                onRoomChanged={refresh}
+                onRoomChanged={roomChanged}
                 onClose={closeEditor}
                 onAuthorityLost={onGone}
               />

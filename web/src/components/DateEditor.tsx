@@ -114,8 +114,9 @@ interface DateEditorProps {
   // The save was refused and not sent again: the host closes the editor and shows the date as it is now (DEC-164).
   onConflict: (why: RevisionConflict) => void;
   onClose: () => void;
-  // The room was booked or released (its own action, not part of Save).
-  onRoomChanged?: () => void;
+  // The date's room may have changed (its own action, not part of Save): a pick landed, or someone else's change
+  // refused it (`refused`). The host reads again quietly.
+  onRoomChanged?: (refused?: boolean) => void;
   // Opened by "Pick a room": the cursor goes to the Room control.
   focusRoom?: boolean;
   // The kept-dates panel's read was refused: this person may no longer manage the event's sign-ups.
