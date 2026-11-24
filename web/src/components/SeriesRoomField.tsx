@@ -235,7 +235,7 @@ function SeriesRoomControl({ eventId, id, read, show, onChanged, onGone }: {
     send(pending.roomId, why, pending.dates);
   }
 
-  if (off) return <RoomsOffLine />;
+  if (off) return <RoomsOffLine refused />;
 
   const busy = action.running;
   // A series room an admin set that this person can't list (a restricted room) still shows by name.

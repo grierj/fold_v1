@@ -259,7 +259,7 @@ function DateRoomControl({ eventId, date, id, read, show, onChanged, onGone }: {
     send({ roomId: booking.roomId, setupMinutes: s, teardownMinutes: t }, { roomId: booking.roomId, setup: s, teardown: t }, () => "Setup and cleanup times saved.");
   }
 
-  if (off) return <RoomsOffLine />;
+  if (off) return <RoomsOffLine refused />;
 
   const busy = action.running;
   const waiting = booking?.pending === true;

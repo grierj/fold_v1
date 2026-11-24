@@ -28,9 +28,11 @@ export function useRoomPicker<T>(fetch: () => Promise<T>, deps: readonly unknown
 export const roomsTurnedOff = (cause: unknown) => errorCode(cause) === "rooms_off";
 
 // What a room control shows in place of its picker once room booking was turned off: nothing to retry, and the editor
-// around it carries on.
-export function RoomsOffLine() {
-  return <p role="status" className="text-sm text-text-muted">Room booking has been turned off, so rooms can't be picked here now.</p>;
+// around it carries on. `refused`: a pick on its way found it off, so it says the choice could not be saved.
+export function RoomsOffLine({ refused = false }: { refused?: boolean }) {
+  return <p role="status" className="text-sm text-text-muted">
+    {refused ? "Room booking has been turned off, so your choice could not be saved." : "Room booking has been turned off, so rooms can't be picked here now."}
+  </p>;
 }
 
 export function RoomLoadStatus({ loading, error, onRetry }: { loading: boolean; error: string | null; onRetry: () => void }) {

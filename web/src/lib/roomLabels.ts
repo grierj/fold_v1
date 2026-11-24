@@ -113,5 +113,7 @@ export function seriesBookingMessage(res: SeriesBooking, over = 0): string {
 export function seriesStoredMessage(read: SeriesRoomsResponse): string {
   if (read.defaultRoom === null) return "Series room released.";
 
-  return ["The room for every date is saved.", ...waitingAndBusy(read.pending, read.needsRoom.length)].join(" ");
+  const parts = waitingAndBusy(read.pending, read.needsRoom.length);
+
+  return parts.length > 0 ? parts.join(" ") : "The room for every date is saved.";
 }

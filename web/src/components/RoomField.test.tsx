@@ -486,11 +486,21 @@ it("hands nothing to the host when a refusal arrives after the control closed", 
   expect(onGone).not.toHaveBeenCalled();
 });
 
+it("hands over to the host when the read after a refusal says the person may no longer manage the date", async () => {
+  vi.mocked(DateRooms.list)
+    .mockResolvedValueOnce(listed({ rooms: [hall, closet], booking: null }))
+    .mockRejectedValueOnce(new ApiError(404, "gone", { code: "not_found" }));
+  vi.mocked(DateRooms.set).mockRejectedValue(changed());
+  show();
+  await userEvent.selectOptions(await select(), "1");
+  await waitFor(() => expect(onGone).toHaveBeenCalledOnce());
+});
+
 it("says rooms were turned off, keeps the host's editor, and does not hand over", async () => {
   const onChanged = show();
   vi.mocked(DateRooms.set).mockRejectedValue(new ApiError(404, "off", { code: "rooms_off" }));
   await userEvent.selectOptions(await select(), "1");
-  expect(await screen.findByText("Room booking has been turned off, so rooms can't be picked here now.")).toBeInTheDocument();
+  expect(await screen.findByText("Room booking has been turned off, so your choice could not be saved.")).toBeInTheDocument();
   expect(screen.queryByRole("combobox", { name: /^Room/ })).not.toBeInTheDocument();
   expect(onGone).not.toHaveBeenCalled();
   expect(onChanged).not.toHaveBeenCalled();

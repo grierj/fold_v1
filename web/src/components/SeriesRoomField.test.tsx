@@ -375,7 +375,8 @@ it("says what each date has when a pick whose answer was lost is found stored, a
   await pickAndBook("2");
   expect(await screen.findByRole("alert")).toBeInTheDocument();
   await userEvent.click(screen.getByRole("button", { name: "Book for every date" }));
-  await waitForStatus("The room for every date is saved. Sent to an admin for approval: 8 dates. 2 dates are busy; pick another room for them under “Dates that need a room” on the event page.");
+  await waitForStatus("Sent to an admin for approval: 8 dates. 2 dates are busy; pick another room for them under “Dates that need a room” on the event page.");
+  expect(screen.queryByText(/The room for every date is saved/)).not.toBeInTheDocument();
 });
 
 it("offers an admin Book anyway for the busy dates a stored pick's read shows", async () => {
@@ -453,7 +454,7 @@ it("says rooms were turned off without handing over to the host", async () => {
   const onChanged = show();
   vi.mocked(SeriesRooms.set).mockRejectedValue(new ApiError(404, "off", { code: "rooms_off" }));
   await pickAndBook("1");
-  expect(await screen.findByText("Room booking has been turned off, so rooms can't be picked here now.")).toBeInTheDocument();
+  expect(await screen.findByText("Room booking has been turned off, so your choice could not be saved.")).toBeInTheDocument();
   expect(onGone).not.toHaveBeenCalled();
   expect(onChanged).not.toHaveBeenCalled();
 });
