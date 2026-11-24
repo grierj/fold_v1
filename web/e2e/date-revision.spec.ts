@@ -116,6 +116,15 @@ async function dropFirstAnswer(page: Page, s: Series) {
   return saves;
 }
 
+// The editor closed as after a save: once the page's read after it has landed, no line says the changes could not be
+// saved (a conflict also closes the editor, and its line comes only with that read).
+async function closedAsSaved(page: Page) {
+  await expect(page.getByRole("button", { name: "Save this date" })).toHaveCount(0);
+  await page.waitForLoadState("networkidle");
+  await expect(page.getByRole("button", { name: /^More for / }).first()).toBeVisible();
+  await expect(page.getByText(/could not be saved/)).toHaveCount(0);
+}
+
 test("pressing Save again after a stored save's answer was lost closes the editor as a save does", async ({ page, request }) => {
   const series = await newSeries(request, `Lost date answer ${Date.now().toString(36)}`);
   await hosts[2].open(page, series);
@@ -128,8 +137,7 @@ test("pressing Save again after a stored save's answer was lost closes the edito
   expect((await series.read()).title).toBe(`${series.title} night`);
 
   await page.getByRole("button", { name: "Save this date" }).click();
-  await expect(page.getByRole("button", { name: "Save this date" })).toHaveCount(0);
-  await expect(page.getByText(/could not be saved/)).toHaveCount(0);
+  await closedAsSaved(page);
   // The second press named the first's read, so it was refused, the date read and found stored.
   expect(saves).toEqual([409]);
   expect((await series.read()).title).toBe(`${series.title} night`);
@@ -165,8 +173,7 @@ for (const c of ownChanges) {
     expect(await series.read()).toMatchObject(c.stored(series.date));
 
     await page.getByRole("button", { name: "Save this date" }).click();
-    await expect(page.getByRole("button", { name: "Save this date" })).toHaveCount(0);
-    await expect(page.getByText(/could not be saved/)).toHaveCount(0);
+    await closedAsSaved(page);
     expect(saves).toEqual([409]);
     expect(await series.read()).toMatchObject(c.stored(series.date));
   });
