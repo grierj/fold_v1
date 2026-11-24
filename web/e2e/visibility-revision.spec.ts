@@ -56,6 +56,7 @@ test("a second manager's widening over another's tightening closes the panel and
   await openPanel(page, series.id);
   await page.getByRole("radio", { name: /^Invite only/ }).check();
   await page.getByRole("button", { name: "Save visibility" }).click();
+  await page.getByRole("dialog", { name: "Making this event invite-only" }).getByRole("button", { name: "Make this event invite-only" }).click();
   await expect.poll(async () => (await series.read()).visibility).toBe("invite_only");
 
   await second.getByRole("radio", { name: /^Public/ }).check();
@@ -74,7 +75,7 @@ test("a second manager's widening over another's tightening closes the panel and
 });
 
 test("changing the visibility right after booking a series room saves on one press", async ({ page, request }) => {
-  const series = await newSeries(request, "Booked then private", `${dateIn(70)}T06:00`);
+  const series = await newSeries(request, "Booked then private", `${dateIn(98)}T05:00`);
   const saves = visibilitySaves(page, series.id);
   await signIn(page, "lee");
   await openPanel(page, series.id);
@@ -84,6 +85,7 @@ test("changing the visibility right after booking a series room saves on one pre
 
   await page.getByRole("radio", { name: /^Invite only/ }).check();
   await page.getByRole("button", { name: "Save visibility" }).click();
+  await page.getByRole("dialog", { name: "Making this event invite-only" }).getByRole("button", { name: "Make this event invite-only" }).click();
   await expect.poll(async () => (await series.read()).visibility).toBe("invite_only");
   await expect(page.getByText(NOTICE)).toHaveCount(0);
   // The booking moved the event's revision: the first send was refused, the event read, and the same save sent again.

@@ -547,10 +547,12 @@ stubService(Events, () => ({ get }));
 // DEC-163: the save names the read the control opened with; a refusal is checked against the event as stored.
 describe("EventVisibilityControl and the read it opened with", () => {
   const changed = () => new ApiError(409, "changed", { code: "event_changed" });
+
   const readOf = (over: Partial<EventSeries> = {}, canSetVisibility = true): EventDetailResponse => ({
     event: { ...testEvent(7), groupId: 3, groupName: "Garden", groupVisibility: "public", visibility: "private", revision: "r2", ...over },
     occurrences: [], canManage: canSetVisibility, canSetVisibility,
   });
+
   const tightening = { visibility: "invite_only" as const, currentVisibility: "private" as const, tightened: [{ id: 7, title: "Picnic", visibility: "private" as const, registrants: 1 }], leaderOpened: [], consent: A };
 
   beforeEach(() => {

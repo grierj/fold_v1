@@ -20,9 +20,9 @@ function deferred<T>() {
   return { promise, resolve };
 }
 
-function setup(read: () => Promise<RevisionRead<Value>>, options: { fields?: (v: Value) => unknown } = {}) {
+function setup(read: () => Promise<RevisionRead<Value>>, options: { fields?: (v: Value) => ReturnType<typeof fields> | null } = {}) {
   const onConflict = vi.fn();
-  const view = renderHook(() => useRevisionSave<Value>({ opened: { title: "Supper" }, revision: "r1", read, fields: options.fields ?? fields, onConflict }));
+  const view = renderHook(() => useRevisionSave({ opened: { title: "Supper" }, revision: "r1", read, fields: options.fields ?? fields, onConflict }));
 
   return { send: view.result.current, view, onConflict };
 }
@@ -73,6 +73,7 @@ describe("useRevisionSave", () => {
       .mockResolvedValueOnce(readOf({ title: "Supper" }, "r2"))
       .mockResolvedValueOnce(readOf({ title: "Supper" }, "r3"))
       .mockResolvedValueOnce(readOf({ title: "Supper" }, "r4"));
+
     const write = vi.fn().mockRejectedValue(changed());
     const { send, onConflict } = setup(read);
     expect(await send(write)).toBe("refused");
@@ -120,11 +121,13 @@ describe("useRevisionSave", () => {
 
   it("throws the first send's own refusal, a 403 or a decision, for the form to handle", async () => {
     const read = vi.fn();
+
     for (const err of [new ApiError(403, "no", { code: "forbidden" }), new ApiError(409, "review", { needsDecision: true })]) {
       const { send, onConflict } = setup(read);
       await expect(send(vi.fn().mockRejectedValue(err))).rejects.toBe(err);
       expect(onConflict).not.toHaveBeenCalled();
     }
+
     expect(read).not.toHaveBeenCalled();
   });
 

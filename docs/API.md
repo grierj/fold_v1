@@ -660,7 +660,7 @@ One event works the same way (DEC-48):
 
 ```
 GET /api/v1/events/:id/visibility-impact?visibility=invite_only → 200 impact  (leader, host, or admin)
-PUT /api/v1/events/:id/visibility  body {visibility, reason?, consent?, resetOverrides?}
+PUT /api/v1/events/:id/visibility  body {visibility, reason?, consent?, resetOverrides?, revision}
 ```
 
 The impact lists only that event, under `tightened`, when the change is more
@@ -668,6 +668,49 @@ private. A change that would cancel registrations, and every request with
 `resetOverrides`, needs the impact's `consent` (see Visibility consent below);
 otherwise the PUT answers 409 `{error, needsDecision: true, impact}` with a
 fresh impact and token, and writes nothing.
+
+**The visibility revision (DEC-163).** The PUT names the read it was made from:
+`revision` is required and is the event page's `event.revision`, the same token
+a series save sends (DEC-162). The answers, in the order the handler gives them:
+
+1. 404 when the event does not exist or the person cannot see it.
+2. 400 for a body the server cannot read, a `revision` of any JSON type but a
+   string included (a JSON `null` is read as missing); 400 `too_long` for a
+   reason over 500 characters.
+3. 403 when the person can see the event and may not manage it; 400
+   `visibility_not_allowed` for a value the event cannot take (invite only on a
+   church-wide event).
+4. Under the event's row lock: 401 for a session that ended, 403 or 404 for a
+   person who no longer manages or sees the event, and the value judged again.
+   A person who may not manage the event never gets `event_changed`.
+5. 409 `event_changed` for any revision but the event's current token
+   (missing, empty, garbled, another event's, one from before the server
+   restarted, or one read before any later change to the event), writing
+   nothing: no event or date change, cancellation, notice, audit row or job.
+   This comes before the no-change answer and before any consent work, so a
+   stale page's no-change save is refused too.
+6. 200 for a save that changes nothing (the same visibility and leader-opened
+   state, and no reset); nothing is written and the revision stays.
+7. The consent rule (Visibility consent, below): 409
+   `visibility_review_outdated` or 409 `needsDecision`, writing nothing.
+8. 200 `{event}`; `event.revision` is the token after the save. A reset that
+   leaves the visibility and leader-opened state as they were changes only the
+   dates, so the event's revision stays.
+
+Refused with `event_changed`, the web control reads the event once
+(`GET /api/v1/events/:id`) and compares what the save can write: the
+visibility, the leader-opened state and the group's visibility it follows. The
+same, it sends the same save with the new revision, up to three sends in all,
+and the server judges the consent again, so a save sent again that now needs a
+review opens the review. Different, or a read that no longer lets the person set
+the visibility (a 403 or 404 on the read or on a save it sent again, included),
+and the panel closes on its own, with any open review, and the page reads the
+event from nothing and says the changes weren't saved, as after a refused
+series save. A reset is always treated as different: the page's read lists 90
+days of dates and a reset reaches every later one, so the read cannot show it
+is still the same decision. After a third refusal with nothing changed it shows
+"We couldn't change who can see this. Please try again." and stays open. Any
+other failure of the read leaves the control open with its ordinary error.
 
 ### Visibility consent (DEC-158)
 
@@ -677,6 +720,9 @@ return `consent`: an HMAC over the scope, the actor, the consent epoch, the
 current visibility, every displayed row and reset date, and the identities of
 the registrations each row would cancel. The released writes take
 `consent?: string`:
+
+On an event's visibility the revision is judged first (above), so a body
+with no `revision` gets `event_changed`, not the answers below.
 
 | `consent` | The change is review-required | Answer |
 |---|---|---|
@@ -946,8 +992,8 @@ POST /api/v1/groups/:id/events              → 201 {event} | 409 group_events_n
      a session that ended answers 401.
 PUT  /api/v1/events/:id                     → 200 {event} | 409 event_changed   (leader, host, or admin; series edit)
      body: the create body's fields to change (not visibility, visibilityReason, roomId or hosts, which have their own routes), and the required revision of the read the edit was made from (below)
-PUT  /api/v1/events/:id/visibility          → 200 {event}   (leader, host, or admin)
-     body: {visibility, reason?, consent?, resetOverrides?}
+PUT  /api/v1/events/:id/visibility          → 200 {event} | 409 event_changed   (leader, host, or admin)
+     body: {visibility, reason?, consent?, resetOverrides?, revision}
 DELETE /api/v1/events/:id                   → 200 {}        (leader, host, or admin)
 POST /api/v1/events/:id/hosts               → 200 {hosts}   (admin; church-wide only)
      body: {email}
@@ -1344,11 +1390,18 @@ What each deployed client shows:
   (DEC-162), so its save answers 409 `event_changed`, which that page shows as
   "We couldn't update the series. Please try again in a minute." Nothing is
   saved. Reloading the page loads the current SPA, which saves normally.
+- *"Save visibility" on an event page from the release before DEC-163* sends no
+  `revision`, so its save answers 409 `event_changed`, which that page shows as
+  "This event may have changed since you opened it, so your changes weren't
+  saved. Check it and try again." Nothing is saved, and no one is cancelled.
+  Reloading the page loads the current SPA, which saves normally. A page from
+  before DEC-158 (`confirm: true`) gets the same answer, since it sends no
+  revision either.
 
 The upgrade restarts the server, so any revision a tab already holds is
 refused once: a date's with `date_changed` (After any restart, above), and a
-series' with `event_changed`, after which the current editor saves again by
-itself when the event has not changed.
+series' or an event visibility's with `event_changed`, after which the current
+editor or control saves again by itself when the event has not changed.
 
 ### Registration
 

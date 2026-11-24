@@ -2839,12 +2839,16 @@ describe("EventDetail when a visibility save meets someone else's change", () =>
     await userEvent.click(screen.getByRole("radio", { name: /^Private/ }));
     const after = deferred<EventDetailResponse>();
     vi.mocked(Events.get).mockReturnValueOnce(after.promise);
+
     if (review) vi.mocked(Events.visibilityImpact).mockResolvedValueOnce(tightening);
+
     await userEvent.click(screen.getByRole("button", { name: "Save visibility" }));
+
     if (review) {
       const dialog = await screen.findByRole("dialog", { name: "Making this event private" });
       await userEvent.click(within(dialog).getByRole("button", { name: /^Make this event private/ }));
     }
+
     await waitFor(() => expect(Events.get).toHaveBeenCalledTimes(3));
 
     return after;

@@ -171,6 +171,7 @@ export function SeriesEditor({
   const own = useAction();
   const action = shared ?? own;
   const [saved, setSaved] = useState(false);
+
   // The save names the read the editor opened with (DEC-162); a refusal is the shared protocol's (DEC-163).
   const send = useRevisionSave({
     opened: instance,
@@ -183,6 +184,7 @@ export function SeriesEditor({
     fields: savedFields,
     onConflict,
   });
+
   // Nothing in the form changes while a save is on its way or after one worked: the save sends what was there when
   // it began, so a later edit would be lost without a word.
   const frozen = action.running || locked || saved;

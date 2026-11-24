@@ -97,10 +97,13 @@ export function EventVisibilityControl({
 
     return () => { live = false; };
   }, [eventId, visibility]);
+
   // What this save can write: the audience and whether it is leader-opened, which follows the group's. The page's
   // read lists 90 days of dates and a reset reaches every later one, so a refused reset is always a conflict.
-  const send = useRevisionSave<Audience>({
-    opened: { visibility, leaderOpened, groupVisibility },
+  const opened: Audience = { visibility, leaderOpened, groupVisibility };
+
+  const send = useRevisionSave({
+    opened,
     revision,
     read: async () => {
       const stored = await Events.get(eventId);
@@ -110,6 +113,7 @@ export function EventVisibilityControl({
     fields: (a) => (resetOverrides ? null : { visibility: a.visibility, leaderOpened: a.leaderOpened ?? false, groupVisibility: a.groupVisibility ?? null }),
     onConflict,
   });
+
   // `mark` is the session roster sequence the request behind the review was sent at.
   const [review, setReview] = useState<{ impact: VisibilityImpact; mark: number } | null>(null);
 

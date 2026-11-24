@@ -19,7 +19,7 @@ export interface RevisionRead<T> {
 // A refused save is sent again at most this many times in all, while the stored value still matches the form.
 const MAX_SENDS = 3;
 
-const lostAuthority = (err: unknown) => err instanceof ApiError && (err.status === 403 || err.status === 404);
+const lostAuthority = (err: ApiError) => err.status === 403 || err.status === 404;
 
 // useRevisionSave is the one conflict protocol for a manager's save (DEC-162, DEC-163). The save names the read the
 // form opened with (`revision`, kept from the first render, like `opened`). On a refusal (`event_changed`) the value
@@ -34,7 +34,7 @@ const lostAuthority = (err: unknown) => err instanceof ApiError && (err.status =
 //
 // Every other answer, on the first send or a later one, is thrown for the form to handle as it always has, except a
 // 403 or 404 on a send this hook made by itself: a read had said the person still could, so that is "gone".
-export function useRevisionSave<T>({
+export function useRevisionSave<T, F>({
   opened,
   revision,
   read,
@@ -44,23 +44,25 @@ export function useRevisionSave<T>({
   opened: T;
   revision: string | undefined;
   read: () => Promise<RevisionRead<T>>;
-  fields: (value: T) => unknown;
+  fields: (value: T) => F | null;
   onConflict?: (why: RevisionConflict) => void;
 }) {
   const [base] = useState(() => ({ opened, revision }));
   const mounted = useRef(true);
+
   useEffect(() => {
     mounted.current = true;
 
     return () => { mounted.current = false; };
   }, []);
 
-  return async function send(write: (revision: string | undefined) => Promise<unknown>): Promise<RevisionSent> {
+  return async function send<R>(write: (revision: string | undefined) => Promise<R>): Promise<RevisionSent> {
     const conflict = (why: RevisionConflict): RevisionSent => {
       onConflict?.(why);
 
       return "conflict";
     };
+
     const was = fields(base.opened);
     const credential = currentCredential();
     const sameSignIn = () => (credential === null ? currentCredential() === null : credentialCurrent(credential));
@@ -72,7 +74,7 @@ export function useRevisionSave<T>({
 
         return "saved";
       } catch (err) {
-        if (sends > 1 && lostAuthority(err)) return conflict("gone");
+        if (sends > 1 && err instanceof ApiError && lostAuthority(err)) return conflict("gone");
 
         if (errorCode(err) !== "event_changed") throw err;
       }
@@ -86,7 +88,8 @@ export function useRevisionSave<T>({
       try {
         stored = await read();
       } catch (err) {
-        if (lostAuthority(err)) return conflict("gone");
+        if (err instanceof ApiError && lostAuthority(err)) return conflict("gone");
+
         throw err;
       }
 
@@ -99,6 +102,7 @@ export function useRevisionSave<T>({
       if (was === null || now === null || JSON.stringify(now) !== JSON.stringify(was)) return conflict("changed");
 
       if (sends === MAX_SENDS) return "refused";
+
       current = stored.revision;
     }
   }
