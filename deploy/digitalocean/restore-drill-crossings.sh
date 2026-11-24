@@ -695,7 +695,8 @@ crossing_mirror_ghcr() {
 crossing_prove_mirror() { # tag
   local tag="$1" local_repo pushed pulled
   local_repo="$REGISTRY/${CROSSING_BACKUP_REPO#ghcr.io/}"
-  docker image inspect "$local_repo:$tag" >/dev/null 2>&1 || return 0
+  docker image inspect "$local_repo:$tag" >/dev/null 2>&1 \
+    || { echo "crossing: the candidate's backup image $local_repo:$tag was not built, so the mirror cannot be proved" >&2; return 1; }
   pushed="$(crossing_repo_digest "$local_repo" "$local_repo:$tag")"
   [[ -n "$pushed" ]] || { echo "crossing: $local_repo:$tag has no pushed digest" >&2; return 1; }
   docker pull -q "$CROSSING_BACKUP_REPO:$tag" >/dev/null || { echo "crossing: $CROSSING_BACKUP_REPO:$tag did not resolve through the drill registry; the daemon must use the containerd image store" >&2; return 1; }
@@ -1080,7 +1081,8 @@ crossing_lineage_site() {
     assert_image "$cid" "$built_id" || { echo 'crossing: the running app is not the image built from the head Dockerfile' >&2; return 1; }
     img_bin="$(crossing_binary_sha "$cid")"
     cid="$(docker create "$CROSSING_CAND_IMG")"
-    cand_bin="$(crossing_binary_sha "$cid")"
+    # The probe has no project label, so teardown would not find it.
+    cand_bin="$(crossing_binary_sha "$cid")" || { docker rm -v "$cid" >/dev/null; return 1; }
     docker rm -v "$cid" >/dev/null
     jq -n --arg built "$built_id" --arg head "$REVISION" --arg onBox "$img_bin" --arg registry "$cand_bin" --argjson origin "$origin" \
       '{origin:$origin, commit:$head, builtImageId:$built, onBoxBinarySha256:$onBox, registryCandidateBinarySha256:$registry,
