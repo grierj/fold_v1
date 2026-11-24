@@ -229,8 +229,10 @@ section or decision; check it still exists.
   `changeBookings` or `moveRoomRequest`/`moveRoomRequestsWhere` (`room_status.go`).
 - An event's series and visibility saves name their read (DEC-162, DEC-163): the token is built and compared only in
   `edit_revision.go` (`eventRevision`, `checkEventRevision`, inside the write transaction under the row lock), and
-  both forms send it through `web/src/lib/useRevisionSave.ts`, which owns the read-and-compare after a refusal. The
-  single-date edit keeps its own protocol for now (`dateToken`, `api_date_edits.go`).
+  both forms send it through `web/src/lib/useRevisionSave.ts`, which owns the read-and-compare after a refusal. An
+  editor a refusal closes hands it to `useRefusedSave` (`web/src/lib/refusedSave.tsx`), which reads the page from
+  nothing and says the changes weren't saved with `RefusedSaveLine`. The single-date edit keeps its own protocol for
+  now (`dateToken`, `api_date_edits.go`).
 - Registrations: seat decisions go through `registration_seats.go` (`poolFits`, `seatChange`,
   `seatTally`; party size and childcare demand each have one SQL and one Go form,
   `TestSeatSQLMatchesGoRules`); the status changes only by a `policy.RegistrationMove`
@@ -312,10 +314,10 @@ or write down why not. Example: group and single-event tightening share `visibil
 
 Conflicts (Grier, DEC-163): "Any time we don't save and require someone to try again we need to
 make sure they're not confused as to what happened." All conflicts behave the same when it comes
-to closing editors. Say "updated", never "now shows your changes": outside the audit log there is
-no proof management. Make good faith, but simple, efforts at conflict avoidance: the target is a
-church with a few paid staff who are admins and mostly one leader per group, and 500 people with 6
-staff is VERY LARGE.
+to closing editors; one piece reads the page again and says so (`useRefusedSave`). Say "updated",
+never "now shows your changes": outside the audit log there is no proof management. Make good
+faith, but simple, efforts at conflict avoidance: the target is a church with a few paid staff who
+are admins and mostly one leader per group, and 500 people with 6 staff is VERY LARGE.
 
 Errors a person can't act on, or that are a security risk, never reach them (Grier, DEC-52). Rate
 limits and anything that could reveal whether an account exists answer with the form's usual
