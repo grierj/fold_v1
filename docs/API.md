@@ -649,8 +649,8 @@ tightening, cancellation, notice, audit row or job. It comes before any field is
 applied and before the consent work. The 200 answer's `group.revision` is the
 token after the save, read again once the write is done.
 
-The token is a digest of the group row (every column, with the time it was last
-written), not a counter, so it adds no column, and any write of the row moves
+The token is a digest of the group row (it omits `created_at` and includes
+`updated_at` as the instant the row was last written), not a counter, so it adds no column, and any write of the row moves
 it: a save that put the group back as it was still does. The read gives it from
 the same snapshot as the fields beside it. When the token moved and nothing the
 form writes changed, the form sends again by itself, as above; after a send
@@ -676,8 +676,8 @@ answer carried the same decisions. Anything else, or a 403 or 404 on any send or
 the read, and the form closes on its own, the page reads the group from nothing
 and a focused line says the changes could not be saved. The form saves the
 details first and changes the cover only once they are saved; when that cover
-step fails, the page shows the saved details and says the photo could not be
-uploaded or removed.
+step fails, the page shows the saved details and says the cover change could
+not be confirmed (an answer that was lost may belong to a change that was made).
 
 Changing a group's visibility (DEC-48). Making it more open never changes
 its events. Making it more private, in the same transaction:

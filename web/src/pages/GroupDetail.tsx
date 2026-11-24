@@ -561,7 +561,8 @@ function GroupDetailContent() {
   }
 
   // Uploads or removes the cover, then reads the page whether that worked or not. After a saved edit (`afterSave`) the
-  // line says the rest was saved; the form's file is already resized (ImageUpload).
+  // line says the rest was saved, and only that the cover change is unconfirmed: an answer that was lost may belong to
+  // a change that was made. The form's file is already resized (ImageUpload).
   function changeCover(step: CoverStep | { pick: File }, afterSave = false) {
     setCoverError(null);
 
@@ -571,9 +572,8 @@ function GroupDetailContent() {
         else if ("file" in step) await GroupCover.upload(id!, step.file, step.focal);
         else await GroupCover.remove(id!);
       } catch (e) {
-        const what = "remove" in step ? "removed" : "uploaded";
         setCoverError(afterSave
-          ? `The cover photo could not be ${what}. Anything else you changed was saved. You can try again from Edit group.`
+          ? "We couldn't confirm the cover photo change. Anything else you changed was saved. Check the photo before trying again."
           : errorText(e, "We couldn't upload the cover photo."));
       }
 

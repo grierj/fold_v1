@@ -2215,7 +2215,7 @@ describe("the group form's refused save", () => {
     await waitFor(() => expect(screen.queryByLabelText("Group name")).not.toBeInTheDocument());
   });
 
-  it("uploads the picked photo only after the details are saved, and says it could not be uploaded when that fails", async () => {
+  it("uploads the picked photo only after the details are saved, and says the cover change is unconfirmed when that fails", async () => {
     vi.stubGlobal("URL", class extends URL {
       static createObjectURL = vi.fn(() => "blob:chosen");
       static revokeObjectURL = vi.fn();
@@ -2235,14 +2235,14 @@ describe("the group form's refused save", () => {
     });
     expect(GroupCover.upload).not.toHaveBeenCalled();
     await act(async () => { saving.resolve({ group: managed.group }); await saving.promise; });
-    expect(await screen.findByText("The cover photo could not be uploaded. Anything else you changed was saved. You can try again from Edit group.")).toBeInTheDocument();
+    expect(await screen.findByText("We couldn't confirm the cover photo change. Anything else you changed was saved. Check the photo before trying again.")).toBeInTheDocument();
     // The new photo's focal point goes with it: sent with the details, a failed upload would crop the old photo for the new.
     expect(GroupCover.upload).toHaveBeenCalledExactlyOnceWith("1", photo, { x: 25, y: 75 });
     expect(vi.mocked(Groups.update).mock.calls[0][1].coverFocal).toBeUndefined();
     vi.unstubAllGlobals();
   });
 
-  it("shows the saved details and says the cover could not be removed when that step fails", async () => {
+  it("shows the saved details and says the cover change is unconfirmed when the removal fails", async () => {
     const saved = { ...managed, group: { ...managed.group, name: "Family group Two", revision: "1.test.g1.2" } };
     vi.mocked(Groups.get).mockResolvedValueOnce(managed).mockResolvedValue(saved);
     vi.mocked(Groups.update).mockResolvedValue({ group: saved.group });
@@ -2252,7 +2252,7 @@ describe("the group form's refused save", () => {
       await userEvent.type(screen.getByLabelText("Group name"), " Two");
       await userEvent.click(screen.getByRole("checkbox", { name: "Remove the current cover" }));
     });
-    expect(await screen.findByText("The cover photo could not be removed. Anything else you changed was saved. You can try again from Edit group.")).toBeInTheDocument();
+    expect(await screen.findByText("We couldn't confirm the cover photo change. Anything else you changed was saved. Check the photo before trying again.")).toBeInTheDocument();
     expect(screen.getByRole("heading", { level: 1, name: "Family group Two" })).toBeInTheDocument();
     expect(screen.queryByLabelText("Group name")).not.toBeInTheDocument();
     expect(document.body.textContent).not.toContain("SECRET");
