@@ -1,3 +1,4 @@
+import { createRosterWrites, type RosterWriteEnd, type RosterWrites } from "../lib/rosterWrites";
 import { stubService } from "../test/service";
 import { Events } from "../api/events";
 import { ApiError } from "../api/core";
@@ -7,7 +8,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { EventVisibilityControl } from "./EventVisibility";
 import type { EventDetailResponse, EventSeries, VisibilityImpact } from "../types";
 import { testEvent } from "../test/fixtures";
-import { createRosterWrites, DateWritesProvider, type RosterWriteEnd, type RosterWrites } from "../lib/dateWrites";
+import { DateWritesProvider } from "../lib/dateWrites";
 import { watchChecks, writeAfterTheCheck } from "../test/rosterOps";
 
 const { setVisibility, visibilityImpact } = vi.hoisted(() => ({ setVisibility: vi.fn(), visibilityImpact: vi.fn() }));
