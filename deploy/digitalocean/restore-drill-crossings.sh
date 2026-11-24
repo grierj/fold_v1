@@ -1511,7 +1511,7 @@ real_prior_refused_at_start() {
 # 00015 beside it, and every visibility change it tries is refused.
 real_prior_running_across_upgrade() {
   local cdir base jar mjar fixture g e5 r s p g3 e6 cid cbase cjar consent t0 since before after status attempt out ok results='[]' label method path body
-  local fenced stale audits notes i rev
+  local fenced stale audits notes i rev window
   crossing_prepare
   cdir="$(crossing_dir)"
   drill_step prior-running/provision
@@ -1560,8 +1560,11 @@ real_prior_running_across_upgrade() {
       since="$(date -u +%Y-%m-%dT%H:%M:%S.%NZ)"
       status="$(crossing_http "$jar" "$base" "$method" "$path" "$body" "$out")"
       sleep 1
-      if crossing_cdc logs --no-color --since "$since" app 2>&1 | grep -qF "$CROSSING_AUDIT_REFUSAL"; then fenced=true; break; fi
-      if crossing_cdc logs --no-color --since "$since" app 2>&1 | grep -qF 0A000; then stale=$((stale+1)); continue; fi
+      # Read whole, then searched: under pipefail, grep -q leaving early makes a
+      # match fail when Compose is still writing (SIGPIPE).
+      window="$(crossing_cdc logs --no-color --since "$since" app 2>&1)"
+      if grep -qF "$CROSSING_AUDIT_REFUSAL" <<<"$window"; then fenced=true; break; fi
+      if grep -qF 0A000 <<<"$window"; then stale=$((stale+1)); continue; fi
       break
     done
     after="$(crossing_visibility_state fold "$e5,$r,$s,$p,$e6")"
