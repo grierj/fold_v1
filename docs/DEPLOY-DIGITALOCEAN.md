@@ -904,8 +904,8 @@ and the level of the image its current Compose pin names. There is no override.
 The floor file is recorded only after smoke passes and never decreases.
 
 This tree reports level 3 (`deploy/recovery-policy`). Release 0.1.0 reports level 2 and is
-published, and the next release does not wait for the remaining
-[real-droplet checks](FIRST-CHURCH-CHECKS.md#live-install-m51-m53) (Grier, 2026-11-24; DEC-165).
+published, and the next release does not wait for the remaining real-droplet restore checks
+in [FIRST-CHURCH-CHECKS.md](FIRST-CHURCH-CHECKS.md#live-install-m51-m53) (Grier, 2026-11-24; DEC-165).
 The current-release restore tooling was run on a real droplet on 2026-11-24, with what each
 check still owes recorded there; the local refusal drills do not verify that restore procedure.
 
