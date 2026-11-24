@@ -548,12 +548,20 @@ func TestEventVisibilityRechecksAfterHeldBody(t *testing.T) {
 func TestEventVisibilityUsesGroupAfterHeldBody(t *testing.T) {
 	f := newEventWriterRace(t, false)
 	path := "/api/v1/events/" + itoa(f.event.ID) + "/visibility"
-	// Already invite only, so the group's tightening leaves the event row, and
-	// so the held body's revision, as they were (DEC-163).
+	// Already invite only, so the group's tightening leaves the event row as
+	// it was. The token covers the group's audience (DEC-163), so the held body
+	// carries the one the page reads after the tightening: the handler loads
+	// its first facts before the group changes and only the locked ones are
+	// fresh.
 	apiDo(t, f.admin, "PUT", path, confirmVisibility(t, f.admin, path, map[string]any{"visibility": models.VisibilityInviteOnly}), http.StatusOK)
-	held := f.actor.doHeld("PUT", path, visibilityBody(t, f.actor, path, map[string]any{"visibility": models.VisibilityPrivate, "consent": "", "reason": "Welcome friends"}))
+	stored := eventRow(t, f.app, f.event.ID)
+	after := f.app.eventRevision(&stored, &models.Group{Visibility: models.VisibilityInviteOnly})
+	held := f.actor.doHeld("PUT", path, map[string]any{"visibility": models.VisibilityPrivate, "consent": "", "reason": "Welcome friends", "revision": after})
 	groupPath := "/api/v1/groups/" + itoa(f.group.ID)
 	apiDo(t, f.admin, "PUT", groupPath, confirmVisibility(t, f.admin, groupPath, map[string]any{"visibility": models.VisibilityInviteOnly}), http.StatusOK)
+	if read := seriesRevisionOf(t, f.actor, f.event.ID); read != after {
+		t.Fatalf("the page reads %q after the tightening, the held body carries %q", read, after)
+	}
 	held.release()
 	w := held.wait(t)
 	if w.Code != http.StatusOK {
