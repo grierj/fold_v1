@@ -7,7 +7,7 @@ import { apiAs, pickRoom, signIn } from "./helpers";
 // audience is as it opened, or closes with the panel and the page says the changes weren't saved.
 const stored = schema.looseObject({ event: schema.looseObject({ visibility: schema.string(), revision: schema.optional(schema.string()) }) });
 
-const NOTICE = "Someone changed this event while you were editing, so your changes weren't saved. This is the event as it is now.";
+const NOTICE = "This event changed while you were editing, so your changes weren't saved. This is the event as it is now.";
 
 const dateIn = (days: number) => new Date(Date.now() + days * 864e5).toISOString().slice(0, 10);
 
@@ -72,6 +72,26 @@ test("a second manager's widening over another's tightening closes the panel and
   await expect(second.getByText(NOTICE)).toHaveCount(0);
   await expect(second.getByRole("radio", { name: /^Invite only/ })).toBeChecked();
   await other.close();
+});
+
+test("a widening chosen before an admin made the group private is not saved", async ({ page, request }) => {
+  const grier = await apiAs(request, "grier");
+  const withId = schema.looseObject({ id: schema.number() });
+  const { group } = schema.parse(schema.looseObject({ group: withId }), await grier("POST", "/groups", { name: "Audience follows the group", visibility: "public", tags: [] }));
+  const { event } = schema.parse(schema.looseObject({ event: withId }), await grier("POST", `/groups/${group.id}/events`, { title: "Group audience", startsLocal: `${dateIn(15)}T19:00`, durationMinutes: 60, tzid: "America/Boise" }));
+  const read = async () => schema.parse(stored, await grier("GET", `/events/${event.id}`)).event;
+  await grier("PUT", `/events/${event.id}/visibility`, { visibility: "invite_only", consent: "", revision: (await read()).revision ?? "" });
+
+  const saves = visibilitySaves(page, event.id);
+  await signIn(page, "grier");
+  await openPanel(page, event.id);
+  await page.getByRole("radio", { name: /^Public \(same as the group\)/ }).check();
+  // The event row stays as it was; only its group's audience changes.
+  await grier("PUT", `/groups/${group.id}`, { visibility: "private" });
+  await page.getByRole("button", { name: "Save visibility" }).click();
+  await expect(page.getByRole("status").filter({ hasText: NOTICE })).toBeFocused();
+  expect(saves).toEqual([409]);
+  expect((await read()).visibility).toBe("invite_only");
 });
 
 test("changing the visibility right after booking a series room saves on one press", async ({ page, request }) => {

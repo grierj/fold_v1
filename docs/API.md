@@ -676,7 +676,8 @@ a series save sends (DEC-162). The answers, in the order the handler gives them:
 1. 404 when the event does not exist or the person cannot see it.
 2. 400 for a body the server cannot read, a `revision` of any JSON type but a
    string included (a JSON `null` is read as missing); 400 `too_long` for a
-   reason over 500 characters.
+   reason over 500 bytes of UTF-8 once trimmed (fewer characters for text
+   outside ASCII).
 3. 403 when the person can see the event and may not manage it; 400
    `visibility_not_allowed` for a value the event cannot take (invite only on a
    church-wide event).
@@ -685,15 +686,18 @@ a series save sends (DEC-162). The answers, in the order the handler gives them:
    A person who may not manage the event never gets `event_changed`.
 5. 409 `event_changed` for any revision but the event's current token
    (missing, empty, garbled, another event's, one from before the server
-   restarted, or one read before any later change to the event), writing
-   nothing: no event or date change, cancellation, notice, audit row or job.
+   restarted, or one read before any later change to the event or to its
+   group's visibility), writing nothing: no event or date change, cancellation, notice, audit row or job.
    This comes before the no-change answer and before any consent work, so a
    stale page's no-change save is refused too.
-6. 200 for a save that changes nothing (the same visibility and leader-opened
-   state, and no reset); nothing is written and the revision stays.
+6. 200 `{event}` for a save that changes nothing (the same visibility and
+   leader-opened state, and no reset): the event's visibility and revision
+   stay as they are. (The contact reconciliation every write on an event runs
+   still runs.)
 7. The consent rule (Visibility consent, below): 409
    `visibility_review_outdated` or 409 `needsDecision`, writing nothing.
-8. 200 `{event}`; `event.revision` is the token after the save. A reset that
+8. 200 `{event}`; `event.revision` is the token after the save (the event in
+   either 200 is a manager's, so it always carries `revision`). A reset that
    leaves the visibility and leader-opened state as they were changes only the
    dates, so the event's revision stays.
 
@@ -1084,7 +1088,11 @@ one registration.
 
 **The series revision (DEC-162).** A series edit names the read it was made
 from: its body's `revision` is the `revision` of the read the editor opened
-with, `1.<generation>.<event id>.<event revision>`, opaque to the client. A
+with, `1.<generation>.<event id>.<event revision>.<audience>`, opaque to the
+client. The audience tags the group's visibility on a group's event (it decides
+whether a wider event is leader-opened) and is fixed on a church-wide event, so
+a change to the group's visibility makes an earlier token stale though the
+event itself did not change. A
 body the server cannot read is answered first, whatever its revision: 400 for a
 `revision` of any JSON type but a string (a JSON `null` is read as missing, so it
 answers 409 `event_changed` below), and for a seat, guest or reminder number or
@@ -1400,8 +1408,12 @@ What each deployed client shows:
 
 The upgrade restarts the server, so any revision a tab already holds is
 refused once: a date's with `date_changed` (After any restart, above), and a
-series' or an event visibility's with `event_changed`, after which the current
-editor or control saves again by itself when the event has not changed.
+series' or an event visibility's with `event_changed`. The event's token also
+gains its group's audience in this release, so one of the older shape is
+refused the same way. The current editor or control then reads the event,
+compares and sends again by itself when nothing it saves has changed, with one
+exception: a refused reset of the dates' visibility is always a conflict, so
+the panel closes and the page says the changes weren't saved.
 
 ### Registration
 

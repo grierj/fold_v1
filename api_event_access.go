@@ -248,7 +248,7 @@ func (a *App) apiGetEvent(c *gin.Context) {
 			return err
 		}
 		if f.canManage(me) {
-			event.Revision = a.eventRevision(&ev)
+			event.Revision = a.eventRevision(&ev, f.group)
 		}
 		out = gin.H{
 			"event":            event,
@@ -431,7 +431,7 @@ func (a *App) apiSetEventVisibility(c *gin.Context) {
 		if !policy.CanSetEventVisibility(asPerson(me), f.view, f.rel, vis) {
 			return errVisibilityNotAllowed
 		}
-		if err := a.checkEventRevision(locked, body.Revision); err != nil {
+		if err := a.checkEventRevision(locked, f.group, body.Revision); err != nil {
 			return err
 		}
 		opened := leaderOpens(f, vis)
@@ -542,7 +542,7 @@ func (a *App) apiSetEventVisibility(c *gin.Context) {
 		fail(c, err)
 		return
 	}
-	j.Revision = a.eventRevision(ev) // the locked row was re-checked: only managers reach here
+	j.Revision = a.eventRevision(ev, f.group) // the locked row was re-checked: only managers reach here
 	c.JSON(http.StatusOK, eventSeriesResponseJSON{Event: j})
 }
 

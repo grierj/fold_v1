@@ -1143,16 +1143,18 @@ func (a *App) apiUpdateEvent(c *gin.Context) {
 	me := apiUser(c)
 	now := a.now().UTC()
 	var locked models.Event
+	var group *models.Group
 	// Everything that depends on the stored row is read from the locked row
 	// inside the transaction, so a concurrent edit is never overwritten with
 	// values built from a stale copy. A validation failure is returned as its
 	// answer and rolls back (nothing is written yet).
 	err = a.contactMutation(contactChange{EventID: ev.ID}, func(tx *gorm.DB) error {
-		actor, lockedEv, _, err := lockManagedEventIn(tx, me, ev.ID)
+		actor, lockedEv, fresh, err := lockManagedEventIn(tx, me, ev.ID)
 		if err != nil {
 			return err
 		}
-		if err := a.checkEventRevision(lockedEv, body.Revision); err != nil {
+		group = fresh.group
+		if err := a.checkEventRevision(lockedEv, group, body.Revision); err != nil {
 			return err
 		}
 		me = actor
@@ -1408,7 +1410,7 @@ func (a *App) apiUpdateEvent(c *gin.Context) {
 	ev = &locked
 	j := toEventJSON(ev)
 	applyEventVideoReveal(&j, ev, false, true) // the locked row was re-checked: only managers reach here
-	j.Revision = a.eventRevision(ev)
+	j.Revision = a.eventRevision(ev, group)
 	c.JSON(http.StatusOK, eventSeriesResponseJSON{Event: j})
 }
 

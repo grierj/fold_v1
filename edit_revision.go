@@ -48,17 +48,42 @@ func checkEditRevision(given, current string, stale error) error {
 }
 
 // eventRevision is the token a series editor or the event's visibility
-// control based on ev holds: 1.<generation>.<event id>.<event revision>. The
-// trigger of migration 00010 raises the revision on every change to a tracked
-// column of the event row.
-func (a *App) eventRevision(ev *models.Event) string {
-	return a.editRevision(ev.ID, ev.EditRevision)
+// control based on ev holds:
+// 1.<generation>.<event id>.<event revision>.<audience>. The trigger of
+// migration 00010 raises the revision on every change to a tracked column of
+// the event row. audience tags the group's visibility on a group's event
+// (group as the read or the locked write loaded it), since it decides whether
+// a wider value is leader-opened (leaderOpens): a group change conflicts
+// though the event row is untouched. It is "c" on a church-wide event. Every
+// writer of groups.visibility holds the exclusive contact gate, which both
+// event saves hold, so the group is not locked here.
+func (a *App) eventRevision(ev *models.Event, group *models.Group) string {
+	return a.editRevision(ev.ID, ev.EditRevision, revisionAudience(ev, group))
+}
+
+var revisionAudienceTags = map[string]string{
+	models.VisibilityPublic:     "pub",
+	models.VisibilityPrivate:    "prv",
+	models.VisibilityInviteOnly: "inv",
+}
+
+func revisionAudience(ev *models.Event, group *models.Group) string {
+	if ev.GroupID == nil {
+		return "c"
+	}
+	if group == nil {
+		return "-"
+	}
+	if tag, ok := revisionAudienceTags[group.Visibility]; ok {
+		return tag
+	}
+	return group.Visibility
 }
 
 // checkEventRevision refuses given unless it is the token of locked, the event
-// as read under its row lock.
-func (a *App) checkEventRevision(locked *models.Event, given string) error {
-	return checkEditRevision(given, a.eventRevision(locked), errEventChanged)
+// as read under its row lock, with group as that transaction read it.
+func (a *App) checkEventRevision(locked *models.Event, group *models.Group, given string) error {
+	return checkEditRevision(given, a.eventRevision(locked, group), errEventChanged)
 }
 
 // readEventRevision reads ev's revision back into it after the transaction's

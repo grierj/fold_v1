@@ -944,6 +944,46 @@ func TestStaleWideningAfterAnotherManagersTighteningIsRefused(t *testing.T) {
 	apiDo(t, f.actor, "PUT", path, visibilityBody(t, f.actor, path, map[string]any{"visibility": models.VisibilityPublic, "reason": "Open house", "consent": ""}), http.StatusOK)
 }
 
+// The event's revision covers its group's audience (DEC-163): with the event
+// row untouched, a group change makes an earlier token stale for both saves,
+// so a widening chosen against the old group is never saved without the
+// leader-opened review. A church-wide event's token follows no group.
+func TestGroupAudienceChangeMakesTheEventTokenStale(t *testing.T) {
+	f := newEventWriterRace(t, false)
+	path := "/api/v1/events/" + itoa(f.event.ID) + "/visibility"
+	series := "/api/v1/events/" + itoa(f.event.ID)
+	group := "/api/v1/groups/" + itoa(f.group.ID)
+	apiDo(t, f.admin, "PUT", path, confirmVisibility(t, f.admin, path, map[string]any{"visibility": models.VisibilityInviteOnly}), http.StatusOK)
+	opened := seriesRevisionOf(t, f.actor, f.event.ID)
+	row := eventRow(t, f.app, f.event.ID).EditRevision
+	apiDo(t, f.admin, "PUT", group, map[string]any{"visibility": models.VisibilityPrivate}, http.StatusOK)
+	if got := eventRow(t, f.app, f.event.ID).EditRevision; got != row {
+		t.Fatalf("the group change wrote the event row: revision %d, was %d", got, row)
+	}
+	before := eventWriterState(t, f.app, f.event.ID)
+	eventChanged(t, f.actor.do("PUT", path, map[string]any{"visibility": models.VisibilityPublic, "consent": "", "revision": opened}, true), "a widening chosen against the public group")
+	eventChanged(t, f.actor.do("PUT", series, map[string]any{"title": "Renamed", "revision": opened}, true), "a series save read before the group change")
+	if after := eventWriterState(t, f.app, f.event.ID); after != before {
+		t.Fatalf("a refused save wrote:\n%s\nwant\n%s", after, before)
+	}
+	if ev := eventRow(t, f.app, f.event.ID); ev.Visibility != models.VisibilityInviteOnly || ev.LeaderOpened {
+		t.Fatalf("the event is %s (leader-opened %t), want invite_only", ev.Visibility, ev.LeaderOpened)
+	}
+	// Read again, the same widening saves as the leader-opened override it now is.
+	apiDo(t, f.actor, "PUT", path, visibilityBody(t, f.actor, path, map[string]any{"visibility": models.VisibilityPublic, "consent": ""}), http.StatusOK)
+	if ev := eventRow(t, f.app, f.event.ID); ev.Visibility != models.VisibilityPublic || !ev.LeaderOpened {
+		t.Fatalf("the event is %s (leader-opened %t), want a leader-opened public event", ev.Visibility, ev.LeaderOpened)
+	}
+
+	church := churchEvent(t, f.admin, "Church supper")
+	token := seriesRevisionOf(t, f.admin, church.ID)
+	apiDo(t, f.admin, "PUT", group, map[string]any{"visibility": models.VisibilityPublic}, http.StatusOK)
+	if got := seriesRevisionOf(t, f.admin, church.ID); got != token {
+		t.Fatalf("a group change moved a church-wide event's token: %q, was %q", got, token)
+	}
+	apiDo(t, f.admin, "PUT", "/api/v1/events/"+itoa(church.ID), map[string]any{"title": "Church supper renamed", "revision": token}, http.StatusOK)
+}
+
 func TestConcurrentVisibilitySavesFromOneReadExactlyOneWins(t *testing.T) {
 	f := newEventWriterRace(t, false)
 	path := "/api/v1/events/" + itoa(f.event.ID) + "/visibility"

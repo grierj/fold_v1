@@ -69,9 +69,9 @@ function EventDetailContent() {
   const [deleting, setDeleting] = useState(false);
   const deletingNow = useRef(false);
   const [editing, setEditing] = useState(false);
-  // A save in the panel was refused and the panel closed on its own (DEC-161, DEC-163): someone else changed the event,
-  // or this person may no longer manage it. It is said once the page shows the event as it is now, until the editor
-  // opens again. The page was read from nothing, so no live region outlasts that read: the line takes focus, which
+  // A save in the panel was refused and the panel closed on its own (DEC-161, DEC-163): the event changed (another
+  // person, another tab or this person's own action), or this person may no longer manage it. It is said once the
+  // page's read answers, even when it finds no event, until the editor opens again. The page was read from nothing, so no live region outlasts that read: the line takes focus, which
   // reads it out and brings it into view whatever else the page scrolled to.
   const unsavedPending = useRef<RevisionConflict | null>(null);
   const [unsaved, setUnsaved] = useState<RevisionConflict | null>(null);
@@ -145,7 +145,7 @@ function EventDetailContent() {
     if (!document.activeElement || document.activeElement === document.body) editButton.current?.focus();
   }, [editing]);
   useEffect(() => {
-    if (!unsavedPending.current || loading || !page) return;
+    if (!unsavedPending.current || loading) return;
     setUnsaved(unsavedPending.current);
     unsavedPending.current = null;
   }, [loading, page]);
@@ -204,14 +204,24 @@ function EventDetailContent() {
     );
   }
 
+  const unsavedLine = (text: string) => (
+    <p ref={unsavedNotice} role="status" tabIndex={-1} className="mb-4 scroll-mt-4 rounded-lg border border-border bg-sunken px-4 py-3 text-sm outline-none">
+      {text}
+    </p>
+  );
+
+  // Without the event the line says nothing about it.
+  const unsavedNoEvent = unsaved ? unsavedLine("Your changes weren't saved.") : null;
+
   if (notFound) {
-    return <Missing title="Event not found" body="It may have been cancelled or removed, or it may be private." />;
+    return <Missing title="Event not found" body="It may have been cancelled or removed, or it may be private." notice={unsavedNoEvent} />;
   }
 
   if (!page) {
     return (
       <div className="fold-page fold-page-narrow">
         <h1 className="text-3xl font-bold mb-6">Event unavailable</h1>
+        {unsavedNoEvent}
         <ErrorNotice message={error ?? "We couldn't load this event."} onRetry={() => void load.retry()} />
       </div>
     );
@@ -270,15 +280,11 @@ function EventDetailContent() {
           </div>
         )}
       </div>
-      {unsaved && (
-        <p ref={unsavedNotice} role="status" tabIndex={-1} className="mb-4 scroll-mt-4 rounded-lg border border-border bg-sunken px-4 py-3 text-sm outline-none">
-          {unsaved === "changed"
-            ? "Someone changed this event while you were editing, so your changes weren't saved. This is the event as it is now."
-            : canManage
-              ? "Your changes weren't saved. This is the event as it is now."
-              : "You can no longer manage this event, so your changes weren't saved."}
-        </p>
-      )}
+      {unsaved && unsavedLine(unsaved === "changed"
+        ? "This event changed while you were editing, so your changes weren't saved. This is the event as it is now."
+        : canManage
+          ? "Your changes weren't saved. This is the event as it is now."
+          : "You can no longer manage this event, so your changes weren't saved.")}
       <div className="grid gap-4 pb-4 sm:grid-cols-2 sm:gap-8">
         <div className="space-y-2">
           {line && <p className="font-semibold wrap-anywhere">{line}</p>}

@@ -227,9 +227,10 @@ section or decision; check it still exists.
   state (waiting or lost, double-booked) is `policy.RoomBookingStateOf`, and the booking and request
   moves are tables in `internal/policy/room_lifecycle.go`; a status changes only through
   `changeBookings` or `moveRoomRequest`/`moveRoomRequestsWhere` (`room_status.go`).
-- A manager's save names its read (DEC-162, DEC-163): the token is built and compared only in `edit_revision.go`
-  (`eventRevision`, `checkEventRevision`, inside the write transaction under the row lock), and a web form sends it
-  through `web/src/lib/useRevisionSave.ts`, which owns the read-and-compare after a refusal.
+- An event's series and visibility saves name their read (DEC-162, DEC-163): the token is built and compared only in
+  `edit_revision.go` (`eventRevision`, `checkEventRevision`, inside the write transaction under the row lock), and
+  both forms send it through `web/src/lib/useRevisionSave.ts`, which owns the read-and-compare after a refusal. The
+  single-date edit keeps its own protocol for now (`dateToken`, `api_date_edits.go`).
 - Registrations: seat decisions go through `registration_seats.go` (`poolFits`, `seatChange`,
   `seatTally`; party size and childcare demand each have one SQL and one Go form,
   `TestSeatSQLMatchesGoRules`); the status changes only by a `policy.RegistrationMove`

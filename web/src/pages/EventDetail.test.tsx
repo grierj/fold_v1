@@ -2722,7 +2722,8 @@ describe("EventDetail: the date question is bound to what asked it", () => {
 // DEC-162: a series save refused because someone else changed the event closes the editor on its own (DEC-161) and
 // reads the page from nothing, which then says the changes were not saved.
 describe("EventDetail when a series save meets someone else's change", () => {
-  const NOTICE = "Someone changed this event while you were editing, so your changes weren't saved. This is the event as it is now.";
+  const NOTICE = "This event changed while you were editing, so your changes weren't saved. This is the event as it is now.";
+  const UNSAVED = "Your changes weren't saved.";
   const opened: EventDetailResponse = { ...page, canSetVisibility: true, event: { ...page.event, groupId: 3, groupName: "Family group", groupVisibility: "public", revision: "r1" } };
   const theirs: EventDetailResponse = { ...opened, event: { ...opened.event, title: "Bible study", revision: "r2" } };
   const changed = () => new ApiError(409, "changed", { code: "event_changed" });
@@ -2783,7 +2784,7 @@ describe("EventDetail when a series save meets someone else's change", () => {
     expect(screen.getByLabelText("Title")).toHaveValue("Bible study");
   });
 
-  it("shows the page's own error and Try again, and nothing of the event, when the read after the conflict fails", async () => {
+  it("shows the page's own error and Try again, nothing of the event, and that the changes weren't saved, when the read after the conflict fails", async () => {
     const after = await saveIntoRefusal(async () => theirs);
     await act(async () => { after.reject(new ApiError(500, "boom", { code: "server_error" })); await after.promise.catch(() => {}); });
     expect(await screen.findByRole("heading", { level: 1, name: "Event unavailable" })).toBeInTheDocument();
@@ -2791,6 +2792,7 @@ describe("EventDetail when a series save meets someone else's change", () => {
     showsNothingOfTheEvent();
     expect(screen.queryByRole("heading", { level: 1, name: "Bible study" })).not.toBeInTheDocument();
     expect(screen.queryByText(NOTICE)).not.toBeInTheDocument();
+    await waitFor(() => expect(screen.getByText(UNSAVED)).toHaveFocus());
   });
 
   it("says the changes weren't saved when the person can still see the event and no longer manage it", async () => {
@@ -2806,18 +2808,37 @@ describe("EventDetail when a series save meets someone else's change", () => {
     expect(screen.queryByRole("button", { name: "Edit event" })).not.toBeInTheDocument();
   });
 
-  it("closes the editor and reads the page from nothing with no notice when the event can no longer be managed or seen", async () => {
+  it("closes the editor and says only that the changes weren't saved when the event can no longer be managed or seen", async () => {
     const after = await saveIntoRefusal(() => Promise.reject(new ApiError(404, "gone", { code: "not_found" })));
     showsNothingOfTheEvent();
     await act(async () => { after.reject(new ApiError(404, "gone", { code: "not_found" })); await after.promise.catch(() => {}); });
-    expect(await screen.findByText("Event not found")).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { level: 1, name: "Event not found" })).toBeInTheDocument();
     expect(screen.queryByText(NOTICE)).not.toBeInTheDocument();
+    const notice = screen.getByText(UNSAVED);
+    expect(notice).toHaveAttribute("role", "status");
+    await waitFor(() => expect(notice).toHaveFocus());
+  });
+
+  it("says the changes weren't saved when the event is gone by the page's read after a change", async () => {
+    const after = await saveIntoRefusal(async () => theirs);
+    await act(async () => { after.reject(new ApiError(404, "gone", { code: "not_found" })); await after.promise.catch(() => {}); });
+    expect(await screen.findByRole("heading", { level: 1, name: "Event not found" })).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByText(UNSAVED)).toHaveFocus());
+  });
+
+  it("says nothing about changes on an ordinary visit to a missing event", async () => {
+    vi.mocked(Events.get).mockRejectedValue(new ApiError(404, "gone", { code: "not_found" }));
+    renderInMain();
+    expect(await screen.findByRole("heading", { level: 1, name: "Event not found" })).toBeInTheDocument();
+    expect(screen.queryByText(UNSAVED)).not.toBeInTheDocument();
+    expect(screen.queryByRole("status")).not.toBeInTheDocument();
   });
 });
 
 // DEC-163: the visibility control takes the same closing path as the series editor.
 describe("EventDetail when a visibility save meets someone else's change", () => {
-  const NOTICE = "Someone changed this event while you were editing, so your changes weren't saved. This is the event as it is now.";
+  const NOTICE = "This event changed while you were editing, so your changes weren't saved. This is the event as it is now.";
+  const UNSAVED = "Your changes weren't saved.";
   const opened: EventDetailResponse = { ...page, canSetVisibility: true, event: { ...page.event, groupId: 3, groupName: "Family group", groupVisibility: "public", revision: "r1" } };
   const theirs: EventDetailResponse = { ...opened, event: { ...opened.event, visibility: "invite_only", revision: "r2" } };
   const changed = () => new ApiError(409, "changed", { code: "event_changed" });
@@ -2879,6 +2900,34 @@ describe("EventDetail when a visibility save meets someone else's change", () =>
     panelClosed();
     await act(async () => { after.resolve(theirs); await after.promise; });
     await waitFor(() => expect(screen.getByText(NOTICE)).toHaveFocus());
+    panelClosed();
+  });
+
+  it("says only that the changes weren't saved when the event can no longer be managed or seen", async () => {
+    const after = await saveIntoRefusal(() => Promise.reject(new ApiError(404, "gone", { code: "not_found" })));
+    panelClosed();
+    await act(async () => { after.reject(new ApiError(404, "gone", { code: "not_found" })); await after.promise.catch(() => {}); });
+    expect(await screen.findByRole("heading", { level: 1, name: "Event not found" })).toBeInTheDocument();
+    const notice = screen.getByText(UNSAVED);
+    expect(notice).toHaveAttribute("role", "status");
+    await waitFor(() => expect(notice).toHaveFocus());
+    expect(screen.queryByText(NOTICE)).not.toBeInTheDocument();
+    expect(Events.setVisibility).toHaveBeenCalledOnce();
+  });
+
+  it("says the changes weren't saved when the event is gone by the page's read after a change", async () => {
+    const after = await saveIntoRefusal(async () => theirs);
+    await act(async () => { after.reject(new ApiError(404, "gone", { code: "not_found" })); await after.promise.catch(() => {}); });
+    expect(await screen.findByRole("heading", { level: 1, name: "Event not found" })).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByText(UNSAVED)).toHaveFocus());
+  });
+
+  it("says the changes weren't saved beside the page's own error when the read after the conflict fails", async () => {
+    const after = await saveIntoRefusal(async () => theirs);
+    await act(async () => { after.reject(new ApiError(500, "boom", { code: "server_error" })); await after.promise.catch(() => {}); });
+    expect(await screen.findByRole("heading", { level: 1, name: "Event unavailable" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Try again" })).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByText(UNSAVED)).toHaveFocus());
     panelClosed();
   });
 

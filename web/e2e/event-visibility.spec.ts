@@ -145,7 +145,7 @@ test("a series change under a reset review closes the panel and says nothing was
   await admin("PUT", `/events/${ev}/visibility`, { visibility: "invite_only", consent: "", revision: (await admin("GET", `/events/${ev}`)).event.revision });
   await review.getByRole("button", { name: "Reset 1 date" }).focus();
   await page.keyboard.press("Enter");
-  const notice = page.getByRole("status").filter({ hasText: "Someone changed this event while you were editing, so your changes weren't saved. This is the event as it is now." });
+  const notice = page.getByRole("status").filter({ hasText: "This event changed while you were editing, so your changes weren't saved. This is the event as it is now." });
   await expect(notice).toBeFocused();
   await expect(review).toHaveCount(0);
   await expect(page.getByRole("button", { name: "Save visibility" })).toHaveCount(0);

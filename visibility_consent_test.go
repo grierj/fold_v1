@@ -385,24 +385,31 @@ func TestNoConsentWhereNothingIsReviewRequired(t *testing.T) {
 
 // TestStaleTabBodiesAreRefused (C8): a page from before this rule (confirm:true,
 // or a group body with no consent) is refused over a registrant with nothing
-// written, saves over nobody, and an event reset is refused either way. A
-// date page from before the guarded edit gets date_page_outdated whatever its
-// body, over a registrant or not (apiRetiredDatePut).
+// written, and saves over nobody. Its event body carries no revision either,
+// so a change and a reset alike get event_changed with nothing written
+// (DEC-163). A date page from before the guarded edit gets date_page_outdated
+// whatever its body, over a registrant or not (apiRetiredDatePut).
 func TestStaleTabBodiesAreRefused(t *testing.T) {
 	f := newVCFixture(t, models.VisibilityPublic)
 	f.outsider(t, "outsider", 0)
 	before := f.state(t)
 	wantDatePageOutdated(t, f.admin.do("PUT", f.datePath(0), map[string]any{"visibility": models.VisibilityInviteOnly, "confirm": true}, true))
-	wantOutdated(t, f.admin.do("PUT", f.eventPath(), visibilityBody(t, f.admin, f.eventPath(), map[string]any{"visibility": models.VisibilityInviteOnly, "confirm": true}), true))
+	// An event body as the old tab sent it: no revision, no consent (DEC-163).
+	eventChanged(t, f.admin.do("PUT", f.eventPath(), map[string]any{"visibility": models.VisibilityInviteOnly, "confirm": true}, true), "an old tab's tightening")
 	wantOutdated(t, f.admin.do("PUT", f.groupPath(), map[string]any{"visibility": models.VisibilityInviteOnly}, true))
 	wantDatePageOutdated(t, f.admin.do("PUT", f.datePath(1), map[string]any{"visibility": models.VisibilityInviteOnly, "confirm": true}, true))
 	if f.state(t) != before {
 		t.Fatal("a stale tab's body wrote")
 	}
-	f.setOverride(t, 1, strp(models.VisibilityInviteOnly))
-	wantOutdated(t, f.admin.do("PUT", f.eventPath(), visibilityBody(t, f.admin, f.eventPath(), map[string]any{"visibility": models.VisibilityPublic, "confirm": true, "resetOverrides": true}), true))
-	f.setOverride(t, 1, nil)
-	wantOutdated(t, f.admin.do("PUT", f.eventPath(), visibilityBody(t, f.admin, f.eventPath(), map[string]any{"visibility": models.VisibilityPublic, "confirm": true, "resetOverrides": true}), true))
+	reset := map[string]any{"visibility": models.VisibilityPublic, "confirm": true, "resetOverrides": true}
+	for _, override := range []*string{strp(models.VisibilityInviteOnly), nil} {
+		f.setOverride(t, 1, override)
+		before := f.state(t)
+		eventChanged(t, f.admin.do("PUT", f.eventPath(), reset, true), "an old tab's reset")
+		if f.state(t) != before {
+			t.Fatal("a stale tab's reset wrote")
+		}
+	}
 }
 
 // TestVisibilityCancellationsCancelExactlyTheCheckedSet (C9): a sign-up sent

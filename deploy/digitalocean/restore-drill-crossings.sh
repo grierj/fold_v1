@@ -1268,7 +1268,8 @@ crossing_visibility_state() { # database event-ids(comma list)
 
 # body with the revision the event page's visibility control sends, read just before from the binary at base: a
 # visibility save names the read it was made from (DEC-163), and a stale or missing one is refused before the fence is
-# reached. A binary from before that rule has no revision in its read and ignores the field. A read refused once per
+# reached. The pinned older binaries (prior, landing, lane, archive) predate the event revision: their read has none
+# and they ignore the field. A read refused once per
 # connection by a plan prepared before a migration (0A000) is asked again, up to five times; then it fails. Any request
 # but an event's visibility keeps its body.
 crossing_with_revision() { # jar base path body
@@ -1503,7 +1504,7 @@ group-event-own-visibility POST /groups/$g3/events {"title":"Crossing E7","start
 zero-loser-group-tightening PUT /groups/$g3 {"visibility":"private"}
 EOF
   # The positive control: a write that changes no visibility still saves.
-  # A series save names the read it was made from (DEC-162); a binary from before it ignores the field.
+  # A series save names the read it was made from (DEC-162); the pinned older binaries have no revision and ignore it.
   rev="$(crossing_http_want "$jar" "$base" GET "/events/$e6" '' 200 | jq -r '.event.revision // ""')"
   crossing_http_want "$jar" "$base" PUT "/events/$e6" "$(jq -nc --arg d "$(crossing_day 7)" --arg r "$rev" '{title:"Crossing E6 renamed",startsLocal:($d+"T19:00"),durationMinutes:60,tzid:"UTC",revision:$r}')" 200 >/dev/null
   [[ "$(crossing_cpg fold -c "SELECT title FROM events WHERE id = $e6")" == 'Crossing E6 renamed' ]]
