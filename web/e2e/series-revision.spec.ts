@@ -11,7 +11,7 @@ const stored = schema.looseObject({ event: schema.looseObject({
   title: schema.string(), location: schema.string(), capacity: schema.nullable(schema.number()),
 }) });
 
-const NOTICE = "This event changed while you were editing, so your changes weren't saved. This is the event as it is now.";
+const NOTICE = "This event changed while you were editing, so your changes could not be saved. This is the event as it is now.";
 
 const dateIn = (days: number) => new Date(Date.now() + days * 864e5).toISOString().slice(0, 10);
 
@@ -119,7 +119,7 @@ test("pressing Save again after a stored save's answer was lost closes the edito
   await page.getByRole("button", { name: "Save series" }).click();
   await expect(page.getByRole("button", { name: "Save series" })).toHaveCount(0);
   await expect(page.getByRole("heading", { level: 1, name: "Lost answer supper" })).toBeVisible();
-  await expect(page.getByText(/weren't saved/)).toHaveCount(0);
+  await expect(page.getByText(/could not be saved/)).toHaveCount(0);
   expect(await series.read()).toMatchObject({ title: "Lost answer supper", capacity: null });
 });
 

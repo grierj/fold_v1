@@ -7,7 +7,7 @@ import { apiAs, pickRoom, signIn } from "./helpers";
 // audience is as it opened, or closes with the panel and the page says the changes weren't saved.
 const stored = schema.looseObject({ event: schema.looseObject({ visibility: schema.string(), revision: schema.optional(schema.string()) }) });
 
-const NOTICE = "This event changed while you were editing, so your changes weren't saved. This is the event as it is now.";
+const NOTICE = "This event changed while you were editing, so your changes could not be saved. This is the event as it is now.";
 
 const dateIn = (days: number) => new Date(Date.now() + days * 864e5).toISOString().slice(0, 10);
 
