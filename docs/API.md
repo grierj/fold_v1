@@ -704,17 +704,21 @@ a series save sends (DEC-162). The answers, in the order the handler gives them:
 
 Refused with `event_changed`, the web control reads the event once
 (`GET /api/v1/events/:id`) and compares what the save can write: the
-visibility, the leader-opened state and the group's visibility it follows. The
-same, it sends the same save with the new revision, up to three sends in all,
+visibility, the leader-opened state and the group's visibility it follows. When
+the read already shows what the save would leave (an earlier press stored it and
+its answer was lost), the save is done: it sends nothing more and the control
+does what it does after any save. The same as it opened with, it sends the same
+save with the new revision, up to three sends in all,
 and the server judges the consent again, so a save sent again that now needs a
 review opens the review. Different, or a read that no longer lets the person set
 the visibility (a 403 or 404 on the preview, on the read or on any save, the
 first included),
 and the panel closes on its own, with any open review, and the page reads the
 event from nothing and says the changes weren't saved, as after a refused
-series save. A reset is always treated as different: the page's read lists 90
-days of dates and a reset reaches every later one, so the read cannot show it
-is still the same decision. After a third refusal with nothing changed it shows
+series save. A reset is always treated as different, also one an earlier press
+stored: the page's read lists 90 days of dates and a reset reaches every later
+one, so the read cannot show it is still the same decision or already done.
+After a third refusal with nothing changed it shows
 "We couldn't change who can see this. Please try again." and stays open. Any
 other failure of the read leaves the control open with its ordinary error.
 
@@ -1109,12 +1113,15 @@ job. The event's revision rises with every change to a stored series field, its
 visibility and its series room, by anyone; a save that changes nothing leaves
 it, and the daily extender does not move it. The answer's `event.revision` is
 the new token. Refused, the web editor reads the event again, and what that read
-says decides: when nothing the editor can save differs from the read it opened
-with, it sends the same save with the new revision, up to three sends in all,
-and after a third refusal whose read still shows no difference it shows its
-ordinary save error and stays open; when something differs, it closes and the
-page shows the event as stored, saying the changes were not saved; when any
-save or the read answers 403 or 404, or the read says the person no longer
+says decides: when it shows what the save would leave, as the server stores it
+(an earlier press stored it and its answer was lost), the save is done and the
+editor closes as after a save, sending nothing more; when nothing the editor can
+save differs from the read it opened with, it sends the same save with the new
+revision, up to three sends in all, and after a third refusal whose read still
+shows no difference it shows its ordinary save error and stays open; when
+something else differs, it closes and the page shows the event as stored,
+saying the changes were not saved; when any save or the read answers 403 or
+404, or the read says the person no longer
 manages the event, it closes and the page shows what that person may
 now see, saying the changes were not saved (on the missing-event and
 event-unavailable screens too). Any

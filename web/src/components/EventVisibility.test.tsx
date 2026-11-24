@@ -666,4 +666,58 @@ describe("EventVisibilityControl and the read it opened with", () => {
     expect(onSaved).not.toHaveBeenCalled();
     expect(screen.getByRole("radio", { name: /^Public/ })).toBeChecked();
   });
+
+  // DEC-163: the first press was stored and its answer lost; the second is refused and its read shows the save done.
+  describe("when a save it pressed before was stored and its answer lost", () => {
+    const offline = "We couldn't reach Fold. Check your connection and try again.";
+
+    beforeEach(() => {
+      setVisibility.mockRejectedValueOnce(new TypeError("Failed to fetch")).mockRejectedValueOnce(changed());
+    });
+
+    it.each([
+      ["the group's own audience", "public" as const, false],
+      ["wider than the group, as leader-opened", "private" as const, true],
+    ])("counts the second press as saved, sending nothing more, when the read shows Public %s", async (_, groupVisibility, leaderOpened) => {
+      get.mockResolvedValue(readOf({ visibility: "public", groupVisibility, leaderOpened, revision: "r3" }));
+      const onSaved = vi.fn();
+      const onConflict = vi.fn();
+      render(<EventVisibilityControl eventId={7} groupName="Garden" groupVisibility={groupVisibility} visibility="private" revision="r1" onSaved={onSaved} onConflict={onConflict} />);
+      await makePublic();
+      expect(await screen.findByText(offline)).toBeInTheDocument();
+      await userEvent.click(screen.getByRole("button", { name: "Save visibility" }));
+      await waitFor(() => expect(onSaved).toHaveBeenCalledOnce());
+      expect(onConflict).not.toHaveBeenCalled();
+      expect(setVisibility.mock.calls.map(([, body]) => body.revision)).toEqual(["r1", "r1"]);
+      expect(get).toHaveBeenCalledExactlyOnceWith(7);
+      expect(screen.queryByText(/couldn't/)).not.toBeInTheDocument();
+    });
+
+    it("hands the page a conflict when the read shows Public with a leader-opened mark the save would not leave", async () => {
+      get.mockResolvedValue(readOf({ visibility: "public", leaderOpened: true, revision: "r3" }));
+      const { onSaved, onConflict } = open();
+      await makePublic();
+      expect(await screen.findByText(offline)).toBeInTheDocument();
+      await userEvent.click(screen.getByRole("button", { name: "Save visibility" }));
+      await waitFor(() => expect(onConflict).toHaveBeenCalledExactlyOnceWith("changed"));
+      expect(onSaved).not.toHaveBeenCalled();
+    });
+
+    // The page's read lists 90 days of dates and a reset reaches every later one, so it cannot show the reset stored.
+    it("hands the page a conflict on a reset, even when the second press's preview finds nothing left to reset", async () => {
+      visibilityImpact.mockResolvedValueOnce({ visibility: "private", currentVisibility: "private", futureOverrides: 1, tightened: [], leaderOpened: [] })
+        .mockResolvedValueOnce({ visibility: "private", currentVisibility: "private", tightened: [], leaderOpened: [], resetDates: [{ occurrenceId: 51, date: "2026-12-01", title: "Picnic", visibility: "public" as const }], consent: A })
+        .mockResolvedValueOnce({ visibility: "private", currentVisibility: "private", tightened: [], leaderOpened: [], resetDates: [], consent: B });
+      get.mockResolvedValue(readOf({ revision: "r3" }));
+      const { onSaved, onConflict } = open();
+      await userEvent.click(await screen.findByLabelText("Also reset those dates to the series setting"));
+      await userEvent.click(screen.getByRole("button", { name: "Save visibility" }));
+      await userEvent.click(await screen.findByRole("button", { name: "Reset 1 date" }));
+      expect(await screen.findByText(offline)).toBeInTheDocument();
+      await userEvent.click(screen.getByRole("button", { name: "Save visibility" }));
+      await waitFor(() => expect(onConflict).toHaveBeenCalledExactlyOnceWith("changed"));
+      expect(setVisibility.mock.calls.map(([, body]) => [body.consent, body.resetOverrides])).toEqual([[A, true], [B, true]]);
+      expect(onSaved).not.toHaveBeenCalled();
+    });
+  });
 });

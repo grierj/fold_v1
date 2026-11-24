@@ -21,6 +21,10 @@ interface Audience {
   groupVisibility?: Visibility;
 }
 
+// A group event wider than its group is leader-opened, as the server decides it on save (`leaderOpens`, DEC-17/28).
+const opensWider = (value: Visibility, groupVisibility?: Visibility, churchWide?: boolean) =>
+  !churchWide && groupVisibility != null && visibilityRank(value) > visibilityRank(groupVisibility);
+
 const CHOICES: { value: Visibility; label: string; description: string }[] = [
   { value: "public", label: "Public", description: "Anyone can see it." },
   { value: "private", label: "Private", description: "Only signed-in people can see it." },
@@ -100,7 +104,8 @@ export function EventVisibilityControl({
   }, [eventId, visibility]);
 
   // What this save can write: the audience and whether it is leader-opened, which follows the group's. The page's
-  // read lists 90 days of dates and a reset reaches every later one, so a refused reset is always a conflict.
+  // read lists 90 days of dates and a reset reaches every later one, so a refused reset is always a conflict, also
+  // when an earlier press stored it and its answer was lost.
   const opened: Audience = { visibility, leaderOpened, groupVisibility };
 
   const send = useRevisionSave({
@@ -220,7 +225,10 @@ export function EventVisibilityControl({
     setError(null);
 
     try {
-      const sent = await send((rev) => Events.setVisibility(eventId, { visibility: value, reason: reason.trim() || undefined, consent, resetOverrides, revision: rev }));
+      const sent = await send(
+        (rev) => Events.setVisibility(eventId, { visibility: value, reason: reason.trim() || undefined, consent, resetOverrides, revision: rev }),
+        { visibility: value, leaderOpened: opensWider(value, groupVisibility, churchWide), groupVisibility },
+      );
 
       if (sent === "refused") {
         setError("We couldn't change who can see this. Please try again.");
@@ -330,7 +338,7 @@ export function VisibilityField({
   reason: string;
   onReason: (v: string) => void;
 }) {
-  const opening = !churchWide && groupVisibility != null && visibilityRank(value) > visibilityRank(groupVisibility);
+  const opening = opensWider(value, groupVisibility, churchWide);
   const choices = churchWide ? CHOICES.filter((c) => c.value !== "invite_only") : CHOICES;
 
   return (
