@@ -1,5 +1,6 @@
 import { Form } from "./ui/Form";
 import { useEffect, useId, useLayoutEffect, useRef, useState } from "react";
+import { ApiError } from "../api/core";
 import { Events } from "../api/events";
 import type { Visibility, VisibilityImpact } from "../types";
 import { GroupVisibilityReview } from "./GroupVisibilityReview";
@@ -10,7 +11,7 @@ import { ROSTER_STALE, ROSTER_WAITING, visibilityRank } from "../lib/visibilityC
 import { useRosterActivityOf } from "../lib/dateWrites";
 import { useFocusHome, useKeepFocusHome, useLockedFocus } from "../lib/focusHome";
 import { useAction, type Action } from "../lib/useAction";
-import { useRevisionSave, type RevisionConflict } from "../lib/useRevisionSave";
+import { lostAuthority, useRevisionSave, type RevisionConflict } from "../lib/useRevisionSave";
 import { Checkbox, Choices, Field, FormError, Input, Radio } from "./ui/Field";
 import { Button } from "./ui/Button";
 
@@ -179,6 +180,13 @@ export function EventVisibilityControl({
       try {
         impact = await Events.visibilityImpact(eventId, value, resetOverrides);
       } catch (err) {
+        // The preview is refused like the save would be: the page closes the panel and says so.
+        if (err instanceof ApiError && lostAuthority(err)) {
+          onConflict?.("gone");
+
+          return false;
+        }
+
         setError(errorText(err, "We couldn't check this event."));
 
         return false;

@@ -19,7 +19,8 @@ export interface RevisionRead<T> {
 // A refused save is sent again at most this many times in all, while the stored value still matches the form.
 const MAX_SENDS = 3;
 
-const lostAuthority = (err: ApiError) => err.status === 403 || err.status === 404;
+// The server says the person may no longer manage or see what they were editing.
+export const lostAuthority = (err: ApiError) => err.status === 403 || err.status === 404;
 
 // useRevisionSave is the one conflict protocol for a manager's save (DEC-162, DEC-163). The save names the read the
 // form opened with (`revision`, kept from the first render, like `opened`). On a refusal (`event_changed`) the value
@@ -34,8 +35,7 @@ const lostAuthority = (err: ApiError) => err.status === 403 || err.status === 40
 // field left out would be overwritten without a word. It answers null when a read cannot show that the save is still
 // the same decision, which is a conflict.
 //
-// Every other answer, on the first send or a later one, is thrown for the form to handle as it always has, except a
-// 403 or 404 on a send this hook made by itself: a read had said the person still could, so that is "gone".
+// Every other answer, on the first send or a later one, is thrown for the form to handle as it always has.
 export function useRevisionSave<T, F>({
   opened,
   revision,

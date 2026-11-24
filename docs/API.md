@@ -708,7 +708,8 @@ visibility, the leader-opened state and the group's visibility it follows. The
 same, it sends the same save with the new revision, up to three sends in all,
 and the server judges the consent again, so a save sent again that now needs a
 review opens the review. Different, or a read that no longer lets the person set
-the visibility (a 403 or 404 on the read or on any save, the first included),
+the visibility (a 403 or 404 on the preview, on the read or on any save, the
+first included),
 and the panel closes on its own, with any open review, and the page reads the
 event from nothing and says the changes weren't saved, as after a refused
 series save. A reset is always treated as different: the page's read lists 90

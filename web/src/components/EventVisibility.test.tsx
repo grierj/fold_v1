@@ -617,6 +617,16 @@ describe("EventVisibilityControl and the read it opened with", () => {
     expect(setVisibility).toHaveBeenCalledOnce();
   });
 
+  it.each([403, 404])("hands the page \"gone\" when the preview itself answers %i, and shows no error of its own", async (status) => {
+    visibilityImpact.mockRejectedValue(new ApiError(status, "no", { code: "x" }));
+    const { onConflict } = open();
+    await userEvent.click(screen.getByRole("radio", { name: /^Invite only/ }));
+    await userEvent.click(screen.getByRole("button", { name: "Save visibility" }));
+    await waitFor(() => expect(onConflict).toHaveBeenCalledExactlyOnceWith("gone"));
+    expect(setVisibility).not.toHaveBeenCalled();
+    expect(screen.queryByText("We couldn't check this event.")).not.toBeInTheDocument();
+  });
+
   it("a save sent again that now needs a review opens the review with the server's impact", async () => {
     visibilityImpact.mockResolvedValueOnce({ visibility: "private", currentVisibility: "private", tightened: [], leaderOpened: [] }).mockResolvedValueOnce(tightening);
     setVisibility.mockRejectedValueOnce(changed()).mockRejectedValueOnce(decision({ ...tightening, tightened: [{ ...tightening.tightened[0], registrants: 2 }], consent: B }));
