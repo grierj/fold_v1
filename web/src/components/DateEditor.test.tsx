@@ -528,6 +528,8 @@ describe("the hold", () => {
       answer.reject(new ApiError(409, "x", { code: "date_needs_consent", impact: { visibility: "private", currentVisibility: "public", tightened: [{ id: 7, title: "One date", visibility: "public", registrants: 2, occurrenceId: 1 }], leaderOpened: [], consent: "1".repeat(32) } }));
       await answer.promise.catch(() => {});
     });
+    // Leaving the page while the editor is off the screen asks first: the change was never saved.
+    expect(hold.current?.unsent).toBe(true);
     render(session(<ConfirmProvider><HoldHarness hold={hold} /></ConfirmProvider>));
     expect(await screen.findByText("The page changed while we were asking, so your changes weren't saved. You can save again.")).toBeInTheDocument();
     expect(screen.getByRole("radio", { name: /^Private/ })).toBeChecked();

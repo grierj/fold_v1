@@ -1,5 +1,5 @@
 import { canRegisterAsGuest } from "../lib/can";
-import { lazy, Suspense, useCallback, useEffect, useId, useLayoutEffect, useRef, useState, type RefObject } from "react";
+import { lazy, Suspense, useCallback, useEffect, useId, useLayoutEffect, useRef, useState, type ReactNode, type RefObject } from "react";
 import { Link, useParams } from "react-router-dom";
 import { ApiError } from "../api/core";
 import { Dates, Events } from "../api/events";
@@ -520,7 +520,7 @@ function DateDetail({ id, date }: { id: string; date: string }) {
     }
   }, [guestOpen]);
 
-  if (tombstone) return <CancelledDate cancelled={tombstone} heading={heading} />;
+  if (tombstone) return <CancelledDate cancelled={tombstone} heading={heading} notice={<RefusedSaveLine save={refusedSave} noun="date" />} />;
 
   const when = occurrence ? dateLine(occurrence.startsAt, occurrence.endsAt) : "";
   const pressed = (status: AnswerStatus) => !!occurrence && (occurrence.myRegistration === status || (status === "going" && occurrence.myRegistration === "waitlisted"));
@@ -621,8 +621,10 @@ function AnswerDetails({ occurrence, values, busy, full, root, onEdit }: {
 // A cancelled date as the server lets a qualified viewer see it (M8.1 brief 2.2): its title, its
 // date and that it was cancelled, with no answer, series, video, attendee, reminder, guest, share or
 // calendar-download controls.
-function CancelledDate({ cancelled, heading }: { cancelled: CancelledEventDate; heading: RefObject<HTMLHeadingElement | null> }) {
+// `notice` says what happened to a save refused on this date just before it was cancelled.
+function CancelledDate({ cancelled, heading, notice }: { cancelled: CancelledEventDate; heading: RefObject<HTMLHeadingElement | null>; notice: ReactNode }) {
   return <div className="fold-page fold-page-narrow space-y-6 wrap-anywhere">
+    {notice}
     <div className="fold-page-header">
       <div>
         <ButtonLink variant="link" to="/calendar"><ChevronLeftIcon className="h-4 w-4 shrink-0" /><span aria-hidden="true">Calendar</span><span className="sr-only">Back to calendar</span></ButtonLink>

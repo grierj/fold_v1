@@ -424,6 +424,7 @@ function GroupDetailContent() {
       <Missing
         title="Group not found"
         body="It may have been removed, or it may be private. If someone invited you, ask them for the link again."
+        notice={refusedDate && <RefusedSaveLine save={dateRefused} noun="date" about={formatDayFull(refusedDate.date)} />}
       />
     );
   }
@@ -432,6 +433,7 @@ function GroupDetailContent() {
     return (
       <div className="fold-page-narrow">
         <h1 className="text-3xl font-bold mb-6">Group unavailable</h1>
+        {refusedDate && <RefusedSaveLine save={dateRefused} noun="date" about={formatDayFull(refusedDate.date)} />}
         <ErrorNotice message={error ?? "We couldn't load this group."} onRetry={() => void load.retry()} />
       </div>
     );

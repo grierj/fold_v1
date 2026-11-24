@@ -137,8 +137,8 @@ export function DateEditor({ opener, base, hold, onSaved, onConflict, onClose, o
   useKeepFocusHome(home);
   const [busy, setBusy] = useState(false);
   const sending = useRef(false);
-  // A stored save ends the draft: nothing is written back to the hold after it.
-  const saved = useRef(false);
+  // A stored save or a conflict ends the draft: nothing is written back to the hold after it.
+  const ended = useRef(false);
   const [error, setErrorState] = useState(() => hold?.current?.notice ?? null);
 
   // An answer may land while the host has this editor off the screen: the hold hears of it at once.
@@ -204,6 +204,8 @@ export function DateEditor({ opener, base, hold, onSaved, onConflict, onClose, o
     read: () => readDateFields(opener),
     fields: (value) => value,
     onConflict: (why) => {
+      ended.current = true;
+
       if (hold?.current?.opened === opened) hold.current = null;
       onConflict(why);
     },
@@ -211,10 +213,10 @@ export function DateEditor({ opener, base, hold, onSaved, onConflict, onClose, o
   });
 
   const changesNow = JSON.stringify(changesOf(draft, opened));
-  const unsent = !busy && !saved.current && changesNow !== "{}";
+  const unsent = !busy && !ended.current && changesNow !== "{}";
 
   useLayoutEffect(() => {
-    if (hold && !saved.current) hold.current = { opened, draft, reason, unsent, kept: kept.refusal?.dates ?? null, notice: error };
+    if (hold && !ended.current) hold.current = { opened, draft, reason, unsent, kept: kept.refusal?.dates ?? null, notice: error };
   });
 
   async function save(e: React.FormEvent) {
@@ -298,7 +300,7 @@ export function DateEditor({ opener, base, hold, onSaved, onConflict, onClose, o
       if (sent === "saved") {
         // The answer may land while the host has this editor off the screen: the draft it holds is this one.
         const mine = mounted.current || hold?.current?.opened === opened;
-        saved.current = true;
+        ended.current = true;
 
         if (hold?.current?.opened === opened) hold.current = null;
         kept.close();
@@ -333,6 +335,9 @@ export function DateEditor({ opener, base, hold, onSaved, onConflict, onClose, o
       sending.current = false;
 
       if (mounted.current) setBusy(false);
+      // A press that ended unsaved while the host had this editor off the screen leaves its change unsent: leaving the
+      // page asks first (DEC-98).
+      else if (!ended.current && hold?.current?.opened === opened) hold.current.unsent = true;
     }
   }
 

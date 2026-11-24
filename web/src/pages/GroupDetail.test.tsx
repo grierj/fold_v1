@@ -1993,9 +1993,9 @@ describe("GroupDetail when a date's save meets someone else's change", () => {
     vi.mocked(Groups.get).mockResolvedValue(managing);
   });
 
-  async function saveTitleInto(stored: Partial<EventOccurrence>) {
+  async function saveTitleInto(stored: Partial<EventOccurrence>, answer: Error = changed()) {
     vi.mocked(Events.managedDate).mockResolvedValueOnce(forGroup({ occurrence: { ...listed, revision: "r0" } })).mockResolvedValue(forGroup({ occurrence: { ...listed, revision: "r1", ...stored } }));
-    edits.answer(changed());
+    edits.answer(answer);
     render(<MemoryRouter initialEntries={["/groups/1"]}><RosterWritesProvider><Routes><Route path="/groups/:id" element={<GroupDetail />} /></Routes></RosterWritesProvider></MemoryRouter>);
     await userEvent.click(await screen.findByRole("button", { name: "More for Supper on 2026-12-01" }));
     await userEvent.click(screen.getByRole("menuitem", { name: "Edit this date" }));
@@ -2036,6 +2036,27 @@ describe("GroupDetail when a date's save meets someone else's change", () => {
     await userEvent.click(screen.getByRole("menuitem", { name: "Edit this date" }));
     expect(screen.queryByText(NOTICE)).not.toBeInTheDocument();
     expect(await screen.findByRole("textbox", { name: /^Location/ })).toHaveValue("Annex");
+  });
+
+  it("says the person can no longer manage the date when a send is refused 403 and the page still shows the group", async () => {
+    vi.mocked(Groups.get).mockResolvedValueOnce(managing).mockResolvedValue({ ...managing, canManage: false });
+    await saveTitleInto({}, new ApiError(403, "SECRET", { code: "forbidden" }));
+    const line = await screen.findByText(`${DAY}. You can no longer manage this date, so your changes weren't saved.`);
+    await waitFor(() => expect(line).toHaveFocus());
+    expect(screen.queryByRole("button", { name: "More for Supper on 2026-12-01" })).not.toBeInTheDocument();
+    expect(edits.sent).toHaveLength(1);
+  });
+
+  it.each([
+    ["the group is gone", () => new ApiError(404, "SECRET", { code: "not_found" }), "Group not found"],
+    ["the page's read fails", () => new ApiError(500, "SECRET", { code: "server_error" }), "Group unavailable"],
+  ])("says only that the changes weren't saved, naming the day, when %s", async (_label, failure, heading) => {
+    vi.mocked(Groups.get).mockResolvedValueOnce(managing).mockRejectedValue(failure());
+    await saveTitleInto({}, new ApiError(404, "SECRET", { code: "not_found" }));
+    expect(await screen.findByRole("heading", { level: 1, name: heading })).toBeInTheDocument();
+    const line = screen.getByText(`${DAY}. Your changes weren't saved.`);
+    await waitFor(() => expect(line).toHaveFocus());
+    expect(document.body.textContent).not.toContain("SECRET");
   });
 
   it("saves twice in a row: the first save closes the editor, and the second opens from a read of its own", async () => {

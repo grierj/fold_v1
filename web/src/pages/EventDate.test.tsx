@@ -1230,6 +1230,15 @@ describe("the date page when a date's save meets someone else's change", () => {
     expect(await screen.findByRole("textbox", { name: /^Location/ })).toHaveValue("Annex");
   });
 
+  it("says only that the changes weren't saved, on the cancelled date's page, when the date was cancelled meanwhile", async () => {
+    vi.mocked(Dates.get).mockResolvedValueOnce(managerAnswer()).mockResolvedValue({ occurrence: { cancelled: true, date: "2026-12-01", title: "One invited date" } });
+    await saveInto({ cancelled: true });
+    expect(await screen.findByText("This date was cancelled. Your calendar shows the dates that are still on.")).toBeInTheDocument();
+    const line = screen.getByText("Your changes weren't saved.");
+    await waitFor(() => expect(line).toHaveFocus());
+    expect(edits.sent).toHaveLength(1);
+  });
+
   it("says the person can no longer manage the date when a send is refused 403 and the page agrees", async () => {
     vi.mocked(Dates.get).mockResolvedValueOnce(managerAnswer()).mockResolvedValue({ occurrence: occurrence({ canManage: false, canDecline: false, canBlock: false, myRegistration: null }) });
     await saveInto({}, new ApiError(403, "SECRET", { code: "forbidden" }));
