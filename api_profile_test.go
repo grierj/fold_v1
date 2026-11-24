@@ -72,9 +72,9 @@ func TestFocalPoints(t *testing.T) {
 		Role: models.MembershipLeader, Status: "active", JoinedAt: time.Now().UTC(),
 	})
 	lc := loginAPI(t, app, "leader", "password1234")
-	w = lc.do("PUT", "/api/v1/groups/"+itoa(g.ID), map[string]interface{}{
+	w = lc.do("PUT", "/api/v1/groups/"+itoa(g.ID), groupBody(t, lc, "/api/v1/groups/"+itoa(g.ID), map[string]interface{}{
 		"coverFocal": map[string]float64{"x": 25, "y": 25},
-	}, true)
+	}), true)
 	if w.Code != http.StatusOK {
 		t.Fatalf("PUT group focal: %d %s", w.Code, w.Body.String())
 	}
@@ -111,9 +111,9 @@ func TestCoverFocalUpdateKeepsUpload(t *testing.T) {
 	}
 	decodeJSON(t, w, &uploaded)
 
-	w = c.do("PUT", "/api/v1/groups/"+gid, map[string]any{
+	w = c.do("PUT", "/api/v1/groups/"+gid, groupBody(t, c, "/api/v1/groups/"+gid, map[string]any{
 		"coverFocal": map[string]float64{"x": 10, "y": 20},
-	}, true)
+	}), true)
 	if w.Code != http.StatusOK {
 		t.Fatalf("focal: %d %s", w.Code, w.Body.String())
 	}
@@ -587,7 +587,7 @@ func TestGroupCoverLinkIgnored(t *testing.T) {
 	if created.Group.ImageURL != "" {
 		t.Fatalf("create stored link: %q", created.Group.ImageURL)
 	}
-	c.do("PUT", "/api/v1/groups/"+itoa(created.Group.ID), map[string]any{"imageUrl": "javascript:alert(1)"}, true)
+	c.do("PUT", "/api/v1/groups/"+itoa(created.Group.ID), groupBody(t, c, "/api/v1/groups/"+itoa(created.Group.ID), map[string]any{"imageUrl": "javascript:alert(1)"}), true)
 	var g models.Group
 	app.DB.First(&g, created.Group.ID)
 	if g.ImageURL != "" {

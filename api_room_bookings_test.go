@@ -418,7 +418,7 @@ func TestPlaceLineSharesCasesWithTheWeb(t *testing.T) {
 // archiveGroup archives f.group through the real API, as its leader.
 func (f bookingFixture) archiveGroup(t *testing.T) {
 	t.Helper()
-	if w := f.leader.do("PUT", "/api/v1/groups/"+itoa(f.group), map[string]any{"status": models.GroupArchived}, true); w.Code != http.StatusOK {
+	if w := f.leader.do("PUT", "/api/v1/groups/"+itoa(f.group), groupBody(t, f.leader, "/api/v1/groups/"+itoa(f.group), map[string]any{"status": models.GroupArchived}), true); w.Code != http.StatusOK {
 		t.Fatalf("archive: %d %s", w.Code, w.Body.String())
 	}
 }

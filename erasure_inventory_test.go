@@ -228,6 +228,7 @@ var erasureColumns = []erasureColumn{
 	{"groups", "updated_at", "T11", "RET", []string{"T11"}},
 	{"groups", "deleted_at", "T11", "RET", []string{"T11"}},
 	{"groups", "member_limit", "T11", "RET", []string{"T11"}},
+	{"groups", "edit_revision", "T11", "RET", []string{"T11"}},
 
 	// T12 guardian_links
 	{"guardian_links", "id", "T12", "RET", []string{"T12"}},

@@ -806,7 +806,7 @@ func TestDateEditTightenWithholdsATitleSetWhileHidden(t *testing.T) {
 	gormMust(t, f.app.DB.Create(&models.Setting{Key: settingGuardianCopies, Value: "true"}))
 	gormMust(t, f.app.DB.Create(&models.Registration{UserID: &teen.ID, OccurrenceID: f.dates[1].ID, Status: models.RegGoing, AttendanceMode: models.AttendanceInPerson, Source: "web"}))
 
-	apiDo(t, f.admin, "PUT", "/api/v1/groups/"+itoa(f.group), map[string]any{"status": models.GroupArchived}, http.StatusOK)
+	apiDo(t, f.admin, "PUT", "/api/v1/groups/"+itoa(f.group), groupBody(t, f.admin, "/api/v1/groups/"+itoa(f.group), map[string]any{"status": models.GroupArchived}), http.StatusOK)
 	if s := regStatus(t, f.app, teen.ID, f.dates[1].ID); s != models.RegGoing {
 		t.Fatalf("fixture: archiving left the teen %s", s)
 	}
@@ -1219,16 +1219,16 @@ func TestDateEditInheritedPlace(t *testing.T) {
 	if base.Location != "Group hall" || strings.HasSuffix(base.Revision, ".-") {
 		t.Fatalf("an inherited place: %+v", base)
 	}
-	apiDo(t, f.admin, "PUT", "/api/v1/groups/"+gid, map[string]any{"location": "Chapel"}, http.StatusOK)
+	apiDo(t, f.admin, "PUT", "/api/v1/groups/"+gid, groupBody(t, f.admin, "/api/v1/groups/"+gid, map[string]any{"location": "Chapel"}), http.StatusOK)
 	wantDateEdit(t, f.admin, f.event.ID, f.date(0), dateEditBody(newDateAttempt(t), base.Revision, map[string]any{"title": "Still here"}), http.StatusConflict, "date_changed")
 	base = editBaseOf(t, f.admin, f.event.ID, f.date(0))
-	apiDo(t, f.admin, "PUT", "/api/v1/groups/"+gid, map[string]any{"location": "Garden"}, http.StatusOK)
+	apiDo(t, f.admin, "PUT", "/api/v1/groups/"+gid, groupBody(t, f.admin, "/api/v1/groups/"+gid, map[string]any{"location": "Garden"}), http.StatusOK)
 	wantDateEdit(t, f.admin, f.event.ID, f.date(0), dateEditBody(newDateAttempt(t), base.Revision, map[string]any{"location": "Garden"}), http.StatusConflict, "date_changed")
 	if o := occurrenceRow(t, f.app, f.dates[0].ID); o.LocationOverride != nil {
 		t.Fatal("a refused edit pinned the place")
 	}
 	// Back to the place the token was read with: the tag matches again.
-	apiDo(t, f.admin, "PUT", "/api/v1/groups/"+gid, map[string]any{"location": "Chapel"}, http.StatusOK)
+	apiDo(t, f.admin, "PUT", "/api/v1/groups/"+gid, groupBody(t, f.admin, "/api/v1/groups/"+gid, map[string]any{"location": "Chapel"}), http.StatusOK)
 	wantDateEdit(t, f.admin, f.event.ID, f.date(0), dateEditBody(newDateAttempt(t), base.Revision, map[string]any{"title": "Chapel supper"}), http.StatusOK, "")
 
 	apiDo(t, f.admin, "PUT", fmt.Sprintf("/api/v1/events/%d", f.event.ID), seriesBody(t, f.admin, fmt.Sprintf("/api/v1/events/%d", f.event.ID), map[string]any{"location": "Own room"}), http.StatusOK)
@@ -1236,7 +1236,7 @@ func TestDateEditInheritedPlace(t *testing.T) {
 	if !strings.HasSuffix(own.Revision, ".-") {
 		t.Fatalf("an event place still tags the group: %s", own.Revision)
 	}
-	apiDo(t, f.admin, "PUT", "/api/v1/groups/"+gid, map[string]any{"location": "Somewhere else"}, http.StatusOK)
+	apiDo(t, f.admin, "PUT", "/api/v1/groups/"+gid, groupBody(t, f.admin, "/api/v1/groups/"+gid, map[string]any{"location": "Somewhere else"}), http.StatusOK)
 	wantDateEdit(t, f.admin, f.event.ID, f.date(1), dateEditBody(newDateAttempt(t), own.Revision, map[string]any{"title": "Own supper"}), http.StatusOK, "")
 }
 
@@ -4354,7 +4354,7 @@ func TestDateEditSignalsASupersededBase(t *testing.T) {
 	})
 	t.Run("the inherited place alone", func(t *testing.T) {
 		base := editBaseOf(t, admin, f.event.ID, date)
-		apiDo(t, f.admin, "PUT", "/api/v1/groups/"+itoa(f.group), map[string]any{"location": "Chapel " + newDateAttempt(t)[:6]}, http.StatusOK)
+		apiDo(t, f.admin, "PUT", "/api/v1/groups/"+itoa(f.group), groupBody(t, f.admin, "/api/v1/groups/"+itoa(f.group), map[string]any{"location": "Chapel " + newDateAttempt(t)[:6]}), http.StatusOK)
 		wantSuperseded(t, "a place-only change", edit(base.Revision, map[string]any{"title": "Stale"}), false)
 	})
 	t.Run("counters ahead or another occurrence", func(t *testing.T) {
@@ -4429,12 +4429,12 @@ func TestDateEditHeldOriginalAcrossAnInheritedPlaceABA(t *testing.T) {
 	body := dateEditBody(newDateAttempt(t), base.Revision, map[string]any{"startsLocal": f.dates[0].StartsAt.Add(time.Hour).Format("2006-01-02T15:04")})
 	held := f.admin.doHeld("POST", dateEditPath(f.event.ID, date), body)
 
-	apiDo(t, f.admin, "PUT", "/api/v1/groups/"+gid, map[string]any{"location": "Chapel"}, http.StatusOK)
+	apiDo(t, f.admin, "PUT", "/api/v1/groups/"+gid, groupBody(t, f.admin, "/api/v1/groups/"+gid, map[string]any{"location": "Chapel"}), http.StatusOK)
 	wantSuperseded(t, "the replay under place B", postDateEdit(f.admin, f.event.ID, date, body), false)
 	if b := editBaseOf(t, f.admin, f.event.ID, date); b.Revision == base.Revision {
 		t.Fatal("fixture: the read under place B has the original base")
 	}
-	apiDo(t, f.admin, "PUT", "/api/v1/groups/"+gid, map[string]any{"location": "Group hall"}, http.StatusOK)
+	apiDo(t, f.admin, "PUT", "/api/v1/groups/"+gid, groupBody(t, f.admin, "/api/v1/groups/"+gid, map[string]any{"location": "Group hall"}), http.StatusOK)
 	held.release()
 	if w := held.wait(t); w.Code != http.StatusOK {
 		t.Fatalf("the held original under place A again: %d %s", w.Code, w.Body.String())

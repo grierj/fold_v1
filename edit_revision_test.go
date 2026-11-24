@@ -43,4 +43,20 @@ func TestEditRevisionTokensKeepTheirBytes(t *testing.T) {
 	if err := a.checkEventRevision(grouped, private, "1."+gen+".7.3.pub"); !errors.Is(err, errEventChanged) {
 		t.Fatalf("a token from before the group's change: %v, want errEventChanged", err)
 	}
+	group := &models.Group{ID: 7, EditRevision: 3}
+	if got, want := a.groupRevision(group), "1."+gen+".g7.3"; got != want {
+		t.Fatalf("group token %q, want %q", got, want)
+	}
+	if err := a.checkGroupRevision(group, "1."+gen+".g7.3"); err != nil {
+		t.Fatalf("the current group token: %v", err)
+	}
+	// An event's or a date's token with the same numbers is never a group's.
+	for _, given := range []string{"", "1." + gen + ".7.3", "1." + gen + ".7.3.c", "1." + gen + ".g7.2", "1." + gen + ".g8.3", "1.0000000000000000.g7.3", a.eventRevision(ev, nil), a.dateToken(ev, occ, nil)} {
+		if err := a.checkGroupRevision(group, given); !errors.Is(err, errGroupChanged) {
+			t.Fatalf("%q: %v, want errGroupChanged", given, err)
+		}
+	}
+	if err := a.checkEventRevision(ev, nil, a.groupRevision(&models.Group{ID: 7, EditRevision: 3})); !errors.Is(err, errEventChanged) {
+		t.Fatalf("a group token taken for an event's: %v", err)
+	}
 }

@@ -355,9 +355,9 @@ func TestDirectoryVisibility(t *testing.T) {
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("unknown visibility on create: %d %s", w.Code, w.Body.String())
 	}
-	w = leader.do("PUT", "/api/v1/groups/"+itoa(invite.ID), map[string]any{
+	w = leader.do("PUT", "/api/v1/groups/"+itoa(invite.ID), groupBody(t, leader, "/api/v1/groups/"+itoa(invite.ID), map[string]any{
 		"visibility": "hidden",
-	}, true)
+	}), true)
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("unknown visibility on update: %d %s", w.Code, w.Body.String())
 	}
@@ -679,7 +679,7 @@ func TestInviteOnlyIs404AndVisibilityEnum(t *testing.T) {
 		t.Fatalf("group JSON: %s", w.Body.String())
 	}
 	for _, v := range []string{"public", "private", "invite_only"} {
-		if w := annC.do("PUT", "/api/v1/groups/"+gid, map[string]any{"visibility": v}, true); w.Code != http.StatusOK {
+		if w := annC.do("PUT", "/api/v1/groups/"+gid, groupBody(t, annC, "/api/v1/groups/"+gid, map[string]any{"visibility": v}), true); w.Code != http.StatusOK {
 			t.Fatalf("set %s: %d %s", v, w.Code, w.Body.String())
 		}
 	}
@@ -1355,9 +1355,11 @@ func TestUpdateGroupNamePatchPreservesConcurrentState(t *testing.T) {
 	client := loginAPI(t, app, leader.Email, "password1234")
 	ac := loginAPI(t, app, admin.Email, "password1234")
 	g := newTestGroup(t, app, leader, "Original", models.GroupActive)
+	path := "/api/v1/groups/" + itoa(g.ID)
+	stale := groupBody(t, client, path, map[string]any{"name": " Renamed "})
 	gate := holdContactGate(t, app)
 	response := queueContact(func() *httptest.ResponseRecorder {
-		return client.do("PUT", "/api/v1/groups/"+itoa(g.ID), map[string]any{"name": " Renamed "}, true)
+		return client.do("PUT", path, stale, true)
 	})
 	waitContactWaiters(t, app, 1)
 	// A preceding transaction commits every field omitted by the queued PUT.
@@ -1372,7 +1374,15 @@ func TestUpdateGroupNamePatchPreservesConcurrentState(t *testing.T) {
 	if err := gate.Commit().Error; err != nil {
 		t.Fatal(err)
 	}
-	w := awaitContactResponse(t, response)
+	// The patch was made from the read before that commit: refused, nothing
+	// written (DEC-166). Sent again from a fresh read, it writes the name alone.
+	wantCode(t, "the stale name patch", awaitContactResponse(t, response), http.StatusConflict, "group_changed")
+	var unchanged models.Group
+	gormMust(t, app.DB.First(&unchanged, g.ID))
+	if unchanged.Name != "Original" || unchanged.Description != "New description" {
+		t.Fatalf("the refused patch wrote: %+v", unchanged)
+	}
+	w := client.do("PUT", path, groupBody(t, client, path, map[string]any{"name": " Renamed "}), true)
 	if w.Code != http.StatusOK {
 		t.Fatalf("name patch: %d %s", w.Code, w.Body.String())
 	}
@@ -1393,16 +1403,19 @@ func TestUpdateGroupNamePatchPreservesConcurrentState(t *testing.T) {
 	if result.Group.Name != saved.Name || result.Group.Status != saved.Status || result.Group.Visibility != saved.Visibility || result.Group.LeaderID != saved.LeaderID {
 		t.Fatalf("response did not reflect committed state: %+v", result.Group)
 	}
+	if result.Group.Revision != app.groupRevision(&saved) {
+		t.Fatalf("the answer's revision %q, want the stored group's %q", result.Group.Revision, app.groupRevision(&saved))
+	}
 	// A leader can edit an archived group but cannot explicitly reactivate it.
-	if w := client.do("PUT", "/api/v1/groups/"+itoa(g.ID), map[string]any{"status": models.GroupActive}, true); w.Code != http.StatusForbidden {
+	if w := client.do("PUT", "/api/v1/groups/"+itoa(g.ID), groupBody(t, client, "/api/v1/groups/"+itoa(g.ID), map[string]any{"status": models.GroupActive}), true); w.Code != http.StatusForbidden {
 		t.Fatalf("leader reactivation: %d %s", w.Code, w.Body.String())
 	}
-	apiDo(t, ac, "PUT", "/api/v1/groups/"+itoa(g.ID), map[string]any{"status": models.GroupActive}, http.StatusOK)
+	apiDo(t, ac, "PUT", "/api/v1/groups/"+itoa(g.ID), groupBody(t, ac, "/api/v1/groups/"+itoa(g.ID), map[string]any{"status": models.GroupActive}), http.StatusOK)
 	// Explicit empty values, zero focal points and null limit must be written.
-	apiDo(t, client, "PUT", "/api/v1/groups/"+itoa(g.ID), map[string]any{
+	apiDo(t, client, "PUT", "/api/v1/groups/"+itoa(g.ID), groupBody(t, client, "/api/v1/groups/"+itoa(g.ID), map[string]any{
 		"description": "", "location": "", "tags": []string{}, "memberLimit": nil,
 		"coverFocal": map[string]any{"x": 0, "y": 0},
-	}, http.StatusOK)
+	}), http.StatusOK)
 	if err := app.DB.First(&saved, g.ID).Error; err != nil {
 		t.Fatal(err)
 	}
@@ -1418,9 +1431,10 @@ func TestUpdateGroupDeletedAfterPreflightIsNotRecreated(t *testing.T) {
 			actor := newTestUser(t, app, "leader", "password1234", models.RoleMember)
 			client := loginAPI(t, app, actor.Email, "password1234")
 			g := newTestGroup(t, app, actor, "Original", models.GroupActive)
+			body := groupBody(t, client, "/api/v1/groups/"+itoa(g.ID), map[string]any{"name": "Resurrected"})
 			gate := holdContactGate(t, app)
 			response := queueContact(func() *httptest.ResponseRecorder {
-				return client.do("PUT", "/api/v1/groups/"+itoa(g.ID), map[string]any{"name": "Resurrected"}, true)
+				return client.do("PUT", "/api/v1/groups/"+itoa(g.ID), body, true)
 			})
 			waitContactWaiters(t, app, 1)
 			q := gate
@@ -1469,6 +1483,9 @@ func TestUpdateGroupRechecksAuthorityAtWrite(t *testing.T) {
 				body["status"] = models.GroupActive
 			}
 			g := newTestGroup(t, app, owner, "Original", status)
+			// Read before the change: the authority is judged before the
+			// revision, so a revoked manager hears the refusal, not group_changed.
+			body = groupBody(t, client, "/api/v1/groups/"+itoa(g.ID), body)
 			gate := holdContactGate(t, app)
 			response := queueContact(func() *httptest.ResponseRecorder {
 				return client.do("PUT", "/api/v1/groups/"+itoa(g.ID), body, true)
@@ -1529,27 +1546,30 @@ func TestUpdateGroupPendingDecisionsUseLockedStatus(t *testing.T) {
 			ac := loginAPI(t, app, admin.Email, "password1234")
 			gid := createGroupAs(t, lc, "Pending", models.VisibilityPrivate)
 			path := "/api/v1/groups/" + itoa(gid)
-			apiDo(t, ac, "PUT", path, map[string]any{"description": "Still pending"}, http.StatusOK)
+			apiDo(t, ac, "PUT", path, groupBody(t, ac, path, map[string]any{"description": "Still pending"}), http.StatusOK)
 			if contactCount(t, app, &models.Notification{}, "kind = ? AND resolved_at IS NULL", "group.pending") != 1 || contactCount(t, app, &models.AuditLog{}, "action IN ?", []string{audit.GroupApproved, audit.GroupRejected}) != 0 {
 				t.Fatal("unrelated pending edit decided approval")
 			}
+			decide, rename := groupBody(t, ac, path, map[string]any{"status": status}), groupBody(t, lc, path, map[string]any{"name": "Renamed"})
 			gate := holdContactGate(t, app)
 			decision := queueContact(func() *httptest.ResponseRecorder {
-				return ac.do("PUT", path, map[string]any{"status": status}, true)
+				return ac.do("PUT", path, decide, true)
 			})
 			waitContactWaiters(t, app, 1)
 			edit := queueContact(func() *httptest.ResponseRecorder {
-				return lc.do("PUT", path, map[string]any{"name": "Renamed"}, true)
+				return lc.do("PUT", path, rename, true)
 			})
 			waitContactWaiters(t, app, 2)
 			gate.Rollback()
-			for _, response := range []<-chan *httptest.ResponseRecorder{decision, edit} {
-				if w := awaitContactResponse(t, response); w.Code != http.StatusOK {
-					t.Fatalf("pending transition: %d %s", w.Code, w.Body.String())
-				}
+			if w := awaitContactResponse(t, decision); w.Code != http.StatusOK {
+				t.Fatalf("pending transition: %d %s", w.Code, w.Body.String())
 			}
+			// The edit was read before the decision: refused, then sent again
+			// from a fresh read as the form does when nothing it writes changed.
+			wantCode(t, "the edit read before the decision", awaitContactResponse(t, edit), http.StatusConflict, "group_changed")
+			apiDo(t, lc, "PUT", path, groupBody(t, lc, path, map[string]any{"name": "Renamed"}), http.StatusOK)
 			// Repeating a decision is an ordinary status no-op, not another task transition.
-			apiDo(t, ac, "PUT", path, map[string]any{"status": status}, http.StatusOK)
+			apiDo(t, ac, "PUT", path, groupBody(t, ac, path, map[string]any{"status": status}), http.StatusOK)
 			var saved models.Group
 			if err := app.DB.First(&saved, gid).Error; err != nil {
 				t.Fatal(err)
@@ -1618,8 +1638,8 @@ func TestUpdateGroupNeverReturnsToPending(t *testing.T) {
 			lc := loginAPI(t, app, leader.Email, "password1234")
 			path := "/api/v1/groups/" + itoa(g.ID)
 			before := readGroupStatusTrail(t, app, g.ID)
-			wantCode(t, "admin back to pending", ac.do("PUT", path, map[string]any{"status": models.GroupPending, "name": "Renamed"}, true), http.StatusConflict, "group_back_to_pending")
-			wantCode(t, "leader back to pending", lc.do("PUT", path, map[string]any{"status": models.GroupPending, "name": "Renamed"}, true), http.StatusForbidden, "")
+			wantCode(t, "admin back to pending", ac.do("PUT", path, groupBody(t, ac, path, map[string]any{"status": models.GroupPending, "name": "Renamed"}), true), http.StatusConflict, "group_back_to_pending")
+			wantCode(t, "leader back to pending", lc.do("PUT", path, groupBody(t, lc, path, map[string]any{"status": models.GroupPending, "name": "Renamed"}), true), http.StatusForbidden, "")
 			if after := readGroupStatusTrail(t, app, g.ID); !reflect.DeepEqual(after, before) {
 				t.Fatalf("a refused move changed something:\n%+v\n%+v", before, after)
 			}
@@ -1638,13 +1658,15 @@ func TestUpdateGroupBackToPendingIsJudgedOnTheLockedStatus(t *testing.T) {
 	ac := loginAPI(t, app, admin.Email, "password1234")
 	gid := createGroupAs(t, lc, "Pending", models.VisibilityPrivate)
 	path := "/api/v1/groups/" + itoa(gid)
+	// Both from one read: the status move is judged before the revision.
+	approveBody, backBody := groupBody(t, ac, path, map[string]any{"status": models.GroupActive}), groupBody(t, ac, path, map[string]any{"status": models.GroupPending})
 	gate := holdContactGate(t, app)
 	approve := queueContact(func() *httptest.ResponseRecorder {
-		return ac.do("PUT", path, map[string]any{"status": models.GroupActive}, true)
+		return ac.do("PUT", path, approveBody, true)
 	})
 	waitContactWaiters(t, app, 1)
 	back := queueContact(func() *httptest.ResponseRecorder {
-		return ac.do("PUT", path, map[string]any{"status": models.GroupPending}, true)
+		return ac.do("PUT", path, backBody, true)
 	})
 	waitContactWaiters(t, app, 2)
 	gate.Rollback()
@@ -1679,22 +1701,22 @@ func TestUpdateGroupArchiveAndUnarchiveAreAudited(t *testing.T) {
 		}
 	}
 
-	apiDo(t, lc, "PUT", path, map[string]any{"status": models.GroupActive}, http.StatusOK)
+	apiDo(t, lc, "PUT", path, groupBody(t, lc, path, map[string]any{"status": models.GroupActive}), http.StatusOK)
 	want("leader keeps active", models.GroupActive)
-	apiDo(t, lc, "PUT", path, map[string]any{"status": models.GroupArchived}, http.StatusOK)
+	apiDo(t, lc, "PUT", path, groupBody(t, lc, path, map[string]any{"status": models.GroupArchived}), http.StatusOK)
 	want("leader archives", models.GroupArchived, by(audit.GroupArchived, leader))
-	apiDo(t, lc, "PUT", path, map[string]any{"status": models.GroupArchived}, http.StatusOK)
+	apiDo(t, lc, "PUT", path, groupBody(t, lc, path, map[string]any{"status": models.GroupArchived}), http.StatusOK)
 	want("leader archives again", models.GroupArchived, by(audit.GroupArchived, leader))
-	wantCode(t, "leader unarchives", lc.do("PUT", path, map[string]any{"status": models.GroupActive}, true), http.StatusForbidden, "")
+	wantCode(t, "leader unarchives", lc.do("PUT", path, groupBody(t, lc, path, map[string]any{"status": models.GroupActive}), true), http.StatusForbidden, "")
 	want("refused unarchive", models.GroupArchived, by(audit.GroupArchived, leader))
-	apiDo(t, ac, "PUT", path, map[string]any{"status": models.GroupActive}, http.StatusOK)
+	apiDo(t, ac, "PUT", path, groupBody(t, ac, path, map[string]any{"status": models.GroupActive}), http.StatusOK)
 	want("admin unarchives", models.GroupActive, by(audit.GroupArchived, leader), by(audit.GroupUnarchived, admin))
-	apiDo(t, ac, "PUT", path, map[string]any{"status": models.GroupArchived}, http.StatusOK)
+	apiDo(t, ac, "PUT", path, groupBody(t, ac, path, map[string]any{"status": models.GroupArchived}), http.StatusOK)
 	want("admin archives", models.GroupArchived, by(audit.GroupArchived, leader), by(audit.GroupUnarchived, admin), by(audit.GroupArchived, admin))
 
 	// A leader withdrawing their own pending group keeps its one rejected row.
 	withdrawn := createGroupAs(t, lc, "Withdrawn", models.VisibilityPrivate)
-	apiDo(t, lc, "PUT", "/api/v1/groups/"+itoa(withdrawn), map[string]any{"status": models.GroupArchived}, http.StatusOK)
+	apiDo(t, lc, "PUT", "/api/v1/groups/"+itoa(withdrawn), groupBody(t, lc, "/api/v1/groups/"+itoa(withdrawn), map[string]any{"status": models.GroupArchived}), http.StatusOK)
 	if trail := readGroupStatusTrail(t, app, withdrawn); !reflect.DeepEqual(trail.audits, []string{by(audit.GroupRejected, leader)}) {
 		t.Fatalf("pending to archived by its leader: %+v", trail)
 	}
@@ -1744,7 +1766,7 @@ func TestUpdateGroupApprovalAuditFailureRollsBackTask(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { app.DB.Callback().Create().Remove(callback) })
-	apiDo(t, ac, "PUT", "/api/v1/groups/"+itoa(gid), map[string]any{"status": models.GroupActive, "name": "Approved"}, http.StatusInternalServerError)
+	apiDo(t, ac, "PUT", "/api/v1/groups/"+itoa(gid), groupBody(t, ac, "/api/v1/groups/"+itoa(gid), map[string]any{"status": models.GroupActive, "name": "Approved"}), http.StatusInternalServerError)
 	var saved models.Group
 	if err := app.DB.First(&saved, gid).Error; err != nil {
 		t.Fatal(err)
@@ -2566,7 +2588,7 @@ func TestGroupNextEventAtCountsOnlyVisibleDates(t *testing.T) {
 	got, _ = nextAtOf(t, cases[3].client, "/api/v1/admin/groups", g.ID)
 	requireNextAt(t, "admin group list", got, &inviteAt)
 	leaderC := loginAPI(t, app, "leader", "password1234")
-	w := leaderC.do("PUT", detail, map[string]any{"description": "Updated"}, true)
+	w := leaderC.do("PUT", "/api/v1/groups/"+itoa(g.ID), groupBody(t, leaderC, "/api/v1/groups/"+itoa(g.ID), map[string]any{"description": "Updated"}), true)
 	if w.Code != http.StatusOK {
 		t.Fatalf("update group: %d %s", w.Code, w.Body.String())
 	}
@@ -2696,4 +2718,190 @@ func TestGroupNextEventAtForPendingAndArchivedGroups(t *testing.T) {
 	requireNextAt(t, "leader of archived group", got, &start)
 	got, _ = nextAtOf(t, loginAPI(t, app, "member", "password1234"), "/api/v1/me/groups", archived.ID)
 	requireNextAt(t, "member of archived group", got, nil)
+}
+
+// groupRevisionFixture is a public group with a recurring event (newVCFixture)
+// and two managers: the church admin who created it and a second leader.
+func groupRevisionFixture(t *testing.T, vis string) (*vcFixture, *apiClient) {
+	t.Helper()
+	f := newVCFixture(t, vis)
+	lead := newTestUser(t, f.app, "co-leader", "password1234", models.RoleMember)
+	var g models.Group
+	gormMust(t, f.app.DB.First(&g, f.gid))
+	addMember(t, f.app, lead, &g, models.MembershipLeader)
+	return f, loginAPI(t, f.app, lead.Email, "password1234")
+}
+
+// TestGroupSaveNamesTheReadItWasMadeFrom (DEC-166): two managers open the
+// group form from one read and both save. The first wins and answers the new
+// revision; the second is refused with group_changed and writes nothing (the
+// group row, the dates, registrations, audit rows, notices and jobs are as
+// they were). Read again, the second saves.
+func TestGroupSaveNamesTheReadItWasMadeFrom(t *testing.T) {
+	f, lead := groupRevisionFixture(t, models.VisibilityPublic)
+	path := f.groupPath()
+	adminForm := groupBody(t, f.admin, path, map[string]any{"name": "Admin's name"})
+	leadForm := groupBody(t, lead, path, map[string]any{"location": "Lead's place"})
+	if adminForm["revision"] == "" || adminForm["revision"] != leadForm["revision"] {
+		t.Fatalf("two managers' reads of one group: %q and %q", adminForm["revision"], leadForm["revision"])
+	}
+	var won struct {
+		Group groupSummaryJSON `json:"group"`
+	}
+	if err := json.Unmarshal([]byte(apiDo(t, f.admin, "PUT", path, adminForm, http.StatusOK)), &won); err != nil {
+		t.Fatal(err)
+	}
+	var stored models.Group
+	gormMust(t, f.app.DB.First(&stored, f.gid))
+	if won.Group.Revision == adminForm["revision"] || won.Group.Revision != f.app.groupRevision(&stored) {
+		t.Fatalf("the save answered revision %q (stored %d), want the stored group's new token", won.Group.Revision, stored.EditRevision)
+	}
+	before := wholeState(t, f.app)
+	wantCode(t, "the second manager's save", lead.do("PUT", path, leadForm, true), http.StatusConflict, "group_changed")
+	if after := wholeState(t, f.app); after != before {
+		t.Fatalf("a refused save wrote:\n%s\nwant\n%s", after, before)
+	}
+	apiDo(t, lead, "PUT", path, groupBody(t, lead, path, map[string]any{"location": "Lead's place"}), http.StatusOK)
+	gormMust(t, f.app.DB.First(&stored, f.gid))
+	if stored.Name != "Admin's name" || stored.Location != "Lead's place" {
+		t.Fatalf("after both saves: %q at %q", stored.Name, stored.Location)
+	}
+}
+
+// A save names its read whatever it changes: no revision, another group's,
+// an event's token or a status-only body without one is refused alike, and
+// nothing is written.
+func TestGroupSaveRequiresItsRevision(t *testing.T) {
+	f, _ := groupRevisionFixture(t, models.VisibilityPublic)
+	path := f.groupPath()
+	other := createGroupAs(t, f.admin, "Another group", models.VisibilityPublic)
+	otherRevision := groupBody(t, f.admin, "/api/v1/groups/"+itoa(other), nil)["revision"]
+	eventRevision := seriesRevisionOf(t, f.admin, f.ev.ID)
+	before := wholeState(t, f.app)
+	for label, body := range map[string]map[string]any{
+		"no revision":             {"name": "Unread"},
+		"an empty revision":       {"name": "Unread", "revision": ""},
+		"another group's":         {"name": "Unread", "revision": otherRevision},
+		"the group's event's":     {"name": "Unread", "revision": eventRevision},
+		"a status-only body":      {"status": models.GroupArchived},
+		"a member limit cleared":  {"memberLimit": nil},
+		"a cover focal point set": {"coverFocal": map[string]any{"x": 10, "y": 20}},
+	} {
+		wantCode(t, label, f.admin.do("PUT", path, body, true), http.StatusConflict, "group_changed")
+	}
+	if after := wholeState(t, f.app); after != before {
+		t.Fatalf("a refused save wrote:\n%s\nwant\n%s", after, before)
+	}
+}
+
+// The #454 case: a manager makes a public group private while another's form,
+// opened earlier, still shows Public. That form's save of Public is a widening
+// from an older read: refused, and the group stays private.
+func TestStaleGroupWideningIsRefused(t *testing.T) {
+	f, lead := groupRevisionFixture(t, models.VisibilityPublic)
+	path := f.groupPath()
+	stale := groupBody(t, lead, path, map[string]any{"name": "Fellowship", "visibility": models.VisibilityPublic})
+	apiDo(t, f.admin, "PUT", path, confirmVisibility(t, f.admin, path, map[string]any{"visibility": models.VisibilityPrivate}), http.StatusOK)
+	before := wholeState(t, f.app)
+	wantCode(t, "the stale widening", lead.do("PUT", path, stale, true), http.StatusConflict, "group_changed")
+	if after := wholeState(t, f.app); after != before {
+		t.Fatalf("a refused widening wrote:\n%s\nwant\n%s", after, before)
+	}
+	var g models.Group
+	gormMust(t, f.app.DB.First(&g, f.gid))
+	if g.Visibility != models.VisibilityPrivate {
+		t.Fatalf("the group is %s, want private", g.Visibility)
+	}
+}
+
+// A stale tightening that would cancel someone is refused before its consent
+// is judged: nobody is cancelled or told, no audit row or notice is written,
+// and the reviewed consent still saves once the form reads again.
+func TestStaleGroupTighteningCancelsNobody(t *testing.T) {
+	f, lead := groupRevisionFixture(t, models.VisibilityPublic)
+	path := f.groupPath()
+	out := f.outsider(t, "outsider", 0)
+	tighten := map[string]any{"visibility": models.VisibilityInviteOnly}
+	stale := confirmVisibility(t, lead, path, tighten)
+	apiDo(t, f.admin, "PUT", path, groupBody(t, f.admin, path, map[string]any{"description": "Changed by the admin"}), http.StatusOK)
+	before := wholeState(t, f.app)
+	wantCode(t, "the stale tightening", lead.do("PUT", path, stale, true), http.StatusConflict, "group_changed")
+	if after := wholeState(t, f.app); after != before {
+		t.Fatalf("a refused tightening wrote:\n%s\nwant\n%s", after, before)
+	}
+	if got := regStatus(t, f.app, out.ID, f.dates[0].ID); got != models.RegGoing {
+		t.Fatalf("the refused tightening cancelled the outsider: %s", got)
+	}
+	apiDo(t, lead, "PUT", path, groupBody(t, lead, path, with(tighten, "consent", stale["consent"])), http.StatusOK)
+	if got := regStatus(t, f.app, out.ID, f.dates[0].ID); got != models.RegCancelled {
+		t.Fatalf("the fresh tightening left the outsider %s", got)
+	}
+}
+
+// Only the group's managers read its revision: a member, a signed-in
+// non-member and a visitor get none, on the group page or in a list.
+func TestGroupRevisionIsReadOnlyByItsManagers(t *testing.T) {
+	f, lead := groupRevisionFixture(t, models.VisibilityPublic)
+	member := newTestUser(t, f.app, "member", "password1234", models.RoleMember)
+	var g models.Group
+	gormMust(t, f.app.DB.First(&g, f.gid))
+	addMember(t, f.app, member, &g, models.MembershipMember)
+	newTestUser(t, f.app, "neighbour", "password1234", models.RoleMember)
+	detail := groupDetailPath(f.gid)
+	for label, c := range map[string]*apiClient{"admin": f.admin, "leader": lead} {
+		if !strings.Contains(apiDo(t, c, "GET", detail, nil, http.StatusOK), `"revision":"`+f.app.groupRevision(&g)+`"`) {
+			t.Errorf("the %s's read carries no current revision", label)
+		}
+	}
+	for label, c := range map[string]*apiClient{
+		"member":    loginAPI(t, f.app, member.Email, "password1234"),
+		"neighbour": loginAPI(t, f.app, "neighbour", "password1234"),
+		"visitor":   anonClient(t, f.app, "10.13.0.9"),
+	} {
+		if body := apiDo(t, c, "GET", detail, nil, http.StatusOK); strings.Contains(body, `"revision"`) {
+			t.Errorf("the %s's read carries a revision: %s", label, body)
+		}
+	}
+	for _, list := range []string{"/api/v1/groups", "/api/v1/me/groups"} {
+		if body := apiDo(t, f.admin, "GET", list, nil, http.StatusOK); strings.Contains(body, `"revision"`) {
+			t.Errorf("%s carries a revision: %s", list, body)
+		}
+	}
+}
+
+// A cover change takes no revision and raises the group's, so a form opened
+// before it is refused; POST /groups takes the cover's focal point, an edge
+// included.
+func TestGroupCoverMovesTheRevision(t *testing.T) {
+	f, _ := groupRevisionFixture(t, models.VisibilityPublic)
+	path := f.groupPath()
+	var g models.Group
+	gormMust(t, f.app.DB.First(&g, f.gid))
+	was := g.EditRevision
+	apiDo(t, f.admin, "DELETE", path+"/cover", nil, http.StatusOK)
+	gormMust(t, f.app.DB.First(&g, f.gid))
+	if g.EditRevision != was {
+		t.Fatalf("removing a cover the group never had moved the revision from %d to %d", was, g.EditRevision)
+	}
+	gormMust(t, f.app.DB.Model(&g).Update("image_url", "/uploads/covers/1/old.jpg"))
+	stale := groupBody(t, f.admin, path, map[string]any{"name": "After the cover"})
+	apiDo(t, f.admin, "DELETE", path+"/cover", nil, http.StatusOK)
+	wantCode(t, "a save read before the cover went", f.admin.do("PUT", path, stale, true), http.StatusConflict, "group_changed")
+
+	w := f.admin.do("POST", "/api/v1/groups", map[string]any{"name": "Edge", "coverFocal": map[string]any{"x": 0, "y": 140}}, true)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("create with a focal point: %d %s", w.Code, w.Body.String())
+	}
+	var created struct {
+		Group groupSummaryJSON `json:"group"`
+	}
+	decodeJSON(t, w, &created)
+	var edge models.Group
+	gormMust(t, f.app.DB.First(&edge, created.Group.ID))
+	if edge.CoverFocalX != 0 || edge.CoverFocalY != 100 || created.Group.CoverFocalX != 0 || created.Group.CoverFocalY != 100 {
+		t.Fatalf("created focal point %v,%v (answered %v,%v), want 0,100", edge.CoverFocalX, edge.CoverFocalY, created.Group.CoverFocalX, created.Group.CoverFocalY)
+	}
+	if created.Group.Revision != "" {
+		t.Fatalf("the create answered a revision: %q", created.Group.Revision)
+	}
 }

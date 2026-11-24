@@ -30,6 +30,8 @@ export interface GroupUpdate extends Partial<GroupInput> {
   openedEvents?: Record<string, OpenedDecision>;
   // The token of the reviewed impact; sent with every visibility change (DEC-158).
   consent?: string;
+  // The group's revision from the read the form opened with; every save names it (DEC-166).
+  revision: string;
 }
 
 export const Groups = {
@@ -39,7 +41,8 @@ export const Groups = {
   get: (id: Id, page?: { cursor?: string; limit?: number }, pinned?: Credential) =>
     api<GroupDetailResponse>(`${path`/groups/${id}`}${query({ datePaging: 2, cursor: page?.cursor, limit: page?.limit })}`, { pinned }),
   mine: () => api<GroupListResponse>("/me/groups"),
-  create: (data: GroupInput) => api<GroupResponse>("/groups", { method: "POST", body: data }),
+  // coverFocal: the focal point of the cover the new-group form uploads right after.
+  create: (data: GroupInput & { coverFocal?: { x: number; y: number } }) => api<GroupResponse>("/groups", { method: "POST", body: data }),
   update: (id: Id, data: GroupUpdate) => api<GroupResponse>(path`/groups/${id}`, { method: "PUT", body: data }),
   visibilityImpact: (id: Id, visibility: Visibility) =>
     api<VisibilityImpact>(`${path`/groups/${id}/visibility-impact`}${query({ visibility })}`),

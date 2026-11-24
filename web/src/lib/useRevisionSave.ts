@@ -45,20 +45,24 @@ export interface LostSend {
 }
 
 // What a save that landed answers: the thing it saved, with its new revision.
-type SavedAnswer = { event: SavedThing } | { occurrence: SavedThing };
+type SavedAnswer = { event: SavedThing } | { occurrence: SavedThing } | { group: SavedThing };
 
 // A save's answer names the thing saved: `{ [key]: { id, revision } }` with this id and a revision. Anything else (a
 // page from something in between, which reads as {}, or another thing's answer) is no answer.
-export const answerNames = (key: "event" | "occurrence", id: number) => (answer: unknown): answer is SavedAnswer => {
+export const answerNames = (key: "event" | "occurrence" | "group", id: number) => (answer: unknown): answer is SavedAnswer => {
   if (!isObject(answer)) return false;
-  const thing = key === "event" ? "event" in answer && answer.event : "occurrence" in answer && answer.occurrence;
+
+  const thing = key === "event" ? "event" in answer && answer.event
+    : key === "occurrence" ? "occurrence" in answer && answer.occurrence
+      : "group" in answer && answer.group;
 
   return isObject(thing) && "id" in thing && "revision" in thing && isNumber(thing.id) && thing.id === id && isString(thing.revision) && thing.revision !== "";
 };
 
-// useRevisionSave is the one conflict protocol for a manager's save (DEC-162, DEC-163, DEC-164). The save names the read
-// the form opened with (`revision`, kept from the first render, like `opened`). On a refusal (`changedCode`: an event's
-// `event_changed`, a single date's `date_changed`) the value is read once and compared, in this order: what is stored
+// useRevisionSave is the one conflict protocol for a manager's save (DEC-162, DEC-163, DEC-164, DEC-166). The save names
+// the read the form opened with (`revision`, kept from the first render, like `opened`). On a refusal (`changedCode`: an
+// event's `event_changed`, a single date's `date_changed`, a group's `group_changed`) the value is read once and
+// compared, in this order: what is stored
 // is what this save would leave (`intended`: an earlier press stored it and its answer was lost), so the save is done
 // and nothing more is sent; nothing the save can write has changed since the form opened (the person's own room
 // booking, a restart), so the same save goes again under the new revision; anything else goes to `onConflict`, and
@@ -100,7 +104,7 @@ export function useRevisionSave<T, F>({
   answers: (answer: unknown) => answer is SavedAnswer;
   lost?: LostSend;
   onConflict?: (why: RevisionConflict) => void;
-  changedCode?: "event_changed" | "date_changed";
+  changedCode?: "event_changed" | "date_changed" | "group_changed";
 }) {
   const [base] = useState(() => ({ opened, revision }));
   const own = useRef<LostSend>({ current: false });

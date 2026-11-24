@@ -1,10 +1,10 @@
 import { renderWithAuth } from "../test/auth";
 import { stubService } from "../test/service";
-import { screen, waitFor } from "@testing-library/react";
+import { fireEvent, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter, Route, RouterProvider, Routes, createMemoryRouter } from "react-router-dom";
-import { beforeEach, expect, it, vi } from "vitest";
-import { Groups } from "../api/groups";
+import { afterEach, beforeEach, expect, it, vi } from "vitest";
+import { GroupCover, Groups } from "../api/groups";
 import type { GroupSummary } from "../types";
 import { UnsavedChangesBlocker } from "../lib/unsavedChanges";
 import { NewGroup } from "./NewGroup";
@@ -14,6 +14,16 @@ const auth = vi.hoisted(() => ({ isAdmin: false }));
 const render = renderWithAuth(() => ({ user: { id: 2 }, loading: false, isAdmin: auth.isAdmin }));
 
 stubService(Groups, () => ({ create: vi.fn(), update: vi.fn() }));
+
+stubService(GroupCover, () => ({ upload: vi.fn() }));
+
+// A photo under 1 MB goes up as it is (prepareUpload); jsdom has no object URLs for its preview.
+function stubObjectUrls() {
+  vi.stubGlobal("URL", class extends URL {
+    static createObjectURL = vi.fn(() => "blob:chosen");
+    static revokeObjectURL = vi.fn();
+  });
+}
 
 const made = (status: GroupSummary["status"]) => ({
   group: {
@@ -34,6 +44,8 @@ async function submit(name = "Sam's study") {
   await userEvent.type(screen.getByLabelText("Group name"), name);
   await userEvent.click(screen.getByRole("button", { name: "Create group" }));
 }
+
+afterEach(() => vi.unstubAllGlobals());
 
 beforeEach(() => { vi.resetAllMocks(); auth.isAdmin = false; });
 
@@ -165,4 +177,22 @@ it("shows a one-line summary while More options is closed, and follows what is t
   await userEvent.type(screen.getByLabelText(/Member limit/), "20");
   await userEvent.click(more);
   expect(screen.getByText("Tags: men, food · Limit 20 · Pattern cover")).toBeInTheDocument();
+});
+
+// The cover's focal point goes with the new group; nothing saves the group a second time (DEC-166).
+it("sends the cover's focal point with the new group, then uploads the photo, and never saves the group again", async () => {
+  const photo = new File(["x"], "cover.jpg", { type: "image/jpeg" });
+  stubObjectUrls();
+  vi.mocked(Groups.create).mockResolvedValue(made("pending"));
+  vi.mocked(GroupCover.upload).mockResolvedValue({ imageUrl: "/uploads/covers/9/a.jpg" });
+  open();
+  await userEvent.click(screen.getByRole("button", { name: "More options" }));
+  await userEvent.upload(document.querySelector<HTMLInputElement>('input[type="file"]')!, photo);
+  const crop = await screen.findByTitle("Click to set the focal point");
+  crop.getBoundingClientRect = () => ({ left: 0, top: 0, width: 200, height: 100, right: 200, bottom: 100, x: 0, y: 0, toJSON: () => ({}) });
+  fireEvent.click(crop, { clientX: 50, clientY: 75 });
+  await submit();
+  await waitFor(() => expect(GroupCover.upload).toHaveBeenCalledWith(9, photo));
+  expect(Groups.create).toHaveBeenCalledWith(expect.objectContaining({ coverFocal: { x: 25, y: 75 } }));
+  expect(Groups.update).not.toHaveBeenCalled();
 });

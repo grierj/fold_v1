@@ -964,7 +964,7 @@ func TestGroupAudienceChangeMakesTheEventTokenStale(t *testing.T) {
 	apiDo(t, f.admin, "PUT", path, confirmVisibility(t, f.admin, path, map[string]any{"visibility": models.VisibilityInviteOnly}), http.StatusOK)
 	opened := seriesRevisionOf(t, f.actor, f.event.ID)
 	row := eventRow(t, f.app, f.event.ID).EditRevision
-	apiDo(t, f.admin, "PUT", group, map[string]any{"visibility": models.VisibilityPrivate}, http.StatusOK)
+	apiDo(t, f.admin, "PUT", group, groupBody(t, f.admin, group, map[string]any{"visibility": models.VisibilityPrivate}), http.StatusOK)
 	if got := eventRow(t, f.app, f.event.ID).EditRevision; got != row {
 		t.Fatalf("the group change wrote the event row: revision %d, was %d", got, row)
 	}
@@ -985,7 +985,7 @@ func TestGroupAudienceChangeMakesTheEventTokenStale(t *testing.T) {
 
 	church := churchEvent(t, f.admin, "Church supper")
 	token := seriesRevisionOf(t, f.admin, church.ID)
-	apiDo(t, f.admin, "PUT", group, map[string]any{"visibility": models.VisibilityPublic}, http.StatusOK)
+	apiDo(t, f.admin, "PUT", group, groupBody(t, f.admin, group, map[string]any{"visibility": models.VisibilityPublic}), http.StatusOK)
 	if got := seriesRevisionOf(t, f.admin, church.ID); got != token {
 		t.Fatalf("a group change moved a church-wide event's token: %q, was %q", got, token)
 	}

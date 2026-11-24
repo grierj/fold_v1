@@ -655,7 +655,7 @@ func tryLogin(t *testing.T, app *App, ip, email, password string) (int, string) 
 
 func setLimit(t *testing.T, c *apiClient, g *models.Group, limit any) {
 	t.Helper()
-	if w := c.do("PUT", "/api/v1/groups/"+itoa(g.ID), map[string]any{"memberLimit": limit}, true); w.Code != http.StatusOK {
+	if w := c.do("PUT", "/api/v1/groups/"+itoa(g.ID), groupBody(t, c, "/api/v1/groups/"+itoa(g.ID), map[string]any{"memberLimit": limit}), true); w.Code != http.StatusOK {
 		t.Fatalf("set limit %v: %d %s", limit, w.Code, w.Body.String())
 	}
 }
@@ -1568,6 +1568,33 @@ func confirmVisibility(t *testing.T, c *apiClient, path string, body map[string]
 	out["consent"] = impact.Consent
 	if eventVisibilityPath.MatchString(path) {
 		return visibilityBody(t, c, path, out)
+	}
+	if groupPutPath.MatchString(path) {
+		return groupBody(t, c, path, out)
+	}
+	return out
+}
+
+// groupBody is body for PUT /api/v1/groups/:id at path with the revision the
+// group form opened by c would hold (DEC-166): c reads the group page and its
+// revision goes with the save. A client that may not manage the group reads
+// none, and the server refuses it before judging the revision. A body that
+// already names a revision keeps it.
+func groupBody(t *testing.T, c *apiClient, path string, body map[string]any) map[string]any {
+	t.Helper()
+	if !groupPutPath.MatchString(path) {
+		t.Fatalf("%s is not a group save", path)
+	}
+	out := map[string]any{}
+	if w := c.do("GET", path+"?datePaging="+groupDetailDatePaging, nil, false); w.Code == http.StatusOK {
+		var page struct {
+			Group groupSummaryJSON `json:"group"`
+		}
+		decodeJSON(t, w, &page)
+		out["revision"] = page.Group.Revision
+	}
+	for k, v := range body {
+		out[k] = v
 	}
 	return out
 }

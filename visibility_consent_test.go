@@ -349,7 +349,7 @@ func TestNoConsentWhereNothingIsReviewRequired(t *testing.T) {
 				want = want[1:]
 			}
 			apiDo(t, f.admin, "PUT", f.eventPath(), visibilityBody(t, f.admin, f.eventPath(), body(map[string]any{"visibility": models.VisibilityPrivate})), http.StatusOK)
-			apiDo(t, f.admin, "PUT", f.groupPath(), body(map[string]any{"visibility": models.VisibilityInviteOnly, "openedEvents": map[string]string{"date:" + itoa(f.dates[0].ID): "keep"}}), http.StatusOK)
+			apiDo(t, f.admin, "PUT", f.groupPath(), groupBody(t, f.admin, f.groupPath(), body(map[string]any{"visibility": models.VisibilityInviteOnly, "openedEvents": map[string]string{"date:" + itoa(f.dates[0].ID): "keep"}})), http.StatusOK)
 			if got := f.takeDeclared(); !slices.Equal(got, want) {
 				t.Fatalf("declarations %v, want %v", got, want)
 			}
@@ -396,7 +396,7 @@ func TestStaleTabBodiesAreRefused(t *testing.T) {
 	wantDatePageOutdated(t, f.admin.do("PUT", f.datePath(0), map[string]any{"visibility": models.VisibilityInviteOnly, "confirm": true}, true))
 	// An event body as the old tab sent it: no revision, no consent (DEC-163).
 	eventChanged(t, f.admin.do("PUT", f.eventPath(), map[string]any{"visibility": models.VisibilityInviteOnly, "confirm": true}, true), "an old tab's tightening")
-	wantOutdated(t, f.admin.do("PUT", f.groupPath(), map[string]any{"visibility": models.VisibilityInviteOnly}, true))
+	wantOutdated(t, f.admin.do("PUT", f.groupPath(), groupBody(t, f.admin, f.groupPath(), map[string]any{"visibility": models.VisibilityInviteOnly}), true))
 	wantDatePageOutdated(t, f.admin.do("PUT", f.datePath(1), map[string]any{"visibility": models.VisibilityInviteOnly, "confirm": true}, true))
 	if f.state(t) != before {
 		t.Fatal("a stale tab's body wrote")
@@ -996,7 +996,7 @@ func TestEventResetBindsTheCurrentSeries(t *testing.T) {
 		body := map[string]any{"visibility": io}
 		token := f.preview(t, f.groupPath(), body).Consent
 		gormMust(t, f.app.DB.Model(&models.Group{}).Where("id = ?", f.gid).Update("visibility", models.VisibilityPrivate))
-		fresh := wantDecision(t, f.admin.do("PUT", f.groupPath(), with(body, "consent", token), true))
+		fresh := wantDecision(t, f.admin.do("PUT", f.groupPath(), groupBody(t, f.admin, f.groupPath(), with(body, "consent", token)), true))
 		if fresh.CurrentVisibility != models.VisibilityPrivate {
 			t.Fatalf("the group's 409 names %q", fresh.CurrentVisibility)
 		}
@@ -1070,7 +1070,7 @@ func TestEveryEventVisibilityWriterDeclaresConsent(t *testing.T) {
 		{"W4 n=0 with a leader-opened event kept (W5)", func() {
 			var opened models.Event
 			gormMust(t, f.app.DB.Where("group_id = ? AND visibility = ?", f.gid, models.VisibilityPublic).First(&opened))
-			apiDo(t, f.admin, "PUT", f.groupPath(), map[string]any{"visibility": models.VisibilityInviteOnly, "consent": "", "openedEvents": map[string]string{itoa(opened.ID): "keep"}}, http.StatusOK)
+			apiDo(t, f.admin, "PUT", f.groupPath(), groupBody(t, f.admin, f.groupPath(), map[string]any{"visibility": models.VisibilityInviteOnly, "consent": "", "openedEvents": map[string]string{itoa(opened.ID): "keep"}}), http.StatusOK)
 		}, consentNoReview},
 	}
 	for _, s := range steps {
@@ -1193,7 +1193,7 @@ func writerRowsUnderTheGate(t *testing.T) {
 	}
 	rows = append(rows,
 		row{"14 W5+W3 a leader-opened event and an opened date kept, nobody cancelled", func(t *testing.T, f *vcFixture) {
-			apiDo(t, f.admin, "PUT", f.groupPath(), with(opened(t, f, openedKeep), "consent", ""), http.StatusOK)
+			apiDo(t, f.admin, "PUT", f.groupPath(), groupBody(t, f.admin, f.groupPath(), with(opened(t, f, openedKeep), "consent", "")), http.StatusOK)
 		}, []string{consentNoReview}},
 		row{"15 W4+W3 the same tightened over a registrant, with the token", func(t *testing.T, f *vcFixture) {
 			body := opened(t, f, openedTighten)

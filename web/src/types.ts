@@ -60,6 +60,9 @@ export interface GroupSummary {
   memberLimit: number | null;
   // The viewer's own role, on the directory and My groups lists only (DEC-94).
   myRole?: "leader" | "member";
+  // The group's revision the group form's save names, only for its managers on the group page and that save's
+  // answer (DEC-166).
+  revision?: string;
 }
 
 // Who can see a group (C3). invite_only groups are hidden from everyone but

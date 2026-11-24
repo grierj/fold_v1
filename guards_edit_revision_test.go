@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"go/ast"
 	"slices"
+	"strings"
 	"testing"
 
 	"fold/internal/guardkit"
@@ -15,8 +16,9 @@ import (
 // (edit_revision.go) inside its write transaction, under the row lock, so a
 // refusal writes nothing.
 //
-// Parse-only, root package. A check is a call named checkEventRevision or
-// checkEditRevision outside edit_revision.go. It is inside the transaction when
+// Parse-only, root package. A check is a call named checkEventRevision,
+// checkGroupRevision or checkEditRevision outside edit_revision.go. It is
+// inside the transaction when
 // the nearest function literal around it is an argument of a call named
 // contactMutation or Transaction. The guard does not see a check reached
 // through a helper the handler calls, a transaction opened another way, or
@@ -24,9 +26,9 @@ import (
 // ---------------------------------------------------------------------------
 
 // editRevisionCheckers is every handler that checks a save's revision, exactly.
-var editRevisionCheckers = []string{"apiSetEventVisibility", "apiUpdateEvent"}
+var editRevisionCheckers = []string{"apiSetEventVisibility", "apiUpdateEvent", "apiUpdateGroup"}
 
-var editRevisionChecks = map[string]bool{"checkEventRevision": true, "checkEditRevision": true}
+var editRevisionChecks = map[string]bool{"checkEventRevision": true, "checkGroupRevision": true, "checkEditRevision": true}
 
 var editRevisionTransactions = map[string]bool{"contactMutation": true, "Transaction": true}
 
@@ -109,7 +111,17 @@ func (a *App) apiUpdateEvent(c *gin.Context) {
 	})
 }
 `
-	if bad := editRevisionProblems(guardkit.Sources{"a.go": visibility, "b.go": series}.Parse(0)); len(bad) > 0 {
+	const group = `package main
+func (a *App) apiUpdateGroup(c *gin.Context) {
+	err := a.contactMutation(contactChange{}, func(tx *gorm.DB) error {
+		if err := a.checkGroupRevision(&locked, body.Revision); err != nil {
+			return err
+		}
+		return nil
+	})
+}
+`
+	if bad := editRevisionProblems(guardkit.Sources{"a.go": visibility, "b.go": series, "c.go": group}.Parse(0)); len(bad) > 0 {
 		t.Fatalf("the sound shape was flagged: %v", bad)
 	}
 	for name, src := range map[string]string{
@@ -132,6 +144,25 @@ func (a *App) apiSetEventVisibility(c *gin.Context) {
 	a.contactMutation(contactChange{}, func(tx *gorm.DB) error { return check() })
 }
 `,
+		"a group save that skips the check": `package main
+func (a *App) apiSetEventVisibility(c *gin.Context) {
+	a.contactMutation(contactChange{}, func(tx *gorm.DB) error { return a.checkEventRevision(locked, body.Revision) })
+}
+func (a *App) apiUpdateGroup(c *gin.Context) {
+	a.contactMutation(contactChange{}, func(tx *gorm.DB) error { return nil })
+}
+`,
+		"a group check before the transaction": `package main
+func (a *App) apiSetEventVisibility(c *gin.Context) {
+	a.contactMutation(contactChange{}, func(tx *gorm.DB) error { return a.checkEventRevision(locked, body.Revision) })
+}
+func (a *App) apiUpdateGroup(c *gin.Context) {
+	if err := a.checkGroupRevision(g, body.Revision); err != nil {
+		return
+	}
+	a.contactMutation(contactChange{}, func(tx *gorm.DB) error { return nil })
+}
+`,
 		"an unlisted handler that checks": `package main
 func (a *App) apiSetEventVisibility(c *gin.Context) {
 	a.contactMutation(contactChange{}, func(tx *gorm.DB) error { return a.checkEventRevision(locked, body.Revision) })
@@ -141,7 +172,11 @@ func (a *App) apiSetGroup(c *gin.Context) {
 }
 `,
 	} {
-		if bad := editRevisionProblems(guardkit.Sources{"a.go": src, "b.go": series}.Parse(0)); len(bad) == 0 {
+		sources := guardkit.Sources{"a.go": src, "b.go": series}
+		if !strings.Contains(src, "apiUpdateGroup") {
+			sources["c.go"] = group
+		}
+		if bad := editRevisionProblems(sources.Parse(0)); len(bad) == 0 {
 			t.Errorf("%s passed the guard", name)
 		}
 	}

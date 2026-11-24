@@ -83,7 +83,8 @@ var factColumnsLeftOut = map[string]map[string]string{
 	"groups": {
 		"name": "a hidden group's name", "location": "place", "description": "unused text", "tags": "unused text",
 		"image_url": "unused", "cover_focal_x": "unused", "cover_focal_y": "unused", "leader_id": "display only",
-		"member_limit": "unused", "deletion_requested": "unused", "created_at": "unused", "updated_at": "unused",
+		"member_limit": "unused", "deletion_requested": "unused", "edit_revision": "group form token only",
+		"created_at": "unused", "updated_at": "unused",
 	},
 	"memberships": {"joined_at": "unused", "tenure": "unused"},
 	"event_occurrences": {

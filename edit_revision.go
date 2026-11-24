@@ -92,3 +92,28 @@ func (a *App) checkEventRevision(locked *models.Event, group *models.Group, give
 func readEventRevision(tx *gorm.DB, ev *models.Event) error {
 	return tx.Raw("SELECT edit_revision FROM events WHERE id = ?", ev.ID).Row().Scan(&ev.EditRevision)
 }
+
+// errGroupChanged refuses a group form save made from an older read of the
+// group than the one it would change. Nothing is written.
+var errGroupChanged = apiErr(http.StatusConflict, "group_changed", "the group changed since this edit was based on it")
+
+// groupRevision is the token the group form based on g holds:
+// 1.<generation>.g<group id>.<group revision>. The "g" and the part count keep
+// it apart from an event's or a date's token. The trigger of migration 00017
+// raises the revision on every change to a tracked column of the group row,
+// the cover endpoints' image_url included.
+func (a *App) groupRevision(g *models.Group) string {
+	return a.editRevision(fmt.Sprintf("g%d", g.ID), g.EditRevision)
+}
+
+// checkGroupRevision refuses given unless it is the token of locked, the group
+// as read under its row lock.
+func (a *App) checkGroupRevision(locked *models.Group, given string) error {
+	return checkEditRevision(given, a.groupRevision(locked), errGroupChanged)
+}
+
+// readGroupRevision reads g's revision back into it after the transaction's
+// last write: edit_revision is the trigger's, never written by GORM.
+func readGroupRevision(tx *gorm.DB, g *models.Group) error {
+	return tx.Raw("SELECT edit_revision FROM groups WHERE id = ?", g.ID).Row().Scan(&g.EditRevision)
+}

@@ -22,7 +22,7 @@ func TestGroupMorePrivateTightensAndCancels(t *testing.T) {
 	newTestUser(t, app, "admin", "password1234", models.RoleAdmin)
 	admin := loginAPI(t, app, "admin", "password1234")
 	gid := createGroupAs(t, admin, "Garden Club", models.VisibilityPublic)
-	apiDo(t, admin, "PUT", "/api/v1/groups/"+itoa(gid), map[string]any{"location": "12 Elm Street"}, http.StatusOK)
+	apiDo(t, admin, "PUT", "/api/v1/groups/"+itoa(gid), groupBody(t, admin, "/api/v1/groups/"+itoa(gid), map[string]any{"location": "12 Elm Street"}), http.StatusOK)
 	mem := newTestUser(t, app, "mem", "password1234", models.RoleMember)
 	addMemberEmail(t, admin, gid, mem.Email)
 	memC := loginAPI(t, app, "mem", "password1234")
@@ -34,7 +34,7 @@ func TestGroupMorePrivateTightensAndCancels(t *testing.T) {
 	register(t, outC, ev.ID)
 
 	// Public -> private: everyone registered can still see it.
-	apiDo(t, admin, "PUT", "/api/v1/groups/"+itoa(gid), map[string]any{"visibility": models.VisibilityPrivate}, http.StatusOK)
+	apiDo(t, admin, "PUT", "/api/v1/groups/"+itoa(gid), groupBody(t, admin, "/api/v1/groups/"+itoa(gid), map[string]any{"visibility": models.VisibilityPrivate}), http.StatusOK)
 	if e := eventRow(t, app, ev.ID); e.Visibility != models.VisibilityPrivate || e.LeaderOpened {
 		t.Fatalf("private: %+v", e)
 	}
@@ -54,8 +54,8 @@ func TestGroupMorePrivateTightensAndCancels(t *testing.T) {
 	// A tightening that cancels someone is saved only with the preview's
 	// consent (DEC-158): without it the old tab's body is outdated.
 	groupPath := "/api/v1/groups/" + itoa(gid)
-	apiDo(t, admin, "PUT", groupPath, map[string]any{"visibility": models.VisibilityInviteOnly}, http.StatusConflict)
-	apiDo(t, admin, "PUT", groupPath, map[string]any{"visibility": models.VisibilityInviteOnly, "consent": impact.Consent}, http.StatusOK)
+	apiDo(t, admin, "PUT", groupPath, groupBody(t, admin, groupPath, map[string]any{"visibility": models.VisibilityInviteOnly}), http.StatusConflict)
+	apiDo(t, admin, "PUT", groupPath, groupBody(t, admin, groupPath, map[string]any{"visibility": models.VisibilityInviteOnly, "consent": impact.Consent}), http.StatusOK)
 	if e := eventRow(t, app, ev.ID); e.Visibility != models.VisibilityInviteOnly {
 		t.Fatalf("invite-only: %+v", e)
 	}
@@ -121,13 +121,13 @@ func TestLeaderOpenedEventsAskBeforeTightening(t *testing.T) {
 	register(t, outC, tightened.ID)
 
 	// Opening the group further changes nothing.
-	apiDo(t, lead, "PUT", "/api/v1/groups/"+itoa(gid), map[string]any{"visibility": models.VisibilityPublic}, http.StatusOK)
+	apiDo(t, lead, "PUT", "/api/v1/groups/"+itoa(gid), groupBody(t, lead, "/api/v1/groups/"+itoa(gid), map[string]any{"visibility": models.VisibilityPublic}), http.StatusOK)
 	if e := eventRow(t, app, inherited.ID); e.Visibility != models.VisibilityPrivate {
 		t.Fatalf("opening the group moved an inherited event: %+v", e)
 	}
 
 	// No decision: 409 with the list, and nothing is saved.
-	w := lead.do("PUT", "/api/v1/groups/"+itoa(gid), map[string]any{"visibility": models.VisibilityInviteOnly}, true)
+	w := lead.do("PUT", "/api/v1/groups/"+itoa(gid), groupBody(t, lead, "/api/v1/groups/"+itoa(gid), map[string]any{"visibility": models.VisibilityInviteOnly}), true)
 	if w.Code != http.StatusConflict {
 		t.Fatalf("want 409: %d %s", w.Code, w.Body.String())
 	}
@@ -146,8 +146,8 @@ func TestLeaderOpenedEventsAskBeforeTightening(t *testing.T) {
 		t.Fatal("a refused change saved something")
 	}
 	// A bad or partial decision is refused the same way.
-	if c := lead.do("PUT", "/api/v1/groups/"+itoa(gid), map[string]any{"visibility": models.VisibilityInviteOnly,
-		"openedEvents": map[string]string{itoa(kept.ID): "keep", itoa(tightened.ID): "maybe"}}, true).Code; c != http.StatusConflict {
+	if c := lead.do("PUT", "/api/v1/groups/"+itoa(gid), groupBody(t, lead, "/api/v1/groups/"+itoa(gid), map[string]any{"visibility": models.VisibilityInviteOnly,
+		"openedEvents": map[string]string{itoa(kept.ID): "keep", itoa(tightened.ID): "maybe"}}), true).Code; c != http.StatusConflict {
 		t.Fatalf("bad decision: %d", c)
 	}
 
@@ -389,10 +389,12 @@ func TestUpdateGroupTighteningUsesLockedVisibilityAndDecisions(t *testing.T) {
 	saveDate(t, admin, ev.ID, models.FormatCalendarDate(dates[0].OriginalDate), map[string]any{"visibility": models.VisibilityPublic}, http.StatusOK, "")
 	opened := scheduleGroupEvent(t, admin, gid, "Opened series")
 	setVisibility(t, admin, opened.ID, models.VisibilityPublic, "", http.StatusOK)
+	patch := map[string]any{"name": "Must roll back", "visibility": models.VisibilityPrivate}
+	stale := groupBody(t, admin, path, patch)
 	gate := holdContactGate(t, app)
 	// This is a visibility no-op at preflight, but becomes tightening at the gate.
 	response := queueContact(func() *httptest.ResponseRecorder {
-		return admin.do("PUT", path, map[string]any{"name": "Must roll back", "visibility": models.VisibilityPrivate}, true)
+		return admin.do("PUT", path, stale, true)
 	})
 	waitContactWaiters(t, app, 1)
 	if err := gate.Model(&models.Group{}).Where("id = ?", gid).Update("visibility", models.VisibilityPublic).Error; err != nil {
@@ -401,8 +403,11 @@ func TestUpdateGroupTighteningUsesLockedVisibilityAndDecisions(t *testing.T) {
 	if err := gate.Commit().Error; err != nil {
 		t.Fatal(err)
 	}
-	w := awaitContactResponse(t, response)
-	if w.Code != http.StatusConflict {
+	// Made from the read before the change: refused before any decision is
+	// asked for (DEC-166). From a fresh read, the same patch asks for them.
+	wantCode(t, "the patch read before the change", awaitContactResponse(t, response), http.StatusConflict, "group_changed")
+	w := admin.do("PUT", path, groupBody(t, admin, path, patch), true)
+	if w.Code != http.StatusConflict || !strings.Contains(w.Body.String(), `"needsDecision":true`) {
 		t.Fatalf("missing decisions: %d %s", w.Code, w.Body.String())
 	}
 	var conflict struct {
@@ -427,9 +432,9 @@ func TestUpdateGroupTighteningUsesLockedVisibilityAndDecisions(t *testing.T) {
 	if saved.Visibility != models.VisibilityPublic || saved.Name == "Must roll back" {
 		t.Fatal("decision conflict saved patch")
 	}
-	apiDo(t, admin, "PUT", path, map[string]any{"visibility": models.VisibilityPrivate, "openedEvents": map[string]string{
+	apiDo(t, admin, "PUT", path, groupBody(t, admin, path, map[string]any{"visibility": models.VisibilityPrivate, "openedEvents": map[string]string{
 		itoa(opened.ID): openedTighten, dateDecisionKey(dates[0].ID): openedTighten,
-	}}, http.StatusOK)
+	}}), http.StatusOK)
 	var date models.EventOccurrence
 	if err := app.DB.First(&date, dates[0].ID).Error; err != nil {
 		t.Fatal(err)

@@ -1361,7 +1361,7 @@ func TestLeadersHearGroupDecisions(t *testing.T) {
 	}
 
 	edited := create("Book club")
-	if w := admin.do("PUT", "/api/v1/groups/"+edited, map[string]any{"status": models.GroupActive}, true); w.Code != http.StatusOK {
+	if w := admin.do("PUT", "/api/v1/groups/"+edited, groupBody(t, admin, "/api/v1/groups/"+edited, map[string]any{"status": models.GroupActive}), true); w.Code != http.StatusOK {
 		t.Fatalf("activate by edit: %d %s", w.Code, w.Body.String())
 	}
 	notice("group.approved", edited)
@@ -1385,7 +1385,7 @@ func TestLeadersHearGroupDecisions(t *testing.T) {
 	var wg models.Group
 	app.DB.First(&wg, withdrawn)
 	addMember(t, app, coLeader, &wg, models.MembershipLeader)
-	if w := lc.do("PUT", "/api/v1/groups/"+withdrawn, map[string]any{"status": models.GroupArchived}, true); w.Code != http.StatusOK {
+	if w := lc.do("PUT", "/api/v1/groups/"+withdrawn, groupBody(t, lc, "/api/v1/groups/"+withdrawn, map[string]any{"status": models.GroupArchived}), true); w.Code != http.StatusOK {
 		t.Fatalf("leader archives own pending group: %d %s", w.Code, w.Body.String())
 	}
 	if n := contactCount(t, app, &models.Notification{}, "subject_id = ? AND kind IN ?", withdrawn, []string{"group.approved", "group.rejected"}); n != 0 {
