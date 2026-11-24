@@ -2,6 +2,9 @@
 # Disposable restore proof, through installed DIR/restore.sh only.
 # Never point this runner at an owner deployment. Artifacts are retained.
 set -Eeuo pipefail
+# Never a terminal: a step under timeout runs in a background process group,
+# and one that touches a terminal on stdin is stopped (SIGTTIN) for good.
+exec </dev/null
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)"
 # shellcheck source=deploy/digitalocean/checks.sh
 source "$ROOT/deploy/digitalocean/checks.sh"

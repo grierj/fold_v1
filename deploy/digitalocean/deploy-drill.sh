@@ -46,14 +46,19 @@ drill_anonymous_volumes() { # project
   docker inspect --format '{{range .Mounts}}{{if eq .Type "volume"}}{{println .Name}}{{end}}{{end}}' $ids | sed '/^$/d' | sort -u \
     | xargs -r docker volume inspect | jq -r '.[] | select((.Labels // {}) | has("com.docker.volume.anonymous")) | .Name'
 }
-# down -v for a drill stack, then the anonymous volumes its containers held.
+# down -v for a drill stack, then any container still labelled with its
+# project (a fixture a stopped case had not removed yet, which Compose does not
+# count as an orphan) and the anonymous volumes its containers held.
 drill_down() { # dir [compose options]
-  local dir="$1" project="" volumes="" rc=0
+  local dir="$1" project="" volumes="" ids="" rc=0
   shift
   project="$(env_value "$dir/.env" COMPOSE_PROJECT_NAME)" || rc=1
   [[ -z "$project" ]] || volumes="$(drill_anonymous_volumes "$project")" || rc=1
   compose_in "$dir" "$@" down -v --remove-orphans || rc=1
-  [[ -z "$volumes" ]] || xargs docker volume rm <<<"$volumes" >/dev/null || rc=1
+  [[ -z "$project" ]] || ids="$(docker ps -aq --filter "label=com.docker.compose.project=$project")" || rc=1
+  # shellcheck disable=SC2086 # a whitespace list of ids
+  [[ -z "$ids" ]] || docker rm -fv $ids >/dev/null || rc=1
+  [[ -z "$volumes" ]] || xargs docker volume rm -f <<<"$volumes" >/dev/null || rc=1
   return "$rc"
 }
 
