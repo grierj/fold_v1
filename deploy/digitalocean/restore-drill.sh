@@ -408,7 +408,7 @@ reset_case() {
   [[ "$DIR" == "$WORK/site" && "$PROJECT" == fold-deploy-drill-* ]] || exit 1
   dc stop caddy app
   ids="$(recovery_ids)"
-  for name in $ids; do docker rm -f "$name"; done
+  for name in $ids; do docker rm -fv "$name"; done
   reset_fixture_databases || return 1
   pg postgres -c 'CREATE DATABASE fold OWNER church TEMPLATE template0'
   dc exec -T db pg_restore -U church -d fold --no-owner --no-acl --single-transaction --exit-on-error <"$DB_DUMP"

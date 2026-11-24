@@ -1744,7 +1744,7 @@ real_current_release_restore() {
   old_id="$(jq -er .attemptId "$cdir/panel-$t3.json")"
   status="$(crossing_api_status DELETE "/admin/users/$t3" "$(crossing_panel_body "$cdir/panel-$t3.json" "$old_id")" "$out")"
   crossing_answer_is "$status" 503 "$out" '.code == "restore_detected"' \
-    || { dc logs --no-color --timestamps --since 10m app >"$cdir/current-release-live-app.log" 2>&1 || true
+    || { dc logs --no-color --timestamps --since 10m app db >"$cdir/current-release-live-app.log" 2>&1 || true
          echo "crossing: the press after a live restore answered $status: $(cat "$out") (app log: $cdir/current-release-live-app.log)" >&2; return 1; }
   live_answer=restore_detected
   [[ "$(pg fold -c "SELECT count(*) FROM contact_requests WHERE reason = '' AND (requester_id=$t3 OR subject_user_id=$t3)")" == 0 ]]
@@ -1916,7 +1916,7 @@ ARCHIVE
   dc exec -T db pg_restore -l <"$older" >"$cdir/table-sets/$id.archive-toc.txt"
   # The archive's own listing must not carry the objects the candidate adds.
   crossing_toc_tables <"$cdir/table-sets/$id.archive-toc.txt" >"$cdir/table-sets/$id.archive.tables"
-  docker rm -f "$archive_id"
+  docker rm -fv "$archive_id"
   pg postgres -c 'DROP DATABASE drill_archive_fixture'
   URL="$old_url"; login
   drill_step "archive-$id/candidate-schema"
