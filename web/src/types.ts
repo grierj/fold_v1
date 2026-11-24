@@ -1969,13 +1969,6 @@ export interface DateNeedsConsentResponse {
   impact: VisibilityImpact;
 }
 
-// What a 409 date_changed from the guarded date edit may carry: baseSuperseded only when the base sent is
-// proved older than the date, so an earlier send of it can never apply.
-/** @public Go JSON contract, checked by TestWebTypesMatchGoJSON; the web client ignores it and reads the date again (DEC-164). */
-export interface DateChangedResponse {
-  baseSuperseded?: boolean;
-}
-
 /** @public Go JSON contract, checked by TestWebTypesMatchGoJSON; the body of 409 date_kept_after_leaving (DEC-156). */
 export interface KeptDatesConflictResponse {
   keptDates: KeptDateCount[];

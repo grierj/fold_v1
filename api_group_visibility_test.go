@@ -642,7 +642,7 @@ func TestSeriesTighteningNamesOnlyDatesTheHolderSaw(t *testing.T) {
 	}
 	apiDo(t, f.admin, "POST", "/api/v1/events/"+itoa(f.event.ID)+"/cancel", map[string]any{"date": f.date(2)}, http.StatusOK)
 	base := editBaseOf(t, f.admin, f.event.ID, f.date(2))
-	wantDateEdit(t, f.admin, f.event.ID, f.date(2), dateEditBody(newDateAttempt(t), base.Revision, map[string]any{"title": "HIDDENTITLE"}), http.StatusOK, "")
+	wantDateEdit(t, f.admin, f.event.ID, f.date(2), dateEditBody(base.Revision, map[string]any{"title": "HIDDENTITLE"}), http.StatusOK, "")
 	mark := markNotices(t, f.app)
 
 	apiDo(t, f.admin, "PUT", "/api/v1/events/"+itoa(f.event.ID)+"/visibility", confirmVisibility(t, f.admin, "/api/v1/events/"+itoa(f.event.ID)+"/visibility", map[string]any{"visibility": models.VisibilityInviteOnly}), http.StatusOK)

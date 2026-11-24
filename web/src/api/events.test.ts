@@ -63,7 +63,7 @@ it("refuses a pinned date answer with no acknowledgment as the credential's loss
   await expect(Dates.get(7, "2026-12-01", credential)).rejects.toMatchObject({ code: "session_expired", unreadable: true });
 });
 
-it("sends each date save to the edits address with a fresh attempt id, never pinned", async () => {
+it("sends each date save to the edits address as its revision and changes alone, never pinned", async () => {
   const fetcher = vi.fn<typeof fetch>(async (url) => String(url).endsWith("/auth/bootstrap") ? bootstrapAnswer({ token: "edit-csrf" }) : new Response(JSON.stringify({ occurrence: {} })));
   vi.stubGlobal("fetch", fetcher);
   await bootstrapCredential(true);
@@ -73,9 +73,10 @@ it("sends each date save to the edits address with a fresh attempt id, never pin
   const calls = fetcher.mock.calls.filter(([url]) => !String(url).endsWith("/auth/bootstrap"));
   expect(calls.map(([url]) => String(url))).toEqual(["/api/v1/events/7%2F8/occurrences/2026-12-01%2F%23/edits", "/api/v1/events/7/occurrences/2026-12-01/edits"]);
   const sent = calls.map(([, init]) => JSON.parse(String(init?.body)));
-  expect(sent[0]).toEqual({ attempt: expect.stringMatching(/^[0-9a-f]{32}$/), revision: "r0", changes: { title: "Supper", capacityOverride: null } });
-  expect(sent[1]).toMatchObject({ revision: "r0", consent: "0123456789abcdef0123456789abcdef" });
-  expect(sent[1].attempt).not.toBe(sent[0].attempt);
+  expect(sent).toEqual([
+    { revision: "r0", changes: { title: "Supper", capacityOverride: null } },
+    { revision: "r0", changes: { title: "Supper", capacityOverride: null }, consent: "0123456789abcdef0123456789abcdef" },
+  ]);
   expect(calls.map(([, init]) => new Headers(init?.headers).get("Fold-Session-Check"))).toEqual([null, null]);
 });
 

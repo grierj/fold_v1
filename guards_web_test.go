@@ -184,7 +184,6 @@ var tsContracts = []struct {
 	{openEventsResponseJSON{}, "OpenEventsResponse"},
 	{occurrenceResponseJSON{}, "OccurrenceResponse"},
 	{dateNeedsConsentJSON{}, "DateNeedsConsentResponse"},
-	{dateChangedJSON{}, "DateChangedResponse"},
 	{keptDatesConflictJSON{}, "KeptDatesConflictResponse"},
 	{keptDateCountJSON{}, "KeptDateCount"},
 	{eventDateResponseJSON{}, "EventDateResponse"},

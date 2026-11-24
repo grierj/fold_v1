@@ -1157,7 +1157,7 @@ func (f datedBatchFixture) subjectRow() models.MessageRecipient {
 // ended in the same commit.
 func (f datedBatchFixture) guardedEdit(t *testing.T, base occurrenceJSON) *httptest.ResponseRecorder {
 	newStart := f.target.StartsAt.Add(2 * time.Hour)
-	return postDateEdit(f.admin, f.event.ID, models.FormatCalendarDate(f.target.OriginalDate), dateEditBody(newDateAttempt(t), base.Revision,
+	return postDateEdit(f.admin, f.event.ID, models.FormatCalendarDate(f.target.OriginalDate), dateEditBody(base.Revision,
 		map[string]any{"startsLocal": newStart.UTC().Format("2006-01-02T15:04"), "title": batchMovedTitle, "location": batchMovedPlace}))
 }
 
@@ -1461,7 +1461,7 @@ func TestBatchEmailHoldsNoDateOrPersonLockOverTheProvider(t *testing.T) {
 		}
 	}
 	within("the guarded date edit", func() {
-		if w := postDateEdit(f.admin, f.ev.ID, date, dateEditBody(newDateAttempt(t), base.Revision, map[string]any{"title": "Renamed while held"})); w.Code != http.StatusOK {
+		if w := postDateEdit(f.admin, f.ev.ID, date, dateEditBody(base.Revision, map[string]any{"title": "Renamed while held"})); w.Code != http.StatusOK {
 			t.Errorf("the edit: %d %s", w.Code, w.Body.String())
 		}
 	})
