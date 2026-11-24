@@ -277,10 +277,14 @@ export function SeriesEditor({
       Object.assign(body, videoBody(video));
     }
 
+    // The event as the read shows it once this save is stored: the body over what the editor opened with, plus what
+    // PUT /events/:id does beyond the body (it trims the end date and keeps the zone when the body's is empty).
+    const intended: SeriesFields = { ...instance, ...body, guestsAllowed: seats.guests, tzid: body.tzid || instance.tzid, rruleUntil: until.trim() };
+
     frozenNow.current = true;
     await action.run(async () => {
       try {
-        const sent = await send((revision) => Events.update(instance.eventId, { ...body, revision }));
+        const sent = await send((revision) => Events.update(instance.eventId, { ...body, revision }), intended);
 
         if (sent === "refused") {
           setError("We couldn't update the series. Please try again.");

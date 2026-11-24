@@ -68,9 +68,10 @@ that changes how an operator upgrades, rolls back or restores. The operator-faci
   checkout's script run by hand can bypass these checks. Installed upgrades keep their frozen
   tools; install newer tools from a newer trusted checkout, subject to the `deploy-tools-version`
   check.
-- **Never publish `recoveryPolicy >= 1` before R4-6c-R's current-release restore tooling and
-  operator procedure are verified on a real droplet.** Local refusal drills do not satisfy that
-  gate or the real-droplet checks in `docs/FIRST-CHURCH-CHECKS.md`. This gate is review only.
+- **Releases and the real-droplet restore checks (DEC-165).** Release 0.1.0 reports level 2 and is
+  published, and the next release does not wait for the remaining real-droplet restore checks in
+  `docs/FIRST-CHURCH-CHECKS.md` (Grier, Nov 24, 2026). Those checks stay owed; local refusal drills
+  do not satisfy them. Publishing a release is the owner's action.
 
 ## Locks
 

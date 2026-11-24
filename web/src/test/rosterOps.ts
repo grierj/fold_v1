@@ -1,14 +1,14 @@
+import type { RosterWriteEnd, RosterWrites } from "../lib/rosterWrites";
 import { act, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { vi } from "vitest";
 import { ApiError } from "../api/core";
 import { Events } from "../api/events";
 import type { Attendee } from "../types";
-import type { RosterWriteEnd, RosterWrites } from "../lib/dateWrites";
 import { deferred } from "./keptPanel";
 
 // The roster writes a manager starts on a date (ManageRoster): each holds the date for the session while its
-// request is on its way (lib/dateWrites).
+// request is on its way (lib/rosterWrites).
 export type RosterOp = "add" | "restore" | "remove";
 
 export const ROSTER_OPS: RosterOp[] = ["add", "restore", "remove"];

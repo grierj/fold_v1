@@ -765,6 +765,7 @@ describe("SeriesEditor and the read it opened with", () => {
     const onSaved = vi.fn();
     const onConflict = vi.fn();
     const view = render(<SeriesEditor series={opened} idPrefix="left" onSaved={onSaved} onConflict={onConflict} />);
+    await userEvent.type(screen.getByRole("textbox", { name: "Title" }), " night");
     await userEvent.click(saveButton());
     await waitFor(() => expect(Events.get).toHaveBeenCalledOnce());
     view.unmount();
@@ -802,10 +803,72 @@ describe("SeriesEditor and the read it opened with", () => {
     const onSaved = vi.fn();
     const onConflict = vi.fn();
     render(<SeriesEditor series={opened} idPrefix={`resent-${status}`} onSaved={onSaved} onConflict={onConflict} />);
+    await userEvent.type(screen.getByRole("textbox", { name: "Title" }), " night");
     await userEvent.click(saveButton());
     await waitFor(() => expect(onConflict).toHaveBeenCalledExactlyOnceWith("gone"));
     expect(Events.update).toHaveBeenCalledTimes(2);
     expect(onSaved).not.toHaveBeenCalled();
     expect(screen.queryByText(/couldn't/)).not.toBeInTheDocument();
+  });
+});
+
+// DEC-163: a save whose answer was lost was stored; pressing Save again is refused, and the read shows the save done.
+describe("SeriesEditor when a save it pressed before was stored and its answer lost", () => {
+  const full = {
+    ...baseSeries, revision: "r1", capacity: 12, videoProvider: "link" as const, videoUrl: "https://meet.example.org/supper",
+    videoReveal: "registered_only" as const, childcareAvailable: true, childcareCapacity: 4, childcareAges: "2–5", childcareNotes: "Nursery",
+  };
+
+  const stored: EventSeries = { ...testEvent(7), ...full, startsAt: "2026-12-03T02:00:00Z", endsAt: "2026-12-03T03:30:00Z", revision: "r2" };
+  const readOf = (event: EventSeries): EventDetailResponse => ({ event, occurrences: [], canManage: true, canSetVisibility: true });
+  const changed = () => new ApiError(409, "changed", { code: "event_changed" });
+  const saveButton = () => screen.getByRole("button", { name: "Save series" });
+  const offline = "We couldn't reach Fold. Check your connection and try again.";
+
+  beforeEach(() => {
+    vi.mocked(Events.update).mockReset().mockRejectedValueOnce(new TypeError("Failed to fetch")).mockRejectedValueOnce(changed());
+    vi.mocked(Events.get).mockReset();
+  });
+
+  async function pressTwice(edit: () => Promise<void>, read: EventSeries, idPrefix: string) {
+    vi.mocked(Events.get).mockResolvedValue(readOf(read));
+    const onSaved = vi.fn();
+    const onConflict = vi.fn();
+    render(<SeriesEditor series={full} idPrefix={idPrefix} onSaved={onSaved} onConflict={onConflict} />);
+    await edit();
+    await userEvent.click(saveButton());
+    expect(await screen.findByText(offline)).toBeInTheDocument();
+    expect(onSaved).not.toHaveBeenCalled();
+    await userEvent.click(saveButton());
+
+    return { onSaved, onConflict };
+  }
+
+  // Each row is a draft and the read the server would answer once that save is stored, normalised as it stores it.
+  it.each([
+    ["a title, trimmed", async () => {
+      const title = screen.getByRole("textbox", { name: "Title" });
+      await userEvent.clear(title);
+      await userEvent.type(title, "  Supper night  ");
+    }, { title: "Supper night" }],
+    ["a cleared seat limit", () => userEvent.clear(screen.getByLabelText(/^Seat limit/)), { capacity: null }],
+    ["a video link removed", () => userEvent.click(screen.getByRole("radio", { name: "No video link" })), { videoProvider: "none" as const, videoUrl: "" }],
+    ["childcare switched off", () => userEvent.click(screen.getByRole("checkbox", { name: /^Childcare available/ })), { childcareAvailable: false, childcareCapacity: null }],
+  ])("counts the second press as saved, sending nothing more, when the read shows %s stored", async (key, edit, over) => {
+    const { onSaved, onConflict } = await pressTwice(edit, { ...stored, ...over, revision: "r3" }, `stored-${key}`);
+    await waitFor(() => expect(onSaved).toHaveBeenCalledOnce());
+    expect(onConflict).not.toHaveBeenCalled();
+    expect(Events.update).toHaveBeenCalledTimes(2);
+    expect(vi.mocked(Events.update).mock.calls.map(([, body]) => body.revision)).toEqual(["r1", "r1"]);
+    expect(Events.get).toHaveBeenCalledExactlyOnceWith(7);
+    expect(screen.queryByText(/couldn't/)).not.toBeInTheDocument();
+  });
+
+  it("hands the page a conflict when the read shows the draft's change and someone else's", async () => {
+    const edit = () => userEvent.type(screen.getByRole("textbox", { name: "Title" }), " night");
+    const { onSaved, onConflict } = await pressTwice(edit, { ...stored, title: "Supper night", location: "Library", revision: "r3" }, "theirs");
+    await waitFor(() => expect(onConflict).toHaveBeenCalledExactlyOnceWith("changed"));
+    expect(onSaved).not.toHaveBeenCalled();
+    expect(Events.update).toHaveBeenCalledTimes(2);
   });
 });

@@ -535,9 +535,10 @@ Record the reason and date with the evidence; use targeted checks otherwise.
 These notes are interim and the steps are recommended, not a promise. They
 describe `/opt/fold/restore.sh` as written in this tree. Local drills on a
 disposable Compose stack have exercised it; the checks on a real droplet in
-[FIRST-CHURCH-CHECKS.md](FIRST-CHURCH-CHECKS.md#live-install-m51-m53) have not
-been done (#310; the exact-head full drill passed on a disposable runner, inventory 15.17). No release that reports `recoveryPolicy` 1 or higher may be
-published until they are. Account erasure still has open work (see `STATUS.md`,
+[FIRST-CHURCH-CHECKS.md](FIRST-CHURCH-CHECKS.md#live-install-m51-m53) are not
+all done (#310; some were run on a disposable droplet on 2026-11-24; the exact-head full drill passed on a disposable runner, inventory 15.17). Release 0.1.0, which reports `recoveryPolicy` 2,
+was published before they were, and the next release does not wait for the
+rest (Grier, 2026-11-24; DEC-165); the checks still owed are listed there. Account erasure still has open work (see `STATUS.md`,
 M7.4); nothing here says a restore brings back or removes every trace of anyone.
 
 **Why a procedure.** A dump knows nothing about people deleted after it was
@@ -742,7 +743,7 @@ shows who. Never delete, rename or replace `ops.lock`, `backup.lock` or
   recreates it. If a reboot hits an interrupted reopen, the app and Caddy may
   come back running; `--resume` closes them before it restarts private
   recovery. These two droplet cases are listed in
-  FIRST-CHURCH-CHECKS.md and have not been checked on a real droplet.
+  FIRST-CHURCH-CHECKS.md and were checked on a disposable droplet on 2026-11-24.
 
 **A lower recovery level is refused on every scripted path.** `provision.sh`,
 a forward `upgrade.sh --image` or `--commit`, `upgrade.sh --rollback` and
@@ -902,10 +903,11 @@ malformed metadata refuses. The host floor is the greater of `recovery-policy-fl
 and the level of the image its current Compose pin names. There is no override.
 The floor file is recorded only after smoke passes and never decreases.
 
-This tree reports level 3 (`deploy/recovery-policy`). Never publish a release reporting `recoveryPolicy >= 1`
-before R4-6c-R's current-release restore tooling and operator procedure land
-and are verified. The local refusal drills do not verify that restore procedure
-or complete the [real-droplet checks](FIRST-CHURCH-CHECKS.md#live-install-m51-m53).
+This tree reports level 3 (`deploy/recovery-policy`). Release 0.1.0 reports level 2 and is
+published, and the next release does not wait for the remaining real-droplet restore checks
+in [FIRST-CHURCH-CHECKS.md](FIRST-CHURCH-CHECKS.md#live-install-m51-m53) (Grier, 2026-11-24; DEC-165).
+The current-release restore tooling was run on a real droplet on 2026-11-24, with what each
+check still owes recorded there; the local refusal drills do not verify that restore procedure.
 
 If a higher-level image starts but smoke fails, its pin already contributes
 to the floor. `--rollback` to a lower-level previous release is refused even
