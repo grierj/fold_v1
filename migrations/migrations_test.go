@@ -5740,3 +5740,100 @@ func TestGroupStatusCheckWaitsAtMostFiveSeconds(t *testing.T) {
 	}
 	upTo(t, p, groupStatusCheckVersion)
 }
+
+const groupEditRevisionVersion = 17
+
+func groupRevision(t *testing.T, db *sql.DB, id int64) int64 {
+	t.Helper()
+	var rev int64
+	if err := db.QueryRow(`SELECT edit_revision FROM groups WHERE id = $1`, id).Scan(&rev); err != nil {
+		t.Fatal(err)
+	}
+	return rev
+}
+
+// TestGroupEditRevisionMigration: 00017 adds the group's revision counter
+// without touching a row, and its trigger counts every tracked change a writer
+// makes (raw SQL here stands for a previous binary that does not know the
+// column, and for the cover endpoints' image_url write) while ignoring a write
+// that changes nothing and one that changes only updated_at or the counter.
+// Down drops only the counter and its trigger.
+func TestGroupEditRevisionMigration(t *testing.T) {
+	t.Parallel()
+	_, db, p := freshAt(t, groupEditRevisionVersion-1)
+	exec := func(q string, args ...any) {
+		t.Helper()
+		if _, err := db.Exec(q, args...); err != nil {
+			t.Fatalf("%s: %v", q, err)
+		}
+	}
+	exec(`INSERT INTO users(id,email) VALUES(1,'leader@example.com'),(2,'next@example.com')`)
+	exec(`INSERT INTO groups(id,name,leader_id,status,location,tags) VALUES(1,'Study',1,'active','Hall','a,b'),(2,'Other',1,'pending','','')`)
+	rowsNow := `SELECT id, (to_jsonb(g) - 'edit_revision')::text FROM groups g`
+	before := snapshotRows[int64](t, db, rowsNow)
+	upTo(t, p, groupEditRevisionVersion)
+	if got := snapshotRows[int64](t, db, rowsNow); !reflect.DeepEqual(got, before) {
+		t.Fatalf("Up changed a group:\n%v\n%v", before, got)
+	}
+	if r1, r2 := groupRevision(t, db, 1), groupRevision(t, db, 2); r1 != 1 || r2 != 1 {
+		t.Fatalf("existing groups start at %d/%d, want 1/1", r1, r2)
+	}
+	for _, q := range []string{
+		`UPDATE groups SET updated_at = now() WHERE id = $1`,
+		`UPDATE groups SET name = name, visibility = visibility, member_limit = member_limit WHERE id = $1`,
+		`UPDATE groups SET edit_revision = 99 WHERE id = $1`,
+	} {
+		exec(q, 1)
+		if rev := groupRevision(t, db, 1); rev != 1 {
+			t.Fatalf("%s = revision %d, want 1", q, rev)
+		}
+	}
+	want := int64(1)
+	for _, q := range []string{
+		`UPDATE groups SET visibility = 'private' WHERE id = $1`,
+		`UPDATE groups SET name = 'Renamed', updated_at = now() WHERE id = $1`,
+		`UPDATE groups SET description = 'New' WHERE id = $1`,
+		`UPDATE groups SET tags = 'a' WHERE id = $1`,
+		`UPDATE groups SET location = 'Chapel' WHERE id = $1`,
+		`UPDATE groups SET member_limit = 12 WHERE id = $1`,
+		`UPDATE groups SET member_limit = NULL WHERE id = $1`,
+		`UPDATE groups SET cover_focal_x = 10, cover_focal_y = 90 WHERE id = $1`,
+		`UPDATE groups SET image_url = '/uploads/covers/1/x.jpg' WHERE id = $1`,
+		`UPDATE groups SET status = 'archived' WHERE id = $1`,
+		`UPDATE groups SET leader_id = 2 WHERE id = $1`,
+		`UPDATE groups SET deletion_requested = true WHERE id = $1`,
+		`UPDATE groups SET edit_revision = 1, location = 'Garden' WHERE id = $1`,
+	} {
+		exec(q, 1)
+		want++
+		if rev := groupRevision(t, db, 1); rev != want {
+			t.Fatalf("%s = revision %d, want %d", q, rev, want)
+		}
+	}
+	if rev := groupRevision(t, db, 2); rev != 1 {
+		t.Fatalf("another group's writes moved group 2 to %d", rev)
+	}
+	var fresh int64
+	if err := db.QueryRow(`INSERT INTO groups(id,name,leader_id,edit_revision) VALUES(3,'New',1,DEFAULT) RETURNING edit_revision`).Scan(&fresh); err != nil || fresh != 1 {
+		t.Fatalf("an inserted group reads %d, %v, want 1", fresh, err)
+	}
+
+	before = snapshotRows[int64](t, db, rowsNow)
+	downTo(t, p, groupEditRevisionVersion-1)
+	if got := snapshotRows[int64](t, db, `SELECT id, to_jsonb(g)::text FROM groups g`); !reflect.DeepEqual(got, before) {
+		t.Fatalf("Down changed a group:\n%v\n%v", before, got)
+	}
+	if hasSchemaObject(t, db, `SELECT 1 FROM pg_proc WHERE proname = 'groups_edit_revision'
+		UNION ALL SELECT 1 FROM pg_trigger WHERE tgname = 'groups_edit_revision'
+		UNION ALL SELECT 1 FROM information_schema.columns WHERE table_name = 'groups' AND column_name = 'edit_revision'`) {
+		t.Fatal("Down left the counter or its trigger behind")
+	}
+	exec(`UPDATE groups SET name = 'Previous schema' WHERE id = 1`)
+	upTo(t, p, groupEditRevisionVersion)
+	if rev := groupRevision(t, db, 1); rev != 1 {
+		t.Fatalf("Up again starts at %d, want 1", rev)
+	}
+	if v, err := p.GetDBVersion(context.Background()); err != nil || v != groupEditRevisionVersion {
+		t.Fatalf("version = %d, %v", v, err)
+	}
+}
