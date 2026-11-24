@@ -105,7 +105,7 @@ export function seriesBookingMessage(res: SeriesBooking): string {
   }
 
   // A series room with nothing to book, wait for, lose or keep: every upcoming date already holds it, or there is none.
-  if (parts.length === 0) parts.push("Every upcoming date already has this room.");
+  if (parts.length === 0) parts.push("The series room is saved.");
 
   return parts.join(" ");
 }

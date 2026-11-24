@@ -409,7 +409,7 @@ it("says what a Book anyway sent again after its answer was lost found, never th
   await waitFor(() => expect(screen.getByRole("button", { name: "Book anyway" })).toBeEnabled());
   expect(screen.getByRole("textbox", { name: /^Reason for double-booking/ })).toHaveValue("Choir moved");
   await userEvent.click(screen.getByRole("button", { name: "Book anyway" }));
-  await waitForStatus("Every upcoming date already has this room.");
+  await waitForStatus("The series room is saved.");
   expect(vi.mocked(SeriesRooms.set).mock.calls[2][1]).toEqual({ roomId: 2, overlapReason: "Choir moved" });
   expect(screen.queryByText(/over another booking|no upcoming dates/)).not.toBeInTheDocument();
 });

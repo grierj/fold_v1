@@ -200,3 +200,36 @@ it("words a date an admin didn't approve differently from one that lost its room
   expect(screen.getByText("An admin didn't approve Fellowship Hall for this date.")).toBeInTheDocument();
   expect(screen.getByText("Chapel isn't free then.")).toBeInTheDocument();
 });
+
+// Two inline picks one after the other: the first date's answer can land while the second date's picker is open, and
+// its booking is not the second date's.
+it("never credits an earlier date's answer to the date whose picker is open now", async () => {
+  const loft = { ...hall, id: 2, name: "Loft" };
+
+  vi.mocked(DateRooms.list).mockImplementation(async (_, date) => ({
+    rooms: [hall, loft], booking: null, dateRoom: { id: date === needs[0].date ? 70 : 71, revision: "r1" },
+  }));
+
+  type Reply = Awaited<ReturnType<typeof DateRooms.set>>;
+
+  const replies = new Map<string, (result: Reply) => void>();
+  vi.mocked(DateRooms.set).mockImplementation((_, date) => new Promise((resolve) => { replies.set(String(date), resolve); }));
+  show({ hasDate: () => false });
+  await userEvent.click(await screen.findByRole("button", { name: "Pick a room for Tuesday, December 8" }));
+  await userEvent.selectOptions(await screen.findByRole("combobox", { name: /^Room/ }), "1");
+  await userEvent.click(await screen.findByRole("button", { name: "Pick a room for Tuesday, December 15" }));
+  await userEvent.selectOptions(await screen.findByRole("combobox", { name: /^Room/ }), "2");
+  expect(replies.size).toBe(2);
+  vi.mocked(SeriesRooms.list).mockResolvedValue({ revision: "r2", rooms: [], dates: 10, defaultRoom: null, needsRoom: [], pending: 0 });
+
+  const reply = (id: number, r: RoomPickerItem): Reply => ({
+    booking: { roomId: r.id, roomName: r.name, building: r.building, status: "confirmed", setupMinutes: 0, teardownMinutes: 0, doubleBooked: false, tooSmall: false, pending: false },
+    dateRoom: { id, revision: "r2" },
+  });
+
+  replies.get(needs[0].date)?.(reply(70, hall));
+  await waitFor(() => expect(screen.queryByRole("heading", { name: /Dates that need a room/ })).not.toBeInTheDocument());
+  replies.get(needs[1].date)?.(reply(71, loft));
+  await waitFor(() => expect(SeriesRooms.list).toHaveBeenCalledTimes(3));
+  expect(screen.getByRole("status")).not.toHaveTextContent("Fellowship Hall");
+});

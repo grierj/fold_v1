@@ -154,7 +154,12 @@ export function NeedsRoomList({ eventId, revision, hasDate, onPick, onGone }: {
                 </div>
                 {inline && open === n.date && (
                   <div id={panel} className="rounded-md border border-border bg-surface p-3">
-                    <RoomField eventId={eventId} date={n.date} idPrefix={`needs-${n.date}`} focusOnLoad onChanged={(refused, stored) => { lastPick.current = { refused: refused === true, stored: stored ?? null }; setOwn((c) => c + 1); }}
+                    <RoomField eventId={eventId} date={n.date} idPrefix={`needs-${n.date}`} focusOnLoad onChanged={(refused, stored) => {
+                      // An earlier date's answer can land after another date's picker opened: it is not that date's pick.
+                      if (watching.current === n.date) lastPick.current = { refused: refused === true, stored: stored ?? null };
+
+                      setOwn((c) => c + 1);
+                    }}
                       onGone={() => {
                         watching.current = null;
                         setOpen(null);
