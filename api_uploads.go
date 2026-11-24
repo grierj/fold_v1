@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"log"
+	"math"
 	"net/http"
 	"os"
 	"strconv"
@@ -200,6 +201,18 @@ func (a *App) apiUploadGroupCover(c *gin.Context) {
 	}
 	defer tmp.Close()
 	defer os.Remove(tmp.Name())
+	// The new image's focal point travels with it: sent with the details
+	// instead, a failed upload would leave the old photo cropped for the new.
+	updates := map[string]any{}
+	if fx, fy := c.PostForm("focalX"), c.PostForm("focalY"); fx != "" || fy != "" {
+		x, errX := strconv.ParseFloat(fx, 64)
+		y, errY := strconv.ParseFloat(fy, 64)
+		if errX != nil || errY != nil || math.IsNaN(x) || math.IsNaN(y) {
+			jsonError(c, http.StatusBadRequest, "invalid body")
+			return
+		}
+		updates["cover_focal_x"], updates["cover_focal_y"] = clampFocal(x), clampFocal(y)
+	}
 
 	rid, err := randomHex(16)
 	if err != nil {
@@ -219,7 +232,8 @@ func (a *App) apiUploadGroupCover(c *gin.Context) {
 	}
 	oldURL := g.ImageURL
 	g.ImageURL = a.Uploads.URL(key)
-	if err := a.DB.Model(g).Update("image_url", g.ImageURL).Error; err != nil {
+	updates["image_url"] = g.ImageURL
+	if err := a.DB.Model(g).Updates(updates).Error; err != nil {
 		a.deleteCoverBlob(ctx, key)
 		jsonError(c, http.StatusInternalServerError, "could not save cover")
 		return

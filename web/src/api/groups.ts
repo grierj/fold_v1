@@ -67,6 +67,8 @@ export const Groups = {
 };
 
 export const GroupCover = {
-  upload: (id: Id, file: File) => apiUpload<CoverUploadResponse>(path`/groups/${id}/cover`, "cover", file),
+  // `focal` is the new image's focal point, stored with it.
+  upload: (id: Id, file: File, focal?: { x: number; y: number }) =>
+    apiUpload<CoverUploadResponse>(path`/groups/${id}/cover`, "cover", file, focal ? { focalX: String(focal.x), focalY: String(focal.y) } : {}),
   remove: (id: Id) => api<Record<string, never>>(path`/groups/${id}/cover`, { method: "DELETE" }),
 };

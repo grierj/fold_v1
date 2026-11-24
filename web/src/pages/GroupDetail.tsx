@@ -568,7 +568,7 @@ function GroupDetailContent() {
     return coverAction.run(async () => {
       try {
         if ("pick" in step) await GroupCover.upload(id!, await prepareUpload(step.pick, 1600));
-        else if ("file" in step) await GroupCover.upload(id!, step.file);
+        else if ("file" in step) await GroupCover.upload(id!, step.file, step.focal);
         else await GroupCover.remove(id!);
       } catch (e) {
         const what = "remove" in step ? "removed" : "uploaded";

@@ -17,7 +17,9 @@ import { GroupVisibilityReview } from "./GroupVisibilityReview";
 export type GroupValue = Pick<GroupSummary, "name" | "description" | "location" | "tags" | "visibility" | "memberLimit" | "coverFocalX" | "coverFocalY" | "imageUrl">;
 
 // The cover change the form asked for, made only once its details are saved.
-export type CoverStep = { file: File } | { remove: true };
+// A new file's focal point goes with it, never with the details: the details are saved first, and a failed upload
+// would otherwise leave the old photo cropped for the new one.
+export type CoverStep = { file: File; focal?: { x: number; y: number } } | { remove: true };
 
 const clampFocal = (v: number) => Math.min(100, Math.max(0, v));
 
@@ -238,6 +240,8 @@ export function GroupEditor({ group, action, onSaved, onConflict, onCancel }: {
   // Saves the details through the shared protocol; true once they are saved. `at.mark` is taken again just before each
   // send, so a 409's review is judged from the request that answered it. The cover change waits for the save.
   async function commit(data: GroupFormData, openedEvents: Record<string, OpenedDecision> | undefined, consent: string, at: { mark: number }) {
+    const detailsFocal = data.coverFile ? undefined : data.coverFocal;
+
     const intended: GroupValue = {
       ...opened,
       name: data.name,
@@ -246,8 +250,8 @@ export function GroupEditor({ group, action, onSaved, onConflict, onCancel }: {
       tags: data.tags,
       visibility: data.visibility,
       memberLimit: data.memberLimit,
-      coverFocalX: data.coverFocal?.x ?? opened.coverFocalX,
-      coverFocalY: data.coverFocal?.y ?? opened.coverFocalY,
+      coverFocalX: detailsFocal?.x ?? opened.coverFocalX,
+      coverFocalY: detailsFocal?.y ?? opened.coverFocalY,
     };
 
     const sent = await send((revision) => {
@@ -258,7 +262,7 @@ export function GroupEditor({ group, action, onSaved, onConflict, onCancel }: {
         description: data.description,
         tags: data.tags,
         location: data.location,
-        coverFocal: data.coverFocal || undefined,
+        coverFocal: detailsFocal,
         visibility: data.visibility,
         memberLimit: data.memberLimit,
         openedEvents,
@@ -272,7 +276,7 @@ export function GroupEditor({ group, action, onSaved, onConflict, onCancel }: {
     if (sent !== "saved") return false;
     parkFocus();
     setReviewError(null);
-    onSaved(data.coverFile ? { file: data.coverFile } : data.removeCover ? { remove: true } : null);
+    onSaved(data.coverFile ? { file: data.coverFile, focal: data.coverFocal } : data.removeCover ? { remove: true } : null);
 
     return true;
   }

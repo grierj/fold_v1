@@ -2926,6 +2926,43 @@ func TestGroupRevisionIsReadOnlyByItsManagers(t *testing.T) {
 	}
 }
 
+// A new cover's focal point is stored with it, clamped; a malformed one stores
+// nothing; an upload that names none keeps the focal point the group had.
+func TestGroupCoverUploadTakesItsFocalPoint(t *testing.T) {
+	f, _ := groupRevisionFixture(t, models.VisibilityPublic)
+	path := f.groupPath() + "/cover"
+	stored := func() models.Group {
+		var g models.Group
+		gormMust(t, f.app.DB.First(&g, f.gid))
+		return g
+	}
+	if w := f.admin.doMultipartWith("POST", path, "cover", "a.png", tinyPNG(t), map[string]string{"focalX": "12", "focalY": "140"}); w.Code != http.StatusOK {
+		t.Fatalf("upload with a focal point: %d %s", w.Code, w.Body.String())
+	}
+	first := stored()
+	if first.ImageURL == "" || first.CoverFocalX != 12 || first.CoverFocalY != 100 {
+		t.Fatalf("stored %q at %v, %v; want an image at 12, 100", first.ImageURL, first.CoverFocalX, first.CoverFocalY)
+	}
+	for name, fields := range map[string]map[string]string{
+		"one axis":     {"focalX": "30"},
+		"not a number": {"focalX": "left", "focalY": "40"},
+		"NaN":          {"focalX": "NaN", "focalY": "40"},
+	} {
+		if w := f.admin.doMultipartWith("POST", path, "cover", "b.png", tinyPNG(t), fields); w.Code != http.StatusBadRequest {
+			t.Fatalf("%s: %d %s", name, w.Code, w.Body.String())
+		}
+		if now := stored(); now.ImageURL != first.ImageURL || now.CoverFocalX != 12 || now.CoverFocalY != 100 {
+			t.Fatalf("%s stored %q at %v, %v", name, now.ImageURL, now.CoverFocalX, now.CoverFocalY)
+		}
+	}
+	if w := f.admin.doMultipart("POST", path, "cover", "c.png", tinyPNG(t)); w.Code != http.StatusOK {
+		t.Fatalf("upload with no focal point: %d %s", w.Code, w.Body.String())
+	}
+	if now := stored(); now.ImageURL == first.ImageURL || now.CoverFocalX != 12 || now.CoverFocalY != 100 {
+		t.Fatalf("an upload naming no focal point stored %q at %v, %v", now.ImageURL, now.CoverFocalX, now.CoverFocalY)
+	}
+}
+
 // A cover change takes no revision and raises the group's, so a form opened
 // before it is refused; POST /groups takes the cover's focal point, an edge
 // included.

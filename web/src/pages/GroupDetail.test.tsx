@@ -2227,11 +2227,16 @@ describe("the group form's refused save", () => {
     await editAndSave(async () => {
       await userEvent.upload(document.querySelector<HTMLInputElement>('form input[type="file"]')!, photo);
       await screen.findByRole("button", { name: "Choose different image" });
+      const crop = screen.getByTitle("Click to set the focal point");
+      crop.getBoundingClientRect = () => ({ left: 0, top: 0, width: 200, height: 100, right: 200, bottom: 100, x: 0, y: 0, toJSON: () => ({}) });
+      fireEvent.click(crop, { clientX: 50, clientY: 75 });
     });
     expect(GroupCover.upload).not.toHaveBeenCalled();
     await act(async () => { saving.resolve({ group: managed.group }); await saving.promise; });
     expect(await screen.findByText("Your other changes were saved, but the cover photo could not be uploaded. You can try again from Edit group.")).toBeInTheDocument();
-    expect(GroupCover.upload).toHaveBeenCalledExactlyOnceWith("1", photo);
+    // The new photo's focal point goes with it: sent with the details, a failed upload would crop the old photo for the new.
+    expect(GroupCover.upload).toHaveBeenCalledExactlyOnceWith("1", photo, { x: 25, y: 75 });
+    expect(vi.mocked(Groups.update).mock.calls[0][1].coverFocal).toBeUndefined();
     vi.unstubAllGlobals();
   });
 

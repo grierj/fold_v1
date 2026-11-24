@@ -1296,8 +1296,18 @@ func tinyPNG(t *testing.T) []byte {
 }
 
 func (c *apiClient) doMultipart(method, path, field, filename string, data []byte) *httptest.ResponseRecorder {
+	return c.doMultipartWith(method, path, field, filename, data, nil)
+}
+
+// doMultipartWith sends text fields beside the file.
+func (c *apiClient) doMultipartWith(method, path, field, filename string, data []byte, fields map[string]string) *httptest.ResponseRecorder {
 	var b bytes.Buffer
 	w := multipart.NewWriter(&b)
+	for name, value := range fields {
+		if err := w.WriteField(name, value); err != nil {
+			c.t.Fatalf("write form field: %v", err)
+		}
+	}
 	fw, err := w.CreateFormFile(field, filename)
 	if err != nil {
 		c.t.Fatalf("create form file: %v", err)

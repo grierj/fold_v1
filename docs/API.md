@@ -503,7 +503,7 @@ GET  /api/v1/me/groups                    → {groups: [groupSummary]}  (auth; g
 POST /api/v1/groups                       → 201 {group}   (auth, not teens; pending, or active when an admin creates it)
 GET  /api/v1/groups/:id?datePaging=2&cursor=&limit= → {group, members, upcomingEvents, truncated, hasMore, nextCursor, canManage, isMember}
 PUT  /api/v1/groups/:id                   → 200 {group} | 409 group_changed   (group leader or admin; body names its revision)
-POST   /api/v1/groups/:id/cover           → 200 {imageUrl} | 503 upload_busy (group leader or admin; multipart, field "cover")
+POST   /api/v1/groups/:id/cover           → 200 {imageUrl} | 503 upload_busy (group leader or admin; multipart, field "cover", optional text fields focalX and focalY)
 DELETE /api/v1/groups/:id/cover           → 200 {}         (group leader or admin)
 ```
 
@@ -601,9 +601,14 @@ of the cover the new-group form uploads right after. Covers are upload-only: set
 one with `POST /groups/:id/cover`, clear it with `DELETE /groups/:id/cover`;
 an `imageUrl` in this body is ignored, so `imageUrl` is always empty or an
 `/uploads/...` path. The cover routes take no revision: replacing or removing
-the file is its own action, and the last one wins. Each raises the group's
+the file is its own action, and the last one wins. Each changes the group's
 revision like any other change, so a group form opened before it is refused
-(the form shows the cover).
+(the form shows the cover). An upload may carry the new image's focal point as
+the text fields `focalX` and `focalY` (both or neither, 0-100, clamped; anything
+else is a 400 and stores nothing), stored with the image in one write: the group
+form sends a replacement's focal point this way, never with the details, so a
+failed upload cannot leave the old photo cropped for the new one. `coverFocal`
+in the update body is for moving the focal point of the cover the group has.
 `memberLimit` is a positive whole number, or null for no limit (the default);
 on update, omit it to leave it unchanged. Lowering it below the count keeps
 everyone and blocks joins until the count drops (DEC-39).
