@@ -191,12 +191,12 @@ func (a *App) managedOccurrence(c *gin.Context) (*models.Event, *models.EventOcc
 	}
 	date := c.Param("date")
 	if _, err := models.ParseCalendarDate(date); err != nil {
-		jsonError(c, http.StatusNotFound, "that date is not on this event")
+		fail(c, errOccurrenceNotFound)
 		return nil, nil, false
 	}
 	var occ models.EventOccurrence
 	if err := a.DB.Where("event_id = ? AND original_date = ? AND status = ?", ev.ID, date, models.OccurrenceScheduled).First(&occ).Error; err != nil {
-		jsonError(c, http.StatusNotFound, "that date is not on this event")
+		fail(c, errOccurrenceNotFound)
 		return nil, nil, false
 	}
 	return ev, &occ, true
@@ -232,37 +232,46 @@ func activeRoomsBusy(db *gorm.DB, windows []rooms.Window, exceptEvent uint) ([]m
 	return list, busy, err
 }
 
+// apiDateRooms is a date's room control: the rooms its manager may book, and
+// the date's booking with its token (dateRoomRevisionIn), both from one
+// snapshot.
 func (a *App) apiDateRooms(c *gin.Context) {
 	ev, occ, ok := a.managedOccurrence(c)
 	if !ok {
 		return
 	}
 	me := asPerson(apiUser(c))
-	list, busy, err := activeRoomsBusy(a.DB, []rooms.Window{{Start: occ.StartsAt, End: occ.EndsAt, OccurrenceID: occ.ID}}, 0)
-	if err != nil {
-		jsonError(c, http.StatusInternalServerError, "could not list rooms")
-		return
-	}
-	want, err := seatsWanted(a.DB, ev, occ)
-	if err != nil {
-		jsonError(c, http.StatusInternalServerError, "could not list rooms")
-		return
-	}
-	out := []roomPickerJSON{}
-	for _, r := range list {
-		if !policy.CanBookRoom(me, true, r.Restricted) {
-			continue
+	var out dateRoomsJSON
+	var want int
+	err := a.DB.Transaction(func(tx *gorm.DB) error {
+		list, busy, err := activeRoomsBusy(tx, []rooms.Window{{Start: occ.StartsAt, End: occ.EndsAt, OccurrenceID: occ.ID}}, 0)
+		if err != nil {
+			return err
 		}
-		out = append(out, roomPickerJSON{ID: r.ID, Name: r.Name, Building: r.Building, Capacity: r.Capacity,
-			Features: r.Features, Restricted: r.Restricted, Busy: busy[r.ID] > 0, TooSmall: tooSmall(r.Capacity, want)})
-	}
-	booking, err := a.dateBooking(a.DB, occ.ID, want)
+		if want, err = seatsWanted(tx, ev, occ); err != nil {
+			return err
+		}
+		out.Rooms = []roomPickerJSON{}
+		for _, r := range list {
+			if !policy.CanBookRoom(me, true, r.Restricted) {
+				continue
+			}
+			out.Rooms = append(out.Rooms, roomPickerJSON{ID: r.ID, Name: r.Name, Building: r.Building, Capacity: r.Capacity,
+				Features: r.Features, Restricted: r.Restricted, Busy: busy[r.ID] > 0, TooSmall: tooSmall(r.Capacity, want)})
+		}
+		if out.Booking, err = a.dateBooking(tx, occ.ID, want); err != nil {
+			return err
+		}
+		out.DateRoom.ID = occ.ID
+		out.DateRoom.Revision, err = a.dateRoomRevisionIn(tx, occ.ID)
+		return err
+	}, readSnapshot)
 	if err != nil {
 		jsonError(c, http.StatusInternalServerError, "could not list rooms")
 		return
 	}
 	offered := map[uint]bool{}
-	for _, r := range out {
+	for _, r := range out.Rooms {
 		offered[r.ID] = true
 	}
 	// Rule 4's capacity tiebreak uses the same seats as the too-small note.
@@ -270,10 +279,10 @@ func (a *App) apiDateRooms(c *gin.Context) {
 	if want > 0 {
 		seats = &want
 	}
-	suggestions := a.roomSuggestions(suggestFor{person: me, eventID: ev.ID, groupID: ev.GroupID,
+	out.Suggestions = a.roomSuggestions(suggestFor{person: me, eventID: ev.ID, groupID: ev.GroupID,
 		visibility: policy.EffectiveVisibility(ev.Visibility, occ.VisibilityOverride), capacity: seats,
 		windows: windowsOf([]models.EventOccurrence{*occ})}, offered)
-	c.JSON(http.StatusOK, dateRoomsJSON{Rooms: out, Booking: booking, Suggestions: suggestions})
+	c.JSON(http.StatusOK, out)
 }
 
 func (a *App) dateBooking(db *gorm.DB, occurrenceID uint, want int) (*roomBookingJSON, error) {
@@ -304,7 +313,9 @@ func (a *App) dateBooking(db *gorm.DB, occurrenceID uint, want int) (*roomBookin
 // apiSetDateRoom books, changes or releases a date's room. roomId null
 // releases it. Padding comes from the room; an admin may override it for
 // this booking (DEC-101). A conflict is 409 room_busy unless an admin gives
-// an overlap reason, which double-books (audited).
+// an overlap reason, which double-books (audited). The pick names the read it
+// was made from (revision, dateRoomRevisionIn): an older one is 409
+// date_room_changed, writing nothing (DEC-167).
 func (a *App) apiSetDateRoom(c *gin.Context) {
 	ev, occ, ok := a.managedOccurrence(c)
 	if !ok {
@@ -315,19 +326,18 @@ func (a *App) apiSetDateRoom(c *gin.Context) {
 		OverlapReason   string `json:"overlapReason"`
 		SetupMinutes    *int   `json:"setupMinutes"`
 		TeardownMinutes *int   `json:"teardownMinutes"`
+		Revision        string `json:"revision"`
 	}
 	if err := c.ShouldBindJSON(&body); err != nil {
 		jsonError(c, http.StatusBadRequest, "invalid request")
 		return
 	}
-	user := apiUser(c)
-	me := asPerson(user)
 	reason := strings.TrimSpace(body.OverlapReason)
 	if utf8.RuneCountInString(reason) > maxOverlapReason {
 		fail(c, errOverlapReasonTooLong)
 		return
 	}
-	if (body.SetupMinutes != nil || body.TeardownMinutes != nil) && !policy.CanAdjustBookingPadding(me) {
+	if (body.SetupMinutes != nil || body.TeardownMinutes != nil) && !policy.CanAdjustBookingPadding(asPerson(apiUser(c))) {
 		fail(c, errBookingSetupAdminOnly)
 		return
 	}
@@ -337,22 +347,13 @@ func (a *App) apiSetDateRoom(c *gin.Context) {
 			return
 		}
 	}
-	errRoomGone, errRestricted, errBusy := errors.New("room gone"), errors.New("restricted"), errors.New("busy")
-	errDateGone, errAdminBooking := errors.New("date gone"), errors.New("admin booking")
+	var out roomBookingResponseJSON
 	err := a.DB.Transaction(func(tx *gorm.DB) error {
-		// The event first, as every series and approval path takes it, so a
-		// date's booking and an admin deciding its request can't deadlock.
-		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Select("id").First(&models.Event{}, ev.ID).Error; err != nil {
+		// The event first: every writer of a date's booking holds it, so the
+		// booking compared below stays as read until this commits.
+		user, _, _, err := lockManagedEventIn(tx, apiUser(c), ev.ID)
+		if err != nil {
 			return err
-		}
-		// DEC-147: a group that isn't active books no new room; releasing
-		// (roomId null) is always allowed. Checked before anything is deleted.
-		if body.RoomID != nil {
-			if ok, err := groupSchedulesIn(tx, ev.GroupID); err != nil {
-				return err
-			} else if !ok {
-				return errGroupRoomsNotApproved
-			}
 		}
 		// Book against the date as it is under the lock: a reschedule or a
 		// cancel that committed since it was read must win.
@@ -361,135 +362,155 @@ func (a *App) apiSetDateRoom(c *gin.Context) {
 			return err
 		}
 		if locked.Status != models.OccurrenceScheduled {
-			return errDateGone
+			return errOccurrenceNotFound
 		}
 		occ = locked
-		var old models.RoomBooking
-		hadOld := tx.Where("occurrence_id = ?", occ.ID).First(&old).Error == nil
-		if hadOld {
-			// A booking only an admin could make (a restricted room, or a
-			// double-booking) is only an admin's to change or release.
-			if !policy.CanDoubleBookRoom(me) {
-				var oldRoom models.Room
-				if err := tx.First(&oldRoom, old.RoomID).Error; err != nil {
-					return err
-				}
-				if oldRoom.Restricted || old.AllowOverlap {
-					return errAdminBooking
-				}
-			}
-			if err := tx.Delete(&old).Error; err != nil {
-				return err
-			}
-			// The old booking may have been a request's last date.
-			if err := closeEmptyRoomRequests(tx); err != nil {
-				return err
-			}
+		if err := a.checkDateRoomRevision(tx, occ.ID, body.Revision); err != nil {
+			return err
 		}
-		if body.RoomID == nil {
-			if !hadOld {
-				return nil
-			}
-			return audit.Write(tx, audit.Entry{Actor: &user.ID, Action: audit.RoomBookingReleased, TargetType: "occurrence", TargetID: occ.ID,
-				Meta: map[string]any{"roomId": old.RoomID, "eventId": ev.ID, "date": models.FormatCalendarDate(occ.OriginalDate)}, IP: c.ClientIP()})
+		pick := datePick{ev: ev, occ: occ, user: user, roomID: body.RoomID, reason: reason,
+			setup: body.SetupMinutes, teardown: body.TeardownMinutes, ip: c.ClientIP()}
+		if err := pickDateRoom(tx, pick); err != nil {
+			return err
 		}
-		lockedRoom, err := lockRoom(tx, *body.RoomID)
-		if errors.Is(err, gorm.ErrRecordNotFound) || (err == nil && !lockedRoom.Active) {
-			return errRoomGone
-		}
+		want, err := seatsWanted(tx, ev, occ)
 		if err != nil {
 			return err
 		}
-		room := *lockedRoom
-		if !policy.CanBookRoom(me, true, room.Restricted) {
-			return errRestricted
-		}
-		// The room's usual padding, unless this is the same room again: then
-		// an admin's override on the booking is kept (DEC-101).
-		setup, teardown := room.DefaultSetupMinutes, room.DefaultTeardownMinutes
-		if hadOld && old.RoomID == room.ID {
-			setup, teardown = old.SetupMinutes, old.TeardownMinutes
-		}
-		if body.SetupMinutes != nil {
-			setup = *body.SetupMinutes
-		}
-		if body.TeardownMinutes != nil {
-			teardown = *body.TeardownMinutes
-		}
-		if !policy.CanDoubleBookRoom(me) {
-			reason = ""
-		}
-		// With approval on, a leader's or host's booking is a request of one
-		// date for an admin (DEC-102, DEC-106).
-		var req *models.RoomRequest
-		var requestID *uint
-		if policy.BookingNeedsApproval(me, roomApprovalOn(tx)) {
-			if req, err = openRoomRequest(tx, ev.ID, room.ID, &user.ID, false); err != nil {
-				return err
-			}
-			requestID = &req.ID
-		}
-		result, err := placeBooking(tx, occ, &room, setup, teardown, placement{by: &user.ID, reason: reason, requestID: requestID})
-		if err != nil {
+		if out.Booking, err = a.dateBooking(tx, occ.ID, want); err != nil {
 			return err
 		}
-		if result == notBooked {
-			return errBusy
-		}
-		if result == bookedPending {
-			err := notifyRoomRequested(tx, req, ev, &room, 1, &user.ID)
-			if err != nil {
-				return err
-			}
-		}
-		action := audit.RoomBookingBooked
-		meta := map[string]any{"roomId": room.ID, "eventId": ev.ID, "date": models.FormatCalendarDate(occ.OriginalDate), "setupMinutes": setup, "teardownMinutes": teardown}
-		if req != nil {
-			meta["requestId"] = req.ID
-		}
-		if result == bookedOverlap {
-			action = audit.RoomBookingOverlap
-			meta["reason"] = reason
-		}
-		if hadOld {
-			meta["previousRoomId"] = old.RoomID
-		}
-		return audit.Write(tx, audit.Entry{Actor: &user.ID, Action: action, TargetType: "occurrence", TargetID: occ.ID, Meta: meta, IP: c.ClientIP()})
+		out.DateRoom.ID = occ.ID
+		out.DateRoom.Revision, err = a.dateRoomRevisionIn(tx, occ.ID)
+		return err
 	})
 	switch {
-	case errors.Is(err, errDateGone):
-		jsonError(c, http.StatusNotFound, "that date is not on this event")
-		return
-	case errors.Is(err, errAdminBooking):
-		fail(c, errBookingAdminOnly)
-		return
-	case errors.Is(err, errRoomGone):
-		jsonError(c, http.StatusNotFound, "room not found")
-		return
-	case errors.Is(err, errRestricted):
-		fail(c, errRoomRestricted)
-		return
-	case errors.Is(err, errBusy):
-		fail(c, errRoomBusy)
-		return
-	case errors.Is(err, errGroupRoomsNotApproved):
+	case isAPIError(err):
 		fail(c, err)
-		return
+	case errors.Is(err, gorm.ErrRecordNotFound):
+		fail(c, errEventNotFound)
 	case err != nil:
 		jsonError(c, http.StatusInternalServerError, "could not save the room")
-		return
+	default:
+		c.JSON(http.StatusOK, out)
 	}
-	want, err := seatsWanted(a.DB, ev, occ)
+}
+
+// datePick is one pick of a date's room by a manager the caller locked.
+type datePick struct {
+	ev              *models.Event
+	occ             *models.EventOccurrence
+	user            *models.User
+	roomID          *uint
+	reason          string
+	setup, teardown *int
+	ip              string
+}
+
+// pickDateRoom replaces the date's booking with the pick, under the event's
+// and the date's locks.
+func pickDateRoom(tx *gorm.DB, p datePick) error {
+	ev, occ, user := p.ev, p.occ, p.user
+	me := asPerson(user)
+	// DEC-147: a group that isn't active books no new room; releasing
+	// (roomId null) is always allowed. Checked before anything is deleted.
+	if p.roomID != nil {
+		if ok, err := groupSchedulesIn(tx, ev.GroupID); err != nil {
+			return err
+		} else if !ok {
+			return errGroupRoomsNotApproved
+		}
+	}
+	var old models.RoomBooking
+	hadOld := tx.Where("occurrence_id = ?", occ.ID).First(&old).Error == nil
+	if hadOld {
+		// A booking only an admin could make (a restricted room, or a
+		// double-booking) is only an admin's to change or release.
+		if !policy.CanDoubleBookRoom(me) {
+			var oldRoom models.Room
+			if err := tx.First(&oldRoom, old.RoomID).Error; err != nil {
+				return err
+			}
+			if oldRoom.Restricted || old.AllowOverlap {
+				return errBookingAdminOnly
+			}
+		}
+		if err := tx.Delete(&old).Error; err != nil {
+			return err
+		}
+		// The old booking may have been a request's last date.
+		if err := closeEmptyRoomRequests(tx); err != nil {
+			return err
+		}
+	}
+	if p.roomID == nil {
+		if !hadOld {
+			return nil
+		}
+		return audit.Write(tx, audit.Entry{Actor: &user.ID, Action: audit.RoomBookingReleased, TargetType: "occurrence", TargetID: occ.ID,
+			Meta: map[string]any{"roomId": old.RoomID, "eventId": ev.ID, "date": models.FormatCalendarDate(occ.OriginalDate)}, IP: p.ip})
+	}
+	room, err := lockRoom(tx, *p.roomID)
+	if errors.Is(err, gorm.ErrRecordNotFound) || (err == nil && !room.Active) {
+		return errRoomGone
+	}
 	if err != nil {
-		jsonError(c, http.StatusInternalServerError, "could not load the room")
-		return
+		return err
 	}
-	booking, err := a.dateBooking(a.DB, occ.ID, want)
+	if !policy.CanBookRoom(me, true, room.Restricted) {
+		return errRoomRestricted
+	}
+	// The room's usual padding, unless this is the same room again: then
+	// an admin's override on the booking is kept (DEC-101).
+	setup, teardown := room.DefaultSetupMinutes, room.DefaultTeardownMinutes
+	if hadOld && old.RoomID == room.ID {
+		setup, teardown = old.SetupMinutes, old.TeardownMinutes
+	}
+	if p.setup != nil {
+		setup = *p.setup
+	}
+	if p.teardown != nil {
+		teardown = *p.teardown
+	}
+	reason := p.reason
+	if !policy.CanDoubleBookRoom(me) {
+		reason = ""
+	}
+	// With approval on, a leader's or host's booking is a request of one
+	// date for an admin (DEC-102, DEC-106).
+	var req *models.RoomRequest
+	var requestID *uint
+	if policy.BookingNeedsApproval(me, roomApprovalOn(tx)) {
+		if req, err = openRoomRequest(tx, ev.ID, room.ID, &user.ID, false); err != nil {
+			return err
+		}
+		requestID = &req.ID
+	}
+	result, err := placeBooking(tx, occ, room, setup, teardown, placement{by: &user.ID, reason: reason, requestID: requestID})
 	if err != nil {
-		jsonError(c, http.StatusInternalServerError, "could not load the room")
-		return
+		return err
 	}
-	c.JSON(http.StatusOK, roomBookingResponseJSON{Booking: booking})
+	if result == notBooked {
+		return errRoomBusy
+	}
+	if result == bookedPending {
+		if err := notifyRoomRequested(tx, req, ev, room, 1, &user.ID); err != nil {
+			return err
+		}
+	}
+	action := audit.RoomBookingBooked
+	meta := map[string]any{"roomId": room.ID, "eventId": ev.ID, "date": models.FormatCalendarDate(occ.OriginalDate), "setupMinutes": setup, "teardownMinutes": teardown}
+	if req != nil {
+		meta["requestId"] = req.ID
+	}
+	if result == bookedOverlap {
+		action = audit.RoomBookingOverlap
+		meta["reason"] = reason
+	}
+	if hadOld {
+		meta["previousRoomId"] = old.RoomID
+	}
+	return audit.Write(tx, audit.Entry{Actor: &user.ID, Action: action, TargetType: "occurrence", TargetID: occ.ID, Meta: meta, IP: p.ip})
 }
 
 // releaseRoomBookings frees the rooms of dates that were cancelled, in the

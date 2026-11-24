@@ -152,7 +152,7 @@ func TestRoomApprovalSeries(t *testing.T) {
 	// reason confirms 3 and hands the busy date back to the leader.
 	second := start.AddDate(0, 0, 7)
 	other := createFeedEvent(t, f.admin, f.group, "Admin night", second, "")
-	if w := f.admin.do("PUT", "/api/v1/events/"+itoa(other.ID)+"/dates/"+feedDate(second)+"/room", map[string]any{"roomId": f.hall.ID}, true); w.Code != http.StatusOK {
+	if w := roomPick(t, f.admin, "/api/v1/events/"+itoa(other.ID)+"/dates/"+feedDate(second)+"/room", map[string]any{"roomId": f.hall.ID}); w.Code != http.StatusOK {
 		t.Fatalf("admin booking: %d %s", w.Code, w.Body.String())
 	}
 	if reqs = listRequests(t, f.admin); reqs[0].BusyDates != 1 {
@@ -226,7 +226,7 @@ func TestRoomApprovalSeriesRoomStaysUnapproved(t *testing.T) {
 	}
 	for i := 0; i < 3; i++ {
 		d := feedDate(start.AddDate(0, 0, 7*i))
-		if w := f.leader.do("PUT", "/api/v1/events/"+itoa(series.ID)+"/dates/"+d+"/room", map[string]any{"roomId": nil}, true); w.Code != http.StatusOK {
+		if w := roomPick(t, f.leader, "/api/v1/events/"+itoa(series.ID)+"/dates/"+d+"/room", map[string]any{"roomId": nil}); w.Code != http.StatusOK {
 			t.Fatalf("release %s: %d", d, w.Code)
 		}
 	}
@@ -400,9 +400,10 @@ func TestRoomRequestNoticeSerializesWithAdminErasure(t *testing.T) {
 	t.Run("one date", func(t *testing.T) {
 		runErasureBarriers(t, 7402009, func(t *testing.T) erasureScene {
 			f, victim := roomRequestsFixture(t)
+			pick := withRevision(map[string]any{"roomId": f.hall.ID}, roomRevision(t, f.leader, f.path(f.eventA, "/room")))
 			return erasureScene{app: f.app, victim: victim,
 				run: func() error {
-					return doExpect(f.leader, "PUT", f.path(f.eventA, "/room"), map[string]any{"roomId": f.hall.ID}, http.StatusOK)
+					return doExpect(f.leader, "PUT", f.path(f.eventA, "/room"), pick, http.StatusOK)
 				},
 				told: func(t *testing.T) {
 					if n := adminOpenTasks(t, f); n != 1 {
@@ -416,9 +417,11 @@ func TestRoomRequestNoticeSerializesWithAdminErasure(t *testing.T) {
 		runErasureBarriers(t, 7402010, func(t *testing.T) erasureScene {
 			f, victim := roomRequestsFixture(t)
 			series := createFeedEvent(t, f.leader, f.group, "Weekly", f.startOn.AddDate(0, 0, 1), "FREQ=WEEKLY;COUNT=4")
+			path := "/api/v1/events/" + itoa(series.ID) + "/room"
+			pick := withRevision(map[string]any{"roomId": f.hall.ID}, roomRevision(t, f.leader, path))
 			return erasureScene{app: f.app, victim: victim,
 				run: func() error {
-					return doExpect(f.leader, "PUT", "/api/v1/events/"+itoa(series.ID)+"/room", map[string]any{"roomId": f.hall.ID}, http.StatusOK)
+					return doExpect(f.leader, "PUT", path, pick, http.StatusOK)
 				},
 				told: func(t *testing.T) {
 					if n := adminOpenTasks(t, f); n != 1 {

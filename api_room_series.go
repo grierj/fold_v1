@@ -25,10 +25,8 @@ import (
 // on the event page as needing a room (DEC-103). Dates the daily extender or
 // a series edit adds later are booked in the series room the same way.
 
-var (
-	errRoomGone   = apiErr(http.StatusNotFound, "", "room not found")
-	errRestricted = errRoomRestricted
-)
+// errRoomGone: the room picked was removed or turned off since it was listed.
+var errRoomGone = apiErr(http.StatusNotFound, "room_gone", "room not found")
 
 type seriesRoomJSON struct {
 	ID         uint   `json:"id"`
@@ -56,6 +54,8 @@ type needsRoomJSON struct {
 }
 
 type seriesBookingJSON struct {
+	// Event: the event the pick stored, with the token the next pick sends.
+	Event       revisionRefJSON     `json:"event"`
 	DefaultRoom *occurrenceRoomJSON `json:"defaultRoom"`
 	Booked      int                 `json:"booked"`
 	// Lost: dates the room was busy on, kept as requested.
@@ -89,66 +89,92 @@ func roomChoices(db *gorm.DB, p *policy.Person, windows []rooms.Window, eventID 
 	return out, nil
 }
 
+// apiSeriesRooms is the series' room control: the rooms its manager may book
+// over the upcoming dates, the series room, the dates that need a room, and
+// the event's token (eventRevision) the series pick sends, all from one
+// snapshot.
 func (a *App) apiSeriesRooms(c *gin.Context) {
 	ev, ok := a.loadManagedEvent(c)
 	if !ok {
 		return
 	}
+	me := apiUser(c)
+	var out seriesRoomsJSON
 	var occs []models.EventOccurrence
-	if err := a.DB.Where("event_id = ? AND status = ? AND starts_at > ?", ev.ID, models.OccurrenceScheduled, time.Now()).
-		Order("starts_at").Find(&occs).Error; err != nil {
-		jsonError(c, http.StatusInternalServerError, "could not list rooms")
-		return
-	}
-	windows := make([]rooms.Window, len(occs))
-	for i, o := range occs {
-		windows[i] = rooms.Window{Start: o.StartsAt, End: o.EndsAt}
-	}
-	choices, err := roomChoices(a.DB, asPerson(apiUser(c)), windows, ev.ID, ev.Capacity)
-	if err != nil {
-		jsonError(c, http.StatusInternalServerError, "could not list rooms")
-		return
-	}
-	var held []struct {
-		Date, RoomName, Status string
-		Waiting                bool
-	}
-	if err := a.DB.Raw(`SELECT to_char(o.original_date, 'YYYY-MM-DD') AS date, r.name AS room_name, b.status,
-			EXISTS (SELECT 1 FROM room_requests q WHERE q.id = b.request_id AND q.status = ?) AS waiting
-		FROM room_bookings b JOIN event_occurrences o ON o.id = b.occurrence_id JOIN rooms r ON r.id = b.room_id
-		WHERE o.event_id = ? AND o.status = ? AND o.starts_at > ? AND b.status IN ?
-		ORDER BY o.starts_at`, models.RoomRequestPending, ev.ID, models.OccurrenceScheduled, time.Now(),
-		[]string{models.BookingRequested, models.BookingRejected}).Scan(&held).Error; err != nil {
-		jsonError(c, http.StatusInternalServerError, "could not list rooms")
-		return
-	}
-	needs, pending := []needsRoomJSON{}, 0
-	for _, h := range held {
-		if h.Waiting {
-			pending++
-		} else {
-			needs = append(needs, needsRoomJSON{Date: h.Date, RoomName: h.RoomName, Status: h.Status})
+	err := a.DB.Transaction(func(tx *gorm.DB) error {
+		if err := tx.First(ev, ev.ID).Error; err != nil {
+			return err
 		}
+		f, err := eventFactsIn(tx, me, ev)
+		if err != nil {
+			return err
+		}
+		if !f.canManage(me) {
+			return errCannotChangeEvent
+		}
+		out.Revision = a.eventRevision(ev, f.group)
+		if err := tx.Where("event_id = ? AND status = ? AND starts_at > ?", ev.ID, models.OccurrenceScheduled, time.Now()).
+			Order("starts_at").Find(&occs).Error; err != nil {
+			return err
+		}
+		windows := make([]rooms.Window, len(occs))
+		for i, o := range occs {
+			windows[i] = rooms.Window{Start: o.StartsAt, End: o.EndsAt}
+		}
+		if out.Rooms, err = roomChoices(tx, asPerson(me), windows, ev.ID, ev.Capacity); err != nil {
+			return err
+		}
+		var held []struct {
+			Date, RoomName, Status string
+			Waiting                bool
+		}
+		if err := tx.Raw(`SELECT to_char(o.original_date, 'YYYY-MM-DD') AS date, r.name AS room_name, b.status,
+				EXISTS (SELECT 1 FROM room_requests q WHERE q.id = b.request_id AND q.status = ?) AS waiting
+			FROM room_bookings b JOIN event_occurrences o ON o.id = b.occurrence_id JOIN rooms r ON r.id = b.room_id
+			WHERE o.event_id = ? AND o.status = ? AND o.starts_at > ? AND b.status IN ?
+			ORDER BY o.starts_at`, models.RoomRequestPending, ev.ID, models.OccurrenceScheduled, time.Now(),
+			[]string{models.BookingRequested, models.BookingRejected}).Scan(&held).Error; err != nil {
+			return err
+		}
+		out.NeedsRoom = []needsRoomJSON{}
+		for _, h := range held {
+			if h.Waiting {
+				out.Pending++
+			} else {
+				out.NeedsRoom = append(out.NeedsRoom, needsRoomJSON{Date: h.Date, RoomName: h.RoomName, Status: h.Status})
+			}
+		}
+		out.Dates = len(occs)
+		out.DefaultRoom, err = seriesRoomIn(tx, ev)
+		return err
+	}, readSnapshot)
+	if err != nil {
+		answerEventWrite(c, err, "could not list rooms")
+		return
 	}
-	suggestions := a.roomSuggestions(suggestFor{person: asPerson(apiUser(c)), eventID: ev.ID, groupID: ev.GroupID,
-		visibility: ev.Visibility, capacity: ev.Capacity, windows: windowsOf(occs)}, offeredRooms(choices))
-	c.JSON(http.StatusOK, seriesRoomsJSON{Rooms: choices, Dates: len(occs), DefaultRoom: a.seriesRoom(ev), NeedsRoom: needs, Pending: pending, Suggestions: suggestions})
+	out.Suggestions = a.roomSuggestions(suggestFor{person: asPerson(me), eventID: ev.ID, groupID: ev.GroupID,
+		visibility: ev.Visibility, capacity: ev.Capacity, windows: windowsOf(occs)}, offeredRooms(out.Rooms))
+	c.JSON(http.StatusOK, out)
 }
 
-func (a *App) seriesRoom(ev *models.Event) *occurrenceRoomJSON {
+// seriesRoomIn is ev's series room as tx reads it; nil when it has none.
+func seriesRoomIn(tx *gorm.DB, ev *models.Event) (*occurrenceRoomJSON, error) {
 	if ev.DefaultRoomID == nil {
-		return nil
+		return nil, nil
 	}
 	var r models.Room
-	if a.DB.First(&r, *ev.DefaultRoomID).Error != nil {
-		return nil
+	if err := tx.First(&r, *ev.DefaultRoomID).Error; err != nil {
+		return nil, err
 	}
-	return &occurrenceRoomJSON{ID: r.ID, Name: r.Name, Building: r.Building}
+	return &occurrenceRoomJSON{ID: r.ID, Name: r.Name, Building: r.Building}, nil
 }
 
 // apiSetSeriesRoom books a room for the whole series, or (roomId null)
 // stops booking one. An admin's reason double-books busy dates instead of
-// leaving them needing a room.
+// leaving them needing a room. The pick names the event's read it was made
+// from (revision, eventRevision): the trigger moves it with the series room
+// (default_room_id, default_room_pending), and an older one is 409
+// event_changed, writing nothing (DEC-167).
 func (a *App) apiSetSeriesRoom(c *gin.Context) {
 	ev, ok := a.loadManagedEvent(c)
 	if !ok {
@@ -157,6 +183,7 @@ func (a *App) apiSetSeriesRoom(c *gin.Context) {
 	var body struct {
 		RoomID        *uint  `json:"roomId"`
 		OverlapReason string `json:"overlapReason"`
+		Revision      string `json:"revision"`
 	}
 	if err := c.ShouldBindJSON(&body); err != nil {
 		jsonError(c, http.StatusBadRequest, "invalid request")
@@ -167,38 +194,29 @@ func (a *App) apiSetSeriesRoom(c *gin.Context) {
 		fail(c, errOverlapReasonTooLong)
 		return
 	}
-	user := apiUser(c)
 	var out seriesBookingJSON
-	errNotManager := errors.New("not a manager")
 	err := a.DB.Transaction(func(tx *gorm.DB) error {
-		var locked models.Event
-		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&locked, ev.ID).Error; err != nil {
-			return err
-		}
-		f, err := eventFactsIn(tx, user, &locked)
+		user, locked, f, err := lockManagedEventIn(tx, apiUser(c), ev.ID)
 		if err != nil {
 			return err
 		}
-		if !f.canManage(user) {
-			return errNotManager
+		if err := a.checkEventRevision(locked, f.group, body.Revision); err != nil {
+			return err
 		}
-		out, err = bookWholeSeries(tx, &locked, body.RoomID, user, reason, c.ClientIP())
-		return err
+		if out, err = bookWholeSeries(tx, locked, body.RoomID, user, reason, c.ClientIP()); err != nil {
+			return err
+		}
+		if err := readEventRevision(tx, locked); err != nil {
+			return err
+		}
+		out.Event = revisionRefJSON{ID: locked.ID, Revision: a.eventRevision(locked, f.group)}
+		return nil
 	})
-	switch {
-	case errors.Is(err, errNotManager):
-		fail(c, errCannotChangeEvent)
-	case errors.Is(err, errRoomGone):
-		jsonError(c, http.StatusNotFound, "room not found")
-	case errors.Is(err, errRestricted):
-		fail(c, errRoomRestricted)
-	case errors.Is(err, errGroupRoomsNotApproved):
-		fail(c, err)
-	case err != nil:
-		jsonError(c, http.StatusInternalServerError, "could not save the room")
-	default:
-		c.JSON(http.StatusOK, out)
+	if err != nil {
+		answerEventWrite(c, err, "could not save the room")
+		return
 	}
+	c.JSON(http.StatusOK, out)
 }
 
 // bookWholeSeries sets ev's series room (nil stops it) and books it on every
@@ -243,7 +261,7 @@ func bookWholeSeries(tx *gorm.DB, ev *models.Event, roomID *uint, user *models.U
 			return out, err
 		}
 		if !policy.CanBookRoom(me, true, r.Restricted) {
-			return out, errRestricted
+			return out, errRoomRestricted
 		}
 		room = r
 		out.DefaultRoom = &occurrenceRoomJSON{ID: r.ID, Name: r.Name, Building: r.Building}

@@ -183,7 +183,7 @@ func TestRoomFeedIsStableAndScoped(t *testing.T) {
 	f.app.DB.Model(&models.Group{}).Where("id = ?", f.group).Update("location", "Church annex")
 	for i := 0; i < 15; i++ {
 		ev := createFeedEvent(t, f.leader, f.group, "Night "+itoa(uint(i)), f.startOn.AddDate(0, 0, i+1), "")
-		if w := f.leader.do("PUT", "/api/v1/events/"+itoa(ev.ID)+"/dates/"+feedDate(f.startOn.AddDate(0, 0, i+1))+"/room", map[string]any{"roomId": f.hall.ID}, true); w.Code != http.StatusOK {
+		if w := roomPick(t, f.leader, "/api/v1/events/"+itoa(ev.ID)+"/dates/"+feedDate(f.startOn.AddDate(0, 0, i+1))+"/room", map[string]any{"roomId": f.hall.ID}); w.Code != http.StatusOK {
 			t.Fatalf("book %d: %d %s", i, w.Code, w.Body.String())
 		}
 	}
@@ -405,7 +405,7 @@ func TestRoomFeedReadsItsLinkAndSwitchInOneSnapshot(t *testing.T) {
 			day := f.startOn.AddDate(0, 0, 1)
 			ev := createFeedEvent(t, f.leader, f.group, late, day, "")
 			fired := atReaderSeam(f.app, "authorized", "room feed", func() {
-				if w := f.leader.do("PUT", "/api/v1/events/"+itoa(ev.ID)+"/dates/"+feedDate(day)+"/room", map[string]any{"roomId": f.hall.ID}, true); w.Code != http.StatusOK {
+				if w := roomPick(t, f.leader, "/api/v1/events/"+itoa(ev.ID)+"/dates/"+feedDate(day)+"/room", map[string]any{"roomId": f.hall.ID}); w.Code != http.StatusOK {
 					t.Errorf("the late booking: %d %s", w.Code, w.Body.String())
 				}
 				var w interface{ Result() *http.Response }

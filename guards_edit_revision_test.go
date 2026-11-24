@@ -16,22 +16,24 @@ import (
 // (edit_revision.go) inside its write transaction, under the row lock, so a
 // refusal writes nothing.
 //
-// Parse-only, root package. A check is a call named checkEventRevision,
-// checkGroupRevision or checkEditRevision outside edit_revision.go. It is
-// inside the transaction when
+// Parse-only, root package. A check is a call named in editRevisionChecks
+// outside edit_revision.go. It is inside the transaction when
 // the nearest function literal around it is an argument of a call named
 // contactMutation or Transaction. The guard does not see a check reached
 // through a helper the handler calls, a transaction opened another way, or
 // whether the call comes after the row lock; the handlers' tests cover that.
-// checkGroupRevision reads the group itself, so its first argument must be
-// that function literal's transaction: the handle outside it would read a
-// row the lock does not hold.
+// A check that reads its row itself (editRevisionReaders) must get that
+// function literal's transaction as its first argument: the handle outside it
+// would read a row the lock does not hold.
 // ---------------------------------------------------------------------------
 
 // editRevisionCheckers is every handler that checks a save's revision, exactly.
-var editRevisionCheckers = []string{"apiSetEventVisibility", "apiUpdateEvent", "apiUpdateGroup"}
+var editRevisionCheckers = []string{"apiSetDateRoom", "apiSetEventVisibility", "apiSetSeriesRoom", "apiUpdateEvent", "apiUpdateGroup"}
 
-var editRevisionChecks = map[string]bool{"checkEventRevision": true, "checkGroupRevision": true, "checkEditRevision": true}
+var editRevisionChecks = map[string]bool{"checkEventRevision": true, "checkGroupRevision": true, "checkDateRoomRevision": true, "checkEditRevision": true}
+
+// editRevisionReaders are the checks that read their row on the handle given.
+var editRevisionReaders = map[string]bool{"checkGroupRevision": true, "checkDateRoomRevision": true}
 
 var editRevisionTransactions = map[string]bool{"contactMutation": true, "Transaction": true}
 
@@ -53,8 +55,8 @@ func editRevisionCensus(p *guardkit.Parsed) (checkers, bad []string) {
 				if !ok || !editRevisionChecks[guardkit.Callee(call)] {
 					return true
 				}
-				if guardkit.Callee(call) == "checkGroupRevision" && !readsThroughItsTransaction(call, stack) {
-					bad = append(bad, fmt.Sprintf("%s:%d: %s reads the group for its revision check outside the transaction's handle", f.Path, p.Fset.Position(call.Pos()).Line, fd.Name.Name))
+				if editRevisionReaders[guardkit.Callee(call)] && !readsThroughItsTransaction(call, stack) {
+					bad = append(bad, fmt.Sprintf("%s:%d: %s reads the row for its revision check outside the transaction's handle", f.Path, p.Fset.Position(call.Pos()).Line, fd.Name.Name))
 				}
 				if inWriteTransaction(stack) {
 					if !slices.Contains(checkers, fd.Name.Name) {
@@ -145,8 +147,69 @@ func (a *App) apiUpdateGroup(c *gin.Context) {
 	})
 }
 `
-	if bad := editRevisionProblems(guardkit.Sources{"a.go": visibility, "b.go": series, "c.go": group}.Parse(0)); len(bad) > 0 {
+	const rooms = `package main
+func (a *App) apiSetDateRoom(c *gin.Context) {
+	err := a.DB.Transaction(func(tx *gorm.DB) error {
+		if err := a.checkDateRoomRevision(tx, occ.ID, body.Revision); err != nil {
+			return err
+		}
+		return nil
+	})
+}
+func (a *App) apiSetSeriesRoom(c *gin.Context) {
+	err := a.DB.Transaction(func(tx *gorm.DB) error {
+		return a.checkEventRevision(locked, f.group, body.Revision)
+	})
+}
+`
+	sound := guardkit.Sources{"a.go": visibility, "b.go": series, "c.go": group, "d.go": rooms}
+	if bad := editRevisionProblems(sound.Parse(0)); len(bad) > 0 {
 		t.Fatalf("the sound shape was flagged: %v", bad)
+	}
+	for name, src := range map[string]string{
+		"a date pick that skips the check": `package main
+func (a *App) apiSetDateRoom(c *gin.Context) {
+	a.DB.Transaction(func(tx *gorm.DB) error { return nil })
+}
+func (a *App) apiSetSeriesRoom(c *gin.Context) {
+	a.DB.Transaction(func(tx *gorm.DB) error { return a.checkEventRevision(locked, f.group, body.Revision) })
+}
+`,
+		"a date pick that reads its booking outside its transaction's handle": `package main
+func (a *App) apiSetDateRoom(c *gin.Context) {
+	a.DB.Transaction(func(tx *gorm.DB) error { return a.checkDateRoomRevision(a.DB, occ.ID, body.Revision) })
+}
+func (a *App) apiSetSeriesRoom(c *gin.Context) {
+	a.DB.Transaction(func(tx *gorm.DB) error { return a.checkEventRevision(locked, f.group, body.Revision) })
+}
+`,
+		"a date pick checked before its transaction": `package main
+func (a *App) apiSetDateRoom(c *gin.Context) {
+	if err := a.checkDateRoomRevision(a.DB, occ.ID, body.Revision); err != nil {
+		return
+	}
+	a.DB.Transaction(func(tx *gorm.DB) error { return nil })
+}
+func (a *App) apiSetSeriesRoom(c *gin.Context) {
+	a.DB.Transaction(func(tx *gorm.DB) error { return a.checkEventRevision(locked, f.group, body.Revision) })
+}
+`,
+		"a series pick checked in the helper it calls": `package main
+func (a *App) apiSetDateRoom(c *gin.Context) {
+	a.DB.Transaction(func(tx *gorm.DB) error { return a.checkDateRoomRevision(tx, occ.ID, body.Revision) })
+}
+func (a *App) apiSetSeriesRoom(c *gin.Context) {
+	a.DB.Transaction(func(tx *gorm.DB) error { return bookWholeSeries(tx, locked, body) })
+}
+func bookWholeSeries(tx *gorm.DB, ev *models.Event, body seriesBody) error {
+	return a.checkEventRevision(ev, nil, body.Revision)
+}
+`,
+	} {
+		sources := guardkit.Sources{"a.go": visibility, "b.go": series, "c.go": group, "d.go": src}
+		if bad := editRevisionProblems(sources.Parse(0)); len(bad) == 0 {
+			t.Errorf("%s passed the guard", name)
+		}
 	}
 	for name, src := range map[string]string{
 		"a handler that skips the check": `package main
@@ -204,7 +267,7 @@ func (a *App) apiSetGroup(c *gin.Context) {
 }
 `,
 	} {
-		sources := guardkit.Sources{"a.go": src, "b.go": series}
+		sources := guardkit.Sources{"a.go": src, "b.go": series, "d.go": rooms}
 		if !strings.Contains(src, "apiUpdateGroup") {
 			sources["c.go"] = group
 		}

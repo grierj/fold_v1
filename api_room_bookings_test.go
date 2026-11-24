@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"strings"
 	"sync"
@@ -64,8 +65,52 @@ func (f bookingFixture) path(ev eventJSON, rest string) string {
 
 func (f bookingFixture) book(t *testing.T, c *apiClient, ev eventJSON, body map[string]any) (int, string) {
 	t.Helper()
-	w := c.do("PUT", f.path(ev, "/room"), body, true)
+	w := roomPick(t, c, f.path(ev, "/room"), body)
 	return w.Code, w.Body.String()
+}
+
+// roomRevision is the revision a room control's read gives c for the pick at
+// path (a date's or a series' /room; the read is the same path's /rooms): a
+// date's dateRoom.revision, a series' revision. "" when c may not read it.
+func roomRevision(t *testing.T, c *apiClient, path string) string {
+	t.Helper()
+	w := c.do("GET", path+"s", nil, false)
+	if w.Code != http.StatusOK {
+		return ""
+	}
+	var read struct {
+		Revision string          `json:"revision"`
+		DateRoom revisionRefJSON `json:"dateRoom"`
+	}
+	decodeJSON(t, w, &read)
+	if read.DateRoom.Revision != "" {
+		return read.DateRoom.Revision
+	}
+	return read.Revision
+}
+
+// withRevision is body with the revision a pick names.
+func withRevision(body map[string]any, revision string) map[string]any {
+	out := make(map[string]any, len(body)+1)
+	for k, v := range body {
+		out[k] = v
+	}
+	out["revision"] = revision
+	return out
+}
+
+// roomPick sends c's pick at path made from a fresh read of its control.
+func roomPick(t *testing.T, c *apiClient, path string, body map[string]any) *httptest.ResponseRecorder {
+	t.Helper()
+	return c.do("PUT", path, withRevision(body, roomRevision(t, c, path)), true)
+}
+
+// roomPickOK is roomPick that must answer 200.
+func roomPickOK(t *testing.T, c *apiClient, path string, body map[string]any) {
+	t.Helper()
+	if w := roomPick(t, c, path, body); w.Code != http.StatusOK {
+		t.Fatalf("PUT %s: %d %s", path, w.Code, w.Body.String())
+	}
 }
 
 func TestRoomBookingOneDate(t *testing.T) {
@@ -309,7 +354,7 @@ func TestRoomBookingSeriesEdits(t *testing.T) {
 	series := createFeedEvent(t, f.leader, f.group, "Weekly", f.startOn.AddDate(0, 0, 1), "FREQ=WEEKLY;COUNT=3")
 	second := feedDate(f.startOn.AddDate(0, 0, 8))
 	bookDate := func(c *apiClient, date string, body map[string]any) int {
-		return c.do("PUT", "/api/v1/events/"+itoa(series.ID)+"/dates/"+date+"/room", body, true).Code
+		return roomPick(t, c, "/api/v1/events/"+itoa(series.ID)+"/dates/"+date+"/room", body).Code
 	}
 	if code := bookDate(f.leader, second, map[string]any{"roomId": f.hall.ID}); code != http.StatusOK {
 		t.Fatalf("book the second date: %d", code)
@@ -333,7 +378,7 @@ func TestRoomBookingSeriesEdits(t *testing.T) {
 	// An admin double-books the hall at 22:00 on that date; moving the
 	// series onto it loses the room, and the leader who moved it is told.
 	clash := createFeedEvent(t, f.admin, f.group, "Admin night", f.startOn.AddDate(0, 0, 8).Add(3*time.Hour), "")
-	if w := f.admin.do("PUT", "/api/v1/events/"+itoa(clash.ID)+"/dates/"+second+"/room", map[string]any{"roomId": f.hall.ID, "overlapReason": "Shared"}, true); w.Code != http.StatusOK {
+	if w := roomPick(t, f.admin, "/api/v1/events/"+itoa(clash.ID)+"/dates/"+second+"/room", map[string]any{"roomId": f.hall.ID, "overlapReason": "Shared"}); w.Code != http.StatusOK {
 		t.Fatalf("admin booking: %d %s", w.Code, w.Body.String())
 	}
 	onto := f.startOn.AddDate(0, 0, 1).Add(3 * time.Hour)
@@ -372,7 +417,7 @@ func TestRoomLostNoticeGoesToLiveChurchHosts(t *testing.T) {
 		if ev.ID == y.ID {
 			path = "/api/v1/events/" + itoa(ev.ID) + "/dates/" + feedDate(f.startOn.Add(4*time.Hour)) + "/room"
 		}
-		if w := f.admin.do("PUT", path, map[string]any{"roomId": f.hall.ID}, true); w.Code != http.StatusOK {
+		if w := roomPick(t, f.admin, path, map[string]any{"roomId": f.hall.ID}); w.Code != http.StatusOK {
 			t.Fatalf("book %s: %d %s", ev.Title, w.Code, w.Body.String())
 		}
 	}
@@ -535,5 +580,142 @@ func TestUsualRoomFollowsTheRoomSwitch(t *testing.T) {
 		if want := on == "false"; (got != nil) != want || roomApprovalOn(app.DB) != (on == "true") {
 			t.Fatalf("a series room awaiting approval, approval %s: %+v", on, got)
 		}
+	}
+}
+
+// roomState is every row a room pick may write: bookings, requests, the
+// event's series room, notices, audit rows and queued jobs.
+func roomState(t *testing.T, app *App) string {
+	t.Helper()
+	var state struct {
+		Bookings []models.RoomBooking
+		Requests []models.RoomRequest
+		Events   []models.Event
+		Audit    []models.AuditLog
+		Notices  []models.Notification
+		Jobs     []models.Job
+	}
+	for _, q := range []any{&state.Bookings, &state.Requests, &state.Events, &state.Audit, &state.Notices, &state.Jobs} {
+		gormMust(t, app.DB.Unscoped().Order("id").Find(q))
+	}
+	b, err := json.Marshal(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(b)
+}
+
+// coLeader adds a second leader of the fixture's group and signs them in.
+func (f bookingFixture) coLeader(t *testing.T) (*apiClient, *models.User) {
+	t.Helper()
+	u := newTestUser(t, f.app, "coleader", "password1234", models.RoleMember)
+	var g models.Group
+	gormMust(t, f.app.DB.First(&g, f.group))
+	addMember(t, f.app, u, &g, models.MembershipLeader)
+	return loginAPI(t, f.app, "coleader", "password1234"), u
+}
+
+// DEC-167: a pick of a date's room names the read it was made from. Two
+// leaders read the same date; the second's pick, made after the first's
+// landed, is refused with nothing written, and goes through from a fresh read.
+func TestDatePickFromAnOlderReadIsRefused(t *testing.T) {
+	f := newBookingFixture(t)
+	co, _ := f.coLeader(t)
+	var chapel struct {
+		Room roomJSON `json:"room"`
+	}
+	decodeJSON(t, f.admin.do("POST", "/api/v1/admin/rooms", map[string]any{"name": "Chapel"}, true), &chapel)
+	path := f.path(f.eventA, "/room")
+	first, second := roomRevision(t, f.leader, path), roomRevision(t, co, path)
+	if first == "" || first != second {
+		t.Fatalf("two reads of the same date: %q and %q", first, second)
+	}
+	w := f.leader.do("PUT", path, withRevision(map[string]any{"roomId": f.hall.ID}, first), true)
+	if w.Code != http.StatusOK {
+		t.Fatalf("the first pick: %d %s", w.Code, w.Body.String())
+	}
+	var landed roomBookingResponseJSON
+	decodeJSON(t, w, &landed)
+	if landed.Booking == nil || landed.Booking.RoomID != f.hall.ID || landed.DateRoom.Revision == first || landed.DateRoom.Revision != roomRevision(t, f.leader, path) {
+		t.Fatalf("the first pick's answer %+v; a fresh read gives %q", landed, roomRevision(t, f.leader, path))
+	}
+	before := roomState(t, f.app)
+	wantCode(t, "the second pick from the older read", co.do("PUT", path, withRevision(map[string]any{"roomId": chapel.Room.ID}, second), true), http.StatusConflict, "date_room_changed")
+	wantCode(t, "a pick with no revision", co.do("PUT", path, map[string]any{"roomId": chapel.Room.ID}, true), http.StatusConflict, "date_room_changed")
+	wantCode(t, "a release from the older read", co.do("PUT", path, withRevision(map[string]any{"roomId": nil}, second), true), http.StatusConflict, "date_room_changed")
+	if after := roomState(t, f.app); after != before {
+		t.Fatalf("a refused pick wrote:\n%s\nwant\n%s", after, before)
+	}
+	// The answer's revision is the next pick's base: the first leader picks again.
+	if w := f.leader.do("PUT", path, withRevision(map[string]any{"roomId": chapel.Room.ID}, landed.DateRoom.Revision), true); w.Code != http.StatusOK {
+		t.Fatalf("a second pick from the first's answer: %d %s", w.Code, w.Body.String())
+	}
+	if code, body := f.book(t, co, f.eventA, map[string]any{"roomId": f.hall.ID}); code != http.StatusOK {
+		t.Fatalf("the second leader's pick from a fresh read: %d %s", code, body)
+	}
+}
+
+// An admin approving a leader's request moves the date's token: the control
+// showed it waiting, and a pick from that read is refused (the web control
+// sends it again by itself, since the room it shows is the same).
+func TestDatePickAfterAnApprovalIsRefused(t *testing.T) {
+	f := newBookingFixture(t)
+	approvalOn(t, f)
+	path := f.path(f.eventA, "/room")
+	if code, body := f.book(t, f.leader, f.eventA, map[string]any{"roomId": f.hall.ID}); code != http.StatusOK {
+		t.Fatalf("the leader's request: %d %s", code, body)
+	}
+	waiting := roomRevision(t, f.leader, path)
+	reqs := listRequests(t, f.admin)
+	if len(reqs) != 1 {
+		t.Fatalf("requests: %+v", reqs)
+	}
+	apiDo(t, f.admin, "POST", "/api/v1/admin/room-requests/"+itoa(reqs[0].ID)+"/confirm", map[string]any{}, http.StatusOK)
+	before := roomState(t, f.app)
+	wantCode(t, "a pick from the read before the approval", f.leader.do("PUT", path, withRevision(map[string]any{"roomId": nil}, waiting), true), http.StatusConflict, "date_room_changed")
+	if after := roomState(t, f.app); after != before {
+		t.Fatalf("a refused pick wrote:\n%s\nwant\n%s", after, before)
+	}
+}
+
+// A leader demoted after the pick passed its first check, while it waits for
+// the event's lock, gets the refusal of someone who may not manage the event,
+// never date_room_changed, and nothing is written.
+func TestDatePickByALeaderDemotedWhileItWaitsWritesNothing(t *testing.T) {
+	f := newBookingFixture(t)
+	co, coUser := f.coLeader(t)
+	path := f.path(f.eventA, "/room")
+	pick := withRevision(map[string]any{"roomId": f.hall.ID}, roomRevision(t, co, path))
+	before := roomState(t, f.app)
+	holder := f.app.DB.Begin()
+	defer holder.Rollback()
+	gormMust(t, holder.Exec("SELECT 1 FROM events WHERE id = ? FOR UPDATE", f.eventA.ID))
+	answer := make(chan *httptest.ResponseRecorder, 1)
+	go func() { answer <- co.do("PUT", path, pick, true) }()
+	waitForLockedUsersQuery(t, f.app, "%events%FOR UPDATE%")
+	gormMust(t, holder.Exec("UPDATE memberships SET role = ? WHERE user_id = ? AND group_id = ?", models.MembershipMember, coUser.ID, f.group))
+	gormMust(t, holder.Commit())
+	wantCode(t, "the demoted leader's pick", <-answer, http.StatusForbidden, "")
+	if after := roomState(t, f.app); after != before {
+		t.Fatalf("the demoted leader's pick wrote:\n%s\nwant\n%s", after, before)
+	}
+}
+
+// Only a manager of the date reads its room control, and so its revision.
+func TestDateRoomRevisionIsReadOnlyByManagers(t *testing.T) {
+	f := newBookingFixture(t)
+	member := newTestUser(t, f.app, "member", "password1234", models.RoleMember)
+	var g models.Group
+	gormMust(t, f.app.DB.First(&g, f.group))
+	addMember(t, f.app, member, &g, models.MembershipMember)
+	mc := loginAPI(t, f.app, "member", "password1234")
+	for name, c := range map[string]*apiClient{"a member": mc, "a visitor": newAPIClient(t, f.app)} {
+		w := c.do("GET", f.path(f.eventA, "/rooms"), nil, false)
+		if w.Code == http.StatusOK || strings.Contains(w.Body.String(), "revision") {
+			t.Fatalf("%s read the room control: %d %s", name, w.Code, w.Body.String())
+		}
+	}
+	if roomRevision(t, f.leader, f.path(f.eventA, "/room")) == "" {
+		t.Fatal("the leader read no revision")
 	}
 }

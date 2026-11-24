@@ -3216,7 +3216,7 @@ func bookStraddleRoom(t *testing.T, f occurrenceReadFixture) {
 	}
 	decodeJSON(t, w, &room)
 	path := fmt.Sprintf("/api/v1/events/%d/dates/%s/room", f.event.ID, models.FormatCalendarDate(f.dates[1].OriginalDate))
-	if w := f.admin.do("PUT", path, map[string]any{"roomId": room.Room.ID}, true); w.Code != http.StatusOK {
+	if w := roomPick(t, f.admin, path, map[string]any{"roomId": room.Room.ID}); w.Code != http.StatusOK {
 		t.Fatalf("book the kept date: %d %s", w.Code, w.Body.String())
 	}
 }
