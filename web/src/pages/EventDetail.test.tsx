@@ -2814,3 +2814,78 @@ describe("EventDetail when a series save meets someone else's change", () => {
     expect(screen.queryByText(NOTICE)).not.toBeInTheDocument();
   });
 });
+
+// DEC-163: the visibility control takes the same closing path as the series editor.
+describe("EventDetail when a visibility save meets someone else's change", () => {
+  const NOTICE = "Someone changed this event while you were editing, so your changes weren't saved. This is the event as it is now.";
+  const opened: EventDetailResponse = { ...page, canSetVisibility: true, event: { ...page.event, groupId: 3, groupName: "Family group", groupVisibility: "public", revision: "r1" } };
+  const theirs: EventDetailResponse = { ...opened, event: { ...opened.event, visibility: "invite_only", revision: "r2" } };
+  const changed = () => new ApiError(409, "changed", { code: "event_changed" });
+  const tightening = { visibility: "private" as const, currentVisibility: "public" as const, tightened: [{ id: 7, title: "Hybrid study", visibility: "public" as const, registrants: 1 }], leaderOpened: [], consent: "a".repeat(32) };
+
+  beforeEach(() => {
+    vi.resetAllMocks();
+    guarded();
+    vi.mocked(Households.mine).mockResolvedValue({ household: null });
+    vi.mocked(Events.visibilityImpact).mockResolvedValue({ visibility: "public", currentVisibility: "public", tightened: [], leaderOpened: [] });
+    vi.mocked(Events.setVisibility).mockRejectedValue(changed());
+  });
+
+  // Opens the panel and saves Private into a refusal whose read shows `controlRead`; the page's read after it is held.
+  async function saveIntoRefusal(controlRead: () => Promise<EventDetailResponse>, review = false) {
+    vi.mocked(Events.get).mockResolvedValueOnce(opened).mockImplementationOnce(controlRead);
+    render(<main id="main" tabIndex={-1}><MemoryRouter initialEntries={["/events/7"]}><DateWritesProvider credential={credential}><Routes><Route path="/events/:id" element={<EventDetail />} /></Routes></DateWritesProvider></MemoryRouter></main>);
+    await userEvent.click(await screen.findByRole("button", { name: "Edit event" }));
+    await userEvent.click(screen.getByRole("radio", { name: /^Private/ }));
+    const after = deferred<EventDetailResponse>();
+    vi.mocked(Events.get).mockReturnValueOnce(after.promise);
+    if (review) vi.mocked(Events.visibilityImpact).mockResolvedValueOnce(tightening);
+    await userEvent.click(screen.getByRole("button", { name: "Save visibility" }));
+    if (review) {
+      const dialog = await screen.findByRole("dialog", { name: "Making this event private" });
+      await userEvent.click(within(dialog).getByRole("button", { name: /^Make this event private/ }));
+    }
+    await waitFor(() => expect(Events.get).toHaveBeenCalledTimes(3));
+
+    return after;
+  }
+
+  function panelClosed() {
+    expect(screen.queryByRole("button", { name: "Save visibility" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("textbox", { name: "Title" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  }
+
+  it("closes the panel, reads the page from nothing and says so with focus on the line, after exactly one save", async () => {
+    const after = await saveIntoRefusal(async () => theirs);
+    expect(Events.setVisibility).toHaveBeenCalledExactlyOnceWith(7, expect.objectContaining({ visibility: "private", revision: "r1" }));
+    panelClosed();
+    await act(async () => { after.resolve(theirs); await after.promise; });
+    const notice = await screen.findByText(NOTICE);
+    expect(notice).toHaveAttribute("role", "status");
+    await waitFor(() => expect(notice).toHaveFocus());
+    expect(screen.getByRole("button", { name: "Edit event" })).toHaveAttribute("aria-expanded", "false");
+    panelClosed();
+    expect(Events.setVisibility).toHaveBeenCalledOnce();
+  });
+
+  it("closes an open review with the panel", async () => {
+    const after = await saveIntoRefusal(async () => theirs, true);
+    expect(Events.setVisibility).toHaveBeenCalledExactlyOnceWith(7, expect.objectContaining({ visibility: "private", revision: "r1", consent: tightening.consent }));
+    panelClosed();
+    await act(async () => { after.resolve(theirs); await after.promise; });
+    await waitFor(() => expect(screen.getByText(NOTICE)).toHaveFocus());
+    panelClosed();
+  });
+
+  it("says the changes weren't saved when the person can still see the event and no longer manage it", async () => {
+    const demoted: EventDetailResponse = { ...opened, canManage: false, canSetVisibility: false, event: { ...opened.event, revision: undefined } };
+    const after = await saveIntoRefusal(async () => demoted);
+    panelClosed();
+    await act(async () => { after.resolve(demoted); await after.promise; });
+    const notice = await screen.findByText("You can no longer manage this event, so your changes weren't saved.");
+    await waitFor(() => expect(notice).toHaveFocus());
+    expect(screen.queryByText(NOTICE)).not.toBeInTheDocument();
+    expect(Events.setVisibility).toHaveBeenCalledOnce();
+  });
+});

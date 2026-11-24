@@ -29,8 +29,9 @@ export const Events = {
   createChurch: (data: NewEventInput & { title: string }) => api<EventSeriesResponse>("/events", { method: "POST", body: data }),
   setVisibility: (
     id: Id,
-    // consent: the token of the impact the leader reviewed ("" when none ran).
-    data: { visibility: Visibility; reason?: string; consent: string; resetOverrides?: boolean }
+    // consent: the token of the impact the leader reviewed ("" when none ran). revision: the event page's read the
+    // control opened with (DEC-163).
+    data: { visibility: Visibility; reason?: string; consent: string; resetOverrides?: boolean; revision?: string }
   ) => api<EventSeriesResponse>(path`/events/${id}/visibility`, { method: "PUT", body: data }),
   visibilityImpact: (id: Id, visibility: Visibility, resetOverrides = false) =>
     api<VisibilityImpact>(`${path`/events/${id}/visibility-impact`}${query({ visibility, resetOverrides: resetOverrides ? "1" : "0" })}`),

@@ -1098,7 +1098,7 @@ func TestGuestManageReauthorizesCancelledLinks(t *testing.T) {
 			if reg.Status != models.RegCancelled || reg.ManageTokenHash != hashToken(token) {
 				t.Fatalf("denial changed retained registration: %+v", reg)
 			}
-			apiDo(t, admin, "PUT", fmt.Sprintf("/api/v1/events/%d/visibility", ev.ID), map[string]any{"visibility": "public"}, http.StatusOK)
+			apiDo(t, admin, "PUT", fmt.Sprintf("/api/v1/events/%d/visibility", ev.ID), visibilityBody(t, admin, fmt.Sprintf("/api/v1/events/%d/visibility", ev.ID), map[string]any{"visibility": "public"}), http.StatusOK)
 			apiDo(t, anon, "GET", path, nil, http.StatusOK)
 			apiDo(t, anon, "POST", path+"/cancel", nil, http.StatusOK)
 		})

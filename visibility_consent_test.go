@@ -283,11 +283,11 @@ func TestVisibilityConsentAcrossServeRestart(t *testing.T) {
 		t.Fatalf("the boot did not rotate the epoch: %q -> %q", e1, e2)
 	}
 	before := f.state(t)
-	fresh := wantDecision(t, f.admin.do("PUT", f.eventPath(), with(body, "consent", old), true))
+	fresh := wantDecision(t, f.admin.do("PUT", f.eventPath(), visibilityBody(t, f.admin, f.eventPath(), with(body, "consent", old)), true))
 	if f.state(t) != before {
 		t.Fatal("a token from before the restart wrote")
 	}
-	apiDo(t, f.admin, "PUT", f.eventPath(), with(body, "consent", fresh.Consent), http.StatusOK)
+	apiDo(t, f.admin, "PUT", f.eventPath(), visibilityBody(t, f.admin, f.eventPath(), with(body, "consent", fresh.Consent)), http.StatusOK)
 	if got := regStatus(t, f.app, out.ID, f.dates[0].ID); got != models.RegCancelled {
 		t.Fatalf("the reviewed registrant is %s", got)
 	}
@@ -310,7 +310,7 @@ func TestVisibilityConsentAcrossSecrets(t *testing.T) {
 		f.app.Config.SessionSecret = s2
 		other := f.preview(t, f.eventPath(), body).Consent
 		f.app.Config.SessionSecret = s1
-		wantDecision(t, f.admin.do("PUT", f.eventPath(), with(body, "consent", other), true))
+		wantDecision(t, f.admin.do("PUT", f.eventPath(), visibilityBody(t, f.admin, f.eventPath(), with(body, "consent", other)), true))
 	}
 	if f.state(t) != before {
 		t.Fatal("a token under another secret wrote")
@@ -348,7 +348,7 @@ func TestNoConsentWhereNothingIsReviewRequired(t *testing.T) {
 				saveDate(t, f.admin, f.ev.ID, f.day(0), changes, http.StatusBadRequest, "date_edit_invalid", "consent", s)
 				want = want[1:]
 			}
-			apiDo(t, f.admin, "PUT", f.eventPath(), body(map[string]any{"visibility": models.VisibilityPrivate}), http.StatusOK)
+			apiDo(t, f.admin, "PUT", f.eventPath(), visibilityBody(t, f.admin, f.eventPath(), body(map[string]any{"visibility": models.VisibilityPrivate})), http.StatusOK)
 			apiDo(t, f.admin, "PUT", f.groupPath(), body(map[string]any{"visibility": models.VisibilityInviteOnly, "openedEvents": map[string]string{"date:" + itoa(f.dates[0].ID): "keep"}}), http.StatusOK)
 			if got := f.takeDeclared(); !slices.Equal(got, want) {
 				t.Fatalf("declarations %v, want %v", got, want)
@@ -363,8 +363,8 @@ func TestNoConsentWhereNothingIsReviewRequired(t *testing.T) {
 				f.setOverride(t, 1, strp(models.VisibilityInviteOnly))
 			}
 			before := f.state(t)
-			wantOutdated(t, f.admin.do("PUT", f.eventPath(), reset, true))
-			impact := wantDecision(t, f.admin.do("PUT", f.eventPath(), with(reset, "consent", ""), true))
+			wantOutdated(t, f.admin.do("PUT", f.eventPath(), visibilityBody(t, f.admin, f.eventPath(), reset), true))
+			impact := wantDecision(t, f.admin.do("PUT", f.eventPath(), visibilityBody(t, f.admin, f.eventPath(), with(reset, "consent", "")), true))
 			if impact.CurrentVisibility != models.VisibilityPublic || len(impact.ResetDates) != overrides {
 				t.Fatalf("the reset's decision: %+v", impact)
 			}
@@ -393,16 +393,16 @@ func TestStaleTabBodiesAreRefused(t *testing.T) {
 	f.outsider(t, "outsider", 0)
 	before := f.state(t)
 	wantDatePageOutdated(t, f.admin.do("PUT", f.datePath(0), map[string]any{"visibility": models.VisibilityInviteOnly, "confirm": true}, true))
-	wantOutdated(t, f.admin.do("PUT", f.eventPath(), map[string]any{"visibility": models.VisibilityInviteOnly, "confirm": true}, true))
+	wantOutdated(t, f.admin.do("PUT", f.eventPath(), visibilityBody(t, f.admin, f.eventPath(), map[string]any{"visibility": models.VisibilityInviteOnly, "confirm": true}), true))
 	wantOutdated(t, f.admin.do("PUT", f.groupPath(), map[string]any{"visibility": models.VisibilityInviteOnly}, true))
 	wantDatePageOutdated(t, f.admin.do("PUT", f.datePath(1), map[string]any{"visibility": models.VisibilityInviteOnly, "confirm": true}, true))
 	if f.state(t) != before {
 		t.Fatal("a stale tab's body wrote")
 	}
 	f.setOverride(t, 1, strp(models.VisibilityInviteOnly))
-	wantOutdated(t, f.admin.do("PUT", f.eventPath(), map[string]any{"visibility": models.VisibilityPublic, "confirm": true, "resetOverrides": true}, true))
+	wantOutdated(t, f.admin.do("PUT", f.eventPath(), visibilityBody(t, f.admin, f.eventPath(), map[string]any{"visibility": models.VisibilityPublic, "confirm": true, "resetOverrides": true}), true))
 	f.setOverride(t, 1, nil)
-	wantOutdated(t, f.admin.do("PUT", f.eventPath(), map[string]any{"visibility": models.VisibilityPublic, "confirm": true, "resetOverrides": true}, true))
+	wantOutdated(t, f.admin.do("PUT", f.eventPath(), visibilityBody(t, f.admin, f.eventPath(), map[string]any{"visibility": models.VisibilityPublic, "confirm": true, "resetOverrides": true}), true))
 }
 
 // TestVisibilityCancellationsCancelExactlyTheCheckedSet (C9): a sign-up sent
@@ -481,7 +481,7 @@ func TestCancellationRefusesRowsOutsideItsPlan(t *testing.T) {
 				body := confirmVisibility(t, f.admin, f.eventPath(), map[string]any{"visibility": models.VisibilityInviteOnly})
 				f.app.hooks.consentSelection = edit
 				before := f.state(t)
-				apiDo(t, f.admin, "PUT", f.eventPath(), body, http.StatusInternalServerError)
+				apiDo(t, f.admin, "PUT", f.eventPath(), visibilityBody(t, f.admin, f.eventPath(), body), http.StatusInternalServerError)
 				if f.state(t) != before {
 					t.Fatal("a selection outside the plan wrote")
 				}
@@ -797,11 +797,11 @@ func TestEventResetIsReviewedWithNoLosers(t *testing.T) {
 		token := f.preview(t, f.eventPath(), reset).Consent
 		f.setOverride(t, 2, &io)
 		before := f.state(t)
-		fresh := wantDecision(t, f.admin.do("PUT", f.eventPath(), with(reset, "consent", token), true))
+		fresh := wantDecision(t, f.admin.do("PUT", f.eventPath(), visibilityBody(t, f.admin, f.eventPath(), with(reset, "consent", token)), true))
 		if len(fresh.ResetDates) != 3 || f.state(t) != before {
 			t.Fatalf("the 409 lists %v, or something was written", ids(fresh))
 		}
-		apiDo(t, f.admin, "PUT", f.eventPath(), with(reset, "consent", fresh.Consent), http.StatusOK)
+		apiDo(t, f.admin, "PUT", f.eventPath(), visibilityBody(t, f.admin, f.eventPath(), with(reset, "consent", fresh.Consent)), http.StatusOK)
 		for i := 0; i < 3; i++ {
 			if f.override(t, i) != "series" {
 				t.Fatalf("date %d was not reset", i)
@@ -812,7 +812,7 @@ func TestEventResetIsReviewedWithNoLosers(t *testing.T) {
 		f := setup(t)
 		token := f.preview(t, f.eventPath(), reset).Consent
 		f.setOverride(t, 1, nil)
-		fresh := wantDecision(t, f.admin.do("PUT", f.eventPath(), with(reset, "consent", token), true))
+		fresh := wantDecision(t, f.admin.do("PUT", f.eventPath(), visibilityBody(t, f.admin, f.eventPath(), with(reset, "consent", token)), true))
 		if !slices.Equal(ids(fresh), []uint{f.dates[0].ID}) {
 			t.Fatalf("the 409 lists %v", ids(fresh))
 		}
@@ -823,7 +823,7 @@ func TestEventResetIsReviewedWithNoLosers(t *testing.T) {
 		f.setOverride(t, 1, nil)
 		f.setOverride(t, 2, &io)
 		before := f.state(t)
-		fresh := wantDecision(t, f.admin.do("PUT", f.eventPath(), with(reset, "consent", token), true))
+		fresh := wantDecision(t, f.admin.do("PUT", f.eventPath(), visibilityBody(t, f.admin, f.eventPath(), with(reset, "consent", token)), true))
 		if !slices.Equal(ids(fresh), []uint{f.dates[0].ID, f.dates[2].ID}) || f.state(t) != before {
 			t.Fatalf("the swapped 409 lists %v, or the old token wrote", ids(fresh))
 		}
@@ -832,18 +832,18 @@ func TestEventResetIsReviewedWithNoLosers(t *testing.T) {
 		f := setup(t)
 		token := f.preview(t, f.eventPath(), reset).Consent
 		f.setOverride(t, 1, strp(models.VisibilityPrivate))
-		wantDecision(t, f.admin.do("PUT", f.eventPath(), with(reset, "consent", token), true))
+		wantDecision(t, f.admin.do("PUT", f.eventPath(), visibilityBody(t, f.admin, f.eventPath(), with(reset, "consent", token)), true))
 	})
 	t.Run("private to public: the second date stays until reviewed", func(t *testing.T) {
 		f := newVCFixture(t, models.VisibilityPublic)
 		f.setOverride(t, 0, &io)
 		token := f.preview(t, f.eventPath(), reset).Consent
 		f.setOverride(t, 1, &io)
-		fresh := wantDecision(t, f.admin.do("PUT", f.eventPath(), with(reset, "consent", token), true))
+		fresh := wantDecision(t, f.admin.do("PUT", f.eventPath(), visibilityBody(t, f.admin, f.eventPath(), with(reset, "consent", token)), true))
 		if f.override(t, 1) != io || len(fresh.ResetDates) != 2 {
 			t.Fatalf("the second date: %s, the 409 lists %v", f.override(t, 1), ids(fresh))
 		}
-		apiDo(t, f.admin, "PUT", f.eventPath(), with(reset, "consent", fresh.Consent), http.StatusOK)
+		apiDo(t, f.admin, "PUT", f.eventPath(), visibilityBody(t, f.admin, f.eventPath(), with(reset, "consent", fresh.Consent)), http.StatusOK)
 		if f.override(t, 0) != "series" || f.override(t, 1) != "series" {
 			t.Fatal("the reviewed dates were not reset")
 		}
@@ -852,8 +852,8 @@ func TestEventResetIsReviewedWithNoLosers(t *testing.T) {
 		f := newVCFixture(t, models.VisibilityPublic)
 		f.setOverride(t, 0, &io)
 		before := f.everything(t)
-		wantOutdated(t, f.admin.do("PUT", f.eventPath(), reset, true))
-		wantDecision(t, f.admin.do("PUT", f.eventPath(), with(reset, "consent", ""), true))
+		wantOutdated(t, f.admin.do("PUT", f.eventPath(), visibilityBody(t, f.admin, f.eventPath(), reset), true))
+		wantDecision(t, f.admin.do("PUT", f.eventPath(), visibilityBody(t, f.admin, f.eventPath(), with(reset, "consent", "")), true))
 		if f.everything(t) != before || f.override(t, 0) != io {
 			t.Fatal("an unreviewed reset wrote")
 		}
@@ -861,17 +861,17 @@ func TestEventResetIsReviewedWithNoLosers(t *testing.T) {
 	t.Run("nothing to reset", func(t *testing.T) {
 		f := newVCFixture(t, models.VisibilityPublic)
 		before := f.everything(t)
-		fresh := wantDecision(t, f.admin.do("PUT", f.eventPath(), with(reset, "consent", ""), true))
+		fresh := wantDecision(t, f.admin.do("PUT", f.eventPath(), visibilityBody(t, f.admin, f.eventPath(), with(reset, "consent", "")), true))
 		if len(fresh.ResetDates) != 0 || f.everything(t) != before {
 			t.Fatalf("the empty reset's 409: %+v, or it wrote", fresh)
 		}
-		apiDo(t, f.admin, "PUT", f.eventPath(), with(reset, "consent", f.preview(t, f.eventPath(), reset).Consent), http.StatusOK)
+		apiDo(t, f.admin, "PUT", f.eventPath(), visibilityBody(t, f.admin, f.eventPath(), with(reset, "consent", f.preview(t, f.eventPath(), reset).Consent)), http.StatusOK)
 	})
 	t.Run("a checked reset that cancels nobody declares v1 under the live fence", func(t *testing.T) {
 		f := setup(t)
 		audits := auditCount(t, f.app, "event.visibility_changed")
 		f.takeDeclared()
-		apiDo(t, f.admin, "PUT", f.eventPath(), with(reset, "consent", f.preview(t, f.eventPath(), reset).Consent), http.StatusOK)
+		apiDo(t, f.admin, "PUT", f.eventPath(), visibilityBody(t, f.admin, f.eventPath(), with(reset, "consent", f.preview(t, f.eventPath(), reset).Consent)), http.StatusOK)
 		if got := f.takeDeclared(); !slices.Equal(got, []string{consentChecked}) {
 			t.Fatalf("the reset declared %v, want v1", got)
 		}
@@ -891,7 +891,7 @@ func TestEventResetIsReviewedWithNoLosers(t *testing.T) {
 		if len(impact.ResetDates) != 0 || impact.FutureOverrides != 0 {
 			t.Fatalf("a started date is in the reset list: %+v", impact)
 		}
-		apiDo(t, f.admin, "PUT", f.eventPath(), with(reset, "consent", impact.Consent), http.StatusOK)
+		apiDo(t, f.admin, "PUT", f.eventPath(), visibilityBody(t, f.admin, f.eventPath(), with(reset, "consent", impact.Consent)), http.StatusOK)
 		if f.override(t, 0) != io {
 			t.Fatal("the started date lost its own visibility")
 		}
@@ -914,11 +914,11 @@ func TestEventResetBindsTheCurrentSeries(t *testing.T) {
 		token := f.preview(t, f.eventPath(), reset).Consent
 		f.setSeries(t, io)
 		before := f.state(t)
-		fresh := wantDecision(t, f.admin.do("PUT", f.eventPath(), with(reset, "consent", token), true))
+		fresh := wantDecision(t, f.admin.do("PUT", f.eventPath(), visibilityBody(t, f.admin, f.eventPath(), with(reset, "consent", token)), true))
 		if fresh.CurrentVisibility != io || len(fresh.ResetDates) != 1 || f.state(t) != before {
 			t.Fatalf("the 409: %+v", fresh)
 		}
-		apiDo(t, f.admin, "PUT", f.eventPath(), with(reset, "consent", fresh.Consent), http.StatusOK)
+		apiDo(t, f.admin, "PUT", f.eventPath(), visibilityBody(t, f.admin, f.eventPath(), with(reset, "consent", fresh.Consent)), http.StatusOK)
 		if ev := eventRow(t, f.app, f.ev.ID); ev.Visibility != models.VisibilityPublic || f.override(t, 0) != "series" {
 			t.Fatalf("after the reviewed reset: %s, %s", ev.Visibility, f.override(t, 0))
 		}
@@ -930,13 +930,13 @@ func TestEventResetBindsTheCurrentSeries(t *testing.T) {
 			f.setOverride(t, 0, strp(models.VisibilityPublic))
 			body := map[string]any{"visibility": move[0], "resetOverrides": true}
 			token := f.preview(t, f.eventPath(), body).Consent
-			apiDo(t, f.admin, "PUT", f.eventPath(), map[string]any{"visibility": move[1], "consent": ""}, http.StatusOK)
+			apiDo(t, f.admin, "PUT", f.eventPath(), visibilityBody(t, f.admin, f.eventPath(), map[string]any{"visibility": move[1], "consent": ""}), http.StatusOK)
 			before := f.everything(t)
-			fresh := wantDecision(t, f.admin.do("PUT", f.eventPath(), with(body, "consent", token), true))
+			fresh := wantDecision(t, f.admin.do("PUT", f.eventPath(), visibilityBody(t, f.admin, f.eventPath(), with(body, "consent", token)), true))
 			if fresh.CurrentVisibility != move[1] || len(fresh.ResetDates) != 1 || f.everything(t) != before {
 				t.Fatalf("the 409: %+v, or the old token wrote", fresh)
 			}
-			apiDo(t, f.admin, "PUT", f.eventPath(), with(body, "consent", fresh.Consent), http.StatusOK)
+			apiDo(t, f.admin, "PUT", f.eventPath(), visibilityBody(t, f.admin, f.eventPath(), with(body, "consent", fresh.Consent)), http.StatusOK)
 			if ev := eventRow(t, f.app, f.ev.ID); ev.Visibility != move[0] || f.override(t, 0) != "series" {
 				t.Fatalf("after the reviewed reset: %s, %s", ev.Visibility, f.override(t, 0))
 			}
@@ -961,7 +961,7 @@ func TestEventResetBindsTheCurrentSeries(t *testing.T) {
 		token := f.preview(t, f.eventPath(), reset).Consent
 		f.setSeries(t, io)
 		f.setOverride(t, 0, nil)
-		fresh := wantDecision(t, f.admin.do("PUT", f.eventPath(), with(reset, "consent", token), true))
+		fresh := wantDecision(t, f.admin.do("PUT", f.eventPath(), visibilityBody(t, f.admin, f.eventPath(), with(reset, "consent", token)), true))
 		if len(fresh.ResetDates) != 0 || fresh.CurrentVisibility != io {
 			t.Fatalf("the 409: %+v", fresh)
 		}
@@ -975,7 +975,7 @@ func TestEventResetBindsTheCurrentSeries(t *testing.T) {
 		body := map[string]any{"visibility": models.VisibilityPrivate}
 		token := f.preview(t, f.eventPath(), body).Consent
 		f.setSeries(t, io)
-		apiDo(t, f.admin, "PUT", f.eventPath(), with(body, "consent", token), http.StatusOK)
+		apiDo(t, f.admin, "PUT", f.eventPath(), visibilityBody(t, f.admin, f.eventPath(), with(body, "consent", token)), http.StatusOK)
 		if ev := eventRow(t, f.app, f.ev.ID); ev.Visibility != models.VisibilityPrivate {
 			t.Fatalf("the series is %s", ev.Visibility)
 		}
@@ -1043,10 +1043,10 @@ func TestEveryEventVisibilityWriterDeclaresConsent(t *testing.T) {
 		want string
 	}{
 		{"W2 open", func() {
-			apiDo(t, f.admin, "PUT", f.eventPath(), map[string]any{"visibility": models.VisibilityPublic, "consent": ""}, http.StatusOK)
+			apiDo(t, f.admin, "PUT", f.eventPath(), visibilityBody(t, f.admin, f.eventPath(), map[string]any{"visibility": models.VisibilityPublic, "consent": ""}), http.StatusOK)
 		}, consentNoReview},
 		{"W2 tighten n=0", func() {
-			apiDo(t, f.admin, "PUT", f.eventPath(), map[string]any{"visibility": models.VisibilityPrivate, "consent": ""}, http.StatusOK)
+			apiDo(t, f.admin, "PUT", f.eventPath(), visibilityBody(t, f.admin, f.eventPath(), map[string]any{"visibility": models.VisibilityPrivate, "consent": ""}), http.StatusOK)
 		}, consentNoReview},
 		{"W3 set more open", func() {
 			saveDate(t, f.admin, f.ev.ID, f.day(0), map[string]any{"visibility": models.VisibilityPublic}, http.StatusOK, "")
@@ -1144,8 +1144,8 @@ func writerRowsUnderTheGate(t *testing.T) {
 		{"8 W2 a church-wide event, public to private and back", func(t *testing.T, f *vcFixture) {
 			ev := requireCreatedEvent(t, f.app, f.admin.do("POST", "/api/v1/events", createEventBodyForTest(), true))
 			path := fmt.Sprintf("/api/v1/events/%d/visibility", ev.ID)
-			apiDo(t, f.admin, "PUT", path, map[string]any{"visibility": models.VisibilityPrivate, "consent": ""}, http.StatusOK)
-			apiDo(t, f.admin, "PUT", path, map[string]any{"visibility": models.VisibilityPublic, "consent": ""}, http.StatusOK)
+			apiDo(t, f.admin, "PUT", path, visibilityBody(t, f.admin, path, map[string]any{"visibility": models.VisibilityPrivate, "consent": ""}), http.StatusOK)
+			apiDo(t, f.admin, "PUT", path, visibilityBody(t, f.admin, path, map[string]any{"visibility": models.VisibilityPublic, "consent": ""}), http.StatusOK)
 		}, []string{consentNoReview, consentNoReview}},
 		{"9 W2+W3 a reset over one override and over none", func(t *testing.T, f *vcFixture) {
 			reset := map[string]any{"visibility": models.VisibilityPublic, "resetOverrides": true}
@@ -1294,7 +1294,9 @@ func TestConsentEpochCheckIsOrderedWithTheBoot(t *testing.T) {
 		return route{name, func(t *testing.T, f *vcFixture) (string, send) {
 			p := path(f)
 			b := f.routeBody(p, body)
-			return f.preview(t, p, b).Consent, func(c string) *httptest.ResponseRecorder { return f.admin.do("PUT", p, with(b, "consent", c), true) }
+			token := f.preview(t, p, b).Consent
+			b = visibilityBody(t, f.admin, p, b)
+			return token, func(c string) *httptest.ResponseRecorder { return f.admin.do("PUT", p, with(b, "consent", c), true) }
 		}}
 	}
 	routes := []route{
@@ -1499,7 +1501,13 @@ func TestConsentEpochCheckIsOrderedWithTheBoot(t *testing.T) {
 					return
 				}
 				time.Sleep(time.Duration(i*13%50) * time.Millisecond)
-				w := clients[(i+1)%2].do("PUT", path, with(reset, "consent", impact.Consent), true)
+				sender := clients[(i+1)%2]
+				var page eventPage
+				if gw := sender.do("GET", strings.TrimSuffix(path, "/visibility"), nil, false); gw.Code != http.StatusOK || json.Unmarshal(gw.Body.Bytes(), &page) != nil {
+					results <- result{path: path, err: fmt.Sprintf("read %d %s", gw.Code, gw.Body.String())}
+					return
+				}
+				w := sender.do("PUT", path, with(with(reset, "consent", impact.Consent), "revision", page.Event.Revision), true)
 				r := result{path: path, code: w.Code}
 				var a decisionAnswer
 				if w.Code == http.StatusConflict && json.Unmarshal(w.Body.Bytes(), &a) == nil && a.NeedsDecision {
@@ -1536,9 +1544,9 @@ func TestConsentEpochCheckIsOrderedWithTheBoot(t *testing.T) {
 			if r.code == http.StatusConflict {
 				// A 409 minted before a later boot is stale in its turn and
 				// asks once more; the token it then gives saves.
-				w := f.admin.do("PUT", r.path, with(reset, "consent", r.fresh), true)
+				w := f.admin.do("PUT", r.path, visibilityBody(t, f.admin, r.path, with(reset, "consent", r.fresh)), true)
 				if w.Code == http.StatusConflict {
-					w = f.admin.do("PUT", r.path, with(reset, "consent", wantDecision(t, w).Consent), true)
+					w = f.admin.do("PUT", r.path, visibilityBody(t, f.admin, r.path, with(reset, "consent", wantDecision(t, w).Consent)), true)
 				}
 				if w.Code != http.StatusOK {
 					t.Fatalf("a 409's token after the load: %d %s", w.Code, w.Body.String())
@@ -1562,7 +1570,7 @@ func TestConsentEpochCheckIsOrderedWithTheBoot(t *testing.T) {
 		if e, _ := consentEpochIn(f.app.DB); e != e1 {
 			t.Fatal("a rolled-back boot rotated the epoch")
 		}
-		apiDo(t, f.admin, "PUT", f.eventPath(), body, http.StatusOK)
+		apiDo(t, f.admin, "PUT", f.eventPath(), visibilityBody(t, f.admin, f.eventPath(), body), http.StatusOK)
 	})
 }
 
@@ -2317,7 +2325,7 @@ func TestVisibilityConsentLifecycleMatrix(t *testing.T) {
 				old := f.preview(t, path, r.body)
 				row.apply(t, f, p, x)
 				send := func(body map[string]any, token string) *httptest.ResponseRecorder {
-					return f.admin.do("PUT", path, with(body, "consent", token), true)
+					return f.admin.do("PUT", path, visibilityBody(t, f.admin, path, with(body, "consent", token)), true)
 				}
 				if r.name == "date" {
 					// The guarded edit on a base read after the transition, so
@@ -2627,7 +2635,7 @@ func TestVisibilityConsentSerializesWithLifecycleWriters(t *testing.T) {
 				f, p := newLifecycleFixture(t)
 				path := r.path(f)
 				reviewed := f.preview(t, path, r.body)
-				body := with(r.body, "consent", reviewed.Consent)
+				body := visibilityBody(t, f.admin, path, with(r.body, "consent", reviewed.Consent))
 				parked := make(chan int, 1)
 				release := make(chan struct{})
 				t.Cleanup(func() { closeOnce(release) })
@@ -2906,7 +2914,7 @@ func TestConsentEpochLockAddsNoDeadlockWithTheGates(t *testing.T) {
 		case http.StatusOK:
 		case http.StatusConflict:
 			// It reached the epoch after the boot's rotation: one more question.
-			apiDo(t, f.admin, "PUT", path, with(body, "consent", wantDecision(t, w).Consent), http.StatusOK)
+			apiDo(t, f.admin, "PUT", path, visibilityBody(t, f.admin, path, with(body, "consent", wantDecision(t, w).Consent)), http.StatusOK)
 		default:
 			t.Fatalf("the confirmation behind the deletion and the boot: %d %s", w.Code, w.Body.String())
 		}
@@ -2946,7 +2954,7 @@ func TestVisibilityConsentPreviewMatchesWrite(t *testing.T) {
 	io := models.VisibilityInviteOnly
 	put := func(f *vcFixture, path string, body map[string]any) func(string) *httptest.ResponseRecorder {
 		return func(c string) *httptest.ResponseRecorder {
-			return f.admin.do("PUT", path, with(body, "consent", c), true)
+			return f.admin.do("PUT", path, visibilityBody(t, f.admin, path, with(body, "consent", c)), true)
 		}
 	}
 	day := func(f *vcFixture, i int) string { return models.FormatCalendarDate(f.dates[i].OriginalDate) }
@@ -3017,9 +3025,9 @@ func TestVisibilityConsentPreviewMatchesWrite(t *testing.T) {
 			old := f.preview(t, path, r.body)
 			later := f.dates[0].EndsAt.Add(time.Minute)
 			f.app.clock = func() time.Time { return later }
-			fresh := wantDecision(t, f.admin.do("PUT", path, with(r.body, "consent", old.Consent), true))
+			fresh := wantDecision(t, f.admin.do("PUT", path, visibilityBody(t, f.admin, path, with(r.body, "consent", old.Consent)), true))
 			before := cancelledCount(t, f.app)
-			apiDo(t, f.admin, "PUT", path, with(r.body, "consent", fresh.Consent), http.StatusOK)
+			apiDo(t, f.admin, "PUT", path, visibilityBody(t, f.admin, path, with(r.body, "consent", fresh.Consent)), http.StatusOK)
 			if got, want := cancelledCount(t, f.app)-before, reviewedRegistrants(fresh); got != want {
 				t.Fatalf("cancelled %d, the 409 showed %d", got, want)
 			}
@@ -3041,14 +3049,14 @@ func TestVisibilityConsentAcrossARestore(t *testing.T) {
 		t.Fatal(err)
 	}
 	before := f.everything(t)
-	wantDecision(t, f.admin.do("PUT", f.eventPath(), with(body, "consent", token), true))
+	wantDecision(t, f.admin.do("PUT", f.eventPath(), visibilityBody(t, f.admin, f.eventPath(), with(body, "consent", token)), true))
 	if f.everything(t) != before {
 		t.Fatal("a token from before the restore wrote")
 	}
 	// The restore stands in as SQL: the saved epoch row comes back with an
 	// identical loser set and impact.
 	gormMust(t, f.app.DB.Exec("UPDATE settings SET value = ? WHERE key = ?", saved, consentEpochKey))
-	apiDo(t, f.admin, "PUT", f.eventPath(), with(body, "consent", token), http.StatusOK)
+	apiDo(t, f.admin, "PUT", f.eventPath(), visibilityBody(t, f.admin, f.eventPath(), with(body, "consent", token)), http.StatusOK)
 	if regStatus(t, f.app, out.ID, f.dates[0].ID) != models.RegCancelled {
 		t.Fatal("the reviewed registrant was not cancelled")
 	}
@@ -3098,7 +3106,7 @@ func TestVisibilityConsentAuthority(t *testing.T) {
 			}
 			demote(t, f, leader)
 			before := f.everything(t)
-			refused(t, lc.do("PUT", path(f), with(body, "consent", impact.Consent), true))
+			refused(t, lc.do("PUT", path(f), visibilityBody(t, lc, path(f), with(body, "consent", impact.Consent)), true))
 			if f.everything(t) != before {
 				t.Fatal("a demoted manager's confirmation wrote")
 			}
@@ -3106,11 +3114,11 @@ func TestVisibilityConsentAuthority(t *testing.T) {
 		t.Run(route+"/another manager's token", func(t *testing.T) {
 			f, _, lc := setup(t)
 			theirs := f.preview(t, path(f), body).Consent
-			mine := wantDecision(t, lc.do("PUT", path(f), with(body, "consent", theirs), true))
+			mine := wantDecision(t, lc.do("PUT", path(f), visibilityBody(t, lc, path(f), with(body, "consent", theirs)), true))
 			if mine.Consent == theirs {
 				t.Fatal("two managers share a token")
 			}
-			apiDo(t, lc, "PUT", path(f), with(body, "consent", mine.Consent), http.StatusOK)
+			apiDo(t, lc, "PUT", path(f), visibilityBody(t, lc, path(f), with(body, "consent", mine.Consent)), http.StatusOK)
 		})
 	}
 }

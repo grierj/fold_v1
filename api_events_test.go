@@ -669,13 +669,13 @@ func TestChurchWideHosts(t *testing.T) {
 		t.Fatalf("host permissions: %+v", page)
 	}
 	apiDo(t, host, "PUT", fmt.Sprintf("/api/v1/events/%d", ev.ID), seriesBody(t, host, fmt.Sprintf("/api/v1/events/%d", ev.ID), map[string]any{"title": "Christmas Potluck"}), http.StatusOK)
-	apiDo(t, host, "PUT", fmt.Sprintf("/api/v1/events/%d/visibility", ev.ID), map[string]any{
+	apiDo(t, host, "PUT", fmt.Sprintf("/api/v1/events/%d/visibility", ev.ID), visibilityBody(t, host, fmt.Sprintf("/api/v1/events/%d/visibility", ev.ID), map[string]any{
 		"visibility": "private", "source": "custom",
-	}, http.StatusOK)
+	}), http.StatusOK)
 	getEvent(t, guest, ev.ID, http.StatusNotFound)
-	apiDo(t, host, "PUT", fmt.Sprintf("/api/v1/events/%d/visibility", ev.ID), map[string]any{
+	apiDo(t, host, "PUT", fmt.Sprintf("/api/v1/events/%d/visibility", ev.ID), visibilityBody(t, host, fmt.Sprintf("/api/v1/events/%d/visibility", ev.ID), map[string]any{
 		"visibility": "invite_only", "source": "custom",
-	}, http.StatusBadRequest)
+	}), http.StatusBadRequest)
 	apiDo(t, host, "POST", fmt.Sprintf("/api/v1/events/%d/hosts", ev.ID), map[string]any{"email": adminUser.Email}, http.StatusForbidden)
 
 	// A host of this event cannot manage another event or a group they can't see.
@@ -688,9 +688,9 @@ func TestChurchWideHosts(t *testing.T) {
 	apiDo(t, host, "PUT", fmt.Sprintf("/api/v1/events/%d", secret.ID), seriesBody(t, host, fmt.Sprintf("/api/v1/events/%d", secret.ID), map[string]any{"title": "Taken"}), http.StatusNotFound)
 
 	// Switch back so a signed-in non-host can see registrants' names.
-	apiDo(t, host, "PUT", fmt.Sprintf("/api/v1/events/%d/visibility", ev.ID), map[string]any{
+	apiDo(t, host, "PUT", fmt.Sprintf("/api/v1/events/%d/visibility", ev.ID), visibilityBody(t, host, fmt.Sprintf("/api/v1/events/%d/visibility", ev.ID), map[string]any{
 		"visibility": "public", "source": "custom",
-	}, http.StatusOK)
+	}), http.StatusOK)
 	apiDo(t, host, "PUT", fmt.Sprintf("/api/v1/events/%d/registrations", ev.ID), map[string]any{
 		"status": "going", "date": "2026-12-01",
 	}, http.StatusOK)
@@ -785,7 +785,7 @@ func TestNewSeriesCopiesOnlyGroupVisibility(t *testing.T) {
 		return r.Event.ID
 	}
 	first := mk("First")
-	if w := admin.do("PUT", "/api/v1/events/"+itoa(first)+"/visibility", map[string]any{"visibility": "public", "reason": "open house"}, true); w.Code != http.StatusOK {
+	if w := admin.do("PUT", "/api/v1/events/"+itoa(first)+"/visibility", visibilityBody(t, admin, "/api/v1/events/"+itoa(first)+"/visibility", map[string]any{"visibility": "public", "reason": "open house"}), true); w.Code != http.StatusOK {
 		t.Fatalf("open first: %d %s", w.Code, w.Body.String())
 	}
 	second := mk("Second")
@@ -3090,7 +3090,8 @@ func TestEventWritersKeepEventFirstLockOrder(t *testing.T) {
 			case "series":
 				body = seriesBody(t, f.actor, path, body)
 			case "visibility":
-				path, body = path+"/visibility", map[string]any{"visibility": models.VisibilityPrivate}
+				path = path + "/visibility"
+				body = visibilityBody(t, f.actor, path, map[string]any{"visibility": models.VisibilityPrivate})
 			case "delete":
 				method, body = "DELETE", nil
 			case "cancel":
@@ -3572,7 +3573,7 @@ func TestSeriesRevisionFollowsTheEventsOtherWriters(t *testing.T) {
 
 	t.Run("visibility", func(t *testing.T) {
 		opened := seriesRevisionOf(t, f.leader, series.ID)
-		apiDo(t, f.leader, "PUT", path+"/visibility", map[string]any{"visibility": models.VisibilityInviteOnly}, http.StatusOK)
+		apiDo(t, f.leader, "PUT", path+"/visibility", visibilityBody(t, f.leader, path+"/visibility", map[string]any{"visibility": models.VisibilityInviteOnly}), http.StatusOK)
 		stale(t, opened)
 	})
 	t.Run("series room", func(t *testing.T) {

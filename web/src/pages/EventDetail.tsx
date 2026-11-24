@@ -19,6 +19,7 @@ import { Field, FormError, Input } from "../components/ui/Field";
 import { Button, ButtonLink } from "../components/ui/Button";
 import { ExternalLinkIcon } from "../components/icons";
 import { EventVisibilityControl } from "../components/EventVisibility";
+import type { RevisionConflict } from "../lib/useRevisionSave";
 import { RsvpButtons } from "../components/RsvpButtons";
 import { GuestRegistrationForm } from "../components/GuestRegistrationForm";
 import { DateActions } from "../components/DateActions";
@@ -68,12 +69,12 @@ function EventDetailContent() {
   const [deleting, setDeleting] = useState(false);
   const deletingNow = useRef(false);
   const [editing, setEditing] = useState(false);
-  // A series save was refused and its editor closed on its own (DEC-161, DEC-162): someone else changed the event,
+  // A save in the panel was refused and the panel closed on its own (DEC-161, DEC-163): someone else changed the event,
   // or this person may no longer manage it. It is said once the page shows the event as it is now, until the editor
   // opens again. The page was read from nothing, so no live region outlasts that read: the line takes focus, which
   // reads it out and brings it into view whatever else the page scrolled to.
-  const unsavedPending = useRef<"changed" | "gone" | null>(null);
-  const [unsaved, setUnsaved] = useState<"changed" | "gone" | null>(null);
+  const unsavedPending = useRef<RevisionConflict | null>(null);
+  const [unsaved, setUnsaved] = useState<RevisionConflict | null>(null);
   const unsavedNotice = useRef<HTMLParagraphElement>(null);
   // The series editor and the visibility control share a panel that a save closes: while either runs, the other
   // is locked and the panel stays open, so neither's answer is lost.
@@ -174,6 +175,16 @@ function EventDetailContent() {
     returnToEdit.current = true;
 
     if (editorRef.current?.contains(document.activeElement)) document.getElementById("main")?.focus({ preventScroll: true });
+  }
+
+  // A save in the panel (the series editor or the visibility control) was refused and not sent again: the panel closes
+  // on its own, the page reads the event from nothing and says the changes weren't saved (DEC-161, DEC-163).
+  function closeOnConflict(why: RevisionConflict) {
+    parkFocus();
+    setEditing(false);
+    unsavedPending.current = why;
+    setRoomsRevision((n) => n + 1);
+    void load.retry();
   }
 
   function reportSeriesFeedback(eventId: number, date: string, actorResults: ActorRsvpResult[]) {
@@ -304,13 +315,7 @@ function EventDetailContent() {
               setRoomsRevision((n) => n + 1);
               void load.retry();
             }}
-            onConflict={(why) => {
-              parkFocus();
-              setEditing(false);
-              unsavedPending.current = why;
-              setRoomsRevision((n) => n + 1);
-              void load.retry();
-            }}
+            onConflict={closeOnConflict}
             onClose={() => {
               closedPanel.current = true;
               setEditing(false);
@@ -327,10 +332,12 @@ function EventDetailContent() {
               groupVisibility={event.groupVisibility}
               visibility={event.visibility}
               leaderOpened={event.leaderOpened}
+              revision={event.revision}
               onSaved={() => {
                 parkFocus();
                 void load.retry();
               }}
+              onConflict={closeOnConflict}
               action={visibilityAction}
               locked={seriesAction.running}
             />
