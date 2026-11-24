@@ -2826,6 +2826,9 @@ func TestStaleGroupTighteningCancelsNobody(t *testing.T) {
 	apiDo(t, f.admin, "PUT", path, groupBody(t, f.admin, path, map[string]any{"description": "Changed by the admin"}), http.StatusOK)
 	before := wholeState(t, f.app)
 	wantCode(t, "the stale tightening", lead.do("PUT", path, stale, true), http.StatusConflict, "group_changed")
+	// Judged before the consent: without one, the stale save is still
+	// group_changed, never a review to confirm.
+	wantCode(t, "the stale tightening without consent", lead.do("PUT", path, with(stale, "consent", ""), true), http.StatusConflict, "group_changed")
 	if after := wholeState(t, f.app); after != before {
 		t.Fatalf("a refused tightening wrote:\n%s\nwant\n%s", after, before)
 	}
