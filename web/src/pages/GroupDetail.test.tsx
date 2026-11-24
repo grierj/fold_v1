@@ -1428,10 +1428,9 @@ describe("GroupDetail: the date question in the app's dialog", () => {
     }],
     ["a roster write on the date begins", (_, store) => { act(() => { store.begin("7:2026-12-01"); }); }],
     ["a roster write on the date begins and ends before the page renders", (_, store) => { act(() => store.begin("7:2026-12-01")("answered")); }],
-    // The page renders again: a roster write on another of its dates ends stored, and the page reads again.
-    ["this tab's marker changing, once the page renders again", async (_, store) => {
+    ["this tab's marker changing, once the session hears of anything", (_, store) => {
       setMarkerCookie("m-another-tab");
-      await act(async () => store.begin("7:2026-12-08")("stored"));
+      act(() => { store.begin("7:2026-12-08"); });
     }],
     ["another credential", async ({ rerender }) => { await verifiedCredential(); act(() => rerender()); }],
     ["signing out in another tab", ({ rerender }) => { clearMarkerCookie(); act(() => rerender()); }],
@@ -2187,6 +2186,39 @@ describe("the group form's refused save", () => {
     await waitFor(() => expect(Groups.get).toHaveBeenCalledTimes(2));
     expect(order).toEqual(["details", "cover"]);
     expect(screen.queryByLabelText("Group name")).not.toBeInTheDocument();
+  });
+
+  it("keeps Join this group off while the save is on its way, for an admin who is not a member", async () => {
+    vi.mocked(Groups.get).mockResolvedValue({ ...managed, isMember: false });
+    const saving = deferred<Awaited<ReturnType<typeof Groups.update>>>();
+    vi.mocked(Groups.update).mockReturnValue(saving.promise);
+    openPage();
+    await editAndSave();
+    expect(screen.getByRole("button", { name: "Join this group" })).toBeDisabled();
+    await act(async () => { saving.resolve({ group: managed.group }); await saving.promise; });
+    await waitFor(() => expect(screen.queryByLabelText("Group name")).not.toBeInTheDocument());
+  });
+
+  it("uploads the picked photo only after the details are saved, and says it could not be uploaded when that fails", async () => {
+    vi.stubGlobal("URL", class extends URL {
+      static createObjectURL = vi.fn(() => "blob:chosen");
+      static revokeObjectURL = vi.fn();
+    });
+    const photo = new File(["x"], "cover.jpg", { type: "image/jpeg" });
+    const saving = deferred<Awaited<ReturnType<typeof Groups.update>>>();
+    vi.mocked(Groups.get).mockResolvedValue(managed);
+    vi.mocked(Groups.update).mockReturnValue(saving.promise);
+    vi.mocked(GroupCover.upload).mockRejectedValue(new TypeError("Failed to fetch"));
+    openPage();
+    await editAndSave(async () => {
+      await userEvent.upload(document.querySelector<HTMLInputElement>('form input[type="file"]')!, photo);
+      await screen.findByRole("button", { name: "Choose different image" });
+    });
+    expect(GroupCover.upload).not.toHaveBeenCalled();
+    await act(async () => { saving.resolve({ group: managed.group }); await saving.promise; });
+    expect(await screen.findByText("Your other changes were saved, but the cover photo could not be uploaded. You can try again from Edit group.")).toBeInTheDocument();
+    expect(GroupCover.upload).toHaveBeenCalledExactlyOnceWith("1", photo);
+    vi.unstubAllGlobals();
   });
 
   it("shows the saved details and says the cover could not be removed when that step fails", async () => {

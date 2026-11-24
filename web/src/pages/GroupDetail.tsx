@@ -5,7 +5,7 @@ import { AddPeople } from "../components/AddPeople";
 import { RequestContactButton } from "../components/RequestContactButton";
 import { ContactDetails } from "../components/ContactDetails";
 import { Badge } from "../components/ui/Badge";
-import { useRosterSettled } from "../lib/rosterWrites";
+import { useRosterActivityOf, useRosterSettled } from "../lib/rosterWrites";
 import { useHousehold } from "../lib/useHousehold";
 import { canDemoteLeader, canMakeLeader, canAskForContact, canRegisterAsGuest, canRemoveMember, groupCanSchedule, isActiveAdult } from "../lib/can";
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
@@ -274,6 +274,9 @@ function GroupDetailContent() {
   // A "Load more" is on its way: a refresh meanwhile reads its page too, from fresh cursors.
   const continuing = useRef(false);
   const rsvpMutationGate = useRsvpMutationGate();
+  // The page renders again at every roster begin and end in the session: a date editor's open question closes on a
+  // sign-in change only when it renders again.
+  useRosterActivityOf();
 
   // `reload` keeps ordinary RSVP drafts mounted; `retry` (also what a
   // terminal refresh calls) drops the page at once, so stale authority cannot
@@ -674,7 +677,7 @@ function GroupDetailContent() {
                 />
               )}
               {group.visibility !== "invite_only" && !isMember && (
-                <Button variant="primary" onClick={toggleJoin} disabled={joinBusy || !!departureTarget}>
+                <Button variant="primary" onClick={toggleJoin} disabled={joinBusy || !!departureTarget || groupSaveAction.running}>
                   {joinBusy ? "…" : user ? "Join this group" : "Log in to join"}
                 </Button>
               )}

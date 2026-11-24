@@ -59,14 +59,12 @@ test("a manager's save over another's closes the form and says nothing was saved
   await expect(notice).toBeInViewport();
   await expect(second.getByRole("button", { name: "Save group" })).toHaveCount(0);
   await expect(second.getByRole("heading", { level: 1, name: "Renamed by Grier" })).toBeVisible();
-  await second.screenshot({ path: test.info().outputPath("group-conflict-390.png"), fullPage: true });
   expect(saves).toEqual([409]);
   expect(await group.read()).toMatchObject({ name: "Renamed by Grier", location: "Hall" });
 
   await openEditor(second);
   await expect(second.getByText(NOTICE)).toHaveCount(0);
   await expect(second.getByLabel("Group name")).toHaveValue("Renamed by Grier");
-  await second.screenshot({ path: test.info().outputPath("group-form-390.png"), fullPage: true });
   await other.close();
 });
 

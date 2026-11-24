@@ -172,6 +172,16 @@ describe("GroupEditor", () => {
     expect(onSaved).not.toHaveBeenCalled();
   });
 
+  it.each([403, 404])("is gone when the tightening's preview answers %i, saving nothing", async (status) => {
+    vi.mocked(Groups.visibilityImpact).mockRejectedValue(new ApiError(status, "gone", {}));
+    const { onSaved, onConflict, save } = setup();
+    await userEvent.click(screen.getByRole("radio", { name: /^Private/ }));
+    await save();
+    await waitFor(() => expect(onConflict).toHaveBeenCalledExactlyOnceWith("gone"));
+    expect(Groups.update).not.toHaveBeenCalled();
+    expect(onSaved).not.toHaveBeenCalled();
+  });
+
   it.each<[string, unknown]>([
     ["an empty answer", {}],
     ["another group's answer", { group: { ...group, id: 5, revision: "1.gen.g5.2" } }],

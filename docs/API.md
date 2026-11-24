@@ -611,8 +611,9 @@ everyone and blocks joins until the count drops (DEC-39).
 anything else is rejected with 400. On update, omit it to leave it
 unchanged.
 
-Group updates patch only supplied fields onto the current locked row; omitted
-fields retain concurrent changes. `status` may also be supplied, judged
+Group updates patch only supplied fields onto the current locked row, and only
+when the body's `revision` is the row's current one (below), so a save made
+before a concurrent change is refused rather than patched over it. `status` may also be supplied, judged
 against the status read under the row lock (`policy.DecideGroupStatus`):
 leaders may archive, but only admins may approve or reactivate. Sending the
 status the group already has is no move and is allowed for anyone who manages

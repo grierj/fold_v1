@@ -8,7 +8,7 @@ import { useFocusHome, useKeepFocusHome, useLockedFocus } from "../lib/focusHome
 import { decisionImpact, reviewOutdated } from "../lib/visibilityConsent";
 import { ROSTER_STALE, visibilityRank } from "../lib/visibilityChange";
 import { errorText } from "../lib/errors";
-import { answerNames, useRevisionSave, type RevisionConflict } from "../lib/useRevisionSave";
+import { answerNames, lostAuthority, useRevisionSave, type RevisionConflict } from "../lib/useRevisionSave";
 import { FormError } from "./ui/Field";
 import { GroupForm, type GroupFormData } from "./GroupForm";
 import { GroupVisibilityReview } from "./GroupVisibilityReview";
@@ -150,7 +150,20 @@ export function GroupEditor({ group, action, onSaved, onConflict, onCancel }: {
 
     if (visibilityRank(data.visibility) < visibilityRank(opened.visibility)) {
       const mark = activity.mark();
-      impact = await Groups.visibilityImpact(opened.id, data.visibility);
+
+      try {
+        impact = await Groups.visibilityImpact(opened.id, data.visibility);
+      } catch (err) {
+        // The preview is refused like the save would be: the editor closes and the page says so.
+        if (err instanceof ApiError && lostAuthority(err)) {
+          parkFocus();
+          onConflict("gone");
+
+          return false;
+        }
+
+        throw err;
+      }
 
       if (moved(mark, impactEventIds(impact))) {
         staleReview();
