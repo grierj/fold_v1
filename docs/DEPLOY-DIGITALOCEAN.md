@@ -535,8 +535,8 @@ Record the reason and date with the evidence; use targeted checks otherwise.
 These notes are interim and the steps are recommended, not a promise. They
 describe `/opt/fold/restore.sh` as written in this tree. Local drills on a
 disposable Compose stack have exercised it; the checks on a real droplet in
-[FIRST-CHURCH-CHECKS.md](FIRST-CHURCH-CHECKS.md#live-install-m51-m53) have not
-been done (#310; the exact-head full drill passed on a disposable runner, inventory 15.17). No release that reports `recoveryPolicy` 1 or higher may be
+[FIRST-CHURCH-CHECKS.md](FIRST-CHURCH-CHECKS.md#live-install-m51-m53) are not
+all done (#310; some were run on a disposable droplet on 2026-11-24; the exact-head full drill passed on a disposable runner, inventory 15.17). No release that reports `recoveryPolicy` 1 or higher may be
 published until they are. Account erasure still has open work (see `STATUS.md`,
 M7.4); nothing here says a restore brings back or removes every trace of anyone.
 
@@ -742,7 +742,7 @@ shows who. Never delete, rename or replace `ops.lock`, `backup.lock` or
   recreates it. If a reboot hits an interrupted reopen, the app and Caddy may
   come back running; `--resume` closes them before it restarts private
   recovery. These two droplet cases are listed in
-  FIRST-CHURCH-CHECKS.md and have not been checked on a real droplet.
+  FIRST-CHURCH-CHECKS.md and were checked on a disposable droplet on 2026-11-24.
 
 **A lower recovery level is refused on every scripted path.** `provision.sh`,
 a forward `upgrade.sh --image` or `--commit`, `upgrade.sh --rollback` and
