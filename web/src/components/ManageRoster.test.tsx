@@ -1,3 +1,4 @@
+import { createRosterWrites, useRosterWrites, type RosterGate, type RosterWriteEnd, type RosterWrites } from "../lib/rosterWrites";
 import { renderWithAuth } from "../test/auth";
 import { stubService } from "../test/service";
 import { act, screen, waitFor, within } from "@testing-library/react";
@@ -9,7 +10,7 @@ import { Events } from "../api/events";
 import { People } from "../api/people";
 import { occurrence } from "../test/occurrence";
 import type { Attendee, EventOccurrence, User } from "../types";
-import { createRosterWrites, DateWritesProvider, useRosterWrites, type RosterGate, type RosterWriteEnd, type RosterWrites } from "../lib/dateWrites";
+import { DateWritesProvider } from "../lib/dateWrites";
 import { ConfirmProvider, usePageFacts } from "./ui/ConfirmDialog";
 import { ManageRoster, type RosterRecheck } from "./ManageRoster";
 
@@ -172,7 +173,7 @@ it("labels manager provenance only when the server explicitly supplies addedByLe
   expect(within(screen.getByText("Invited").closest("li")!).getByText("Added by a leader")).toBeInTheDocument();
 });
 
-// A gate as a fail-closed host passes it (lib/dateWrites), over a test store. Its begin and end are mocks, so the
+// A gate as a fail-closed host passes it (lib/rosterWrites), over a test store. Its begin and end are mocks, so the
 // log puts them in call order beside the requests the roster sends (vitest numbers every mock call).
 const KEY = "7:2026-12-01";
 

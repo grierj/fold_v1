@@ -1,3 +1,4 @@
+import { useRosterActivityOf } from "../lib/rosterWrites";
 import { Form } from "./ui/Form";
 import { useEffect, useId, useLayoutEffect, useRef, useState } from "react";
 import { ApiError } from "../api/core";
@@ -8,7 +9,6 @@ import { openedEventWarning } from "./EventIntro";
 import { errorText } from "../lib/errors";
 import { decisionImpact, reviewOutdated } from "../lib/visibilityConsent";
 import { ROSTER_STALE, ROSTER_WAITING, visibilityRank } from "../lib/visibilityChange";
-import { useRosterActivityOf } from "../lib/dateWrites";
 import { useFocusHome, useKeepFocusHome, useLockedFocus } from "../lib/focusHome";
 import { useAction, type Action } from "../lib/useAction";
 import { lostAuthority, useRevisionSave, type RevisionConflict } from "../lib/useRevisionSave";

@@ -1,3 +1,4 @@
+import { rosterWriteFailure, useRosterWrites, type RosterGate } from "../lib/rosterWrites";
 import { Form } from "./ui/Form";
 import { AddRequestForm } from "./AddRequestForm";
 import { PeopleList } from "./PeopleList";
@@ -18,7 +19,6 @@ import { registrationStatusLabel } from "../lib/status";
 import { poolFull } from "../lib/registration";
 import { canAskForContact, isActiveAdult } from "../lib/can";
 import { useConfirm } from "./ui/ConfirmDialog";
-import { rosterWriteFailure, useRosterWrites, type RosterGate } from "../lib/dateWrites";
 
 const poolName = (a: Attendee) => a.attendanceMode === "remote" ? "remote" : "in-person";
 
@@ -32,7 +32,7 @@ type RosterRefresh =
   // A host that reads quietly (EventDetail's date rows): today's behavior.
   | { onChanged: () => void; gate?: undefined; onRecheck?: undefined }
   // A host that fails closed (ManageDate, the kept-dates panel): writes are reported to the gate, which starts
-  // the read after each (lib/dateWrites), and rechecks go to onRecheck.
+  // the read after each (lib/rosterWrites), and rechecks go to onRecheck.
   | { gate: RosterGate; onRecheck: (why: RosterRecheck) => void; onChanged?: undefined };
 
 type ManageRosterProps = RosterRefresh & { instance: EventOccurrence; onClose: () => void; headingLevel?: 3 | 4 };

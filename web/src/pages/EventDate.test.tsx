@@ -1,3 +1,4 @@
+import { createRosterWrites } from "../lib/rosterWrites";
 import { renderWithAuth } from "../test/auth";
 import { stubService } from "../test/service";
 import { act, cleanup, fireEvent, screen, waitFor, within } from "@testing-library/react";
@@ -9,7 +10,7 @@ import { Dates, Events } from "../api/events";
 import { Site } from "../api/site";
 import type { Attendee, EventDate, EventDateRead, EventDateAttendee, EventDateSeries, EventDateUsual, EventOccurrence, OccurrenceResponse, RegistrationResponse, SeriesRegistrationResponse } from "../types";
 import { coverSrc } from "../lib/covers";
-import { createRosterWrites, DateWritesProvider } from "../lib/dateWrites";
+import { DateWritesProvider } from "../lib/dateWrites";
 import { invalidateSite } from "../lib/useSite";
 import { occurrence as rosterOccurrence } from "../test/occurrence";
 import { Messages } from "../api/messages";
