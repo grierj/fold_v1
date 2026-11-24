@@ -24,6 +24,7 @@
   "events.spec.ts": 1.4,
   "exact-date.spec.ts": 26.9,
   "friendly-errors.spec.ts": 3.1,
+  "group-revision.spec.ts": 6.0,
   "group-visibility.spec.ts": 2.2,
   "guardian-consent.spec.ts": 7.8,
   "guest-registration.spec.ts": 2.3,

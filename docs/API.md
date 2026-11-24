@@ -502,7 +502,7 @@ GET  /api/v1/groups?search=&tag=          → {groups: [groupSummary]}
 GET  /api/v1/me/groups                    → {groups: [groupSummary]}  (auth; groups I belong to, any status)
 POST /api/v1/groups                       → 201 {group}   (auth, not teens; pending, or active when an admin creates it)
 GET  /api/v1/groups/:id?datePaging=2&cursor=&limit= → {group, members, upcomingEvents, truncated, hasMore, nextCursor, canManage, isMember}
-PUT  /api/v1/groups/:id                   → 200 {group}   (group leader or admin)
+PUT  /api/v1/groups/:id                   → 200 {group} | 409 group_changed   (group leader or admin; body names its revision)
 POST   /api/v1/groups/:id/cover           → 200 {imageUrl} | 503 upload_busy (group leader or admin; multipart, field "cover")
 DELETE /api/v1/groups/:id/cover           → 200 {}         (group leader or admin)
 ```
@@ -526,9 +526,12 @@ Pending and archived groups stay limited to their leaders and admins.
 
 `groupSummary`: `{id, name, description, tags[], imageUrl, coverFocalX,
 coverFocalY, location, leaderName, memberCount, nextEventAt (UTC; the SPA shows it in the browser's zone, DEC-57),
-status, leaderId, visibility, deletionRequested, memberLimit, myRole?}`.
+status, leaderId, visibility, deletionRequested, memberLimit, myRole?, revision?}`.
 `myRole` (`leader` or `member`) is the viewer's own active role, sent only on
 `GET /groups` and `GET /me/groups` and only for groups they belong to (DEC-94).
+`revision` is the group's token the group form's save names (DEC-166), sent only
+on `GET /groups/:id` to a viewer with `canManage`, and on the answer of
+`PUT /groups/:id`; no list carries it.
 `nextEventAt` is the viewer's soonest upcoming scheduled date that they may see, or
 null: event visibility and per-date overrides apply, so a date the viewer cannot
 see never shows its time here, in any response that carries a `groupSummary`.
@@ -592,10 +595,15 @@ Contact fields follow the context-specific rules below; unauthorized keys are
 omitted entirely, not returned as null or empty strings.
 
 Create/update body: `{name, description, tags[], location,
-coverFocal: {x, y}, visibility, memberLimit}`. Covers are upload-only: set
+coverFocal: {x, y}, visibility, memberLimit}`, plus `revision` on update.
+`coverFocal` is 0-100 on each axis, clamped; on create it is the focal point
+of the cover the new-group form uploads right after. Covers are upload-only: set
 one with `POST /groups/:id/cover`, clear it with `DELETE /groups/:id/cover`;
 an `imageUrl` in this body is ignored, so `imageUrl` is always empty or an
-`/uploads/...` path.
+`/uploads/...` path. The cover routes take no revision: replacing or removing
+the file is its own action, and the last one wins. Each raises the group's
+revision like any other change, so a group form opened before it is refused
+(the form shows the cover).
 `memberLimit` is a positive whole number, or null for no limit (the default);
 on update, omit it to leave it unchanged. Lowering it below the count keeps
 everyone and blocks joins until the count drops (DEC-39).
@@ -619,6 +627,37 @@ pending-group edit does not decide approval. The transaction rechecks the actor'
 current group authority: revoked credentials return 401, a now-hidden/deleted
 group returns 404, and a visible group the actor can no longer manage returns
 403. Approval tasks, tightening, audits and notices commit or roll back together.
+
+**The group revision (DEC-166).** Every update names the read it was made from:
+`revision` is required, whatever the body changes (a status alone included), and
+is the group page's `group.revision`. Under the group's row lock, after the
+session, the authority and the status move are judged (so a person who may no
+longer manage the group, or a move back to `pending`, gets that answer, never
+`group_changed`), any revision but the group's current token is refused with 409
+`group_changed`: missing, empty, garbled, another group's, an event's, one from
+before the server restarted, or one read before any later change to the group
+row (a cover change, an approval, a leader handoff, a deletion request and
+another manager's save included). Nothing is written: no group column,
+tightening, cancellation, notice, audit row or job. It comes before any field is
+applied and before the consent work. The 200 answer's `group.revision` is the
+token after the save, read again once the write is done.
+
+Refused with `group_changed`, the web form reads the group once
+(`GET /api/v1/groups/:id`) and compares what the save can write, as the server
+stores it (trimmed name, description and location; tags joined without empty
+ones; visibility; member limit; the clamped focal point), plus the cover's
+address, which the form shows. Already what the save would leave (an earlier
+press stored it and its answer was lost), the save is done. The same as it
+opened with, it sends the same save with the new revision, up to three sends in
+all, unless a send from the form got no answer since its last save landed: then
+it is a conflict. A leader's keep/tighten decisions go with the save and no read
+shows them: what is stored counts as this save only when the send that got no
+answer carried the same decisions. Anything else, or a 403 or 404 on any send or
+the read, and the form closes on its own, the page reads the group from nothing
+and a focused line says the changes could not be saved. The form saves the
+details first and changes the cover only once they are saved; when that cover
+step fails, the page shows the saved details and says the photo could not be
+uploaded or removed.
 
 Changing a group's visibility (DEC-48). Making it more open never changes
 its events. Making it more private, in the same transaction:

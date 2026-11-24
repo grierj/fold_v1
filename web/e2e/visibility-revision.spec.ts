@@ -1,6 +1,6 @@
 import * as schema from "valibot";
 import { expect, test, type APIRequestContext, type Page } from "@playwright/test";
-import { apiAs, pickRoom, signIn } from "./helpers";
+import { apiAs, pickRoom, saveGroup, signIn } from "./helpers";
 
 // DEC-163: a visibility save names the read it was made from, like a series save (DEC-162). A save made from an
 // older read is refused with nothing written; the control checks the event once and saves again by itself when the
@@ -87,7 +87,7 @@ test("a widening chosen before an admin made the group private is not saved", as
   await openPanel(page, event.id);
   await page.getByRole("radio", { name: /^Public \(same as the group\)/ }).check();
   // The event row stays as it was; only its group's audience changes.
-  await grier("PUT", `/groups/${group.id}`, { visibility: "private" });
+  await saveGroup(grier, group.id, { visibility: "private" });
   await page.getByRole("button", { name: "Save visibility" }).click();
   await expect(page.getByRole("status").filter({ hasText: NOTICE })).toBeFocused();
   expect(saves).toEqual([409]);

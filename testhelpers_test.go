@@ -1601,12 +1601,16 @@ func groupBody(t *testing.T, c *apiClient, path string, body map[string]any) map
 
 // visibilityBody is body for PUT /api/v1/events/:id/visibility at path with
 // the revision the event page's visibility control would send, read by c just
-// before (DEC-163). A client that may not manage the event reads none, and the
-// server refuses it before judging the revision. A body that already names a
-// revision keeps it. Another route's body is returned as it is, so a test over
-// several routes sends each body through it.
+// before (DEC-163), and for PUT /api/v1/groups/:id the group form's
+// (groupBody, DEC-166). A client that may not manage the event reads none, and
+// the server refuses it before judging the revision. A body that already names
+// a revision keeps it. Another route's body is returned as it is, so a test
+// over several routes sends each body through it.
 func visibilityBody(t *testing.T, c *apiClient, path string, body map[string]any) map[string]any {
 	t.Helper()
+	if groupPutPath.MatchString(path) {
+		return groupBody(t, c, path, body)
+	}
 	m := eventVisibilityPath.FindStringSubmatch(path)
 	if m == nil {
 		return body

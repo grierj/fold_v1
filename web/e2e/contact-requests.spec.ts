@@ -2,7 +2,7 @@ import type { JsonValue } from "../src/lib/wireValues";
 import AxeBuilder from "@axe-core/playwright";
 import { expect, test, type Page } from "@playwright/test";
 import { mkdirSync, writeFileSync } from "node:fs";
-import { apiAs, email, fromMore, PASSWORD, signInTo, soon } from "./helpers";
+import { apiAs, email, fromMore, PASSWORD, saveGroup, signInTo, soon } from "./helpers";
 import { measure } from "./ui-measure.mjs";
 
 test.use({ actionTimeout: 10_000 });
@@ -132,7 +132,7 @@ test("teen decisions work in both orders; guardian sees only active grants and c
   const { group } = await adminAgain("POST", "/groups", { name: "Contact youth group", visibility: "public", tags: [] });
   await (await apiAs(request, "contact-teen"))("POST", `/groups/${group.id}/join`);
   adminAgain = await apiAs(request, adminName);
-  await adminAgain("PUT", `/groups/${group.id}`, { visibility: "invite_only" });
+  await saveGroup(adminAgain, group.id, { visibility: "invite_only" });
   await adminAgain("POST", `/admin/groups/${group.id}/members`, { userId: leader.id, role: "leader" });
   const { event: visibleEvent } = await adminAgain("POST", `/groups/${group.id}/events`, { title: "Contact teen date", startsLocal, durationMinutes: 60, tzid: "UTC" });
   const teenApi = await apiAs(request, "contact-teen");

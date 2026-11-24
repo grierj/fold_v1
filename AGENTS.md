@@ -227,13 +227,16 @@ section or decision; check it still exists.
   state (waiting or lost, double-booked) is `policy.RoomBookingStateOf`, and the booking and request
   moves are tables in `internal/policy/room_lifecycle.go`; a status changes only through
   `changeBookings` or `moveRoomRequest`/`moveRoomRequestsWhere` (`room_status.go`).
-- An event's series and visibility saves name their read (DEC-162, DEC-163): the token is built and compared only in
-  `edit_revision.go` (`eventRevision`, `checkEventRevision`, inside the write transaction under the row lock). The
-  single-date edit names its read too, with its own token (`dateToken`, `api_date_edits.go`, DEC-164). All three
-  forms send it through `web/src/lib/useRevisionSave.ts`, which owns the read-and-compare after a refusal; the date
-  editor's comparison is `dateFields` (`web/src/lib/editBase.ts`). An editor a refusal closes hands it to
-  `useRefusedSave` (`web/src/lib/refusedSave.tsx`), which reads the page from nothing and says the changes weren't
-  saved with `RefusedSaveLine`.
+- An event's series and visibility saves and the group form's save name their read (DEC-162, DEC-163, DEC-166): the
+  token is built and compared only in `edit_revision.go` (`eventRevision`/`checkEventRevision`,
+  `groupRevision`/`checkGroupRevision`, inside the write transaction under the row lock; the group's counter is
+  `groups.edit_revision`, kept by migration `00017`'s trigger). The single-date edit names its read too, with its own
+  token (`dateToken`, `api_date_edits.go`, DEC-164). All four forms send it through `web/src/lib/useRevisionSave.ts`,
+  which owns the read-and-compare after a refusal; the date editor's comparison is `dateFields`
+  (`web/src/lib/editBase.ts`), the group form's `groupFields` (`web/src/components/GroupEditor.tsx`, which mounts once
+  per opening and changes the cover only after the details are saved). An editor a refusal closes hands it to
+  `useRefusedSave` (`web/src/lib/refusedSave.tsx`), which reads the page from nothing and says the changes could not
+  be saved with `RefusedSaveLine`.
 - Registrations: seat decisions go through `registration_seats.go` (`poolFits`, `seatChange`,
   `seatTally`; party size and childcare demand each have one SQL and one Go form,
   `TestSeatSQLMatchesGoRules`); the status changes only by a `policy.RegistrationMove`
@@ -442,7 +445,7 @@ table), and a new area gets a new file there and a row in that table, not a row 
 | Token contrast: text 4.5:1, control edges 3:1 | `npm run contrast` (in CI) |
 | The entry JS chunk stays under its gzip budget; rarely needed libraries load with `import()` | `npm run bundle-size` (in CI) |
 | Seat counts never overrun under concurrent registration | `TestConcurrentGoingRespectsCapacity` |
-| A save that takes a revision checks it with the one shared check inside its write transaction (DEC-163) | `TestSavesCheckTheirRevisionInTheirTransaction`, `TestEditRevisionGuardCatchesABypass` |
+| A save that takes a revision (a series, an event's visibility, the group form) checks it with the one shared check inside its write transaction (DEC-163, DEC-166) | `TestSavesCheckTheirRevisionInTheirTransaction`, `TestEditRevisionGuardCatchesABypass` |
 | Secrets in URLs never reach the access log | `TestAccessLogKeepsSecretsOut` |
 | Tests sit next to their code | `TestTestFilesSitNextToTheirSource` |
 | Source guards read the whole production tree, not a directory glob | `internal/guardkit` tests, `TestContactRequestTextGuardReadsTheRealTree` |

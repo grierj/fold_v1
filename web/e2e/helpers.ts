@@ -106,6 +106,21 @@ export async function saveDate(api: Awaited<ReturnType<typeof apiAs>>, eventId: 
   return saved;
 }
 
+// saveGroup is a manager's ordinary save of a group through the group form's route, as the form sends it: the
+// revision from the manager's own read of the group page and only the changed fields (DEC-166). It expects the save
+// itself: any refusal, a consent question included, fails.
+export async function saveGroup(api: Awaited<ReturnType<typeof apiAs>>, groupId: number, changes: JsonObject) {
+  const base = (await api("GET", groupDetailPath(groupId))).group;
+
+  if (!isString(base?.revision) || !base.revision) throw new Error(`The managed read of group ${groupId} carried no revision`);
+  const saved = (await api("PUT", `/groups/${groupId}`, { ...changes, revision: base.revision })).group;
+
+  expect(saved?.id).toBe(groupId);
+  expect(isString(saved?.revision) && saved.revision !== "").toBe(true);
+
+  return saved;
+}
+
 declare global {
   interface Window {
     __cspViolation?: (violation: string) => void;
