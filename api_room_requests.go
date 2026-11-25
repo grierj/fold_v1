@@ -231,7 +231,7 @@ func (a *App) apiConfirmRoomRequest(c *gin.Context) {
 	var confirmed, overlapped int
 	lost := []string{}
 	err := a.DB.Transaction(func(tx *gorm.DB) error {
-		actor, req, ev, err := lockRoomDecisionIn(tx, apiUser(c), id)
+		me, req, ev, err := lockRoomDecisionIn(tx, apiUser(c), id)
 		if err != nil {
 			return err
 		}
@@ -284,14 +284,14 @@ func (a *App) apiConfirmRoomRequest(c *gin.Context) {
 			}
 		}
 		now := time.Now().UTC()
-		if _, err := moveRoomRequest(tx, req, policy.RoomRequestConfirm, map[string]any{"decided_by": actor.ID, "decided_at": now, "updated_at": now}); err != nil {
+		if _, err := moveRoomRequest(tx, req, policy.RoomRequestConfirm, map[string]any{"decided_by": me.ID, "decided_at": now, "updated_at": now}); err != nil {
 			return err
 		}
 		meta := map[string]any{"eventId": ev.ID, "roomId": req.RoomID, "confirmed": confirmed, "overlapped": overlapped, "lost": lost}
 		if reason != "" {
 			meta["reason"] = reason
 		}
-		if err := audit.Write(tx, audit.Entry{Actor: &actor.ID, Action: audit.RoomRequestConfirmed, TargetType: "room_request", TargetID: req.ID,
+		if err := audit.Write(tx, audit.Entry{Actor: &me.ID, Action: audit.RoomRequestConfirmed, TargetType: "room_request", TargetID: req.ID,
 			Meta: meta, IP: c.ClientIP()}); err != nil {
 			return err
 		}
@@ -305,7 +305,7 @@ func (a *App) apiConfirmRoomRequest(c *gin.Context) {
 		}
 		// Tell the leaders (which locks their user rows) BEFORE closing the admins'
 		// tasks: see settleRoomDecision.
-		return settleRoomDecision(tx, ev, req.ID, actor.ID, "approved", note, "confirmed")
+		return settleRoomDecision(tx, ev, req.ID, me.ID, "approved", note, "confirmed")
 	}, readCommitted)
 	if a.requestFailed(c, id, err) {
 		return
@@ -333,7 +333,7 @@ func (a *App) apiRejectRoomRequest(c *gin.Context) {
 		return
 	}
 	err := a.DB.Transaction(func(tx *gorm.DB) error {
-		actor, req, ev, err := lockRoomDecisionIn(tx, apiUser(c), id)
+		me, req, ev, err := lockRoomDecisionIn(tx, apiUser(c), id)
 		if err != nil {
 			return err
 		}
@@ -350,11 +350,11 @@ func (a *App) apiRejectRoomRequest(c *gin.Context) {
 			}
 		}
 		now := time.Now().UTC()
-		if _, err := moveRoomRequest(tx, req, policy.RoomRequestReject, map[string]any{"decided_by": actor.ID, "decided_at": now,
+		if _, err := moveRoomRequest(tx, req, policy.RoomRequestReject, map[string]any{"decided_by": me.ID, "decided_at": now,
 			"reject_reason": reason, "updated_at": now}); err != nil {
 			return err
 		}
-		if err := audit.Write(tx, audit.Entry{Actor: &actor.ID, Action: audit.RoomRequestRejected, TargetType: "room_request", TargetID: req.ID,
+		if err := audit.Write(tx, audit.Entry{Actor: &me.ID, Action: audit.RoomRequestRejected, TargetType: "room_request", TargetID: req.ID,
 			Meta: map[string]any{"eventId": ev.ID, "roomId": req.RoomID, "dates": rejected, "reason": reason}, IP: c.ClientIP()}); err != nil {
 			return err
 		}
@@ -366,7 +366,7 @@ func (a *App) apiRejectRoomRequest(c *gin.Context) {
 		if reason != "" {
 			note = room.Name + " wasn't approved: " + reason + " Pick another room on the event page."
 		}
-		return settleRoomDecision(tx, ev, req.ID, actor.ID, "not approved", note, "rejected")
+		return settleRoomDecision(tx, ev, req.ID, me.ID, "not approved", note, "rejected")
 	}, readCommitted)
 	if a.requestFailed(c, id, err) {
 		return

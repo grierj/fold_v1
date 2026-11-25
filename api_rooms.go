@@ -288,14 +288,14 @@ func (a *App) apiAdminCreateRoom(c *gin.Context) {
 	}
 	var revision string
 	err := a.DB.Transaction(func(tx *gorm.DB) error {
-		actor, err := lockRoomManagerIn(tx, apiUser(c), actorShare)
+		me, err := lockRoomManagerIn(tx, apiUser(c), actorShare)
 		if err != nil {
 			return err
 		}
 		if err := tx.Create(&room).Error; err != nil {
 			return err
 		}
-		if err := audit.Write(tx, audit.Entry{Actor: &actor.ID, Action: audit.RoomCreated, TargetType: "room", TargetID: room.ID,
+		if err := audit.Write(tx, audit.Entry{Actor: &me.ID, Action: audit.RoomCreated, TargetType: "room", TargetID: room.ID,
 			Meta: map[string]any{"name": room.Name, "building": room.Building}, IP: c.ClientIP()}); err != nil {
 			return err
 		}
@@ -346,7 +346,7 @@ func (a *App) apiAdminUpdateRoom(c *gin.Context) {
 			}
 			return err
 		}
-		actor, err := lockRoomManagerIn(tx, apiUser(c), actorRead)
+		me, err := lockRoomManagerIn(tx, apiUser(c), actorRead)
 		if err != nil {
 			return err
 		}
@@ -361,7 +361,7 @@ func (a *App) apiAdminUpdateRoom(c *gin.Context) {
 			if err := tx.Save(&room).Error; err != nil {
 				return err
 			}
-			if err := audit.Write(tx, audit.Entry{Actor: &actor.ID, Action: audit.RoomUpdated, TargetType: "room", TargetID: room.ID,
+			if err := audit.Write(tx, audit.Entry{Actor: &me.ID, Action: audit.RoomUpdated, TargetType: "room", TargetID: room.ID,
 				Meta: map[string]any{"changed": changed}, IP: c.ClientIP()}); err != nil {
 				return err
 			}
@@ -403,14 +403,14 @@ func (a *App) setRoomSwitch(c *gin.Context, key, action string) (enabled, ok boo
 		return false, false
 	}
 	err := a.DB.Transaction(func(tx *gorm.DB) error {
-		actor, err := lockRoomManagerIn(tx, apiUser(c), actorShare)
+		me, err := lockRoomManagerIn(tx, apiUser(c), actorShare)
 		if err != nil {
 			return err
 		}
 		if err := setSettingIn(tx, key, strconv.FormatBool(*body.Enabled)); err != nil {
 			return err
 		}
-		return audit.Write(tx, audit.Entry{Actor: &actor.ID, Action: action,
+		return audit.Write(tx, audit.Entry{Actor: &me.ID, Action: action,
 			TargetType: "setting", Meta: map[string]any{"enabled": *body.Enabled}, IP: c.ClientIP()})
 	}, readCommitted)
 	if isAPIError(err) {

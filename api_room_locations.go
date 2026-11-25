@@ -110,7 +110,7 @@ func (a *App) apiAdminMatchLocation(c *gin.Context) {
 				return err
 			}
 		}
-		actor, err := lockRoomManagerIn(tx, apiUser(c), actorRead)
+		me, err := lockRoomManagerIn(tx, apiUser(c), actorRead)
 		if err != nil {
 			return err
 		}
@@ -136,7 +136,7 @@ func (a *App) apiAdminMatchLocation(c *gin.Context) {
 			return err
 		}
 		for i := range occs {
-			result, err := placeBooking(tx, &occs[i], room, room.DefaultSetupMinutes, room.DefaultTeardownMinutes, placement{by: &actor.ID})
+			result, err := placeBooking(tx, &occs[i], room, room.DefaultSetupMinutes, room.DefaultTeardownMinutes, placement{by: &me.ID})
 			if err != nil {
 				return err
 			}
@@ -155,7 +155,7 @@ func (a *App) apiAdminMatchLocation(c *gin.Context) {
 			return res.Error
 		}
 		series = int(res.RowsAffected)
-		return audit.Write(tx, audit.Entry{Actor: &actor.ID, Action: audit.RoomLocationMatched, TargetType: "room", TargetID: room.ID,
+		return audit.Write(tx, audit.Entry{Actor: &me.ID, Action: audit.RoomLocationMatched, TargetType: "room", TargetID: room.ID,
 			Meta: map[string]any{"location": loc, "booked": booked, "busy": busyTotal, "series": series}, IP: c.ClientIP()})
 	}, readCommitted)
 	switch {
