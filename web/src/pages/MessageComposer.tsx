@@ -7,7 +7,7 @@ import { ApiError } from "../api/core";
 import { Messages, previewHTMLPath } from "../api/messages";
 import type { AudienceChange, AudienceSummary, ComposeOptions, Message, MessageAudience, MessagePreview, MessageReview } from "../types";
 import { ERROR_COPY, errorCode, errorText, type ErrorCode } from "../lib/errors";
-import { audienceKey, audienceLabel, changeLines, confirmLine, confirmPushLine, fromAudience, guardianLine, historyLine, historyTeenLine, isOneEvent, prefillChoice, pushHistoryLine, retryQuestion, reviewRefusal, listSavedLine, saveListLine, statusLabel, stillScheduledLine, toAudience, type AudienceChoice, type ReviewRefusal } from "../lib/messages";
+import { audienceKey, audienceLabel, changeLines, confirmLine, confirmPushLine, fromAudience, guardianLine, historyLine, historyTeenLine, isOneEvent, prefillChoice, pushHistoryLine, retryQuestion, reviewRefusal, saveListLine, statusLabel, stillScheduledLine, toAudience, type AudienceChoice, type ReviewRefusal } from "../lib/messages";
 import { reminderAudience, reminderDateText, reminderName } from "../lib/reminders";
 import { RefusedSaveLine, useRefusedSave } from "../lib/refusedSave";
 import { outcomeOf } from "../lib/rosterWrites";
@@ -123,8 +123,9 @@ interface Asked {
   change: AudienceChange | null;
   // The server asked for a fresh review without a change to show (message_review_needed, or a restart).
   again: boolean;
-  // This send follows a save of the scheduled message's new list, which landed: a refusal of the send leaves that saved.
-  listSaved?: boolean;
+  // The question follows a confirmed save of the scheduled message's new list: it takes focus on its line, never on its
+  // button, so a key still held from "Save the change" sends nothing.
+  afterSave?: boolean;
   snap: string;
 }
 
@@ -346,7 +347,7 @@ function Composer({ options, zone, opened, edit = false, params, refusal, back, 
   useEffect(() => { setConfirm((c) => (c && c.snap !== snap ? null : c)); }, [snap]);
   useEffect(() => {
     if (!asking) return;
-    const target = asking.kind === "send" && !asking.change && !asking.again ? confirmButton.current : confirmLead.current;
+    const target = asking.kind === "send" && !asking.change && !asking.again && !asking.afterSave ? confirmButton.current : confirmLead.current;
     target?.focus({ preventScroll: true });
     target?.scrollIntoView?.({ block: "center" });
   }, [asking]);
@@ -576,21 +577,26 @@ function Composer({ options, zone, opened, edit = false, params, refusal, back, 
 
     if (!m) return false;
 
-    // The sender just confirmed this list, and the save's answer seals it for the text it left: the schedule goes on
-    // without asking the same question again, and its question stays on screen, so a lost answer settles as any send's.
-    const token = savedReview.current;
-
-    if (k === "send" && list && token) {
-      const next: Asked = { ...list, kind: "send", revision: m.revision, value: valueOf(m), review: { ...list.review, token }, change: null, again: false, listSaved: true };
-      setConfirm(next);
-
-      return send(next);
-    }
-
     if (list) setConfirm(null);
 
     try {
       if (k === "draft") return "Draft saved.";
+
+      // A Schedule press that changed a scheduled message's list: the list is saved, at the time it already had. A new
+      // time is its own question, the ordinary send's, so no list is ever stored beside a time nobody was asked about.
+      // The save's answer seals the list just confirmed for the text it left, so that question needs no new review.
+      if (k === "send" && list) {
+        if (keepsTime(m)) {
+          sent(m);
+
+          return false;
+        }
+
+        const token = savedReview.current;
+        await ask(m, null, false, token ? { ...list.review, token } : undefined, true);
+
+        return false;
+      }
 
       if (k === "preview") {
         const { preview: p } = await Messages.preview(m.id);
@@ -615,8 +621,15 @@ function Composer({ options, zone, opened, edit = false, params, refusal, back, 
   // The form's time, as a send asks for it: null for now.
   const formAt = () => (when === "later" ? wallToInstant(day, time, zone) : null);
 
+  // The form asks for the time m is already scheduled for, to the minute the form shows.
+  function keepsTime(m: Message): boolean {
+    const has = formTime(m, zone);
+
+    return when === "later" && has.when === "later" && has.day === day && has.time === time;
+  }
+
   // Takes a review of who m reaches and asks before sending (DEC-169).
-  async function ask(m: Message, change: AudienceChange | null, again: boolean, review?: MessageReview) {
+  async function ask(m: Message, change: AudienceChange | null, again: boolean, review?: MessageReview, afterSave = false) {
     const r = review ?? (await Messages.review(m.id)).review;
 
     if (!alive.current) return;
@@ -629,7 +642,7 @@ function Composer({ options, zone, opened, edit = false, params, refusal, back, 
       return;
     }
 
-    setConfirm({ kind: "send", goesOn: "send", revision: m.revision, value: valueOf(m), at: formAt(), review: r, change, again, snap });
+    setConfirm({ kind: "send", goesOn: "send", revision: m.revision, value: valueOf(m), at: formAt(), review: r, change, again, afterSave, snap });
   }
 
   // A scheduled message's save changed who it goes to: the server wrote nothing and answered a review of the new list,
@@ -650,10 +663,10 @@ function Composer({ options, zone, opened, edit = false, params, refusal, back, 
 
     if (asked.kind === "save") {
       void action.run(async () => {
-        kind.current = asked.goesOn === "send" ? "schedule" : asked.goesOn;
+        kind.current = asked.goesOn;
 
         return press(asked.goesOn, asked);
-      }, asked.goesOn === "send" ? { fallback: UNSURE_SEND } : undefined);
+      });
 
       return;
     }
@@ -667,7 +680,7 @@ function Composer({ options, zone, opened, edit = false, params, refusal, back, 
 
   // The schedule: it names the text it was pressed on and the review it showed. A changed list shows the change and a
   // fresh review; a lost answer is settled by the next press, which the server refuses if the first one went.
-  async function send(asked: Asked): Promise<false | string> {
+  async function send(asked: Asked): Promise<false> {
     const id = messageId.current;
 
     if (id === null) return false;
@@ -741,7 +754,7 @@ function Composer({ options, zone, opened, edit = false, params, refusal, back, 
       setConfirm(null);
       await place(e, "We couldn't schedule the message.");
 
-      return asked.listSaved ? listSavedLine(asked.value.scheduledAt, zone) : false;
+      return false;
     }
   }
 
@@ -911,7 +924,7 @@ function Composer({ options, zone, opened, edit = false, params, refusal, back, 
 
   // A confirmation of a scheduled message's new list for Preview or the test saves it and sends nothing; one for Schedule
   // or Send now asks the send's own question.
-  const savingList = asking?.kind === "save" && asking.goesOn !== "send";
+  const savingList = asking?.kind === "save";
   const busyWord = savingList ? "Saving…" : asking?.at ? "Scheduling…" : "Sending…";
   const pushOn = pushShown && pushAlert;
 

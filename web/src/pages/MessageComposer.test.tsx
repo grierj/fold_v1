@@ -1168,16 +1168,49 @@ describe("a scheduled message's new list is the sender's to confirm", () => {
     expect(await screen.findByRole("group", { name: "Change who gets this to 3 people?" })).toBeInTheDocument();
   });
 
-  it("asks once before Schedule saves the new list, then schedules with the list it confirmed", async () => {
+  // Schedule on a scheduled message whose list changed: the list is saved first, at the time it has.
+  async function saveListBySchedule(user: ReturnType<typeof userEvent.setup>, newTime?: string) {
+    await editLeadersOnly(user);
+
+    if (newTime) fireEvent.change(screen.getByLabelText("Time"), { target: { value: newTime } });
+    await user.click(screen.getByRole("button", { name: "Schedule" }));
+    const ask = await screen.findByRole("group", { name: "Change who gets this to 1 person?" });
+    expect(ask).toHaveTextContent(/It isn't sent now\. It stays scheduled on /);
+    expect(Messages.schedule).not.toHaveBeenCalled();
+    await user.click(within(ask).getByRole("button", { name: "Save the change" }));
+  }
+
+  it("saves the new list on a Schedule press and asks nothing more when the time is the one it has", async () => {
+    const user = userEvent.setup();
+    await saveListBySchedule(user);
+    expect(await screen.findByRole("heading", { name: "Bring a friend", level: 1 })).toBeInTheDocument();
+    expect(Messages.update).toHaveBeenLastCalledWith(5, expect.objectContaining({ audience: { type: "group", groupId: 7, roles: ["leader"] } }), "1.r0", "proposal-1");
+    expect(Messages.schedule).not.toHaveBeenCalled();
+    expect(screen.queryByRole("group", { name: /^Send to / })).toBeNull();
+  });
+
+  it("asks the send's own question for a new time once the list is saved, with the list just confirmed, and a held key sends nothing", async () => {
     const user = userEvent.setup();
     vi.mocked(Messages.schedule).mockImplementation(async (id, send) => ({ message: message({ id: Number(id), status: "scheduled", scheduledAt: send.scheduledAt ?? null, revision: "1.sched" }) }));
-    await editLeadersOnly(user);
-    await user.click(screen.getByRole("button", { name: "Schedule" }));
+    await saveListBySchedule(user, "10:30");
     const ask = await screen.findByRole("group", { name: /^Send to 1 person on / });
+    expect(within(ask).getByText(/^Send to 1 person on /)).toHaveFocus();
+    await user.keyboard("{Enter}");
+    expect(Messages.schedule).not.toHaveBeenCalled();
+    expect(Messages.review).not.toHaveBeenCalled();
     await user.click(within(ask).getByRole("button", { name: "Schedule" }));
     await waitFor(() => expect(Messages.schedule).toHaveBeenCalledWith(5, expect.objectContaining({ revision: "1.r1", review: "saved-list" })));
-    expect(Messages.review).not.toHaveBeenCalled();
     expect(await screen.findByRole("heading", { name: "Bring a friend", level: 1 })).toBeInTheDocument();
+  });
+
+  it("leaves the saved list at its old time when the new time is refused, having asked about each", async () => {
+    const user = userEvent.setup();
+    vi.mocked(Messages.schedule).mockRejectedValueOnce(new ApiError(409, "limit", { code: "message_daily_limit" }));
+    await saveListBySchedule(user, "10:30");
+    await user.click(within(await screen.findByRole("group", { name: /^Send to 1 person on / })).getByRole("button", { name: "Schedule" }));
+    expect(await screen.findByText(ERROR_COPY.message_daily_limit)).toBeInTheDocument();
+    expect(Messages.update).toHaveBeenCalledTimes(2);
+    expect(Messages.schedule).toHaveBeenCalledTimes(1);
   });
 
   it("keeps the schedule's question on screen when its answer is lost after a confirmed new list, and the next press ends as sent", async () => {
@@ -1185,8 +1218,7 @@ describe("a scheduled message's new list is the sender's to confirm", () => {
     vi.mocked(Messages.schedule)
       .mockRejectedValueOnce(new ApiError(502, "bad gateway", {}, true))
       .mockRejectedValueOnce(new ApiError(409, "changed", { code: "message_changed" }));
-    await editLeadersOnly(user);
-    await user.click(screen.getByRole("button", { name: "Schedule" }));
+    await saveListBySchedule(user, "10:30");
     await user.click(within(await screen.findByRole("group", { name: /^Send to 1 person on / })).getByRole("button", { name: "Schedule" }));
     expect(await screen.findByText(/couldn't tell whether it went out/)).toBeInTheDocument();
     const ask = screen.getByRole("group", { name: /^Send to 1 person on / });
@@ -1205,8 +1237,7 @@ describe("a scheduled message's new list is the sender's to confirm", () => {
     vi.mocked(Messages.schedule)
       .mockRejectedValueOnce(new ApiError(502, "bad gateway", {}, true))
       .mockRejectedValueOnce(new ApiError(400, "when", { code: "message_when" }));
-    await editLeadersOnly(user);
-    await user.click(screen.getByRole("button", { name: "Schedule" }));
+    await saveListBySchedule(user, "10:30");
     await user.click(within(await screen.findByRole("group", { name: /^Send to 1 person on / })).getByRole("button", { name: "Schedule" }));
     expect(await screen.findByText(/couldn't tell whether it went out/)).toBeInTheDocument();
     const formAt = vi.mocked(Messages.schedule).mock.calls[0][1].scheduledAt ?? null;
@@ -1214,17 +1245,6 @@ describe("a scheduled message's new list is the sender's to confirm", () => {
     await user.click(within(screen.getByRole("group", { name: /^Send to 1 person on / })).getByRole("button", { name: "Schedule" }));
     expect(await screen.findByRole("heading", { name: "Bring a friend", level: 1 })).toBeInTheDocument();
     expect(screen.queryByText(ERROR_COPY.message_when)).toBeNull();
-  });
-
-  it("says the list was changed and the time was not when the schedule after a confirmed list is refused", async () => {
-    const user = userEvent.setup();
-    vi.mocked(Messages.schedule).mockRejectedValueOnce(new ApiError(409, "limit", { code: "message_daily_limit" }));
-    await editLeadersOnly(user);
-    await user.click(screen.getByRole("button", { name: "Schedule" }));
-    await user.click(within(await screen.findByRole("group", { name: /^Send to 1 person on / })).getByRole("button", { name: "Schedule" }));
-    expect(await screen.findByText(/^Who gets this was changed, but its time was not\. It is still scheduled on /)).toBeInTheDocument();
-    expect(screen.getByText(ERROR_COPY.message_daily_limit)).toBeInTheDocument();
-    expect(Messages.update).toHaveBeenCalledTimes(2);
   });
 
   it("is a conflict, not a fresh question, when the stored time moved while the question was open", async () => {

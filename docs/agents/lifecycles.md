@@ -174,7 +174,9 @@ chosen when the row is made, or is a setting that may change to any value its ow
   time moved since the question was asked, and the page then says the message was not sent
   (`RefusedSaveLine`'s send wording). A save of a scheduled message that changes its list is
   answered with a review of the proposal; the confirmation sends the save again with its token and
-  the press that asked goes on (Schedule names the token the save's answer gives, so it asks once).
+  the press that asked goes on. A Schedule press ends there when the form's time is the one the
+  message has; a new time is the send's own question, on the token the save's answer gives, so a
+  refused schedule never leaves a list beside a time nobody was asked about.
 - `web/src/components/ui/Form.tsx` validates; the submit lifecycle is `web/src/lib/useAction.ts`
   (idle, running, failed, done). It refuses a second run while one is on its way, always leaves
   running, words a throw with `errorText`, and keeps a follow-up step (a reload after the save)

@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { composeOptions, recipients, summary } from "../test/compose";
 import { ApiError } from "../api/core";
-import { AUDIENCE_LABEL_MAX, AUDIENCE_LABEL_WIDTH_EM, audienceLabel, audienceLabels, changeLines, confirmLine, confirmPushLine, emptyChoice, failedLine, fromAudience, guardianLine, historyLine, historyTeenLine, isOneEvent, prefillChoice, pushBadge, pushHistoryLine, pushLine, labelWidthEm, listSavedLine, retryQuestion, reviewRefusal, shortLabel, statusLabel, summaryLine, teenLine, toAudience } from "./messages";
+import { AUDIENCE_LABEL_MAX, AUDIENCE_LABEL_WIDTH_EM, audienceLabel, audienceLabels, changeLines, confirmLine, confirmPushLine, emptyChoice, failedLine, fromAudience, guardianLine, historyLine, historyTeenLine, isOneEvent, prefillChoice, pushBadge, pushHistoryLine, pushLine, labelWidthEm, retryQuestion, reviewRefusal, shortLabel, statusLabel, summaryLine, teenLine, toAudience } from "./messages";
 
 describe("audiences", () => {
   it("turns the picker's choice into the API's audience and back", () => {
@@ -71,19 +71,6 @@ describe("counts", () => {
     expect(confirmPushLine({ summary: summary({ eligible: 2, push: 1 }), reached: 2 })).toBe("1 person gets a push notification too.");
     expect(confirmPushLine({ summary: summary({ eligible: 2, push: 1 }), reached: 3 })).toBe("1 of them gets only the push notification.");
     expect(confirmPushLine({ summary: summary({ eligible: 2, push: 3 }), reached: 3 })).toBe("3 of them get a push notification; 1 gets only the push.");
-  });
-
-  it("says a scheduled message's list was changed and its time was not", () => {
-    vi.useFakeTimers({ toFake: ["Date"] });
-    vi.setSystemTime(new Date("2026-11-02T18:00:00Z"));
-
-    try {
-      expect(listSavedLine("2026-11-05T16:00:00Z", "Asia/Kolkata")).toBe("Who gets this was changed, but its time was not. It is still scheduled on Thu, Nov 5 at 9:30 PM GMT+5:30.");
-      expect(listSavedLine("2026-11-01T16:00:00Z", "Asia/Kolkata")).toBe("Who gets this was changed, but its time was not.");
-      expect(listSavedLine(null, "Asia/Kolkata")).toBe("Who gets this was changed, but its time was not.");
-    } finally {
-      vi.useRealTimers();
-    }
   });
 
   it("names every status in words", () => {
