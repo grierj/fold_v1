@@ -1956,10 +1956,10 @@ the same ID and never reads as "not saved". Limits:
   (beyond 2^53 − 1) can be listed and read but not saved: Save sends nothing and
   shows "That didn't work."
 - After `history_unavailable` or a definitive restore response to mint or save,
-  Save is disabled and the old choices remain visible but disabled. Reload
-  discards those choices. If settle reports a restore, the attempt remains
-  unresolved and Check again settles the same ID. A later `history_unavailable`
-  answer leads to the reload without carrying choices.
+  the page clears the choices and automatically reads the account's reasons again.
+  If the read fails, Try again repeats it. If settle reports a restore, the
+  attempt stays unresolved and Check again settles the same ID. A later
+  `history_unavailable` answer starts the fresh read and keeps the outcome unknown.
 
 Restore limits. The save runs in the same fenced transaction as a deletion, so
 the barrier and its limits are the deletion's: only an in-memory floor detects a
