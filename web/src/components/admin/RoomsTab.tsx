@@ -42,6 +42,8 @@ interface RoomForm {
   cleanup: string;
 }
 
+const ROOMS_PER_PAGE = 25;
+
 const EMPTY: RoomForm = { name: "", building: "", capacity: "", features: "", notes: "", restricted: false, setup: "", cleanup: "" };
 
 const fromRoom = (r: Room): RoomForm => ({
@@ -400,6 +402,8 @@ export function RoomsTab({ rooms, error, reload, load, onSaved }: {
   const [open, setOpen] = useState<"new" | number | null>(null);
   const [query, setQuery] = useState("");
   const [building, setBuilding] = useState("");
+  // The page is kept here, so reading the rooms again from nothing (a refused save) leaves it where it was.
+  const [page, setPage] = useState(1);
   const [status, setStatus] = useState("");
   const [busyId, setBusyId] = useState<number | null>(null);
   const statusRef = useRef<HTMLParagraphElement>(null);
@@ -450,10 +454,14 @@ export function RoomsTab({ rooms, error, reload, load, onSaved }: {
     setStatus(`“${room.name}” ${verb}.`);
   }
 
-  // A save was refused: whatever was open closes, and the page reads the rooms from nothing and says so.
+  // A save was refused: whatever was open closes, and the page reads the rooms from nothing and says so. The line says
+  // "this is the room as it is now", so nothing may hide that room: the search and the building filter clear (a rename
+  // or a move could put it outside them), and the page follows it below.
   function refused(room: Room, why: RevisionConflict) {
     setOpen(null);
     setFeedOpen(null);
+    setQuery("");
+    setBuilding("");
     setStatus("");
     setRefusedId({ id: room.id, name: room.name });
     refusal.refused(why);
@@ -467,7 +475,12 @@ export function RoomsTab({ rooms, error, reload, load, onSaved }: {
 
   const ordered = [...(rooms ?? [])].sort((a, b) => a.building.localeCompare(b.building) || Number(b.active) - Number(a.active) || a.name.localeCompare(b.name));
   const matching = ordered.filter((r) => (!building || r.building === building) && `${r.name} ${r.building} ${r.features}`.toLowerCase().includes(query.trim().toLowerCase()));
-  const paging = usePage(matching, query + building);
+  const paging = usePage(matching, query + building, ROOMS_PER_PAGE, { page, onChange: setPage });
+  const refusedAt = refusal.why && refusedId ? matching.findIndex((r) => r.id === refusedId.id) : -1;
+  const refusedPage = refusedAt < 0 ? null : Math.floor(refusedAt / ROOMS_PER_PAGE) + 1;
+  useEffect(() => {
+    if (refusedPage !== null) setPage(refusedPage);
+  }, [refusedPage]);
   const refusedName = refusedId ? rooms?.find((r) => r.id === refusedId.id)?.name ?? refusedId.name : undefined;
   const line = <RefusedSaveLine save={refusal} noun="room" canManage={rooms ? true : undefined} about={refusedName} />;
 
@@ -489,8 +502,8 @@ export function RoomsTab({ rooms, error, reload, load, onSaved }: {
         <div><Button variant="secondary" data-opener="new" disabled={locked} onClick={startAdding}>Add room</Button></div>
       )}
       {rooms.length > 0 && <div className="flex flex-wrap items-end gap-3">
-        <div className="min-w-48 flex-1"><SearchBox label="Search rooms" value={query} onChange={setQuery} disabled={locked} /></div>
-        <Field label="Building"><Select value={building} onChange={(e) => setBuilding(e.target.value)} disabled={locked} options={[{ value: "", label: "All buildings" }, ...[...new Set(rooms.map((r) => r.building).filter(Boolean))].sort().map((b) => ({ value: b, label: b }))]} /></Field>
+        <div className="min-w-48 flex-1"><SearchBox label="Search rooms" value={query} onChange={(q) => { setQuery(q); setPage(1); }} disabled={locked} /></div>
+        <Field label="Building"><Select value={building} onChange={(e) => { setBuilding(e.target.value); setPage(1); }} disabled={locked} options={[{ value: "", label: "All buildings" }, ...[...new Set(rooms.map((r) => r.building).filter(Boolean))].sort().map((b) => ({ value: b, label: b }))]} /></Field>
       </div>}
       <PageCount paging={paging} noun="rooms" />
       {rooms.length > 0 && matching.length === 0 && <EmptyState title="No rooms match" body="Try another name or choose another building." />}

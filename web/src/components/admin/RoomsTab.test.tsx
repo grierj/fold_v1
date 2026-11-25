@@ -331,6 +331,16 @@ describe("an edit someone else's change refused", () => {
     expect(screen.queryByText(/This room changed/)).not.toBeInTheDocument();
   });
 
+  it("is a conflict when only who may book the room changed, so a rename never puts that back", async () => {
+    vi.mocked(AdminRooms.update).mockRejectedValue(changed());
+    vi.mocked(AdminRooms.list).mockResolvedValue(listOf({ ...hall, restricted: true, revision: "rev-1b" }));
+    render(<Harness initial={[hall]} />);
+    await editName("Great Hall");
+    expect(await screen.findByText(/^Fellowship Hall\. This room changed while you were editing/)).toHaveFocus();
+    expect(screen.queryByRole("form")).not.toBeInTheDocument();
+    expect(AdminRooms.update).toHaveBeenCalledTimes(1);
+  });
+
   it("sends the same save again under the new revision when nothing it writes changed", async () => {
     vi.mocked(AdminRooms.update).mockRejectedValueOnce(changed()).mockResolvedValueOnce({ room: { ...hall, active: false, name: "Great Hall", revision: "rev-1c" } });
     vi.mocked(AdminRooms.list).mockResolvedValue(listOf({ ...hall, active: false, revision: "rev-1b" }));

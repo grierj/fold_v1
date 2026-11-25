@@ -774,6 +774,38 @@ it("closes a room edit someone else's change refused, reads the rooms again and 
   expect(screen.queryByRole("form", { name: /Edit/ })).not.toBeInTheDocument();
 });
 
+it("shows the room a refused edit names even when the search no longer matches it", async () => {
+  withRooms(true);
+  vi.mocked(AdminRooms.list).mockResolvedValueOnce({ rooms: [hall], needApproval: false })
+    .mockResolvedValue({ rooms: [{ ...hall, name: "Chapel", revision: "rev-1b" }], needApproval: false });
+  vi.mocked(AdminRooms.update).mockRejectedValue(new ApiError(409, "room changed", { code: "room_changed" }));
+  render(<MemoryRouter initialEntries={["/admin?tab=rooms"]}><AdminPage /></MemoryRouter>);
+  await userEvent.type(await screen.findByLabelText("Search rooms"), "Fellowship");
+  await userEvent.click(screen.getByRole("button", { name: "Edit Fellowship Hall" }));
+  await userEvent.type(screen.getByLabelText(/^Name/), " 2");
+  await userEvent.click(screen.getByRole("button", { name: "Save room" }));
+  expect(await screen.findByText(/^Chapel\. This room changed while you were editing/)).toHaveFocus();
+  expect(screen.getByRole("group", { name: "Chapel" })).toBeInTheDocument();
+  expect(screen.queryByText("No rooms match")).not.toBeInTheDocument();
+  expect(screen.getByLabelText("Search rooms")).toHaveValue("");
+});
+
+it("shows the room a refused edit names on the page it is on", async () => {
+  withRooms(true);
+  const many: Room[] = Array.from({ length: 26 }, (_, i) => ({ ...hall, id: i + 1, name: `Room ${String(i + 1).padStart(2, "0")}`, revision: `rev-${i + 1}` }));
+  vi.mocked(AdminRooms.list).mockResolvedValueOnce({ rooms: many, needApproval: false })
+    .mockResolvedValue({ rooms: many.map((r) => (r.id === 26 ? { ...r, capacity: 12, revision: "rev-26b" } : r)), needApproval: false });
+  vi.mocked(AdminRooms.update).mockRejectedValue(new ApiError(409, "room changed", { code: "room_changed" }));
+  render(<MemoryRouter initialEntries={["/admin?tab=rooms"]}><AdminPage /></MemoryRouter>);
+  await userEvent.click(await screen.findByRole("button", { name: "Next rooms" }));
+  await userEvent.click(await screen.findByRole("button", { name: "Edit Room 26" }));
+  await userEvent.type(screen.getByLabelText(/^Name/), "b");
+  await userEvent.click(screen.getByRole("button", { name: "Save room" }));
+  expect(await screen.findByText(/^Room 26\. This room changed while you were editing/)).toHaveFocus();
+  expect(screen.getByRole("group", { name: "Room 26" })).toBeInTheDocument();
+  expect(screen.queryByRole("group", { name: "Room 01" })).not.toBeInTheDocument();
+});
+
 it("falls back to Approvals for a bookmarked Rooms tab when rooms are off", async () => {
   render(<MemoryRouter initialEntries={["/admin?tab=rooms"]}><AdminPage /></MemoryRouter>);
   expect(await screen.findByText(request.name)).toBeInTheDocument();
