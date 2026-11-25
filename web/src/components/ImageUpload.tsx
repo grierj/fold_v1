@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { focalPosition, prepareUpload } from "../lib/image";
 import { Avatar } from "./Avatar";
 import { Button } from "./ui/Button";
-import { FormError, HiddenFileInput } from "./ui/Field";
+import { Field, FormError, HiddenFileInput, Input } from "./ui/Field";
 
 // ImageUpload: pick a file (resized in the browser), preview it, and click
 // to set the focal point used for object-position when cropped. With no image
@@ -16,6 +16,7 @@ export function ImageUpload({
   aspectClass,
   onFile,
   onFocal,
+  keyboardFocal,
   placeholderSrc,
   placeholderName,
 }: {
@@ -26,6 +27,7 @@ export function ImageUpload({
   aspectClass: string; // e.g. "aspect-square" or "aspect-video"
   onFile: (file: File | null) => void;
   onFocal: (f: { x: number; y: number }) => void;
+  keyboardFocal?: boolean;
   // The stand-in shown while there is no image: what people will see instead
   // (a group's pattern cover), or the person's initials for an avatar.
   placeholderSrc?: string;
@@ -68,14 +70,15 @@ export function ImageUpload({
     onFile(null);
   }
 
-  function setPoint(e: React.MouseEvent<HTMLDivElement>) {
+  function pointFromClick(e: React.MouseEvent<HTMLDivElement>) {
     const rect = e.currentTarget.getBoundingClientRect();
-
-    const next = {
+    setPoint({
       x: Math.min(100, Math.max(0, Math.round(((e.clientX - rect.left) / rect.width) * 100))),
       y: Math.min(100, Math.max(0, Math.round(((e.clientY - rect.top) / rect.height) * 100))),
-    };
+    });
+  }
 
+  function setPoint(next: { x: number; y: number }) {
     setFocal(next);
     onFocal(next);
   }
@@ -113,7 +116,7 @@ export function ImageUpload({
       <p className="label">{label}</p>
       <div
         className={`relative ${aspectClass} w-full max-w-sm overflow-hidden rounded-md bg-sunken border border-border cursor-crosshair`}
-        onClick={setPoint}
+        onClick={pointFromClick}
         title="Click to set the focal point"
       >
         <img
@@ -128,8 +131,18 @@ export function ImageUpload({
         />
       </div>
       <p className="text-xs text-text-muted mt-1">
-        Tap or click the image to move the focal point. Faces stay centered when cropped.
+        {keyboardFocal ? "Tap the image or use the sliders to move the focal point." : "Tap or click the image to move the focal point."} Faces stay centered when cropped.
       </p>
+      {keyboardFocal && (
+        <div className="mt-3 grid gap-3 sm:grid-cols-2">
+          <Field label="Focal point from left">
+            <Input type="range" min={0} max={100} value={focal.x} aria-valuetext={`${focal.x}% from the left`} onChange={(e) => setPoint({ ...focal, x: e.target.valueAsNumber })} />
+          </Field>
+          <Field label="Focal point from top">
+            <Input type="range" min={0} max={100} value={focal.y} aria-valuetext={`${focal.y}% from the top`} onChange={(e) => setPoint({ ...focal, y: e.target.valueAsNumber })} />
+          </Field>
+        </div>
+      )}
       <div className="flex gap-2 mt-2">
         {chooser}
         <Button variant="secondary" onClick={clear}>
