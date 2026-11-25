@@ -127,8 +127,9 @@ function SeriesRoomControl({ eventId, id, read, show, onChanged, onGone }: {
       return { allowed: true, revision: now.revision, row: now };
     },
     value: readFields,
-    // The next pick is chosen from the dates as the answer read them after this one, never from its counts.
-    stored: (res) => ({ ...read, revision: res.event.revision, defaultRoom: res.defaultRoom, ...res.after }),
+    // The next pick is chosen from the dates as the answer read them after this one, never from its counts. Each field is
+    // read from `after` by name: an answer without it (an older server's) fails here, and is never shown as the dates.
+    stored: (res) => ({ ...read, revision: res.event.revision, defaultRoom: res.defaultRoom, ownRooms: res.after.ownRooms, needsRoom: res.after.needsRoom, pending: res.after.pending }),
     fields: (value) => compared(value, overBusy.current),
     answers: answerNames("event", eventId),
     stays: true,

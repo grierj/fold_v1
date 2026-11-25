@@ -99,6 +99,18 @@ it("says which dates are busy and which keep their own room", async () => {
   expect(screen.queryByRole("button", { name: "Book anyway" })).not.toBeInTheDocument();
 });
 
+it("shows an answer with no dates after the pick as a failure, never as the dates before it", async () => {
+  // An older server's answer: the room and the counts, and no `after`.
+  const old = JSON.parse(JSON.stringify(booking({ booked: 1 })));
+  delete old.after;
+  vi.mocked(SeriesRooms.set).mockResolvedValue(old);
+  const onChanged = show();
+  await pickAndBook("2");
+  expect(await screen.findByRole("alert")).toHaveTextContent("We couldn't reach Fold. Check your connection and try again.");
+  expect(screen.queryByText(/Booked for/)).not.toBeInTheDocument();
+  expect(onChanged).not.toHaveBeenCalled();
+});
+
 it("uses the singular for one date", async () => {
   vi.mocked(SeriesRooms.set).mockResolvedValue(booking({ booked: 1, lost: ["2026-12-08"] }));
   show();
