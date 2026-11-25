@@ -185,6 +185,23 @@ a matching backup image, set `FOLD_BACKUP_VERSION` in `/opt/fold/.env` to a
 published backup version yourself. Clear that override when upgrading to a
 paired release so both images follow `FOLD_VERSION`.
 
+If you mirror the images, pass both references to `provision.sh`. Use a
+source checkout whose Compose file reads `FOLD_BACKUP_IMAGE`.
+
+```bash
+/root/fold/deploy/digitalocean/provision.sh \
+  --domain groups.example.org \
+  --image registry.example.com/church/fold:0.5.0 \
+  --backup-image registry.example.com/church/fold-backup:0.5.0
+```
+
+Use a pinned tag or a SHA-256 digest for the backup image. If the registry is
+private, sign in with `sudo docker login registry.example.com` before you run
+the provisioner. The flag saves `FOLD_BACKUP_IMAGE` in `/opt/fold/.env`, where
+it takes precedence over `FOLD_BACKUP_VERSION`. It stays set on later deploys
+and restores that use this Compose file. Remove `FOLD_BACKUP_IMAGE` from
+`.env` to go back to the GHCR backup image.
+
 Apply it:
 
 ```bash
@@ -851,6 +868,10 @@ sudo /opt/fold/upgrade.sh \
   --image ghcr.io/grierj/fold:x.y.z \
   --source-dir /root/fold
 ```
+
+For mirrored images, pass the mirror's app reference to `--image` and the
+corresponding backup reference to `--backup-image`. If you omit
+`--backup-image`, the saved `FOLD_BACKUP_IMAGE` stays in effect.
 
 On a build-based install, name the commit:
 
