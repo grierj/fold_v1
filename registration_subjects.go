@@ -205,7 +205,8 @@ func (a *App) reconcileHouseholdPerson(tx *gorm.DB, person *models.HouseholdPers
 	var regs []models.Registration
 	now := time.Now().UTC()
 	if err := tx.Joins("JOIN event_occurrences ON event_occurrences.id = registrations.occurrence_id").
-		Where("registrations.household_person_id = ? AND event_occurrences.starts_at > ? AND event_occurrences.status = ? AND registrations.status IN ?", person.ID, now, models.OccurrenceScheduled, models.CurrentRegStatuses).Order("registrations.occurrence_id, registrations.id").Find(&regs).Error; err != nil {
+		Where("registrations.household_person_id = ? AND event_occurrences.starts_at > ? AND event_occurrences.status = ?", person.ID, now, models.OccurrenceScheduled).
+		Where(registrationStartsFrom(policy.RegHouseholdPersonChanged)).Order("registrations.occurrence_id, registrations.id").Find(&regs).Error; err != nil {
 		return err
 	}
 	for _, r := range regs {
@@ -218,6 +219,9 @@ func (a *App) reconcileHouseholdPerson(tx *gorm.DB, person *models.HouseholdPers
 		}
 		if err := tx.First(&r, r.ID).Error; err != nil {
 			return err
+		}
+		if !policy.RegHouseholdPersonChanged.StartsFrom(r.Status) {
+			continue
 		}
 		var ev models.Event
 		if err := tx.First(&ev, o.EventID).Error; err != nil {
