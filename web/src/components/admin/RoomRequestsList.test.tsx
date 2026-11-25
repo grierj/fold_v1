@@ -179,8 +179,19 @@ describe("RoomRequestsList", () => {
     });
   });
 
+  it("keeps an archived group's request and explains why it cannot be approved", async () => {
+    vi.mocked(RoomRequests.confirm).mockRejectedValue(new ApiError(409, "group no longer active", { code: "group_rooms_not_approved" }));
+    const reload = vi.fn();
+    render(<Harness initial={[series]} reload={reload} />);
+    const r = row("Weekly Bible study");
+    await userEvent.click(btn(r, "Approve"));
+    expect(await within(r).findByRole("alert")).toHaveTextContent("This group isn't approved yet.");
+    expect(reload).not.toHaveBeenCalled();
+    expect(btn(r, "Reject")).toBeEnabled();
+  });
+
   describe("when someone else decided first (409)", () => {
-    const conflict = (data: JsonObject) => new ApiError(409, "This was already handled", data);
+    const conflict = (data: JsonObject) => new ApiError(409, "This was already handled", { ...data, code: "already_handled" });
 
     it("says who handled it, in this page's verbs, drops the row and asks for a fresh list", async () => {
       vi.mocked(RoomRequests.confirm).mockRejectedValue(conflict({ resolvedBy: "Pat Smith", resolution: "rejected" }));

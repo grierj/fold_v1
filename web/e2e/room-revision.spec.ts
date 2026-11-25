@@ -22,8 +22,7 @@ test("two leaders pick rooms for the same date: the second is told, sees the fir
   }
 
   const rooms = [];
-  // Short room names: the Room select at 390px has no room for a long name beside "Used by this event once" (#484).
-  const tag = suffix.slice(-4);
+  const tag = `in the West Wing ${suffix.slice(-4)}`;
 
   for (const name of [`Loft ${tag}`, `Parlor ${tag}`]) {
     rooms.push(schema.parse(schema.looseObject({ room: idOf }), await grier("POST", "/admin/rooms", { name })).room);
@@ -57,7 +56,9 @@ test("two leaders pick rooms for the same date: the second is told, sees the fir
   const line = second.getByText(LINE);
   await expect(line).toBeVisible();
   await expect(line).toBeFocused();
-  await expect(second.getByRole("combobox", { name: /^Room/ })).toHaveValue(String(rooms[0].id));
+  const roomField = second.getByRole("combobox", { name: /^Room/ });
+  await expect(roomField).toHaveValue(String(rooms[0].id));
+  await expect(roomField).toHaveAccessibleDescription(/Used by this event once/);
   await expect(second.getByRole("textbox", { name: /^Title/ })).toHaveValue("Typed while choosing");
   await expect(second.getByRole("button", { name: /^Save/ })).toBeVisible();
   // The page around the editor reads again: the date's place names the first leader's room, and the draft stays.
