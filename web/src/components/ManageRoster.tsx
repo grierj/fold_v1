@@ -10,10 +10,11 @@ import { RequestContactButton } from "./RequestContactButton";
 import { Events } from "../api/events";
 import { attendeeSubject } from "../lib/attendee";
 import type { PersonSearchResult, Attendee, EventOccurrence } from "../types";
+import { useResourceRefusal } from "../lib/refusedSave";
 import { errorCode, errorText } from "../lib/errors";
 import { AttendeeDetails } from "./AttendeeDetails";
 import { Button } from "./ui/Button";
-import { Field, FormError, Input } from "./ui/Field";
+import { Field, FormError, Input, showFieldErrors } from "./ui/Field";
 import { EmptyState } from "./ui/EmptyState";
 import { registrationStatusLabel } from "../lib/status";
 import { poolFull } from "../lib/registration";
@@ -41,8 +42,10 @@ export function ManageRoster({ instance, onChanged, gate, onRecheck, onClose, he
   const Heading = headingLevel === 3 ? "h3" : "h4";
   const Subheading = headingLevel === 3 ? "h4" : "h5";
   const { user } = useAuth();
+  const refreshRefusal = useResourceRefusal();
   const [busy, setBusy] = useState<number | "add" | null>(null);
   const [email, setEmail] = useState("");
+  const [emailError, setEmailError] = useState<string | null>(null);
   const [adding, setAdding] = useState((instance.attendees?.length ?? 0) <= 6);
   const [selection, setSelection] = useState<PersonSearchResult | null>(null);
   const [approvalRequired, setApprovalRequired] = useState<{ overCapacity: boolean } | null>(null);
@@ -129,13 +132,15 @@ export function ManageRoster({ instance, onChanged, gate, onRecheck, onClose, he
       onChanged?.();
     } catch (e) {
       end(rosterWriteFailure(e));
-      setError(errorText(e, "We couldn't update that registration."));
+
+      if (!refreshRefusal(e)) setError(errorText(e, "We couldn't update that registration."));
     }
     finally { setBusy(null); }
   }
 
   async function add(e: React.FormEvent) {
     e.preventDefault();
+    const form = e.currentTarget;
 
     if (blocked) return;
 
@@ -155,7 +160,7 @@ export function ManageRoster({ instance, onChanged, gate, onRecheck, onClose, he
 
     if (!pending.current()) return;
     const end = writes.begin();
-    setBusy("add"); setError(null);
+    setBusy("add"); setError(null); setEmailError(null);
 
     try {
       try { await Events.addRegistration(instance.eventId, instance.date, target, full || undefined); }
@@ -171,7 +176,19 @@ export function ManageRoster({ instance, onChanged, gate, onRecheck, onClose, he
     catch (e) {
       end(rosterWriteFailure(e));
 
-      if (["date_add_approval_required", "teen_add_approval_required"].includes(errorCode(e) ?? "")) {
+      if (refreshRefusal(e)) return;
+      const code = errorCode(e);
+
+      if (code === "date_add_person_not_found" && !selection) {
+        showFieldErrors(form instanceof HTMLFormElement ? form : null, () => {
+          setBusy(null);
+          setEmailError(errorText(e));
+        });
+
+        return;
+      }
+
+      if (["date_add_approval_required", "teen_add_approval_required"].includes(code ?? "")) {
         if (selection) { setApprovalRequired({ overCapacity }); setError("They need to approve this date. Choose Ask to add to send an ask using your selected person and options."); }
         else setError("Select this person by name, then choose Ask to add. An email address cannot be used to send an ask.");
       } else setError(errorText(e, "We couldn't add that registration."));
@@ -187,8 +204,8 @@ export function ManageRoster({ instance, onChanged, gate, onRecheck, onClose, he
     <div className="my-3"><Button variant="secondary" aria-expanded={adding} onClick={() => setAdding(!adding)}>{adding ? "Close add person" : "Add person"}</Button></div>
     <div hidden={!adding} className="mb-4">
       <Form noValidate onSubmit={add} className="space-y-3">
-        {isActiveAdult(user) && <Field label="Find a person by name"><PeoplePicker value={selection} disabled={blocked} onChange={(person) => { setSelection(person); setApprovalRequired(null); setAskPerson(null); setEmail(""); setError(null); }} /></Field>}
-        <Field label="Add someone" hint="Or use their email address"><Input type="email" value={email} disabled={blocked} onChange={(e) => { setEmail(e.target.value); setSelection(null); setApprovalRequired(null); setAskPerson(null); }} /></Field><Button type="submit" variant="secondary" disabled={blocked || (!selection && !email.trim())}>{busy === "add" ? "Adding…" : selection && (selection.teen || approvalRequired) ? "Ask to add" : "Add"}</Button>
+        {isActiveAdult(user) && <Field label="Find a person by name"><PeoplePicker value={selection} disabled={blocked} onChange={(person) => { setSelection(person); setApprovalRequired(null); setAskPerson(null); setEmail(""); setEmailError(null); setError(null); }} /></Field>}
+        <Field label="Add someone" hint="Or use their email address" error={emailError ?? undefined}><Input type="email" value={email} disabled={blocked} onChange={(e) => { setEmail(e.target.value); setEmailError(null); setSelection(null); setApprovalRequired(null); setAskPerson(null); }} /></Field><Button type="submit" variant="secondary" disabled={blocked || (!selection && !email.trim())}>{busy === "add" ? "Adding…" : selection && (selection.teen || approvalRequired) ? "Ask to add" : "Add"}</Button>
       </Form>
       {askPerson && isActiveAdult(user) && <AddRequestForm key={askPerson.person.selectionId} person={askPerson.person} scope={{ contextType: "event", contextId: instance.eventId, occurrenceId: instance.id, overCapacity: askPerson.overCapacity }} full={poolFull(instance, "in_person")} onClose={() => setAskPerson(null)} />}
     </div>

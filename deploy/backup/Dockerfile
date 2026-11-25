@@ -33,8 +33,8 @@ RUN set -eu; \
     if [ -n "$(find /bin /usr/bin /usr/local/bin -name 'pyth*' -print -quit)" ]; then echo "an interpreter that does not belong here is installed" >&2; exit 1; fi; \
     if command -v docker >/dev/null 2>&1; then echo "a container client is installed" >&2; exit 1; fi
 
-# Fresh named volumes copy these folders' ownership on first use, so the
-# nonroot service can write them whichever container creates the volume first.
+# Fresh named volumes copy these folders' ownership on first use. In Compose
+# the app seeds the shared uploads volume.
 # /backups is root:65532 mode 1770: the service (group 65532) creates and removes
 # its own top-level archives, and cannot remove or replace anything the host
 # (root) keeps there, such as the host-owned adopted/ folder (mode 0700).

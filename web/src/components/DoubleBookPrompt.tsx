@@ -32,9 +32,10 @@ export function useOverlapReason(reasonId: string) {
 
 // The warning and reason box an admin sees when a room is in use. `message` says
 // what is busy; Book anyway sends the booking again with the reason.
-export function DoubleBookPrompt({ reasonId, message, prompt, busy, onBookAnyway }: {
+export function DoubleBookPrompt({ reasonId, message, details, prompt, busy, onBookAnyway }: {
   reasonId: string;
   message: ReactNode;
+  details?: ReactNode;
   prompt: ReturnType<typeof useOverlapReason>;
   busy: boolean;
   onBookAnyway: () => void;
@@ -42,10 +43,11 @@ export function DoubleBookPrompt({ reasonId, message, prompt, busy, onBookAnyway
   return (
     <div className="space-y-2 rounded-md border border-warning-border bg-warning-subtle p-3">
       <p role="alert" className="text-sm text-warning-on-subtle"><AlertCircleIcon className="mr-1 inline-block size-4 align-text-bottom" />{message}</p>
+      {details}
       <Field id={reasonId} label="Reason for double-booking" error={prompt.error}>
         <Textarea rows={2} maxLength={OVERLAP_REASON_MAX} value={prompt.reason} onChange={(e) => prompt.setReason(e.target.value)} />
       </Field>
-      <Button variant="secondary" disabled={busy} onClick={onBookAnyway}>Book anyway</Button>
+      <Button variant="secondary" aria-disabled={busy} onClick={onBookAnyway}>Book anyway</Button>
     </div>
   );
 }

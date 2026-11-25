@@ -828,12 +828,14 @@ var errGroupBackToPending = apiErr(http.StatusConflict, "group_back_to_pending",
 // errGroupNotApprovedForAdds: only admins add people to a pending or
 // archived group (policy.CanAddToGroup).
 var errGroupNotApprovedForAdds = apiErr(http.StatusConflict, "group_add_not_approved", "this group isn't approved yet; you can add people once an admin approves it")
+var errGroupMemberEmailUnavailable = apiErr(http.StatusBadRequest, "group_member_email_unavailable", "could not add this person by email")
 
 // memberAddOptions distinguishes direct manager adds from self-join and role
 // changes. Regular adds preserve an active member's role; admin adds may change it.
 type memberAddOptions struct {
 	KeepExistingRole bool
 	approved         *verifiedGroupAdd
+	email            string
 	// invitationID names the invitation being accepted: the new member joins
 	// on its authority (checked by the acceptor under the inviter's lock), so
 	// the people-add rules do not apply, a teen still waiting for consent may
@@ -872,9 +874,14 @@ func (a *App) changeRoleIn(tx *gorm.DB, actor *models.User, ip string, g *models
 	}
 	actor = fresh
 	target := actor
-	if userID != actor.ID {
+	byEmail := add != nil && add.email != ""
+	if userID != actor.ID || byEmail {
 		target = &models.User{}
-		if err := tx.Clauses(clause.Locking{Strength: "NO KEY UPDATE"}).First(target, userID).Error; err != nil {
+		query := tx.Clauses(clause.Locking{Strength: "NO KEY UPDATE"})
+		if byEmail {
+			query = selectablePeople(query).Where("email = ?", add.email)
+		}
+		if err := query.First(target, userID).Error; err != nil {
 			if errors.Is(err, gorm.ErrRecordNotFound) {
 				return errRoleRefused
 			}
@@ -893,6 +900,9 @@ func (a *App) changeRoleIn(tx *gorm.DB, actor *models.User, ip string, g *models
 		actor = fresh
 	}
 	if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(g, g.ID).Error; err != nil {
+		if byEmail && errors.Is(err, gorm.ErrRecordNotFound) {
+			return errGroupMemberEmailUnavailable
+		}
 		return err
 	}
 	var m models.Membership // any status, so a removed row is reused
@@ -917,6 +927,9 @@ func (a *App) changeRoleIn(tx *gorm.DB, actor *models.User, ip string, g *models
 	}
 	if !allow(actor, target, actorRel, targetRel, leaders) {
 		return errRoleRefused
+	}
+	if byEmail && !groupMemberEmailVisible(actor, target) {
+		return errGroupMemberEmailUnavailable
 	}
 	if (add != nil && add.KeepExistingRole && targetRel.Member) || oldRole == newRole {
 		return nil
@@ -1021,29 +1034,72 @@ func (a *App) apiAddGroupMember(c *gin.Context) {
 		jsonError(c, http.StatusBadRequest, "choose one person by selection or email")
 		return
 	}
-	var target models.User
+	actor := apiUser(c)
+	add := memberAddOptions{KeepExistingRole: true}
+	var userID uint
 	if body.SelectionID != "" {
 		selected, ok := a.resolvePeopleSelection(c, body.SelectionID)
 		if !ok {
 			return
 		}
-		target = *selected
-	} else if err := a.DB.Where("email = ?", mail.NormalizeAddress(body.Email)).First(&target).Error; err != nil {
-		jsonError(c, http.StatusNotFound, "user not found")
-		return
+		if policy.TeenAddNeedsApproval(asPerson(selected)) {
+			fail(c, errTeenAddApproval)
+			return
+		}
+		userID = selected.ID
+	} else {
+		if !policy.CanAddToGroup(asPerson(actor), g.Status) {
+			fail(c, errGroupNotApprovedForAdds)
+			return
+		}
+		add.email = mail.NormalizeAddress(body.Email)
+		var err error
+		userID, err = a.groupMemberEmailTarget(c.Request.Context(), actor, c.ClientIP(), add.email)
+		if err != nil {
+			fail(c, err)
+			return
+		}
 	}
-	if policy.TeenAddNeedsApproval(asPerson(&target)) {
-		fail(c, errTeenAddApproval)
-		return
-	}
-	err := a.changeRole(apiUser(c), c.ClientIP(), g, target.ID, models.MembershipMember, body.OverLimit, &memberAddOptions{KeepExistingRole: true}, func(me, _ *models.User, actor, _ policy.Rel, _ int) bool {
+	err := a.changeRole(actor, c.ClientIP(), g, userID, models.MembershipMember, body.OverLimit, &add, func(me, _ *models.User, actor, _ policy.Rel, _ int) bool {
 		return policy.CanManageGroup(asPerson(me), actor)
 	})
 	if err != nil {
+		if add.email != "" {
+			switch err {
+			case errRoleRefused, errPeopleAddForbidden, errGroupNotApprovedForAdds:
+				err = errGroupMemberEmailUnavailable
+			}
+		}
 		fail(c, err)
 		return
 	}
-	a.membershipAdded(c, g, target.ID)
+	a.membershipAdded(c, g, userID)
+}
+
+func (a *App) groupMemberEmailTarget(ctx context.Context, actor *models.User, ip, email string) (uint, error) {
+	allowed, err := a.groupMemberEmailAllowed(ctx, actor, ip)
+	if err != nil {
+		return 0, err
+	}
+	if !allowed {
+		log.Printf("group member email lookup limited")
+		return 0, errGroupMemberEmailUnavailable
+	}
+	var target models.User
+	res := selectablePeople(a.DB.WithContext(ctx)).Select("id", "account_type", "hide_contact_from_leaders").Where("email = ?", email).Limit(1).Find(&target)
+	if res.Error != nil {
+		return 0, res.Error
+	}
+	if res.RowsAffected == 0 || !groupMemberEmailVisible(actor, &target) {
+		return 0, errGroupMemberEmailUnavailable
+	}
+	return target.ID, nil
+}
+
+func groupMemberEmailVisible(actor, target *models.User) bool {
+	return policy.CanAddGroupMemberByEmail(asPerson(actor), actor.ID == target.ID, policy.Contact{
+		Teen: target.AccountType == models.AccountTeen, HideFromLeaders: target.HideContactFromLeaders,
+	})
 }
 
 // apiRequestDeletion asks an admin to delete the group. Only a leader can

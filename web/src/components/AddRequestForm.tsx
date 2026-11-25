@@ -2,6 +2,7 @@ import { Form } from "./ui/Form";
 import { useState } from "react";
 import { Adds, type AddRequestInput } from "../api/adds";
 import type { AddRequest, PersonSearchResult } from "../types";
+import { useResourceRefusal } from "../lib/refusedSave";
 import { ERROR_COPY, errorText } from "../lib/errors";
 import { Button, ButtonLink } from "./ui/Button";
 import { Checkbox, Field, FormError, Textarea, showFieldErrors } from "./ui/Field";
@@ -18,6 +19,7 @@ export function AddRequestForm({ person, scope, full = false, onClose }: {
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   const [created, setCreated] = useState<AddRequest | null>(null);
+  const refreshRefusal = useResourceRefusal();
   const group = scope.contextType === "group";
   const [over, setOver] = useState(group ? scope.overLimit === true : scope.overCapacity === true);
   // Asked about the page as it was (usePageFacts where the page supplies the dialog): a refresh drops the question.
@@ -47,7 +49,7 @@ export function AddRequestForm({ person, scope, full = false, onClose }: {
       : { ...scope, selectionId: person.selectionId, reason, overCapacity: over };
 
     try { setCreated((await Adds.create(body)).request); }
-    catch (e) { setError(errorText(e)); }
+    catch (e) { if (!refreshRefusal(e)) setError(errorText(e)); }
     finally { setBusy(false); }
   }
 
