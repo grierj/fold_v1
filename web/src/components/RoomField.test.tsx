@@ -571,7 +571,7 @@ it("keeps an admin's Book anyway and its reason when the answer was lost, and th
   await userEvent.type(await screen.findByRole("textbox", { name: /^Reason for double-booking/ }), "Choir moved");
   await userEvent.click(screen.getByRole("button", { name: "Book anyway" }));
   await waitFor(() => expect(DateRooms.set).toHaveBeenCalledTimes(2));
-  await waitFor(() => expect(screen.getByRole("button", { name: "Book anyway" })).toBeEnabled());
+  await waitFor(() => expect(screen.getByRole("button", { name: "Book anyway" })).toHaveAttribute("aria-disabled", "false"));
   expect(screen.getByRole("textbox", { name: /^Reason for double-booking/ })).toHaveValue("Choir moved");
   await userEvent.click(screen.getByRole("button", { name: "Book anyway" }));
   await waitForStatus("Booked Chapel over another booking.");
@@ -598,7 +598,7 @@ it("carries Save times' minutes into a Book anyway it opened, so a lost answer i
   await userEvent.type(await screen.findByRole("textbox", { name: /^Reason for double-booking/ }), "Long setup");
   await userEvent.click(screen.getByRole("button", { name: "Book anyway" }));
   await waitFor(() => expect(DateRooms.set).toHaveBeenCalledTimes(2));
-  await waitFor(() => expect(screen.getByRole("button", { name: "Book anyway" })).toBeEnabled());
+  await waitFor(() => expect(screen.getByRole("button", { name: "Book anyway" })).toHaveAttribute("aria-disabled", "false"));
   await userEvent.click(screen.getByRole("button", { name: "Book anyway" }));
   await waitForStatus("Booked Fellowship Hall over another booking.");
   expect(vi.mocked(DateRooms.set).mock.calls[2][2]).toEqual({ roomId: 1, setupMinutes: 45, teardownMinutes: 15, overlapReason: "Long setup" });

@@ -81,6 +81,37 @@ func stillDraft(t *testing.T, f composeFixture, path string) {
 	}
 }
 
+func TestAdminEditAndSendRequireTheAuthorsAudience(t *testing.T) {
+	f := newComposeFixture(t)
+	aud := map[string]any{"type": "group", "groupId": f.group.ID}
+	path := f.draft(t, f.leader, "News", "<p>Hi</p>", aud)
+	revision := revisionOf(t, f.admin, path)
+	body := map[string]any{"subject": "Office news", "bodyHtml": "<p>Hi</p>", "revision": revision,
+		"audience": map[string]any{"type": "group", "groupId": f.otherGroup.ID}}
+	wantCode(t, "retarget draft", f.admin.do("PUT", path, body, true), http.StatusForbidden, "message_not_yours")
+	if got := revisionOf(t, f.admin, path); got != revision {
+		t.Fatal("the refused edit changed the draft")
+	}
+
+	body["audience"] = aud
+	wantCode(t, "edit within the author's audience", f.admin.do("PUT", path, body, true), http.StatusOK, "")
+	revision = revisionOf(t, f.admin, path)
+	review := takeReview(t, f.admin, path)
+	id := idOfPath(t, path)
+	var m models.Message
+	gormMust(t, f.app.DB.First(&m, id))
+	if m.AuthorID == nil || *m.AuthorID != f.leaderUser.ID {
+		t.Fatalf("the edit changed the author: %+v", m)
+	}
+
+	addMember(t, f.app, f.hostUser, f.group, models.MembershipLeader)
+	demote := "/api/v1/groups/" + itoa(f.group.ID) + "/members/" + itoa(f.leaderUser.ID) + "/role"
+	wantCode(t, "demote the author", f.admin.do("PUT", demote, map[string]any{"role": "member"}, true), http.StatusOK, "")
+	wantCode(t, "review after the author's demotion", f.admin.do("GET", path+"/review", nil, false), http.StatusForbidden, "message_not_yours")
+	wantCode(t, "confirm a prior review after the author's demotion", confirmSend(f.admin, path, revision, review.Token, nil), http.StatusForbidden, "message_not_yours")
+	stillDraft(t, f, path)
+}
+
 // Two editors of one draft opened the same read: the first save lands, the
 // second is refused with nothing written, and each answer carries the token of
 // what it left.
