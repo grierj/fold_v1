@@ -7,7 +7,7 @@ import { ApiError } from "../api/core";
 import { Messages, previewHTMLPath } from "../api/messages";
 import type { AudienceChange, AudienceSummary, ComposeOptions, Message, MessageAudience, MessagePreview, MessageReview } from "../types";
 import { ERROR_COPY, errorCode, errorText, type ErrorCode } from "../lib/errors";
-import { audienceKey, audienceLabel, changeLines, confirmLine, confirmPushLine, fromAudience, guardianLine, historyLine, historyTeenLine, isOneEvent, prefillChoice, pushHistoryLine, retryQuestion, reviewRefusal, saveListLine, statusLabel, stillScheduledLine, toAudience, type AudienceChoice, type ReviewRefusal } from "../lib/messages";
+import { audienceKey, audienceLabel, changeLines, confirmLine, confirmPushLine, fromAudience, guardianLine, historyLine, historyTeenLine, isOneEvent, prefillChoice, pushHistoryLine, retryQuestion, reviewRefusal, listSavedLine, saveListLine, statusLabel, stillScheduledLine, toAudience, type AudienceChoice, type ReviewRefusal } from "../lib/messages";
 import { reminderAudience, reminderDateText, reminderName } from "../lib/reminders";
 import { RefusedSaveLine, useRefusedSave } from "../lib/refusedSave";
 import { outcomeOf } from "../lib/rosterWrites";
@@ -68,10 +68,11 @@ const FIELD_OF: Partial<Record<ErrorCode, keyof Errors>> = {
 
 const YEAR_MS = 366 * 24 * 60 * 60 * 1000;
 
-// What a save writes, as the server stores it.
-type MessageValue = Pick<Message, "subject" | "bodyHtml" | "audience" | "pushAlert" | "channel">;
+// What a save writes, as the server stores it, and the status and scheduled time it leaves as they are: a save made
+// beside a status or a time that moved is a save on a message that changed.
+type MessageValue = Pick<Message, "subject" | "bodyHtml" | "audience" | "pushAlert" | "channel" | "status" | "scheduledAt">;
 
-const valueOf = (m: Message): MessageValue => ({ subject: m.subject, bodyHtml: m.bodyHtml, audience: m.audience, pushAlert: m.pushAlert, channel: m.channel });
+const valueOf = (m: Message): MessageValue => ({ subject: m.subject, bodyHtml: m.bodyHtml, audience: m.audience, pushAlert: m.pushAlert, channel: m.channel, status: m.status, scheduledAt: m.scheduledAt });
 
 const sorted = (xs: readonly string[] | undefined, fallback: readonly string[]) => [...(xs?.length ? xs : fallback)].sort();
 
@@ -88,10 +89,13 @@ function canonicalAudience(a: MessageAudience) {
   }
 }
 
-// messageFields is everything PUT /messages/:id writes, as the server stores it: the subject trimmed, the body (the
+// textFields is everything PUT /messages/:id writes, as the server stores it: the subject trimmed, the body (the
 // server sanitises it, so an editor's HTML it rewrites never reads as already stored), the audience in canonical form,
 // the channel and "Push notification too".
-const messageFields = (v: MessageValue) => ({ subject: v.subject.trim(), body: v.bodyHtml, audience: canonicalAudience(v.audience), channel: v.channel, pushAlert: v.pushAlert });
+const textFields = (v: MessageValue) => ({ subject: v.subject.trim(), body: v.bodyHtml, audience: canonicalAudience(v.audience), channel: v.channel, pushAlert: v.pushAlert });
+
+// messageFields is what a save compares after a refusal: what it writes, and the status and scheduled time beside it.
+const messageFields = (v: MessageValue) => ({ ...textFields(v), status: v.status, at: v.scheduledAt === null ? null : Date.parse(v.scheduledAt) });
 
 type SavedAnswer = ReturnType<typeof answerNames> extends (answer: unknown) => answer is infer S ? S : never;
 
@@ -100,27 +104,27 @@ const namesAMessage = (answer: unknown): answer is { message: Message } =>
   isObject(answer) && "message" in answer && isObject(answer.message) && "id" in answer.message && isNumber(answer.message.id) && answerNames("message", answer.message.id)(answer);
 
 // The value a new message's form opens with, before its first save.
-const BLANK: MessageValue = { subject: "", bodyHtml: "", audience: { type: "group" }, pushAlert: true, channel: "email" };
+const BLANK: MessageValue = { subject: "", bodyHtml: "", audience: { type: "group" }, pushAlert: true, channel: "email", status: "draft", scheduledAt: null };
 
 // Every send was refused while nothing the form writes changed: the form says its ordinary refusal.
 const refusedEverySend = () => new ApiError(409, "message changed", { code: "message_changed" });
 
-// What a press of the confirmation sends: a send (the schedule) of the text it was pressed on, or a save of a scheduled
-// message's new list (DEC-169) that then goes on with the press that asked it (`goesOn`); the status and scheduled time the
-// message had when it was asked, when it should go and the review it showed.
+// What a press of the confirmation sends: a send (the schedule) of the message it was pressed on (`value`, with the
+// status and scheduled time it had), or a save of a scheduled message's new list (DEC-169) that then goes on with the
+// press that asked it (`goesOn`); when it should go and the review it showed.
 interface Asked {
   kind: "send" | "save";
   goesOn: GoesOn;
   revision: string | undefined;
   value: MessageValue;
-  status: Message["status"];
-  storedAt: string | null;
   at: string | null;
   review: MessageReview;
   // What changed since the review before this one (message_list_changed); null for a first review.
   change: AudienceChange | null;
   // The server asked for a fresh review without a change to show (message_review_needed, or a restart).
   again: boolean;
+  // This send follows a save of the scheduled message's new list, which landed: a refusal of the send leaves that saved.
+  listSaved?: boolean;
   snap: string;
 }
 
@@ -129,14 +133,12 @@ interface Asked {
 function wentOut(m: Message, asked: Asked): boolean {
   if (!["scheduled", "sending", "sent"].includes(m.status)) return false;
 
-  if (JSON.stringify(messageFields(valueOf(m))) !== JSON.stringify(messageFields(asked.value))) return false;
+  if (JSON.stringify(textFields(valueOf(m))) !== JSON.stringify(textFields(asked.value))) return false;
 
   if (asked.at) return !!m.scheduledAt && Date.parse(m.scheduledAt) === Date.parse(asked.at);
 
   return m.status !== "scheduled" || (!!m.scheduledAt && Date.parse(m.scheduledAt) <= Date.now() + 60_000);
 }
-
-const sameInstant = (a: string | null, b: string | null) => (a === null || b === null ? a === b : Date.parse(a) === Date.parse(b));
 
 export function MessageComposerPage() {
   const { id } = useParams<{ id: string }>();
@@ -177,6 +179,9 @@ export function MessageComposerPage() {
     }
 
     if (Number(id) === shown.current) return;
+    // The address moved on: what was shown is read again if the person comes back to it (a new draft saved here opened
+    // from nothing, and would open blank).
+    shown.current = null;
     let alive = true;
     Messages.get(Number(id))
       .then(({ message: m }) => {
@@ -483,7 +488,7 @@ function Composer({ options, zone, opened, edit = false, params, refusal, back, 
       }
 
       return res;
-    }, { ...draft, channel: "email" });
+    }, { ...draft, channel: "email", status: known.current?.status ?? "draft", scheduledAt: known.current?.scheduledAt ?? null });
 
     if (outcome === "refused") throw refusedEverySend();
 
@@ -576,7 +581,7 @@ function Composer({ options, zone, opened, edit = false, params, refusal, back, 
     const token = savedReview.current;
 
     if (k === "send" && list && token) {
-      const next: Asked = { ...list, kind: "send", revision: m.revision, value: valueOf(m), status: m.status, storedAt: m.scheduledAt, review: { ...list.review, token }, change: null, again: false };
+      const next: Asked = { ...list, kind: "send", revision: m.revision, value: valueOf(m), review: { ...list.review, token }, change: null, again: false, listSaved: true };
       setConfirm(next);
 
       return send(next);
@@ -624,7 +629,7 @@ function Composer({ options, zone, opened, edit = false, params, refusal, back, 
       return;
     }
 
-    setConfirm({ kind: "send", goesOn: "send", revision: m.revision, value: valueOf(m), status: m.status, storedAt: m.scheduledAt, at: formAt(), review: r, change, again, snap });
+    setConfirm({ kind: "send", goesOn: "send", revision: m.revision, value: valueOf(m), at: formAt(), review: r, change, again, snap });
   }
 
   // A scheduled message's save changed who it goes to: the server wrote nothing and answered a review of the new list,
@@ -633,7 +638,7 @@ function Composer({ options, zone, opened, edit = false, params, refusal, back, 
     if (!alive.current) return;
     const m = known.current;
     took(r.review);
-    setConfirm({ kind: "save", goesOn: then, revision: m?.revision, value: m ? valueOf(m) : BLANK, status: m?.status ?? "scheduled", storedAt: m?.scheduledAt ?? null, at: formAt(), review: r.review, change: r.change, again, snap });
+    setConfirm({ kind: "save", goesOn: then, revision: m?.revision, value: m ? valueOf(m) : BLANK, at: formAt(), review: r.review, change: r.change, again, snap });
   }
 
   // The confirmation's press: a save of a scheduled message's new list goes on with the press that asked it; a send
@@ -662,7 +667,7 @@ function Composer({ options, zone, opened, edit = false, params, refusal, back, 
 
   // The schedule: it names the text it was pressed on and the review it showed. A changed list shows the change and a
   // fresh review; a lost answer is settled by the next press, which the server refuses if the first one went.
-  async function send(asked: Asked): Promise<false> {
+  async function send(asked: Asked): Promise<false | string> {
     const id = messageId.current;
 
     if (id === null) return false;
@@ -699,37 +704,44 @@ function Composer({ options, zone, opened, edit = false, params, refusal, back, 
         throw e;
       }
 
-      if (errorCode(e) === "message_changed") {
+      const changed = errorCode(e) === "message_changed";
+      const lost = lostSend.current;
+
+      // A refusal after an answer was lost may be about a message that already went (its time has passed, say): a read
+      // settles that before anything else is said.
+      if (changed || lost) {
         const { message: m } = await Messages.get(id);
 
         if (!alive.current) return false;
-        known.current = m;
 
-        if (lostSend.current && wentOut(m, lostSend.current)) {
+        if (lost && wentOut(m, lost)) {
           sent(m);
 
           return false;
         }
 
-        // Nothing this send names changed (a restart, or the same words saved again): ask again on the message as it is.
-        // A status or a time moved since the question was asked is someone else's change, never one to send over.
-        if (m.editable && m.status === asked.status && sameInstant(m.scheduledAt, asked.storedAt) &&
-          JSON.stringify(messageFields(valueOf(m))) === JSON.stringify(messageFields(asked.value))) {
-          await ask(m, null, true);
+        if (changed) {
+          known.current = m;
+
+          // Nothing this send names changed (a restart, or the same words saved again): ask again on the message as it
+          // is. A status or a time moved since the question was asked is someone else's change, never one to send over.
+          if (m.editable && JSON.stringify(messageFields(valueOf(m))) === JSON.stringify(messageFields(asked.value))) {
+            await ask(m, null, true);
+
+            return false;
+          }
+
+          lastRead.current = m;
+          refused(m.editable ? "changed" : "gone", "send");
 
           return false;
         }
-
-        lastRead.current = m;
-        refused(m.editable ? "changed" : "gone", "send");
-
-        return false;
       }
 
       setConfirm(null);
       await place(e, "We couldn't schedule the message.");
 
-      return false;
+      return asked.listSaved ? listSavedLine(asked.value.scheduledAt, zone) : false;
     }
   }
 
@@ -984,7 +996,7 @@ function Composer({ options, zone, opened, edit = false, params, refusal, back, 
           <div id={`${ids.change}-d`} className="space-y-1 text-sm text-primary-on-subtle">
             {changeLines(asking.change).map((line) => <p key={line}>{line}</p>)}
             <p>{savingList ? saveListLine(asking.review.reached) : confirmLine(asking.review.reached, asking.at, zone)}</p>
-            {savingList && <p>{stillScheduledLine(asking.storedAt, zone)}</p>}
+            {savingList && <p>{stillScheduledLine(asking.value.scheduledAt, zone)}</p>}
           </div>
           <RecipientList summary={asking.review.summary} push={pushOn} />
           <FormActions>
@@ -1002,7 +1014,7 @@ function Composer({ options, zone, opened, edit = false, params, refusal, back, 
           </p>
           {asking.again && <p ref={confirmLead} role="status" tabIndex={-1} className="text-sm text-primary-on-subtle outline-none">We checked who gets it again, so this is the list as it is now.</p>}
           {savingList
-            ? <p className="text-sm text-primary-on-subtle">To {audience ? audienceLabel(audience, options) : "the people you chose"}. {stillScheduledLine(asking.storedAt, zone)}</p>
+            ? <p className="text-sm text-primary-on-subtle">To {audience ? audienceLabel(audience, options) : "the people you chose"}. {stillScheduledLine(asking.value.scheduledAt, zone)}</p>
             : <p className="text-sm text-primary-on-subtle">To {audience ? audienceLabel(audience, options) : "the people you chose"}. You can change or cancel it until it starts sending.</p>}
           {pushOn && asking.review.summary.push > 0 && <p className="text-sm text-primary-on-subtle">{confirmPushLine(asking.review)}</p>}
           <RecipientList summary={asking.review.summary} push={pushOn} />

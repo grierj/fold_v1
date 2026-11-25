@@ -597,6 +597,14 @@ export function saveListLine(n: number): string {
   return `Change who gets this to ${people(n)}?`;
 }
 
+// listSavedLine is what the composer says when a scheduled message's new list was saved and the schedule press after
+// it was refused: who gets it changed, its time did not. at is when it is still scheduled for.
+export function listSavedLine(at: string | null, zone: string): string {
+  const still = at && Date.parse(at) > Date.now() ? ` It is still scheduled ${whenPhrase(at, zone)}.` : "";
+
+  return `Who gets this was changed, but its time was not.${still}`;
+}
+
 // stillScheduledLine says what saving a scheduled message's new list does, and does not do: at is when it is scheduled
 // for, null once that time has come.
 export function stillScheduledLine(at: string | null, zone: string): string {
