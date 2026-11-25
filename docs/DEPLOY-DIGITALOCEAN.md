@@ -185,6 +185,23 @@ a matching backup image, set `FOLD_BACKUP_VERSION` in `/opt/fold/.env` to a
 published backup version yourself. Clear that override when upgrading to a
 paired release so both images follow `FOLD_VERSION`.
 
+If you mirror the images, pass both references to `provision.sh`. Use a
+source checkout whose Compose file reads `FOLD_BACKUP_IMAGE`.
+
+```bash
+/root/fold/deploy/digitalocean/provision.sh \
+  --domain groups.example.org \
+  --image registry.example.com/church/fold:0.5.0 \
+  --backup-image registry.example.com/church/fold-backup:0.5.0
+```
+
+Use a pinned tag or a SHA-256 digest for the backup image. If the registry is
+private, sign in with `sudo docker login registry.example.com` before you run
+the provisioner. The flag saves `FOLD_BACKUP_IMAGE` in `/opt/fold/.env`, where
+it takes precedence over `FOLD_BACKUP_VERSION`. It stays set on later deploys
+and restores that use this Compose file. Remove `FOLD_BACKUP_IMAGE` from
+`.env` to go back to the GHCR backup image.
+
 Apply it:
 
 ```bash
@@ -892,6 +909,25 @@ sudo /opt/fold/upgrade.sh \
   --image ghcr.io/grierj/fold:x.y.z \
   --source-dir /root/fold
 ```
+
+For the first upgrade with mirrored images, check out the trusted release that
+introduces `--backup-image` in `/root/fold`. Run its upgrade script so it can
+install the matching tools and recognize the new flag:
+
+```bash
+sudo /root/fold/deploy/digitalocean/upgrade.sh \
+  --image registry.example.com/church/fold:x.y.z \
+  --backup-image registry.example.com/church/fold-backup:x.y.z \
+  --source-dir /root/fold
+```
+
+Later upgrades can use `/opt/fold/upgrade.sh`. Omitting `--backup-image`
+keeps the saved `FOLD_BACKUP_IMAGE`. Before changing that setting, record its
+previous value, including whether it was unset. If the replacement backup
+image fails, use `sudoedit /opt/fold/.env` before rollback. Restore the
+previous `FOLD_BACKUP_IMAGE` line, or remove it if the backup previously
+followed the version-based default. The rollback command restores the app pin
+from `release.prev` and reads the backup selection from `.env`.
 
 On a build-based install, name the commit:
 

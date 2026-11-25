@@ -84,7 +84,7 @@ services:
     # (deploy/backup/README.md). FOLD_BACKUP_VERSION lets a deployment keep a
     # published backup image while the app is pinned to an older release that
     # has none; it defaults to the app's version.
-    image: ghcr.io/grierj/fold-backup:${FOLD_BACKUP_VERSION:-${FOLD_VERSION}}
+    image: ${FOLD_BACKUP_IMAGE:-ghcr.io/grierj/fold-backup:${FOLD_BACKUP_VERSION:-${FOLD_VERSION}}}
     # No host ports. The service only talks to the database.
     restart: unless-stopped
     # An explicit identity: the host keeps its own copies of older archives in a

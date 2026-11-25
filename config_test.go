@@ -410,6 +410,19 @@ func TestComposeBackupImageSelection(t *testing.T) {
 	if got := cfg.Services["app"].Image; got != "ghcr.io/grierj/fold:0.5.0" {
 		t.Errorf("FOLD_BACKUP_VERSION must not move the app: %q", got)
 	}
+	for _, ref := range []string{
+		"registry.example.com:5000/church/fold-backup:0.5.0",
+		"registry.example.com/church/fold-backup@sha256:" + strings.Repeat("a", 64),
+	} {
+		env["FOLD_BACKUP_IMAGE"] = ref
+		cfg = resolveCompose(t, env)
+		if got := cfg.Services["backup"].Image; got != ref {
+			t.Errorf("FOLD_BACKUP_IMAGE resolved to %q, want %q", got, ref)
+		}
+		if got := cfg.Services["app"].Image; got != "ghcr.io/grierj/fold:0.5.0" {
+			t.Errorf("FOLD_BACKUP_IMAGE changed the app image to %q", got)
+		}
+	}
 	for _, svc := range []string{"app", "backup"} {
 		if cfg.Services[svc].Build != nil {
 			t.Errorf("the shipped file must not build %s", svc)
@@ -420,6 +433,7 @@ func TestComposeBackupImageSelection(t *testing.T) {
 func TestComposeBuildOverrideBuildsBackupLocally(t *testing.T) {
 	env := composeFixtureEnv()
 	env["FOLD_VERSION"] = "dev"
+	env["FOLD_BACKUP_IMAGE"] = "registry.example.com/church/fold-backup:0.5.0"
 	cfg := resolveCompose(t, env, "docker-compose.build.yml")
 	backup := cfg.Services["backup"]
 	if backup.Build == nil || !strings.HasSuffix(filepath.ToSlash(backup.Build.Context), "/deploy/backup") {
@@ -632,7 +646,7 @@ func TestComposeBackupSourceContracts(t *testing.T) {
 		t.Error("the backup service comes after caddy")
 	}
 	for _, want := range []string{
-		"image: ghcr.io/grierj/fold-backup:${FOLD_BACKUP_VERSION:-${FOLD_VERSION}}",
+		"image: ${FOLD_BACKUP_IMAGE:-ghcr.io/grierj/fold-backup:${FOLD_BACKUP_VERSION:-${FOLD_VERSION}}}",
 		"restart: unless-stopped",
 		`user: "65532:65532"`,
 		"cap_drop:\n      - ALL",

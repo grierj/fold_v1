@@ -11,6 +11,10 @@ that changes how an operator upgrades, rolls back or restores. The operator-faci
   `ghcr.io/grierj/fold-backup:${FOLD_VERSION}` (`release.yml` stages both images under `stage-<version>-<commit>`, smokes that digest pair, then writes the exact tags, SHA aliases and attestations from the same digests, then the GitHub release (the done mark), then the `:x.y` tags in a separate `minor` job that a "Re-run failed jobs" finishes; a retry reuses the staged pair, and an exact tag is only accepted when it already holds that digest; `scripts/release-tag-commit.sh` refuses a version tag that no longer peels to the built commit before `promote` and `notes`, `notes` refuses until both images pull anonymously, and `minor` leaves `:x.y` on a newer already-released patch; a newer patch whose notes failed has no release, so an older retry can move `:x.y` back until that patch is finished); `FOLD_VERSION` is an
   exact release in `.env`, never `latest`. Developers (and anyone before the first release) add
   the override: `docker compose -f docker-compose.yml -f docker-compose.build.yml up -d --build`.
+- For a mirrored installation, `provision.sh --image APP --backup-image BACKUP` saves the full
+  backup reference as `FOLD_BACKUP_IMAGE` in `.env`. `upgrade.sh --image` accepts the same option.
+  The value takes precedence over `FOLD_BACKUP_VERSION` in the pulled stack. Source builds use
+  the local backup build and its existing image name.
 - The Dockerfile is multi-stage (node → go → distroless), `CGO_ENABLED=0`; no C compiler. The
   image carries only the binary, pins `WORKDIR /` (distroless nonroot defaults to
   `/home/nonroot`, off the volume) and pre-creates `/data/uploads` with `--chown=65532:65532` so
@@ -266,14 +270,14 @@ before it creates anything. Never point it at a machine that runs anything you k
 checked on 26.04 only) is not refused, since the drill never hardens; any other content is,
 including the three lines `provision.sh`'s hardening writes.
 
-The crossings run each release's stock `docker-compose.yml`, which pulls
-`ghcr.io/grierj/fold-backup:${FOLD_VERSION}` beside the app, and `--image` relocates only the app.
+The crossings run each release's stock `docker-compose.yml`. The pinned older releases pull
+`ghcr.io/grierj/fold-backup:${FOLD_VERSION}` beside the app and their tools can relocate only the app.
 So for the run they write `/etc/docker/certs.d/ghcr.io/hosts.toml`, a registry mirror that serves
 the backup images they build from each release's own `deploy/backup` and passes anything else on to
 ghcr.io. That needs Docker's containerd image store (a new install's default), which the drill
 checks before it creates anything; the crossings prove the mirror by digest before any site runs,
 refuse when the candidate's backup image was not built, and remove the file when the drill ends,
-`--keep` or not. The drill clears an inherited `FOLD_VERSION`, `FOLD_BACKUP_VERSION` and
+`--keep` or not. The drill clears an inherited `FOLD_VERSION`, `FOLD_BACKUP_VERSION`, `FOLD_BACKUP_IMAGE` and
 `COMPOSE_ENV_FILES`, any of which would make a stock Compose file ask for another backup image than
 the one proved.
 
