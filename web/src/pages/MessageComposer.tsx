@@ -302,6 +302,8 @@ function Composer({ options, zone, opened, edit = false, params, refusal, back, 
   // sender confirms, until the audience is changed. Bumped by "Review the whole list": the picker opens that list.
   const [reviewed, setReviewed] = useState<{ key: string; summary: AudienceSummary } | null>(null);
   const [reviewing, setReviewing] = useState(0);
+  // Bumped when the server refuses the people chosen: the picker drops the list it showed and counts again.
+  const [recount, setRecount] = useState(0);
   // Once it goes out: who got it, checked every few seconds while sending.
   const { history, failed: historyFailed, stale, announce, retryLoad } = useMessageHistory(editing ? null : message, setMessage);
   const [retryError, setRetryError] = useState("");
@@ -462,6 +464,12 @@ function Composer({ options, zone, opened, edit = false, params, refusal, back, 
       }
 
       return;
+    }
+
+    // The people chosen were refused: the list on screen is no longer who gets it.
+    if (field === "audience") {
+      setReviewed(null);
+      setRecount((n) => n + 1);
     }
 
     show({ [field ?? where]: text });
@@ -935,7 +943,7 @@ function Composer({ options, zone, opened, edit = false, params, refusal, back, 
       <section aria-labelledby={`${ids.audience}-h`} className="space-y-4">
         <h2 id={`${ids.audience}-h`} className="text-xl font-semibold">Who gets it</h2>
         <AudiencePicker id={ids.audience} options={options} choice={choice} error={errors.audience} push={pushOn}
-          reviewed={reviewed?.key === key ? reviewed.summary : null} reviewing={reviewing}
+          reviewed={reviewed?.key === key ? reviewed.summary : null} reviewing={reviewing} recount={recount}
           onChange={(c) => { setChoice(c); setReviewed(null); setErrors((e) => ({ ...e, audience: undefined })); }} />
         {/* A companion to the email, never instead of it (DEC-123). */}
         {pushShown && (

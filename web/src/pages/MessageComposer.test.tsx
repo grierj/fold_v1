@@ -718,6 +718,24 @@ describe("push notification too", () => {
     expect(screen.getByText("3 of them get a push notification; 1 gets only the push.")).toBeInTheDocument();
   });
 
+  it("drops the list it showed and counts again when the people chosen are refused", async () => {
+    const user = userEvent.setup();
+    vi.mocked(Messages.get).mockResolvedValue({ message: message({ subject: "Snacks", bodyHtml: "<p>Bring some</p>" }) });
+    vi.mocked(Messages.schedule).mockRejectedValueOnce(new ApiError(400, "nobody", { code: "message_nobody" }));
+    open("/messages/5");
+    await editorReady();
+    // The picker has counted, so what follows is a second count, not its first.
+    await waitFor(() => expect(Messages.audiencePreview).toHaveBeenCalled());
+    await user.click(screen.getByRole("button", { name: "Send now" }));
+    const ask = await screen.findByRole("group", { name: /^Send to / });
+    const counts = vi.mocked(Messages.audiencePreview).mock.calls.length;
+    vi.mocked(Messages.audiencePreview).mockResolvedValue({ summary: summary({ people: 1, eligible: 0, teens: 0, skipped: { "no email address": 1 }, recipients: [] }) });
+    await user.click(within(ask).getByRole("button", { name: "Send now" }));
+    expect(await screen.findByText(ERROR_COPY.message_nobody)).toBeInTheDocument();
+    await waitFor(() => expect(vi.mocked(Messages.audiencePreview).mock.calls.length).toBe(counts + 1));
+    expect(await screen.findByText(/^1 person; 1 won't get it: /)).toBeInTheDocument();
+  });
+
   it("shows each person's push on their own row, with a count apart from the email", async () => {
     viewer.isAdmin = true;
     const user = userEvent.setup();

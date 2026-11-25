@@ -27,7 +27,7 @@ const LISTED_DATES = 10;
 // shown in place of the picker's own count, so every name and count on
 // screen is the one the sender confirms. reviewing: bumped when the sender
 // asks to review the whole list, which opens it.
-export function AudiencePicker({ options, choice, onChange, error, id, push = false, reviewed = null, reviewing = 0 }: {
+export function AudiencePicker({ options, choice, onChange, error, id, push = false, reviewed = null, reviewing = 0, recount = 0 }: {
   options: ComposeOptions;
   choice: AudienceChoice;
   onChange: (c: AudienceChoice) => void;
@@ -36,31 +36,34 @@ export function AudiencePicker({ options, choice, onChange, error, id, push = fa
   push?: boolean;
   reviewed?: AudienceSummary | null;
   reviewing?: number;
+  // Bumped when the server refused the people chosen: the count on screen is not shown again, and is taken again.
+  recount?: number;
 }) {
   const chipsLabel = useId();
   const [kind, raw] = choice.target.split(":");
   const event = kind === "event" ? options.events.find((e) => e.id === Number(raw)) : undefined;
   const audience = toAudience(choice);
   const key = audienceKey(audience);
+  const counted = `${key}#${recount}`;
   const [summary, setSummary] = useState<{ key: string; summary: AudienceSummary } | null>(null);
   const [countError, setCountError] = useState<{ key: string; text: string } | null>(null);
   const latest = useRef("");
   const list = useRef<HTMLDetailsElement>(null);
 
   useEffect(() => {
-    latest.current = key;
+    latest.current = counted;
 
     if (!audience) return;
 
     const timer = setTimeout(() => {
       Messages.audiencePreview(audience)
-        .then(({ summary: s }) => { if (latest.current === key) setSummary({ key, summary: s }); })
-        .catch((e) => { if (latest.current === key) setCountError({ key, text: errorText(e, "We couldn't count who gets this.") }); });
+        .then(({ summary: s }) => { if (latest.current === counted) setSummary({ key: counted, summary: s }); })
+        .catch((e) => { if (latest.current === counted) setCountError({ key: counted, text: errorText(e, "We couldn't count who gets this.") }); });
     }, COUNT_DELAY_MS);
 
     return () => clearTimeout(timer);
-    // audience is derived from key, so key alone says when to count again.
-  }, [key]);
+    // audience is derived from key, so counted alone says when to count again.
+  }, [counted]);
 
   useEffect(() => {
     const details = list.current;
@@ -93,8 +96,8 @@ export function AudiencePicker({ options, choice, onChange, error, id, push = fa
   const groupLabel = (i: number) => labels[i].label;
   const eventLabel = (i: number) => labels[options.groups.length + i].label;
   const datesListed = choice.dates === "all" || !!event?.dates.some((d) => String(d.occurrenceId) === choice.dates);
-  const current = reviewed ?? (summary?.key === key ? summary.summary : null);
-  const failed = reviewed ? "" : countError?.key === key ? countError.text : "";
+  const current = reviewed ?? (summary?.key === counted ? summary.summary : null);
+  const failed = reviewed ? "" : countError?.key === counted ? countError.text : "";
   const isGroup = kind === "group";
   const chips = isGroup ? ROLE_CHOICES : STATUS_CHOICES;
   const picked: string[] = isGroup ? choice.roles : choice.statuses;
