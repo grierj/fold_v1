@@ -407,6 +407,7 @@ function GroupDetailContent() {
 
   const { group, members, upcomingEvents, canManage, isMember } = detail;
   const canSchedule = groupCanSchedule(group.status);
+  const canInvite = group.status === "active";
 
   const scheduleReason = group.status === "pending"
     ? "You can schedule events once an admin approves this group."
@@ -865,10 +866,10 @@ function GroupDetailContent() {
                 ) : (
                   <>
                     {memberError && <FormError layout="mb-3">{memberError}</FormError>}
-                    {canManage && <div className="mb-4"><AddPeople
+                    {canManage && (canInvite || isAdmin) && <div className="mb-4"><AddPeople key={group.status}
                       groupId={group.id} groupName={group.name} memberCount={group.memberCount} memberLimit={group.memberLimit}
                       canSearch={isActiveAdult(user)} onAdded={async () => { await refresh(); }}
-                      restoredEmail={pendingInviteEmail.current}
+                      restoredEmail={canInvite ? pendingInviteEmail.current : null}
                       onEmailUnavailable={(email) => {
                         pendingInviteEmail.current = email;
                         refreshRefusal("write");

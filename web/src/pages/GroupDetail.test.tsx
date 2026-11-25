@@ -33,7 +33,7 @@ const actor: TestSession = {
   canCompose: false,
 };
 
-const render = renderWithAuth(() => ({ user: actor.user, loading: false, isAdmin: false, canCompose: actor.canCompose }));
+const render = renderWithAuth(() => ({ user: actor.user, loading: false, isAdmin: actor.user?.role === "admin", canCompose: actor.canCompose }));
 
 stubService(People, () => ({ search: vi.fn() }));
 
@@ -324,7 +324,13 @@ it("checks the group from nothing after a by-name add is refused", async () => {
   expect(screen.queryByRole("button", { name: "Add people" })).not.toBeInTheDocument();
 });
 
-it.each([404, 400])("rechecks a group after an unavailable email add (%s) and restores the invitation address if authorized", async (status) => {
+it.each([
+  { status: 404, groupStatus: "active", role: "member" },
+  { status: 400, groupStatus: "active", role: "member" },
+  { status: 400, groupStatus: "archived", role: "member" },
+  { status: 404, groupStatus: "archived", role: "admin" },
+] as const)("rechecks a refused email add ($status) for a $role when the group is $groupStatus", async ({ status, groupStatus, role }) => {
+  actor.user = testUser({ id: 2, role });
   const shown = { ...page, canManage: true };
   const fresh = deferred<GroupDetailResponse>();
   vi.mocked(Groups.get).mockResolvedValueOnce(shown).mockReturnValueOnce(fresh.promise);
@@ -341,7 +347,25 @@ it.each([404, 400])("rechecks a group after an unavailable email add (%s) and re
   await waitFor(() => expect(Groups.get).toHaveBeenCalledTimes(2));
   expect(screen.queryByRole("heading", { name: "Family group" })).not.toBeInTheDocument();
   expect(screen.queryByRole("textbox", { name: "Email address" })).not.toBeInTheDocument();
-  await act(async () => fresh.resolve(shown));
+  await act(async () => fresh.resolve({ ...shown, group: { ...shown.group, status: groupStatus } }));
+
+  if (groupStatus === "archived") {
+    expect(screen.queryByRole("button", { name: "Send invitation" })).not.toBeInTheDocument();
+    expect(screen.queryByDisplayValue("sam@example.com")).not.toBeInTheDocument();
+
+    if (role === "admin") {
+      await userEvent.click(screen.getByRole("button", { name: "Add people" }));
+      await userEvent.click(screen.getByRole("button", { name: "Use an email instead" }));
+      await userEvent.type(screen.getByRole("textbox", { name: "Email address" }), "other@example.com");
+      await userEvent.click(screen.getByRole("button", { name: "Add member" }));
+      expect(Groups.addMember).toHaveBeenLastCalledWith(1, "other@example.com");
+    } else {
+      expect(screen.queryByRole("button", { name: "Add people" })).not.toBeInTheDocument();
+    }
+
+    return;
+  }
+
   expect(await screen.findByRole("textbox", { name: "Email address" })).toHaveValue("sam@example.com");
   expect(screen.getByRole("button", { name: "Send invitation" })).toBeInTheDocument();
 });
