@@ -8,12 +8,10 @@ import { formatDayLong } from "../lib/when";
 import type { NeedsRoom, RoomBooking } from "../types";
 import { RoomField } from "./RoomField";
 import { roomsTurnedOff } from "./useRoomPicker";
+import { useShowAll } from "./useShowAll";
 import { Button } from "./ui/Button";
 import { FormError } from "./ui/Field";
 import { AlertCircleIcon } from "./icons";
-
-// A long list shows its first rows; the rest wait behind one button.
-const SHOWN = 10;
 
 const OFF_LIST = "It is no longer listed under “Dates that need a room”.";
 
@@ -53,7 +51,6 @@ export function NeedsRoomList({ eventId, revision, hasDate, onPick, onGone }: {
   // A church with rooms off, or a site we can't read, sees no list at all.
   const enabled = useRoomsEnabled() === true;
   const [own, setOwn] = useState(0);
-  const [all, setAll] = useState(false);
   // The off-page date whose Room control is open under its row.
   const [open, setOpen] = useState<string | null>(null);
   // What the inline control just did, so the row that leaves the list is not silent.
@@ -76,6 +73,7 @@ export function NeedsRoomList({ eventId, revision, hasDate, onPick, onGone }: {
     if (enabled) reload();
   }, [stamp, enabled, reload]);
   const needs: NeedsRoom[] = list.data?.needsRoom ?? [];
+  const more = useShowAll(needs);
   // Room booking turned off since the page read the site settings: no list, as with rooms off.
   const error = list.error && !roomsTurnedOff(list.error) ? errorText(list.error, "We couldn't load the dates that need a room.") : null;
   const loaded = list.data;
@@ -108,7 +106,6 @@ export function NeedsRoomList({ eventId, revision, hasDate, onPick, onGone }: {
   }
 
   if (needs.length === 0) return <>{notes}</>;
-  const rows = all ? needs : needs.slice(0, SHOWN);
 
   return (
     <>
@@ -119,13 +116,13 @@ export function NeedsRoomList({ eventId, revision, hasDate, onPick, onGone }: {
         </h2>
         <p className="mt-1 text-sm text-warning-on-subtle">These dates have no room right now. Pick another one for each.</p>
         <ul className="mt-3 space-y-3">
-          {rows.map((n) => {
+          {more.rows.map((n, i) => {
             const day = formatDayLong(n.date);
             const inline = !hasDate(n.date);
             const panel = `needs-room-${n.date}`;
 
             return (
-              <li key={n.date} className="space-y-2">
+              <li key={n.date} {...more.row(i)} className="space-y-2">
                 <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
                   <div className="min-w-0">
                     <div className="font-semibold">{day}</div>
@@ -171,11 +168,7 @@ export function NeedsRoomList({ eventId, revision, hasDate, onPick, onGone }: {
             );
           })}
         </ul>
-        {!all && needs.length > SHOWN && (
-          <div className="mt-3">
-            <Button variant="link" onClick={() => setAll(true)}>Show all {needs.length}</Button>
-          </div>
-        )}
+        {more.button && <div className="mt-3">{more.button}</div>}
       </section>
     </>
   );

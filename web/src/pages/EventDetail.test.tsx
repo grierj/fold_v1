@@ -969,7 +969,7 @@ describe("EventDetail dates that need a room", () => {
   };
 
   const needs = (...rows: NeedsRoom[]) =>
-    vi.spyOn(SeriesRooms, "list").mockResolvedValue({ revision: "r1", rooms: [], dates: 2, defaultRoom: null, needsRoom: rows, pending: 0 });
+    vi.spyOn(SeriesRooms, "list").mockResolvedValue({ revision: "r1", rooms: [], dates: 2, defaultRoom: null, ownRooms: [], needsRoom: rows, pending: 0 });
 
   beforeEach(() => {
     vi.resetAllMocks();
@@ -1027,7 +1027,7 @@ describe("EventDetail dates that need a room", () => {
     const hall = { id: 1, name: "Fellowship Hall", building: "Main", capacity: 80, features: "", restricted: false, busyDates: 0, tooSmall: false };
     const chapel = { ...hall, id: 2, name: "Chapel", building: "" };
     // Another leader booked the chapel for the series just before this pick: every read from then on shows it.
-    let stored: SeriesRoomsResponse = { revision: "r1", rooms: [hall, chapel], dates: 2, defaultRoom: null, needsRoom: [], pending: 0 };
+    let stored: SeriesRoomsResponse = { revision: "r1", rooms: [hall, chapel], dates: 2, defaultRoom: null, ownRooms: [], needsRoom: [], pending: 0 };
     vi.spyOn(SeriesRooms, "list").mockImplementation(() => Promise.resolve(stored));
     vi.spyOn(SeriesRooms, "set").mockImplementation(() => {
       stored = { ...stored, revision: "r3", defaultRoom: { id: 2, name: "Chapel", building: "" } };
