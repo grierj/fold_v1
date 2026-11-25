@@ -365,9 +365,8 @@ type proxyConn struct {
 	closeOnSync    bool
 	upstreamClosed bool
 
-	holdReply       atomic.Bool
-	closeAfterReady atomic.Bool
-	clientClosed    atomic.Bool
+	holdReply    atomic.Bool
+	clientClosed atomic.Bool
 	// suppress drops every server reply instead of forwarding it. It is set
 	// before the transaction-ending message is sent upstream, so no reply to
 	// it can reach the client first. suppressedReady counts the ReadyForQuery
@@ -734,7 +733,6 @@ func (c *proxyConn) endOfTransaction(typ byte, body []byte, sql, kind string, mo
 		// none can reach the client ahead of the close; the server still
 		// runs the statement and its replies are read and discarded.
 		c.suppress.Store(true)
-		c.closeAfterReady.Store(true)
 		c.event(KindStatement, sql, ActionForwarded)
 		c.event(kind, sql, ActionForwarded)
 		if writeMsg(c.upstream, typ, body) != nil {
@@ -811,17 +809,17 @@ func (c *proxyConn) fromServer() {
 				return
 			}
 		}
+		// Forwarding ReadyForQuery can let the client arm suppression for the
+		// next command before the write returns. Decide once for this frame.
 		if c.suppress.Load() {
 			if typ == 'Z' {
 				c.suppressedReady.Add(1)
+				c.closeUpstream()
 			}
 		} else if !c.clientClosed.Load() {
 			if writeMsg(c.client, typ, body) == nil && typ == 'D' {
 				c.forwardedRows.Add(1)
 			}
-		}
-		if typ == 'Z' && c.closeAfterReady.Load() {
-			c.closeUpstream()
 		}
 	}
 }

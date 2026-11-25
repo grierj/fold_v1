@@ -425,14 +425,15 @@ lives under `UPLOAD_DIR` (`./data/uploads` default, `/data/uploads` in the
 compose stack, persisted on the `/data` volume). See AGENTS.md for the
 S3-replacement seam.
 
-Resource bounds for avatar and cover uploads (one path, `readImageUpload`):
+Resource bounds for avatar, cover and announcement picture uploads (`readImageUpload`):
 
 - Pictures are copied, decoded and re-encoded, so the process allows
-  `images.MaxConcurrentProcessing` (2) at once across both routes. A request
-  takes a slot only after sign-in, CSRF and its own permission check
-  (`teen_avatar`, leader or admin for a cover) have passed. It never waits:
-  when both slots are taken it answers `503 upload_busy`, nothing is saved, and
-  the client may try again. The slot is held until the picture has been
+  `images.MaxConcurrentProcessing` (2) at once across all three routes, with one
+  slot per signed-in account across its sessions. A request takes a slot only
+  after sign-in, CSRF and its own permission check have passed. If both slots
+  are taken or the account already has a slot, the request immediately answers
+  `503 upload_busy` without saving a picture. The client may try again.
+  The slot is held until the picture has been
   normalized and is released before the file is stored or any row changes, on
   every path including errors. A decoder cannot be stopped, so a client that
   goes away keeps its slot until the decode returns, and is then answered
@@ -493,7 +494,8 @@ Resource bounds for avatar and cover uploads (one path, `readImageUpload`):
   overhead per request, whether or not it declares its length, and the CSRF
   check reads that body before sign-in, so concurrent requests still buffer
   one body each ahead of the slot check; the cap bounds each request, not
-  their number. There is no per-user quota and no whole-server memory cap.
+  their number. There is no per-account upload rate limit or whole-server
+  memory cap.
 
 ### Groups
 
@@ -946,15 +948,18 @@ POST /api/v1/account-requests              → 200 {message} | 400 | 403  (publi
 POST /api/v1/account-requests/invite-friend → 200 {message} | 400 | 403  (auth)
 POST /api/v1/account-requests/confirm      {token, password} → 200 {user, pendingConsent?} | 400  (public)
 GET  /api/v1/admin/account-requests?status=pending → {requests: [accountRequest]}  (admin)
-POST /api/v1/admin/account-requests/:id/approve → 200 {request, userId} | 409  (admin)
+POST /api/v1/admin/account-requests/:id/approve → 200 {request, userId} | 401 | 409  (admin)
      body: {note?, fromNotification?, accountConsentEvidenceText?}
-POST /api/v1/admin/account-requests/:id/reject  → 200 {request, userId: 0}  (admin)
+POST /api/v1/admin/account-requests/:id/reject  → 200 {request, userId: 0} | 401 | 409  (admin)
      body: {note?, fromNotification?} — rejection is never inline (403 with fromNotification)
 PUT  /api/v1/admin/self-signup             {mode: "request"|"off"} → 200 {selfSignup}  (admin)
 ```
 
 Self-signup and invite-a-friend (M1.3, 5.10, DEC-4) create a pending
-`AccountRequest`; only an admin approves. There is no open mode: the
+`AccountRequest`. Approval and rejection recheck the admin's session and role
+inside the decision transaction. If the admin can no longer act, ordinary
+decisions return `401`, and consent and conversion approvals return `403`.
+There is no open mode: the
 `self_signup` setting is `request` (default) or `off`, and `off` refuses
 the public door with 403 (the member door still works). Create body:
 `{name, email, phone?, ageBand: "adult"|"teen"|"under13", birthDate?,
