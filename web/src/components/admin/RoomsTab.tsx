@@ -107,11 +107,11 @@ function createBody(form: RoomForm): RoomInput {
 // Every send was refused while nothing the save writes changed: the control says its ordinary refusal.
 const refusedEverySend = () => new ApiError(409, "room changed", { code: "room_changed" });
 
-// The room as one read of the list shows it, or undefined when the list has no such room.
-async function readRoom(id: number, keep: (list: AdminRoomsResponse) => void): Promise<RevisionRead<Room | undefined>> {
+// The room as one read of the list shows it, or undefined when the list has no such room. `keep` gets the read.
+async function readRoom(id: number, keep: (list: AdminRoomsResponse, room: Room | undefined) => void): Promise<RevisionRead<Room | undefined>> {
   const list = await AdminRooms.list();
-  keep(list);
   const room = list.rooms.find((r) => r.id === id);
+  keep(list, room);
 
   return { allowed: room !== undefined, revision: room?.revision, value: room };
 }
@@ -134,7 +134,7 @@ function RoomEditor({ room, onSaved, onConflict, onCancel }: {
   const send = useRevisionSave<Room | undefined, ReturnType<typeof roomFields> | null>({
     opened,
     revision: opened.revision,
-    read: () => readRoom(opened.id, (list) => { lastRead.current = list.rooms.find((r) => r.id === opened.id); }),
+    read: () => readRoom(opened.id, (_, r) => { lastRead.current = r; }),
     fields: (r) => (r ? roomFields(r) : null),
     answers: answerNames("room", opened.id),
     onConflict,
