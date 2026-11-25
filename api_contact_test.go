@@ -895,15 +895,17 @@ func TestGroupAskSelectionAndDirectTeenRoutesStayClosed(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, tc := range []struct {
-		c    *apiClient
-		path string
-		body map[string]any
+		c      *apiClient
+		path   string
+		body   map[string]any
+		status int
+		code   string
 	}{
-		{f.lc, "/api/v1/groups/" + itoa(f.group.ID) + "/members", map[string]any{"selectionId": token}},
-		{f.lc, "/api/v1/groups/" + itoa(f.group.ID) + "/members", map[string]any{"email": f.subject.Email}},
-		{f.ac, "/api/v1/admin/groups/" + itoa(f.group.ID) + "/members", map[string]any{"userId": f.subject.ID}},
+		{f.lc, "/api/v1/groups/" + itoa(f.group.ID) + "/members", map[string]any{"selectionId": token}, 409, "teen_add_approval_required"},
+		{f.lc, "/api/v1/groups/" + itoa(f.group.ID) + "/members", map[string]any{"email": f.subject.Email}, 400, "group_member_email_unavailable"},
+		{f.ac, "/api/v1/admin/groups/" + itoa(f.group.ID) + "/members", map[string]any{"userId": f.subject.ID}, 409, "teen_add_approval_required"},
 	} {
-		if w := tc.c.do("POST", tc.path, tc.body, true); w.Code != 409 {
+		if w := tc.c.do("POST", tc.path, tc.body, true); w.Code != tc.status || !strings.Contains(w.Body.String(), `"code":"`+tc.code+`"`) {
 			t.Fatalf("direct teen route: %d %s", w.Code, w.Body.String())
 		}
 	}

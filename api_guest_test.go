@@ -637,7 +637,7 @@ func TestGuestInvitationUpgradeAndNoMembership(t *testing.T) {
 
 	w := admin.do("POST", "/api/v1/groups/"+itoa(gid)+"/members",
 		map[string]any{"email": "gail@example.com"}, true)
-	if w.Code != http.StatusForbidden {
+	if w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), `"code":"group_member_email_unavailable"`) {
 		t.Fatalf("adding a guest as a member: %d %s", w.Code, w.Body.String())
 	}
 

@@ -915,7 +915,7 @@ A selected date is retained with DEC-74 departure provenance tied to the locked 
 ### Invitations
 
 ```
-POST /api/v1/invitations          → 201 {invitation}  (auth)
+POST /api/v1/invitations          → 200 {message} (leader) | 201 {invitation} (admin)
 GET  /api/v1/invitations/:token   → 200 {invitation, inviterName, siteName, site} | 404  (public)
 POST /api/v1/invitations/accept   → 200 {user?, pendingConsent, pendingApproval} | 400 | 409  (public)
 ```
@@ -924,10 +924,24 @@ Invitations (M1.2, 5.10, DEC-4): admins invite into any group or none;
 leaders invite only into groups they lead or none (403 otherwise); members,
 teens, and guests get 403, signed-out visitors 401. There is no approval
 step for adults: the person confirms their age and sets a password on acceptance. Teens start `pending_consent`.
-Create body: `{email, name?, phone?, groupId?, overLimit?}`. The invitee chooses their age when accepting; the inviter cannot activate a teen. 409 when the email already has
-an account or a pending invitation. Leaders are limited to 20 valid invitation
-attempts per rolling day, including refused existing-account and duplicate-invitation checks. Refusals are durable `invitation.refused` actor counters, not sent-mail counters; they do not consume a recipient's mail allowance. The actor allowance is checked under its transaction gate before the address lookup. The 21st attempt gets 429 and is audited
-(`invitation.rate_limited`).
+Create body: `{email, name?, phone?, groupId?, overLimit?}`. The invitee chooses
+their age when accepting. For admins, an existing account answers 409 `email_taken`.
+A pending invitation or household conversion answers 409 `already_invited`.
+
+Leaders with and without a `groupId` receive 200 with the same `message` for an
+eligible address, an existing account, a pending invitation or household
+conversion, or a destination over its allowance (DEC-172). Only an eligible
+address queues an invitation. A guest account can receive an ordinary invitation
+and upgrade on acceptance. Mail preparation checks the invitation, the leader's
+authority, and any new hold on the address before delivery.
+
+The leader allowance is 20 valid attempts per rolling day. A request that
+cannot send to its destination writes `invitation.refused` and counts against
+the leader's allowance. The destination's allowance counts queued sends and
+resends. The server checks the actor's allowance before the address lookup.
+An exhausted actor allowance answers 429 `invite_limit` and records
+`invitation.rate_limited`. Input validation, group authorization and group
+approval errors apply independently of the address.
 
 Tokens are 32 random bytes, stored as SHA-256, single use, and expire after
 24 hours. Ordinary accept body: `{token, name, password, ageBand: "adult"|"teen"|"under13", birthDate?}` (password ≥ 10 chars). A teen needs a real birth date aged 13 to 17 on the church-local date. Missing or inconsistent ages answer 400. Under-13 input is not stored and the token remains usable. Adults start active; teens start pending consent without a login and may browse public groups and events as signed-out visitors. Household conversion acceptance still uses its saved adult birth date. Accepting into a full group joins over
@@ -2915,7 +2929,14 @@ Malformed, expired, wrong-actor or unavailable selections fail with 400 code
 Existing add endpoints accept `selectionId` in place of the legacy target:
 
 - `POST /groups/:id/members`: exactly one of `selectionId`, `email`; retain
-  `overLimit` and existing group management/capacity rules.
+  `overLimit` and existing group management/capacity rules. Email adds use the
+  same active account filter as the name picker. Leaders can add adults who
+  share their contact details with leaders or use their own email address.
+  Admins can add any selectable adult. Contact grants are used through the
+  audited reveal route.
+  Unavailable email targets and requests over the email limit answer 400
+  `group_member_email_unavailable`. The limit is 30 per actor and 100 per client
+  IP per minute. The invitation remains a separate action.
 - `POST /admin/groups/:id/members`: exactly one of `selectionId`, `userId`;
   retain `role`, `overLimit` and admin authorization.
 - `POST /events/:id/registrations/add`: `selectionId` instead of `userId`,
@@ -2929,10 +2950,10 @@ leadership/over-limit and registration audit rows remain; no-op adds do not log 
 new addition. Audit failure rolls back the membership change.
 
 Every ordinary direct manager-initiated teen account add through these
-endpoints (including email, raw-ID and admin paths) fails closed with 409 code
-`teen_add_approval_required`. Use a separate Ask to add; direct endpoints do not
-auto-create asks. Teen self-RSVP, household, proxy, consent conversion and
-invitation flows retain their own rules.
+endpoints fails closed. Email adds give the same unavailable response as other
+ineligible email targets. Selection and raw-ID adds return 409
+`teen_add_approval_required`. Use a separate Ask to add. Teen self-RSVP,
+household, proxy, consent conversion and invitation flows follow their own rules.
 
 Picker copy (client-owned):
 

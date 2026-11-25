@@ -1,21 +1,16 @@
 import { isString } from "../lib/wireValues";
 import { useEffect, useId, useRef, useState } from "react";
-import { ApiError } from "../api/core";
 import { Groups } from "../api/groups";
 import { Invitations } from "../api/invitations";
 import type { PersonSearchResult } from "../types";
-import { errorCode, errorText } from "../lib/errors";
+import { ERROR_COPY, errorCode, errorText } from "../lib/errors";
 import { AddRequestForm } from "./AddRequestForm";
 import { Button } from "./ui/Button";
 import { Checkbox, Field, FormError, Input } from "./ui/Field";
 import { Form } from "./ui/Form";
 import { PeoplePicker } from "./ui/PeoplePicker";
 
-// One "Add people" panel on a group's Members tab (DEC-99). It starts with the
-// name search (DEC-78's main path, including Ask to add for a teen). "Use an
-// email instead" switches to one email field: it tries to add an existing
-// account first, and when there is none, offers the invitation for that same
-// email. Every call and rule is the one the three old forms used.
+// DEC-99 keeps the email and invitation fallback beside the DEC-78 name picker.
 export function AddPeople({ groupId, groupName, memberCount, memberLimit, canSearch, onAdded }: {
   groupId: number;
   groupName: string;
@@ -31,7 +26,6 @@ export function AddPeople({ groupId, groupName, memberCount, memberLimit, canSea
   const [selection, setSelection] = useState<PersonSearchResult | null>(null);
   const [askPerson, setAskPerson] = useState<PersonSearchResult | null>(null);
   const [email, setEmail] = useState("");
-  // The email we found no account for; the invitation goes to exactly this address.
   const [inviteFor, setInviteFor] = useState<string | null>(null);
   const [overLimit, setOverLimit] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -81,10 +75,8 @@ export function AddPeople({ groupId, groupName, memberCount, memberLimit, canSea
       setStatus(`Added ${label}.`);
       await onAdded();
     } catch (err) {
-      if (isString(target) && err instanceof ApiError && err.status === 404) setInviteFor(target);
-      else if (errorCode(err) === "teen_add_approval_required" && isString(target)) {
-        setError("Select this person by name, then choose Ask to add. An email address cannot be used to send an ask.");
-      } else setError(errorText(err, "We couldn't add that person."));
+      if (isString(target) && errorCode(err) === "group_member_email_unavailable") setInviteFor(target);
+      else setError(errorText(err, "We couldn't add that person."));
     } finally {
       setBusy(false);
     }
@@ -122,8 +114,8 @@ export function AddPeople({ groupId, groupName, memberCount, memberLimit, canSea
     setStatus(null);
 
     try {
-      await Invitations.create({ email: inviteFor, groupId, overLimit });
-      setStatus(`Invitation sent to ${inviteFor}.`);
+      const result = await Invitations.create({ email: inviteFor, groupId, overLimit });
+      setStatus("message" in result ? result.message : `Invitation sent to ${inviteFor}.`);
       setInviteFor(null);
       setEmail("");
       setOverLimit(false);
@@ -174,7 +166,7 @@ export function AddPeople({ groupId, groupName, memberCount, memberLimit, canSea
               </Form>
               {inviteFor && (
                 <div className="space-y-3 rounded-lg border border-border bg-sunken p-3">
-                  <p role="status" className="text-sm">No account uses that email. Invite them to Fold?</p>
+                  <p role="status" className="text-sm">{ERROR_COPY.group_member_email_unavailable}</p>
                   {full && (
                     <Checkbox label="Invite over the limit anyway" description="This group is full. Going over the limit is logged."
                       checked={overLimit} onChange={(e) => setOverLimit(e.target.checked)} />
