@@ -425,14 +425,15 @@ lives under `UPLOAD_DIR` (`./data/uploads` default, `/data/uploads` in the
 compose stack, persisted on the `/data` volume). See AGENTS.md for the
 S3-replacement seam.
 
-Resource bounds for avatar and cover uploads (one path, `readImageUpload`):
+Resource bounds for avatar, cover and announcement picture uploads (`readImageUpload`):
 
 - Pictures are copied, decoded and re-encoded, so the process allows
-  `images.MaxConcurrentProcessing` (2) at once across both routes. A request
-  takes a slot only after sign-in, CSRF and its own permission check
-  (`teen_avatar`, leader or admin for a cover) have passed. It never waits:
-  when both slots are taken it answers `503 upload_busy`, nothing is saved, and
-  the client may try again. The slot is held until the picture has been
+  `images.MaxConcurrentProcessing` (2) at once across all three routes, with one
+  slot per signed-in account across its sessions. A request takes a slot only
+  after sign-in, CSRF and its own permission check have passed. If both slots
+  are taken or the account already has a slot, the request immediately answers
+  `503 upload_busy` without saving a picture. The client may try again.
+  The slot is held until the picture has been
   normalized and is released before the file is stored or any row changes, on
   every path including errors. A decoder cannot be stopped, so a client that
   goes away keeps its slot until the decode returns, and is then answered
