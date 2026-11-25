@@ -1216,21 +1216,33 @@ export interface OwnRoom {
   mayChange: boolean;
 }
 
+// What the series room control shows of the future dates: the dates that keep a room of their own (DEC-168), the
+// dates that need a room, and how many of the series room's dates wait for an admin.
+export interface SeriesDates {
+  ownRooms: OwnRoom[];
+  needsRoom: NeedsRoom[];
+  pending: number;
+}
+
 // What booking a whole series did (M2.1c), and the event's revision the next pick sends.
 export interface SeriesBooking {
   event: RevisionRef;
   defaultRoom: OccurrenceRoom | null;
   booked: number;
   lost: string[];
-  // Listed dates this pick left with their room, each in `keptRooms`.
+  // Listed dates this pick left with their room, `keptWaiting` of them waiting for an admin's approval.
   kept: number;
-  keptRooms: OwnRoom[];
+  keptWaiting: number;
+  // Named dates that kept their own room because the room picked is in use then.
+  keptInUse: number;
   // Named dates whose own room this pick released; where they ended is in the counts beside it.
   changed: number;
   // Dates waiting on an admin's approval (M2.1d).
   pending: number;
   // Of the dates booked, those an admin's reason booked over another booking.
   doubleBooked: number;
+  // The dates as the control's read shows them once this pick is stored, so the next pick is chosen from them.
+  after: SeriesDates;
 }
 
 // A typed place on upcoming dates without a room, for the admin location

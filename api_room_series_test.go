@@ -661,7 +661,7 @@ func TestSeriesPickLeavesDatesWithTheirOwnRoom(t *testing.T) {
 	}
 
 	out := seriesPickFrom(t, f.leader, series, read, map[string]any{"roomId": f.hall.ID})
-	if out.Kept != 2 || out.Changed != 0 || out.Pending != 2 || out.Booked != 0 || !reflect.DeepEqual(out.KeptRooms, want) {
+	if out.Kept != 2 || out.Changed != 0 || out.Pending != 2 || out.Booked != 0 || out.KeptWaiting != 1 || !reflect.DeepEqual(out.After.OwnRooms, want) {
 		t.Fatalf("the pick: %+v, want 2 kept, 2 waiting and the same list", out)
 	}
 	if room, status, _, _ := dateBookingOf(t, f.app, series, day(0)); room != chapel.ID || status != models.BookingConfirmed {
@@ -677,7 +677,7 @@ func TestSeriesPickLeavesDatesWithTheirOwnRoom(t *testing.T) {
 		t.Fatalf("after the pick, the read: %+v pending %d", read.OwnRooms, read.Pending)
 	}
 	out = seriesPickFrom(t, f.leader, series, read, map[string]any{"roomId": f.hall.ID, "includeDates": ownDates(read.OwnRooms)})
-	if out.Kept != 0 || out.Changed != 2 || out.Pending != 4 || len(out.KeptRooms) != 0 {
+	if out.Kept != 0 || out.Changed != 2 || out.Pending != 4 || len(out.After.OwnRooms) != 0 {
 		t.Fatalf("the pick with them named: %+v, want 2 changed and 4 waiting", out)
 	}
 	for n := range 4 {
@@ -728,7 +728,7 @@ func TestSeriesPickChangesOnlyTheNamedDates(t *testing.T) {
 	// The first date is named, the second shown and left out; the third was
 	// never shown, and the request also names a date with no room of its own.
 	out := seriesPickFrom(t, f.leader, series, read, map[string]any{"roomId": f.hall.ID, "includeDates": []string{day(0), day(3)}})
-	if out.Changed != 1 || out.Kept != 2 || out.Booked != 2 || !reflect.DeepEqual(ownDates(out.KeptRooms), []string{day(1), day(2)}) {
+	if out.Changed != 1 || out.Kept != 2 || out.Booked != 2 || !reflect.DeepEqual(ownDates(out.After.OwnRooms), []string{day(1), day(2)}) {
 		t.Fatalf("the pick: %+v, want 1 changed, 2 kept and 2 booked", out)
 	}
 	for n, room := range []uint{f.hall.ID, annex.ID, chapel.ID, f.hall.ID} {
@@ -788,7 +788,7 @@ func TestStoppingTheSeriesRoomKeepsOwnRoomsUnlessNamed(t *testing.T) {
 	}
 
 	out := seriesPickFrom(t, f.leader, series, seriesRoomsRead(t, f.leader, series), map[string]any{"roomId": nil})
-	if out.DefaultRoom != nil || out.Kept != 1 || out.Changed != 0 || bookings() != 1 || !reflect.DeepEqual(ownDates(out.KeptRooms), []string{second}) {
+	if out.DefaultRoom != nil || out.Kept != 1 || out.Changed != 0 || bookings() != 1 || !reflect.DeepEqual(ownDates(out.After.OwnRooms), []string{second}) {
 		t.Fatalf("stop: %+v, %d bookings left", out, bookings())
 	}
 	if room, _, _, _ := dateBookingOf(t, f.app, series, second); room != chapel.ID {
@@ -798,7 +798,7 @@ func TestStoppingTheSeriesRoomKeepsOwnRoomsUnlessNamed(t *testing.T) {
 	roomPickOK(t, f.leader, "/api/v1/events/"+itoa(series.ID)+"/room", map[string]any{"roomId": f.hall.ID})
 	read := seriesRoomsRead(t, f.leader, series)
 	out = seriesPickFrom(t, f.leader, series, read, map[string]any{"roomId": nil, "includeDates": ownDates(read.OwnRooms)})
-	if out.Kept != 0 || out.Changed != 1 || bookings() != 0 || len(out.KeptRooms) != 0 {
+	if out.Kept != 0 || out.Changed != 1 || bookings() != 0 || len(out.After.OwnRooms) != 0 {
 		t.Fatalf("stop with the own room named: %+v, %d bookings left", out, bookings())
 	}
 }
@@ -834,5 +834,144 @@ func TestSeriesPickOfItsOwnRoomBooksBareDatesAndCountsOverlaps(t *testing.T) {
 	}
 	if n := contactCount(t, f.app, &models.RoomRequest{}, "event_id = ?", series.ID); n != requests {
 		t.Fatalf("picking the approved series room again opened a request: %d, was %d", n, requests)
+	}
+}
+
+// afterIsTheRead: the answer's dates are what c's read shows right after it.
+func afterIsTheRead(t *testing.T, c *apiClient, ev eventJSON, out seriesBookingJSON) {
+	t.Helper()
+	read := seriesRoomsRead(t, c, ev)
+	if now := (seriesDatesJSON{OwnRooms: read.OwnRooms, NeedsRoom: read.NeedsRoom, Pending: read.Pending}); !reflect.DeepEqual(out.After, now) || out.Event.Revision != read.Revision {
+		t.Fatalf("the answer's dates %+v (%s), the read %+v (%s)", out.After, out.Event.Revision, now, read.Revision)
+	}
+}
+
+// The next pick is chosen from the dates as they are after the last one: once
+// the series room is the hall, a date waiting for the hall is the series' own,
+// so the answer no longer lists it as keeping its room, and stopping the series
+// room releases it as the answer's list said it would.
+func TestSeriesPickAnswersWithTheDatesAsTheyAreNow(t *testing.T) {
+	f := newBookingFixture(t)
+	series := createFeedEvent(t, f.leader, f.group, "Weekly", f.startOn.AddDate(0, 0, 1), "FREQ=WEEKLY;COUNT=3")
+	first := feedDate(f.startOn.AddDate(0, 0, 1))
+	approvalOn(t, f)
+	roomPickOK(t, f.leader, "/api/v1/events/"+itoa(series.ID)+"/dates/"+first+"/room", map[string]any{"roomId": f.hall.ID})
+
+	read := seriesRoomsRead(t, f.admin, series)
+	if got := ownDates(read.OwnRooms); !reflect.DeepEqual(got, []string{first}) {
+		t.Fatalf("listed %v", got)
+	}
+	out := seriesPickFrom(t, f.admin, series, read, map[string]any{"roomId": f.hall.ID})
+	if out.Kept != 1 || out.KeptWaiting != 1 || out.Booked != 2 {
+		t.Fatalf("the hall for the series: %+v", out)
+	}
+	afterIsTheRead(t, f.admin, series, out)
+	if len(out.After.OwnRooms) != 0 || out.After.Pending != 1 {
+		t.Fatalf("after the hall, the answer lists %+v with %d waiting; want none listed and the hall's waiting date counted", out.After.OwnRooms, out.After.Pending)
+	}
+
+	read = seriesRoomsRead(t, f.admin, series)
+	stop := seriesPickFrom(t, f.admin, series, read, map[string]any{"roomId": nil})
+	if stop.Kept != len(out.After.OwnRooms) || stop.KeptWaiting != 0 {
+		t.Fatalf("stop kept %d, the list showed %d", stop.Kept, len(out.After.OwnRooms))
+	}
+	if _, status, _, _ := dateBookingOf(t, f.app, series, first); status != "" {
+		t.Fatalf("the waiting date is %q, want released as the list said", status)
+	}
+	afterIsTheRead(t, f.admin, series, stop)
+	noOrphanRequests(t, f.app)
+}
+
+// A leader's pick never withdraws a request the list says only an admin can
+// change: with dates kept on the series request, the pick cannot open its
+// own, so it is refused and writes nothing. An admin's pick, which opens no
+// request, changes them.
+func TestSeriesPickKeepsARequestOnlyAnAdminCanChange(t *testing.T) {
+	f := newBookingFixture(t)
+	series := createFeedEvent(t, f.leader, f.group, "Weekly", f.startOn.AddDate(0, 0, 1), "FREQ=WEEKLY;COUNT=2")
+	chapel := newRoom(t, f, "Chapel")
+	approvalOn(t, f)
+	if code, out := f.seriesRoom(t, f.leader, series, map[string]any{"roomId": f.hall.ID}); code != http.StatusOK || out.Pending != 2 {
+		t.Fatalf("request the hall: %d %+v", code, out)
+	}
+	apiDo(t, f.admin, "PUT", "/api/v1/admin/rooms/"+itoa(f.hall.ID), map[string]any{"restricted": true}, http.StatusOK)
+
+	read := seriesRoomsRead(t, f.leader, series)
+	if len(read.OwnRooms) != 2 || read.OwnRooms[0].MayChange || !read.OwnRooms[0].Waiting {
+		t.Fatalf("the leader's list: %+v", read.OwnRooms)
+	}
+	before := roomState(t, f.app)
+	wantCode(t, "the leader's pick", f.leader.do("PUT", "/api/v1/events/"+itoa(series.ID)+"/room",
+		withRevision(map[string]any{"roomId": chapel.ID}, read.Revision), true), http.StatusConflict, "series_request_kept")
+	if after := roomState(t, f.app); after != before {
+		t.Fatalf("the refused pick wrote:\n%s\nwant\n%s", after, before)
+	}
+	if n := contactCount(t, f.app, &models.Notification{}, "kind = ? AND waiting AND resolved_at IS NULL", notify.RoomRequested); n != 1 {
+		t.Fatalf("%d open admin tasks, want the hall's", n)
+	}
+
+	out := seriesPickFrom(t, f.admin, series, seriesRoomsRead(t, f.admin, series), map[string]any{"roomId": chapel.ID})
+	if out.Booked != 2 || out.Kept != 0 || out.Pending != 0 {
+		t.Fatalf("the admin's pick: %+v", out)
+	}
+	for _, day := range []string{feedDate(f.startOn.AddDate(0, 0, 1)), feedDate(f.startOn.AddDate(0, 0, 8))} {
+		if room, status, _, _ := dateBookingOf(t, f.app, series, day); room != chapel.ID || status != models.BookingConfirmed {
+			t.Fatalf("%s: %d %s, want the chapel", day, room, status)
+		}
+	}
+	noOrphanRequests(t, f.app)
+}
+
+// Including a date never leaves it with no room: a named date whose new room is
+// in use then keeps the room it has, untouched, and is not counted as changed.
+func TestSeriesPickKeepsANamedDateWhoseNewRoomIsInUse(t *testing.T) {
+	f := newBookingFixture(t)
+	music, parlor := newRoom(t, f, "Music"), newRoom(t, f, "Parlor")
+	roomPickOK(t, f.leader, f.path(f.eventA, "/room"), map[string]any{"roomId": music.ID})
+	series := createFeedEvent(t, f.leader, f.group, "Weekly", f.startOn.Add(30*time.Minute), "FREQ=WEEKLY;COUNT=3")
+	day := func(n int) string { return feedDate(f.startOn.AddDate(0, 0, 7*n)) }
+	for n := range 2 {
+		roomPickOK(t, f.leader, "/api/v1/events/"+itoa(series.ID)+"/dates/"+day(n)+"/room", map[string]any{"roomId": parlor.ID})
+	}
+	var was models.RoomBooking
+	gormMust(t, f.app.DB.Where("occurrence_id IN (SELECT id FROM event_occurrences WHERE event_id = ? AND original_date = ?)", series.ID, day(0)).First(&was))
+
+	read := seriesRoomsRead(t, f.leader, series)
+	out := seriesPickFrom(t, f.leader, series, read, map[string]any{"roomId": music.ID, "includeDates": ownDates(read.OwnRooms)})
+	if out.Changed != 1 || out.KeptInUse != 1 || out.Kept != 0 || out.Booked != 2 || len(out.Lost) != 0 {
+		t.Fatalf("the pick: %+v, want 1 changed, 1 kept as the music room is in use, 2 booked", out)
+	}
+	var now models.RoomBooking
+	gormMust(t, f.app.DB.First(&now, was.ID))
+	if now.RoomID != parlor.ID || now.Status != models.BookingConfirmed || !now.UpdatedAt.Equal(was.UpdatedAt) {
+		t.Fatalf("the busy date's booking is now %+v, was %+v", now, was)
+	}
+	if room, _, _, _ := dateBookingOf(t, f.app, series, day(1)); room != music.ID {
+		t.Fatalf("the free date is in %d, want the music room", room)
+	}
+	if got := ownDates(out.After.OwnRooms); !reflect.DeepEqual(got, []string{day(0)}) {
+		t.Fatalf("the answer lists %v, want the busy date", got)
+	}
+	afterIsTheRead(t, f.leader, series, out)
+}
+
+// The dates a pick names are its own event's: another event's booking on a
+// named date stays as it is.
+func TestSeriesPickNamingAnotherEventsDateLeavesItAlone(t *testing.T) {
+	f := newBookingFixture(t)
+	chapel := newRoom(t, f, "Chapel")
+	series := createFeedEvent(t, f.leader, f.group, "Weekly", f.startOn.AddDate(0, 0, 1), "FREQ=WEEKLY;COUNT=2")
+	roomPickOK(t, f.leader, "/api/v1/events/"+itoa(series.ID)+"/room", map[string]any{"roomId": f.hall.ID})
+	roomPickOK(t, f.leader, f.path(f.eventA, "/room"), map[string]any{"roomId": chapel.ID})
+	other := func() string {
+		var b []models.RoomBooking
+		gormMust(t, f.app.DB.Where("occurrence_id IN (SELECT id FROM event_occurrences WHERE event_id <> ?)", series.ID).Order("id").Find(&b))
+		out, _ := json.Marshal(b)
+		return string(out)
+	}
+	before := other()
+	seriesPickFrom(t, f.leader, series, seriesRoomsRead(t, f.leader, series), map[string]any{"roomId": nil, "includeDates": []string{feedDate(f.startOn)}})
+	if after := other(); after != before {
+		t.Fatalf("another event's bookings changed:\n%s\nwas\n%s", after, before)
 	}
 }

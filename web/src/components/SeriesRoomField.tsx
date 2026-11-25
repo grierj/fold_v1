@@ -5,18 +5,19 @@ import { useAuth } from "../auth";
 import { roomName } from "../lib/place";
 import { RefusedSaveLine, useRefusedSave } from "../lib/refusedSave";
 import {
-  busyDatesNote, includeLabel, LIST_SHOWN, NO_ROOM, ownRoomNote, ownRoomsFor, ownRoomsLead, seriesBookingMessage, seriesRoomLabel, seriesStoredMessage,
+  busyDatesNote, includeLabel, NO_ROOM, ownRoomNote, ownRoomsFor, ownRoomsLead, seriesBookingMessage, seriesRoomLabel, seriesStoredMessage,
 } from "../lib/roomLabels";
 import { count } from "../lib/plural";
 import { useAction } from "../lib/useAction";
 import { answerNames, useRevisionSave } from "../lib/useRevisionSave";
 import { formatDayLong } from "../lib/when";
-import type { SeriesBooking, SeriesRoomsResponse } from "../types";
+import type { OccurrenceRoom, SeriesBooking, SeriesDates, SeriesRoomsResponse } from "../types";
 import { Checkbox, Field, FormError, Select } from "./ui/Field";
 import { Button } from "./ui/Button";
 import { DoubleBookPrompt, useOverlapReason } from "./DoubleBookPrompt";
 import { RoomOptions } from "./RoomOptions";
 import { pickGone, RoomLoadStatus, RoomsOffLine, roomsTurnedOff, useRoomPicker } from "./useRoomPicker";
+import { useShowAll } from "./useShowAll";
 import { AlertCircleIcon } from "./icons";
 
 // What a series pick writes: the series room, and, booked anyway over busy dates, those dates (`needs`: the dates that
@@ -26,15 +27,16 @@ interface SeriesRoomFields {
   needs: string[];
 }
 
-const readFields = (read: SeriesRoomsResponse): SeriesRoomFields => ({
-  roomId: read.defaultRoom?.id ?? null,
-  needs: read.needsRoom.map((n) => n.date).sort(),
+const fieldsOf = (defaultRoom: OccurrenceRoom | null, dates: SeriesDates): SeriesRoomFields => ({
+  roomId: defaultRoom?.id ?? null,
+  needs: dates.needsRoom.map((n) => n.date).sort(),
 });
 
-const answerFields = (res: SeriesBooking | null): SeriesRoomFields => ({
-  roomId: res?.defaultRoom?.id ?? null,
-  needs: res?.defaultRoom ? [...res.lost].sort() : [],
-});
+const readFields = (read: SeriesRoomsResponse) => fieldsOf(read.defaultRoom, read);
+
+// What a pick carries that no read shows: an admin's reason, or the dates it names, so a pick whose answer was lost
+// counts as this one only when it carried the same.
+const unseenOf = (reason: string, dates: string[] = []) => [reason, ...[...dates].sort()].join("\n");
 
 // What a pick compares: the dates that need a room only for "Book anyway", which books over them. A plain pick leaves
 // each date to the server (booked, waiting, busy or kept), and intends whatever it stored. The dates with a room of
@@ -104,7 +106,6 @@ function SeriesRoomControl({ eventId, id, read, show, onChanged, onGone }: {
   const [pick, setPick] = useState(current ? String(current.id) : NO_ROOM);
   // Also change the listed dates this person may change: each pick is its own choice, so a new read clears it.
   const [include, setInclude] = useState(false);
-  const [allListed, setAllListed] = useState(false);
   const [shown, setShown] = useState(read);
 
   if (read !== shown) {
@@ -136,7 +137,11 @@ function SeriesRoomControl({ eventId, id, read, show, onChanged, onGone }: {
     },
     fields: (value) => compared(value, overBusy.current),
     answers: answerNames("event", eventId),
-    stays: () => answerFields(lastAnswer.current),
+    stays: () => {
+      const res = lastAnswer.current;
+
+      return res ? fieldsOf(res.defaultRoom, res.after) : { roomId: null, needs: [] };
+    },
     writesMore: true,
     gone: pickGone,
     onConflict: (why) => {
@@ -175,7 +180,7 @@ function SeriesRoomControl({ eventId, id, read, show, onChanged, onGone }: {
           lastAnswer.current = res;
 
           return res;
-        }, { roomId, needs: [] }, overlapReason ?? "");
+        }, { roomId, needs: [] }, unseenOf(overlapReason ?? "", includeDates));
       } catch (e) {
         if (roomsTurnedOff(e)) {
           setOff(true);
@@ -204,14 +209,8 @@ function SeriesRoomControl({ eventId, id, read, show, onChanged, onGone }: {
         return now ? seriesStoredMessage(now) : roomId === null ? "Series room released." : "The series room is saved.";
       }
 
-      show({
-        ...read,
-        revision: res.event.revision,
-        defaultRoom: res.defaultRoom,
-        ownRooms: res.keptRooms,
-        needsRoom: res.defaultRoom ? res.lost.map((date) => ({ date, roomName: res.defaultRoom?.name ?? "", status: "requested" })) : [],
-        pending: res.defaultRoom ? res.pending : 0,
-      });
+      // The next pick is chosen from the dates as the answer read them after this one, never from its counts.
+      show({ ...read, revision: res.event.revision, defaultRoom: res.defaultRoom, ...res.after });
       // Only an admin may double-book what stayed busy, and only with a reason.
       setPending(isAdmin && roomId !== null && !overlapReason && res.lost.length > 0 ? { roomId, dates: res.lost.length } : null);
 
@@ -219,8 +218,10 @@ function SeriesRoomControl({ eventId, id, read, show, onChanged, onGone }: {
     }, { fallback: "We couldn't update the room." });
   }
 
+  // The box is a choice about the option chosen: a new option starts it clear.
   function choose(value: string) {
     setPick(value);
+    setInclude(false);
     setPending(null);
     overlap.clearError();
   }
@@ -247,8 +248,6 @@ function SeriesRoomControl({ eventId, id, read, show, onChanged, onGone }: {
     send(pending.roomId, why);
   }
 
-  if (off) return <RoomsOffLine refused />;
-
   const busy = action.running;
   // A series room an admin set that this person can't list (a restricted room) still shows by name.
   const hidden = current && !rooms.some((r) => r.id === current.id) ? current : null;
@@ -258,10 +257,14 @@ function SeriesRoomControl({ eventId, id, read, show, onChanged, onGone }: {
   const status = action.state.status === "done" ? action.state.text : "";
   const listed = ownRoomsFor(read.ownRooms, pick === NO_ROOM ? null : Number(pick));
   const changeable = listed.filter((o) => o.mayChange);
+  const more = useShowAll(listed);
   // The box changes the listed dates to a room this person may book, or, stopping the series room, releases them; with
-  // no series room and none chosen there is nothing to do.
-  const offerInclude = changeable.length > 0 && (pick === NO_ROOM ? value !== NO_ROOM : chosen !== null);
+  // no series room and none chosen there is nothing to do. Book anyway names no dates, so the box goes while it is asked.
+  const offerInclude = changeable.length > 0 && !pending && (pick === NO_ROOM ? value !== NO_ROOM : chosen !== null);
   const including = include && offerInclude;
+  const busyNote = chosen && pick !== value ? busyDatesNote(chosen, dates, "edit", listed.length > 0) : null;
+
+  if (off) return <RoomsOffLine refused />;
 
   return (
     <>
@@ -282,13 +285,13 @@ function SeriesRoomControl({ eventId, id, read, show, onChanged, onGone }: {
         <div className="space-y-2 text-sm">
           <p>{ownRoomsLead(listed.length, including)}</p>
           <ul className="space-y-1">
-            {(allListed ? listed : listed.slice(0, LIST_SHOWN)).map((o) => (
-              <li key={o.date} className="wrap-anywhere">
+            {more.rows.map((o, i) => (
+              <li key={o.date} {...more.row(i)} className="wrap-anywhere">
                 <span className="font-semibold">{formatDayLong(o.date)}</span>: <span className="text-text-muted">{ownRoomNote(o)}</span>
               </li>
             ))}
           </ul>
-          {!allListed && listed.length > LIST_SHOWN && <Button variant="link" onClick={() => setAllListed(true)}>Show all {listed.length}</Button>}
+          {more.button}
           {offerInclude && (
             <Checkbox label={includeLabel(chosen, changeable.length, listed.length)} checked={include} disabled={busy} onChange={(e) => setInclude(e.target.checked)} />
           )}
@@ -299,8 +302,8 @@ function SeriesRoomControl({ eventId, id, read, show, onChanged, onGone }: {
       </Button>
       <div role="status" className="space-y-2 empty:hidden">
         {busy && <p className="text-sm text-text-muted">Saving…</p>}
-        {chosen && pick !== value && busyDatesNote(chosen, dates, "edit") && (
-          <p className="text-sm text-warning-on-subtle"><AlertCircleIcon className="mr-1 inline-block size-4 align-text-bottom" />{busyDatesNote(chosen, dates, "edit")}</p>
+        {busyNote && (
+          <p className="text-sm text-warning-on-subtle"><AlertCircleIcon className="mr-1 inline-block size-4 align-text-bottom" />{busyNote}</p>
         )}
         {status && <p className="text-sm text-text-muted">{status}</p>}
         {!status && current && read.pending > 0 && (

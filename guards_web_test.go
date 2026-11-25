@@ -65,6 +65,7 @@ var tsContracts = []struct {
 	{needsRoomJSON{}, "NeedsRoom"},
 	{ownRoomJSON{}, "OwnRoom"},
 	{seriesBookingJSON{}, "SeriesBooking"},
+	{seriesDatesJSON{}, "SeriesDates"},
 	{roomRequestJSON{}, "RoomRequest"},
 	{typedLocationJSON{}, "TypedLocation"},
 	{matchBusyJSON{}, "MatchBusy"},

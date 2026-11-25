@@ -53,10 +53,14 @@ export function seriesRoomLabel(room: SeriesRoom, dates: number, reason?: string
 }
 
 // What picking a room will do to the dates it is busy on, said before it is
-// booked. `where` is the page that lists those dates afterwards.
-export function busyDatesNote(room: SeriesRoom, dates: number, where: "edit" | "create"): string | null {
+// booked. `where` is the page that lists those dates afterwards. With dates
+// that keep a room of their own (`kept`), the busy count may include them, so
+// the note says only what was measured: the pick's answer says what it did.
+export function busyDatesNote(room: SeriesRoom, dates: number, where: "edit" | "create", kept = false): string | null {
   if (room.busyDates <= 0) return null;
   const name = roomName(room);
+
+  if (kept) return dates <= 1 ? `${name} is in use at this time.` : `${name} is in use on ${room.busyDates >= dates ? `all ${dates}` : `${room.busyDates} of ${dates}`} dates.`;
   const listed = where === "edit" ? "the busy dates will be listed under “Dates that need a room”." : "the event page will list the busy dates under “Dates that need a room”.";
 
   if (dates <= 1) {
@@ -113,9 +117,16 @@ export function ownRoomNote(o: OwnRoom): string {
 
 // The box that includes the listed dates this person may change: into `room`, or, stopping the series room, released.
 export function includeLabel(room: OccurrenceRoom | null, changeable: number, listed: number): string {
-  const which = changeable === listed ? "these dates" : `${changeable} of these dates`;
+  const one = changeable === 1;
+  const all = changeable === listed;
 
-  return room === null ? `Also release the rooms of ${which}` : `Also change ${which} to ${roomName(room)}`;
+  if (room === null) {
+    if (all) return one ? "Also release this date's room" : "Also release the rooms of these dates";
+
+    return `Also release the ${one ? "room" : "rooms"} of ${changeable} of these dates`;
+  }
+
+  return `Also change ${all ? (one ? "this date" : "these dates") : `${changeable} of these dates`} to ${roomName(room)}`;
 }
 
 // The dates a series pick left with their own room (`kept`), `waiting` of them for an admin's approval.
@@ -150,7 +161,11 @@ export function seriesBookingMessage(res: SeriesBooking): string {
       : `Also changed ${dates(res.changed)} that had a room of ${their} own.`);
   }
 
-  if (res.kept > 0) parts.push(keptLine(res.kept, res.keptRooms.filter((o) => o.waiting).length));
+  if (res.keptInUse > 0 && res.defaultRoom !== null) {
+    parts.push(`${dates(res.keptInUse)} ${res.keptInUse === 1 ? "keeps its" : "keep their"} own room because ${roomName(res.defaultRoom)} is in use then.`);
+  }
+
+  if (res.kept > 0) parts.push(keptLine(res.kept, res.keptWaiting));
 
   // A series room with nothing to book, wait for, lose, change or keep: every upcoming date already holds it, or there is
   // none.

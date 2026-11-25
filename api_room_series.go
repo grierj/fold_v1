@@ -36,6 +36,12 @@ const maxSeriesIncludeDates = 1000
 // date's 404, which say the person may no longer manage them.
 var errPickedRoomGone = apiErr(http.StatusNotFound, "room_gone", "that room is no longer available")
 
+// errSeriesRequestKept: a pick that would open the event's series request
+// while dates it keeps still wait on the one there is
+// (idx_room_requests_one_series). Only an admin, whose pick opens none, can
+// change the room then.
+var errSeriesRequestKept = apiErr(http.StatusConflict, "series_request_kept", "only an admin can change this event's room request now")
+
 type seriesRoomJSON struct {
 	ID         uint   `json:"id"`
 	Name       string `json:"name"`
@@ -72,6 +78,16 @@ type ownRoomJSON struct {
 	MayChange bool               `json:"mayChange"`
 }
 
+// seriesDatesJSON is what the series room control shows of the future
+// dates: the dates that keep a room of their own through a change of the
+// series room (DEC-168), the dates that need a room, and how many of the
+// series room's dates wait for an admin.
+type seriesDatesJSON struct {
+	OwnRooms  []ownRoomJSON   `json:"ownRooms"`
+	NeedsRoom []needsRoomJSON `json:"needsRoom"`
+	Pending   int             `json:"pending"`
+}
+
 type seriesBookingJSON struct {
 	// Event: the event the pick stored, with the token the next pick sends.
 	Event       revisionRefJSON     `json:"event"`
@@ -80,9 +96,12 @@ type seriesBookingJSON struct {
 	// Lost: dates the room was busy on, kept as requested.
 	Lost []string `json:"lost"`
 	// Kept: listed dates this pick left with their room (policy.SeriesKept),
-	// each in KeptRooms.
-	Kept      int           `json:"kept"`
-	KeptRooms []ownRoomJSON `json:"keptRooms"`
+	// KeptWaiting of them waiting for an admin's approval.
+	Kept        int `json:"kept"`
+	KeptWaiting int `json:"keptWaiting"`
+	// KeptInUse: named dates that kept their own room because the room picked
+	// is in use then (policy.SeriesKeptInUse).
+	KeptInUse int `json:"keptInUse"`
 	// Changed: dates the request named whose own room this pick released
 	// (policy.SeriesIncluded); where they ended is in the counts beside it.
 	Changed int `json:"changed"`
@@ -91,6 +110,9 @@ type seriesBookingJSON struct {
 	// DoubleBooked: of the dates booked, those an admin's reason booked over
 	// another booking.
 	DoubleBooked int `json:"doubleBooked"`
+	// After: the dates as the control's read shows them once this pick is
+	// stored, read in its transaction, so the next pick is chosen from them.
+	After seriesDatesJSON `json:"after"`
 }
 
 // roomChoices lists the active rooms p may book for the given dates, with
@@ -153,23 +175,11 @@ func (a *App) apiSeriesRooms(c *gin.Context) {
 		if out.Rooms, err = roomChoices(tx, me, windows, ev.ID, ev.Capacity); err != nil {
 			return err
 		}
-		held, err := futureDateBookingsIn(tx, ev.ID, now)
+		dates, err := seriesDatesIn(tx, me, ev, now)
 		if err != nil {
 			return err
 		}
-		// A listed date is neither the series room's waiting date nor one that
-		// needs a room.
-		out.OwnRooms, out.NeedsRoom = ownRooms(me, ev.DefaultRoomID, held), []needsRoomJSON{}
-		for _, h := range held {
-			b := h.judged()
-			switch {
-			case b.Listed(me, ev.DefaultRoomID):
-			case b.State == policy.RoomBookingWaiting:
-				out.Pending++
-			case !b.State.HoldsRoom():
-				out.NeedsRoom = append(out.NeedsRoom, needsRoomJSON{Date: h.Date, RoomName: h.RoomName, Status: h.Status})
-			}
-		}
+		out.OwnRooms, out.NeedsRoom, out.Pending = dates.OwnRooms, dates.NeedsRoom, dates.Pending
 		out.Dates = len(occs)
 		if out.DefaultRoom, err = seriesRoomIn(tx, ev); err != nil {
 			return err
@@ -188,6 +198,29 @@ func (a *App) apiSeriesRooms(c *gin.Context) {
 	c.JSON(http.StatusOK, out)
 }
 
+// seriesDatesIn is the series room control's view of ev's future dates for
+// me (seriesDatesJSON). A listed date is neither the series room's waiting
+// date nor one that needs a room.
+func seriesDatesIn(tx *gorm.DB, me *policy.Person, ev *models.Event, now time.Time) (seriesDatesJSON, error) {
+	out := seriesDatesJSON{OwnRooms: []ownRoomJSON{}, NeedsRoom: []needsRoomJSON{}}
+	held, err := futureDateBookingsIn(tx, ev.ID, now)
+	if err != nil {
+		return out, err
+	}
+	for _, h := range held {
+		b := h.judged()
+		switch {
+		case b.Listed(me, ev.DefaultRoomID):
+			out.OwnRooms = append(out.OwnRooms, h.ownRoom(me))
+		case b.State == policy.RoomBookingWaiting:
+			out.Pending++
+		case !b.State.HoldsRoom():
+			out.NeedsRoom = append(out.NeedsRoom, needsRoomJSON{Date: h.Date, RoomName: h.RoomName, Status: h.Status})
+		}
+	}
+	return out, nil
+}
+
 // dateBookingRow is one date's booking with what a series room change judges
 // it by (policy.SeriesDateBooking).
 type dateBookingRow struct {
@@ -198,8 +231,9 @@ type dateBookingRow struct {
 	Restricted         bool
 	Status             string
 	AllowOverlap       bool
-	// Waiting: the request it names is undecided.
-	Waiting bool
+	// Waiting: the request it names is undecided; SeriesWaiting: and it is the
+	// event's series request.
+	Waiting, SeriesWaiting bool
 }
 
 func (r dateBookingRow) judged() policy.SeriesDateBooking {
@@ -212,27 +246,15 @@ func (r dateBookingRow) judged() policy.SeriesDateBooking {
 func dateBookingsIn(tx *gorm.DB, where string, args ...any) ([]dateBookingRow, error) {
 	var rows []dateBookingRow
 	err := tx.Raw(`SELECT b.id, b.occurrence_id, to_char(o.original_date, 'YYYY-MM-DD') AS date, b.room_id, r.name AS room_name,
-			r.building, r.restricted, b.status, b.allow_overlap,
-			EXISTS (SELECT 1 FROM room_requests q WHERE q.id = b.request_id AND q.status IN ?) AS waiting
+			r.building, r.restricted, b.status, b.allow_overlap, q.id IS NOT NULL AS waiting, COALESCE(q.series, false) AS series_waiting
 		FROM room_bookings b JOIN event_occurrences o ON o.id = b.occurrence_id JOIN rooms r ON r.id = b.room_id
+			LEFT JOIN room_requests q ON q.id = b.request_id AND q.status IN ?
 		WHERE `+where+` ORDER BY o.starts_at, o.id`, append([]any{policy.RoomRequestConfirm.From()}, args...)...).Scan(&rows).Error
 	return rows, err
 }
 
 func futureDateBookingsIn(tx *gorm.DB, eventID uint, now time.Time) ([]dateBookingRow, error) {
 	return dateBookingsIn(tx, "o.event_id = ? AND o.status = ? AND o.starts_at > ?", eventID, models.OccurrenceScheduled, now)
-}
-
-// ownRooms is the list the series room control shows me (DEC-168) of rows,
-// under the series room seriesRoom.
-func ownRooms(me *policy.Person, seriesRoom *uint, rows []dateBookingRow) []ownRoomJSON {
-	out := []ownRoomJSON{}
-	for _, r := range rows {
-		if r.judged().Listed(me, seriesRoom) {
-			out = append(out, r.ownRoom(me))
-		}
-	}
-	return out
 }
 
 func (r dateBookingRow) ownRoom(me *policy.Person) ownRoomJSON {
@@ -299,6 +321,9 @@ func (a *App) apiSetSeriesRoom(c *gin.Context) {
 		if out, err = bookWholeSeries(tx, locked, pick, user, c.ClientIP()); err != nil {
 			return err
 		}
+		if out.After, err = seriesDatesIn(tx, asPerson(user), locked, a.now().UTC()); err != nil {
+			return err
+		}
 		if err := readEventRevision(tx, locked); err != nil {
 			return err
 		}
@@ -323,19 +348,22 @@ type seriesPick struct {
 
 // bookWholeSeries sets ev's series room (nil stops it) and books it on every
 // scheduled future date, under ev's lock. What it does to a date that has a
-// booking is policy.SeriesRoomChange (DEC-168): a date with a room of its own
-// keeps it unless the pick names it, and a booking only an admin could make
-// stays unless an admin is booking. A busy date keeps a requested booking
-// (DEC-103) unless an admin's reason double-books it.
+// booking is policy.SeriesRoomChange (DEC-168), judged by every booking as it
+// was before the pick: a date with a room of its own keeps it unless the pick
+// names it and the room picked is free then, and a booking only an admin
+// could make stays unless an admin is booking. A busy date keeps a requested
+// booking (DEC-103) unless an admin's reason double-books it.
 //
 // With approval on (DEC-102), a leader's or host's free dates wait on one
-// request for the whole series (DEC-106); busy ones are lost as above.
+// request for the whole series (DEC-106); busy ones are lost as above. The
+// event has one series request, so while a date this pick keeps still waits
+// on it the pick is refused (errSeriesRequestKept).
 //
 // A group that isn't active books no room (DEC-147); stopping the series room
 // (roomID nil) is always allowed.
 func bookWholeSeries(tx *gorm.DB, ev *models.Event, pick seriesPick, user *models.User, ip string) (seriesBookingJSON, error) {
 	roomID, reason := pick.roomID, pick.reason
-	out := seriesBookingJSON{Lost: []string{}, KeptRooms: []ownRoomJSON{}}
+	out := seriesBookingJSON{Lost: []string{}}
 	if roomID != nil {
 		if ok, err := groupSchedulesIn(tx, ev.GroupID); err != nil {
 			return out, err
@@ -369,13 +397,61 @@ func bookWholeSeries(tx *gorm.DB, ev *models.Event, pick seriesPick, user *model
 		room = r
 		out.DefaultRoom = &occurrenceRoomJSON{ID: r.ID, Name: r.Name, Building: r.Building}
 	}
+	ids := make([]uint, len(occs))
+	for i, o := range occs {
+		ids[i] = o.ID
+	}
+	// Every date is judged by its booking before this pick changes any.
+	var current []dateBookingRow
+	if len(ids) > 0 {
+		var err error
+		if current, err = dateBookingsIn(tx, "b.occurrence_id IN ?", ids); err != nil {
+			return out, err
+		}
+	}
+	named := make(map[string]bool, len(pick.include))
+	for _, d := range pick.include {
+		named[d] = true
+	}
+	oldRoom := ev.DefaultRoomID
+	type judgedDate struct {
+		row     dateBookingRow
+		outcome policy.SeriesRoomOutcome
+	}
+	byDate := make(map[uint]judgedDate, len(current))
+	occByID := make(map[uint]*models.EventOccurrence, len(occs))
+	for i := range occs {
+		occByID[occs[i].ID] = &occs[i]
+	}
+	keepsSeriesRequest := false
+	for _, b := range current {
+		j := b.judged()
+		if room != nil && reason == "" && named[b.Date] {
+			o := occByID[b.OccurrenceID]
+			busy, err := rooms.BusyCounts(tx, []uint{room.ID}, []rooms.Window{{Start: o.StartsAt, End: o.EndsAt, OccurrenceID: o.ID}}, 0)
+			if err != nil {
+				return out, err
+			}
+			j.PickInUse = busy[room.ID] > 0
+		}
+		outcome := policy.SeriesRoomChange(me, j, oldRoom, roomID, named[b.Date])
+		if (outcome == policy.SeriesKept || outcome == policy.SeriesKeptInUse) && b.SeriesWaiting {
+			keepsSeriesRequest = true
+		}
+		byDate[b.OccurrenceID] = judgedDate{row: b, outcome: outcome}
+	}
 	var req *models.RoomRequest
 	var requestID *uint
 	// Re-booking the series room an admin already approved (to retry lost
 	// dates) needs no new approval.
-	approved := ev.DefaultRoomID != nil && room != nil && *ev.DefaultRoomID == room.ID && !ev.DefaultRoomPending
+	approved := oldRoom != nil && room != nil && *oldRoom == room.ID && !ev.DefaultRoomPending
 	needsApproval := room != nil && !approved && policy.BookingNeedsApproval(me, roomApprovalOn(tx))
 	if needsApproval {
+		// The event has one series request: a date this pick keeps still waits
+		// on it, so this pick cannot open its own.
+		if keepsSeriesRequest {
+			return out, errSeriesRequestKept
+		}
 		if err := withdrawSeriesRequest(tx, ev.ID); err != nil {
 			return out, err
 		}
@@ -385,40 +461,23 @@ func bookWholeSeries(tx *gorm.DB, ev *models.Event, pick seriesPick, user *model
 		}
 		requestID = &req.ID
 	}
-	ids := make([]uint, len(occs))
-	for i, o := range occs {
-		ids[i] = o.ID
-	}
-	// Read after the withdrawal above: the series' own dates it left waiting
-	// on nothing are lost now, and replaced.
-	var current []dateBookingRow
-	if len(ids) > 0 {
-		var err error
-		if current, err = dateBookingsIn(tx, "b.occurrence_id IN ?", ids); err != nil {
-			return out, err
-		}
-	}
-	byDate := make(map[uint]int, len(current))
-	for i, b := range current {
-		byDate[b.OccurrenceID] = i
-	}
-	named := make(map[string]bool, len(pick.include))
-	for _, d := range pick.include {
-		named[d] = true
-	}
-	oldRoom := ev.DefaultRoomID
-	kept, changed := []string{}, []string{}
+	kept, inUse, changed := []string{}, []string{}, []string{}
 	released := 0
 	for i := range occs {
 		occ := &occs[i]
-		if j, has := byDate[occ.ID]; has {
-			b := current[j]
-			switch policy.SeriesRoomChange(me, b.judged(), oldRoom, roomID, named[b.Date]) {
+		if d, has := byDate[occ.ID]; has {
+			b := d.row
+			switch d.outcome {
 			case policy.SeriesAlreadyThere, policy.SeriesLeftAlone:
 				continue
 			case policy.SeriesKept:
 				kept = append(kept, b.Date)
-				out.KeptRooms = append(out.KeptRooms, b.ownRoom(me))
+				if b.Waiting {
+					out.KeptWaiting++
+				}
+				continue
+			case policy.SeriesKeptInUse:
+				inUse = append(inUse, b.Date)
 				continue
 			case policy.SeriesIncluded:
 				changed = append(changed, b.Date)
@@ -448,7 +507,7 @@ func bookWholeSeries(tx *gorm.DB, ev *models.Event, pick seriesPick, user *model
 			out.Booked++
 		}
 	}
-	out.Kept, out.Changed = len(kept), len(changed)
+	out.Kept, out.KeptInUse, out.Changed = len(kept), len(inUse), len(changed)
 	if req != nil && out.Pending == 0 {
 		if err := tx.Delete(req).Error; err != nil {
 			return out, err
@@ -474,7 +533,7 @@ func bookWholeSeries(tx *gorm.DB, ev *models.Event, pick seriesPick, user *model
 	}
 	ev.DefaultRoomID, ev.DefaultRoomPending = roomID, needsApproval
 	meta := map[string]any{"eventId": ev.ID, "roomId": roomID, "previousRoomId": oldRoom,
-		"booked": out.Booked, "lost": out.Lost, "kept": out.Kept, "keptDates": kept, "changedDates": changed,
+		"booked": out.Booked, "lost": out.Lost, "kept": out.Kept, "keptDates": kept, "keptInUseDates": inUse, "changedDates": changed,
 		"released": released, "pending": out.Pending}
 	if reason != "" {
 		meta["reason"] = reason

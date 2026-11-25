@@ -13,6 +13,9 @@ type SeriesDateBooking struct {
 	RoomID       uint
 	Restricted   bool
 	AllowOverlap bool
+	// PickInUse: another booking holds the room picked at this date, and the
+	// pick does not book over it (no admin's reason).
+	PickInUse bool
 }
 
 // holdsOrWaits: the booking holds its room, or waits for an admin's
@@ -46,6 +49,10 @@ const (
 	// SeriesIncluded: a room of its own the person was shown and named, which
 	// then goes as SeriesFollows does.
 	SeriesIncluded SeriesRoomOutcome = "a room of its own, included"
+	// SeriesKeptInUse: a room of its own the person named, kept because the
+	// room picked is in use then: including a date never leaves it with no
+	// room.
+	SeriesKeptInUse SeriesRoomOutcome = "a room of its own, named, kept: the room picked is in use"
 	// SeriesAlreadyThere: it already holds the room picked, with any padding
 	// an admin set.
 	SeriesAlreadyThere SeriesRoomOutcome = "already holds the room picked"
@@ -71,10 +78,13 @@ func SeriesRoomChange(p *Person, b SeriesDateBooking, seriesRoom, pick *uint, na
 		}
 		return SeriesLeftAlone
 	case b.OwnRoom(seriesRoom):
-		if named {
-			return SeriesIncluded
+		switch {
+		case !named:
+			return SeriesKept
+		case pick != nil && b.PickInUse:
+			return SeriesKeptInUse
 		}
-		return SeriesKept
+		return SeriesIncluded
 	case pick == nil && (seriesRoom == nil || b.RoomID != *seriesRoom):
 		return SeriesLeftAlone
 	}

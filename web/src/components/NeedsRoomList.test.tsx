@@ -158,6 +158,18 @@ it("shows the first 10 dates with the count in the heading, and the rest on requ
   expect(screen.queryByRole("button", { name: /^Show all/ })).not.toBeInTheDocument();
 });
 
+it("keeps the keyboard's place when the rest of the dates are shown: on the first one shown", async () => {
+  const many: NeedsRoom[] = Array.from({ length: 14 }, (_, i) => ({ date: `2027-01-${`${i + 1}`.padStart(2, "0")}`, roomName: "Chapel", status: "requested" }));
+  vi.mocked(SeriesRooms.list).mockResolvedValue({ revision: "r1", rooms: [], dates: 30, defaultRoom: null, ownRooms: [], needsRoom: many, pending: 0 });
+  show();
+  (await screen.findByRole("button", { name: "Show all 14" })).focus();
+  await userEvent.keyboard("{Enter}");
+  expect(document.activeElement?.tagName).toBe("LI");
+  expect(document.activeElement).toHaveTextContent("Monday, January 11");
+  await userEvent.tab();
+  expect(document.activeElement).toHaveAccessibleName("Pick a room for Monday, January 11");
+});
+
 it("shows nothing when every date has its room", async () => {
   vi.mocked(SeriesRooms.list).mockResolvedValue({ revision: "r1", rooms: [], dates: 10, defaultRoom: null, ownRooms: [], needsRoom: [], pending: 0 });
   const { container } = show();

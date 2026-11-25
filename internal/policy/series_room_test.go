@@ -27,6 +27,10 @@ func TestSeriesRoomChange(t *testing.T) {
 		return SeriesDateBooking{State: s, RoomID: room}
 	}
 	nursery := SeriesDateBooking{State: RoomBookingConfirmed, RoomID: annex, Restricted: true}
+	inUse := func(b SeriesDateBooking) SeriesDateBooking {
+		b.PickInUse = true
+		return b
+	}
 	for _, tc := range []struct {
 		name         string
 		p            *Person
@@ -55,6 +59,12 @@ func TestSeriesRoomChange(t *testing.T) {
 		{"stopping keeps an own room", leader, at(RoomBookingConfirmed, chapel), &hall, nil, false, SeriesKept},
 		{"stopping with it named releases it", leader, at(RoomBookingWaiting, chapel), &hall, nil, true, SeriesIncluded},
 		{"stopping leaves a lost booking in another room", leader, at(RoomBookingLost, chapel), &hall, nil, false, SeriesLeftAlone},
+		{"a named own room keeps it when the room picked is in use then", leader, inUse(at(RoomBookingConfirmed, chapel)), &hall, &annex, true, SeriesKeptInUse},
+		{"a named waiting own room keeps its request too", leader, inUse(at(RoomBookingWaiting, chapel)), &hall, &annex, true, SeriesKeptInUse},
+		{"not named, it is kept as any own room is", leader, inUse(at(RoomBookingConfirmed, chapel)), &hall, &annex, false, SeriesKept},
+		{"stopping with it named releases it whatever else is booked", leader, inUse(at(RoomBookingConfirmed, chapel)), &hall, nil, true, SeriesIncluded},
+		{"a date that follows the series room is not kept by it", leader, inUse(at(RoomBookingConfirmed, hall)), &hall, &annex, true, SeriesFollows},
+		{"an admin's named restricted room keeps it too", admin, inUse(nursery), &hall, &chapel, true, SeriesKeptInUse},
 		{"stopping releases a lost booking in the series room", leader, at(RoomBookingLost, hall), &hall, nil, false, SeriesFollows},
 	} {
 		if got := SeriesRoomChange(tc.p, tc.b, tc.series, tc.pick, tc.named); got != tc.want {
@@ -74,18 +84,23 @@ func TestSeriesRoomListIsWhatAChangeKeeps(t *testing.T) {
 			for _, room := range rooms {
 				for _, restricted := range []bool{false, true} {
 					for _, overlap := range []bool{false, true} {
-						b := SeriesDateBooking{State: s, RoomID: room, Restricted: restricted, AllowOverlap: overlap}
-						for _, series := range pointers {
-							for _, pick := range pointers {
-								shown := b.Listed(p, series) && !(pick != nil && room == *pick && s.HoldsRoom())
-								for _, named := range []bool{false, true} {
-									got := SeriesRoomChange(p, b, series, pick, named)
-									keeps := got == SeriesKept || got == SeriesIncluded
-									if keeps != shown {
-										t.Errorf("%+v %+v series %v pick %v named %v: %q, shown %v", p, b, series, pick, named, got, shown)
-									}
-									if got == SeriesIncluded && !named {
-										t.Errorf("%+v: included without being named", b)
+						for _, inUse := range []bool{false, true} {
+							b := SeriesDateBooking{State: s, RoomID: room, Restricted: restricted, AllowOverlap: overlap, PickInUse: inUse}
+							for _, series := range pointers {
+								for _, pick := range pointers {
+									shown := b.Listed(p, series) && !(pick != nil && room == *pick && s.HoldsRoom())
+									for _, named := range []bool{false, true} {
+										got := SeriesRoomChange(p, b, series, pick, named)
+										keeps := got == SeriesKept || got == SeriesIncluded || got == SeriesKeptInUse
+										if keeps != shown {
+											t.Errorf("%+v %+v series %v pick %v named %v: %q, shown %v", p, b, series, pick, named, got, shown)
+										}
+										if (got == SeriesIncluded || got == SeriesKeptInUse) && !named {
+											t.Errorf("%+v: included without being named", b)
+										}
+										if got == SeriesIncluded && inUse && pick != nil {
+											t.Errorf("%+v pick %v: included into a room in use then", b, pick)
+										}
 									}
 								}
 							}

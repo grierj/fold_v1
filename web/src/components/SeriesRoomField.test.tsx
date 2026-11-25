@@ -23,7 +23,15 @@ const room = (over: Partial<SeriesRoom>): SeriesRoom => ({ id: 1, name: "Fellows
 const hall = room({});
 const chapel = room({ id: 2, name: "Chapel", building: "", capacity: null, busyDates: 2 });
 const closet = room({ id: 3, name: "Closet", building: "Annex", capacity: 1, tooSmall: true });
-const booking = (over: Partial<SeriesBooking> = {}): SeriesBooking => ({ event: { id: 7, revision: "r2" }, defaultRoom: { id: 1, name: "Fellowship Hall", building: "Main" }, booked: 10, lost: [], kept: 0, keptRooms: [], changed: 0, pending: 0, doubleBooked: 0, ...over });
+
+// An answer whose dates afterwards are, unless the test says, its busy dates needing a room and its waiting ones.
+function booking(over: Partial<SeriesBooking> = {}): SeriesBooking {
+  const res: SeriesBooking = { event: { id: 7, revision: "r2" }, defaultRoom: { id: 1, name: "Fellowship Hall", building: "Main" }, booked: 10, lost: [], kept: 0, keptWaiting: 0, keptInUse: 0, changed: 0, pending: 0, doubleBooked: 0, after: { ownRooms: [], needsRoom: [], pending: 0 }, ...over };
+  const room = res.defaultRoom;
+
+  return over.after || !room ? res : { ...res, after: { ownRooms: [], needsRoom: res.lost.map((date) => ({ date, roomName: room.name, status: "requested" })), pending: res.pending } };
+}
+
 const onGone = vi.fn();
 const changed = () => new ApiError(409, "changed", { code: "event_changed" });
 const waitForStatus = (text: string | RegExp) => waitFor(() => expect(screen.getAllByRole("status")[0]).toHaveTextContent(text));
@@ -529,7 +537,7 @@ it("names the dates shown when the box is ticked, and leaves out one already in 
   // The chapel date already holds the room picked: it is not listed, and not named.
   expect(screen.getByText("1 date has a room of its own and will keep it:")).toBeInTheDocument();
   expect(screen.getAllByRole("listitem").map((li) => li.textContent)).toEqual(["Tuesday, December 15: Closet · Annex"]);
-  await userEvent.click(screen.getByRole("checkbox", { name: "Also change these dates to Chapel" }));
+  await userEvent.click(screen.getByRole("checkbox", { name: "Also change this date to Chapel" }));
   expect(screen.getByText("1 date has a room of its own:")).toBeInTheDocument();
   await userEvent.click(screen.getByRole("button", { name: "Book for every date" }));
   expect(SeriesRooms.set).toHaveBeenCalledWith(7, { roomId: 2, includeDates: ["2026-12-15"] }, "r1");
@@ -541,7 +549,7 @@ it("says the rooms will be released when the series room stops, and names the da
   vi.mocked(SeriesRooms.set).mockResolvedValue(booking({ defaultRoom: null, booked: 0, changed: 1 }));
   show();
   await userEvent.selectOptions(await select(), "none");
-  await userEvent.click(screen.getByRole("checkbox", { name: "Also release the rooms of these dates" }));
+  await userEvent.click(screen.getByRole("checkbox", { name: "Also release this date's room" }));
   await userEvent.click(screen.getByRole("button", { name: "Stop the series room" }));
   expect(SeriesRooms.set).toHaveBeenCalledWith(7, { roomId: null, includeDates: ["2026-12-08"] }, "r1");
   await waitForStatus("Series room released. Also released the room of 1 date that had its own.");
@@ -550,7 +558,7 @@ it("says the rooms will be released when the series room stops, and names the da
 it("lists a leader's admin-only dates as staying, and the box counts only the dates the leader may change", async () => {
   const nursery = { id: 9, name: "Nursery", building: "" };
   vi.mocked(SeriesRooms.list).mockResolvedValue(read({ ownRooms: [ownRoom("2026-12-08", { room: nursery, mayChange: false }), ownRoom("2026-12-15")] }));
-  vi.mocked(SeriesRooms.set).mockResolvedValue(booking({ booked: 9, changed: 1, kept: 1, keptRooms: [ownRoom("2026-12-08", { room: nursery, mayChange: false })] }));
+  vi.mocked(SeriesRooms.set).mockResolvedValue(booking({ booked: 9, changed: 1, kept: 1 }));
   show();
   await userEvent.selectOptions(await select(), "1");
   expect(screen.getByText("Nursery — stays: only an admin can change it")).toBeInTheDocument();
@@ -571,8 +579,8 @@ it("offers no box when every listed date is only an admin's to change", async ()
 it("books the series room again for the listed dates when only the box is ticked, and then lists what it kept", async () => {
   vi.mocked(SeriesRooms.list).mockResolvedValue(read({ defaultRoom: { id: 1, name: "Fellowship Hall", building: "Main" }, ownRooms: [ownRoom("2026-12-08"), ownRoom("2026-12-15")] }));
   vi.mocked(SeriesRooms.set)
-    .mockResolvedValueOnce(booking({ booked: 1, changed: 1, kept: 1, keptRooms: [ownRoom("2026-12-22")] }))
-    .mockResolvedValueOnce(booking({ event: { id: 7, revision: "r3" }, defaultRoom: { id: 3, name: "Closet", building: "Annex" }, booked: 10, kept: 1, keptRooms: [ownRoom("2026-12-22")] }));
+    .mockResolvedValueOnce(booking({ booked: 1, changed: 1, kept: 1, after: { ownRooms: [ownRoom("2026-12-22")], needsRoom: [], pending: 0 } }))
+    .mockResolvedValueOnce(booking({ event: { id: 7, revision: "r3" }, defaultRoom: { id: 3, name: "Closet", building: "Annex" }, booked: 10, kept: 1 }));
   show();
   await select();
   const book = screen.getByRole("button", { name: "Book for every date" });
@@ -598,7 +606,7 @@ it("after someone else changed the series room, says so and lists the dates the 
   vi.mocked(SeriesRooms.set).mockRejectedValueOnce(changed());
   show();
   await userEvent.selectOptions(await select(), "1");
-  await userEvent.click(screen.getByRole("checkbox", { name: "Also change these dates to Fellowship Hall · Main" }));
+  await userEvent.click(screen.getByRole("checkbox", { name: "Also change this date to Fellowship Hall · Main" }));
   await userEvent.click(screen.getByRole("button", { name: "Book for every date" }));
   expect(await screen.findByText("The room for every date changed while you were choosing, so your choice could not be saved. This is the room as it is now.")).toBeInTheDocument();
   expect(await select()).toHaveValue("3");
@@ -612,7 +620,7 @@ it("sends the same named dates again by itself when the event changed but its se
     .mockResolvedValueOnce(read({ ownRooms: [ownRoom("2026-12-08")] }))
     // A date picked its own room since: it is not named, so the server keeps it.
     .mockResolvedValueOnce(read({ revision: "r3", ownRooms: [ownRoom("2026-12-08"), ownRoom("2026-12-29")] }));
-  vi.mocked(SeriesRooms.set).mockRejectedValueOnce(changed()).mockResolvedValueOnce(booking({ booked: 9, changed: 1, kept: 1, keptRooms: [ownRoom("2026-12-29")] }));
+  vi.mocked(SeriesRooms.set).mockRejectedValueOnce(changed()).mockResolvedValueOnce(booking({ booked: 9, changed: 1, kept: 1 }));
   show();
   await userEvent.selectOptions(await select(), "1");
   await userEvent.click(screen.getByRole("checkbox"));
@@ -652,4 +660,83 @@ it("never carries the named dates into Book anyway", async () => {
     { roomId: 2, includeDates: ["2026-12-08"] },
     { roomId: 2, overlapReason: "Choir moved" },
   ]);
+});
+
+it("keeps the keyboard's place when the rest of the dates are shown: on the first one shown", async () => {
+  const many = Array.from({ length: 12 }, (_, i) => ownRoom(`2027-01-${String(i + 1).padStart(2, "0")}`));
+  vi.mocked(SeriesRooms.list).mockResolvedValue(read({ ownRooms: many }));
+  show();
+  await userEvent.selectOptions(await select(), "1");
+  screen.getByRole("button", { name: "Show all 12" }).focus();
+  await userEvent.keyboard("{Enter}");
+  expect(document.activeElement?.tagName).toBe("LI");
+  expect(document.activeElement).toHaveTextContent("Monday, January 11: Chapel");
+  await userEvent.tab();
+  expect(screen.getByRole("checkbox")).toHaveFocus();
+});
+
+// The next choice is made from the dates as the answer read them after the pick, never from what it kept: once the
+// hall is the series room, a date waiting for the hall is the series' own, and stopping the series room releases it.
+it("lists for the next choice the dates the answer read after the pick", async () => {
+  actor.isAdmin = true;
+  vi.mocked(SeriesRooms.list).mockResolvedValue(read({ ownRooms: [ownRoom("2026-12-08", { waiting: true, room: { id: 1, name: "Fellowship Hall", building: "Main" } })] }));
+  vi.mocked(SeriesRooms.set).mockResolvedValue(booking({ booked: 9, kept: 1, keptWaiting: 1, after: { ownRooms: [], needsRoom: [], pending: 1 } }));
+  show();
+  await userEvent.selectOptions(await select(), "1");
+  expect(screen.getByText("1 date has a room of its own and will keep it:")).toBeInTheDocument();
+  await userEvent.click(screen.getByRole("button", { name: "Book for every date" }));
+  await waitForStatus("Booked for 9 dates. 1 date keeps its own room request, still waiting for an admin's approval.");
+  await userEvent.selectOptions(await select(), "none");
+  expect(ownList()).not.toBeInTheDocument();
+  expect(screen.queryByRole("checkbox")).not.toBeInTheDocument();
+});
+
+// A pick whose answer was lost, then the box ticked and pressed again: the dates it now names were never sent, so the
+// stored series room is not this pick.
+it("says the choice could not be saved when the box changed after a pick whose answer was lost", async () => {
+  vi.mocked(SeriesRooms.list)
+    .mockResolvedValueOnce(read({ ownRooms: [ownRoom("2026-12-08")] }))
+    .mockResolvedValue(read({ revision: "r3", defaultRoom: { id: 1, name: "Fellowship Hall", building: "Main" }, ownRooms: [ownRoom("2026-12-08")] }));
+  vi.mocked(SeriesRooms.set).mockRejectedValueOnce(new TypeError("Failed to fetch")).mockRejectedValue(changed());
+  show();
+  await pickAndBook("1");
+  expect(await screen.findByRole("alert")).toBeInTheDocument();
+  await userEvent.click(screen.getByRole("checkbox", { name: "Also change this date to Fellowship Hall · Main" }));
+  await userEvent.click(screen.getByRole("button", { name: "Book for every date" }));
+  expect(await screen.findByText("The room for every date changed while you were choosing, so your choice could not be saved. This is the room as it is now.")).toBeInTheDocument();
+  expect(screen.queryByText(/The series room is saved/)).not.toBeInTheDocument();
+  expect(screen.getByRole("checkbox")).not.toBeChecked();
+});
+
+it("says only how many dates the room is in use on while some dates keep their own room", async () => {
+  vi.mocked(SeriesRooms.list).mockResolvedValue(read({ ownRooms: [ownRoom("2026-12-08", { room: { id: 3, name: "Closet", building: "Annex" } })] }));
+  show();
+  await userEvent.selectOptions(await select(), "2");
+  expect(screen.getByText("Chapel is in use on 2 of 10 dates.")).toBeInTheDocument();
+  expect(screen.queryByText(/It will be booked|will be listed/)).not.toBeInTheDocument();
+});
+
+it("clears the box when the choice changes, so a tick for one room never releases rooms", async () => {
+  vi.mocked(SeriesRooms.list).mockResolvedValue(read({ defaultRoom: { id: 1, name: "Fellowship Hall", building: "Main" }, ownRooms: [ownRoom("2026-12-08")] }));
+  vi.mocked(SeriesRooms.set).mockResolvedValue(booking({ defaultRoom: null, booked: 0, kept: 1 }));
+  show();
+  await userEvent.selectOptions(await select(), "3");
+  await userEvent.click(screen.getByRole("checkbox", { name: "Also change this date to Closet · Annex" }));
+  await userEvent.selectOptions(await select(), "none");
+  expect(screen.getByRole("checkbox", { name: "Also release this date's room" })).not.toBeChecked();
+  await userEvent.click(screen.getByRole("button", { name: "Stop the series room" }));
+  expect(SeriesRooms.set).toHaveBeenCalledWith(7, { roomId: null }, "r1");
+});
+
+it("offers no box while it asks an admin to book the busy dates anyway, which names no dates", async () => {
+  actor.isAdmin = true;
+  const closetDate = ownRoom("2026-12-08", { room: { id: 3, name: "Closet", building: "Annex" } });
+  vi.mocked(SeriesRooms.list).mockResolvedValue(read({ ownRooms: [closetDate] }));
+  vi.mocked(SeriesRooms.set).mockResolvedValue(booking({ defaultRoom: chapelRoom, booked: 7, kept: 1, lost: ["2026-12-15", "2026-12-22"],
+    after: { ownRooms: [closetDate], needsRoom: busyDates("2026-12-15", "2026-12-22"), pending: 0 } }));
+  show();
+  await pickAndBook("2");
+  expect(await screen.findByRole("textbox", { name: /^Reason for double-booking/ })).toBeInTheDocument();
+  expect(screen.getByText("Tuesday, December 8")).toBeInTheDocument();
+  expect(screen.queryByRole("checkbox")).not.toBeInTheDocument();
 });

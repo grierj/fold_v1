@@ -82,6 +82,7 @@ export const ERROR_COPY = {
   room_busy: "That room is already booked then. Pick another room, or ask an admin.",
   room_restricted: "Only an admin can book that room.",
   room_gone: "That room isn't available anymore. Pick another room.",
+  series_request_kept: "The room for every date could not be changed: some dates are still waiting for an admin to approve a room only an admin can change. Only an admin can change this event's room request now.",
   booking_admin_only: "Only an admin can change this date's room. Ask an admin if it needs to change.",
   rooms_off: "Room booking has been turned off, so rooms can't be picked here now.",
   job_handled: "Someone already handled this task. Refresh to see the latest.",

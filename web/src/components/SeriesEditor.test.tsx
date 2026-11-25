@@ -678,7 +678,7 @@ describe("SeriesEditor and the read it opened with", () => {
     vi.mocked(Site.get).mockResolvedValue({ name: "Fold", timezone: "UTC", selfSignup: "off", roomsEnabled: true, pushEnabled: true });
     const hall = { id: 1, name: "Fellowship Hall", building: "Main", capacity: 80, features: "", restricted: false, busyDates: 0, tooSmall: false };
     vi.mocked(SeriesRooms.list).mockResolvedValue({ revision: "r1", rooms: [hall], dates: 10, defaultRoom: null, ownRooms: [], needsRoom: [], pending: 0 });
-    vi.mocked(SeriesRooms.set).mockResolvedValue({ event: { id: 7, revision: "r2" }, defaultRoom: { id: 1, name: "Fellowship Hall", building: "Main" }, booked: 10, lost: [], kept: 0, keptRooms: [], changed: 0, pending: 0, doubleBooked: 0 });
+    vi.mocked(SeriesRooms.set).mockResolvedValue({ event: { id: 7, revision: "r2" }, defaultRoom: { id: 1, name: "Fellowship Hall", building: "Main" }, booked: 10, lost: [], kept: 0, keptWaiting: 0, keptInUse: 0, changed: 0, pending: 0, doubleBooked: 0, after: { ownRooms: [], needsRoom: [], pending: 0 } });
     vi.mocked(Events.update).mockRejectedValueOnce(changed()).mockResolvedValueOnce({ event: stored });
     vi.mocked(Events.get).mockResolvedValue(readOf(stored));
     const onSaved = vi.fn();
