@@ -344,6 +344,9 @@ type seriesPick struct {
 	roomID  *uint
 	include []string
 	reason  string
+	// created: the room picked on a new event's form. Its creator is the
+	// actor and the event is new, so no one is told (DEC-170).
+	created bool
 }
 
 // bookWholeSeries sets ev's series room (nil stops it) and books it on every
@@ -362,6 +365,10 @@ type seriesPick struct {
 //
 // A group that isn't active books no room (DEC-147); stopping the series room
 // (roomID nil) is always allowed.
+//
+// Unless the pick is a new event's, the event's other runners are told what
+// it changed, once (DEC-170); a pick that leaves every date holding what it
+// held, and the same series room, tells no one.
 func bookWholeSeries(tx *gorm.DB, ev *models.Event, pick seriesPick, user *models.User, ip string) (seriesBookingJSON, error) {
 	roomID, reason := pick.roomID, pick.reason
 	out := seriesBookingJSON{Lost: []string{}}
@@ -444,6 +451,7 @@ func bookWholeSeries(tx *gorm.DB, ev *models.Event, pick seriesPick, user *model
 	}
 	var req *models.RoomRequest
 	var requestID *uint
+	var withdrawn []uint
 	// Re-booking the series room an admin already approved (to retry lost
 	// dates) needs no new approval.
 	approved := oldRoom != nil && room != nil && *oldRoom == room.ID && !ev.DefaultRoomPending
@@ -454,19 +462,21 @@ func bookWholeSeries(tx *gorm.DB, ev *models.Event, pick seriesPick, user *model
 		if keepsSeriesRequest {
 			return out, errSeriesRequestKept
 		}
-		if err := withdrawSeriesRequest(tx, ev.ID); err != nil {
+		var err error
+		if withdrawn, err = withdrawSeriesRequest(tx, ev.ID); err != nil {
 			return out, err
 		}
-		var err error
 		if req, err = openRoomRequest(tx, ev.ID, room.ID, &user.ID, true); err != nil {
 			return out, err
 		}
 		requestID = &req.ID
 	}
 	kept, inUse, changed := []string{}, []string{}, []string{}
-	released := 0
+	// moved: dates whose room, or waiting for one, this pick changed.
+	released, moved := 0, 0
 	for i := range occs {
 		occ := &occs[i]
+		var before roomHeld
 		if d, has := byDate[occ.ID]; has {
 			b := d.row
 			switch d.outcome {
@@ -484,18 +494,25 @@ func bookWholeSeries(tx *gorm.DB, ev *models.Event, pick seriesPick, user *model
 			case policy.SeriesIncluded:
 				changed = append(changed, b.Date)
 			}
+			before = roomHeldOf(b.RoomID, b.judged().State)
 			if err := tx.Delete(&models.RoomBooking{}, b.ID).Error; err != nil {
 				return out, err
 			}
 			released++
 		}
 		if room == nil {
+			if before != (roomHeld{}) {
+				moved++
+			}
 			continue
 		}
 		result, err := placeBooking(tx, occ, room, room.DefaultSetupMinutes, room.DefaultTeardownMinutes,
 			placement{by: &user.ID, reason: reason, keepRequested: true, requestID: requestID})
 		if err != nil {
 			return out, err
+		}
+		if roomHeldAfter(room.ID, result) != before {
+			moved++
 		}
 		switch result {
 		case bookedRequested:
@@ -522,8 +539,23 @@ func bookWholeSeries(tx *gorm.DB, ev *models.Event, pick seriesPick, user *model
 			return out, err
 		}
 	}
-	// Replaced bookings may have been other requests' last dates: an
-	// included date's own request is withdrawn here and its task closed.
+	roomChanged := (oldRoom == nil) != (roomID == nil) || (oldRoom != nil && *oldRoom != *roomID)
+	if !pick.created && (moved > 0 || roomChanged) {
+		freed := 0
+		if room == nil {
+			freed = moved
+		}
+		if err := notifySeriesRoomChanged(tx, ev, user.ID, oldRoom, roomID, out, freed); err != nil {
+			return out, err
+		}
+	}
+	// Tasks close after the notices have locked their recipients
+	// (settleDatePick). Replaced bookings may have been other requests' last
+	// dates: an included date's own request is withdrawn here and its task
+	// closed.
+	if err := resolveWithdrawn(tx, withdrawn); err != nil {
+		return out, err
+	}
 	if err := closeEmptyRoomRequests(tx); err != nil {
 		return out, err
 	}
@@ -741,6 +773,6 @@ func (a *App) bookCreatedSeries(tx *gorm.DB, ev *models.Event, roomID *uint, use
 	if !a.roomsEnabled() {
 		return errRoomGone
 	}
-	_, err := bookWholeSeries(tx, ev, seriesPick{roomID: roomID}, user, ip)
+	_, err := bookWholeSeries(tx, ev, seriesPick{roomID: roomID, created: true}, user, ip)
 	return err
 }

@@ -835,6 +835,7 @@ func TestNoticeGuardianCopyKindsAreClassified(t *testing.T) {
 		notify.VisibilityOverride:      neverTo,
 		notify.RoomRequestDecided:      neverTo,
 		notify.RoomLost:                neverTo,
+		notify.RoomChanged:             neverTo,
 		notify.PushKeysReset:           neverTo,
 		notify.WaitlistCutoff:          neverTo,
 	}

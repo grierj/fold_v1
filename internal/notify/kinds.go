@@ -3,6 +3,7 @@ package notify
 import (
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -52,6 +53,7 @@ const (
 	RegistrationNotRestored = "registration.not_restored"
 	WaitlistCutoff          = "waitlist.cutoff"
 	RoomLost                = "room.lost"
+	RoomChanged             = "room.changed"
 	RoomRequested           = "room.requested"
 	RoomRequestDecided      = "room.request_decided"
 	HouseholdLinkPending    = "household.link_pending"
@@ -94,6 +96,7 @@ type Vars struct {
 	Count      int    // how many events this row covers; Send sets it (to 1 for a new row) unless the caller gave one, as system.job_dead does for its attempts used
 	KeptCount  int    // departure summary: exact dates retained
 	EndedCount int    // departure summary: upcoming registrations ended
+	NeedRoom   int    // room.changed: dates left needing a room because the room picked is in use then
 	// SubjectKind is who the notice is about when that person is a teen or a
 	// child: SubjectTeen or SubjectChild, empty for an adult or no one. The
 	// writer sets it only for a recipient who already sees that person and
@@ -756,6 +759,51 @@ func init() {
 		// whether it is urgent (PushSoon).
 		AllowPush: true, PushSoon: true, PushRender: func(v Vars) (string, string) {
 			return "Room booking lost: " + or(v.Event, "an event"), "Pick another room for " + or(v.Change, "a date") + " in Fold."
+		},
+	})
+	register(Kind{
+		// Someone changed an event's room plans; the others who run it hear
+		// of it (DEC-170). Change is what they did: "booked", "asked",
+		// "changed" or "cleared" for the date in When, "series_picked",
+		// "series_changed" or "series_stopped" for every date. Note is how it
+		// came out, in words the writer builds from its own counts. No room
+		// name: a room can say where a group meets (DEC-124).
+		Key: RoomChanged, Category: CatEvents, AllowEmail: true, CopyTitleOnly: true,
+		Render: func(v Vars) (string, string) {
+			who, event, when := or(v.Actor, "Someone"), or(v.Event, "an event"), or(v.When, "one date")
+			var title, body string
+			switch v.Change {
+			case "booked":
+				title, body = "Room booked: "+event, who+" booked a room for "+when+"."
+			case "asked":
+				title, body = "Room requested: "+event, who+" asked for a room for "+when+"."
+			case "cleared":
+				title, body = "Room removed: "+event, who+" took the room off "+when+". That date has no room booked now."
+			case "series_picked":
+				title, body = "Room picked for every date: "+event, who+" picked a room for every date."
+			case "series_changed":
+				title, body = "Room changed for every date: "+event, who+" changed the room for every date."
+			case "series_stopped":
+				title, body = "Room removed from every date: "+event, who+" stopped booking a room for every date."
+			default:
+				title, body = "Room changed: "+event, who+" changed the room for "+when+"."
+			}
+			if v.Note != "" {
+				body += " " + v.Note
+			}
+			return title, body
+		},
+		// Pushed only when dates were left needing a room; Data "dates" names
+		// them, so the earliest decides whether it is urgent (PushSoon).
+		AllowPush: true, PushSoon: true, PushRender: func(v Vars) (string, string) {
+			if v.NeedRoom == 0 {
+				return "", ""
+			}
+			count := "1 date"
+			if v.NeedRoom > 1 {
+				count = strconv.Itoa(v.NeedRoom) + " dates"
+			}
+			return "Room needed: " + or(v.Event, "an event"), "Pick another room for " + count + " in Fold."
 		},
 	})
 	register(Kind{

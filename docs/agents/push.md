@@ -75,6 +75,8 @@ push reminders or the service worker. Background: M3.13, DEC-121 to DEC-129,
 
 - A kind pushes only with `AllowPush` and its own short `PushRender` (stored on the row, never the
   bell body cut short). Safety kinds get the safe line, titled with `site_name` at send (DEC-134).
+- A `PushRender` that returns no title means that row does not push: `room.changed` pushes only
+  when dates were left needing a room (`Vars.NeedRoom`, DEC-170).
 - No push shows a place (DEC-136), contact details, signed links or a hidden group's name
   (`TestEveryKindsPushTextIsLockScreenSafe`).
 

@@ -531,6 +531,7 @@ notify.reconcile (hourly): requeues lost delivery jobs and backfills notices of 
   - contact requests and grants, including guardian notices (5.11)
   - account and consent changes, and birthdays (turned 18; a household child turned 13)
   - for events you're going to or waitlisted for: cancellations, time or place changes, removals, and "you're in" off the waitlist
+  - for events you run: someone else changed a date's room or the series room (`room.changed`, DEC-170), a date lost its room (`room.lost`), and an admin's decision on a room request
   - **Planned:** message requests (M3.9, 7.6) and conversation replies (M3.11, 7.8)
 - **Event items expire (6.13 #3):** their `expires_at` is the occurrence end. After that the feed and badge treat them as archived (nothing rewrites the row), and retention removes them later.
 - **Not in the bell (DEC-44):** event **reminders** go by email and push only (7.7, DEC-123; SMS reminders arrive with M3.8), and the old derived "upcoming events" items are gone.
