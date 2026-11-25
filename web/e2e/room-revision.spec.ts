@@ -22,8 +22,10 @@ test("two leaders pick rooms for the same date: the second is told, sees the fir
   }
 
   const rooms = [];
+  // Short room names: the Room select at 390px has no room for a long name beside "Used by this event once" (#484).
+  const tag = suffix.slice(-4);
 
-  for (const name of [`Loft ${suffix}`, `Parlor ${suffix}`]) {
+  for (const name of [`Loft ${tag}`, `Parlor ${tag}`]) {
     rooms.push(schema.parse(schema.looseObject({ room: idOf }), await grier("POST", "/admin/rooms", { name })).room);
   }
 
@@ -46,10 +48,10 @@ test("two leaders pick rooms for the same date: the second is told, sees the fir
 
   const [first, second] = pages;
   const where = second.locator("[data-date-answer=where]");
-  await expect(where).not.toContainText(`Loft ${suffix}`);
+  await expect(where).not.toContainText(`Loft ${tag}`);
   await second.getByRole("textbox", { name: /^Title/ }).fill("Typed while choosing");
   await first.getByRole("combobox", { name: /^Room/ }).selectOption(String(rooms[0].id));
-  await expect(first.getByText(`Booked Loft ${suffix}.`)).toBeVisible();
+  await expect(first.getByText(`Booked Loft ${tag}.`)).toBeVisible();
 
   await second.getByRole("combobox", { name: /^Room/ }).selectOption(String(rooms[1].id));
   const line = second.getByText(LINE);
@@ -59,7 +61,7 @@ test("two leaders pick rooms for the same date: the second is told, sees the fir
   await expect(second.getByRole("textbox", { name: /^Title/ })).toHaveValue("Typed while choosing");
   await expect(second.getByRole("button", { name: /^Save/ })).toBeVisible();
   // The page around the editor reads again: the date's place names the first leader's room, and the draft stays.
-  await expect(where).toContainText(`Loft ${suffix}`);
+  await expect(where).toContainText(`Loft ${tag}`);
   await expect(second.getByRole("textbox", { name: /^Title/ })).toHaveValue("Typed while choosing");
   await checkState(second, "room-revision", "conflict");
 
