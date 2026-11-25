@@ -332,7 +332,7 @@ func TestRoomChangedSeriesBookAnywayApprovalAndCreate(t *testing.T) {
 		t.Fatalf("a waiting series pick: %d %+v", code, out)
 	}
 	all := roomChangedOf(t, f.app, f.leaderUser.ID)
-	if n := all[len(all)-1]; n.Body != "coleader changed the series room. 1 date is waiting for an admin's approval. 1 date was left as it is. 1 date still needs a room because the room is in use then. The event page lists it." ||
+	if n := all[len(all)-1]; n.Body != "coleader changed the series room. Requested approval for 1 date. 1 date was left as it is. 1 date still needs a room because the room is in use then. The event page lists it." ||
 		n.PushTitle != "Room needed: Weekly" {
 		t.Fatalf("the waiting pick's notice: %+v", n)
 	}
