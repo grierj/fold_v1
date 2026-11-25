@@ -17,8 +17,11 @@ type Props = Omit<ButtonHTMLAttributes<HTMLButtonElement>, "className" | "style"
 const buttonClass = (variant: ButtonVariant, size: "md" | "sm", layout?: string) =>
   [`btn-${variant}`, size === "sm" ? "min-h-11 px-3 text-sm" : "", layout ?? ""].filter(Boolean).join(" ");
 
-export function Button({ variant, size = "md", layout, type = "button", ...rest }: Props) {
-  return <button type={type} className={buttonClass(variant, size, layout)} {...rest} />;
+export function Button({ variant, size = "md", layout, type = "button", onClick, "aria-disabled": unavailable, ...rest }: Props) {
+  const blocked = unavailable === true || unavailable === "true";
+
+  return <button type={type} className={buttonClass(variant, size, layout)} {...rest} aria-disabled={unavailable}
+    onClick={blocked ? (event) => event.preventDefault() : onClick} />;
 }
 
 export function ButtonLink({
