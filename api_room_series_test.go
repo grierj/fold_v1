@@ -381,7 +381,8 @@ func TestRoomLostNoticeFromExtenderSerializesWithLeaderErasure(t *testing.T) {
 		if w := roomPick(t, f.leader, "/api/v1/events/"+itoa(other.ID)+"/dates/"+fourth+"/room", map[string]any{"roomId": f.hall.ID}); w.Code != http.StatusOK {
 			t.Fatalf("book the other event: %d %s", w.Code, w.Body.String())
 		}
-		return erasureScene{app: f.app, victim: victim,
+		// The setup's picks told the second leader (room.changed).
+		return erasureScene{app: f.app, victim: victim, mailBase: mailCount(t, f.app, victim.Email),
 			run: func() error { return eventdates.Extend(f.app.DB, time.Now().UTC(), f.app.afterExtend()) },
 			told: func(t *testing.T) {
 				if n := contactCount(t, f.app, &models.Notification{}, "user_id = ? AND kind = ?", f.leaderUser.ID, notify.RoomLost); n != 1 {
