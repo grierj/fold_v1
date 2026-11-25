@@ -11,6 +11,7 @@ import { decisionImpact, reviewOutdated } from "../lib/visibilityConsent";
 import { ROSTER_STALE, ROSTER_WAITING, visibilityRank } from "../lib/visibilityChange";
 import { useFocusHome, useKeepFocusHome, useLockedFocus } from "../lib/focusHome";
 import { useAction, type Action } from "../lib/useAction";
+import { useResourceRefusal } from "../lib/refusedSave";
 import { answerNames, lostAuthority, useRevisionSave, type RevisionConflict } from "../lib/useRevisionSave";
 import { Checkbox, Choices, Field, FormError, Input, Radio } from "./ui/Field";
 import { Button } from "./ui/Button";
@@ -96,12 +97,15 @@ export function EventVisibilityControl({
     if (waiting && document.activeElement === saveButton.current) home.moveHere();
   }, [waiting, home]);
   const lockFocus = useLockedFocus(home, frozen);
+  const refreshRefusal = useResourceRefusal();
   useEffect(() => {
     let live = true;
-    Promise.resolve(Events.visibilityImpact(eventId, visibility)).then((impact) => { if (live) setFutureOverrides(impact?.futureOverrides ?? 0); }).catch(() => {});
+    Promise.resolve(Events.visibilityImpact(eventId, visibility)).then((impact) => { if (live) setFutureOverrides(impact?.futureOverrides ?? 0); }).catch((cause: unknown) => {
+      if (live) refreshRefusal(cause, "read");
+    });
 
     return () => { live = false; };
-  }, [eventId, visibility]);
+  }, [eventId, visibility, refreshRefusal]);
 
   // What this save can write: the audience and whether it is leader-opened, which follows the group's. The page's
   // read lists 90 days of dates and a reset reaches every later one, so a refused reset is always a conflict, also

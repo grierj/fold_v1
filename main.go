@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"embed"
+	"errors"
 	"fmt"
 	"html/template"
 	"io"
@@ -84,6 +85,21 @@ func newSessionStore(secret []byte, secure bool) *sessions.CookieStore {
 	return store
 }
 
+func newDatabaseSessionStore(db *gorm.DB, cfg Config) (*sessions.CookieStore, error) {
+	epoch, found, err := settingIn(db, sessionSigningEpochKey)
+	if err != nil {
+		return nil, err
+	}
+	if !found || epoch == "" {
+		return nil, errors.New("session signing epoch is missing")
+	}
+	key, err := deriveKey(cfg.SessionSecret, "session-cookie:v1:"+epoch)
+	if err != nil {
+		return nil, err
+	}
+	return newSessionStore(key, cfg.CookieSecure), nil
+}
+
 // serve runs the web server until SIGINT or SIGTERM.
 func serve(stderr io.Writer) int {
 	cfg, err := LoadConfig()
@@ -115,10 +131,8 @@ func serve(stderr io.Writer) int {
 		return 1
 	}
 
-	store := newSessionStore(cfg.SessionSecret, cfg.CookieSecure)
-
 	app := &App{
-		DB: db, Store: store, Config: cfg, Uploads: uploads,
+		DB: db, Config: cfg, Uploads: uploads,
 		Mailer: mailer,
 	}
 	// The signal context exists this early so a detected database restore can
@@ -140,6 +154,10 @@ func serve(stderr io.Writer) int {
 	// including an unacknowledged COMMIT, exits non-zero.
 	if err := app.bootRestoreFence(); err != nil {
 		fmt.Fprintln(stderr, "fold:", err)
+		return 1
+	}
+	if app.Store, err = newDatabaseSessionStore(db, cfg); err != nil {
+		fmt.Fprintln(stderr, "fold: session store:", err)
 		return 1
 	}
 	ready, err := app.setupComplete()

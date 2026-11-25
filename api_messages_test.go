@@ -592,7 +592,7 @@ func TestAudiencePreviewCountsPush(t *testing.T) {
 		return out.Summary
 	}
 	s := preview()
-	if s.Push != 2 || s.Eligible != 2 || len(s.Skipped) != 2 {
+	if s.Push != 2 || s.PushOnly != 1 || s.Eligible != 2 || len(s.Skipped) != 2 {
 		t.Fatalf("summary: %+v", s)
 	}
 	for _, r := range s.Recipients {
@@ -601,11 +601,11 @@ func TestAudiencePreviewCountsPush(t *testing.T) {
 		}
 	}
 	pushConsentRow(t, f.app, f.teen, "category:"+notify.CatMessages, models.ConsentOptedOut)
-	if s := preview(); s.Push != 1 || s.Eligible != 2 {
+	if s := preview(); s.Push != 1 || s.PushOnly != 1 || s.Eligible != 2 {
 		t.Fatalf("push off for messages from leaders: %+v", s)
 	}
 	f.app.DB.Create(&models.Setting{Key: settingPushEnabled, Value: "false"})
-	if s := preview(); s.Push != 0 {
+	if s := preview(); s.Push != 0 || s.PushOnly != 0 {
 		t.Fatalf("church off: %+v", s)
 	}
 }

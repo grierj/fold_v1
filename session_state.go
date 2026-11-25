@@ -149,12 +149,15 @@ func (a *App) replaceCredential(c *gin.Context, change func(*sessions.Session) b
 	return a.writeSession(c, session)
 }
 
-// issueAnonymousCredential binds a first T to a session that has none (the
-// lazy CSRF token of a first visit, or a cookie from before tokens existed).
-func (a *App) issueAnonymousCredential(c *gin.Context, s *sessions.Session) (string, error) {
+// issueAnonymousCredential binds a first T or replaces an unverified cookie
+// with a fresh anonymous credential.
+func (a *App) issueAnonymousCredential(c *gin.Context, s *sessions.Session, discard bool) (string, error) {
 	token, err := a.mintCredential()
 	if err != nil {
 		return "", err
+	}
+	if discard {
+		s.Values = map[any]any{}
 	}
 	s.Values[csrfSessionKey] = token
 	return token, a.writeSession(c, s)

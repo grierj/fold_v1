@@ -496,13 +496,16 @@ export function teenLine(s: AudienceSummary): string {
   return s.teens === 1 ? "1 of them is a teen." : `${s.teens} of them are teens.`;
 }
 
-// pushLine is the composer's "38 also get a push notification." (PLAN
-// 7.3), or "" when nobody would. People with no device aren't skipped:
-// they still get the email.
 export function pushLine(s: AudienceSummary): string {
-  if (!s.push) return "";
+  const { push, pushOnly } = s;
 
-  return `${s.push} also ${s.push === 1 ? "gets" : "get"} a push notification.`;
+  if (!push) return "";
+
+  if (!pushOnly) return `${push} ${push === 1 ? "person gets" : "people get"} a push notification too.`;
+
+  return pushOnly === push
+    ? `${pushOnly} ${pushOnly === 1 ? "person gets" : "people get"} only the push notification.`
+    : `${push} people get a push notification. ${pushOnly} of them ${pushOnly === 1 ? "gets" : "get"} only the push.`;
 }
 
 // A push row's reason (the pipeline's words) as the history says it.
@@ -575,20 +578,6 @@ function whenPhrase(at: string, zone: string): string {
   const when = formatWhenIn(at, zone);
 
   return /^(Today|Tomorrow) /.test(when) ? when[0].toLowerCase() + when.slice(1) : `on ${when}`;
-}
-
-// confirmPushLine says who gets the push, under a question that counts everyone the message reaches: the people it
-// reaches beyond those who get the email get only the push.
-export function confirmPushLine(review: Pick<MessageReview, "summary" | "reached">): string {
-  const { push, eligible } = review.summary;
-  const only = review.reached - eligible;
-  const all = `${push} ${push === 1 ? "person gets" : "people get"} a push notification too.`;
-
-  if (only <= 0) return all;
-
-  return only === push
-    ? `${only} of them ${only === 1 ? "gets" : "get"} only the push notification.`
-    : `${push} of them get a push notification; ${only} ${only === 1 ? "gets" : "get"} only the push.`;
 }
 
 // saveListLine is the question before an edit changes who a scheduled message goes to (DEC-169): "Change who gets this
@@ -671,6 +660,7 @@ const wireReview = object({
     teens: number(),
     skipped: record(string(), number()),
     push: number(),
+    pushOnly: number(),
     recipients: array(object({ name: string(), teen: boolean(), skipped: optional(string()), push: optional(boolean()) })),
     more: boolean(),
   }),

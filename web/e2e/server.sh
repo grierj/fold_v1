@@ -4,7 +4,11 @@
 set -euo pipefail
 : "${DATABASE_URL:?set DATABASE_URL (make e2e does)}"
 root="$(cd "$(dirname "$0")/../.." && pwd)"
-[ -f "$root/web/dist/index.html" ] || { echo "run npm run build first (make e2e does)" >&2; exit 1; }
+
+if [[ -z ${FOLD_E2E_BIN:-} && ! -f "$root/web/dist/index.html" ]]; then
+  echo "run npm run build first (make e2e does)" >&2
+  exit 1
+fi
 
 base="${DATABASE_URL%%\?*}"          # postgres://u:p@host:port/db
 query="${DATABASE_URL#"$base"}"      # ?sslmode=disable, or empty

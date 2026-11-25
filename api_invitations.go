@@ -24,6 +24,7 @@ import (
 // (10.1). The 21st gets 429 and is audited. Admins set the limit later;
 // until then it is a constant.
 const leaderInviteDailyLimit = 20
+const leaderInvitationReceived = "Invitation request received. If they can accept it, they'll get an email with a link."
 
 // writeInvitationRefusal spends only the actor allowance for a valid address
 // check that sent no invitation. Ordinary and household invitations share it.
@@ -118,82 +119,74 @@ func (a *App) apiCreateInvitation(c *gin.Context) {
 		return
 	}
 
-	// The target group: 404 when it doesn't exist or the inviter can't see
-	// it (invite-only groups never answer 403 to outsiders).
 	var g *models.Group
-	var rel policy.Rel
-	if body.GroupID != nil {
-		var gg *models.Group
-		var ok bool
-		if gg, rel, ok = a.loadGroupFor(c, *body.GroupID); !ok {
-			return
-		}
-		g = gg
-	}
-	leadsTarget := rel.Leader
-	leadsAnywhere := false
-	if !asPerson(me).Admin {
-		var err error
-		if leadsAnywhere, err = leadsApprovedGroup(a.DB, me.ID); err != nil {
-			jsonError(c, http.StatusInternalServerError, "could not create invitation")
-			return
-		}
-	}
-	if !policy.CanInvite(asPerson(me), body.GroupID != nil, leadsTarget, leadsAnywhere) {
-		jsonError(c, http.StatusForbidden, "forbidden")
-		return
-	}
-	// An invitation into a group that isn't active could never be accepted.
-	if g != nil && !policy.CanInviteIntoGroup(g.Status) {
-		fail(c, errGroupNotApprovedToInvite)
-		return
-	}
-
 	var refusal error
-	overLimit := body.OverLimit && g != nil
+	var admin bool
+	overLimit := body.OverLimit && body.GroupID != nil
 	inv := models.Invitation{
 		Email: email, Phone: phone, Name: name, InvitedBy: me.ID,
 		Role: models.MembershipMember, AccountType: "adult",
 		GroupID: body.GroupID, OverLimit: overLimit,
 		ExpiresAt: time.Now().UTC().Add(tokenTTL),
 	}
-	err = a.DB.Transaction(func(tx *gorm.DB) error {
+	err = a.DB.WithContext(c.Request.Context()).Transaction(func(tx *gorm.DB) error {
+		if err := lockContacts(tx); err != nil {
+			return err
+		}
+		actor, err := lockActorIn(tx, me, actorShare)
+		if err != nil {
+			return err
+		}
+		person := asPerson(actor)
+		admin = policy.IsAdmin(person)
+		var rel policy.Rel
+		var leadsAnywhere bool
+		if body.GroupID != nil {
+			if g, rel, err = loadGroupIn(tx, actor, *body.GroupID); err != nil {
+				return err
+			}
+		} else if !admin {
+			if leadsAnywhere, err = leadsApprovedGroup(tx, actor.ID); err != nil {
+				return err
+			}
+		}
+		if !policy.CanInvite(person, g != nil, rel.Leader, leadsAnywhere) {
+			return errRoleRefused
+		}
+		if g != nil && !policy.CanInviteIntoGroup(g.Status) {
+			return errGroupNotApprovedToInvite
+		}
 		if err := lockInvitationEmail(tx, email); err != nil {
 			return err
 		}
-		// Refusals spend the actor's allowance without pretending mail was
-		// sent. Commit this audit instead of rolling the counter back with
-		// the public conflict response. Admin invitations stay exempt.
-		refuse := func(cause error, reason string) error {
-			refusal = cause
-			if asPerson(me).Admin {
-				return nil
-			}
-			if errors.Is(cause, errInvitationLimit) {
-				return audit.Write(tx, audit.Entry{Actor: &me.ID, Action: audit.InvitationRateLimited,
-					TargetType: "user", TargetID: me.ID,
-					Meta: map[string]any{"reason": reason, "limit": leaderInviteDailyLimit}, IP: c.ClientIP()})
-			}
-			return writeInvitationRefusal(tx, me.ID, reason, c.ClientIP())
-		}
-		if !asPerson(me).Admin {
-			allowed, err := inviteSendAllowed(tx, me.ID, email)
+		if !admin {
+			limit, err := inviteSendAllowed(tx, me.ID, email)
 			if err != nil {
 				return err
 			}
-			if !allowed {
-				return refuse(errInvitationLimit, "daily_limit")
+			switch limit {
+			case invitationActorLimit:
+				refusal = errInvitationLimit
+				return audit.Write(tx, audit.Entry{Actor: &me.ID, Action: audit.InvitationRateLimited,
+					TargetType: "user", TargetID: me.ID,
+					Meta: map[string]any{"reason": "daily_limit", "limit": leaderInviteDailyLimit}, IP: c.ClientIP()})
+			case invitationDestinationLimit:
+				return writeInvitationRefusal(tx, me.ID, "destination_limit", c.ClientIP())
 			}
 		}
 		hold, err := emailHeldBy(tx, email, 0, 0, true)
 		if err != nil {
 			return err
 		}
-		switch hold {
-		case holdAccount:
-			return refuse(errEmailTaken, hold)
-		case holdPendingConversion, holdPendingInvitation:
-			return refuse(errConversionEmail, hold)
+		if hold != "" {
+			if !admin {
+				return writeInvitationRefusal(tx, me.ID, hold, c.ClientIP())
+			}
+			refusal = errAlreadyInvited
+			if hold == holdAccount {
+				refusal = errEmailTaken
+			}
+			return nil
 		}
 		_, hash, err := newTokenAndHash()
 		if err != nil {
@@ -213,23 +206,17 @@ func (a *App) apiCreateInvitation(c *gin.Context) {
 		}
 		_, err = invitationMailType.Enqueue(tx, invitationMailJob{InvitationID: inv.ID}, time.Now(), "")
 		return err
-	})
+	}, contactGateTx)
 	if err != nil {
-		jsonError(c, http.StatusInternalServerError, "could not create invitation")
+		answerGroupRead(c, err)
 		return
 	}
-	switch {
-	case errors.Is(refusal, errInvitationLimit):
-		fail(c, errInvitationLimit)
+	if refusal != nil {
+		fail(c, refusal)
 		return
-	case errors.Is(refusal, errEmailTaken):
-		fail(c, errEmailTaken)
-		return
-	case errors.Is(refusal, errConversionEmail):
-		fail(c, errAlreadyInvited)
-		return
-	case refusal != nil:
-		jsonError(c, http.StatusInternalServerError, "could not create invitation")
+	}
+	if !admin {
+		c.JSON(http.StatusOK, noticeResponseJSON{Message: leaderInvitationReceived})
 		return
 	}
 	if g != nil {

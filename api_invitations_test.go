@@ -2,8 +2,6 @@ package main
 
 import (
 	"fmt"
-	"fold/internal/audit"
-	"fold/models"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -11,6 +9,9 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"fold/internal/audit"
+	"fold/models"
 
 	"github.com/gin-gonic/gin"
 	"gorm.io/gorm"
@@ -29,7 +30,7 @@ func TestInvitationAcceptanceRechecksInviterAuthority(t *testing.T) {
 				t.Fatal(err)
 			}
 			client := loginAPI(t, app, "leader", "pw")
-			apiDo(t, client, "POST", "/api/v1/invitations", map[string]any{"email": "new@example.com", "name": "New Person", "groupId": g.ID, "overLimit": true}, http.StatusCreated)
+			apiDo(t, client, "POST", "/api/v1/invitations", map[string]any{"email": "new@example.com", "name": "New Person", "groupId": g.ID, "overLimit": true}, http.StatusOK)
 			token := tokenInEmail(t, latestEmail(t, app, "new@example.com"))
 			switch state {
 			case "demoted":
@@ -167,10 +168,10 @@ func TestInvitationPolicy(t *testing.T) {
 		t.Errorf("admin no group: %d", code)
 	}
 	// Leader: own group or none.
-	if code := invite(lc, "l1@example.com", &g.ID); code != http.StatusCreated {
+	if code := invite(lc, "l1@example.com", &g.ID); code != http.StatusOK {
 		t.Errorf("leader into own group: %d", code)
 	}
-	if code := invite(lc, "l2@example.com", nil); code != http.StatusCreated {
+	if code := invite(lc, "l2@example.com", nil); code != http.StatusOK {
 		t.Errorf("leader no group: %d", code)
 	}
 	// Leader: someone else's group -> 403.
@@ -221,7 +222,7 @@ func TestLeaderInviteDailyLimit(t *testing.T) {
 	for i := 0; i < 20; i++ {
 		w := lc.do("POST", "/api/v1/invitations",
 			map[string]any{"email": fmt.Sprintf("i%d@example.com", i)}, true)
-		if w.Code != http.StatusCreated {
+		if w.Code != http.StatusOK {
 			t.Fatalf("invite %d: %d %s", i, w.Code, w.Body.String())
 		}
 	}
@@ -254,7 +255,7 @@ func TestLeaderInviteRefusalsConsumeDailyLimit(t *testing.T) {
 
 	for i := 0; i < leaderInviteDailyLimit; i++ {
 		w := lc.do("POST", "/api/v1/invitations", map[string]any{"email": existing.Email}, true)
-		if w.Code != http.StatusConflict {
+		if w.Code != http.StatusOK {
 			t.Fatalf("existing-account refusal %d: %d %s", i, w.Code, w.Body.String())
 		}
 	}
@@ -279,6 +280,92 @@ func TestLeaderInviteRefusalsConsumeDailyLimit(t *testing.T) {
 	}
 }
 
+func TestLeaderInvitationAcknowledgesEligibleAndHeldAddressesAlike(t *testing.T) {
+	app := testApp(t)
+	adminUser := newTestUser(t, app, "root", "pw", models.RoleAdmin)
+	admin := loginAPI(t, app, adminUser.Email, "pw")
+	leader := newTestUser(t, app, "leader", "pw", models.RoleMember)
+	group := newTestGroup(t, app, leader, "Choir", models.GroupActive)
+	client := loginAPI(t, app, leader.Email, "pw")
+	client.holdNotices = true
+	const path = "/api/v1/invitations"
+	const newcomer = "new-singer@example.com"
+	want := apiDo(t, client, "POST", path, map[string]any{"email": newcomer, "groupId": group.ID}, http.StatusOK)
+	if want != jsonString(noticeResponseJSON{Message: leaderInvitationReceived}) {
+		t.Fatalf("leader acknowledgement: %s", want)
+	}
+	if rows := mailJobsOfKind(t, app, kindInvitationMail); len(rows) != 1 {
+		t.Fatalf("eligible invitation queued %d mail jobs", len(rows))
+	}
+
+	adult := newTestUser(t, app, "private-singer", "pw", models.RoleMember)
+	gormMust(t, app.DB.Model(adult).Update("hide_contact_from_leaders", true))
+	teen := newTestUser(t, app, "teen-singer", "pw", models.RoleMember)
+	gormMust(t, app.DB.Model(teen).Updates(map[string]any{"account_type": models.AccountTeen, "birth_date": time.Now().AddDate(-15, 0, 0)}))
+	_, holder, householdPerson, _ := householdFamily(t, app, admin, "parent")
+	const conversion = "household-singer@example.com"
+	token := inviteHouseholdPerson(t, app, holder, householdPerson.ID, conversion)
+	acceptConversion(t, app, token, http.StatusOK)
+	if n := mailCount(t, app, newcomer); n != 1 {
+		t.Fatalf("eligible invitation delivered %d emails", n)
+	}
+	before := len(mailJobsOfKind(t, app, kindInvitationMail))
+	for _, c := range []struct{ name, email string }{
+		{"existing adult", adult.Email}, {"existing teen", teen.Email},
+		{"open ordinary invitation", newcomer}, {"pending household conversion", conversion},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			got := apiDo(t, client, "POST", path, map[string]any{"email": c.email}, http.StatusOK)
+			if got != want {
+				t.Fatalf("acknowledgement: %s, want %s", got, want)
+			}
+		})
+	}
+	if rows := mailJobsOfKind(t, app, kindInvitationMail); len(rows) != before {
+		t.Fatalf("held addresses queued mail: %d jobs before, %d after", before, len(rows))
+	}
+	if n := contactCount(t, app, &models.Invitation{}, "invited_by = ?", leader.ID); n != 1 {
+		t.Fatalf("leader stored %d invitations, want only the eligible one", n)
+	}
+	if n := contactCount(t, app, &models.AuditLog{}, "actor_id = ? AND action = ?", leader.ID, audit.InvitationRefused); n != 4 {
+		t.Fatalf("leader recorded %d refused attempts", n)
+	}
+	for _, c := range []struct{ email, code string }{{adult.Email, "email_taken"}, {newcomer, "already_invited"}, {conversion, "already_invited"}} {
+		got := apiDo(t, admin, "POST", path, map[string]any{"email": c.email}, http.StatusConflict)
+		if !strings.Contains(got, `"code":"`+c.code+`"`) {
+			t.Fatalf("admin refusal: %s, want %s", got, c.code)
+		}
+	}
+	if got := apiDo(t, admin, "POST", path, map[string]any{"email": "other-cohort@example.com"}, http.StatusCreated); !strings.Contains(got, `"invitation":`) {
+		t.Fatalf("admin creation: %s", got)
+	}
+}
+
+func TestLeaderInvitationAcknowledgesDestinationLimit(t *testing.T) {
+	app := testApp(t)
+	admin := newTestUser(t, app, "admin", "pw", models.RoleAdmin)
+	leader := newTestUser(t, app, "leader", "pw", models.RoleMember)
+	group := newTestGroup(t, app, leader, "Choir", models.GroupActive)
+	client := loginAPI(t, app, leader.Email, "pw")
+	client.holdNotices = true
+	prior := models.Invitation{Email: "known@example.com", InvitedBy: admin.ID, TokenHash: "expired", ExpiresAt: time.Now().Add(-time.Minute)}
+	gormMust(t, app.DB.Create(&prior))
+	for i := 0; i < leaderInviteDailyLimit; i++ {
+		if err := audit.Write(app.DB, audit.Entry{Actor: &admin.ID, Action: audit.InvitationResent, TargetType: "invitation", TargetID: prior.ID}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	const path = "/api/v1/invitations"
+	want := apiDo(t, client, "POST", path, map[string]any{"email": "eligible@example.com", "groupId": group.ID}, http.StatusOK)
+	got := apiDo(t, client, "POST", path, map[string]any{"email": prior.Email, "groupId": group.ID}, http.StatusOK)
+	if got != want || len(mailJobsOfKind(t, app, kindInvitationMail)) != 1 {
+		t.Fatalf("destination-limited request answered %s and should queue no additional mail", got)
+	}
+	if n := contactCount(t, app, &models.AuditLog{}, "actor_id = ? AND action = ?", leader.ID, audit.InvitationRefused); n != 1 {
+		t.Fatalf("destination-limited attempt counted %d refusals, want one", n)
+	}
+}
+
 // M1.2 acceptance (DEC-39): accepting an invitation into a full group joins
 // over member_limit only when the inviter explicitly chose to go over it,
 // and the over-limit join is audited.
@@ -300,7 +387,7 @@ func TestInvitationIntoFullGroup(t *testing.T) {
 	// Without the over-limit choice: 409, no account, token stays live.
 	w := lc.do("POST", "/api/v1/invitations",
 		map[string]any{"email": "full1@example.com", "groupId": g.ID}, true)
-	if w.Code != http.StatusCreated {
+	if w.Code != http.StatusOK {
 		t.Fatalf("invite: %d %s", w.Code, w.Body.String())
 	}
 	token := tokenInEmail(t, latestEmail(t, app, "full1@example.com"))
@@ -330,7 +417,7 @@ func TestInvitationIntoFullGroup(t *testing.T) {
 	// With the explicit over-limit choice: joins, and it's audited.
 	w = lc.do("POST", "/api/v1/invitations",
 		map[string]any{"email": "full2@example.com", "groupId": g.ID, "overLimit": true}, true)
-	if w.Code != http.StatusCreated {
+	if w.Code != http.StatusOK {
 		t.Fatalf("invite over limit: %d %s", w.Code, w.Body.String())
 	}
 	token2 := tokenInEmail(t, latestEmail(t, app, "full2@example.com"))
@@ -397,16 +484,16 @@ func TestInvitePowerNeedsAnApprovedGroup(t *testing.T) {
 	}
 	// An active-group leader still can, with a group or without.
 	lc := loginAPI(t, app, "act", "password1234")
-	if w := invite(lc, "newact@example.com", nil); w.Code != http.StatusCreated {
+	if w := invite(lc, "newact@example.com", nil); w.Code != http.StatusOK {
 		t.Errorf("active leader, no group: %d %s", w.Code, w.Body.String())
 	}
 	var active models.Group
 	app.DB.Where("name = ?", "Active").First(&active)
-	if w := invite(lc, "act2@example.com", &active.ID); w.Code != http.StatusCreated {
+	if w := invite(lc, "act2@example.com", &active.ID); w.Code != http.StatusOK {
 		t.Errorf("active leader into active group: %d %s", w.Code, w.Body.String())
 	}
 	// Leading one approved group is enough even beside a pending one.
-	if w := invite(loginAPI(t, app, "mixed", "password1234"), "newmixed@example.com", nil); w.Code != http.StatusCreated {
+	if w := invite(loginAPI(t, app, "mixed", "password1234"), "newmixed@example.com", nil); w.Code != http.StatusOK {
 		t.Errorf("mixed leader, no group: %d %s", w.Code, w.Body.String())
 	}
 }
@@ -417,7 +504,7 @@ func TestInvitationAcceptRechecksApprovedGroupLeadership(t *testing.T) {
 	app := testApp(t)
 	leader := newTestUser(t, app, "leader", "password1234", models.RoleMember)
 	g := newTestGroup(t, app, leader, "Soon rejected", models.GroupActive)
-	apiDo(t, loginAPI(t, app, "leader", "password1234"), "POST", "/api/v1/invitations", map[string]any{"email": "new@example.com"}, http.StatusCreated)
+	apiDo(t, loginAPI(t, app, "leader", "password1234"), "POST", "/api/v1/invitations", map[string]any{"email": "new@example.com"}, http.StatusOK)
 	token := tokenInEmail(t, latestEmail(t, app, "new@example.com"))
 	app.DB.Model(g).Update("status", models.GroupArchived)
 	anon := anonClient(t, app, "192.0.2.3")
@@ -490,7 +577,7 @@ func TestInvitationAcceptanceRechecksLiveStateAtClaim(t *testing.T) {
 // invitedIntoGroup has leader invite email into g and returns the raw token.
 func invitedIntoGroup(t *testing.T, app *App, leader *apiClient, email string, groupID uint) string {
 	t.Helper()
-	apiDo(t, leader, "POST", "/api/v1/invitations", map[string]any{"email": email, "groupId": groupID}, http.StatusCreated)
+	apiDo(t, leader, "POST", "/api/v1/invitations", map[string]any{"email": email, "groupId": groupID}, http.StatusOK)
 	return tokenInEmail(t, latestEmail(t, app, email))
 }
 

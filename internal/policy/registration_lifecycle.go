@@ -77,10 +77,7 @@ var (
 
 // Recorded as built, odd moves included: a manager's add brings back a removed
 // person, a series undo restores any earlier answer (cancelled too), a guest's
-// confirm turns a waiter into going when a seat is free, and a household
-// person's reconcile judges the row as it reads it again under the date's
-// lock, which a removal, a link cancel or a privacy cancel may have changed
-// since its selection, so it starts from any status.
+// confirm turns a waiter into going when a seat is free.
 var registrationRules = map[RegistrationMove]registrationRule{
 	RegAnswer: {
 		from: []string{RegNone, RegGoing, RegMaybe, RegDeclined, RegCancelled, RegWaitlisted},
@@ -102,7 +99,7 @@ var registrationRules = map[RegistrationMove]registrationRule{
 	RegRemoveFromGroup: {from: CurrentRegStatuses, to: []string{RegRemoved}, releasesSeat: true},
 	RegMorePrivate:     {from: CurrentRegStatuses, to: []string{RegCancelled}},
 	RegHouseholdPersonChanged: {
-		from:  allRegStatuses,
+		from:  CurrentRegStatuses,
 		to:    []string{RegCancelled},
 		keeps: true,
 	},

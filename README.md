@@ -90,6 +90,10 @@ Before the release is written it also checks both images pull with no login.
 
 ## Upgrade notes
 
+- **Browser sessions after a database restore.** The first upgrade with this
+  change asks everyone to sign in again. On DigitalOcean, update and verify
+  the restore tools when you upgrade. See [Upgrades and rollback](docs/DEPLOY-DIGITALOCEAN.md#6-upgrades-and-rollback).
+
 - **Nov 2026 (M8.1): exact visibility consent (DEC-158).** From this release on,
   an earlier release refuses to start on the upgraded database, even after
   `fold migrate down-one`. Keep this release; restore data only with its own

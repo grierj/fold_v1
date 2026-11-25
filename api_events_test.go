@@ -2155,11 +2155,11 @@ func TestSeriesRestoreTellsAnEndedGrantOnlyThatItIsBack(t *testing.T) {
 }
 
 // A viewer who can see only one date of a hidden series must get none of the
-// series: the seven "omit" keys are absent from the JSON, the blanked fields are
+// series: the "omit" keys are absent from the JSON, the blanked fields are
 // empty. The tag names are pinned here so a typo in a `series:` tag cannot
 // silently stop hiding a field.
 func TestHiddenSeriesDateHidesEverySeriesField(t *testing.T) {
-	omit := []string{"recurrenceRule", "rruleUntil", "seriesStartsLocal", "seriesTitle", "seriesLocation", "seriesDurationMinutes", "seriesVisibility"}
+	omit := []string{"recurrenceRule", "rruleUntil", "seriesStartsLocal", "seriesVisibility"}
 	blank := []string{"description", "childcareNotes", "childcareCapacity", "childcareAges"}
 
 	// The tags name exactly these fields.
@@ -2189,9 +2189,12 @@ func TestHiddenSeriesDateHidesEverySeriesField(t *testing.T) {
 	inst := occurrenceJSON{
 		ID: 1, EventID: 2, Date: "2030-01-01", Title: "The date", Location: "Hall",
 		Description: "series description", RecurrenceRule: "FREQ=WEEKLY", RRuleUntil: "2031-01-01",
-		SeriesStartsLocal: "2030-01-01T19:00", SeriesTitle: "The series", SeriesLocation: "Series hall",
-		SeriesDurationMinutes: 60, SeriesVisibility: "invite_only",
+		SeriesStartsLocal: "2030-01-01T19:00", SeriesVisibility: "invite_only",
 		ChildcareNotes: "notes", ChildcareCapacity: &cap, ChildcareAges: "2-5",
+	}
+	full, err := json.Marshal(inst)
+	if err != nil {
+		t.Fatal(err)
 	}
 	inst.hideSeriesDetails("/events/2/dates/2030-01-01")
 	body, err := json.Marshal(inst)
@@ -2222,9 +2225,8 @@ func TestHiddenSeriesDateHidesEverySeriesField(t *testing.T) {
 		t.Errorf("the date's own fields must stay: %s", body)
 	}
 	// A viewer who can see the series still gets every key.
-	full, _ := json.Marshal(occurrenceJSON{SeriesTitle: "The series"})
 	for _, key := range omit {
-		if !strings.Contains(string(full), `"`+key+`"`) && key != "rruleUntil" && key != "seriesVisibility" {
+		if !strings.Contains(string(full), `"`+key+`"`) {
 			t.Errorf("authorized JSON lost %q: %s", key, full)
 		}
 	}
@@ -2814,7 +2816,7 @@ func TestCreateEventSerializesWithGroupFirstWriters(t *testing.T) {
 				method, path, otherBody := "POST", "", map[string]any{}
 				if writer == "invitation" {
 					const email = "new-invitee@example.com"
-					apiDo(t, creator, "POST", "/api/v1/invitations", map[string]any{"email": email, "groupId": g.ID}, http.StatusCreated)
+					apiDo(t, creator, "POST", "/api/v1/invitations", map[string]any{"email": email, "groupId": g.ID}, http.StatusOK)
 					token := tokenInEmail(t, latestEmail(t, app, email))
 					otherClient = newAPIClient(t, app)
 					otherClient.fetchCSRF()

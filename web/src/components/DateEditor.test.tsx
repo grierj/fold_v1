@@ -389,7 +389,7 @@ describe("a save refused as stale (date_changed)", () => {
     edits.answer(changed());
     render(editor({ onSaved }));
     await typeTitle();
-    base = { ...base, location: "New hall", seriesLocation: "New hall", revision: "r1" };
+    base = { ...base, location: "New hall", revision: "r1" };
     await save();
     await waitFor(() => expect(onSaved).toHaveBeenCalledOnce());
     expect(edits.sent.map((s) => s.revision)).toEqual(["r0", "r1"]);

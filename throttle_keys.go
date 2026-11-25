@@ -134,6 +134,18 @@ func peopleSearchUserKey(id uint) throttleKey {
 	return throttleKey("people-search:user:" + strconv.FormatUint(uint64(id), 10))
 }
 
+// groupMemberEmailUserKey is the email add budget for one person.
+// owned: one person's id.
+func groupMemberEmailUserKey(id uint) throttleKey {
+	return throttleKey("group-member-email:user:" + strconv.FormatUint(uint64(id), 10))
+}
+
+// groupMemberEmailIPKey is the email add budget for one IP.
+// shared: an IP.
+func groupMemberEmailIPKey(ip string) throttleKey {
+	return throttleKey("group-member-email:ip:" + rateLimitIP(ip))
+}
+
 // managerDateAddKey is the budget for a manager adding people to a date.
 // owned: one person's id.
 func managerDateAddKey(id uint) throttleKey {
@@ -172,6 +184,7 @@ func ownedThrottleKeys(userID uint, held heldAddress) []string {
 	keys := []throttleKey{
 		loginUserKey(userID),
 		peopleSearchUserKey(userID),
+		groupMemberEmailUserKey(userID),
 		managerDateAddKey(userID),
 	}
 	both := emailChangeUserKey(userID).targeted()

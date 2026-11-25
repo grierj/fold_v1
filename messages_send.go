@@ -1018,16 +1018,14 @@ func (a *App) preparedAudienceIn(tx *gorm.DB, m *models.Message, au *audienceJSO
 		}
 		return ids, hidden, "", nil
 	}
-	var author models.User
-	if m.AuthorID != nil {
-		if err := tx.Where("id = ?", *m.AuthorID).Limit(1).Find(&author).Error; err != nil {
-			return nil, nil, "", err
-		}
+	author, err := activeMessageAuthorIn(tx, m, nil)
+	if err != nil {
+		return nil, nil, "", err
 	}
-	if author.ID == 0 || author.Status != models.UserActive {
+	if author == nil {
 		return nil, nil, whyAuthorGone, nil
 	}
-	ids, err = a.resolveAudienceIn(tx, &author, au, now)
+	ids, err = a.resolveAudienceIn(tx, author, au, now)
 	switch {
 	case errors.Is(err, errAudienceRefused):
 		return nil, nil, whyAuthorRefused, nil
