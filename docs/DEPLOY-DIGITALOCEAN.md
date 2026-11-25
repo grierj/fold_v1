@@ -846,20 +846,22 @@ Read the release notes first. `README.md` records operator steps (for
 example the `SESSION_SECRET` length).
 
 For the first upgrade to a release with the browser-session signing epoch,
-update the trusted `/root/fold` checkout to that release's tag or commit.
-Run the matching image or build command below with
-`/root/fold/deploy/digitalocean/upgrade.sh` in place of
-`/opt/fold/upgrade.sh`. The checkout's script installs its tool set before
-upgrading the app. The installed script can upgrade the app while retaining
-its earlier restore tools.
+prepare a separate trusted checkout of the release at `/root/fold-release`.
+For a build-based install, leave `/root/fold` at the deployed commit and fetch
+the target into it without checking it out. Run the matching image or build
+command below with `/root/fold-release/deploy/digitalocean/upgrade.sh` in
+place of `/opt/fold/upgrade.sh` and keep `--source-dir /root/fold`. This
+installs the release's tools and lets the script record the deployed commit
+for rollback before it checks out the target. The earlier installed script
+can upgrade the app while retaining its old restore tools.
 
 After the upgrade, check both installed copies against the release checkout.
 Each comparison succeeds silently. If either differs, finish the upgrade from
 the release checkout before restoring a dump.
 
 ```bash
-sudo cmp /root/fold/deploy/digitalocean/restore.sh /opt/fold/restore.sh
-sudo cmp /root/fold/deploy/digitalocean/restore.sh /opt/fold/deploy-tools/restore.sh
+sudo cmp /root/fold-release/deploy/digitalocean/restore.sh /opt/fold/restore.sh
+sudo cmp /root/fold-release/deploy/digitalocean/restore.sh /opt/fold/deploy-tools/restore.sh
 ```
 
 For subsequent upgrades, run the installed `/opt/fold/upgrade.sh`. It uses its enforcing copy in
