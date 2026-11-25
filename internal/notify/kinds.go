@@ -780,11 +780,11 @@ func init() {
 			case "cleared":
 				title, body = "Room removed: "+event, who+" took the room off "+when+". That date has no room booked now."
 			case "series_picked":
-				title, body = "Room picked for every date: "+event, who+" picked a room for every date."
+				title, body = "Series room picked: "+event, who+" picked a room for the series."
 			case "series_changed":
-				title, body = "Room changed for every date: "+event, who+" changed the room for every date."
+				title, body = "Series room changed: "+event, who+" changed the series room."
 			case "series_stopped":
-				title, body = "Room removed from every date: "+event, who+" stopped booking a room for every date."
+				title, body = "Series room stopped: "+event, who+" stopped the series room."
 			default:
 				title, body = "Room changed: "+event, who+" changed the room for "+when+"."
 			}
@@ -799,11 +799,11 @@ func init() {
 			if v.NeedRoom == 0 {
 				return "", ""
 			}
-			count := "1 date"
+			body := "1 date needs a room. See it in Fold."
 			if v.NeedRoom > 1 {
-				count = strconv.Itoa(v.NeedRoom) + " dates"
+				body = strconv.Itoa(v.NeedRoom) + " dates need a room. See them in Fold."
 			}
-			return "Room needed: " + or(v.Event, "an event"), "Pick another room for " + count + " in Fold."
+			return "Room needed: " + or(v.Event, "an event"), body
 		},
 	})
 	register(Kind{

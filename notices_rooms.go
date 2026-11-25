@@ -195,19 +195,21 @@ func notifySeriesRoomChanged(tx *gorm.DB, ev *models.Event, actor uint, oldRoom,
 	}
 	var note []string
 	if out.Booked > 0 {
-		note = append(note, isAre(out.Booked)+" booked.")
+		note = append(note, "Booked "+dateCount(out.Booked)+".")
 	}
 	if out.Pending > 0 {
 		note = append(note, isAre(out.Pending)+" waiting for an admin's approval.")
 	}
+	// "Left as it is", not "keeps its room": a kept date may hold a room or only wait for one.
 	if kept := out.Kept + out.KeptInUse; kept > 0 {
-		note = append(note, keepsKeep(kept))
+		note = append(note, leftAsIs(kept))
 	}
 	if freed > 0 {
 		note = append(note, hasHave(freed, "no room now."))
 	}
 	if n := len(out.Lost); n > 0 {
-		note = append(note, needsNeed(n)+" a room because the room is in use then. Pick another room for "+themIt(n)+" on the event page.")
+		// No "pick another room": a runner may not be allowed to change a booking an admin made.
+		note = append(note, needsNeed(n)+" a room because the room is in use then. The event page lists "+themIt(n)+".")
 	}
 	_, err = notify.Send(tx, notify.Msg{
 		Kind: notify.RoomChanged, To: to, Actor: &actor,
@@ -240,11 +242,11 @@ func hasHave(n int, rest string) string {
 	return fmt.Sprintf("%d dates have %s", n, rest)
 }
 
-func keepsKeep(n int) string {
+func leftAsIs(n int) string {
 	if n == 1 {
-		return "1 date keeps its room."
+		return "1 date was left as it is."
 	}
-	return fmt.Sprintf("%d dates keep their room.", n)
+	return fmt.Sprintf("%d dates were left as they are.", n)
 }
 
 func needsNeed(n int) string {

@@ -237,9 +237,9 @@ func TestRoomChangedSeries(t *testing.T) {
 		t.Fatalf("the series pick: %d %+v", code, out)
 	}
 	n := next(t)
-	if n.Title != "Room picked for every date: Weekly" || n.SubjectType != "event" ||
-		n.Body != "coleader picked a room for every date. 9 dates are booked. 1 date still needs a room because the room is in use then. Pick another room for it on the event page." ||
-		n.PushTitle != "Room needed: Weekly" || n.PushBody != "Pick another room for 1 date in Fold." {
+	if n.Title != "Series room picked: Weekly" || n.SubjectType != "event" ||
+		n.Body != "coleader picked a room for the series. Booked 9 dates. 1 date still needs a room because the room is in use then. The event page lists it." ||
+		n.PushTitle != "Room needed: Weekly" || n.PushBody != "1 date needs a room. See it in Fold." {
 		t.Fatalf("the series pick's notice: %+v", n)
 	}
 	if d := noticeDates(t, n); len(d) != 1 || d[0] != feedDate(f.startOn) {
@@ -254,7 +254,7 @@ func TestRoomChangedSeries(t *testing.T) {
 	if code, _ := f.seriesRoom(t, co, series, map[string]any{"roomId": chapel.ID}); code != http.StatusOK {
 		t.Fatalf("change: %d", code)
 	}
-	if n := next(t); n.Title != "Room changed for every date: Weekly" || n.Body != "coleader changed the room for every date. 10 dates are booked." || n.PushTitle != "" || len(noticeDates(t, n)) != 0 {
+	if n := next(t); n.Title != "Series room changed: Weekly" || n.Body != "coleader changed the series room. Booked 10 dates." || n.PushTitle != "" || len(noticeDates(t, n)) != 0 {
 		t.Fatalf("the change's notice: %+v", n)
 	}
 
@@ -270,13 +270,13 @@ func TestRoomChangedSeries(t *testing.T) {
 	if code, _ := f.seriesRoom(t, co, series, map[string]any{"roomId": annex.ID}); code != http.StatusOK {
 		t.Fatalf("change to the annex: %d", code)
 	}
-	if n := next(t); n.Body != "coleader changed the room for every date. 9 dates are booked. 1 date keeps its room." {
+	if n := next(t); n.Body != "coleader changed the series room. Booked 9 dates. 1 date was left as it is." {
 		t.Fatalf("the change that keeps a date: %+v", n)
 	}
 	if code, out := f.seriesRoom(t, co, series, map[string]any{"roomId": annex.ID, "includeDates": []string{third}}); code != http.StatusOK || out.Changed != 1 {
 		t.Fatalf("include the third date: %d %+v", code, out)
 	}
-	if n := next(t); n.Title != "Room picked for every date: Weekly" || n.Body != "coleader picked a room for every date. 1 date is booked." {
+	if n := next(t); n.Title != "Series room picked: Weekly" || n.Body != "coleader picked a room for the series. Booked 1 date." {
 		t.Fatalf("the included date's notice: %+v", n)
 	}
 
@@ -290,7 +290,7 @@ func TestRoomChangedSeries(t *testing.T) {
 	if code, _ := f.seriesRoom(t, co, series, map[string]any{"roomId": nil}); code != http.StatusOK {
 		t.Fatalf("stop: %d", code)
 	}
-	if n := next(t); n.Title != "Room removed from every date: Weekly" || n.Body != "coleader stopped booking a room for every date. 10 dates have no room now." {
+	if n := next(t); n.Title != "Series room stopped: Weekly" || n.Body != "coleader stopped the series room. 10 dates have no room now." {
 		t.Fatalf("the stop's notice: %+v", n)
 	}
 	if code, _ := f.seriesRoom(t, co, series, map[string]any{"roomId": nil}); code != http.StatusOK {
@@ -316,7 +316,7 @@ func TestRoomChangedSeriesBookAnywayApprovalAndCreate(t *testing.T) {
 	}
 	for _, uid := range []uint{f.leaderUser.ID, coUser.ID} {
 		all := roomChangedOf(t, f.app, uid)
-		if n := all[len(all)-1]; n.Body != "admin picked a room for every date. 3 dates are booked." || strings.Contains(n.Body+n.EmailBody, "youth") {
+		if n := all[len(all)-1]; n.Body != "admin picked a room for the series. Booked 3 dates." || strings.Contains(n.Body+n.EmailBody, "youth") {
 			t.Fatalf("user %d: the admin's notice: %+v", uid, n)
 		}
 	}
@@ -332,7 +332,7 @@ func TestRoomChangedSeriesBookAnywayApprovalAndCreate(t *testing.T) {
 		t.Fatalf("a waiting series pick: %d %+v", code, out)
 	}
 	all := roomChangedOf(t, f.app, f.leaderUser.ID)
-	if n := all[len(all)-1]; n.Body != "coleader changed the room for every date. 1 date is waiting for an admin's approval. 1 date keeps its room. 1 date still needs a room because the room is in use then. Pick another room for it on the event page." ||
+	if n := all[len(all)-1]; n.Body != "coleader changed the series room. 1 date is waiting for an admin's approval. 1 date was left as it is. 1 date still needs a room because the room is in use then. The event page lists it." ||
 		n.PushTitle != "Room needed: Weekly" {
 		t.Fatalf("the waiting pick's notice: %+v", n)
 	}
