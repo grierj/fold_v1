@@ -348,7 +348,7 @@ func (a *App) apiAdminUpdateRoom(c *gin.Context) {
 			if err := tx.Save(&room).Error; err != nil {
 				return err
 			}
-			if err := audit.Write(tx, audit.Entry{Actor: &actor.ID, Action: audit.RoomUpdated, TargetType: "room", TargetID: room.ID,
+			if err := audit.Write(tx, audit.Entry{Actor: &me.ID, Action: audit.RoomUpdated, TargetType: "room", TargetID: room.ID,
 				Meta: map[string]any{"changed": changed}, IP: c.ClientIP()}); err != nil {
 				return err
 			}
