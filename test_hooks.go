@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"sync/atomic"
 	"time"
 
@@ -31,12 +32,14 @@ type testHooks struct {
 	// between a busy attempt's acknowledged rollback and the next attempt, with
 	// no transaction open (T-301).
 	// sealAttempts counts seal entries of the deletion, settle and the save.
+	// wrapDeleteContext lets a test expire the deletion's budget at an observed phase.
 	restoreAckPause          func()
 	settleBeforeTx           func()
 	settleBeforeFence        func(*gorm.DB)
 	settleAfterFence         func(*gorm.DB)
 	deleteBeforeSeal         func(*gorm.DB)
 	deleteBeforeRetry        func()
+	wrapDeleteContext        func(context.Context) context.Context
 	readBeforeSeal           func(*gorm.DB)
 	legacySaveBeforeSeal     func(*gorm.DB)
 	legacySaveBeforeRetry    func()
