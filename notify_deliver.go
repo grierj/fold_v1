@@ -356,10 +356,18 @@ func (a *App) sendHeldNotification(tx *gorm.DB, ctx context.Context, id uint) (o
 			return nil, err
 		}
 	}
-	n.EmailTitle, n.EmailBody, err = noticeEmailText(tx, &n, k, n.EmailTitle, n.EmailBody)
+	title, body, nameFree, err := noticeEmailText(tx, &n, k, n.EmailTitle, n.EmailBody)
 	if err != nil {
 		return nil, err
 	}
+	if nameFree && k.Key == notify.RegistrationPromoted {
+		manage, err := a.promotionManagePart(tx, &n)
+		if err != nil {
+			return nil, err
+		}
+		body += manage
+	}
+	n.EmailTitle, n.EmailBody = title, body
 	msg := a.notificationEmailMessage(&n, u, k, footer)
 	sendCtx, cancel := context.WithTimeout(ctx, deliverSendTimeout)
 	defer cancel()

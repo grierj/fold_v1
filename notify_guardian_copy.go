@@ -182,7 +182,7 @@ func (a *App) prepareGuardianCopy(tx *gorm.DB, p guardianCopyJob) (msg mail.Mess
 		return msg, nil, false, nil
 	}
 	if !k.CopyWithoutSubjectAccess {
-		title, body, err = noticeEmailText(tx, &n, k, n.Title, n.Body)
+		title, body, _, err = noticeEmailText(tx, &n, k, n.Title, n.Body)
 		if err != nil {
 			return msg, nil, false, err
 		}

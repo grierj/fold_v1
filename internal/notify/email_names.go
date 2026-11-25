@@ -2,6 +2,7 @@ package notify
 
 import (
 	"encoding/json"
+	"strings"
 
 	"fold/models"
 )
@@ -21,6 +22,20 @@ type namedEmail struct {
 }
 
 const emailHouseholdPersonKey = "emailHouseholdPersonId"
+
+const promotionManageLabel = "\n\nCan't come after all? Cancel your registration here:\n"
+
+func PromotionManagePart(link string) string { return promotionManageLabel + link }
+
+// StoredPromotionManageURL reads the final manage-link section written by the
+// promotion template, including on rows that predate name attribution.
+func StoredPromotionManageURL(body string) string {
+	i := strings.LastIndex(body, promotionManageLabel)
+	if i < 0 {
+		return ""
+	}
+	return body[i+len(promotionManageLabel):]
+}
 
 // EmailNames describes the names a stored email or guardian copy can carry
 // (O-16, #493). Known is false when a row lacks reliable attribution.

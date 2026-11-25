@@ -34,8 +34,10 @@ suppressions. The guards named here are parse-only; each test file states its ow
   may still reach the provider. Every attempt reads again and a failed read retries.
 - Registration notices put the named household person's ID in private notice data. A zero
   records that the text names no household person. Older registration notices lack that ID and
-  use the name-free text. The direct email still has its stored Fold link. Guardian copies
-  keep their own footer and unsubscribe. See O-16 and T26 in the erasure inventory.
+  use the name-free text. In direct promotion mail, Fold also keeps the existing cancellation
+  token when it still controls a going registration for that recipient and date. It builds the
+  cancellation URL on the current Fold origin. Guardian copies use their own footer and
+  unsubscribe. See O-16 and T26 in the erasure inventory.
 
 ## Optional email choices
 

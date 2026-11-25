@@ -571,7 +571,7 @@ func (a *App) promoteRows(tx *gorm.DB, ev *models.Event, o *models.EventOccurren
 		if err := auditRegistration(tx, actor, audit.RegistrationChanged, ev.ID, r, next, ""); err != nil {
 			return err
 		}
-		if err := notifyRegistrationPromoted(tx, ev, o, r, a.emailBaseURL()+"/guest/manage/"+raw, actor, now); err != nil {
+		if err := notifyRegistrationPromoted(tx, ev, o, r, a.guestManageURL(raw), actor, now); err != nil {
 			return err
 		}
 	}

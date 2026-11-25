@@ -658,7 +658,7 @@ func init() {
 				body += "\n\nJoin by video: " + v.VideoURL
 			}
 			if v.ManageURL != "" {
-				body += "\n\nCan't come after all? Cancel your registration here:\n" + v.ManageURL
+				body += PromotionManagePart(v.ManageURL)
 			}
 			return title, body
 		},

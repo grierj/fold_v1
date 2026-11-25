@@ -1,6 +1,8 @@
 package main
 
 import (
+	"errors"
+	"net/url"
 	"strings"
 
 	"fold/internal/mail"
@@ -108,21 +110,53 @@ func categoryOfScope(scope string) (string, bool) {
 // noticeEmailText checks only the identities expressed by the notice's
 // template. Finding a name in a title or note by matching free text would
 // guess whose name it was (erasure inventory §3).
-func noticeEmailText(tx *gorm.DB, n *models.Notification, k notify.Kind, title, body string) (string, string, error) {
+func noticeEmailText(tx *gorm.DB, n *models.Notification, k notify.Kind, title, body string) (string, string, bool, error) {
 	names, check := k.EmailNames(n)
 	if !check {
-		return title, body, nil
+		return title, body, false, nil
 	}
 	if names.Known {
 		live, err := noticeNamesAvailable(tx, names)
 		if err != nil {
-			return "", "", err
+			return "", "", false, err
 		}
 		if live {
-			return title, body, nil
+			return title, body, false, nil
 		}
 	}
-	return names.Title, names.Body, nil
+	return names.Title, names.Body, true, nil
+}
+
+// promotionManagePart keeps the existing cancellation credential for this
+// recipient and date. Rebuild its URL on the current Fold origin so no
+// unverified text from the old email is copied.
+func (a *App) promotionManagePart(tx *gorm.DB, n *models.Notification) (string, error) {
+	if n.SubjectType != "occurrence" || n.SubjectID == nil {
+		return "", nil
+	}
+	u, err := url.Parse(notify.StoredPromotionManageURL(n.EmailBody))
+	if err != nil || u.Host == "" {
+		return "", nil
+	}
+	i := strings.LastIndex(u.EscapedPath(), guestManagePath)
+	if i < 0 {
+		return "", nil
+	}
+	raw := u.EscapedPath()[i+len(guestManagePath):]
+	if len(raw) != rawTokenLen {
+		return "", nil
+	}
+	m, err := liveTokenManage(tx, raw)
+	if errors.Is(err, errTokenInvalid) || errors.Is(err, gorm.ErrRecordNotFound) {
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	if m.Occ.ID != *n.SubjectID || registrationHolder(*m.Reg) != n.UserID || m.Reg.Status != models.RegGoing {
+		return "", nil
+	}
+	return notify.PromotionManagePart(a.guestManageURL(raw)), nil
 }
 
 func noticeNamesAvailable(tx *gorm.DB, names notify.EmailNames) (bool, error) {
