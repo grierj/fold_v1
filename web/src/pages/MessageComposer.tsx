@@ -12,7 +12,7 @@ import { reminderAudience, reminderDateText, reminderName } from "../lib/reminde
 import { RefusedSaveLine, useRefusedSave } from "../lib/refusedSave";
 import { outcomeOf } from "../lib/rosterWrites";
 import { useAction } from "../lib/useAction";
-import { answerNames, useRevisionSave, type RevisionConflict } from "../lib/useRevisionSave";
+import { answerNames, refusedAgain, useRevisionSave, type RevisionConflict } from "../lib/useRevisionSave";
 import { useChurchZoneLoad } from "../lib/useSite";
 import { isNumber, isObject, isString } from "../lib/wireValues";
 import { useUnsavedChanges } from "../lib/unsavedChanges";
@@ -105,9 +105,6 @@ const namesAMessage = (answer: unknown): answer is { message: Message } =>
 
 // The value a new message's form opens with, before its first save.
 const BLANK: MessageValue = { subject: "", bodyHtml: "", audience: { type: "group" }, pushAlert: true, channel: "email", status: "draft", scheduledAt: null };
-
-// Every send was refused while nothing the form writes changed: the form says its ordinary refusal.
-const refusedEverySend = () => new ApiError(409, "message changed", { code: "message_changed" });
 
 // What a press of the confirmation sends: a send (the schedule) of the message it was pressed on (`value`, with the
 // status and scheduled time it had), or a save of a scheduled message's new list (DEC-169) that then goes on with the
@@ -500,7 +497,7 @@ function Composer({ options, zone, opened, edit = false, params, refusal, back, 
       return res;
     }, { ...draft, channel: "email", status: known.current?.status ?? "draft", scheduledAt: known.current?.scheduledAt ?? null });
 
-    if (outcome === "refused") throw refusedEverySend();
+    if (outcome === "refused") throw refusedAgain("message_changed");
 
     if (outcome !== "saved" || !alive.current || !known.current) return null;
     const m = known.current;
