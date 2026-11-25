@@ -50,12 +50,17 @@ test("a message sender sees who joined since they looked, then sends to the list
   await group.join("Pat Newcomer");
   await ask.getByRole("button", { name: "Send now" }).click();
 
-  const step = page.getByRole("group", { name: "Who gets this changed since you looked." });
+  const step = page.getByRole("group", { name: "The list of people who get this has changed since you looked." });
   await expect(step).toBeVisible();
   await expect(step).toContainText("Pat Newcomer will now get this.");
   await expect(step).toContainText("Send to 3 people now?");
+  // Focus is on the line that says what changed, so a key still held from the refused press chooses nothing.
+  await expect(step.getByText("The list of people who get this has changed since you looked.")).toBeFocused();
+  await page.keyboard.press("Enter");
   const go = step.getByRole("button", { name: "Send to the list as it is now" });
-  await expect(go).toBeFocused();
+  // The list it asks about is the review's, Pat included.
+  await step.getByText("See who's on the list").click();
+  await expect(step.getByRole("list").getByText("Pat Newcomer", { exact: true })).toBeVisible();
   await expect(step.getByRole("button", { name: "Review the whole list" })).toBeVisible();
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
   await step.screenshot({ path: "/var/tmp/msgslice/changed-list-390.png" });
@@ -66,6 +71,46 @@ test("a message sender sees who joined since they looked, then sends to the list
   await expect(page.getByRole("heading", { name: subject, level: 1 })).toBeVisible();
   await expect(page.getByRole("textbox", { name: "Subject" })).toHaveCount(0);
   expect(schedules).toEqual([409, 200]);
+});
+
+test("a scheduled message's new list is confirmed before Preview saves it, and goes back to its old list when the sender goes back", async ({ page, request }) => {
+  const group = await leesGroup(request, `Scheduled ${Date.now()}`);
+  const lee = await apiAs(request, "lee");
+  const subject = `Later ${Date.now()}`;
+  const audience = { type: "group", groupId: group.id };
+
+  const created = schema.parse(schema.looseObject({ message: schema.looseObject({ id: schema.number(), revision: schema.string() }) }), await lee("POST", "/messages", {
+    channel: "email", subject, bodyHtml: "<p>Hello</p>", audience, pushAlert: true,
+  }));
+
+  const id = created.message.id;
+  const { review } = schema.parse(schema.looseObject({ review: schema.looseObject({ token: schema.string() }) }), await lee("GET", `/messages/${id}/review`));
+
+  await lee("POST", `/messages/${id}/schedule`, { revision: created.message.revision, review: review.token, scheduledAt: new Date(Date.now() + 3 * 864e5).toISOString() });
+
+  const stored = async () => schema.parse(schema.looseObject({ message: schema.looseObject({ status: schema.string(), audience: schema.looseObject({ roles: schema.array(schema.string()) }) }) }),
+    await (await apiAs(request, "lee"))("GET", `/messages/${id}`)).message;
+
+  await signInTo(page, "lee", `/messages/${id}`);
+  await page.getByRole("button", { name: "Edit" }).click();
+  await page.getByRole("button", { name: "Members" }).click();
+  await page.getByRole("button", { name: "Preview" }).click();
+  const ask = page.getByRole("group", { name: "Change who gets this to 1 person?" });
+  await expect(ask).toBeVisible();
+  await expect(ask).toContainText("It isn't sent now. It stays scheduled");
+  await expect(ask.getByText("Change who gets this to 1 person?")).toBeFocused();
+  await page.keyboard.press("Enter");
+  await expect(page.getByRole("heading", { name: "Preview", level: 2 })).toHaveCount(0);
+
+  // Going back saves nothing: it stays scheduled for members and leaders, and the form keeps the edit.
+  await ask.getByRole("button", { name: "Go back" }).click();
+  await expect(page.getByRole("button", { name: "Members" })).toHaveAttribute("aria-pressed", "false");
+  expect(await stored()).toMatchObject({ status: "scheduled", audience: { roles: ["member", "leader"] } });
+
+  await page.getByRole("button", { name: "Preview" }).click();
+  await page.getByRole("group", { name: "Change who gets this to 1 person?" }).getByRole("button", { name: "Save the change" }).click();
+  await expect(page.getByRole("heading", { name: "Preview", level: 2 })).toBeVisible();
+  expect(await stored()).toMatchObject({ status: "scheduled", audience: { roles: ["leader"] } });
 });
 
 test("a message edited in two tabs: the second save says the changes could not be saved and shows the first", async ({ page, browser, request }) => {
