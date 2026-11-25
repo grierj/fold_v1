@@ -1,6 +1,7 @@
 import { ApiError } from "../api/core";
 import type { KeptDateCount } from "../types";
 import { isJsonObject, isNumber, isString } from "./wireValues";
+import { formatEventDay } from "./when";
 
 // What people read when something goes wrong (UI makeover PR 4, DEC-61).
 // The API sends a stable code with every error; this is the only place
@@ -82,6 +83,7 @@ export const ERROR_COPY = {
   room_busy: "That room is already booked then. Pick another room, or ask an admin.",
   room_restricted: "Only an admin can book that room.",
   room_gone: "That room isn't available anymore. Pick another room.",
+  series_busy_dates_changed: "The dates in use changed. Check the event for current bookings.",
   series_request_kept: "Only an admin can change this event's room request now, so the room for every date could not be changed.",
   booking_admin_only: "Only an admin can change this date's room. Ask an admin if it needs to change.",
   rooms_off: "Room booking has been turned off, so rooms can't be picked here now.",
@@ -146,6 +148,7 @@ export const ERROR_COPY = {
   needs_host_successor: "Some church-wide events this person hosts alone still need a new host, or the list changed. Check the host for each event and try again.",
 
   group_full: "This group is full.",
+  group_member_email_unavailable: "We couldn't add them by email. If they need a Fold account, you can send an invitation.",
   invite_only: "This group is invite only. Ask a leader to invite you.",
   cannot_join: "You can't join this group. Ask a leader if you think that's a mistake.",
   members_only: "Only members can see who's in this group.",
@@ -183,6 +186,7 @@ export const ERROR_COPY = {
   visibility_not_allowed: "That visibility isn't available for this event. Pick another.",
   cannot_host: "That account can't host an event.",
   teen_host: "Hosts need to be adults.",
+  date_add_person_not_found: "We couldn't find that person. Check the email address and try again.",
   no_account: "There's no account with that email. Check the spelling, or invite them first.",
   invalid_duration: "An event can last from 1 minute to 7 days.",
   recurrence_too_many: "That repeat rule makes too many dates. Choose a rule that repeats at most a few times a day.",
@@ -245,6 +249,10 @@ export const ERROR_COPY = {
 } as const;
 
 export type ErrorCode = keyof typeof ERROR_COPY;
+
+export function messageDailyLimitText(at: string | null, zone: string): string {
+  return ERROR_COPY.message_daily_limit.replace("for that day", at ? `on ${formatEventDay(at, zone)}` : "today");
+}
 
 const NETWORK = "We couldn't reach Fold. Check your connection and try again.";
 

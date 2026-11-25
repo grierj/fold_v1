@@ -35,7 +35,7 @@ async function useEmail(address: string) {
   await userEvent.type(screen.getByLabelText("Email address"), address);
 }
 
-const noAccount = () => new ApiError(404, "user not found", { code: "not_found" });
+const emailUnavailable = () => new ApiError(400, "could not add this person by email", { code: "group_member_email_unavailable" });
 
 beforeEach(() => {
   vi.resetAllMocks();
@@ -83,22 +83,32 @@ it("switches to one email field and adds an existing account", async () => {
   expect(screen.getByRole("combobox", { name: "Find a person by name" })).toBeInTheDocument();
 });
 
-it("offers the invitation when no account uses the email, and sends it to that email", async () => {
-  vi.mocked(Groups.addMember).mockRejectedValue(noAccount());
-  vi.mocked(Invitations.create).mockResolvedValue({ invitation: testInvitation() });
+it("shows the leader's acknowledgement after an unavailable email add and an invitation request", async () => {
+  vi.mocked(Groups.addMember).mockRejectedValue(emailUnavailable());
+  const message = "Invitation request received. If they can accept it, they'll get an email with a link.";
+  vi.mocked(Invitations.create).mockResolvedValue({ message });
   panel(); await openPanel(); await useEmail("new@example.com");
   await userEvent.click(screen.getByRole("button", { name: "Add member" }));
-  expect(await screen.findByText("No account uses that email. Invite them to Fold?")).toBeInTheDocument();
+  expect(await screen.findByText("We couldn't add them by email. If they need a Fold account, you can send an invitation.")).toBeInTheDocument();
   expect(screen.queryByRole("alert")).not.toBeInTheDocument();
   await userEvent.click(screen.getByRole("button", { name: "Send invitation" }));
   expect(Invitations.create).toHaveBeenCalledExactlyOnceWith({ email: "new@example.com", groupId: 1, overLimit: false });
-  expect(await screen.findByText("Invitation sent to new@example.com.")).toBeInTheDocument();
+  expect(await screen.findByText(message)).toHaveAttribute("role", "status");
   expect(screen.queryByRole("button", { name: "Send invitation" })).not.toBeInTheDocument();
   expect(screen.getByLabelText("Email address")).toHaveValue("");
 });
 
+it("confirms a completed admin invitation", async () => {
+  vi.mocked(Groups.addMember).mockRejectedValue(emailUnavailable());
+  vi.mocked(Invitations.create).mockResolvedValue({ invitation: testInvitation() });
+  panel(); await openPanel(); await useEmail("new@example.com");
+  await userEvent.click(screen.getByRole("button", { name: "Add member" }));
+  await userEvent.click(await screen.findByRole("button", { name: "Send invitation" }));
+  expect(await screen.findByText("Invitation sent to new@example.com.")).toBeInTheDocument();
+});
+
 it("drops the invitation offer when the email changes", async () => {
-  vi.mocked(Groups.addMember).mockRejectedValue(noAccount());
+  vi.mocked(Groups.addMember).mockRejectedValue(emailUnavailable());
   panel(); await openPanel(); await useEmail("new@example.com");
   await userEvent.click(screen.getByRole("button", { name: "Add member" }));
   await screen.findByRole("button", { name: "Send invitation" });
@@ -107,7 +117,7 @@ it("drops the invitation offer when the email changes", async () => {
 });
 
 it("keeps the invitation rules: a refusal shows friendly wording, never the server's text", async () => {
-  vi.mocked(Groups.addMember).mockRejectedValue(noAccount());
+  vi.mocked(Groups.addMember).mockRejectedValue(emailUnavailable());
   vi.mocked(Invitations.create).mockRejectedValue(new ApiError(429, "invitation limit reached (20 per day)", { code: "rate_limited" }));
   panel(); await openPanel(); await useEmail("new@example.com");
   await userEvent.click(screen.getByRole("button", { name: "Add member" }));
@@ -136,7 +146,7 @@ it("adds nobody when the leader declines the over-limit prompt", async () => {
 });
 
 it("carries the over-limit choice into the invitation for a full group", async () => {
-  vi.mocked(Groups.addMember).mockRejectedValue(noAccount());
+  vi.mocked(Groups.addMember).mockRejectedValue(emailUnavailable());
   vi.mocked(Invitations.create).mockResolvedValue({ invitation: testInvitation() });
   panel({ memberCount: 3, memberLimit: 3 }); await openPanel(); await useEmail("new@example.com");
   await userEvent.click(screen.getByRole("button", { name: "Add member" }));
@@ -152,11 +162,12 @@ it("starts on the email field, with no name search, for someone who can't search
   expect(screen.queryByRole("button", { name: "Search by name instead" })).not.toBeInTheDocument();
 });
 
-it("says a teen can only be asked by name when the email belongs to a teen", async () => {
-  vi.mocked(Groups.addMember).mockRejectedValue(new ApiError(409, "teen", { code: "teen_add_approval_required" }));
-  panel(); await openPanel(); await useEmail("teen@example.com");
+it("shows an error instead of offering an invitation when the group is unavailable", async () => {
+  vi.mocked(Groups.addMember).mockRejectedValue(new ApiError(404, "group not found", { code: "not_found" }));
+  panel(); await openPanel(); await useEmail("pat@example.com");
   await userEvent.click(screen.getByRole("button", { name: "Add member" }));
-  expect(await screen.findByRole("alert")).toHaveTextContent("Select this person by name, then choose Ask to add.");
+  expect(await screen.findByRole("alert")).toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "Send invitation" })).not.toBeInTheDocument();
 });
 
 it("moves focus to the field it switches to, in both directions", async () => {

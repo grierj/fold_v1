@@ -1,4 +1,4 @@
-import type { AgeBand, InvitationAcceptance, InvitationContext, InvitationResponse } from "../types";
+import type { AgeBand, InvitationAcceptance, InvitationContext, InvitationResponse, NoticeResponse } from "../types";
 import { api, path } from "./core";
 
 // Invitations (M1.2, 5.10): admins and leaders invite; the person sets a
@@ -12,7 +12,7 @@ export const Invitations = {
     role?: "member" | "leader";
     accountType?: "adult" | "teen";
     overLimit?: boolean;
-  }) => api<InvitationResponse>("/invitations", { method: "POST", body: data }),
+  }) => api<InvitationResponse | NoticeResponse>("/invitations", { method: "POST", body: data }),
   get: (token: string) => api<InvitationContext>(path`/invitations/${token}`),
   accept: (data: { token: string; name: string; password: string; ageBand: AgeBand; birthDate?: string }) =>
     api<InvitationAcceptance>("/invitations/accept", { method: "POST", body: data, rotatesCsrf: true }),

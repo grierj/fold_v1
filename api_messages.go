@@ -439,6 +439,17 @@ func (a *App) resolveAudienceIn(db *gorm.DB, me *models.User, au *audienceJSON, 
 	return kept, nil
 }
 
+func (a *App) resolveAuthorAudienceIn(tx *gorm.DB, me *models.User, m *models.Message, au *audienceJSON) ([]uint, error) {
+	author, err := activeMessageAuthorIn(tx, m, me)
+	if err != nil {
+		return nil, err
+	}
+	if author == nil {
+		return nil, errAudienceRefused
+	}
+	return a.resolveAudienceIn(tx, author, au, a.now())
+}
+
 // composeGroupJSON / composeEventJSON are what the picker offers.
 type composeGroupJSON struct {
 	ID   uint   `json:"id"`
@@ -633,9 +644,7 @@ type messageBody struct {
 	Review string `json:"review"`
 }
 
-// applyMessageBodyIn validates body and copies it onto m, checking on tx that
-// me may message its audience; the HTML is sanitized before it is stored. The
-// errors are the refusals in words, or a failed read.
+// applyMessageBodyIn validates the body against the message author's audience.
 func (a *App) applyMessageBodyIn(tx *gorm.DB, me *models.User, m *models.Message, body messageBody) error {
 	if body.Channel == "" {
 		body.Channel = "email"
@@ -666,7 +675,7 @@ func (a *App) applyMessageBodyIn(tx *gorm.DB, me *models.User, m *models.Message
 	if !ownPictures(clean, m.ID) {
 		return errMessageImage
 	}
-	if _, err := a.resolveAudienceIn(tx, me, &body.Audience, a.now()); err != nil {
+	if _, err := a.resolveAuthorAudienceIn(tx, me, m, &body.Audience); err != nil {
 		return audienceError(me, err)
 	}
 	if err := mergeFieldError(subject+"\n"+clean, body.Audience); err != nil {

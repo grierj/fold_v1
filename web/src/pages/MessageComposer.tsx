@@ -6,8 +6,8 @@ import { useAuth } from "../auth";
 import { ApiError } from "../api/core";
 import { Messages, previewHTMLPath } from "../api/messages";
 import type { AudienceChange, AudienceSummary, ComposeOptions, Message, MessageAudience, MessagePreview, MessageReview } from "../types";
-import { ERROR_COPY, errorCode, errorText, type ErrorCode } from "../lib/errors";
-import { audienceKey, audienceLabel, changeLines, confirmLine, confirmPushLine, fromAudience, guardianLine, historyLine, historyTeenLine, isOneEvent, listLimitLine, notMovedLine, prefillChoice, pushHistoryLine, retryQuestion, reviewRefusal, saveListLine, statusLabel, stillScheduledLine, toAudience, type AudienceChoice, type ReviewRefusal } from "../lib/messages";
+import { ERROR_COPY, errorCode, errorText, messageDailyLimitText, type ErrorCode } from "../lib/errors";
+import { audienceKey, audienceLabel, changeLines, confirmLine, fromAudience, guardianLine, historyLine, historyTeenLine, isOneEvent, listLimitLine, notMovedLine, prefillChoice, pushHistoryLine, pushLine, retryQuestion, reviewRefusal, saveListLine, statusLabel, stillScheduledLine, toAudience, type AudienceChoice, type ReviewRefusal } from "../lib/messages";
 import { reminderAudience, reminderDateText, reminderName } from "../lib/reminders";
 import { RefusedSaveLine, useRefusedSave } from "../lib/refusedSave";
 import { outcomeOf } from "../lib/rosterWrites";
@@ -770,12 +770,13 @@ function Composer({ options, zone, opened, edit = false, params, refusal, back, 
       }
 
       setConfirm(null);
-      await place(e, "We couldn't schedule the message.");
+      const code = errorCode(e);
+
+      if (code === "message_daily_limit") show({ form: messageDailyLimitText(asked.at, zone) });
+      else await place(e, "We couldn't schedule the message.");
 
       // A new time for a message already scheduled was refused: it says where that leaves it. Not for a refusal the
       // server gives before it reads the message (the time asked for), or one that reads it again (it started sending).
-      const code = errorCode(e);
-
       return asked.value.status === "scheduled" && code !== "message_locked" && code !== "message_when" ? notMovedLine(asked.value.scheduledAt, zone) : false;
     }
   }
@@ -1051,7 +1052,7 @@ function Composer({ options, zone, opened, edit = false, params, refusal, back, 
           {savingList
             ? <p className="text-sm text-primary-on-subtle">To {audience ? audienceLabel(audience, options) : "the people you chose"}. {stillScheduledLine(asking.value.scheduledAt, zone)}</p>
             : <p className="text-sm text-primary-on-subtle">To {audience ? audienceLabel(audience, options) : "the people you chose"}. You can change or cancel it until it starts sending.</p>}
-          {pushOn && asking.review.summary.push > 0 && <p className="text-sm text-primary-on-subtle">{confirmPushLine(asking.review)}</p>}
+          {pushOn && asking.review.summary.push > 0 && <p className="text-sm text-primary-on-subtle">{pushLine(asking.review.summary)}</p>}
           <RecipientList summary={asking.review.summary} push={pushOn} />
           <FormActions>
             <Button ref={confirmButton} variant="primary" layout="w-full sm:w-auto" disabled={action.running} onClick={confirmed}>
