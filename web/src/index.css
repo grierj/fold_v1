@@ -215,6 +215,7 @@
   .input:focus-visible { outline-offset: 2px; }
   .input:disabled { @apply bg-sunken text-text-muted cursor-not-allowed; }
   .input[aria-invalid="true"] { @apply border-danger; }
+  .input[type="range"] { accent-color: var(--color-primary); }
   .btn-secondary:active, .btn-ghost:active, .btn-link:active { @apply bg-primary-subtle text-primary-on-subtle; }
   .btn-danger-outline:active { @apply bg-danger-subtle; }
   .btn-secondary:is(:disabled, [aria-disabled="true"]), .btn-danger-outline:disabled, .btn-ghost:disabled, .btn-link:disabled { @apply bg-sunken text-text-muted cursor-not-allowed; }

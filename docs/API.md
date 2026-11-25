@@ -425,14 +425,15 @@ lives under `UPLOAD_DIR` (`./data/uploads` default, `/data/uploads` in the
 compose stack, persisted on the `/data` volume). See AGENTS.md for the
 S3-replacement seam.
 
-Resource bounds for avatar and cover uploads (one path, `readImageUpload`):
+Resource bounds for avatar, cover and announcement picture uploads (`readImageUpload`):
 
 - Pictures are copied, decoded and re-encoded, so the process allows
-  `images.MaxConcurrentProcessing` (2) at once across both routes. A request
-  takes a slot only after sign-in, CSRF and its own permission check
-  (`teen_avatar`, leader or admin for a cover) have passed. It never waits:
-  when both slots are taken it answers `503 upload_busy`, nothing is saved, and
-  the client may try again. The slot is held until the picture has been
+  `images.MaxConcurrentProcessing` (2) at once across all three routes, with one
+  slot per signed-in account across its sessions. A request takes a slot only
+  after sign-in, CSRF and its own permission check have passed. If both slots
+  are taken or the account already has a slot, the request immediately answers
+  `503 upload_busy` without saving a picture. The client may try again.
+  The slot is held until the picture has been
   normalized and is released before the file is stored or any row changes, on
   every path including errors. A decoder cannot be stopped, so a client that
   goes away keeps its slot until the decode returns, and is then answered
@@ -493,7 +494,8 @@ Resource bounds for avatar and cover uploads (one path, `readImageUpload`):
   overhead per request, whether or not it declares its length, and the CSRF
   check reads that body before sign-in, so concurrent requests still buffer
   one body each ahead of the slot check; the cap bounds each request, not
-  their number. There is no per-user quota and no whole-server memory cap.
+  their number. There is no per-account upload rate limit or whole-server
+  memory cap.
 
 ### Groups
 
@@ -946,15 +948,18 @@ POST /api/v1/account-requests              → 200 {message} | 400 | 403  (publi
 POST /api/v1/account-requests/invite-friend → 200 {message} | 400 | 403  (auth)
 POST /api/v1/account-requests/confirm      {token, password} → 200 {user, pendingConsent?} | 400  (public)
 GET  /api/v1/admin/account-requests?status=pending → {requests: [accountRequest]}  (admin)
-POST /api/v1/admin/account-requests/:id/approve → 200 {request, userId} | 409  (admin)
+POST /api/v1/admin/account-requests/:id/approve → 200 {request, userId} | 401 | 409  (admin)
      body: {note?, fromNotification?, accountConsentEvidenceText?}
-POST /api/v1/admin/account-requests/:id/reject  → 200 {request, userId: 0}  (admin)
+POST /api/v1/admin/account-requests/:id/reject  → 200 {request, userId: 0} | 401 | 409  (admin)
      body: {note?, fromNotification?} — rejection is never inline (403 with fromNotification)
 PUT  /api/v1/admin/self-signup             {mode: "request"|"off"} → 200 {selfSignup}  (admin)
 ```
 
 Self-signup and invite-a-friend (M1.3, 5.10, DEC-4) create a pending
-`AccountRequest`; only an admin approves. There is no open mode: the
+`AccountRequest`. Approval and rejection recheck the admin's session and role
+inside the decision transaction. If the admin can no longer act, ordinary
+decisions return `401`, and consent and conversion approvals return `403`.
+There is no open mode: the
 `self_signup` setting is `request` (default) or `off`, and `off` refuses
 the public door with 403 (the member door still works). Create body:
 `{name, email, phone?, ageBand: "adult"|"teen"|"under13", birthDate?,
@@ -2292,9 +2297,9 @@ Leaders, hosts and admins write announcements (`policy.CanComposeMessages`): adm
 
 `message.revision` is the message's token, a digest of its row (every column but `created_at`, with `scheduled_at`, `sent_at` and `updated_at` as instants, through the same row-token helper as the group form's: no column, no migration), read in the same snapshot as the fields beside it. Only a viewer who may edit the message gets it (`editable`); a reminder, or a message that is sending, sent, failed or cancelled, has none. Every write that answers `{message}` (create, edit, schedule) builds the answer in its own transaction under its locks, so the revision is the one that write left.
 
-`PUT /messages/:id` requires `revision`. In one Read Committed transaction it locks the person (`lockActorIn`), then the message `FOR UPDATE`, then decides who may change it and whether its status still allows it (404 for a message that isn't theirs, 409 `message_reminder`, 409 `message_locked`, as before), then compares the token: a missing, malformed or older one is 409 `message_changed` with nothing written. Any write moves the token, one that puts the message back as it was included, so a save whose answer was lost is never applied again over a change that undid it. The rest (fields, audience, a scheduled message's count and daily limit) follows as before, with one more rule for a scheduled message below.
+`PUT /messages/:id` requires `revision`. In one Read Committed transaction it locks the person (`lockActorIn`), then the message `FOR UPDATE`, then decides who may change it and whether its status still allows it (404 for a message that isn't theirs, 409 `message_reminder`, 409 `message_locked`, as before), then compares the token: a missing, malformed or older one is 409 `message_changed` with nothing written. Any write moves the token, one that puts the message back as it was included, so a save whose answer was lost is never applied again over a change that undid it. The audience must be one the active author may message, even when an admin edits or schedules the message. The admin stays the actor in the audit log, and the original author stays on the message.
 
-`GET /messages/:id/review` is the review the send confirmation shows. In one read-only snapshot it decides the session, the message and the right to send it (as above, and 409 `message_locked` once it can no longer be scheduled), then who it reaches for this sender now: the audience as they may still message it (403 `message_not_yours` or, for an admin, 404 `message_audience_gone`, as a save answers) and the people preparation would write a row for, each once: an email row that goes out, or, when the message has "Push notification too" and the church's switch is on, a push row. It answers today's `summary`, `reached` (how many people that set holds: the email's `eligible` and anyone only a push reaches) and `token`, an AES-GCM seal (key `deriveKey(SESSION_SECRET, "message-review:v1")`) of that set of user ids, bound to the sender, the message, its revision, and the audience (in one canonical form: its type's fields, defaults filled, sets sorted) and push switch reviewed. Nothing is stored: no table, no column, nothing for an erasure to find.
+`GET /messages/:id/review` is the review the send confirmation shows. In one read-only snapshot it decides the session, the message and the right to send it (as above, and 409 `message_locked` once it can no longer be scheduled), then checks whether the author may still message the audience (403 `message_not_yours` or, for an admin, 404 `message_audience_gone`). It counts each person preparation would reach by email or, when "Push notification too" and the church's switch are on, by push. It answers today's `summary`, `reached` (how many people that set holds: the email's `eligible` and anyone only a push reaches) and `token`, an AES-GCM seal (key `deriveKey(SESSION_SECRET, "message-review:v1")`) of that set of user ids, bound to the sender, the message, its revision, and the audience (in one canonical form: its type's fields, defaults filled, sets sorted) and push switch reviewed. Nothing is stored: no table, no column, nothing for an erasure to find.
 
 `POST /messages/:id/schedule` requires `revision` and `review`. Under the same locks and rules as an edit it compares the revision first (409 `message_changed`, nothing scheduled, no job), then checks a subject, a body and someone who gets the email (400 `message_nobody`), then opens the review and works out who the message reaches now, in the same transaction. A token that does not open for this sender, this message and this revision (another's, an older revision's, garbled, none) is 409 `message_review_needed` with a fresh `review`, never a send. A set that is not the one the review sealed is 409 `message_list_changed` with a fresh `review` and `change`, nothing scheduled. Either answer is built after the refusal in its own read-only snapshot, as the review is; when that finds the list back as it was, the answer is `message_review_needed`. The same set schedules as before, and the answer is `{message}` alone, with no recipient names. `retry` and `cancel` keep their own rules.
 
