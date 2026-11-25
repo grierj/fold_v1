@@ -63,6 +63,18 @@ func newBookingFixture(t *testing.T) bookingFixture {
 	return f
 }
 
+// newRoom adds an ordinary room as the fixture's admin.
+func newRoom(t *testing.T, f bookingFixture, name string) roomJSON {
+	t.Helper()
+	var out struct {
+		Room roomJSON `json:"room"`
+	}
+	if err := json.Unmarshal([]byte(apiDo(t, f.admin, "POST", "/api/v1/admin/rooms", map[string]any{"name": name}, http.StatusCreated)), &out); err != nil {
+		t.Fatal(err)
+	}
+	return out.Room
+}
+
 func (f bookingFixture) path(ev eventJSON, rest string) string {
 	return "/api/v1/events/" + itoa(ev.ID) + "/dates/" + feedDate(f.startOn) + rest
 }
@@ -895,11 +907,17 @@ func TestRoomPickerReadsJudgeAuthorityInTheirSnapshot(t *testing.T) {
 				series := createFeedEvent(t, f.leader, f.group, "Weekly", f.startOn.AddDate(0, 0, 1), "FREQ=WEEKLY;COUNT=4")
 				path = "/api/v1/events/" + itoa(series.ID) + "/rooms"
 				roomPickOK(t, f.leader, "/api/v1/events/"+itoa(series.ID)+"/room", map[string]any{"roomId": f.hall.ID})
+				// A date with a room of its own: the list of them is read in the snapshot too.
+				chapel := newRoom(t, f, "Chapel")
+				roomPickOK(t, f.leader, "/api/v1/events/"+itoa(series.ID)+"/dates/"+feedDate(f.startOn.AddDate(0, 0, 8))+"/room", map[string]any{"roomId": chapel.ID})
 			} else {
 				roomPickOK(t, f.leader, f.path(f.eventA, "/room"), map[string]any{"roomId": f.hall.ID})
 			}
 			before := apiDo(t, co, "GET", path, nil, http.StatusOK)
 			wantIn(t, "the leader's answer", before, "Fellowship Hall", `"revision":"1.`)
+			if surface == "series rooms" {
+				wantIn(t, "the leader's answer", before, `"ownRooms":[{"date":"`+feedDate(f.startOn.AddDate(0, 0, 8)))
+			}
 			fired := atReaderSeam(f.app, "authorized", surface, func() {
 				if err := f.app.DB.Transaction(func(tx *gorm.DB) error {
 					for _, step := range []*gorm.DB{
