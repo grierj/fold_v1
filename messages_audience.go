@@ -140,6 +140,25 @@ func (a *App) audienceTargets(db *gorm.DB, me *models.User, au audienceJSON) ([]
 	return audienceTargetsFrom(a.dbDates(db), me, au)
 }
 
+func activeMessageAuthorIn(tx *gorm.DB, m *models.Message, viewer *models.User) (*models.User, error) {
+	if m.AuthorID == nil {
+		return nil, nil
+	}
+	author := viewer
+	if author == nil || author.ID != *m.AuthorID {
+		author = &models.User{}
+		if err := tx.First(author, *m.AuthorID).Error; errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, nil
+		} else if err != nil {
+			return nil, err
+		}
+	}
+	if author.Status != models.UserActive {
+		return nil, nil
+	}
+	return author, nil
+}
+
 // audienceTargetsFrom is audienceTargets on any fact source (dateFactSource).
 func audienceTargetsFrom(src dateFactSource, me *models.User, au audienceJSON) ([]policy.MessageTarget, error) {
 	if au.Type == policy.AudienceGroup {

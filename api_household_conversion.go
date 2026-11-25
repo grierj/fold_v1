@@ -285,11 +285,11 @@ func (a *App) issueHouseholdConversion(c *gin.Context, resend bool) {
 		}
 		// Household address checks use the same actor gate before looking up
 		// an address. Otherwise this sibling could bypass the ordinary limit.
-		allowed, err = inviteSendAllowed(tx, actor.ID, body.Email)
+		limit, err := inviteSendAllowed(tx, actor.ID, body.Email)
 		if err != nil {
 			return err
 		}
-		if !allowed {
+		if limit != invitationWithinLimits {
 			log.Printf("household invitation send suppressed for actor %d", actor.ID)
 			// Keep an existing token intact. A first invitation isn't saved,
 			// so a limited sender can't reserve a newcomer's email (Warden,

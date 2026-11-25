@@ -115,6 +115,62 @@ experiment only when the requested change specifically calls for it.
 - Local concurrency tests can flake under load; rerun with `-count=8` before chasing them, and
   trust CI.
 
+### Browser journey performance (#419)
+
+The report-only `journeys` CI job builds the production SPA and Go binary twice. On a PR
+it measures the base tip and GitHub's proposed merge commit. On master it compares HEAD
+to its first parent. Both binaries use `CGO_ENABLED=0` and `-trimpath`. They run on the same
+dedicated Ubuntu 24.04 VM with Postgres 16 and the head's pinned Playwright Chromium. Each binary gets a fresh database, the common
+`seed.setup.ts` site, and the pagination test's continuation group. Its two daily series
+have 55 dates each, one visible to Sam and one invite-only.
+
+| Journey | Clock starts | Ready on screen |
+| --- | --- | --- |
+| Directory | Navigation to `/#groups` | Search field and link to the seeded group |
+| Event date | Navigation to the first visible date | Series title, when, where and enabled RSVP control |
+| Load more dates | Sam clicks Load more dates on page two | The series link shows all 55 visible dates |
+| Manager editor | The admin chooses Edit group | The editable name field contains the group's saved name |
+
+Each journey warms the server and records a Playwright trace once, then measures five
+runs without tracing. Every run opens a fresh signed-in browser context with the HTTP cache
+disabled and service workers blocked. Sign-in and menu preparation are outside the timer.
+The viewport is 390 × 844 CSS pixels, locale en-US, zone UTC. Chromium applies 4× CPU slowdown,
+80 ms latency, 200,000 bytes/s download and 90,000 bytes/s upload over loopback. The end
+timestamp comes from the browser frame following the first frame with the ready content.
+Click timings measure lab click-to-result latency. Field INP requires interactions from real
+visits. Layout shift is the sum of unexpected shift scores during the measured window.
+Route JS bytes are the sum of the individual gzipped files Chromium finished loading by
+the endpoint, including eager chunks. They describe the build independently of HTTP encoding.
+
+Read the job summary for median and range in milliseconds, base-to-head changes, largest
+shift and JS sizes. Download `journey-measurements` for individual samples, the CPU model,
+browser version and traces. Each build records its active journey and iteration before
+opening the browser context and saves completed samples by atomic rename. After an
+interruption, earlier traces and samples remain in the artifact. Run 0 is the traced
+warm-up, runs 1–5 are timed, and date run 6 is the slowdown proof. A build or measurement
+failure still lets the other revision run. The summary lists each side's outcome,
+compares journeys with all five samples on each side, and gives sample counts for
+incomplete journeys. An incomplete run fails the diagnostic job.
+
+From `web/`, use `npx playwright show-trace PATH.zip` to inspect requests, DOM snapshots and screenshots. To reproduce, set `DATABASE_URL` to
+a disposable developer database, then run `npm ci`, `npx playwright install chromium`,
+`npm run build` and `npm run journeys`.
+The server creates a database with the suffix `_e2e_journeys` and uses port 18419.
+Set unique `E2E_SHARD`, `E2E_PORT` and `E2E_OUTPUT_DIR` when running concurrent copies.
+To compare two saved samples files, run `node scripts/journey-report.mjs BASE.json HEAD.json`.
+
+There are no approved timing thresholds yet. A proof run delays the real date read by
+four seconds and must cross a test-only ceiling two seconds above the slowest normal
+sample. The comparator tests also cover a change over the relative or absolute limit
+and a size increase with steady timings. The existing 145 KiB build gate remains in CI
+during calibration. Review ranges from repeated CI jobs on the same revision, including
+variation across VMs. CI measures the base first. Recheck borderline differences in
+reverse order before attributing them to a change. Use those results to choose an absolute
+ceiling and a tolerable increase in ms per journey. The comparator takes these values
+from an optional third JSON file, keyed by journey, with `ceilingMs` and `increaseMs`.
+After review, the rollout decision is to require stable checks and retire the fixed byte gate.
+Device checks are in `docs/FIRST-CHURCH-CHECKS.md`. Field data collection is a separate decision.
+
 ### Upload memory measurement
 
 `TestMeasureNormalize` (`internal/images`) and `TestMeasureUploadRequests` (root, needs

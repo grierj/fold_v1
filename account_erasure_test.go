@@ -322,10 +322,12 @@ func TestAccountErasureDeletesOnlyOwnedThrottleKeys(t *testing.T) {
 		// shared
 		string(loginIPKey("10.0.0.9")), string(pwresetIPKey("10.0.0.9")), string(accountRequestIPKey("10.0.0.9")),
 		string(guestIPKey("10.0.0.9")), string(guardianClaimIPKey("10.0.0.9")),
+		string(groupMemberEmailIPKey("10.0.0.9")),
 		string(accountRequestSiteKey()), string(guestSiteKey()),
 		// other people
 		string(loginEmailKey(addr + ".example")), string(loginUserKey(u.ID * 10)),
 		string(managerDateAddKey(v.ID)), string(peopleSearchUserKey(v.ID)),
+		string(groupMemberEmailUserKey(v.ID)),
 		// residue (O-21): the pending new address and a past address
 		string(loginEmailKey(pastAddr)), string(pwresetAddrKey(pastAddr) + ":h"),
 	}

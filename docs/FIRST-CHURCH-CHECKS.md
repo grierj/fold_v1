@@ -4,6 +4,10 @@ These need real phones, real mail providers, a real domain or a real server, whi
 
 Each item says what to do, what you should see, and the milestone it came from.
 
+## Journey performance (#419)
+
+- [ ] On an iPhone and an Android phone over a typical church connection, open the group directory, open an event date and use its RSVP controls, load more dates in a group, and open Edit group as a leader. Record the model, browser, connection, and which action or layout shift made you wait or miss a tap.
+
 ## Web push (M3.13)
 
 Follow the directions page at `/notifications/setup` literally, on each device below. Record the iOS version you used.
@@ -95,7 +99,7 @@ section 11 cross-references these items. The exact-head full restore drill passe
   2026-11-24, `19d6879a` → `777289b6` (`upgrade.sh --commit`), DigitalOcean droplet, Ubuntu 26.04, fold.coffeepugs.com: during the upgrade's own step, a second installed `upgrade.sh`, an `upgrade.sh --rollback` and a `restore.sh --dump` each exited 75 with "maintenance busy: pid=... mode=upgrade-forward start=..." and "Nothing changed." Once the upgrade had reached its provisioning step, a second `upgrade.sh` and an installed `provision.sh` each exited 75 naming the provision child (`mode=provision`, its own pid and start time) rather than the upgrade. `ops.lock` was not touched.
 - [x] **Profile photos are cleaned up on the real volume (M7.4 R4-5).** With a throwaway test account (not a real member's), upload a profile photo, replace it, remove it, upload again, then delete that account as an admin. After each change you should see `/data/uploads/avatars/<id>/` hold only the current file (look inside the container or on the `uploads` volume), and after the deletion the folder should disappear within a minute. Admin, System should show no dead `Removing old profile photos` or `Finding leftover profile photos` task.
   2026-11-24, `19d6879a`, DigitalOcean droplet, Ubuntu 26.04, fold.coffeepugs.com: through the API as a throwaway account: upload, replace, remove and upload again each left `uploads/avatars/<id>/` on the `fold_uploads` volume holding only the current file (the folder was gone after the remove). After the admin delete the folder was gone within 5 seconds and the old `/uploads/...` URL answered 404. `GET /api/v1/admin/jobs` listed no task and Admin → System said "Nothing needs attention."
-- [ ] **`deploy/digitalocean/provision.sh` as a real run**, not `--dry-run`, on a fresh droplet the church owns, then `smoke.sh`. You should see health, TLS, and that Postgres and the app are not published. After the first dump, run the backup restore test (`--restore-test`) from `docs/DEPLOY-DIGITALOCEAN.md`.
+- [ ] **`deploy/digitalocean/provision.sh` as a real run**, not `--dry-run`, on a fresh droplet the church owns, then `smoke.sh`. You should see health, TLS, and that Postgres and the app are not published. Follow the [backup and restore test steps](DEPLOY-DIGITALOCEAN.md#5-backups-and-a-restore-test) after the first dump.
   2026-11-24, `19d6879a` with `--allow-onbox-build`, DigitalOcean droplet, Ubuntu 26.04, fold.coffeepugs.com (pristine 2 vCPU / 4 GB droplet; the script installed Docker 29.10.0 and Compose v5.8.0 itself): the real run took about 9 minutes and exited 0, and `smoke.sh` passed. `/healthz` answered 200 over HTTP/2 with a Let's Encrypt certificate (TLS 1.3, verify ok), and 5432 and 8080 were closed from outside. Root and password login were off, and `ufw` was active for 22, 80 and 443. Not ticked: after the first dump, the documented `sudo /opt/fold/backup.sh` exits 75 and `backup.sh --restore-test` fails (`find: '/var/backups/fold': No such file or directory`), because the backup service is in charge after the cutover (#458). The service's own `docker compose exec backup backup.sh restore-test` passed.
   2026-11-24, `4a9fd1e4` with `--allow-onbox-build`, DigitalOcean droplet, Ubuntu 26.04, 2 GB / 1 vCPU, gb2.fold.coffeepugs.com: the same result on a second pristine host. Provision exited 0 and smoke passed. 5432 and 8080 were closed from outside, root and password login were off, and `ufw` was active. Section 5's `sudo /opt/fold/backup.sh` exited 75 and `backup.sh --restore-test` exited 1 (`/var/backups/fold` does not exist); `--restore-test` exited 1 again after a dump from the service (#458). The service's `backup.sh restore-test` passed.
 - [x] **Re-running `provision.sh` changes nothing (DEC-154).** On the provisioned droplet, run the same `provision.sh` command again. You should see it finish without reinstalling packages, rewriting `.env` or `backup.env`, restarting the app or changing `ufw` and SSH settings, and `smoke.sh` pass again. (The removed CI idempotency run checked this against stubbed systemd and Docker.)
@@ -115,6 +119,16 @@ section 11 cross-references these items. The exact-head full restore drill passe
 ## Drill and QC-1 isolation on a disposable droplet (M5.2)
 
 These replace stub-Docker fixtures that were removed when the nested runner was (the refusals, the browser preparation and the runner's order of work were simulated; nothing below was checked then). Run them on a droplet created for the purpose, as root, with the default local daemon.
+
+- [ ] **The running prior's event read and edit (#480, DEC-128).** Run the
+  full `restore-drill.sh` against the candidate on a disposable Ubuntu
+  droplet with `FOLD_DRILL_ISOLATED_DAEMON=1`. In
+  `real_prior_running_across_upgrade`, the seven visibility requests must
+  reach the audit fence and leave the stored rows unchanged. The prior's
+  final event GET and PUT must answer 200 within five attempts and the
+  stored title must be `Crossing E6 renamed`. Check for a passing
+  `prior-running-across-upgrade` row in `cases.jsonl`. Record the candidate
+  SHA, date, and result. The changed crossing is the reason for the full run.
 
 - [ ] **Refusals leave nothing behind.** With `FOLD_DRILL_ISOLATED_DAEMON` unset, run `restore-drill.sh --dir <new>` and `qc1-measure.sh --dir <new> --no-browser`: each exits 1 with "not declared disposable" and creates no directory, container, network or volume (compare `docker ps -a`, `docker network ls` and `docker volume ls` before and after). Then, declared, repeat with `DOCKER_HOST=tcp://127.0.0.1:2375` (and, separately, a non-default `DOCKER_CONTEXT`): both refuse naming the daemon. With one stopped container on the daemon, the drill refuses naming it; with one running, `qc1-measure.sh` refuses unless `--shared-daemon`.
 - [ ] **`browser-prepare.sh` on a fresh Ubuntu droplet.** Undeclared, it exits 1 before `npm` or `apt` run. Declared, with `QC1_PREPARE_FIREFOX=1`, it runs `npm ci` as locked, installs the locked Playwright's Chromium with its libraries, passes the preflight, builds the Firefox container, leaves `git status` clean and writes `browser.env` with `QC1_CHROMIUM` and `QC1_NO_SANDBOX=1`. Break the lock's Playwright pin once: it must stop before installing anything.

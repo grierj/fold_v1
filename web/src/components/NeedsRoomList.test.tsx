@@ -32,7 +32,7 @@ function show(props: Partial<Parameters<typeof NeedsRoomList>[0]> = {}) {
 
   const view = render(
     <MemoryRouter>
-      <NeedsRoomList eventId={7} revision={0} hasDate={() => true} onPick={onPick} onGone={vi.fn()} {...props} />
+      <NeedsRoomList eventId={7} revision={0} hasDate={() => true} onPick={onPick} onGone={vi.fn()} onRead={vi.fn()} onRetryPage={vi.fn()} {...props} />
     </MemoryRouter>,
   );
 
@@ -116,7 +116,7 @@ it("says only that an open row left the list when something else took it off", a
   await screen.findByRole("combobox", { name: /^Room/ });
   vi.mocked(SeriesRooms.list).mockResolvedValue({ revision: "r1", rooms: [], dates: 10, defaultRoom: null, ownRooms: [], needsRoom: [needs[0]], pending: 0 });
   // Another tab booked it: the page's revision moves and the list asks again.
-  rerender(<MemoryRouter><NeedsRoomList eventId={7} revision={1} hasDate={hasDate} onPick={vi.fn()} onGone={vi.fn()} /></MemoryRouter>);
+  rerender(<MemoryRouter><NeedsRoomList eventId={7} revision={1} hasDate={hasDate} onPick={vi.fn()} onGone={vi.fn()} onRead={vi.fn()} onRetryPage={vi.fn()} /></MemoryRouter>);
   expect(await screen.findByText("Tuesday, December 15. It is no longer listed under “Dates that need a room”.")).toBeInTheDocument();
   expect(screen.queryByText(/has a room|Booked/)).not.toBeInTheDocument();
 });
@@ -189,7 +189,7 @@ it("asks again when a room changed, and drops a date that now has one", async ()
   const { rerender } = show();
   await screen.findByText("Chapel isn't free then.");
   vi.mocked(SeriesRooms.list).mockResolvedValue({ revision: "r1", rooms: [], dates: 10, defaultRoom: null, ownRooms: [], needsRoom: [needs[0]], pending: 0 });
-  rerender(<MemoryRouter><NeedsRoomList eventId={7} revision={1} hasDate={() => true} onPick={() => {}} onGone={vi.fn()} /></MemoryRouter>);
+  rerender(<MemoryRouter><NeedsRoomList eventId={7} revision={1} hasDate={() => true} onPick={() => {}} onGone={vi.fn()} onRead={vi.fn()} onRetryPage={vi.fn()} /></MemoryRouter>);
   await waitFor(() => expect(screen.queryByText("Chapel isn't free then.")).not.toBeInTheDocument());
   expect(screen.getByText("Fellowship Hall isn't free then.")).toBeInTheDocument();
 });

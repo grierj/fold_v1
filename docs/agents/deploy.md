@@ -16,7 +16,8 @@ that changes how an operator upgrades, rolls back or restores. The operator-faci
   `/home/nonroot`, off the volume) and pre-creates `/data/uploads` with `--chown=65532:65532` so
   the nonroot app can write to a fresh volume.
 - Named volumes `pgdata` and `uploads` (mounted at `/data`). Do not drop `uploads`: an anonymous
-  volume is discarded on `up --build`.
+  volume is discarded on `up --build`. The app populates a fresh uploads volume. The backup
+  service mounts the same volume read-only with Docker's image copy disabled.
 - The compose subnet `172.30.0.0/24` is the default `FOLD_TRUSTED_PROXIES`; change both together.
 - Every `APP_ENV` refuses to boot without `DATABASE_URL`. Migrations run on start under a Postgres
   advisory lock; a failed one exits non-zero. First boot with an empty DB serves `/setup`; after

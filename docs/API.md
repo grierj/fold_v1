@@ -425,14 +425,15 @@ lives under `UPLOAD_DIR` (`./data/uploads` default, `/data/uploads` in the
 compose stack, persisted on the `/data` volume). See AGENTS.md for the
 S3-replacement seam.
 
-Resource bounds for avatar and cover uploads (one path, `readImageUpload`):
+Resource bounds for avatar, cover and announcement picture uploads (`readImageUpload`):
 
 - Pictures are copied, decoded and re-encoded, so the process allows
-  `images.MaxConcurrentProcessing` (2) at once across both routes. A request
-  takes a slot only after sign-in, CSRF and its own permission check
-  (`teen_avatar`, leader or admin for a cover) have passed. It never waits:
-  when both slots are taken it answers `503 upload_busy`, nothing is saved, and
-  the client may try again. The slot is held until the picture has been
+  `images.MaxConcurrentProcessing` (2) at once across all three routes, with one
+  slot per signed-in account across its sessions. A request takes a slot only
+  after sign-in, CSRF and its own permission check have passed. If both slots
+  are taken or the account already has a slot, the request immediately answers
+  `503 upload_busy` without saving a picture. The client may try again.
+  The slot is held until the picture has been
   normalized and is released before the file is stored or any row changes, on
   every path including errors. A decoder cannot be stopped, so a client that
   goes away keeps its slot until the decode returns, and is then answered
@@ -493,7 +494,8 @@ Resource bounds for avatar and cover uploads (one path, `readImageUpload`):
   overhead per request, whether or not it declares its length, and the CSRF
   check reads that body before sign-in, so concurrent requests still buffer
   one body each ahead of the slot check; the cap bounds each request, not
-  their number. There is no per-user quota and no whole-server memory cap.
+  their number. There is no per-account upload rate limit or whole-server
+  memory cap.
 
 ### Groups
 
@@ -913,7 +915,7 @@ A selected date is retained with DEC-74 departure provenance tied to the locked 
 ### Invitations
 
 ```
-POST /api/v1/invitations          → 201 {invitation}  (auth)
+POST /api/v1/invitations          → 200 {message} (leader) | 201 {invitation} (admin)
 GET  /api/v1/invitations/:token   → 200 {invitation, inviterName, siteName, site} | 404  (public)
 POST /api/v1/invitations/accept   → 200 {user?, pendingConsent, pendingApproval} | 400 | 409  (public)
 ```
@@ -922,10 +924,24 @@ Invitations (M1.2, 5.10, DEC-4): admins invite into any group or none;
 leaders invite only into groups they lead or none (403 otherwise); members,
 teens, and guests get 403, signed-out visitors 401. There is no approval
 step for adults: the person confirms their age and sets a password on acceptance. Teens start `pending_consent`.
-Create body: `{email, name?, phone?, groupId?, overLimit?}`. The invitee chooses their age when accepting; the inviter cannot activate a teen. 409 when the email already has
-an account or a pending invitation. Leaders are limited to 20 valid invitation
-attempts per rolling day, including refused existing-account and duplicate-invitation checks. Refusals are durable `invitation.refused` actor counters, not sent-mail counters; they do not consume a recipient's mail allowance. The actor allowance is checked under its transaction gate before the address lookup. The 21st attempt gets 429 and is audited
-(`invitation.rate_limited`).
+Create body: `{email, name?, phone?, groupId?, overLimit?}`. The invitee chooses
+their age when accepting. For admins, an existing account answers 409 `email_taken`.
+A pending invitation or household conversion answers 409 `already_invited`.
+
+Leaders with and without a `groupId` receive 200 with the same `message` for an
+eligible address, an existing account, a pending invitation or household
+conversion, or a destination over its allowance (DEC-172). Only an eligible
+address queues an invitation. A guest account can receive an ordinary invitation
+and upgrade on acceptance. Mail preparation checks the invitation, the leader's
+authority, and any new hold on the address before delivery.
+
+The leader allowance is 20 valid attempts per rolling day. A request that
+cannot send to its destination writes `invitation.refused` and counts against
+the leader's allowance. The destination's allowance counts queued sends and
+resends. The server checks the actor's allowance before the address lookup.
+An exhausted actor allowance answers 429 `invite_limit` and records
+`invitation.rate_limited`. Input validation, group authorization and group
+approval errors apply independently of the address.
 
 Tokens are 32 random bytes, stored as SHA-256, single use, and expire after
 24 hours. Ordinary accept body: `{token, name, password, ageBand: "adult"|"teen"|"under13", birthDate?}` (password ≥ 10 chars). A teen needs a real birth date aged 13 to 17 on the church-local date. Missing or inconsistent ages answer 400. Under-13 input is not stored and the token remains usable. Adults start active; teens start pending consent without a login and may browse public groups and events as signed-out visitors. Household conversion acceptance still uses its saved adult birth date. Accepting into a full group joins over
@@ -946,15 +962,18 @@ POST /api/v1/account-requests              → 200 {message} | 400 | 403  (publi
 POST /api/v1/account-requests/invite-friend → 200 {message} | 400 | 403  (auth)
 POST /api/v1/account-requests/confirm      {token, password} → 200 {user, pendingConsent?} | 400  (public)
 GET  /api/v1/admin/account-requests?status=pending → {requests: [accountRequest]}  (admin)
-POST /api/v1/admin/account-requests/:id/approve → 200 {request, userId} | 409  (admin)
+POST /api/v1/admin/account-requests/:id/approve → 200 {request, userId} | 401 | 409  (admin)
      body: {note?, fromNotification?, accountConsentEvidenceText?}
-POST /api/v1/admin/account-requests/:id/reject  → 200 {request, userId: 0}  (admin)
+POST /api/v1/admin/account-requests/:id/reject  → 200 {request, userId: 0} | 401 | 409  (admin)
      body: {note?, fromNotification?} — rejection is never inline (403 with fromNotification)
 PUT  /api/v1/admin/self-signup             {mode: "request"|"off"} → 200 {selfSignup}  (admin)
 ```
 
 Self-signup and invite-a-friend (M1.3, 5.10, DEC-4) create a pending
-`AccountRequest`; only an admin approves. There is no open mode: the
+`AccountRequest`. Approval and rejection recheck the admin's session and role
+inside the decision transaction. If the admin can no longer act, ordinary
+decisions return `401`, and consent and conversion approvals return `403`.
+There is no open mode: the
 `self_signup` setting is `request` (default) or `off`, and `off` refuses
 the public door with 403 (the member door still works). Create body:
 `{name, email, phone?, ageBand: "adult"|"teen"|"under13", birthDate?,
@@ -1125,14 +1144,13 @@ edit's answer.
 
 `occurrence`: `{id, eventId, date, startsAt, endsAt, startsLocal, endsLocal,
 tzid, durationMinutes, location, title, description, recurrenceRule, rruleUntil,
-seriesStartsLocal, seriesTitle, seriesLocation, seriesDurationMinutes,
+seriesStartsLocal, seriesVisibility?,
 overridden, registrations: {going, maybe, declined, waitlisted},
 myRegistration: "going"|"maybe"|"declined"|"waitlisted"|"removed"|null,
 myGuestCount?, myWaitlistPosition?, visibility,
 leaderOpened, churchWide, groupId?, groupName?, hostedBy?,
 attendeesVisible, attendees?, capacity, seatsUsed, spotsLeft,
-waitlistEnabled, guestsAllowed, videoProvider, videoUrl?, videoReveal,
-videoHidden?}`. `startsAt`/`endsAt` are UTC.
+waitlistEnabled, guestsAllowed, videoUrl?, videoHidden?}`. `startsAt`/`endsAt` are UTC.
 `startsLocal`/`endsLocal` are the wall clock in `tzid`, including a
 per-date override. `overridden` is true when this date has its own time,
 title, or location. `attendees` (`{userId, name, status, guestCount}`) is
@@ -1583,6 +1601,10 @@ POST /api/v1/events/:id/registrations/add     → 200 {} | 403 | 404 | 409  (lea
   body: {date: "YYYY-MM-DD", selectionId | userId | email | (personId + registeredBy),
          guestCount?, attendanceMode?, childcareRequested?, overCapacity?}
 ```
+
+A date add returns 404 `date_add_person_not_found` if the email or user ID does
+not resolve to an eligible account, including when the account becomes unavailable
+before the write. The missing date or event still returns 404 `not_found`.
 
 `registration`: `{userId, eventId, occurrenceId, date, status, guestCount,
 waitlistPosition}`. `waitlistPosition` is null unless the person is
@@ -2114,6 +2136,9 @@ erases no identity data, which is later M7.4 work, and M7.4 is not complete.
 
 Rooms are optional (PLAN 9.1). While the `rooms_enabled` setting is off, every room route answers 404, for anyone, and `GET /api/v1/site` reports `roomsEnabled: false`.
 
+Room admin writes recheck the actor's session and role in their transaction.
+They return `401` if the admin can no longer act.
+
 ```
 PUT  /api/v1/admin/settings/rooms {enabled: boolean} → 200 {roomsEnabled}   (admin; audited setting.rooms_enabled_changed)
 GET  /api/v1/admin/rooms            → 200 {rooms: [room]}                 (admin; active first, then building and name)
@@ -2150,10 +2175,10 @@ Cancelling a date releases its room. Moving a date (a per-date reschedule or a s
 
 ```
 GET  /api/v1/events/:id/rooms → 200 {revision, rooms: [seriesRoom], dates, defaultRoom: {id, name, building} | null, ownRooms: [ownRoom], needsRoom: [{date, roomName, status}], pending, suggestions}
-PUT  /api/v1/events/:id/room {roomId: number | null, revision, overlapReason?, includeDates?: [date]}
+PUT  /api/v1/events/:id/room {roomId: number | null, revision, overlapReason?, includeDates?: [date], reviewedBusyDates?: [date]}
      → 200 {event: {id, revision}, defaultRoom, booked, lost: [date], kept, keptWaiting, keptInUse, changed, pending, doubleBooked,
             after: {ownRooms: [ownRoom], needsRoom: [{date, roomName, status}], pending}} | 400 series_date_invalid
-       | 401 | 403 room_restricted | 404 room_gone | 404 rooms_off | 404 | 409 event_changed | 409 series_request_kept | 409 group_rooms_not_approved
+       | 401 | 403 room_restricted | 404 room_gone | 404 rooms_off | 404 | 409 event_changed | 409 series_request_kept | 409 series_busy_dates_changed {busyDates: [date]} | 409 group_rooms_not_approved
 POST /api/v1/rooms/check {groupId?, startsLocal, durationMinutes, tzid?, recurrenceRule?, rruleUntil?, capacity?, visibility?}
      → 200 {rooms: [seriesRoom], dates, suggestions}
 ```
@@ -2162,7 +2187,7 @@ POST /api/v1/rooms/check {groupId?, startsLocal, durationMinutes, tzid?, recurre
 
 A series pick names the event's read it was made from (DEC-167): `revision` is the event's token (the one `GET /events/:id` gives a manager), which moves with the series room as with every other change to the event. The read decides everything in one read-only snapshot, as the date's does: the rooms switch, the caller read again and judged as someone who runs the event, the event and its token, the rooms, the series room, the dates that need a room and the suggestions. The revision is required on every `PUT`: under the event's lock, after the caller is read again and checked as someone who runs the event and before anything is deleted or booked, any other revision is refused with 409 `event_changed`, writing nothing. The answer's `event.revision` is what the next pick sends. The series editor around the control keeps the revision it opened with, so its next Save is refused with `event_changed` after its own room pick and sends again by itself, since none of its fields changed (DEC-162). The event's revision does not see a single date's booking; a pick that changes dates with a room of their own names them (`includeDates`, below), so it never takes a room from a date the person was not shown.
 
-`PUT …/room` books the room for the whole series (DEC-103): it is stored as `events.default_room_id` and booked on every scheduled future date. Dates the room is busy on keep a `requested` booking that holds nothing and are returned in `lost` and listed in `needsRoom`; an admin's `overlapReason` double-books them instead, and `doubleBooked` counts the booked dates this pick found busy. Bookings in the old series room, and lost or rejected ones, are replaced. A date with a room of its own keeps it (DEC-168): its booking holds a room (confirmed or double-booked) or waits on an admin's approval of one, in a room other than the series room. So does a booking only an admin could make (a restricted room or a double-booking), unless an admin is booking. A date whose booking already holds the room picked is left as it is.
+`PUT …/room` books the room for the whole series (DEC-103): it is stored as `events.default_room_id` and booked on every scheduled future date. Dates the room is busy on keep a `requested` booking that holds nothing and are returned in `lost` and listed in `needsRoom`. An admin can double-book them with an `overlapReason` and the exact nonempty list of `reviewedBusyDates` in `YYYY-MM-DD` format. Changes to the list, or a missing review, return 409 `series_busy_dates_changed` with the current `busyDates` and roll back the whole pick. An empty `busyDates` means a fresh pick can proceed without double-booking. On success, `doubleBooked` counts the dates this pick double-booked. Bookings in the old series room, and lost or rejected ones, are replaced. A date with a room of its own keeps it (DEC-168): its booking holds a room (confirmed or double-booked) or waits on an admin's approval of one, in a room other than the series room. So does a booking only an admin could make (a restricted room or a double-booking), unless an admin is booking. A date whose booking already holds the room picked is left as it is.
 
 A series pick, change or stop gives each of the event's other leaders or hosts one `room.changed` notice (DEC-170), unless the series room and what every date holds are both as they were (the same room again with the busy dates lost again): it says what happened to the series room and, from the answer's own counts, how many dates this pick booked, how many wait for an admin's approval, how many were left as they are, how many have no room now (a stop) and how many still need a room because the room is in use then; its data names those last dates (`dates`), and only then does it push. Creating an event with a room tells no one.
 
@@ -2292,9 +2317,9 @@ Leaders, hosts and admins write announcements (`policy.CanComposeMessages`): adm
 
 `message.revision` is the message's token, a digest of its row (every column but `created_at`, with `scheduled_at`, `sent_at` and `updated_at` as instants, through the same row-token helper as the group form's: no column, no migration), read in the same snapshot as the fields beside it. Only a viewer who may edit the message gets it (`editable`); a reminder, or a message that is sending, sent, failed or cancelled, has none. Every write that answers `{message}` (create, edit, schedule) builds the answer in its own transaction under its locks, so the revision is the one that write left.
 
-`PUT /messages/:id` requires `revision`. In one Read Committed transaction it locks the person (`lockActorIn`), then the message `FOR UPDATE`, then decides who may change it and whether its status still allows it (404 for a message that isn't theirs, 409 `message_reminder`, 409 `message_locked`, as before), then compares the token: a missing, malformed or older one is 409 `message_changed` with nothing written. Any write moves the token, one that puts the message back as it was included, so a save whose answer was lost is never applied again over a change that undid it. The rest (fields, audience, a scheduled message's count and daily limit) follows as before, with one more rule for a scheduled message below.
+`PUT /messages/:id` requires `revision`. In one Read Committed transaction it locks the person (`lockActorIn`), then the message `FOR UPDATE`, then decides who may change it and whether its status still allows it (404 for a message that isn't theirs, 409 `message_reminder`, 409 `message_locked`, as before), then compares the token: a missing, malformed or older one is 409 `message_changed` with nothing written. Any write moves the token, one that puts the message back as it was included, so a save whose answer was lost is never applied again over a change that undid it. The audience must be one the active author may message, even when an admin edits or schedules the message. The admin stays the actor in the audit log, and the original author stays on the message.
 
-`GET /messages/:id/review` is the review the send confirmation shows. In one read-only snapshot it decides the session, the message and the right to send it (as above, and 409 `message_locked` once it can no longer be scheduled), then who it reaches for this sender now: the audience as they may still message it (403 `message_not_yours` or, for an admin, 404 `message_audience_gone`, as a save answers) and the people preparation would write a row for, each once: an email row that goes out, or, when the message has "Push notification too" and the church's switch is on, a push row. It answers today's `summary`, `reached` (how many people that set holds: the email's `eligible` and anyone only a push reaches) and `token`, an AES-GCM seal (key `deriveKey(SESSION_SECRET, "message-review:v1")`) of that set of user ids, bound to the sender, the message, its revision, and the audience (in one canonical form: its type's fields, defaults filled, sets sorted) and push switch reviewed. Nothing is stored: no table, no column, nothing for an erasure to find.
+`GET /messages/:id/review` is the review the send confirmation shows. In one read-only snapshot it decides the session, the message and the right to send it (as above, and 409 `message_locked` once it can no longer be scheduled), then checks whether the author may still message the audience (403 `message_not_yours` or, for an admin, 404 `message_audience_gone`). It counts each person preparation would reach by email or, when "Push notification too" and the church's switch are on, by push. It answers today's `summary`, `reached` (how many people that set holds: the email's `eligible` and anyone only a push reaches) and `token`, an AES-GCM seal (key `deriveKey(SESSION_SECRET, "message-review:v1")`) of that set of user ids, bound to the sender, the message, its revision, and the audience (in one canonical form: its type's fields, defaults filled, sets sorted) and push switch reviewed. Nothing is stored: no table, no column, nothing for an erasure to find.
 
 `POST /messages/:id/schedule` requires `revision` and `review`. Under the same locks and rules as an edit it compares the revision first (409 `message_changed`, nothing scheduled, no job), then checks a subject, a body and someone who gets the email (400 `message_nobody`), then opens the review and works out who the message reaches now, in the same transaction. A token that does not open for this sender, this message and this revision (another's, an older revision's, garbled, none) is 409 `message_review_needed` with a fresh `review`, never a send. A set that is not the one the review sealed is 409 `message_list_changed` with a fresh `review` and `change`, nothing scheduled. Either answer is built after the refusal in its own read-only snapshot, as the review is; when that finds the list back as it was, the answer is `message_review_needed`. The same set schedules as before, and the answer is `{message}` alone, with no recipient names. `retry` and `cancel` keep their own rules.
 
@@ -2426,7 +2451,7 @@ A reminder is a message the pipeline sends (`category` `reminder`, no author, `o
 
 #### The reminder controls (M3.6b)
 
-- **The forms.** Every event form (create a group event, create a church-wide event, Edit series on the event page, DEC-161) has a "Reminder email" select under More options: Off, 2 hours, 1 day (the default), 2 days or 1 week before; the closed More options says "Reminder 1 day before" or "No reminder". It sends `reminderEmailMinutes`; Edit series sends it only when changed. It is a series setting: editing one date doesn't change it. Group date rows (`occurrenceJSON`) also carry the series' `reminderEmailMinutes`.
+- **The forms.** Every event form (create a group event, create a church-wide event, Edit series on the event page, DEC-161) has a "Reminder email" select under More options: Off, 2 hours, 1 day (the default), 2 days or 1 week before; the closed More options says "Reminder 1 day before" or "No reminder". It sends `reminderEmailMinutes`; Edit series sends it only when changed. It is a series setting: editing one date doesn't change it.
 - **The date page.** `GET /api/v1/events/:id/dates/:date` answers `reminders` only to the event's managers (`policy.CanManageEvent`: an admin, a leader of its group, a host of a church-wide event); for anyone else, and for an exact-date invitation read, the field is absent. It is `{minutes, dueAt, covered, messages: [{messageId, kind, status, sentAt, reached, failed, skipped}]}`: the event's reminder time (`0` off), when this date's reminder goes (`null` when off), whether a reminder already written covers that one so it won't go (the same reminder, or another sent one less than the reminder time before it: `reminderAlreadyCovers`' rule), and every reminder written for the date, oldest first, read in one query. `kind` is `going` (the reminder) or `waitlist` (the waitlist note). The people are counted as the M3.5b history counts them, without guardian copies (DEC-132): `reached` got it (sent or delivered), `failed` didn't (bounced, marked as spam, or failed), `skipped` weren't sent it. The page says "Reminder emailed to 12 people · yesterday at 7:00 PM · 1 didn't get it · 2 skipped" and "Waitlist note emailed to 3 people · …", each linking to the reminder's page; then "Reminder goes out Tue, Nov 3 at 7:00 PM" before it goes (not when `covered`), or "Reminders are off for this event". Times read on the church's clock, as message times do.
 - **Who may read a reminder.** `GET /messages/:id` and `/messages/:id/recipients` let in the author, an admin, and for a reminder anyone who manages its event (`policy.CanSeeMessageHistory`, by the facts the event page uses). Anyone else gets 404. These two, the composer's picker and its preview (with the rendering "Send a test to me" sends), `GET /messages` and the `message` a write answers with (cancel, Try again; create, edit and schedule build theirs in their own transaction, under the person's and the message's locks, DEC-169) each read the session's user, their right and what they show in one read-only snapshot, so a leader or manager who loses the group or event, or an admin who is demoted, never sees a message, title or name written after; a session no longer current there answers 401, and a write's answer answers 404 when its viewer may no longer see the message. A leader or host reads the history under the leader rules: no reasons, guardian copies as a count (DEC-132), a provider's error in plain words (DEC-52).
 - **Read only.** A reminder is never `editable`. Edit, schedule, cancel, preview and test answer 409 `message_reminder` for everyone, admins included (`policy.CanEditMessage`).
@@ -2435,7 +2460,7 @@ A reminder is a message the pipeline sends (`category` `reminder`, no author, `o
 
 #### The 2-hour push reminder (M3.13d3)
 
-Every event also has `reminderPush` (on by default, PLAN 7.7, DEC-123), set on create and update and in Edit series (sent only when changed) like `reminderEmailMinutes`; group date rows carry it too. The forms show a "Push reminder 2 hours before" checkbox under the reminder email ("People who turned on notifications get a short reminder on their phone."), hidden while the church has push off (`pushEnabled` on `/site`); the closed More options adds "Push reminder".
+Every event also has `reminderPush` (on by default, PLAN 7.7, DEC-123), set on create and update and in Edit series (sent only when changed) like `reminderEmailMinutes`. The forms show a "Push reminder 2 hours before" checkbox under the reminder email ("People who turned on notifications get a short reminder on their phone."), hidden while the church has push off (`pushEnabled` on `/site`); the closed More options adds "Push reminder".
 
 - **Its own message.** Each date's push reminder is a reminder message with `channel` `push`, `reminder.kind` `push` and key `push:<occurrence>:<start>:120`, holding only push rows (`message_recipients.channel` `push`), one per person. It is never an announcement's push-only case (DEC-123 refuses that): reminders are a channel of their own. It is `sent` from the start; its `sentAt` is its first push, and until then Messages says "Waiting to go out" while some of its rows are still to go (`pushWaiting` on `message`), else "Nobody got it", and "Pushed …" once one went. It is never sent again (`canRetry` false), and it writes no bell row (DEC-44). A date cancelled and restored at the same start keeps its key, so a row its cancelled job already skipped stays skipped.
 - **Who.** The date's `going` registrants (a household person's reaches the account holder) who are active, have push on (`(push, all)` opted in), haven't turned push off for event updates (`category:events`) and have a device. Nobody else gets a row. No waitlist push and no guests (they can't subscribe).
@@ -2908,7 +2933,14 @@ Malformed, expired, wrong-actor or unavailable selections fail with 400 code
 Existing add endpoints accept `selectionId` in place of the legacy target:
 
 - `POST /groups/:id/members`: exactly one of `selectionId`, `email`; retain
-  `overLimit` and existing group management/capacity rules.
+  `overLimit` and existing group management/capacity rules. Email adds use the
+  same active account filter as the name picker. Leaders can add adults who
+  share their contact details with leaders or use their own email address.
+  Admins can add any selectable adult. Contact grants are used through the
+  audited reveal route.
+  Unavailable email targets and requests over the email limit answer 400
+  `group_member_email_unavailable`. The limit is 30 per actor and 100 per client
+  IP per minute. The invitation remains a separate action.
 - `POST /admin/groups/:id/members`: exactly one of `selectionId`, `userId`;
   retain `role`, `overLimit` and admin authorization.
 - `POST /events/:id/registrations/add`: `selectionId` instead of `userId`,
@@ -2922,10 +2954,10 @@ leadership/over-limit and registration audit rows remain; no-op adds do not log 
 new addition. Audit failure rolls back the membership change.
 
 Every ordinary direct manager-initiated teen account add through these
-endpoints (including email, raw-ID and admin paths) fails closed with 409 code
-`teen_add_approval_required`. Use a separate Ask to add; direct endpoints do not
-auto-create asks. Teen self-RSVP, household, proxy, consent conversion and
-invitation flows retain their own rules.
+endpoints fails closed. Email adds give the same unavailable response as other
+ineligible email targets. Selection and raw-ID adds return 409
+`teen_add_approval_required`. Use a separate Ask to add. Teen self-RSVP,
+household, proxy, consent conversion and invitation flows follow their own rules.
 
 Picker copy (client-owned):
 
