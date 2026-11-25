@@ -38,9 +38,8 @@ var (
 	// errRegNotFound: no matching registration row. A handler whose person is
 	// not a household person says so in its own words before it calls fail.
 	errRegNotFound = apiErr(http.StatusNotFound, "", "household person not found")
-	// errAddTargetGone: the person a manager is adding was erased while the add
-	// waited for the contact gate.
-	errAddTargetGone = apiErr(http.StatusNotFound, "", "person not found")
+	// errAddTargetGone distinguishes the person being added from a missing date.
+	errAddTargetGone = apiErr(http.StatusNotFound, "date_add_person_not_found", "person not found")
 	// errOccurrenceNotFound: no occurrence for the event and date.
 	errOccurrenceNotFound  = apiErr(http.StatusNotFound, "", "that date is not on this event")
 	errOccurrenceGateRetry = errors.New("retry invitation mutation under contact gate")
@@ -473,8 +472,9 @@ func registrationNotice(tx *gorm.DB, kind string, ev *models.Event, o *models.Ev
 	end := noticeEnd(o)
 	m := notify.Msg{
 		Kind: kind, To: []uint{userID}, SubjectType: "occurrence", SubjectID: o.ID, Link: link, Vars: vars,
-		Data:      map[string]any{"eventId": ev.ID, "date": models.FormatCalendarDate(o.OriginalDate)},
-		ExpiresAt: &end,
+		HouseholdPersonID: reg.HouseholdPersonID,
+		Data:              map[string]any{"eventId": ev.ID, "date": models.FormatCalendarDate(o.OriginalDate)},
+		ExpiresAt:         &end,
 	}
 	return m, facts.canSeeDate(userID, ev, o), nil
 }
@@ -570,7 +570,7 @@ func (a *App) promoteRows(tx *gorm.DB, ev *models.Event, o *models.EventOccurren
 		if err := auditRegistration(tx, actor, audit.RegistrationChanged, ev.ID, r, next, ""); err != nil {
 			return err
 		}
-		if err := notifyRegistrationPromoted(tx, ev, o, r, a.emailBaseURL()+"/guest/manage/"+raw, actor, now); err != nil {
+		if err := notifyRegistrationPromoted(tx, ev, o, r, a.guestManageURL(raw), actor, now); err != nil {
 			return err
 		}
 	}
@@ -1528,27 +1528,28 @@ func (a *App) apiAddRegistration(c *gin.Context) {
 		return
 	}
 	var target models.User
-	// A pruned guest keeps status=guest (never active); the add action is
-	// their way back in, so both statuses resolve here.
-	if body.SelectionID != "" {
+	missing := errAddTargetGone
+	var lookup *gorm.DB
+	switch {
+	case body.SelectionID != "":
 		id, err := a.parsePeopleSelection(body.SelectionID, apiUser(c).ID, a.now())
-		if err != nil || a.DB.Where("id = ? AND status = ? AND account_type IN ?", id, models.UserActive, []string{models.AccountAdult, models.AccountTeen}).First(&target).Error != nil {
+		if err != nil {
 			a.managerDateAddRefusal(c, errPeopleSelectionUnavailable)
 			return
 		}
-	} else if body.UserID != 0 {
-		if err := a.DB.Where("id = ? AND status IN ?", body.UserID,
-			[]string{models.UserActive, models.UserGuest}).First(&target).Error; err != nil {
-			a.managerDateAddError(c, http.StatusNotFound, "person not found")
-			return
+		missing = errPeopleSelectionUnavailable
+		lookup = a.DB.Where("id = ? AND status = ? AND account_type IN ?", id, models.UserActive, []string{models.AccountAdult, models.AccountTeen})
+	case body.UserID != 0:
+		lookup = a.DB.Where("id = ? AND status IN ?", body.UserID, []string{models.UserActive, models.UserGuest})
+	default:
+		lookup = a.DB.Where("email = ? AND status IN ?", strings.TrimSpace(body.Email), []string{models.UserActive, models.UserGuest})
+	}
+	if err := lookup.First(&target).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			err = missing
 		}
-	} else {
-		// The leader UI adds by email; resolve it to the account.
-		if err := a.DB.Where("email = ? AND status IN ?", strings.TrimSpace(body.Email),
-			[]string{models.UserActive, models.UserGuest}).First(&target).Error; err != nil {
-			a.managerDateAddError(c, http.StatusNotFound, "person not found")
-			return
-		}
+		a.managerDateAddRefusal(c, err)
+		return
 	}
 	var o models.EventOccurrence
 	if err := firstScheduledOn(a.DB, ev.ID, body.Date, &o); err != nil {

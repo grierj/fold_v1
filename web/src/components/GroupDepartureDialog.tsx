@@ -3,6 +3,7 @@ import { ApiError } from "../api/core";
 import { Groups } from "../api/groups";
 import type { DepartureConfirmation, DepartureKeepableDate, DeparturePreview } from "../types";
 import { errorCode, errorText } from "../lib/errors";
+import { useResourceRefusal } from "../lib/refusedSave";
 import { formatWhen } from "../lib/when";
 import { count } from "../lib/plural";
 import { registrationStatusLabel } from "../lib/status";
@@ -53,6 +54,7 @@ export function GroupDepartureDialog({
   onUnavailableRef.current = onUnavailable;
   const fallbackFocusRef = useRef(fallbackFocus);
   fallbackFocusRef.current = fallbackFocus;
+  const refreshRefusal = useResourceRefusal();
   const remove = subjectId !== undefined;
 
   const fetchPreview = useCallback(async () => {
@@ -93,7 +95,7 @@ export function GroupDepartureDialog({
         if (alive) showPreview(next);
       })
       .catch((err) => {
-        if (!alive) return;
+        if (!alive || refreshRefusal(err, "read")) return;
         setUnavailable(true);
         setError(errorText(err, "We couldn't load this departure. Close this window and refresh the page."));
         void onUnavailableRef.current?.();
@@ -103,7 +105,7 @@ export function GroupDepartureDialog({
       });
 
     return () => { alive = false; };
-  }, [fetchPreview, showPreview]);
+  }, [fetchPreview, showPreview, refreshRefusal]);
 
   function close() {
     if (!pending) onCancel();
@@ -157,7 +159,8 @@ export function GroupDepartureDialog({
           : "Membership or leadership changed. We refreshed what you can do. Review the choices, then confirm again."
       );
       requestAnimationFrame(() => cancelButton.current?.focus());
-    } catch {
+    } catch (err) {
+      if (refreshRefusal(err, "read")) return;
       setUnavailable(true);
       setError("This departure isn't available anymore. Close this window to see the current membership.");
       await onUnavailableRef.current?.();
@@ -183,6 +186,7 @@ export function GroupDepartureDialog({
 
       await onCompleted(response.departure);
     } catch (err) {
+      if (refreshRefusal(err)) return;
       const code = errorCode(err);
 
       if (code === "departure_stale" || code === "departure_unavailable" || (err instanceof ApiError && (err.status === 403 || err.status === 404))) {

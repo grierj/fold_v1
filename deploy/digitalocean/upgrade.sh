@@ -29,6 +29,7 @@ REL_COMMIT=""
 DRY_RUN=0
 DO_ROLLBACK=0
 IMAGE=""
+BACKUP_IMAGE=""
 COMMIT=""
 DEPLOY_DIR="/opt/fold"
 SOURCE_DIR=""
@@ -37,13 +38,14 @@ BACKUP_DIR="/var/backups/fold"
 
 usage() {
   cat <<'EOF'
-Usage: upgrade.sh --image ghcr.io/grierj/fold:1.2.3
+Usage: upgrade.sh --image ghcr.io/grierj/fold:1.2.3 [--backup-image REF]
        upgrade.sh --commit GITSHA [--source-dir /root/fold]
        upgrade.sh --rollback
        [--deploy-dir /opt/fold] [--domain groups.example.org] [--dry-run]
 
 Pins the new release to an image tag (FOLD_VERSION in <deploy-dir>/.env) or a
 git commit (build with docker-compose.build.yml), after a pg_dump.
+With --image, --backup-image saves a separate backup image reference in .env.
 --rollback exits 3 if the archive is restored but SITE IS CLOSED in private
 recovery pending operator checks. Exit 0 requires a successful reopen.
 --rollback restores the dump and the previous tag or commit recorded in
@@ -66,6 +68,7 @@ while [[ $# -gt 0 ]]; do
       shift
       ;;
     --image|--image=*) take_value IMAGE "$@"; shift "$OPT_SHIFT" ;;
+    --backup-image|--backup-image=*) take_value BACKUP_IMAGE "$@"; need_value --backup-image "$BACKUP_IMAGE"; shift "$OPT_SHIFT" ;;
     --commit|--commit=*) take_value COMMIT "$@"; shift "$OPT_SHIFT" ;;
     --deploy-dir|--deploy-dir=*) take_value DEPLOY_DIR "$@"; shift "$OPT_SHIFT" ;;
     --source-dir|--source-dir=*) take_value SOURCE_DIR "$@"; shift "$OPT_SHIFT" ;;
@@ -88,6 +91,10 @@ fi
 if [[ -n "$IMAGE" ]]; then
   [[ "$IMAGE" =~ ^[A-Za-z0-9][A-Za-z0-9._:/-]*$ ]] || die "--image has characters this script will not put in a compose file"
   assert_pinned_image "$IMAGE" || exit 1
+fi
+if [[ -n "$BACKUP_IMAGE" ]]; then
+  [[ -n "$IMAGE" ]] || die '--backup-image requires --image'
+  assert_backup_image "$BACKUP_IMAGE" || exit 1
 fi
 if [[ -n "$COMMIT" ]]; then
   [[ "$COMMIT" =~ ^[0-9a-f]{7,40}$ ]] || die "--commit must be a git SHA (7 to 40 hex digits)"
@@ -401,6 +408,7 @@ run_provision() {
   local -a cmd=("$PROVISION" --skip-harden --domain "$DOMAIN" --deploy-dir "$DEPLOY_DIR" --source-dir "$SOURCE_DIR")
   if [[ "$1" == "image" ]]; then
     cmd+=(--image "$2")
+    [[ -z "$BACKUP_IMAGE" ]] || cmd+=(--backup-image "$BACKUP_IMAGE")
   else
     cmd+=(--allow-onbox-build)
   fi
@@ -426,6 +434,9 @@ run_provision() {
 forward() {
   read_domain
   require_root
+  if [[ -n "$BACKUP_IMAGE" ]]; then
+    assert_backup_image_compose "$SOURCE_DIR/docker-compose.yml" || exit 1
+  fi
   if [[ -n "$COMMIT" ]]; then
     check_target_level build "$COMMIT"
     COMMIT="$RESOLVED_COMMIT"

@@ -64,7 +64,7 @@ export function RoomField({ eventId, date, idPrefix, onChanged, onGone, focusOnL
 }) {
   const id = `${idPrefix}-room`;
   // A church with rooms off, or a site we can't read, sees no rooms control at all.
-  const { enabled, off, list, loading, loadError } = useRoomPicker(() => DateRooms.list(eventId, date), [eventId, date]);
+  const { enabled, off, list, loading, loadError } = useRoomPicker(() => DateRooms.list(eventId, date), [eventId, date], onGone);
 
   const focused = useRef(false);
   useEffect(() => {
@@ -326,7 +326,7 @@ function DateRoomControl({ eventId, date, id, read, show, onChanged, onGone }: {
                     <Input ref={teardownRef} type="number" inputMode="numeric" min={0} max={240} value={teardown} onChange={(e) => setTeardown(e.target.value)} onKeyDown={onPaddingEnter} />
                   </Field>
                 </div>
-                <Button variant="secondary" disabled={busy} onClick={savePadding}>Save times</Button>
+                <Button variant="secondary" aria-disabled={busy} onClick={savePadding}>Save times</Button>
               </>
             )}
           </div>
