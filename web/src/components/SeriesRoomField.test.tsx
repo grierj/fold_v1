@@ -78,6 +78,20 @@ it("shows the series room that is already set", async () => {
   expect(await select()).toHaveValue("1");
 });
 
+it("shows the current room's capacity warning before applying it to a date that has its own room", async () => {
+  const defaultRoom = { id: 3, name: "Closet", building: "Annex" };
+  vi.mocked(SeriesRooms.list).mockResolvedValue(read({ defaultRoom, ownRooms: [ownRoom("2026-12-08")] }));
+  vi.mocked(SeriesRooms.set).mockResolvedValue(booking({ defaultRoom, booked: 1, changed: 1 }));
+  show();
+  const box = await select();
+  expect(box).toHaveValue("3");
+  expect(box).toHaveAccessibleDescription(/1 seat\. This room may be too small\./);
+  await userEvent.click(screen.getByRole("checkbox", { name: /Also change this date to Closet/ }));
+  expect(screen.getByText("1 seat. This room may be too small.")).toBeVisible();
+  await userEvent.click(screen.getByRole("button", { name: "Book for every date" }));
+  expect(SeriesRooms.set).toHaveBeenCalledWith(7, { roomId: 3, includeDates: ["2026-12-08"] }, "r1");
+});
+
 it("books every date at once and says how many", async () => {
   vi.mocked(SeriesRooms.set).mockResolvedValue(booking({ booked: 8 }));
   const onChanged = show();
@@ -155,7 +169,7 @@ it("offers an admin Book anyway for the busy dates, with a required reason", asy
   expect(SeriesRooms.set).toHaveBeenCalledTimes(1);
   await userEvent.type(reason, "Choir moved");
   await userEvent.click(screen.getByRole("button", { name: "Book anyway" }));
-  await waitFor(() => expect(SeriesRooms.set).toHaveBeenLastCalledWith(7, { roomId: 2, overlapReason: "Choir moved" }, "r2"));
+  await waitFor(() => expect(SeriesRooms.set).toHaveBeenLastCalledWith(7, { roomId: 2, overlapReason: "Choir moved", reviewedBusyDates: ["2026-12-08", "2026-12-15"] }, "r2"));
   await waitForStatus("Booked for 10 dates, 2 of them over another booking.");
   expect(screen.queryByRole("textbox", { name: /^Reason/ })).not.toBeInTheDocument();
 });
@@ -416,25 +430,59 @@ it("books every date again, and says what its answer did, when someone else alre
   expect(screen.queryByText(/is saved|changed while you were choosing/)).not.toBeInTheDocument();
 });
 
-it("says what a Book anyway sent again after its answer was lost found, never the prompt's count", async () => {
+it("offers a plain pick without claiming what was booked when an all-busy confirmation's reply was lost", async () => {
   actor.isAdmin = true;
+  vi.mocked(SeriesRooms.list).mockResolvedValue(read({ dates: 2 }));
   vi.mocked(SeriesRooms.set)
-    .mockResolvedValueOnce(booking({ defaultRoom: chapelRoom, booked: 8, lost: ["2026-12-08", "2026-12-15"] }))
+    .mockResolvedValueOnce(booking({ defaultRoom: chapelRoom, booked: 0, lost: ["2026-12-08", "2026-12-15"] }))
     .mockRejectedValueOnce(new TypeError("Failed to fetch"))
-    // The lost send double-booked both dates: the same series room, so the revision did not move and this one lands.
+    .mockRejectedValueOnce(new ApiError(409, "changed", { code: "series_busy_dates_changed", busyDates: [] }))
     .mockResolvedValueOnce(booking({ defaultRoom: chapelRoom, booked: 0 }));
   show();
   await pickAndBook("2");
+  const allBusy = "Not booked on any date yet: every date is busy.";
+  expect(await screen.findByText(allBusy)).toBeVisible();
   const reason = await screen.findByRole("textbox", { name: /^Reason for double-booking/ });
   await userEvent.type(reason, "Choir moved");
   await userEvent.click(screen.getByRole("button", { name: "Book anyway" }));
   await waitFor(() => expect(SeriesRooms.set).toHaveBeenCalledTimes(2));
   await waitFor(() => expect(screen.getByRole("button", { name: "Book anyway" })).toHaveAttribute("aria-disabled", "false"));
+  expect(screen.queryByText(allBusy)).not.toBeInTheDocument();
   expect(screen.getByRole("textbox", { name: /^Reason for double-booking/ })).toHaveValue("Choir moved");
   await userEvent.click(screen.getByRole("button", { name: "Book anyway" }));
+  const available = await screen.findByRole("button", { name: "Book available dates" });
+  expect(available).toHaveFocus();
+  expect(screen.getByText("The dates in use changed. Check the event for current bookings.")).toBeVisible();
+  expect(screen.queryByText(allBusy)).not.toBeInTheDocument();
+  expect(screen.queryByText(/no rooms were booked/i)).not.toBeInTheDocument();
+  expect(SeriesRooms.set).toHaveBeenCalledTimes(3);
+  expect(vi.mocked(SeriesRooms.set).mock.calls[2][1]).toEqual({ roomId: 2, overlapReason: "Choir moved", reviewedBusyDates: ["2026-12-08", "2026-12-15"] });
+  await userEvent.click(available);
   await waitForStatus("The series room is saved.");
-  expect(vi.mocked(SeriesRooms.set).mock.calls[2][1]).toEqual({ roomId: 2, overlapReason: "Choir moved" });
+  expect(vi.mocked(SeriesRooms.set).mock.calls[3][1]).toEqual({ roomId: 2 });
   expect(screen.queryByText(/over another booking|no upcoming dates/)).not.toBeInTheDocument();
+});
+
+it("shows the new dates on a conflict and waits for the admin to confirm again", async () => {
+  actor.isAdmin = true;
+  vi.mocked(SeriesRooms.set)
+    .mockResolvedValueOnce(booking({ defaultRoom: chapelRoom, booked: 9, lost: ["2026-12-08"] }))
+    .mockRejectedValueOnce(new ApiError(409, "changed", { code: "series_busy_dates_changed", busyDates: ["2026-12-15"] }))
+    .mockResolvedValueOnce(booking({ defaultRoom: chapelRoom, booked: 1, doubleBooked: 1 }));
+  show();
+  await pickAndBook("2");
+  const reason = await screen.findByRole("textbox", { name: /^Reason for double-booking/ });
+  expect(screen.getByRole("listitem")).toHaveTextContent("December 8");
+  await userEvent.type(reason, "Choir moved");
+  await userEvent.click(screen.getByRole("button", { name: "Book anyway" }));
+  await screen.findByText("The dates in use changed. Check the event for current bookings.");
+  expect(screen.getByRole("listitem")).toHaveTextContent("December 15");
+  expect(reason).toHaveFocus();
+  expect(reason).toHaveValue("Choir moved");
+  expect(SeriesRooms.set).toHaveBeenCalledTimes(2);
+  await userEvent.click(screen.getByRole("button", { name: "Book anyway" }));
+  await waitForStatus("Booked for 1 date, 1 of them over another booking.");
+  expect(SeriesRooms.set).toHaveBeenLastCalledWith(7, { roomId: 2, overlapReason: "Choir moved", reviewedBusyDates: ["2026-12-15"] }, "r2");
 });
 
 it("offers an admin Book anyway for the busy dates a stored pick's read shows", async () => {
@@ -673,7 +721,7 @@ it("never carries the named dates into Book anyway", async () => {
   await waitForStatus("Booked for 2 dates, 2 of them over another booking.");
   expect(vi.mocked(SeriesRooms.set).mock.calls.map((c) => c[1])).toEqual([
     { roomId: 2, includeDates: ["2026-12-08"] },
-    { roomId: 2, overlapReason: "Choir moved" },
+    { roomId: 2, overlapReason: "Choir moved", reviewedBusyDates: ["2026-12-15", "2026-12-22"] },
   ]);
 });
 
