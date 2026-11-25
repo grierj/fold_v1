@@ -1,5 +1,5 @@
 import { expect, test, type Locator, type Page } from "@playwright/test";
-import { writeFileSync } from "node:fs";
+import { renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { cpus } from "node:os";
 import { eagerGzipBytes, gzipBytes } from "../scripts/bundle-size.mjs";
@@ -101,13 +101,28 @@ test("measure useful content and interactions", async ({ browser, request, baseU
   await apiAs(request, "grier");
   const admin = await request.storageState();
   const results: { journey: string; run: number; ms: number; shift: number; jsGzipBytes: number }[] = [];
-  let delayedDateMs = 0;
+  let delayedDateMs: number | undefined;
   const dist = process.env.JOURNEY_DIST ?? "dist";
+
+  const reportFile = join(info.project.outputDir, "samples.json");
+
+  const environment = {
+    revision: process.env.JOURNEY_REVISION, browser: browser.version(), cpu: cpus()[0].model,
+    profile, eagerGzipBytes: eagerGzipBytes(dist).bytes,
+  };
+
+  function checkpoint(attempt: { journey: string; run: number; error?: string } | null) {
+    writeFileSync(reportFile + ".tmp", JSON.stringify({ ...environment, attempt, delayedDateMs, samples: results }, null, 2));
+    renameSync(reportFile + ".tmp", reportFile);
+  }
 
   for (const journey of ["directory", "date", "more-dates", "editor"]) {
     const verifySlowdown = journey === "date";
 
     for (let run = 0; run <= (verifySlowdown ? 6 : 5); run++) {
+      const attempt = { journey, run };
+      checkpoint(attempt);
+
       const context = await browser.newContext({
         baseURL, storageState: journey === "editor" ? admin : sam,
         viewport: profile.viewport, locale: "en-US", timezoneId: "UTC", serviceWorkers: "block",
@@ -161,6 +176,11 @@ test("measure useful content and interactions", async ({ browser, request, baseU
 
           results.push({ journey, run, ms: sample.ms, shift: sample.shift, jsGzipBytes });
         }
+
+        checkpoint(attempt);
+      } catch (error) {
+        checkpoint({ ...attempt, error: error instanceof Error ? error.message : String(error) });
+        throw error;
       } finally {
         if (run === 0) await context.tracing.stop({ path: info.outputPath(`${journey}.zip`) });
         await context.close();
@@ -168,8 +188,5 @@ test("measure useful content and interactions", async ({ browser, request, baseU
     }
   }
 
-  writeFileSync(join(info.project.outputDir, "samples.json"), JSON.stringify({
-    revision: process.env.JOURNEY_REVISION, browser: browser.version(), cpu: cpus()[0].model,
-    profile, delayedDateMs, eagerGzipBytes: eagerGzipBytes(dist).bytes, samples: results,
-  }, null, 2));
+  checkpoint(null);
 });

@@ -119,8 +119,8 @@ experiment only when the requested change specifically calls for it.
 
 The report-only `journeys` CI job builds the production SPA and Go binary twice. On a PR
 it measures the base tip and GitHub's proposed merge commit. On master it compares HEAD
-to its first parent. Both run on the same dedicated Ubuntu 24.04 VM with Postgres 16 and
-the head's pinned Playwright Chromium. Each binary gets a fresh database, the common
+to its first parent. Both binaries use `CGO_ENABLED=0` and `-trimpath`. They run on the same
+dedicated Ubuntu 24.04 VM with Postgres 16 and the head's pinned Playwright Chromium. Each binary gets a fresh database, the common
 `seed.setup.ts` site, and the pagination test's continuation group. Its two daily series
 have 55 dates each, one visible to Sam and one invite-only.
 
@@ -144,8 +144,15 @@ the endpoint, including eager chunks. They describe the build independently of H
 
 Read the job summary for median and range in milliseconds, base-to-head changes, largest
 shift and JS sizes. Download `journey-measurements` for individual samples, the CPU model,
-browser version and traces. From `web/`, use `npx playwright show-trace PATH.zip` to
-inspect requests, DOM snapshots and screenshots. To reproduce, set `DATABASE_URL` to
+browser version and traces. Each build records its active journey and iteration before
+opening the browser context and saves completed samples by atomic rename. After an
+interruption, earlier traces and samples remain in the artifact. Run 0 is the traced
+warm-up, runs 1–5 are timed, and date run 6 is the slowdown proof. A build or measurement
+failure still lets the other revision run. The summary lists each side's outcome,
+compares journeys with all five samples on each side, and gives sample counts for
+incomplete journeys. An incomplete run fails the diagnostic job.
+
+From `web/`, use `npx playwright show-trace PATH.zip` to inspect requests, DOM snapshots and screenshots. To reproduce, set `DATABASE_URL` to
 a disposable developer database, then run `npm ci`, `npx playwright install chromium`,
 `npm run build` and `npm run journeys`.
 The server creates a database with the suffix `_e2e_journeys` and uses port 18419.

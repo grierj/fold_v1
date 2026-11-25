@@ -200,32 +200,11 @@ jobs:
           node-version-file: .nvmrc
           cache: npm
           cache-dependency-path: web/package-lock.json
-      - name: Build both embedded binaries
-        shell: bash
-        run: |
-          mkdir "$RUNNER_TEMP/base"
-          git archive HEAD^ | tar -x -C "$RUNNER_TEMP/base"
-          for side in base head; do
-            source_dir="$GITHUB_WORKSPACE"
-            if [[ "$side" == base ]]; then source_dir="$RUNNER_TEMP/base"; fi
-            (cd "$source_dir/web" && npm ci && npm run build)
-            (cd "$source_dir" && go build -o "$RUNNER_TEMP/fold-$side" .)
-          done
-      - working-directory: web
-        run: npx playwright install --with-deps chromium
-      - name: Measure the base and proposed build
-        shell: bash
+      - name: Install the common measurement harness
         working-directory: web
-        run: |
-          for side in base head; do
-            export JOURNEY_DIST="$GITHUB_WORKSPACE/web/dist" JOURNEY_REVISION="$(git rev-parse HEAD)"
-            if [[ "$side" == base ]]; then
-              export JOURNEY_DIST="$RUNNER_TEMP/base/web/dist" JOURNEY_REVISION="$(git rev-parse HEAD^)"
-            fi
-            E2E_PORT=18419 E2E_SHARD="journey_$side" E2E_OUTPUT_DIR="test-results/$side" \
-              FOLD_E2E_BIN="$RUNNER_TEMP/fold-$side" npm run journeys
-          done
-          node scripts/journey-report.mjs test-results/{base,head}/samples.json | tee -a "$GITHUB_STEP_SUMMARY"
+        run: npm ci && npx playwright install --with-deps chromium
+      - name: Build, measure and compare the two revisions
+        run: bash web/e2e/compare-journeys.sh
       - if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
