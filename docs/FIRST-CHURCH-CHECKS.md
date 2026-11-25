@@ -116,6 +116,16 @@ section 11 cross-references these items. The exact-head full restore drill passe
 
 These replace stub-Docker fixtures that were removed when the nested runner was (the refusals, the browser preparation and the runner's order of work were simulated; nothing below was checked then). Run them on a droplet created for the purpose, as root, with the default local daemon.
 
+- [ ] **The running prior's event read and edit (#480, DEC-128).** Run the
+  full `restore-drill.sh` against the candidate on a disposable Ubuntu
+  droplet with `FOLD_DRILL_ISOLATED_DAEMON=1`. In
+  `real_prior_running_across_upgrade`, the seven visibility requests must
+  reach the audit fence and leave the stored rows unchanged. The prior's
+  final event GET and PUT must answer 200 within five attempts and the
+  stored title must be `Crossing E6 renamed`. Check for a passing
+  `prior-running-across-upgrade` row in `cases.jsonl`. Record the candidate
+  SHA, date, and result. The changed crossing is the reason for the full run.
+
 - [ ] **Refusals leave nothing behind.** With `FOLD_DRILL_ISOLATED_DAEMON` unset, run `restore-drill.sh --dir <new>` and `qc1-measure.sh --dir <new> --no-browser`: each exits 1 with "not declared disposable" and creates no directory, container, network or volume (compare `docker ps -a`, `docker network ls` and `docker volume ls` before and after). Then, declared, repeat with `DOCKER_HOST=tcp://127.0.0.1:2375` (and, separately, a non-default `DOCKER_CONTEXT`): both refuse naming the daemon. With one stopped container on the daemon, the drill refuses naming it; with one running, `qc1-measure.sh` refuses unless `--shared-daemon`.
 - [ ] **`browser-prepare.sh` on a fresh Ubuntu droplet.** Undeclared, it exits 1 before `npm` or `apt` run. Declared, with `QC1_PREPARE_FIREFOX=1`, it runs `npm ci` as locked, installs the locked Playwright's Chromium with its libraries, passes the preflight, builds the Firefox container, leaves `git status` clean and writes `browser.env` with `QC1_CHROMIUM` and `QC1_NO_SANDBOX=1`. Break the lock's Playwright pin once: it must stop before installing anything.
 - [ ] **The QC-1 runner's identity and volume checks.** Run `qc1-measure.sh --no-browser --image <an image labelled with another revision>`: it refuses with "is labelled revision" before any container, network or volume exists. Dirty the tree: it refuses "the tree is dirty" before looking at the image. A normal run's volume carries a `fold.qc1.owner` label, and `docker volume ls` shows nothing left after it (with `--keep`, the stack and volume stay).
