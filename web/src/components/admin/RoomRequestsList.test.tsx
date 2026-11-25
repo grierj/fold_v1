@@ -185,7 +185,7 @@ describe("RoomRequestsList", () => {
     render(<Harness initial={[series]} reload={reload} />);
     const r = row("Weekly Bible study");
     await userEvent.click(btn(r, "Approve"));
-    expect(await within(r).findByRole("alert")).toHaveTextContent("This group isn't approved yet.");
+    expect(await within(r).findByRole("alert")).toHaveTextContent("An admin can approve a pending group or reactivate an archived one.");
     expect(reload).not.toHaveBeenCalled();
     expect(btn(r, "Reject")).toBeEnabled();
   });

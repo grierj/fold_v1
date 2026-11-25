@@ -155,7 +155,7 @@ export const ERROR_COPY = {
   group_add_not_approved: "This group isn't approved yet. You can add people once an admin approves it.",
   group_events_not_approved: "This group isn't approved yet. You can schedule events once an admin approves it.",
   already_handled: "Someone already handled this request.",
-  group_rooms_not_approved: "This group isn't approved yet. You can book rooms once an admin approves it.",
+  group_rooms_not_approved: "Only active groups can book rooms. An admin can approve a pending group or reactivate an archived one.",
   group_has_members: "This group still has other members. Remove them or hand it to a new leader first.",
   removed_from_group: "A leader removed you from this group. Ask them if you'd like to come back.",
   leader_rule: "Only adults can be leaders, and every group needs at least one leader.",
