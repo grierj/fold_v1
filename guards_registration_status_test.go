@@ -14,7 +14,7 @@ import (
 // promotion's from-set (docs/agents/lifecycles.md). An insert is a Save of a
 // row with no id, so there is no other creator.
 //
-// Direct fields of named, locally typed structs are included in the census.
+// The census follows direct fields of named structs through local assignments.
 
 var registrationStatusWriterCensus = []string{
 	`promoteRegistration: Updates of a map with "status"`,
@@ -52,6 +52,15 @@ func write(tx *gorm.DB, changes []registrationChange, other otherChange) error {
 	tx.Save(&other.next)
 	return tx.Save(&ch.next).Error
 }`, "write: Save of a registration"},
+		{"a save through registerLocked's local variable", `package main
+type registrationChange struct { next models.Registration }
+type otherChange struct { next models.Membership }
+func (a *App) registerLocked(tx *gorm.DB, ch *registrationChange, other *otherChange) error {
+	otherRow := &other.next
+	tx.Save(otherRow)
+	r := &ch.next
+	return tx.Save(r).Error
+}`, "registerLocked: Save of a registration"},
 		{"a new batch given inline", `package main
 func create(tx *gorm.DB) error {
 	return tx.Create(&[]models.Registration{{}}).Error

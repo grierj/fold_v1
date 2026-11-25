@@ -41,13 +41,10 @@ var (
 
 type tableStatusWrite struct{ at, fn, shape string }
 
-func (g tableStatusGuard) value(e ast.Expr, bindings modelBindings, fields map[string]map[string]bool) bool {
+func (g tableStatusGuard) value(e ast.Expr, bindings modelBindings, fields tableStatusFields) bool {
 	e = tableStatusIndirect(e)
-	if selector, ok := e.(*ast.SelectorExpr); ok {
-		owner, ok := tableStatusIndirect(tableStatusExprType(selector.X)).(*ast.Ident)
-		return ok && fields[owner.Name][selector.Sel.Name]
-	}
-	return exprKind(e, g.model, bindings, nil) != notModel
+	return exprKind(e, g.model, bindings, nil) != notModel ||
+		(len(fields) > 0 && typeKind(tableStatusExprType(e, fields), g.model) != notModel)
 }
 
 func tableStatusIndirect(e ast.Expr) ast.Expr {
@@ -66,18 +63,22 @@ func tableStatusIndirect(e ast.Expr) ast.Expr {
 	}
 }
 
-// tableStatusExprType follows local declarations and indexing into a typed
-// slice or map. In particular, ch := &changes[i] retains the element type.
-func tableStatusExprType(e ast.Expr) ast.Expr {
+// tableStatusExprType follows declarations, indexing into typed collections,
+// and direct model fields of named structs.
+func tableStatusExprType(e ast.Expr, fields tableStatusFields) ast.Expr {
 	switch v := tableStatusIndirect(e).(type) {
 	case *ast.CompositeLit:
 		return v.Type
 	case *ast.IndexExpr:
-		switch t := tableStatusIndirect(tableStatusExprType(v.X)).(type) {
+		switch t := tableStatusIndirect(tableStatusExprType(v.X, fields)).(type) {
 		case *ast.ArrayType:
 			return t.Elt
 		case *ast.MapType:
 			return t.Value
+		}
+	case *ast.SelectorExpr:
+		if owner, ok := tableStatusIndirect(tableStatusExprType(v.X, fields)).(*ast.Ident); ok {
+			return fields[owner.Name][v.Sel.Name]
 		}
 	case *ast.Ident:
 		if v.Obj == nil {
@@ -90,7 +91,7 @@ func tableStatusExprType(e ast.Expr) ast.Expr {
 			if len(d.Lhs) == len(d.Rhs) {
 				for i, lhs := range d.Lhs {
 					if id, ok := lhs.(*ast.Ident); ok && id.Obj == v.Obj {
-						return tableStatusExprType(d.Rhs[i])
+						return tableStatusExprType(d.Rhs[i], fields)
 					}
 				}
 			}
@@ -103,8 +104,10 @@ func tableStatusExprType(e ast.Expr) ast.Expr {
 
 type tableStatusPackage struct{ dir, name string }
 
-func (g tableStatusGuard) structFields(p *guardkit.Parsed) map[tableStatusPackage]map[string]map[string]bool {
-	packages := map[tableStatusPackage]map[string]map[string]bool{}
+type tableStatusFields map[string]map[string]ast.Expr
+
+func (g tableStatusGuard) structFields(p *guardkit.Parsed) map[tableStatusPackage]tableStatusFields {
+	packages := map[tableStatusPackage]tableStatusFields{}
 	for _, f := range p.Files {
 		key := tableStatusPackage{f.Dir(), f.AST.Name.Name}
 		for _, d := range f.AST.Decls {
@@ -123,13 +126,13 @@ func (g tableStatusGuard) structFields(p *guardkit.Parsed) map[tableStatusPackag
 						continue
 					}
 					if packages[key] == nil {
-						packages[key] = map[string]map[string]bool{}
+						packages[key] = tableStatusFields{}
 					}
 					if packages[key][typ.Name.Name] == nil {
-						packages[key][typ.Name.Name] = map[string]bool{}
+						packages[key][typ.Name.Name] = map[string]ast.Expr{}
 					}
 					for _, name := range field.Names {
-						packages[key][typ.Name.Name][name.Name] = true
+						packages[key][typ.Name.Name][name.Name] = field.Type
 					}
 				}
 			}
