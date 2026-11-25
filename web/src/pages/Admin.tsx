@@ -1606,13 +1606,13 @@ export function AdminPage() {
         <div className="space-y-8">
           <RoomRequestsList requests={requests} needApproval={needApproval} error={requestsError}
             reload={requestsLoad.reload} onRemoved={requestRemoved}>
-            <RoomsTab rooms={rooms} error={roomsError} reload={roomsLoad.reload} onSaved={roomSaved} />
+            <RoomsTab rooms={rooms} error={roomsError} reload={roomsLoad.reload} load={roomsLoad} onSaved={roomSaved} />
           </RoomRequestsList>
           <MatchLocations rooms={rooms} />
         </div>
       ) : (
         <RoomsTab rooms={rooms} error={roomsEnabled === null ? siteError : roomsError}
-          reload={roomsEnabled === null ? retrySite : roomsLoad.reload} onSaved={roomSaved} />
+          reload={roomsEnabled === null ? retrySite : roomsLoad.reload} load={roomsLoad} onSaved={roomSaved} />
       ))}
       {tab === "users" && (
         usersLoad.loading ? <Skeleton kind="lines" /> : usersLoad.data ? (

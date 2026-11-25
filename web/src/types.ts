@@ -1082,6 +1082,8 @@ export interface Room {
   restricted: boolean;
   defaultSetupMinutes: number;
   defaultTeardownMinutes: number;
+  // The room's token, read with the fields beside it; an edit names it (DEC-171).
+  revision: string;
 }
 
 // A room's calendar-feed link (M2.2b). url is only in the response that

@@ -28,12 +28,12 @@ import (
 // ---------------------------------------------------------------------------
 
 // editRevisionCheckers is every handler that checks a save's revision, exactly.
-var editRevisionCheckers = []string{"apiScheduleMessage", "apiSetDateRoom", "apiSetEventVisibility", "apiSetSeriesRoom", "apiUpdateEvent", "apiUpdateGroup", "apiUpdateMessage"}
+var editRevisionCheckers = []string{"apiAdminUpdateRoom", "apiScheduleMessage", "apiSetDateRoom", "apiSetEventVisibility", "apiSetSeriesRoom", "apiUpdateEvent", "apiUpdateGroup", "apiUpdateMessage"}
 
-var editRevisionChecks = map[string]bool{"checkEventRevision": true, "checkGroupRevision": true, "checkDateRoomRevision": true, "checkMessageRevision": true, "checkEditRevision": true}
+var editRevisionChecks = map[string]bool{"checkEventRevision": true, "checkGroupRevision": true, "checkDateRoomRevision": true, "checkMessageRevision": true, "checkRoomRevision": true, "checkEditRevision": true}
 
 // editRevisionReaders are the checks that read their row on the handle given.
-var editRevisionReaders = map[string]bool{"checkGroupRevision": true, "checkDateRoomRevision": true, "checkMessageRevision": true}
+var editRevisionReaders = map[string]bool{"checkGroupRevision": true, "checkDateRoomRevision": true, "checkMessageRevision": true, "checkRoomRevision": true}
 
 var editRevisionTransactions = map[string]bool{"contactMutation": true, "Transaction": true}
 
@@ -177,9 +177,44 @@ func (a *App) apiScheduleMessage(c *gin.Context) {
 	}, readCommitted)
 }
 `
-	sound := guardkit.Sources{"a.go": visibility, "b.go": series, "c.go": group, "d.go": rooms, "e.go": messages}
+	const roomEditor = `package main
+func (a *App) apiAdminUpdateRoom(c *gin.Context) {
+	err = a.DB.Transaction(func(tx *gorm.DB) error {
+		if err := a.checkRoomRevision(tx, room.ID, body.Revision); err != nil {
+			return err
+		}
+		return nil
+	}, readCommitted)
+}
+`
+	sound := guardkit.Sources{"a.go": visibility, "b.go": series, "c.go": group, "d.go": rooms, "e.go": messages, "f.go": roomEditor}
 	if bad := editRevisionProblems(sound.Parse(0)); len(bad) > 0 {
 		t.Fatalf("the sound shape was flagged: %v", bad)
+	}
+	for name, src := range map[string]string{
+		"a room edit that skips the check": `package main
+func (a *App) apiAdminUpdateRoom(c *gin.Context) {
+	a.DB.Transaction(func(tx *gorm.DB) error { return nil }, readCommitted)
+}
+`,
+		"a room edit checked before its transaction": `package main
+func (a *App) apiAdminUpdateRoom(c *gin.Context) {
+	if err := a.checkRoomRevision(a.DB, room.ID, body.Revision); err != nil {
+		return
+	}
+	a.DB.Transaction(func(tx *gorm.DB) error { return nil }, readCommitted)
+}
+`,
+		"a room edit that reads its room outside its transaction's handle": `package main
+func (a *App) apiAdminUpdateRoom(c *gin.Context) {
+	a.DB.Transaction(func(tx *gorm.DB) error { return a.checkRoomRevision(a.DB, room.ID, body.Revision) }, readCommitted)
+}
+`,
+	} {
+		sources := guardkit.Sources{"a.go": visibility, "b.go": series, "c.go": group, "d.go": rooms, "e.go": messages, "f.go": src}
+		if bad := editRevisionProblems(sources.Parse(0)); len(bad) == 0 {
+			t.Errorf("%s passed the guard", name)
+		}
 	}
 	for name, src := range map[string]string{
 		"a date pick that skips the check": `package main
@@ -221,7 +256,7 @@ func bookWholeSeries(tx *gorm.DB, ev *models.Event, body seriesBody) error {
 }
 `,
 	} {
-		sources := guardkit.Sources{"a.go": visibility, "b.go": series, "c.go": group, "d.go": src, "e.go": messages}
+		sources := guardkit.Sources{"a.go": visibility, "b.go": series, "c.go": group, "d.go": src, "e.go": messages, "f.go": roomEditor}
 		if bad := editRevisionProblems(sources.Parse(0)); len(bad) == 0 {
 			t.Errorf("%s passed the guard", name)
 		}
@@ -255,7 +290,7 @@ func (a *App) apiScheduleMessage(c *gin.Context) {
 }
 `,
 	} {
-		sources := guardkit.Sources{"a.go": visibility, "b.go": series, "c.go": group, "d.go": rooms, "e.go": src}
+		sources := guardkit.Sources{"a.go": visibility, "b.go": series, "c.go": group, "d.go": rooms, "e.go": src, "f.go": roomEditor}
 		if bad := editRevisionProblems(sources.Parse(0)); len(bad) == 0 {
 			t.Errorf("%s passed the guard", name)
 		}
@@ -316,7 +351,7 @@ func (a *App) apiSetGroup(c *gin.Context) {
 }
 `,
 	} {
-		sources := guardkit.Sources{"a.go": src, "b.go": series, "d.go": rooms, "e.go": messages}
+		sources := guardkit.Sources{"a.go": src, "b.go": series, "d.go": rooms, "e.go": messages, "f.go": roomEditor}
 		if !strings.Contains(src, "apiUpdateGroup") {
 			sources["c.go"] = group
 		}

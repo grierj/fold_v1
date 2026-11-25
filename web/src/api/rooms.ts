@@ -33,7 +33,9 @@ export interface RoomInput {
 export const AdminRooms = {
   list: () => api<AdminRoomsResponse>("/admin/rooms"),
   create: (body: RoomInput) => api<RoomResponse>("/admin/rooms", { method: "POST", body }),
-  update: (id: Id, body: RoomInput) => api<RoomResponse>(path`/admin/rooms/${id}`, { method: "PUT", body }),
+  // An edit names the read it was made from (DEC-171): an older one is 409 room_changed.
+  update: (id: Id, body: RoomInput, revision: string | undefined) =>
+    api<RoomResponse>(path`/admin/rooms/${id}`, { method: "PUT", body: { ...body, revision: revision ?? "" } }),
   setEnabled: (enabled: boolean) => api<RoomsEnabledResponse>("/admin/settings/rooms", { method: "PUT", body: { enabled } }),
   // Whether leaders' and hosts' bookings wait for an admin (M2.1d, DEC-102).
   setApproval: (enabled: boolean) => api<RoomApprovalResponse>("/admin/settings/room-approval", { method: "PUT", body: { enabled } }),

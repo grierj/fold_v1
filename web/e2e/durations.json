@@ -6,6 +6,7 @@
   "a11y:rest": 4.4,
   "account-deletion.spec.ts": 18.3,
   "account-requests.spec.ts": 7.6,
+  "admin-room-revision.spec.ts": 4.0,
   "add-requests.spec.ts": 7.2,
   "admin-delete-user.spec.ts": 116.2,
   "admin-reason-review.spec.ts": 45.6,

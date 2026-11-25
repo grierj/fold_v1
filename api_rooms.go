@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
@@ -103,12 +104,15 @@ type roomJSON struct {
 	Restricted             bool   `json:"restricted"`
 	DefaultSetupMinutes    int    `json:"defaultSetupMinutes"`
 	DefaultTeardownMinutes int    `json:"defaultTeardownMinutes"`
+	// Revision is the room's token (roomRevisionIn), read with the fields
+	// beside it; an edit names it (DEC-171).
+	Revision string `json:"revision"`
 }
 
-func toRoomJSON(r *models.Room) roomJSON {
+func toRoomJSON(r *models.Room, revision string) roomJSON {
 	return roomJSON{ID: r.ID, Name: r.Name, Building: r.Building, Capacity: r.Capacity, Features: r.Features,
 		Notes: r.Notes, Active: r.Active, Restricted: r.Restricted,
-		DefaultSetupMinutes: r.DefaultSetupMinutes, DefaultTeardownMinutes: r.DefaultTeardownMinutes}
+		DefaultSetupMinutes: r.DefaultSetupMinutes, DefaultTeardownMinutes: r.DefaultTeardownMinutes, Revision: revision}
 }
 
 // roomBody is the create and edit body. On edit, an absent field keeps its
@@ -224,17 +228,39 @@ func roomNameTaken(err error) bool {
 	return pgConstraint(err, pgUniqueViolation, "idx_rooms_building_name")
 }
 
+// apiAdminListRooms reads the rooms, their revisions and the approval switch
+// in one snapshot, so a revision never belongs to newer fields than the ones
+// beside it.
 func (a *App) apiAdminListRooms(c *gin.Context) {
-	var rooms []models.Room
-	if err := a.DB.Order("active DESC, lower(building), lower(name)").Find(&rooms).Error; err != nil {
+	out := adminRoomsJSON{Rooms: []roomJSON{}}
+	err := a.DB.Transaction(func(tx *gorm.DB) error {
+		var rooms []models.Room
+		if err := tx.Order("active DESC, lower(building), lower(name)").Find(&rooms).Error; err != nil {
+			return err
+		}
+		ids := make([]uint, len(rooms))
+		for i := range rooms {
+			ids[i] = rooms[i].ID
+		}
+		revisions, err := a.roomRevisionsIn(tx, ids)
+		if err != nil {
+			return err
+		}
+		for i := range rooms {
+			revision, ok := revisions[rooms[i].ID]
+			if !ok {
+				return fmt.Errorf("room %d: no revision in the list's snapshot", rooms[i].ID)
+			}
+			out.Rooms = append(out.Rooms, toRoomJSON(&rooms[i], revision))
+		}
+		out.NeedApproval, err = boolSettingErrIn(tx, settingRoomApproval, false)
+		return err
+	}, readSnapshot)
+	if err != nil {
 		jsonError(c, http.StatusInternalServerError, "could not list rooms")
 		return
 	}
-	out := make([]roomJSON, 0, len(rooms))
-	for i := range rooms {
-		out = append(out, toRoomJSON(&rooms[i]))
-	}
-	c.JSON(http.StatusOK, adminRoomsJSON{Rooms: out, NeedApproval: roomApprovalOn(a.DB)})
+	c.JSON(http.StatusOK, out)
 }
 
 func (a *App) apiAdminCreateRoom(c *gin.Context) {
@@ -250,12 +276,18 @@ func (a *App) apiAdminCreateRoom(c *gin.Context) {
 		return
 	}
 	me := apiUser(c)
+	var revision string
 	err := a.DB.Transaction(func(tx *gorm.DB) error {
 		if err := tx.Create(&room).Error; err != nil {
 			return err
 		}
-		return audit.Write(tx, audit.Entry{Actor: &me.ID, Action: audit.RoomCreated, TargetType: "room", TargetID: room.ID,
-			Meta: map[string]any{"name": room.Name, "building": room.Building}, IP: c.ClientIP()})
+		if err := audit.Write(tx, audit.Entry{Actor: &me.ID, Action: audit.RoomCreated, TargetType: "room", TargetID: room.ID,
+			Meta: map[string]any{"name": room.Name, "building": room.Building}, IP: c.ClientIP()}); err != nil {
+			return err
+		}
+		var err error
+		revision, err = a.roomRevisionIn(tx, room.ID)
+		return err
 	})
 	if roomNameTaken(err) {
 		fail(c, errRoomNameTaken)
@@ -265,45 +297,65 @@ func (a *App) apiAdminCreateRoom(c *gin.Context) {
 		jsonError(c, http.StatusInternalServerError, "could not add the room")
 		return
 	}
-	c.JSON(http.StatusCreated, roomResponseJSON{Room: toRoomJSON(&room)})
+	c.JSON(http.StatusCreated, roomResponseJSON{Room: toRoomJSON(&room, revision)})
 }
 
+// apiAdminUpdateRoom saves an admin's edit of a room. The edit names the read
+// it was made from (revision, roomRevisionIn): an older one, or none, is 409
+// room_changed, writing nothing (DEC-171).
 func (a *App) apiAdminUpdateRoom(c *gin.Context) {
 	id, err := strconv.ParseUint(c.Param("id"), 10, 63)
 	if err != nil || id == 0 {
 		jsonError(c, http.StatusNotFound, "room not found")
 		return
 	}
-	var body roomBody
+	var body struct {
+		roomBody
+		Revision string `json:"revision"`
+	}
 	if err := c.ShouldBindJSON(&body); err != nil {
 		jsonError(c, http.StatusBadRequest, "invalid request")
 		return
 	}
 	me := apiUser(c)
 	var room models.Room
-	var changed []string
+	var revision string
 	errNotFound := errors.New("not found")
 	err = a.DB.Transaction(func(tx *gorm.DB) error {
+		// The room's lock is the last every booking writer takes (lockRoom),
+		// and this holds no other: then the actor, read after the wait.
 		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&room, id).Error; err != nil {
 			if errors.Is(err, gorm.ErrRecordNotFound) {
 				return errNotFound
 			}
 			return err
 		}
-		var applyErr error
-		changed, applyErr = body.apply(&room)
-		if applyErr != nil {
-			return applyErr
-		}
-		if len(changed) == 0 {
-			return nil
-		}
-		if err := tx.Save(&room).Error; err != nil {
+		actor, err := lockActorIn(tx, me, actorRead)
+		if err != nil {
 			return err
 		}
-		return audit.Write(tx, audit.Entry{Actor: &me.ID, Action: audit.RoomUpdated, TargetType: "room", TargetID: room.ID,
-			Meta: map[string]any{"changed": changed}, IP: c.ClientIP()})
-	})
+		if !policy.CanManageRooms(asPerson(actor)) {
+			return errSecuritySession
+		}
+		if err := a.checkRoomRevision(tx, room.ID, body.Revision); err != nil {
+			return err
+		}
+		changed, err := body.apply(&room)
+		if err != nil {
+			return err
+		}
+		if len(changed) > 0 {
+			if err := tx.Save(&room).Error; err != nil {
+				return err
+			}
+			if err := audit.Write(tx, audit.Entry{Actor: &me.ID, Action: audit.RoomUpdated, TargetType: "room", TargetID: room.ID,
+				Meta: map[string]any{"changed": changed}, IP: c.ClientIP()}); err != nil {
+				return err
+			}
+		}
+		revision, err = a.roomRevisionIn(tx, room.ID)
+		return err
+	}, readCommitted)
 	switch {
 	case errors.Is(err, errNotFound):
 		jsonError(c, http.StatusNotFound, "room not found")
@@ -314,7 +366,7 @@ func (a *App) apiAdminUpdateRoom(c *gin.Context) {
 	case err != nil:
 		jsonError(c, http.StatusInternalServerError, "could not save the room")
 	default:
-		c.JSON(http.StatusOK, roomResponseJSON{Room: toRoomJSON(&room)})
+		c.JSON(http.StatusOK, roomResponseJSON{Room: toRoomJSON(&room, revision)})
 	}
 }
 

@@ -255,3 +255,53 @@ func (a *App) checkMessageRevision(tx *gorm.DB, id uint, given string) error {
 	}
 	return checkEditRevision(given, current, errMessageChanged)
 }
+
+// errRoomChanged refuses an admin's save of a room made from an older read of
+// the room than the one it would change. Nothing is written.
+var errRoomChanged = apiErr(http.StatusConflict, "room_changed", "the room changed since this edit was based on it")
+
+// roomRevisionRows is a room: the admin room editor and its Deactivate and
+// Reactivate name it (DEC-171). created_at never changes.
+var roomRevisionRows = revisionRows{table: "rooms", kind: "r", key: "id", instants: []string{"updated_at"}, omit: []string{"created_at"}}
+
+// roomRevisionIn is the token the room editor holds for the room row as tx
+// sees it (rowRevisionIn): a writer calls it under the room's row lock.
+func (a *App) roomRevisionIn(tx *gorm.DB, id uint) (string, error) {
+	return a.rowRevisionIn(tx, roomRevisionRows, id)
+}
+
+// roomRevisionsIn is roomRevisionIn for each of ids, keyed by id: the room
+// list calls it in the snapshot that read the rooms it shows.
+func (a *App) roomRevisionsIn(tx *gorm.DB, ids []uint) (map[uint]string, error) {
+	return a.rowRevisionsIn(tx, roomRevisionRows, ids)
+}
+
+// rowRevisionsIn is rowRevisionIn for each of keys, keyed by key, in one
+// statement a chunk. A key with no row is missing from the map.
+func (a *App) rowRevisionsIn(tx *gorm.DB, t revisionRows, keys []uint) (map[uint]string, error) {
+	out := make(map[uint]string, len(keys))
+	err := eachIDChunk(keys, func(chunk []uint) error {
+		var rows []struct {
+			Key    uint
+			Digest string
+		}
+		if err := tx.Raw("SELECT r."+t.key+" AS key, "+t.digestSQL()+" AS digest FROM "+t.table+" r WHERE r."+t.key+" IN ?", chunk).Scan(&rows).Error; err != nil {
+			return err
+		}
+		for _, r := range rows {
+			out[r.Key] = a.editRevision(fmt.Sprintf("%s%d", t.kind, r.Key), r.Digest)
+		}
+		return nil
+	})
+	return out, err
+}
+
+// checkRoomRevision refuses given unless it is the token of the room as tx
+// reads it under its row lock.
+func (a *App) checkRoomRevision(tx *gorm.DB, id uint, given string) error {
+	current, err := a.roomRevisionIn(tx, id)
+	if err != nil {
+		return err
+	}
+	return checkEditRevision(given, current, errRoomChanged)
+}

@@ -16,7 +16,7 @@ import { RoomFeedPanel } from "./RoomFeedPanel";
 
 const hall: Room = {
   id: 7, name: "Fellowship Hall", building: "Main", capacity: 80, features: "", notes: "",
-  active: true, restricted: false, defaultSetupMinutes: 0, defaultTeardownMinutes: 0,
+  active: true, restricted: false, defaultSetupMinutes: 0, defaultTeardownMinutes: 0, revision: "rev-7",
 };
 
 const URL_ = "https://church.example/cal/rooms/7/s3cret.ics";

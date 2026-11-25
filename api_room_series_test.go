@@ -895,7 +895,7 @@ func TestSeriesPickKeepsARequestOnlyAnAdminCanChange(t *testing.T) {
 	if code, out := f.seriesRoom(t, f.leader, series, map[string]any{"roomId": f.hall.ID}); code != http.StatusOK || out.Pending != 2 {
 		t.Fatalf("request the hall: %d %+v", code, out)
 	}
-	apiDo(t, f.admin, "PUT", "/api/v1/admin/rooms/"+itoa(f.hall.ID), map[string]any{"restricted": true}, http.StatusOK)
+	apiDo(t, f.admin, "PUT", "/api/v1/admin/rooms/"+itoa(f.hall.ID), withRevision(map[string]any{"restricted": true}, adminRoomRevision(t, f.admin, f.hall.ID)), http.StatusOK)
 
 	read := seriesRoomsRead(t, f.leader, series)
 	if len(read.OwnRooms) != 2 || read.OwnRooms[0].MayChange || !read.OwnRooms[0].Waiting {
