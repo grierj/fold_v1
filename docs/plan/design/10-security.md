@@ -11,6 +11,9 @@ promises.
 
 - Transport and cookies: HTTPS through Caddy. Session cookies are Secure, HttpOnly and
   SameSite=Lax, and expire after 7 days. Passwords use bcrypt (DEC-90).
+- The managed database restore ends every browser session when the restored build
+  uses the session signing epoch. Ordinary restarts keep sessions. A rollback to a
+  build without the epoch can accept cookies it previously issued.
 - Trusted proxies (C17): Gin trusts `X-Forwarded-For` only from `FOLD_TRUSTED_PROXIES`. The
   default is the Compose network's fixed subnet, `172.30.0.0/24`. Fold refuses to start with a
   `/0` range. **Not built, no milestone yet:** an Admin > System page that shows the IP Fold sees,
@@ -50,9 +53,9 @@ promises.
   (DEC-52). The limits:
   - guest verification emails: 3 per address per hour and 10 per day, plus a per-IP budget (M1.4);
   - account requests and guest sign-ups: a site-wide cap of 100 an hour for each;
-  - leader invitations: 20 valid attempts per leader per rolling day, including refusals for an
-    existing account or a duplicate invitation; the leader's allowance is checked before any
-    address lookup (M1.2);
+  - leader invitations: 20 valid attempts per leader per rolling day, with 429 when the actor's
+    allowance runs out. A destination over its allowance gets the same acknowledgement as any
+    other valid destination. The leader's allowance is checked before any address lookup (DEC-172);
   - direct-contact and add requests: 10 open per requester (5.11, M1.11);
   - announcements: 5 emails per group (or church-wide event) per leader or host per church day;
     admins have no limit (M3.5);

@@ -637,7 +637,7 @@ func TestGuestInvitationUpgradeAndNoMembership(t *testing.T) {
 
 	w := admin.do("POST", "/api/v1/groups/"+itoa(gid)+"/members",
 		map[string]any{"email": "gail@example.com"}, true)
-	if w.Code != http.StatusForbidden {
+	if w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), `"code":"group_member_email_unavailable"`) {
 		t.Fatalf("adding a guest as a member: %d %s", w.Code, w.Body.String())
 	}
 
@@ -1349,13 +1349,6 @@ func TestGuestRegistrationDefersMailForEveryAddressKind(t *testing.T) {
 }
 
 func TestGuestRegistrationWorkAndThrottleGates(t *testing.T) {
-	realPasswordCost(t)
-	// Calibrate a deliberately loose lower bound instead of hard-coding the
-	// machine's bcrypt speed. Observe work at the account lookup, not at the
-	// end of the request: the padding must precede all address-dependent work.
-	start := time.Now()
-	(&models.User{}).CheckPassword("not a real password")
-	minimumWork := time.Since(start) / 3
 	for _, tt := range []struct {
 		name      string
 		account   bool
@@ -1417,12 +1410,22 @@ func TestGuestRegistrationWorkAndThrottleGates(t *testing.T) {
 			if tt.gate == "site" {
 				seedThrottle("guestreg:site", publicSignupSiteLimit)
 			}
-			var lookupAt time.Duration
-			var started time.Time
+			workCalls := 0
+			app.hooks.wrapGuestPasswordCheck = func(check func(string) bool) func(string) bool {
+				return func(password string) bool {
+					result := check(password)
+					workCalls++
+					return result
+				}
+			}
+			lookedUp := false
 			const callback = "guest:observe-account-lookup"
 			if err := app.DB.Callback().Query().Before("gorm:query").Register(callback, func(db *gorm.DB) {
 				if db.Statement.Table == "users" {
-					lookupAt = time.Since(started)
+					lookedUp = true
+					if workCalls != 1 {
+						t.Errorf("account lookup after %d bcrypt calls, want 1", workCalls)
+					}
 				}
 			}); err != nil {
 				t.Fatal(err)
@@ -1435,7 +1438,6 @@ func TestGuestRegistrationWorkAndThrottleGates(t *testing.T) {
 			if tt.gate == "honeypot" {
 				body["website"] = "bot"
 			}
-			started = time.Now()
 			answer := guestSubmit(t, anon, ev.ID, body, http.StatusOK)
 			if !strings.Contains(answer, signupThanks) {
 				t.Fatalf("nonuniform answer: %s", answer)
@@ -1443,12 +1445,12 @@ func TestGuestRegistrationWorkAndThrottleGates(t *testing.T) {
 			hints := len(mailJobsOfKind(t, app, kindAccountExistsMail))
 			jobs := len(mailJobsOfKind(t, app, kindGuestVerifyMail))
 			if tt.gate != "" {
-				if lookupAt != 0 || jobs != 0 || hints != 0 || guestSignupCount(t, app, email) != 0 {
-					t.Fatalf("early gate inspected/stored/mailed address: lookup=%v jobs=%d hints=%d", lookupAt, jobs, hints)
+				if workCalls != 0 || lookedUp || jobs != 0 || hints != 0 || guestSignupCount(t, app, email) != 0 {
+					t.Fatalf("early gate did work or inspected/stored/mailed address: bcrypt=%d lookup=%t jobs=%d hints=%d", workCalls, lookedUp, jobs, hints)
 				}
 			} else {
-				if lookupAt < minimumWork {
-					t.Fatalf("account lookup before bcrypt work: %v, want >= %v", lookupAt, minimumWork)
+				if workCalls != 1 || !lookedUp {
+					t.Fatalf("expected one bcrypt call and an account lookup: bcrypt=%d lookup=%t", workCalls, lookedUp)
 				}
 				wantJobs, wantHints := 1, 0
 				if tt.account {

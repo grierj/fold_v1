@@ -10,6 +10,7 @@ import (
 
 	"fold/internal/notify"
 	"fold/internal/policy"
+	"fold/internal/testdb"
 	"fold/models"
 
 	"gorm.io/gorm"
@@ -346,6 +347,61 @@ func TestHouseholdReconcileSkipsADateCancelledWhileItWaited(t *testing.T) {
 		t.Fatalf("the holder was told about a cancelled date: %+v", got)
 	}
 	noSecrets(t, f.app, "the household holder", holder.ID, holder.Email, mark, []string{"RENAMEDSECRET"})
+}
+
+func TestHouseholdReconcilePreservesManagerRemoval(t *testing.T) {
+	f := newDateEditFixture(t)
+	target := f.dates[1]
+	gormMust(t, f.app.DB.Model(&models.EventOccurrence{}).Where("id = ?", target.ID).Update("visibility_override", models.VisibilityPublic))
+	holder, holderClient, spouse, _ := householdFamily(t, f.app, f.admin, "household holder")
+	partner := newTestUser(t, f.app, "household partner", "password1234", models.RoleMember)
+	gormMust(t, f.app.DB.Create(&models.HouseholdAccount{HouseholdID: spouse.HouseholdID, UserID: partner.ID, Relation: models.HouseholdRelationAdult}))
+	partnerClient := loginAPI(t, f.app, partner.Name, "password1234")
+	date := models.FormatCalendarDate(target.OriginalDate)
+	answer := batchAnswer(t, holderClient, f.event.ID, date, map[string]any{
+		"people": []map[string]any{{"personId": spouse.ID, "status": models.RegGoing}},
+	}, http.StatusOK)
+	rowID := answer.People[0].RegistrationID
+	mark := markNotices(t, f.app)
+
+	blocker := f.app.DB.Begin()
+	gormMust(t, blocker)
+	t.Cleanup(func() { blocker.Rollback() })
+	if _, err := lockOccurrence(blocker, target.ID); err != nil {
+		t.Fatal(err)
+	}
+	manager := queueContact(func() *httptest.ResponseRecorder {
+		return f.admin.do("POST", "/api/v1/events/"+itoa(f.event.ID)+"/registrations/remove",
+			map[string]any{"date": date, "registrationId": rowID, "note": "Removed by the organizer"}, true)
+	})
+	const dateLock = `%FROM "event_occurrences"%FOR UPDATE%`
+	managerPID := waitForLockedUsersQuery(t, f.app, dateLock)
+	household := queueContact(func() *httptest.ResponseRecorder {
+		return partnerClient.do("DELETE", "/api/v1/me/household/people/"+itoa(spouse.ID), nil, true)
+	})
+	testdb.WaitUntil(t, "the household change to queue behind the manager", 10*time.Second, func() bool {
+		var waiting bool
+		gormMust(t, f.app.DB.Raw(`SELECT EXISTS (SELECT 1 FROM pg_stat_activity
+			WHERE datname = current_database() AND pid <> ? AND state = 'active'
+			AND wait_event_type = 'Lock' AND query LIKE ?)`, managerPID, dateLock).Scan(&waiting))
+		return waiting
+	})
+	gormMust(t, blocker.Commit())
+	if w := awaitContactResponse(t, manager); w.Code != http.StatusOK {
+		t.Fatalf("manager removal: %d %s", w.Code, w.Body.String())
+	}
+	if w := awaitContactResponse(t, household); w.Code != http.StatusOK {
+		t.Fatalf("household change: %d %s", w.Code, w.Body.String())
+	}
+
+	var row models.Registration
+	gormMust(t, f.app.DB.First(&row, rowID))
+	if row.Status != models.RegRemoved || row.RemovedBy == nil || row.RemovalNote != "Removed by the organizer" {
+		t.Fatalf("the manager removal was lost: %+v", row)
+	}
+	if got := noticesSince(t, f.app, holder.ID, notify.RegistrationRemoved, mark.notice); len(got) != 1 {
+		t.Fatalf("the holder got %d removal notices, want 1", len(got))
+	}
 }
 
 // householdAcrossTwoDates is a household person going on dates A and B of a

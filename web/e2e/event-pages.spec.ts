@@ -1,3 +1,4 @@
+import { continuationGroup } from "./continuation-group";
 import * as schema from "valibot";
 import { expect, test } from "@playwright/test";
 import { apiAs, signIn } from "./helpers";
@@ -86,24 +87,7 @@ test("the leader group page at 390 shows one primary action and a keyboard-frien
 });
 
 test("group dates continue across page boundaries to exhaustion without duplicates", async ({ page, request }) => {
-  const admin = await apiAs(request, "grier");
-
-  const { group } = schema.parse(schema.looseObject({ group: schema.looseObject({ id: schema.number() }) }), (await admin("POST", "/groups", {
-    name: "Continuation group", visibility: "public", tags: [],
-  })));
-
-  const dates = Array.from({ length: 55 }, (_, i) => new Date(Date.now() + (i + 2) * 864e5).toISOString().slice(0, 10));
-  // All dates fit inside the upcoming window. Earlier hidden dates must not
-  // consume the visible page's 25 slots or appear in its loaded counts.
-  await admin("POST", `/groups/${group.id}/events`, {
-    title: "Hidden daily series", startsLocal: `${dates[0]}T17:00`, durationMinutes: 60,
-    tzid: "UTC", recurrenceRule: "FREQ=DAILY;COUNT=55", visibility: "invite_only",
-  });
-
-  const { event } = schema.parse(schema.looseObject({ event: schema.looseObject({ id: schema.number() }) }), (await admin("POST", `/groups/${group.id}/events`, {
-    title: "Visible daily series", startsLocal: `${dates[0]}T19:00`, durationMinutes: 60,
-    tzid: "UTC", recurrenceRule: "FREQ=DAILY;COUNT=55", visibility: "public",
-  })));
+  const { group, event, dates } = await continuationGroup(request);
 
   await page.setViewportSize({ width: 390, height: 844 });
   await signIn(page, "sam");

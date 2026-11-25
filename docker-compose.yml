@@ -110,8 +110,13 @@ services:
       # empty and the service runs uncoordinated.
       FOLD_RECOVERY_DIR: ${FOLD_BACKUP_COORD:+/coord}
     volumes:
-      # Read-only: a backup only reads the uploads.
-      - uploads:/data:ro
+      # The app initializes the shared volume. Concurrent image copies can race.
+      - type: volume
+        source: uploads
+        target: /data
+        read_only: true
+        volume:
+          nocopy: true
       - backups:/backups
       - backup-status:/backup-status
       # The host's backup.lock and recovery.lock, read-only. With

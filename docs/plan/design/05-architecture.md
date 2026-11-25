@@ -397,6 +397,12 @@ How a person gets in:
 
 An invited person who answers "13 to 17" starts `pending_consent` like any teen account.
 
+For a leader, the invitation acknowledgement is the same for every valid
+destination, including an existing account or an address held by a pending
+invitation or household conversion (DEC-172). Fold queues mail when the
+address is eligible and rechecks before preparing it. Admins receive the
+invitation record or an address conflict.
+
 The age gate is on every account door and on the guest form for public events. A guest must tick "I am 18 or older"; the form explains that a parent or guardian can register a younger person from their own account, as a household person. On account doors, the person picks "18 or older", "13 to 17", or "Under 13":
 
 - **Under 13**: no account. The form explains that a parent or guardian can add the child to their household, and nothing typed is submitted.
