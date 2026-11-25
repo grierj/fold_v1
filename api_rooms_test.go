@@ -382,13 +382,15 @@ func TestRoomListReadsFieldsAndRevisionsInOneSnapshot(t *testing.T) {
 // An admin disabled or demoted while the edit waits for the room's lock is
 // refused (the actor is read after the lock), not told the room changed, and
 // nothing is written. Each change is what its admin route writes, the session
-// version bumped with it. The edit runs on a pool whose default is Repeatable
+// version bumped with it; a role taken away with the session kept is refused
+// by the room-manager rule itself. The edit runs on a pool whose default is Repeatable
 // Read: the route pins Read Committed, so the actor read sees what committed
 // during the wait.
 func TestRoomEditByAnAdminRevokedWhileItWaitsWritesNothing(t *testing.T) {
 	for name, change := range map[string]string{
-		"disabled": "status = '" + models.UserDisabled + "', session_version = session_version + 1",
-		"demoted":  "role = '" + models.RoleMember + "', session_version = session_version + 1",
+		"disabled":                         "status = '" + models.UserDisabled + "', session_version = session_version + 1",
+		"demoted":                          "role = '" + models.RoleMember + "', session_version = session_version + 1",
+		"no longer an admin, session kept": "role = '" + models.RoleMember + "'",
 	} {
 		t.Run(name, func(t *testing.T) {
 			f, _ := newRoomEditorFixture(t)

@@ -58,6 +58,7 @@ beforeEach(() => {
 });
 
 const changed = () => new ApiError(409, "room changed", { code: "room_changed" });
+
 // A send whose answer never came: it may have been stored.
 const lost = () => new ApiError(502, "bad gateway");
 const listOf = (...rooms: Room[]) => ({ rooms, needApproval: false });
@@ -392,6 +393,7 @@ describe("an edit someone else's change refused", () => {
 
   it("keeps Cancel and the other openers waiting while a save is on its way", async () => {
     let answer: (r: { room: Room }) => void = () => {};
+
     vi.mocked(AdminRooms.update).mockReturnValue(new Promise((resolve) => { answer = resolve; }));
     render(<Harness initial={[hall, room(2, "Nursery")]} />);
     await editName("Great Hall");
@@ -469,6 +471,7 @@ describe("a deactivation someone else's change refused", () => {
 
   it("keeps Edit and Add room waiting while it is on its way", async () => {
     let answer: (r: { room: Room }) => void = () => {};
+
     vi.mocked(AdminRooms.update).mockReturnValue(new Promise((resolve) => { answer = resolve; }));
     render(<Harness initial={[hall, room(2, "Nursery")]} />);
     await deactivate();

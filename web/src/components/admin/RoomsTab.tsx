@@ -57,7 +57,7 @@ const fromRoom = (r: Room): RoomForm => ({
 
 // What an edit of a room writes, as PUT /admin/rooms/:id stores it: the text trimmed, a blank capacity as no limit and
 // blank padding as none. Active is not the editor's to write: Deactivate and Reactivate send it on their own.
-export const roomFields = (r: Room) => ({
+const roomFields = (r: Room) => ({
   name: r.name.trim(),
   building: r.building.trim(),
   capacity: r.capacity,
@@ -91,6 +91,7 @@ function createBody(form: RoomForm): RoomInput {
     notes: form.notes.trim(),
     restricted: form.restricted,
   };
+
   const setup = minutes(form.setup);
   const cleanup = minutes(form.cleanup);
 
