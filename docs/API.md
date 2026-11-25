@@ -494,7 +494,8 @@ Resource bounds for avatar, cover and announcement picture uploads (`readImageUp
   overhead per request, whether or not it declares its length, and the CSRF
   check reads that body before sign-in, so concurrent requests still buffer
   one body each ahead of the slot check; the cap bounds each request, not
-  their number. There is no per-user quota and no whole-server memory cap.
+  their number. There is no per-account upload rate limit or whole-server
+  memory cap.
 
 ### Groups
 
