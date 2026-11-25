@@ -3,6 +3,7 @@ package testdb
 import (
 	"context"
 	"errors"
+	"net"
 	"net/url"
 	"strings"
 	"sync/atomic"
@@ -257,6 +258,56 @@ func TestProxyCommitModes(t *testing.T) {
 			t.Errorf("rows = %d, want 0 (rolled back)", n)
 		}
 	})
+}
+
+type observeProxyWrite struct {
+	net.Conn
+	afterWrite func()
+}
+
+func (c observeProxyWrite) Write(p []byte) (int, error) {
+	n, err := c.Conn.Write(p)
+	if err == nil {
+		c.afterWrite()
+	}
+	return n, err
+}
+
+func TestProxyForwardedReadyDoesNotCloseUpstream(t *testing.T) {
+	client, downstream := net.Pipe()
+	server, upstream := net.Pipe()
+	for _, conn := range []net.Conn{client, downstream, server, upstream} {
+		conn.SetDeadline(time.Now().Add(5 * time.Second))
+		t.Cleanup(func() { conn.Close() })
+	}
+	c := &proxyConn{p: &Proxy{}, upstream: upstream}
+	c.client = observeProxyWrite{downstream, func() {
+		// The client can start COMMIT as soon as it receives the previous
+		// ReadyForQuery, before the proxy finishes handling that frame.
+		c.endOfTransaction('Q', []byte("COMMIT\x00"), "COMMIT", KindCommit,
+			int(CommitForwardThenClose), int(CommitHoldReply), int(CommitForwardThenClose), int(CommitCloseUnforwarded))
+	}}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		c.fromServer()
+	}()
+	if err := writeMsg(server, 'Z', []byte{'T'}); err != nil {
+		t.Fatal(err)
+	}
+	if typ, _, err := readMsg(client); err != nil || typ != 'Z' {
+		t.Fatalf("previous ReadyForQuery: type %q, err %v", typ, err)
+	}
+	if typ, body, err := readMsg(server); err != nil || typ != 'Q' || string(body) != "COMMIT\x00" {
+		t.Fatalf("forwarded COMMIT: type %q, body %q, err %v", typ, body, err)
+	}
+	if err := writeMsg(server, 'Z', []byte{'I'}); err != nil {
+		t.Fatalf("upstream closed before the COMMIT reply: %v", err)
+	}
+	<-done
+	if got := c.suppressedReady.Load(); got != 1 {
+		t.Errorf("suppressed %d ReadyForQuery frames, want one for COMMIT", got)
+	}
 }
 
 func TestProxyRollbackModes(t *testing.T) {

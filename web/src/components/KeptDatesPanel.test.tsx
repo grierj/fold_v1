@@ -773,9 +773,9 @@ describe("W4k: keyboard focus", () => {
   it("(e) a care boundary, a window focus and a confirmed Remove each leave focus on the home", async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
     const until = new Date(Date.now() + 60_000).toISOString();
-    vi.mocked(Events.managedDate).mockResolvedValueOnce(read(A, { attendees: [person("Old Name"), kit(until)] }));
+    const first = holdRead();
     mount([A]);
-    await screen.findByText("Old Name");
+    await act(async () => { first.resolve(read(A, { attendees: [person("Old Name"), kit(until)] })); await first.promise; });
     const more = () => screen.getByRole("button", { name: "More for Old Name" });
 
     more().focus();
