@@ -272,7 +272,10 @@ it("says dates are waiting for an admin when the field loads", async () => {
   vi.mocked(SeriesRooms.list).mockResolvedValue({ revision: "r1", rooms: [hall], dates: 10, defaultRoom: { id: 1, name: "Fellowship Hall", building: "Main" }, ownRooms: [], needsRoom: [], pending: 8 });
   show();
   await select();
-  expect(screen.getByRole("status")).toHaveTextContent("Waiting for an admin to approve this room for 8 dates.");
+  expect(screen.getByRole("status")).toHaveTextContent("Waiting for an admin to approve Fellowship Hall · Main for 8 dates.");
+  // Beside another choice the line still names the room that waits, not the one in the select.
+  await userEvent.selectOptions(await select(), "none");
+  expect(screen.getByRole("status")).toHaveTextContent("Waiting for an admin to approve Fellowship Hall · Main for 8 dates.");
 });
 
 it("does not repeat the waiting line right after a booking said it", async () => {

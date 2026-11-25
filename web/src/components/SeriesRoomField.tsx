@@ -309,7 +309,7 @@ function SeriesRoomControl({ eventId, id, read, show, onChanged, onGone }: {
         )}
         {status && <p className="text-sm text-text-muted">{status}</p>}
         {!status && current && read.pending > 0 && (
-          <p className="text-sm text-text-muted">Waiting for an admin to approve this room for {count(read.pending, "date")}.</p>
+          <p className="text-sm text-text-muted">Waiting for an admin to approve {roomName(current)} for {count(read.pending, "date")}.</p>
         )}
         {current && dates > 0 && needsCount >= dates && (
           <p className="text-sm text-warning-on-subtle"><AlertCircleIcon className="mr-1 inline-block size-4 align-text-bottom" />Not booked on any date yet: every date is busy.</p>
