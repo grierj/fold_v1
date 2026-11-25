@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState } from "react";
+import { ApiError } from "../api/core";
 import { SeriesRooms } from "../api/rooms";
 import { useAuth } from "../auth";
+import { errorText } from "../lib/errors";
 import { roomName } from "../lib/place";
 import { RefusedSaveLine, useRefusedSave } from "../lib/refusedSave";
 import {
@@ -9,6 +11,7 @@ import {
 import { count } from "../lib/plural";
 import { useAction } from "../lib/useAction";
 import { answerNames, refusedAgain, useManagedSave } from "../lib/useRevisionSave";
+import { isString } from "../lib/wireValues";
 import { formatDayLong } from "../lib/when";
 import type { OccurrenceRoom, SeriesBooking, SeriesDates, SeriesRoomsResponse } from "../types";
 import { Checkbox, Field, FormError, Select } from "./ui/Field";
@@ -110,13 +113,13 @@ function SeriesRoomControl({ eventId, id, read, show, onChanged, onGone }: {
     setInclude(false);
   }
 
-  // An admin's answer for dates that are busy: the room to resend with a reason.
-  const [pending, setPending] = useState<{ roomId: number; dates: number } | null>(null);
+  const [pending, setPending] = useState<{ roomId: number; dates: string[]; notice?: string } | null>(null);
+  const available = useRef<HTMLButtonElement>(null);
   const overlap = useOverlapReason(reasonId);
 
   // Only an admin may double-book the dates a read shows busy in the room it booked, and only with a reason.
   const overBusyOffer = (shown: SeriesRoomsResponse, roomId: number | null) =>
-    isAdmin && roomId !== null && shown.defaultRoom?.id === roomId && shown.needsRoom.length > 0 ? { roomId, dates: shown.needsRoom.length } : null;
+    isAdmin && roomId !== null && shown.defaultRoom?.id === roomId && shown.needsRoom.length > 0 ? { roomId, dates: shown.needsRoom.map((date) => date.date) } : null;
 
   const save = useManagedSave<SeriesRoomsResponse, SeriesRoomFields, Partial<SeriesRoomFields>, SeriesBooking>({
     opened: read,
@@ -150,21 +153,39 @@ function SeriesRoomControl({ eventId, id, read, show, onChanged, onGone }: {
     },
   });
 
-  // An admin's busy-dates answer moves focus to the reason it asks for.
+  // Focus the next action when the server asks for a fresh review.
   useEffect(() => {
-    if (pending) document.getElementById(reasonId)?.focus();
+    if (!pending) return;
+
+    if (pending.dates.length > 0) document.getElementById(reasonId)?.focus();
+    else available.current?.focus();
   }, [pending, reasonId]);
 
-  function send(roomId: number | null, overlapReason?: string, includeDates?: string[]) {
+  function send(roomId: number | null, includeDates?: string[], confirmation?: { reason: string; dates: string[] }) {
     refusal.clear();
     void action.run(async () => {
-      overBusy.current = overlapReason !== undefined;
-      const body = overlapReason ? { roomId, overlapReason } : includeDates ? { roomId, includeDates } : { roomId };
+      overBusy.current = confirmation !== undefined;
+
+      const body = confirmation
+        ? { roomId, overlapReason: confirmation.reason, reviewedBusyDates: confirmation.dates }
+        : includeDates ? { roomId, includeDates } : { roomId };
+
       let outcome;
 
       try {
-        outcome = await save((revision) => SeriesRooms.set(eventId, body, revision), { roomId, needs: [] }, unseenOf(overlapReason ?? "", includeDates));
+        outcome = await save((revision) => SeriesRooms.set(eventId, body, revision), { roomId, needs: [] }, unseenOf(confirmation?.reason ?? "", confirmation?.dates ?? includeDates));
       } catch (e) {
+        if (confirmation && roomId !== null && e instanceof ApiError && e.code === "series_busy_dates_changed") {
+          const dates = e.data.busyDates;
+
+          if (Array.isArray(dates) && dates.every(isString)) {
+            setPending({ roomId, dates, notice: errorText(e) });
+            onChanged?.();
+
+            return false;
+          }
+        }
+
         if (roomsTurnedOff(e)) {
           setOff(true);
 
@@ -187,13 +208,13 @@ function SeriesRoomControl({ eventId, id, read, show, onChanged, onGone }: {
 
       if (!res) {
         // Already stored by a send whose answer was lost: the read shows it, and says what each date has.
-        setPending(now && !overlapReason ? overBusyOffer(now, roomId) : null);
+        setPending(now && !confirmation ? overBusyOffer(now, roomId) : null);
 
         return now ? seriesStoredMessage(now) : roomId === null ? "Series room released." : "The series room is saved.";
       }
 
       // Only an admin may double-book what stayed busy, and only with a reason.
-      setPending(isAdmin && roomId !== null && !overlapReason && res.lost.length > 0 ? { roomId, dates: res.lost.length } : null);
+      setPending(isAdmin && roomId !== null && !confirmation && res.lost.length > 0 ? { roomId, dates: res.lost } : null);
 
       return seriesBookingMessage(res);
     }, { fallback: "We couldn't update the room." });
@@ -215,12 +236,12 @@ function SeriesRoomControl({ eventId, id, read, show, onChanged, onGone }: {
     const dates = including ? changeable.map((o) => o.date) : undefined;
 
     if (pick === NO_ROOM) {
-      send(null, undefined, dates);
+      send(null, dates);
 
       return;
     }
 
-    if (chosen) send(chosen.id, undefined, dates);
+    if (chosen) send(chosen.id, dates);
   }
 
   function bookAnyway() {
@@ -228,7 +249,7 @@ function SeriesRoomControl({ eventId, id, read, show, onChanged, onGone }: {
     const why = overlap.read();
 
     if (why === null) return;
-    send(pending.roomId, why);
+    send(pending.roomId, undefined, { reason: why, dates: pending.dates });
   }
 
   const busy = action.running;
@@ -260,7 +281,7 @@ function SeriesRoomControl({ eventId, id, read, show, onChanged, onGone }: {
         <Select value={pick} disabled={busy} aria-busy={busy || undefined} onChange={(e) => choose(e.target.value)}>
           <option value={NO_ROOM}>No series room</option>
           {hidden && <option value={String(hidden.id)}>{roomName(hidden)}</option>}
-          <RoomOptions rooms={rooms} suggestions={suggestions} label={(r, reason) => seriesRoomLabel(r, dates, reason)} />
+          <RoomOptions rooms={rooms} suggestions={suggestions} label={(r, reason) => r.id === current?.id ? roomName(r) : seriesRoomLabel(r, dates, reason)} />
         </Select>
       </Field>
       <RefusedSaveLine save={refusal} noun="room" choosing="The room for every date" />
@@ -297,10 +318,14 @@ function SeriesRoomControl({ eventId, id, read, show, onChanged, onGone }: {
         )}
       </div>
       {action.state.status === "failed" && <FormError>{action.state.text}</FormError>}
-      {pending && (
+      {pending?.notice && <p role="status" className="text-sm">{pending.notice}</p>}
+      {pending && (pending.dates.length > 0 ? (
         <DoubleBookPrompt reasonId={reasonId} prompt={overlap} busy={busy} onBookAnyway={bookAnyway}
-          message={`${pending.dates === 1 ? "1 date is" : `${pending.dates} dates are`} in use. Give a reason to book ${pending.dates === 1 ? "it" : "them"} anyway.`} />
-      )}
+          message={`${pending.dates.length === 1 ? "1 date is" : `${pending.dates.length} dates are`} in use. Give a reason to book ${pending.dates.length === 1 ? "it" : "them"} anyway.`}
+          details={<ul className="space-y-1 text-sm">{pending.dates.map((date) => <li key={date}>{formatDayLong(date)}</li>)}</ul>} />
+      ) : (
+        <Button ref={available} variant="secondary" disabled={busy} onClick={() => send(pending.roomId)}>Book available dates</Button>
+      ))}
     </>
   );
 }

@@ -311,7 +311,7 @@ func TestRoomChangedSeriesBookAnywayApprovalAndCreate(t *testing.T) {
 		t.Fatalf("book A: %d %s", code, body)
 	}
 	series := createFeedEvent(t, f.leader, f.group, "Weekly", f.startOn.Add(30*time.Minute), "FREQ=WEEKLY;COUNT=3")
-	if code, out := f.seriesRoom(t, f.admin, series, map[string]any{"roomId": f.hall.ID, "overlapReason": "Shared with the youth"}); code != http.StatusOK || out.Booked != 3 || out.DoubleBooked != 1 {
+	if code, out := f.seriesRoom(t, f.admin, series, map[string]any{"roomId": f.hall.ID, "overlapReason": "Shared with the youth", "reviewedBusyDates": []string{feedDate(f.startOn)}}); code != http.StatusOK || out.Booked != 3 || out.DoubleBooked != 1 {
 		t.Fatalf("book anyway: %d %+v", code, out)
 	}
 	for _, uid := range []uint{f.leaderUser.ID, coUser.ID} {
