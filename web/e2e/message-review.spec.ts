@@ -15,12 +15,14 @@ async function leesGroup(request: APIRequestContext, name: string) {
   const lee = await apiAs(request, "lee");
   const { group } = schema.parse(schema.looseObject({ group: withId }), await lee("POST", "/groups", { name, visibility: "public", location: "Hall", tags: [] }));
   await (await apiAs(request, "grier"))("POST", `/admin/groups/${group.id}/approve`, {});
+
   const join = async (display: string) => {
     const grier = await apiAs(request, "grier");
     const handle = `review-${Date.now()}-${Math.floor(Math.random() * 1e6)}`;
     const { user } = schema.parse(schema.looseObject({ user: withId }), await grier("POST", "/admin/users", { name: display, email: email(handle), password: PASSWORD, ageBand: "adult" }));
     await grier("POST", `/admin/groups/${group.id}/members`, { userId: user.id, role: "member" });
   };
+
   await join("Ruth Early");
 
   return { id: group.id, join };
@@ -69,6 +71,7 @@ test("a message sender sees who joined since they looked, then sends to the list
 test("a message edited in two tabs: the second save says the changes could not be saved and shows the first", async ({ page, browser, request }) => {
   const group = await leesGroup(request, `Two tabs ${Date.now()}`);
   const lee = await apiAs(request, "lee");
+
   const { message } = schema.parse(schema.looseObject({ message: withId }), await lee("POST", "/messages", {
     channel: "email", subject: "First words", bodyHtml: "<p>Hello</p>", audience: { type: "group", groupId: group.id }, pushAlert: true,
   }));
