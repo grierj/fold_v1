@@ -111,7 +111,7 @@ test("a series room busy on one date lists it, and Pick a room books another roo
   const dateRoom = page.getByRole("combobox", { name: /^Room \(optional\)/ });
   await expect(dateRoom).toBeFocused();
   await pickRoom(dateRoom, "Library (20 seats)");
-  await expect(page.getByRole("status").filter({ hasText: "Booked Library." })).toBeVisible();
+  await expect(page.getByRole("article").first()).toContainText("Library · Room 201");
   await expect(page.getByRole("heading", { name: /Dates that need a room/ })).toHaveCount(0);
 });
 

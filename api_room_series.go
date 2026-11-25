@@ -4,6 +4,7 @@ import (
 	"errors"
 	"log"
 	"net/http"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -41,6 +42,18 @@ var errPickedRoomGone = apiErr(http.StatusNotFound, "room_gone", "that room is n
 // (idx_room_requests_one_series). Only an admin, whose pick opens none, can
 // change the room then.
 var errSeriesRequestKept = apiErr(http.StatusConflict, "series_request_kept", "only an admin can change this event's room request now")
+
+var errSeriesBusyDatesChanged = apiErr(http.StatusConflict, "series_busy_dates_changed", "the series' busy dates changed")
+
+type seriesBusyDatesChanged struct {
+	dates []string
+}
+
+func (e seriesBusyDatesChanged) Error() string { return errSeriesBusyDatesChanged.Error() }
+
+func (e seriesBusyDatesChanged) apiAnswer() *apiError {
+	return errSeriesBusyDatesChanged.with(gin.H{"busyDates": e.dates})
+}
 
 type seriesRoomJSON struct {
 	ID         uint   `json:"id"`
@@ -288,21 +301,25 @@ func (a *App) apiSetSeriesRoom(c *gin.Context) {
 		return
 	}
 	var body struct {
-		RoomID        *uint    `json:"roomId"`
-		OverlapReason string   `json:"overlapReason"`
-		Revision      string   `json:"revision"`
-		IncludeDates  []string `json:"includeDates"`
+		RoomID            *uint    `json:"roomId"`
+		OverlapReason     string   `json:"overlapReason"`
+		Revision          string   `json:"revision"`
+		IncludeDates      []string `json:"includeDates"`
+		ReviewedBusyDates []string `json:"reviewedBusyDates"`
 	}
-	if err := c.ShouldBindJSON(&body); err != nil || len(body.IncludeDates) > maxSeriesIncludeDates {
+	if err := c.ShouldBindJSON(&body); err != nil || len(body.IncludeDates) > maxSeriesIncludeDates || len(body.ReviewedBusyDates) > maxSeriesIncludeDates {
 		jsonError(c, http.StatusBadRequest, "invalid request")
 		return
 	}
-	for _, d := range body.IncludeDates {
-		if !isCalendarDate(d) {
-			fail(c, errSeriesDateInvalid)
-			return
+	for _, dates := range [][]string{body.IncludeDates, body.ReviewedBusyDates} {
+		for _, d := range dates {
+			if !isCalendarDate(d) {
+				fail(c, errSeriesDateInvalid)
+				return
+			}
 		}
 	}
+	slices.Sort(body.ReviewedBusyDates)
 	reason := strings.TrimSpace(body.OverlapReason)
 	if utf8.RuneCountInString(reason) > maxOverlapReason {
 		fail(c, errOverlapReasonTooLong)
@@ -317,7 +334,7 @@ func (a *App) apiSetSeriesRoom(c *gin.Context) {
 		if err := a.checkEventRevision(locked, f.group, body.Revision); err != nil {
 			return err
 		}
-		pick := seriesPick{roomID: body.RoomID, include: body.IncludeDates, reason: reason}
+		pick := seriesPick{roomID: body.RoomID, include: body.IncludeDates, reason: reason, reviewedBusyDates: body.ReviewedBusyDates}
 		if out, err = bookWholeSeries(tx, locked, pick, user, c.ClientIP()); err != nil {
 			return err
 		}
@@ -339,11 +356,12 @@ func (a *App) apiSetSeriesRoom(c *gin.Context) {
 
 // seriesPick is one change of a series room: the room (nil stops it), the
 // dates with a room of their own the person named to change too (DEC-168),
-// and an admin's reason to double-book busy dates.
+// and the busy dates an admin reviewed with a reason to double-book them.
 type seriesPick struct {
-	roomID  *uint
-	include []string
-	reason  string
+	roomID            *uint
+	include           []string
+	reason            string
+	reviewedBusyDates []string
 	// created: the room picked on a new event's form. Its creator is the
 	// actor and the event is new, so no one is told (DEC-170).
 	created bool
@@ -472,6 +490,7 @@ func bookWholeSeries(tx *gorm.DB, ev *models.Event, pick seriesPick, user *model
 		requestID = &req.ID
 	}
 	kept, inUse, changed := []string{}, []string{}, []string{}
+	busyDates := []string{}
 	// moved: dates whose room, or waiting for one, this pick changed.
 	released, moved := 0, 0
 	for i := range occs {
@@ -521,11 +540,20 @@ func bookWholeSeries(tx *gorm.DB, ev *models.Event, pick seriesPick, user *model
 			out.Pending++
 		case bookedOverlap:
 			out.Booked++
-			out.DoubleBooked++
+			busyDates = append(busyDates, models.FormatCalendarDate(occ.OriginalDate))
 		default:
 			out.Booked++
 		}
 	}
+	if room != nil && reason != "" {
+		slices.Sort(busyDates)
+		// Use the placement results under the room lock so the review includes the same
+		// conflicts as booking. A changed list rolls back every placement.
+		if len(pick.reviewedBusyDates) == 0 || !slices.Equal(pick.reviewedBusyDates, busyDates) {
+			return out, seriesBusyDatesChanged{dates: busyDates}
+		}
+	}
+	out.DoubleBooked = len(busyDates)
 	out.Kept, out.KeptInUse, out.Changed = len(kept), len(inUse), len(changed)
 	if req != nil && out.Pending == 0 {
 		if err := tx.Delete(req).Error; err != nil {

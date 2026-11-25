@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -18,6 +19,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/iotest"
 	"time"
 
 	"fold/internal/audit"
@@ -743,10 +745,31 @@ func TestDefinitiveResponsesEndTheAttempt(t *testing.T) {
 	})
 }
 
-// TestOutcomeClassification: how each commit result reaches the ledger and
-// what settle then says. Nothing here turns an applied deletion into
-// not_applied.
+type forcedDeleteDeadline struct{ context.Context }
 
+func (c forcedDeleteDeadline) Err() error { return context.Cause(c.Context) }
+
+// Keep the real deadline as a backstop. The test can end it earlier with
+// DeadlineExceeded when the phase it needs is reached.
+func controlDeleteDeadline(t *testing.T, app *App) func() {
+	t.Helper()
+	ready := make(chan context.CancelCauseFunc, 1)
+	app.hooks.wrapDeleteContext = func(parent context.Context) context.Context {
+		ctx, cancel := context.WithCancelCause(parent)
+		ready <- cancel
+		return forcedDeleteDeadline{ctx}
+	}
+	return func() {
+		select {
+		case cancel := <-ready:
+			cancel(context.DeadlineExceeded)
+		default:
+			t.Fatal("the deletion did not start its budget")
+		}
+	}
+}
+
+// An unknown COMMIT closes the id and settles from the receipt in PostgreSQL.
 func TestOutcomeClassification(t *testing.T) {
 	const claim = "idle_in_transaction_session_timeout"
 	cases := []struct {
@@ -761,63 +784,63 @@ func TestOutcomeClassification(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			setAdminDeleteBounds(t, 4*time.Second, 300*time.Millisecond)
-			app := testApp(t)
-			admin := newTestUser(t, app, "admin", "pw", models.RoleAdmin)
-			target := newTestUser(t, app, "target", "pw", models.RoleMember)
-			r := newCtxRigFor(t, app)
-			c := loginAPI(t, r.papp, "admin", "pw")
-			var clock atomic.Int64
-			r.papp.useAttemptClock(func() time.Duration { return time.Duration(clock.Load()) })
-			mintW := c.do("POST", "/api/v1/admin/operation-attempts", map[string]any{"kind": attemptKindAccountDelete, "subjectUserId": target.ID}, true)
-			var minted attemptMintJSON
-			decodeJSON(t, mintW, &minted)
+			s := newProxiedAttemptScene(t)
+			target := s.target("target").ID
+			id := s.mint(target)
+			r := s.rig
+			floor := s.app.restoreFenceFloor()
 			r.proxy.Arm(tc.fault)
-			w := c.do("DELETE", "/api/v1/admin/users/"+itoa(target.ID), map[string]any{"attemptId": minted.AttemptID}, true)
+			var w *httptest.ResponseRecorder
+			if tc.fault.Commit == testdb.CommitHoldReply {
+				expire := controlDeleteDeadline(t, s.app)
+				done := make(chan *httptest.ResponseRecorder, 1)
+				go func() {
+					defer close(done)
+					done <- s.del(id, target)
+				}()
+				t.Cleanup(func() {
+					r.proxy.ReleaseReply()
+					<-done
+				})
+				testdb.WaitUntil(t, "PostgreSQL to commit while the proxy holds the reply", 30*time.Second, func() bool {
+					return len(r.proxy.Find(testdb.KindCommit, testdb.ActionHeld)) > 0 && r.deletedUser(target)
+				})
+				expire()
+				w = awaitRec(t, done, "delete with a held COMMIT reply")
+			} else {
+				w = s.del(id, target)
+			}
 			if w.Code != http.StatusInternalServerError || codeOf(t, w) != "delete_outcome_unknown" {
 				t.Fatalf("delete: %d %s, want 500 delete_outcome_unknown", w.Code, w.Body.String())
 			}
-			nonce, _, _ := r.papp.openAttempt(minted.AttemptID, attemptKindAccountDelete, admin.ID, target.ID)
-			if st, _ := r.papp.attempts.ledger.look(nonce); st != attemptUnknown {
+			if st := s.state(id, target); st != attemptUnknown {
 				t.Fatalf("an unknown COMMIT ends the id %v, want unknown", st)
 			}
-			floor := r.papp.restoreFenceFloor()
 			if tc.committed {
-				deadline := time.Now().Add(5 * time.Second)
-				for !r.deletedUser(target.ID) && time.Now().Before(deadline) {
-					time.Sleep(10 * time.Millisecond)
-				}
+				testdb.WaitUntil(t, "the committed deletion", 10*time.Second, func() bool { return r.deletedUser(target) })
 			} else {
 				r.awaitReleased(r.pidOf(claim), 10*time.Second)
 			}
-			if r.deletedUser(target.ID) != tc.committed {
-				t.Fatalf("deleted = %v, want %v", r.deletedUser(target.ID), tc.committed)
+			if deleted := r.deletedUser(target); deleted != tc.committed {
+				t.Fatalf("deleted = %v, want %v", deleted, tc.committed)
 			}
-			if r.papp.restoreFenceFloor() != floor {
+			if s.app.restoreFenceFloor() != floor {
 				t.Error("an unknown COMMIT raised the floor")
 			}
-			sw := c.do("POST", "/api/v1/admin/operation-attempts/settle",
-				map[string]any{"attemptId": minted.AttemptID, "kind": attemptKindAccountDelete, "subjectUserId": target.ID}, true)
-			var got attemptSettleJSON
-			decodeJSON(t, sw, &got)
-			wantSettle(t, got, tc.settles, nil)
+			wantSettle(t, s.settled(id, target), tc.settles, nil)
 			// s4: resubmitted after 10 minutes the id is still closed, whatever the
 			// target's state, without a transaction.
-			clock.Store(int64(11 * time.Minute))
-			if w := c.do("DELETE", "/api/v1/admin/users/"+itoa(target.ID), map[string]any{"attemptId": minted.AttemptID}, true); w.Code != http.StatusConflict || codeOf(t, w) != "attempt_closed" {
+			s.advance(11 * time.Minute)
+			if w := s.del(id, target); w.Code != http.StatusConflict || codeOf(t, w) != "attempt_closed" {
 				t.Fatalf("resubmission at 11 minutes: %d %s, want 409 attempt_closed", w.Code, w.Body.String())
 			}
 			if tc.committed {
 				// The receipt later removed by an undetected restore: the unknown
 				// attempt can no longer be shown to have applied.
-				if err := app.DB.Exec("DELETE FROM admin_operation_attempts").Error; err != nil {
+				if err := s.direct.Exec("DELETE FROM admin_operation_attempts").Error; err != nil {
 					t.Fatal(err)
 				}
-				sw := c.do("POST", "/api/v1/admin/operation-attempts/settle",
-					map[string]any{"attemptId": minted.AttemptID, "kind": attemptKindAccountDelete, "subjectUserId": target.ID}, true)
-				var again attemptSettleJSON
-				decodeJSON(t, sw, &again)
-				wantSettle(t, again, settleHistoryUnavailable, nil)
+				wantSettle(t, s.settled(id, target), settleHistoryUnavailable, nil)
 			}
 		})
 	}
@@ -1778,27 +1801,47 @@ func TestAttemptFailsValidationWhileHeld(t *testing.T) {
 	wantSettle(t, s.settled(id, a.ID), settleNotApplied, nil)
 }
 
-// A deadline that expires during a retry attempt: attempt 1 finds the admin's
-// own row busy, the retry seam runs out the budget, attempt 2 is refused before
-// BEGIN. The answer is delete_timed_out, the id ends rolled back and settles
-// not_applied.
+// The deadline expires after the busy seal's rollback, before the next BEGIN.
 func TestDeletionDeadlineDuringARetry(t *testing.T) {
-	setAdminDeleteBounds(t, time.Second, 100*time.Millisecond)
-	s := newAttemptScene(t)
+	// The first attempt must reach the retry seam even on a loaded database.
+	// The production retry window is covered by TestBusyRetryPolicy.
+	oldWindow := busyRetryWindow
+	busyRetryWindow = adminDeleteBudget
+	defer func() { busyRetryWindow = oldWindow }()
+	s := newProxiedAttemptScene(t)
 	a := s.target("a")
-	hold, _ := beginOwnedTx(t, s.app.DB)
+	hold, _ := beginOwnedTx(t, s.direct)
 	if err := hold.Exec("SELECT id FROM users WHERE id = ? FOR NO KEY UPDATE", s.admin.ID).Error; err != nil {
 		t.Fatal(err)
 	}
 	id := s.mint(a.ID)
+	s.c.holdNotices = true
+	mark := len(s.rig.proxy.Events())
+	expire := controlDeleteDeadline(t, s.app)
 	s.app.hooks.sealAttempts = &atomic.Int64{}
-	s.app.hooks.deleteBeforeRetry = func() { time.Sleep(1100 * time.Millisecond) }
+	reachedRetry := false
+	s.app.hooks.deleteBeforeRetry = func() {
+		reachedRetry = true
+		expire()
+	}
 	w := s.del(id, a.ID)
 	if w.Code != http.StatusServiceUnavailable || codeOf(t, w) != "delete_timed_out" {
 		t.Fatalf("delete: %d %s, want 503 delete_timed_out", w.Code, w.Body.String())
 	}
 	if s.app.hooks.sealAttempts.Load() != 1 {
 		t.Errorf("sealed attempts = %d, want the one before the retry ran out of time", s.app.hooks.sealAttempts.Load())
+	}
+	if !reachedRetry {
+		t.Error("the deadline did not end at the retry seam")
+	}
+	begins := 0
+	for _, e := range s.rig.proxy.Events()[mark:] {
+		if e.Kind == testdb.KindStatement && strings.HasPrefix(strings.ToUpper(e.SQL), "BEGIN") {
+			begins++
+		}
+	}
+	if begins != 1 {
+		t.Errorf("PostgreSQL saw %d BEGINs, want only the first attempt", begins)
 	}
 	if s.state(id, a.ID) != attemptRolledBack || s.deleted(a.ID) {
 		t.Fatal("the id should end rolled back with nothing deleted")
@@ -1818,92 +1861,78 @@ func TestSubMillisecondRemainderInstallsAPositiveTimeout(t *testing.T) {
 	}
 }
 
-// A DELETE whose body is trickled past the budget never starts its transaction
-// before the body is complete (the budget starts after decoding), and one cut
-// off mid-body starts none at all; either way its id settles.
+type observedDeleteBody struct {
+	io.Reader
+	eofAt time.Time
+}
+
+func (b *observedDeleteBody) Read(p []byte) (int, error) {
+	n, err := b.Reader.Read(p)
+	if err == io.EOF {
+		b.eofAt = time.Now()
+	}
+	return n, err
+}
+
 func TestDeletionTrickledBody(t *testing.T) {
 	trickle := func(t *testing.T, cut bool) {
-		setAdminDeleteBounds(t, time.Second, 100*time.Millisecond)
-		app := testApp(t)
-		admin := newTestUser(t, app, "admin", "pw", models.RoleAdmin)
-		target := newTestUser(t, app, "target", "pw", models.RoleMember)
-		r := newCtxRigFor(t, app)
-		c := loginAPI(t, r.papp, "admin", "pw")
-		mint := c.do("POST", "/api/v1/admin/operation-attempts", map[string]any{"kind": attemptKindAccountDelete, "subjectUserId": target.ID}, true)
-		var minted attemptMintJSON
-		decodeJSON(t, mint, &minted)
-
-		srv := httptest.NewServer(r.papp.setupRouter())
-		defer srv.Close()
-		pr, pw := io.Pipe()
-		req, err := http.NewRequest("DELETE", srv.URL+"/api/v1/admin/users/"+itoa(target.ID), pr)
-		if err != nil {
-			t.Fatal(err)
-		}
-		req.Header.Set("Content-Type", "application/json")
-		req.Header.Set("X-CSRF-Token", c.token)
-		for _, ck := range c.jar {
-			req.AddCookie(&http.Cookie{Name: ck.Name, Value: ck.Value})
-		}
-		mark := len(r.proxy.Events())
-		var bodyDone atomic.Int64
-		go func() {
-			io.WriteString(pw, `{"attemptId":"`+minted.AttemptID[:40])
-			time.Sleep(1500 * time.Millisecond) // past the 1 s budget
-			if cut {
-				pw.CloseWithError(errors.New("client gave up"))
-				return
-			}
-			// Stamped before the last bytes go out: the server cannot have a
-			// complete body, and so cannot start its transaction, any earlier.
-			bodyDone.Store(time.Now().UnixNano())
-			io.WriteString(pw, minted.AttemptID[40:]+`"}`)
-			pw.Close()
-		}()
-		resp, err := http.DefaultClient.Do(req)
-		if err == nil {
-			defer resp.Body.Close()
-		}
-		fenceEvents := func() []testdb.Event {
-			var out []testdb.Event
-			for _, e := range r.proxy.Events()[mark:] {
-				if e.Kind == testdb.KindStatement && isRestoreFenceStatement(e.SQL) {
-					out = append(out, e)
-				}
-			}
-			return out
-		}
-		nonce, _, _ := r.papp.openAttempt(minted.AttemptID, attemptKindAccountDelete, admin.ID, target.ID)
+		s := newProxiedAttemptScene(t)
+		target := s.target("target").ID
+		id := s.mint(target)
+		prefix := strings.NewReader(`{"attemptId":"` + id[:40])
+		var last io.Reader = strings.NewReader(id[40:] + `"}`)
 		if cut {
-			if len(fenceEvents()) != 0 {
+			last = iotest.ErrReader(io.ErrUnexpectedEOF)
+		}
+		body := &observedDeleteBody{Reader: io.MultiReader(prefix, last)}
+		var budgetStarted time.Time
+		s.app.hooks.deleteBeforeSeal = func(tx *gorm.DB) {
+			if deadline, ok := tx.Statement.Context.Deadline(); ok {
+				budgetStarted = deadline.Add(-adminDeleteBudget)
+			}
+		}
+
+		req := httptest.NewRequest("DELETE", "/api/v1/admin/users/"+itoa(target), body)
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("X-CSRF-Token", s.c.token)
+		for _, ck := range s.c.jar {
+			req.AddCookie(ck)
+		}
+		mark := len(s.rig.proxy.Events())
+		resp := httptest.NewRecorder()
+		s.c.router.ServeHTTP(resp, req)
+		var fenceAt time.Time
+		for _, e := range s.rig.proxy.Events()[mark:] {
+			if e.Kind == testdb.KindStatement && isRestoreFenceStatement(e.SQL) {
+				fenceAt = e.Time
+				break
+			}
+		}
+		if cut {
+			if resp.Code != http.StatusBadRequest {
+				t.Fatalf("cut-off DELETE: %d %s, want 400", resp.Code, resp.Body.String())
+			}
+			if !fenceAt.IsZero() {
 				t.Fatal("a transaction started although the body never completed")
 			}
-			if st, _ := r.papp.attempts.ledger.look(nonce); st != attemptAbsent {
+			if st := s.state(id, target); st != attemptAbsent {
 				t.Fatalf("a cut-off body claimed the id: %v", st)
 			}
+			wantSettle(t, s.settled(id, target), settleNotApplied, nil)
 		} else {
-			if err != nil || resp.StatusCode != http.StatusOK {
-				t.Fatalf("the trickled delete: %v %v, want 200 (the budget starts after the body)", err, resp)
+			if resp.Code != http.StatusOK {
+				t.Fatalf("complete DELETE: %d %s, want 200", resp.Code, resp.Body.String())
 			}
-			fe := fenceEvents()
-			if len(fe) == 0 || fe[0].Time.UnixNano() < bodyDone.Load() {
-				t.Fatalf("the transaction started before the body was complete: %+v (body done at %d)", fe, bodyDone.Load())
+			if body.eofAt.IsZero() || budgetStarted.Before(body.eofAt) || fenceAt.Before(budgetStarted) {
+				t.Fatalf("want body EOF, then deletion budget, then transaction: EOF=%v budget=%v transaction=%v", body.eofAt, budgetStarted, fenceAt)
 			}
-			if st, _ := r.papp.attempts.ledger.look(nonce); st != attemptApplied {
+			if st := s.state(id, target); st != attemptApplied {
 				t.Fatalf("ledger = %v, want applied", st)
 			}
-		}
-		sw := c.do("POST", "/api/v1/admin/operation-attempts/settle",
-			map[string]any{"attemptId": minted.AttemptID, "kind": attemptKindAccountDelete, "subjectUserId": target.ID}, true)
-		var got attemptSettleJSON
-		decodeJSON(t, sw, &got)
-		if cut {
-			wantSettle(t, got, settleNotApplied, nil)
-		} else {
-			wantSettle(t, got, settleApplied, nil)
+			wantSettle(t, s.settled(id, target), settleApplied, nil)
 		}
 	}
-	t.Run("trickled past the budget", func(t *testing.T) { trickle(t, false) })
+	t.Run("budget starts after the body", func(t *testing.T) { trickle(t, false) })
 	t.Run("cut off mid-body", func(t *testing.T) { trickle(t, true) })
 }
 

@@ -522,7 +522,7 @@ const leaderRow = { id: 2, name: "Current Leader", email: "leader@example.com", 
 const protectedTeen = { ...leaderRow, id: 4, name: "Protected Teen", email: "protected@example.com", phone: "208-555-0144", role: "member" as const, accountType: "teen" as const };
 
 const managerOnlyDate = occurrence({
-  id: 9, eventId: 9, date: "2026-12-15", title: "Leaders planning", seriesTitle: "Leaders planning", attendeesVisible: true,
+  id: 9, eventId: 9, date: "2026-12-15", title: "Leaders planning", attendeesVisible: true,
   attendees: [{ registrationId: 5, userId: 4, name: "Protected Teen", email: "protected@example.com", accountType: "teen", status: "going", guestCount: 0, attendanceMode: "in_person" }],
 });
 
