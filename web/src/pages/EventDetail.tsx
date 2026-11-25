@@ -2,7 +2,7 @@ import { canRegisterAsGuest } from "../lib/can";
 import { Form } from "../components/ui/Form";
 import { useHousehold } from "../lib/useHousehold";
 import { SeriesEditor, type SeriesDraftHold } from "../components/SeriesEditor";
-import { lazy, Suspense, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { ApiError } from "../api/core";
 import { Events } from "../api/events";
@@ -79,19 +79,30 @@ function EventDetailContent() {
   const visibilityAction = useAction();
   const panelBusy = seriesAction.running || visibilityAction.running;
   const editButton = useRef<HTMLButtonElement>(null);
-  // A save in the panel reads the page again from nothing: focus still in the panel waits on the main region, and
-  // focus the reload dropped goes back to Edit series, the panel's opener, once the page is shown.
-  const returnToEdit = useRef(false);
+  // An empty id returns to the opener. A recheck can restore a field only if it still belongs to the editor.
+  const returnToEdit = useRef<string | null>(null);
   // Close took the focused control with the panel: focus goes back to Edit series, never the page body.
   const closedPanel = useRef(false);
   const [seriesFeedback, setSeriesFeedback] = useState<SeriesFeedbackSignal | null>(null);
   const seriesFeedbackRevision = useRef(0);
   const rsvpMutationGate = useRsvpMutationGate();
-  const editorRef = useRef<HTMLDivElement>(null);
+  const editorRef = useRef<HTMLDivElement | null>(null);
+
   // Rooms changed (a series room, a date's room, a cancelled or moved date): ask for the dates that need one again.
   const [roomsRevision, setRoomsRevision] = useState(0);
   // "Pick a room" asks one date's card to open its editor; seq makes a second ask count.
   const [pickRequest, setPickRequest] = useState<{ date: string; seq: number } | null>(null);
+
+  const attachEditor = useCallback((editor: HTMLDivElement | null) => {
+    const active = document.activeElement;
+
+    if (!editor && active && editorRef.current?.contains(active)) {
+      returnToEdit.current = active.id;
+      document.getElementById("main")?.focus({ preventScroll: true });
+    }
+
+    editorRef.current = editor;
+  }, []);
 
   // Opening the editor brings it into view and puts the cursor in its first
   // field, so a screen reader and a keyboard follow the button they pressed.
@@ -144,12 +155,16 @@ function EventDetailContent() {
     if (page.canManage) setEditing(true);
   }, [page, loading, authLoading]);
   useLayoutEffect(() => {
-    if (!returnToEdit.current || loading) return;
-    returnToEdit.current = false;
+    if (returnToEdit.current === null || loading || authLoading) return;
+    const field = document.getElementById(returnToEdit.current);
+    returnToEdit.current = null;
     const active = document.activeElement;
 
-    if (!active || active === document.body || active.id === "main") editButton.current?.focus();
-  }, [loading, page]);
+    if (!active || active === document.body || active.id === "main") {
+      const destination = field && editorRef.current?.contains(field) ? field : editButton.current;
+      destination?.focus({ preventScroll: true });
+    }
+  }, [loading, authLoading, editing, page]);
   useLayoutEffect(() => {
     if (editing || !closedPanel.current) return;
     closedPanel.current = false;
@@ -179,7 +194,7 @@ function EventDetailContent() {
   function handleRsvp() { void load.reload(); }
 
   function parkFocus() {
-    returnToEdit.current = true;
+    returnToEdit.current = "";
 
     if (editorRef.current?.contains(document.activeElement)) document.getElementById("main")?.focus({ preventScroll: true });
   }
@@ -322,7 +337,7 @@ function EventDetailContent() {
       )}
 
       {canManage && editing && (
-        <div ref={editorRef} className="mt-4">
+        <div ref={attachEditor} className="mt-4">
           <SeriesEditor
             series={{ ...event, eventId: event.id }}
             hold={seriesDraft}

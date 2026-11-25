@@ -2658,37 +2658,44 @@ describe("EventDetail when a series save meets someone else's change", () => {
     expect(Events.setVisibility).toHaveBeenCalledExactlyOnceWith(7, expect.objectContaining({ visibility: "private", revision: "r1" }));
   });
 
-  it.each(["allowed", "revoked"])("hides both drafts until a renewed session's read settles as %s", async (result) => {
+  it.each(["allowed", "moved focus", "revoked"])("hides both drafts until a renewed session's read settles as %s", async (result) => {
     const fresh = deferred<EventDetailResponse>();
     vi.mocked(Events.get).mockResolvedValueOnce(opened).mockReturnValueOnce(fresh.promise);
     let sessionCredential: Credential | null = credential;
 
     const renderSession = renderWithAuth(() => ({ user: { id: 2 }, credential: sessionCredential }));
-    const tree = () => <MemoryRouter initialEntries={["/events/7"]}><Routes><Route path="/events/:id" element={<EventDetail />} /></Routes></MemoryRouter>;
+    const tree = () => <><button>Outside the editor</button><main id="main" tabIndex={-1}><MemoryRouter initialEntries={["/events/7"]}><Routes><Route path="/events/:id" element={<EventDetail />} /></Routes></MemoryRouter></main></>;
     const view = renderSession(tree());
     await userEvent.click(await screen.findByRole("button", { name: "Edit event" }));
     await userEvent.type(screen.getByLabelText("Title"), " night");
     await userEvent.click(screen.getByRole("radio", { name: /^Private/ }));
 
+    expect(screen.getByRole("radio", { name: /^Private/ })).toHaveFocus();
     sessionCredential = null;
     view.rerender(tree());
     showsNothingOfTheEvent();
 
+    expect(screen.getByRole("main")).toHaveFocus();
+
+    if (result === "moved focus") await userEvent.click(screen.getByRole("button", { name: "Outside the editor" }));
     sessionCredential = { ...credential, token: "renewed" };
     view.rerender(tree());
     await waitFor(() => expect(Events.get).toHaveBeenCalledTimes(2));
     showsNothingOfTheEvent();
 
-    const allowed = result === "allowed";
+    const allowed = result !== "revoked";
     await act(async () => fresh.resolve({
       ...opened, canManage: allowed, canSetVisibility: allowed, event: { ...opened.event, revision: "r2" },
     }));
     await screen.findByRole("heading", { name: "Hybrid study", level: 1 });
 
     if (allowed) {
+      const destination = result === "moved focus" ? screen.getByRole("button", { name: "Outside the editor" }) : screen.getByRole("radio", { name: /^Private/ });
+      expect(destination).toHaveFocus();
       expect(screen.getByLabelText("Title")).toHaveValue("Hybrid study night");
       expect(screen.getByRole("radio", { name: /^Private/ })).toBeChecked();
     } else {
+      expect(screen.getByRole("main")).toHaveFocus();
       expect(screen.queryByLabelText("Title")).not.toBeInTheDocument();
       expect(screen.queryByRole("button", { name: "Edit event" })).not.toBeInTheDocument();
     }
