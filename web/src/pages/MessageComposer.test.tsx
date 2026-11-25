@@ -1161,6 +1161,26 @@ describe("a scheduled message's new list is the sender's to confirm", () => {
     expect(await screen.findByRole("heading", { name: "Bring a friend", level: 1 })).toBeInTheDocument();
   });
 
+  it("keeps the schedule's question on screen when its answer is lost after a confirmed new list, and the next press ends as sent", async () => {
+    const user = userEvent.setup();
+    vi.mocked(Messages.schedule)
+      .mockRejectedValueOnce(new ApiError(502, "bad gateway", {}, true))
+      .mockRejectedValueOnce(new ApiError(409, "changed", { code: "message_changed" }));
+    await editLeadersOnly(user);
+    await user.click(screen.getByRole("button", { name: "Schedule" }));
+    await user.click(within(await screen.findByRole("group", { name: /^Send to 1 person on / })).getByRole("button", { name: "Schedule" }));
+    expect(await screen.findByText(/couldn't tell whether it went out/)).toBeInTheDocument();
+    const ask = screen.getByRole("group", { name: /^Send to 1 person on / });
+    const formAt = vi.mocked(Messages.schedule).mock.calls[0][1].scheduledAt ?? null;
+    vi.mocked(Messages.get).mockResolvedValue({ message: message({ status: "scheduled", scheduledAt: formAt, audience: { type: "group", groupId: 7, roles: ["leader"] }, revision: "1.sched" }) });
+    await user.click(within(ask).getByRole("button", { name: "Schedule" }));
+    expect(await screen.findByRole("heading", { name: "Bring a friend", level: 1 })).toBeInTheDocument();
+    expect(screen.queryByText(/could not be/)).toBeNull();
+    expect(Messages.schedule).toHaveBeenCalledTimes(2);
+    expect(Messages.schedule).toHaveBeenLastCalledWith(5, expect.objectContaining({ revision: "1.r1", review: "saved-list" }));
+    expect(Messages.update).toHaveBeenCalledTimes(2);
+  });
+
   it("leaves it scheduled for its old list when the sender goes back, with the edit still in the form", async () => {
     const user = userEvent.setup();
     await editLeadersOnly(user);

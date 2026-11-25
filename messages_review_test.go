@@ -207,7 +207,7 @@ func TestMessageSendNamesItsText(t *testing.T) {
 	if out.Message.Status != models.MessageScheduled || out.Message.Revision == "" || out.Message.Revision == now {
 		t.Fatalf("scheduled: %+v", out)
 	}
-	// The answer names no one: its count is the one stored under the lock.
+	// The answer is the message alone: it names no one.
 	if strings.Contains(w.Body.String(), `"summary"`) || strings.Contains(w.Body.String(), `"recipients"`) {
 		t.Fatalf("the schedule answer names people: %s", w.Body.String())
 	}

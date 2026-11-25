@@ -1115,8 +1115,7 @@ func (a *App) apiUpdateMessage(c *gin.Context) {
 // message reaches now is answered from a fresh one (answerReviewRefusal).
 // Nothing is scheduled and no job queued then. It needs a subject, a body and
 // at least one person who gets the email; M3.5 sends it to the list as it
-// stands when it goes. The answer names no one: its message's count is the one
-// stored under the lock.
+// stands when it goes. The answer is the message alone and names no one.
 func (a *App) apiScheduleMessage(c *gin.Context) {
 	id, ok := messageIDParam(c)
 	if !ok {

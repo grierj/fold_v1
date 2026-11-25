@@ -74,6 +74,7 @@ test("a message sender sees who joined since they looked, then sends to the list
 });
 
 test("a scheduled message's new list is confirmed before Preview saves it, and goes back to its old list when the sender goes back", async ({ page, request }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
   const group = await leesGroup(request, `Scheduled ${Date.now()}`);
   const lee = await apiAs(request, "lee");
   const subject = `Later ${Date.now()}`;
@@ -99,6 +100,8 @@ test("a scheduled message's new list is confirmed before Preview saves it, and g
   await expect(ask).toBeVisible();
   await expect(ask).toContainText("It isn't sent now. It stays scheduled");
   await expect(ask.getByText("Change who gets this to 1 person?")).toBeFocused();
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+  await ask.screenshot({ path: "/var/tmp/msgslice/scheduled-list-390.png" });
   await page.keyboard.press("Enter");
   await expect(page.getByRole("heading", { name: "Preview", level: 2 })).toHaveCount(0);
 

@@ -80,10 +80,9 @@ func audienceKeyOf(raw string) string {
 	if json.Unmarshal([]byte(raw), &au) != nil || au.normalize() != nil {
 		return raw
 	}
-	slices.Sort(au.Roles)
-	slices.Sort(au.Statuses)
-	slices.Sort(au.EventIDs)
-	slices.Sort(au.UserIDs)
+	// Sorted copies: normalize may hand back the shared default sets.
+	au.Roles, au.Statuses = slices.Sorted(slices.Values(au.Roles)), slices.Sorted(slices.Values(au.Statuses))
+	au.EventIDs, au.UserIDs = slices.Sorted(slices.Values(au.EventIDs)), slices.Sorted(slices.Values(au.UserIDs))
 	key, _ := json.Marshal(au)
 	return string(key)
 }
