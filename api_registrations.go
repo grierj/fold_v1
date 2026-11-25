@@ -472,8 +472,9 @@ func registrationNotice(tx *gorm.DB, kind string, ev *models.Event, o *models.Ev
 	end := noticeEnd(o)
 	m := notify.Msg{
 		Kind: kind, To: []uint{userID}, SubjectType: "occurrence", SubjectID: o.ID, Link: link, Vars: vars,
-		Data:      map[string]any{"eventId": ev.ID, "date": models.FormatCalendarDate(o.OriginalDate)},
-		ExpiresAt: &end,
+		HouseholdPersonID: reg.HouseholdPersonID,
+		Data:              map[string]any{"eventId": ev.ID, "date": models.FormatCalendarDate(o.OriginalDate)},
+		ExpiresAt:         &end,
 	}
 	return m, facts.canSeeDate(userID, ev, o), nil
 }
@@ -569,7 +570,7 @@ func (a *App) promoteRows(tx *gorm.DB, ev *models.Event, o *models.EventOccurren
 		if err := auditRegistration(tx, actor, audit.RegistrationChanged, ev.ID, r, next, ""); err != nil {
 			return err
 		}
-		if err := notifyRegistrationPromoted(tx, ev, o, r, a.emailBaseURL()+"/guest/manage/"+raw, actor, now); err != nil {
+		if err := notifyRegistrationPromoted(tx, ev, o, r, a.guestManageURL(raw), actor, now); err != nil {
 			return err
 		}
 	}

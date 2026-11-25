@@ -764,6 +764,12 @@ func TestGuestRedeemOnFullEventWithoutWaitlistCreatesNothing(t *testing.T) {
 // A promoted guest gets the promotion email at the guest address in the
 // devoutbox, with a working manage link.
 func TestPromotedGuestGetsEmail(t *testing.T) {
+	t.Run("current notice", func(t *testing.T) { promotedGuestGetsEmail(t, false) })
+	t.Run("pre-upgrade notice", func(t *testing.T) { promotedGuestGetsEmail(t, true) })
+}
+
+func promotedGuestGetsEmail(t *testing.T, legacy bool) {
+	t.Helper()
 	app := testApp(t)
 	newTestUser(t, app, "admin", "password1234", models.RoleAdmin)
 	admin := loginAPI(t, app, "admin", "password1234")
@@ -789,16 +795,39 @@ func TestPromotedGuestGetsEmail(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("guest confirm: %d %s", w.Code, w.Body.String())
 	}
+	var confirmed struct {
+		ManageToken string `json:"manageToken"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &confirmed); err != nil || confirmed.ManageToken == "" {
+		t.Fatalf("confirmation did not return a manage token: %v", err)
+	}
+	gu := guestUser(t, app, "gail@example.com")
 
 	// The member cancels; the guest is promoted and emailed.
+	mc.holdNotices = legacy
 	if code, _ := registerAs(mc, ev.ID, models.FormatCalendarDate(occ.OriginalDate), "declined", nil); code != http.StatusOK {
 		t.Fatalf("member cancel: %d", code)
 	}
+	if legacy {
+		var n models.Notification
+		gormMust(t, app.DB.Where("user_id = ? AND kind = ?", gu.ID, notify.RegistrationPromoted).First(&n))
+		if d := emailDeliveryOf(t, app, n.ID); d.Status != models.DeliveryQueued {
+			t.Fatalf("legacy fixture needs a queued promotion email, got %s", d.Status)
+		}
+		gormMust(t, app.DB.Model(&n).UpdateColumn("data", gorm.Expr("data - 'emailHouseholdPersonId'")))
+	}
 	m := latestEmail(t, app, "gail@example.com")
-	if !strings.Contains(m.Subject, "You're in") {
+	if legacy {
+		if m.Subject != "A waitlist spot opened" || strings.Contains(m.Subject+m.Body, gu.PublicName()) {
+			t.Fatalf("legacy promotion did not send the name-free email: %q", m.Subject)
+		}
+	} else if !strings.Contains(m.Subject, "You're in") {
 		t.Fatalf("promotion email subject: %q", m.Subject)
 	}
 	manageToken := manageTokenInEmail(t, m)
+	if manageToken == confirmed.ManageToken {
+		t.Fatal("promotion sent the old waitlisted registration token")
+	}
 	// Fetching the manage page changes nothing; the token still works.
 	w = anon.do("GET", "/api/v1/guest-registrations/manage/"+manageToken, nil, false)
 	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"status":"going"`) {
@@ -806,7 +835,6 @@ func TestPromotedGuestGetsEmail(t *testing.T) {
 	}
 	// Confirming the cancel sets cancelled and the old token then fails.
 	apiDo(t, anon, "POST", "/api/v1/guest-registrations/manage/"+manageToken+"/cancel", nil, http.StatusOK)
-	gu := guestUser(t, app, "gail@example.com")
 	if r := guestRegistrationRow(t, app, gu.ID); r.Status != models.RegCancelled {
 		t.Fatalf("after manage cancel: %q", r.Status)
 	}
