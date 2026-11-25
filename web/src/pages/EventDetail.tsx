@@ -40,6 +40,7 @@ import { applyActorRsvpResults, type ActorRsvpResult, type SeriesFeedbackSignal 
 import { useRsvpMutationGate, type RsvpMutationGate } from "../lib/useRsvpMutationGate";
 import { ConfirmProvider, useConfirm, usePageFacts } from "../components/ui/ConfirmDialog";
 import { useLeaveQuestion } from "../lib/leaveQuestion";
+import { ManagerSaveStatus } from "../components/ui/ManagerSaveStatus";
 import { useRosterSettled } from "../lib/rosterWrites";
 import { seriesSchedules } from "../lib/registration";
 
@@ -74,6 +75,12 @@ function EventDetailContent() {
   const seriesAction = useAction();
   const visibilityAction = useAction();
   const panelBusy = seriesAction.running || visibilityAction.running;
+  const [panelUpdated, setPanelUpdated] = useState(false);
+  const [dateUpdated, setDateUpdated] = useState(false);
+  const managerStatus = <ManagerSaveStatus saving={panelBusy} updated={panelUpdated} />;
+  useEffect(() => {
+    if (panelBusy) setPanelUpdated(false);
+  }, [panelBusy]);
   const editButton = useRef<HTMLButtonElement>(null);
   // A save in the panel reads the page again from nothing: focus still in the panel waits on the main region, and
   // focus the reload dropped goes back to Edit series, the panel's opener, once the page is shown.
@@ -187,18 +194,20 @@ function EventDetailContent() {
   if (loading || authLoading) {
     return (
       <div className="fold-page fold-page-narrow">
+        {managerStatus}
         <Skeleton kind="page" />
       </div>
     );
   }
 
   if (notFound) {
-    return <Missing title="Event not found" body="It may have been cancelled or removed, or it may be private." notice={<><RefusedSaveLine save={refusedSave} noun="event" /><RefusedSaveLine save={dateRefused} noun="date" /></>} />;
+    return <Missing title="Event not found" body="It may have been cancelled or removed, or it may be private." notice={<>{managerStatus}<RefusedSaveLine save={refusedSave} noun="event" /><RefusedSaveLine save={dateRefused} noun="date" /></>} />;
   }
 
   if (!page) {
     return (
       <div className="fold-page fold-page-narrow">
+        {managerStatus}
         <h1 className="text-3xl font-bold mb-6">Event unavailable</h1>
         <RefusedSaveLine save={refusedSave} noun="event" />
         <RefusedSaveLine save={dateRefused} noun="date" />
@@ -242,6 +251,7 @@ function EventDetailContent() {
 
   return (
     <div className="fold-page fold-page-narrow">
+      {managerStatus}
       {/* Edit series and More sit beside the title as secondary actions; an event page has no primary one (DEC-63, DEC-65). */}
       <div className="fold-page-header">
         <div className="min-w-0">
@@ -250,7 +260,7 @@ function EventDetailContent() {
         </div>
         {canManage && (
           <div className="flex w-full gap-2 sm:w-auto sm:shrink-0">
-            <Button ref={editButton} variant="secondary" layout="flex-1 sm:flex-none" aria-expanded={editing} disabled={panelBusy} onClick={() => { refusedSave.clear(); setEditing((v) => !v); }}>
+            <Button ref={editButton} variant="secondary" layout="flex-1 sm:flex-none" aria-expanded={editing} disabled={panelBusy} onClick={() => { refusedSave.clear(); setPanelUpdated(false); setDateUpdated(false); setEditing((v) => !v); }}>
               {event.recurrenceRule ? "Edit series" : "Edit event"}
             </Button>
             <Menu label="More event actions" items={[
@@ -293,6 +303,7 @@ function EventDetailContent() {
             onRoomChanged={() => { setRoomsRevision((n) => n + 1); void load.reload(); }}
             onSaved={() => {
               parkFocus();
+              setPanelUpdated(true);
               setEditing(false);
               setRoomsRevision((n) => n + 1);
               void load.retry();
@@ -319,6 +330,7 @@ function EventDetailContent() {
               revision={event.revision}
               onSaved={() => {
                 parkFocus();
+                setPanelUpdated(true);
                 void load.retry();
               }}
               onConflict={closeOnConflict}
@@ -341,6 +353,7 @@ function EventDetailContent() {
 
       {!single && <h2 className="text-xl font-semibold mt-6 mb-4">Upcoming dates</h2>}
       {householdError && <ErrorNotice message={householdError} onRetry={retryHousehold} />}
+      <ManagerSaveStatus saving={false} updated={dateUpdated} />
       {/* Above the list, never in a row a long list may hide: focus brings it into view, and it names the day. */}
       {refusedDate && <RefusedSaveLine save={dateRefused} noun="date" about={formatDayFull(refusedDate.date)}
         canManage={occurrences.some((o) => o.eventId === refusedDate.eventId && o.date === refusedDate.date) ? canManage : undefined} />}
@@ -369,7 +382,12 @@ function EventDetailContent() {
             onSeriesFeedback={reportSeriesFeedback}
             onTerminalRefresh={() => void load.retry()}
             onChanged={refreshDates}
-            onEditDate={dateRefused.clear}
+            onDateSaved={() => setDateUpdated(true)}
+            onEditDate={() => {
+              dateRefused.clear();
+              setDateUpdated(false);
+              setPanelUpdated(false);
+            }}
             onDateConflict={(why) => dateConflict(why, m.eventId, m.date)}
             onNeedLogin={() => navigate("/login", { state: { from: `/events/${id}` } })}
           />}
@@ -398,6 +416,7 @@ function DateRow({
   onSeriesFeedback,
   onTerminalRefresh,
   onChanged,
+  onDateSaved,
   onEditDate,
   onDateConflict,
   onNeedLogin,
@@ -425,6 +444,7 @@ function DateRow({
   onSeriesFeedback: (eventId: number, date: string, actorResults: ActorRsvpResult[]) => void;
   onTerminalRefresh: () => void;
   onChanged: () => void;
+  onDateSaved: () => void;
   // The date's editor opened, which clears what the page said about its last refused save.
   onEditDate: () => void;
   onDateConflict: (why: RevisionConflict) => void;
@@ -432,7 +452,7 @@ function DateRow({
 }) {
   const navigate = useNavigate();
   const { canCompose } = useAuth();
-  const dateEditor = useDateEditorToggle({ onEditDate, onChanged, onDateConflict, onTerminalRefresh });
+  const dateEditor = useDateEditorToggle({ onEditDate, onChanged, onDateSaved, onDateConflict, onTerminalRefresh });
   const [managing, setManaging] = useState(manageRequested);
   const manageRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
@@ -531,6 +551,7 @@ function DateRow({
           <div className="text-sm text-text-muted">Tap Going below to get the video link.</div>
         ) : null}
         {cancelError && <FormError>{cancelError}</FormError>}
+        {dateEditor.status}
         {instance.overridden && (
           <div className="text-sm text-text-muted">This date was edited on its own, so series changes leave it alone.</div>
         )}

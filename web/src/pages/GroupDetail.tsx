@@ -1,6 +1,8 @@
 import { Tabs } from "../components/ui/Tabs";
 import { ManagedDateEditor, useDateEditorToggle } from "../components/ManagedDateEditor";
 import { ConfirmProvider } from "../components/ui/ConfirmDialog";
+import { ManagerSaveStatus } from "../components/ui/ManagerSaveStatus";
+import { useLeaveQuestion } from "../lib/leaveQuestion";
 import { AddPeople } from "../components/AddPeople";
 import { RequestContactButton } from "../components/RequestContactButton";
 import { ContactDetails } from "../components/ContactDetails";
@@ -67,6 +69,7 @@ function EventRow({
   onTerminalRefresh,
   onCancelled,
   onChanged,
+  onDateSaved,
   onEditDate,
   onDateConflict,
   settlingDate,
@@ -92,6 +95,7 @@ function EventRow({
   onTerminalRefresh: () => void;
   onCancelled: (eventId: number, date: string) => void;
   onChanged: () => void;
+  onDateSaved: () => void;
   // The date's editor opened, which clears what the page said about its last refused save.
   onEditDate: () => void;
   onDateConflict: (why: RevisionConflict) => void;
@@ -106,7 +110,7 @@ function EventRow({
   const { canCompose } = useAuth();
   const [cancelling, setCancelling] = useState(false);
   const [cancelError, setCancelError] = useState<string | null>(null);
-  const dateEditor = useDateEditorToggle({ onEditDate, onChanged, onDateConflict, onTerminalRefresh });
+  const dateEditor = useDateEditorToggle({ onEditDate, onChanged, onDateSaved, onDateConflict, onTerminalRefresh });
   const time = formatTime(instance.startsAt);
   const loc = placeLine(instance.room, instance.location);
   const name = instance.title || groupName;
@@ -146,6 +150,7 @@ function EventRow({
     >
         {showDescription && instance.description && <p className="text-sm text-text-muted whitespace-pre-wrap">{instance.description}</p>}
         {cancelError && <FormError>{cancelError}</FormError>}
+        {dateEditor.status}
         {instance.overridden && <div className="text-sm text-text-muted">This date was edited on its own, so series changes leave it alone.</div>}
         <Attendance instance={instance} />
         {loggedIn && (
@@ -215,7 +220,16 @@ export function GroupDetail() {
   const { user, loading } = useAuth();
 
   // A new group or viewer must never inherit dates, cursors or pending loads.
-  return <GroupDetailContent key={`${id}:${loading}:${user?.id}:${user?.role}:${user?.status}:${user?.accountType}`} />;
+  return <>
+    <ConfirmProvider><GroupLeaveQuestion /></ConfirmProvider>
+    <GroupDetailContent key={`${id}:${loading}:${user?.id}:${user?.role}:${user?.status}:${user?.accountType}`} />
+  </>;
+}
+
+function GroupLeaveQuestion() {
+  useLeaveQuestion();
+
+  return null;
 }
 
 // Dates keyed by id, soonest first; a date in both lists keeps the newer row.
@@ -254,6 +268,9 @@ function GroupDetailContent() {
   // One run for Save group (its preview and save) and the review's confirm, so neither starts while the other runs.
   // While it runs nothing on the page that reads the page again starts: that read would take the editor away mid-save.
   const groupSaveAction = useAction();
+  const [groupUpdated, setGroupUpdated] = useState(false);
+  const [dateUpdated, setDateUpdated] = useState(false);
+  const managerStatus = <ManagerSaveStatus saving={groupSaveAction.running} updated={groupUpdated} />;
   // The page's one cover change: Change cover photo, and the cover step after a saved edit.
   const coverAction = useAction();
   const [joinBusy, setJoinBusy] = useState(false);
@@ -283,9 +300,7 @@ function GroupDetailContent() {
   // reappear, and only the newest request may commit anything.
   const load = useLoad(() => fetchGroup(id ?? "", loadedDates.current + (continuing.current ? 1 : 0)), [id], { enabled: !!id });
 
-  // The same hold on a date's Edit after a roster write as the event page's (useRosterSettled); questions here stay the
-  // browser's own, except a date editor's, which asks in its own ConfirmProvider. This page lists every date of its
-  // group's events, so a write on any event counts: a read on its way may hold the date.
+  // This page lists every date of its group's events, so a roster write on any event counts.
   const settling = useRosterSettled({ epoch: load.epoch, dataEpoch: load.dataEpoch, reload: () => void load.reload() }, () => true);
   // A date's save refused and not sent again (DEC-164): which date, for the line above the dates.
   const dateRefused = useRefusedSave(load);
@@ -355,6 +370,7 @@ function GroupDetailContent() {
   if (loading || authLoading) {
     return (
       <div className="fold-page">
+        {managerStatus}
         <Skeleton kind="cover" />
         <div className="mt-6">
           <Skeleton kind="lines" />
@@ -369,6 +385,7 @@ function GroupDetailContent() {
         title="Group not found"
         body="It may have been removed, or it may be private. If someone invited you, ask them for the link again."
         notice={<>
+          {managerStatus}
           <RefusedSaveLine save={groupRefused} noun="group" />
           {refusedDate && <RefusedSaveLine save={dateRefused} noun="date" about={formatDayFull(refusedDate.date)} />}
         </>}
@@ -379,6 +396,7 @@ function GroupDetailContent() {
   if (!detail) {
     return (
       <div className="fold-page-narrow">
+        {managerStatus}
         <h1 className="text-3xl font-bold mb-6">Group unavailable</h1>
         <RefusedSaveLine save={groupRefused} noun="group" />
         {refusedDate && <RefusedSaveLine save={dateRefused} noun="date" about={formatDayFull(refusedDate.date)} />}
@@ -494,7 +512,10 @@ function GroupDetailContent() {
     setEditing(false);
 
     if (cover) void changeCover(cover, true);
-    else void load.retry();
+    else {
+      setGroupUpdated(true);
+      void load.retry();
+    }
   }
 
   // The group form's save was refused and not sent again: the editor closes on its own, and the page reads from
@@ -571,6 +592,8 @@ function GroupDetailContent() {
         if ("pick" in step) await GroupCover.upload(id!, await prepareUpload(step.pick, 1600));
         else if ("file" in step) await GroupCover.upload(id!, step.file, step.focal);
         else await GroupCover.remove(id!);
+
+        if (afterSave) setGroupUpdated(true);
       } catch (e) {
         setCoverError(afterSave
           ? "We couldn't confirm the cover photo change. Anything else you changed was saved. Check the photo before trying again."
@@ -583,6 +606,7 @@ function GroupDetailContent() {
 
   return (
     <div className="fold-page">
+      {managerStatus}
       {/* No overflow-hidden: group menus can extend beyond the photo header. */}
       <div className="fold-cover relative flex min-h-48 items-end rounded-lg bg-inverse sm:min-h-56">
         <img
@@ -641,6 +665,8 @@ function GroupDetailContent() {
                         onSelect: () => {
                           if (!editing) {
                             groupSaveAction.reset();
+                            setGroupUpdated(false);
+                            setDateUpdated(false);
                             groupRefused.clear();
                             setCoverError(null);
                           }
@@ -740,6 +766,7 @@ function GroupDetailContent() {
                 )}
                 {(error ?? moreError) && <ErrorNotice message={(error ?? moreError)!} onRetry={() => void refresh()} />}
                 {householdError && <ErrorNotice message={householdError} onRetry={retryHousehold} />}
+                <ManagerSaveStatus saving={false} updated={dateUpdated} />
                 {/* Above the list, never in a row a long list may hide: focus brings it into view, and it names the day. */}
                 {refusedDate && <RefusedSaveLine save={dateRefused} noun="date" about={formatDayFull(refusedDate.date)}
                   canManage={nextDates.some((d) => d.eventId === refusedDate.eventId && d.date === refusedDate.date) ? canManage : undefined} />}
@@ -762,7 +789,12 @@ function GroupDetailContent() {
                     onTerminalRefresh={() => void load.retry()}
                     onCancelled={handleCancelled}
                     onChanged={() => void refresh()}
-                    onEditDate={dateRefused.clear}
+                    onDateSaved={() => setDateUpdated(true)}
+                    onEditDate={() => {
+                      dateRefused.clear();
+                      setDateUpdated(false);
+                      setGroupUpdated(false);
+                    }}
                     onDateConflict={(why) => {
                       groupRefused.clear();
                       setRefusedDate({ eventId: m.eventId, date: m.date });

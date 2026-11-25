@@ -377,7 +377,7 @@ export function DateEditor({ opener, base, hold, onSaved, onSaving, pending = fa
         <Field id={`cev-time-${opened.id}`} label="Start time">
           <Input type="time" value={draft.time} onChange={(e) => edit("time")(e.target.value)} required />
         </Field>
-        <Field id={`cev-dur-${opened.id}`} label="Minutes">
+        <Field id={`cev-dur-${opened.id}`} label="Minutes" hint="Enter a whole number from 1 to 10,080.">
           <Input
             type="number"
             min={1}
@@ -388,15 +388,15 @@ export function DateEditor({ opener, base, hold, onSaved, onSaving, pending = fa
         </Field>
       </div>
       <div className="grid gap-3">
-        <Field id={`cev-title-${opened.id}`} label="Title">
+        <Field id={`cev-title-${opened.id}`} label="Title" hint="Up to 200 characters.">
           <Input value={draft.title} onChange={(e) => edit("title")(e.target.value)} />
         </Field>
-        <Field id={`cev-loc-${opened.id}`} label="Location" optional>
+        <Field id={`cev-loc-${opened.id}`} label="Location" optional hint="Up to 300 characters.">
           <Input value={draft.location} onChange={(e) => edit("location")(e.target.value)} />
         </Field>
       </div>
       <RoomField eventId={opened.eventId} date={opened.date} idPrefix={`cev-${opened.id}`} onChanged={onRoomChanged} onGone={() => handOver("gone")} focusOnLoad={focusRoom} />
-      <Field id={`cev-cap-${opened.id}`} label="Capacity for this date" optional hint="Leave it blank to use the event’s capacity.">
+      <Field id={`cev-cap-${opened.id}`} label="Capacity for this date" optional hint="Enter a whole number from 1 to 100,000. Leave it blank to use the event’s capacity.">
         <Input
           type="number"
           min={1}

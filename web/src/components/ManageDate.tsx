@@ -173,6 +173,7 @@ function ManageDateTools({ eventId, date, occurrenceId, authority, onDateChanged
 
   return <section ref={home.ref} tabIndex={-1} aria-labelledby={headingId} className="fold-section space-y-3 pt-6">
     <h2 id={headingId} className="text-xl font-semibold">Manage this date</h2>
+    {dateEditor.status}
     {(authority === "checking" || (granted && refused)) && <p role="status">Checking that you can still manage this date…</p>}
     {authority === "unknown" && <>
       <p role="status">We couldn't check that you can still manage this date. What you typed is kept.</p>
