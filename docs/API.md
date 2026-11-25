@@ -955,8 +955,9 @@ PUT  /api/v1/admin/self-signup             {mode: "request"|"off"} → 200 {self
 
 Self-signup and invite-a-friend (M1.3, 5.10, DEC-4) create a pending
 `AccountRequest`. Approval and rejection recheck the admin's session and role
-inside the decision transaction and return `401` if
-the admin can no longer act. There is no open mode: the
+inside the decision transaction. If the admin can no longer act, ordinary
+decisions return `401`, and consent and conversion approvals return `403`.
+There is no open mode: the
 `self_signup` setting is `request` (default) or `off`, and `off` refuses
 the public door with 403 (the member door still works). Create body:
 `{name, email, phone?, ageBand: "adult"|"teen"|"under13", birthDate?,

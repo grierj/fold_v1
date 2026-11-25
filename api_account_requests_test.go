@@ -90,6 +90,35 @@ func TestAccountRequestDecisionRequiresCurrentAdmin(t *testing.T) {
 	}
 }
 
+func TestExpiredAccountRequestTakesPrecedenceOverConsentConflict(t *testing.T) {
+	app := testApp(t)
+	newTestUser(t, app, "admin", "pw", models.RoleAdmin)
+	admin := loginAPI(t, app, "admin", "pw")
+	anon := anonClient(t, app, "10.1.0.1")
+	email := testEmail("applicant")
+	apiDo(t, anon, "POST", "/api/v1/account-requests",
+		signupBody("Applicant", email, "teen", teenBirthDate()), http.StatusOK)
+	req := pendingRequest(t, app, email)
+	newTestUser(t, app, "applicant", "pw", models.RoleMember)
+	path := "/api/v1/admin/account-requests/" + itoa(req.ID) + "/approve"
+	body := map[string]string{"accountConsentEvidenceText": "Parent confirmed by phone"}
+	if got := apiDo(t, admin, "POST", path, body, http.StatusConflict); !strings.Contains(got, "consent_existing_account") {
+		t.Fatalf("current request: %s", got)
+	}
+	if err := app.DB.Model(&req).Update("expires_at", time.Now().Add(-time.Minute)).Error; err != nil {
+		t.Fatal(err)
+	}
+	if got := apiDo(t, admin, "POST", path, body, http.StatusConflict); !strings.Contains(got, "request_expired") {
+		t.Fatalf("expired request: %s", got)
+	}
+	if err := app.DB.First(&req, req.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if req.Status != models.RequestExpired || req.DecidedBy != nil || req.ApprovedUserID != nil {
+		t.Fatalf("expired request has the wrong status or a decision: %+v", req)
+	}
+}
+
 // A duplicate pending request, a honeypot fill and the member invite door
 // each store what they always did and queue no mail for the requester.
 func TestAccountRequestDuplicateHoneypotAndInviteQueueNoDirectMail(t *testing.T) {
