@@ -116,7 +116,7 @@ export const ERROR_COPY = {
   push_church_off: "Your church has turned off notifications on devices. You'll still get email and alerts in Fold.",
   push_device_unknown: "This device doesn't have notifications on. Turn them on first, then send a test.",
   push_kind_locked: "That kind of notification can't be turned off: account and safety notices always come. Refresh the page to see your switches.",
-  message_daily_limit: "You've already sent 5 messages to these people today. Schedule this one for tomorrow, or ask an admin to send it.",
+  message_daily_limit: "You've already sent 5 messages to these people for that day, counting scheduled ones. Choose another day, or ask an admin to send it.",
   message_retry_daily_limit: "You've already sent 5 messages to these people today, so this one can't go out again until tomorrow. Try again then, or ask an admin to send it if it can't wait.",
   event_reminder_time: "Pick a reminder time from the list: off, or 2 hours, 1 day, 2 days or 1 week before.",
   message_nothing_to_retry: "There's nothing to send again: everyone it could reach got it.",

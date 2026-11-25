@@ -231,7 +231,7 @@ describe("AudiencePicker", () => {
     render(<Harness start={{ ...emptyChoice(), target: "group:7" }} />);
     await wait();
     await act(async () => { calls[0](summary()); });
-    expect(screen.getByRole("status")).toHaveTextContent("3 people; 1 won't get it: 1 turned off messages from leaders");
+    expect(screen.getByRole("status")).toHaveTextContent("3 people; 1 won't get the email: 1 turned off messages from leaders");
     expect(screen.getByRole("status")).toHaveTextContent("1 of them is a teen.");
     const items = screen.getAllByRole("listitem");
     expect(items[1]).toHaveTextContent("Opal Opted· Won't get this");

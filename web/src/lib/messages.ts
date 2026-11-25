@@ -392,7 +392,7 @@ const REASONS = new Map<string, [one: string, many: string]>([
   ["guest, hasn't asked for updates", ["is a guest who hasn't asked for updates", "are guests who haven't asked for updates"]],
 ]);
 
-// summaryLine is the live count: "142 people; 9 won't get it: 6 turned off
+// summaryLine is the live count: "142 people; 9 won't get the email: 6 turned off
 // messages from leaders, 3 have no email address".
 export function summaryLine(s: AudienceSummary): string {
   if (s.people === 0) return "No one is on this list yet.";
@@ -400,7 +400,7 @@ export function summaryLine(s: AudienceSummary): string {
 
   if (skipped === 0) return `${people(s.people)}; everyone on the list will get it.`;
 
-  return `${people(s.people)}; ${skipped} won't get it: ${reasonList(s.skipped)}`;
+  return `${people(s.people)}; ${skipped} won't get the email: ${reasonList(s.skipped)}`;
 }
 
 // reasonList is "6 turned off messages from leaders, 3 have no email
@@ -604,6 +604,11 @@ export function stillScheduledLine(at: string | null, zone: string): string {
   if (at && Date.parse(at) > Date.now()) return `Saving this doesn't change when it goes out: ${whenPhrase(at, zone)}, to whoever is on the list then.`;
 
   return "Its time has come, so it goes out as soon as you save this, to whoever is on the list.";
+}
+
+// notMovedLine is what the composer adds when a new time for a scheduled message was refused: where that leaves it.
+export function notMovedLine(at: string | null, zone: string): string {
+  return at && Date.parse(at) > Date.now() ? `It is still scheduled ${whenPhrase(at, zone)}.` : "It is still waiting to send.";
 }
 
 // statusLabel names a message's state in words, never by color alone. A

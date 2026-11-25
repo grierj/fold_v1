@@ -67,7 +67,7 @@ describe("MessageComposerPage", () => {
     open("/messages/new?group=7");
     expect(await screen.findByRole("heading", { name: "New message", level: 1 })).toBeInTheDocument();
     expect(screen.getByRole("combobox", { name: "Send to" })).toHaveValue("group:7");
-    expect(await screen.findByText("3 people; 1 won't get it: 1 turned off messages from leaders")).toBeInTheDocument();
+    expect(await screen.findByText("3 people; 1 won't get the email: 1 turned off messages from leaders")).toBeInTheDocument();
     expect(Messages.audiencePreview).toHaveBeenCalledWith({ type: "group", groupId: 7, roles: ["member", "leader"] });
     // One primary action.
     await editorReady();
@@ -733,7 +733,7 @@ describe("push notification too", () => {
     await user.click(within(ask).getByRole("button", { name: "Send now" }));
     expect(await screen.findByText(ERROR_COPY.message_nobody)).toBeInTheDocument();
     await waitFor(() => expect(vi.mocked(Messages.audiencePreview).mock.calls.length).toBe(counts + 1));
-    expect(await screen.findByText(/^1 person; 1 won't get it: /)).toBeInTheDocument();
+    expect(await screen.findByText(/^1 person; 1 won't get the email: /)).toBeInTheDocument();
   });
 
   it("shows each person's push on their own row, with a count apart from the email", async () => {
@@ -1227,6 +1227,7 @@ describe("a scheduled message's new list is the sender's to confirm", () => {
     await saveListBySchedule(user, "10:30");
     await user.click(within(await screen.findByRole("group", { name: /^Send to 1 person on / })).getByRole("button", { name: "Schedule" }));
     expect(await screen.findByText(ERROR_COPY.message_daily_limit)).toBeInTheDocument();
+    expect(screen.getByText(/^It is still scheduled on /)).toBeInTheDocument();
     expect(Messages.update).toHaveBeenCalledTimes(2);
     expect(Messages.schedule).toHaveBeenCalledTimes(1);
   });

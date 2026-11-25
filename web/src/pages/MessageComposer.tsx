@@ -7,7 +7,7 @@ import { ApiError } from "../api/core";
 import { Messages, previewHTMLPath } from "../api/messages";
 import type { AudienceChange, AudienceSummary, ComposeOptions, Message, MessageAudience, MessagePreview, MessageReview } from "../types";
 import { ERROR_COPY, errorCode, errorText, type ErrorCode } from "../lib/errors";
-import { audienceKey, audienceLabel, changeLines, confirmLine, confirmPushLine, fromAudience, guardianLine, historyLine, historyTeenLine, isOneEvent, prefillChoice, pushHistoryLine, retryQuestion, reviewRefusal, saveListLine, statusLabel, stillScheduledLine, toAudience, type AudienceChoice, type ReviewRefusal } from "../lib/messages";
+import { audienceKey, audienceLabel, changeLines, confirmLine, confirmPushLine, fromAudience, guardianLine, historyLine, historyTeenLine, isOneEvent, notMovedLine, prefillChoice, pushHistoryLine, retryQuestion, reviewRefusal, saveListLine, statusLabel, stillScheduledLine, toAudience, type AudienceChoice, type ReviewRefusal } from "../lib/messages";
 import { reminderAudience, reminderDateText, reminderName } from "../lib/reminders";
 import { RefusedSaveLine, useRefusedSave } from "../lib/refusedSave";
 import { outcomeOf } from "../lib/rosterWrites";
@@ -690,7 +690,7 @@ function Composer({ options, zone, opened, edit = false, params, refusal, back, 
 
   // The schedule: it names the text it was pressed on and the review it showed. A changed list shows the change and a
   // fresh review; a lost answer is settled by the next press, which the server refuses if the first one went.
-  async function send(asked: Asked): Promise<false> {
+  async function send(asked: Asked): Promise<false | string> {
     const id = messageId.current;
 
     if (id === null) return false;
@@ -765,7 +765,8 @@ function Composer({ options, zone, opened, edit = false, params, refusal, back, 
       setConfirm(null);
       await place(e, "We couldn't schedule the message.");
 
-      return false;
+      // A new time for a message already scheduled was refused: it says where that leaves it.
+      return asked.value.status === "scheduled" && errorCode(e) !== "message_locked" ? notMovedLine(asked.value.scheduledAt, zone) : false;
     }
   }
 

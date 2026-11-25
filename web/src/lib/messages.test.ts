@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { composeOptions, recipients, summary } from "../test/compose";
 import { ApiError } from "../api/core";
-import { AUDIENCE_LABEL_MAX, AUDIENCE_LABEL_WIDTH_EM, audienceLabel, audienceLabels, changeLines, confirmLine, confirmPushLine, emptyChoice, failedLine, fromAudience, guardianLine, historyLine, historyTeenLine, isOneEvent, prefillChoice, pushBadge, pushHistoryLine, pushLine, labelWidthEm, retryQuestion, reviewRefusal, shortLabel, statusLabel, stillScheduledLine, summaryLine, teenLine, toAudience } from "./messages";
+import { AUDIENCE_LABEL_MAX, AUDIENCE_LABEL_WIDTH_EM, audienceLabel, audienceLabels, changeLines, confirmLine, confirmPushLine, emptyChoice, failedLine, fromAudience, guardianLine, historyLine, historyTeenLine, isOneEvent, prefillChoice, pushBadge, pushHistoryLine, pushLine, labelWidthEm, notMovedLine, retryQuestion, reviewRefusal, shortLabel, statusLabel, stillScheduledLine, summaryLine, teenLine, toAudience } from "./messages";
 
 describe("audiences", () => {
   it("turns the picker's choice into the API's audience and back", () => {
@@ -44,8 +44,8 @@ describe("audiences", () => {
 describe("counts", () => {
   it("reads the live count with each reason as the API names it", () => {
     expect(summaryLine(summary({ people: 142, eligible: 133, skipped: { "turned off messages from leaders": 6, "no email address": 3 } })))
-      .toBe("142 people; 9 won't get it: 6 turned off messages from leaders, 3 have no email address");
-    expect(summaryLine(summary({ people: 2, eligible: 1, skipped: { "no email address": 1 } }))).toBe("2 people; 1 won't get it: 1 has no email address");
+      .toBe("142 people; 9 won't get the email: 6 turned off messages from leaders, 3 have no email address");
+    expect(summaryLine(summary({ people: 2, eligible: 1, skipped: { "no email address": 1 } }))).toBe("2 people; 1 won't get the email: 1 has no email address");
     expect(summaryLine(summary({ people: 1, eligible: 1, skipped: {} }))).toBe("1 person; everyone on the list will get it.");
     expect(summaryLine(summary({ people: 0, eligible: 0, skipped: {} }))).toBe("No one is on this list yet.");
     expect(teenLine(summary({ teens: 0 }))).toBe("");
@@ -81,6 +81,8 @@ describe("counts", () => {
       expect(stillScheduledLine("2026-11-05T16:00:00Z", "Asia/Kolkata")).toBe("Saving this doesn't change when it goes out: on Thu, Nov 5 at 9:30 PM GMT+5:30, to whoever is on the list then.");
       expect(stillScheduledLine("2026-11-02T17:59:00Z", "Asia/Kolkata")).toBe("Its time has come, so it goes out as soon as you save this, to whoever is on the list.");
       expect(stillScheduledLine(null, "Asia/Kolkata")).toBe("Its time has come, so it goes out as soon as you save this, to whoever is on the list.");
+      expect(notMovedLine("2026-11-05T16:00:00Z", "Asia/Kolkata")).toBe("It is still scheduled on Thu, Nov 5 at 9:30 PM GMT+5:30.");
+      expect(notMovedLine("2026-11-02T17:59:00Z", "Asia/Kolkata")).toBe("It is still waiting to send.");
     } finally {
       vi.useRealTimers();
     }
