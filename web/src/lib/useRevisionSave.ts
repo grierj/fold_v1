@@ -41,6 +41,13 @@ export interface LostSend {
   unseen?: string;
 }
 
+// The refusal each kind of save answers when the thing changed since the read it names.
+type ChangedCode = "event_changed" | "date_changed" | "group_changed" | "date_room_changed" | "message_changed" | "room_changed";
+
+// What a save throws when every send was refused while nothing it writes changed, so the form says its ordinary
+// refusal for that code.
+export const refusedAgain = (code: ChangedCode) => new ApiError(409, code.replace(/_/g, " "), { code });
+
 // What a save names in its answer: an event, a single date, a group, a date's room (named by its date's id), a
 // message, or a room.
 type AnswerKey = "event" | "occurrence" | "group" | "dateRoom" | "message" | "room";
@@ -140,7 +147,7 @@ export function useRevisionSave<T, F>({
   answers: (answer: unknown) => answer is SavedAnswer;
   lost?: LostSend;
   onConflict?: (why: RevisionConflict) => void;
-  changedCode?: "event_changed" | "date_changed" | "group_changed" | "date_room_changed" | "message_changed" | "room_changed";
+  changedCode?: ChangedCode;
   stays?: (answer: SavedAnswer) => T;
   gone?: (err: ApiError) => boolean;
   writesMore?: boolean;
@@ -260,4 +267,71 @@ export function useRevisionSave<T, F>({
       current = stored.revision;
     }
   }
+}
+
+// What a managed save's send has seen: its write's answer, and the protocol's read.
+interface Seen<Row, A> {
+  answer?: A;
+  row?: Row;
+}
+
+// useManagedSave is useRevisionSave for a form or control that shows a row and needs it back after each outcome, so no
+// caller keeps the last answer and the last read beside the hook. `read` reads the whole row the form shows; `value` is
+// the part the save compares and intends; `stored` is the row a landed save's answer says was stored. `onConflict` gets
+// the row the read found (none when it found nothing). A control that stays on screen passes `stays`: each outcome then
+// moves the base its next save names, as useRevisionSave says. A save resolves how it ended (`sent`), the write's
+// `answer` when it landed by it, and the stored `row`: from that answer, or from the read the protocol made.
+export function useManagedSave<Row, T, F, A>({ opened, revision, read, value, stored, fields, answers, onConflict, changedCode, stays = false, gone, writesMore }: {
+  opened: Row;
+  revision: string | undefined;
+  read: () => Promise<{ allowed: boolean; revision?: string; row: Row }>;
+  value: (row: Row) => T;
+  stored: (answer: A) => Row;
+  fields: (value: T) => F | null;
+  answers: (answer: unknown) => answer is SavedAnswer;
+  onConflict?: (why: RevisionConflict, row?: Row) => void;
+  changedCode?: ChangedCode;
+  stays?: boolean;
+  gone?: (err: ApiError) => boolean;
+  writesMore?: boolean;
+}) {
+  // What the send on its way has seen.
+  const seen = useRef<Seen<Row, A>>({});
+
+  const send = useRevisionSave<T, F>({
+    opened: value(opened),
+    revision,
+    read: async () => {
+      const now = await read();
+      seen.current.row = now.row;
+
+      return { allowed: now.allowed, revision: now.revision, value: value(now.row) };
+    },
+    fields,
+    answers,
+    onConflict: onConflict && ((why) => onConflict(why, seen.current.row)),
+    changedCode,
+    // SAFETY: the hook calls `stays` only for a send that landed, after this save's write recorded its answer in `seen`.
+    stays: stays ? () => value(stored(seen.current.answer as A)) : undefined,
+    gone,
+    writesMore,
+  });
+
+  async function save(write: (revision: string | undefined) => Promise<A>, intended: T, unseen?: string) {
+    const mine: Seen<Row, A> = {};
+    seen.current = mine;
+
+    const sent = await send(async (rev) => {
+      const answer = await write(rev);
+      mine.answer = answer;
+
+      return answer;
+    }, intended, unseen);
+
+    const answer = sent === "saved" ? mine.answer : undefined;
+
+    return { sent, answer, row: answer !== undefined ? stored(answer) : mine.row };
+  }
+
+  return save;
 }
