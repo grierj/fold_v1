@@ -2832,6 +2832,39 @@ describe("EventDetail when a date's save meets someone else's change", () => {
     await userEvent.click(screen.getByRole("button", { name: "Save this date" }));
   }
 
+  it.each([false, true])("announces each open date editor's save (overlapping requests: %s)", async (overlap) => {
+    const second = occurrence({ id: 2, date: "2026-12-08", startsLocal: "2026-12-08T19:00" });
+    vi.mocked(Events.get).mockResolvedValue({ ...page, occurrences: [listed, second] });
+    renderPage();
+
+    for (const date of [listed, second]) {
+      await userEvent.click(await screen.findByRole("button", { name: `More for ${date.date}` }));
+      await userEvent.click(screen.getByRole("menuitem", { name: "Edit this date" }));
+      const card = screen.getByRole("button", { name: `More for ${date.date}` }).closest("article")!;
+      await userEvent.type(await within(card).findByLabelText("Title"), " night");
+    }
+
+    const [firstSave, secondSave] = screen.getAllByRole("button", { name: "Save this date" });
+    const firstReply = deferred<OccurrenceResponse>();
+    const secondReply = deferred<OccurrenceResponse>();
+    edits.answer(firstReply.promise, secondReply.promise);
+    await userEvent.click(firstSave);
+
+    if (overlap) await userEvent.click(secondSave);
+    await act(async () => { firstReply.resolve({ occurrence: { ...listed, revision: "stored" } }); await firstReply.promise; });
+    const announcement = await screen.findByText("Updated", { exact: true });
+    const firstText = announcement.firstChild;
+
+    if (!overlap) {
+      await userEvent.click(secondSave);
+      expect(announcement).toBeEmptyDOMElement();
+    }
+
+    await act(async () => { secondReply.resolve({ occurrence: { ...second, revision: "stored" } }); await secondReply.promise; });
+    await waitFor(() => expect(announcement).toHaveTextContent("Updated"));
+    expect(announcement.firstChild).not.toBe(firstText);
+  });
+
   // An earlier save's answer closes the editor: opening it again meanwhile would show a draft that answer then closes.
   it("keeps the row's Edit this date off while the date's save is on its way", async () => {
     const sent = deferred<OccurrenceResponse>();

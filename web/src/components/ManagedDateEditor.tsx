@@ -14,13 +14,13 @@ import { useKeptDraft } from "../lib/unsavedChanges";
 // A date's "Edit this date" toggle and its editor's endings, the same on the event, group and date pages. The toggle is
 // off while the date's save is on its way, as the editor's own Close is: closing it would leave the page showing the
 // date as it was before a save that stored, and opening it again would show a new draft that the save's answer closes.
-export function useDateEditorToggle({ onEditDate, onChanged, onDateSaved, onDateConflict, onTerminalRefresh }: {
+export function useDateEditorToggle({ onEditDate, onChanged, onDateUpdated, onDateConflict, onTerminalRefresh }: {
   // The editor opened, which clears what the page said about the date's last refused save.
   onEditDate: () => void;
   // Saved, or the room changed: the host reads its page again.
   onChanged: () => void;
   // Lists report the save outside the row, since a moved date can leave the list.
-  onDateSaved?: () => void;
+  onDateUpdated?: (updated: boolean) => void;
   onDateConflict: (why: RevisionConflict) => void;
   // The read was refused: the host checks its page.
   onTerminalRefresh: () => void;
@@ -38,10 +38,13 @@ export function useDateEditorToggle({ onEditDate, onChanged, onDateSaved, onDate
     show: () => { onEditDate(); setRow((r) => ({ ...r, open: true, updated: false })); },
     editor: {
       saving: row.saving,
-      onSaving: (saving: boolean) => setRow((r) => ({ ...r, saving })),
+      onSaving: (saving: boolean) => {
+        if (saving) onDateUpdated?.(false);
+        setRow((r) => ({ ...r, saving }));
+      },
       onSaved: () => {
-        setRow((r) => ({ ...r, open: false, updated: !onDateSaved }));
-        onDateSaved?.();
+        setRow((r) => ({ ...r, open: false, updated: !onDateUpdated }));
+        onDateUpdated?.(true);
         onChanged();
       },
       onConflict: (why: RevisionConflict) => { close(); onDateConflict(why); },

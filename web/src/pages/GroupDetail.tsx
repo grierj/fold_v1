@@ -69,7 +69,7 @@ function EventRow({
   onTerminalRefresh,
   onCancelled,
   onChanged,
-  onDateSaved,
+  onDateUpdated,
   onEditDate,
   onDateConflict,
   settlingDate,
@@ -95,7 +95,7 @@ function EventRow({
   onTerminalRefresh: () => void;
   onCancelled: (eventId: number, date: string) => void;
   onChanged: () => void;
-  onDateSaved: () => void;
+  onDateUpdated: (updated: boolean) => void;
   // The date's editor opened, which clears what the page said about its last refused save.
   onEditDate: () => void;
   onDateConflict: (why: RevisionConflict) => void;
@@ -110,7 +110,7 @@ function EventRow({
   const { canCompose } = useAuth();
   const [cancelling, setCancelling] = useState(false);
   const [cancelError, setCancelError] = useState<string | null>(null);
-  const dateEditor = useDateEditorToggle({ onEditDate, onChanged, onDateSaved, onDateConflict, onTerminalRefresh });
+  const dateEditor = useDateEditorToggle({ onEditDate, onChanged, onDateUpdated, onDateConflict, onTerminalRefresh });
   const time = formatTime(instance.startsAt);
   const loc = placeLine(instance.room, instance.location);
   const name = instance.title || groupName;
@@ -269,7 +269,7 @@ function GroupDetailContent() {
   // While it runs nothing on the page that reads the page again starts: that read would take the editor away mid-save.
   const groupSaveAction = useAction();
   const [groupUpdated, setGroupUpdated] = useState(false);
-  const [dateUpdated, setDateUpdated] = useState(false);
+  const [updatedDateId, setUpdatedDateId] = useState<number | null>(null);
   const managerStatus = <ManagerSaveStatus saving={groupSaveAction.running} updated={groupUpdated} />;
   // The page's one cover change: Change cover photo, and the cover step after a saved edit.
   const coverAction = useAction();
@@ -666,7 +666,7 @@ function GroupDetailContent() {
                           if (!editing) {
                             groupSaveAction.reset();
                             setGroupUpdated(false);
-                            setDateUpdated(false);
+                            setUpdatedDateId(null);
                             groupRefused.clear();
                             setCoverError(null);
                           }
@@ -766,7 +766,7 @@ function GroupDetailContent() {
                 )}
                 {(error ?? moreError) && <ErrorNotice message={(error ?? moreError)!} onRetry={() => void refresh()} />}
                 {householdError && <ErrorNotice message={householdError} onRetry={retryHousehold} />}
-                <ManagerSaveStatus saving={false} updated={dateUpdated} />
+                <ManagerSaveStatus saving={false} updated={updatedDateId !== null} updateKey={updatedDateId} />
                 {/* Above the list, never in a row a long list may hide: focus brings it into view, and it names the day. */}
                 {refusedDate && <RefusedSaveLine save={dateRefused} noun="date" about={formatDayFull(refusedDate.date)}
                   canManage={nextDates.some((d) => d.eventId === refusedDate.eventId && d.date === refusedDate.date) ? canManage : undefined} />}
@@ -789,10 +789,10 @@ function GroupDetailContent() {
                     onTerminalRefresh={() => void load.retry()}
                     onCancelled={handleCancelled}
                     onChanged={() => void refresh()}
-                    onDateSaved={() => setDateUpdated(true)}
+                    onDateUpdated={(updated) => setUpdatedDateId(updated ? m.id : null)}
                     onEditDate={() => {
                       dateRefused.clear();
-                      setDateUpdated(false);
+                      setUpdatedDateId(null);
                       setGroupUpdated(false);
                     }}
                     onDateConflict={(why) => {
