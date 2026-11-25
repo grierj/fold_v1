@@ -580,7 +580,7 @@ function DateDetail({ id, date }: { id: string; date: string }) {
     </div>
     <RefusedSaveLine save={refusedSave} noun="date" canManage={occurrence ? occurrence.canManage === true : undefined} />
     {showManage && <Suspense fallback={<Skeleton kind="lines" label="Loading the manager tools…" />}>
-      <ManageDate eventId={Number(id)} date={date} occurrenceId={occurrence?.id} endsAt={occurrence?.endsAt} authority={authority} onDateChanged={reloadPage} onCancelled={onCancelled}
+      <ManageDate eventId={Number(id)} date={date} occurrenceId={occurrence?.id} startsAt={occurrence?.startsAt} endsAt={occurrence?.endsAt} authority={authority} onDateChanged={reloadPage} onCancelled={onCancelled}
         onConflict={refusedSave.refused} onOpenEditor={refusedSave.clear} onGone={retryPage} onRetryPage={retryPage} />
     </Suspense>}
     {barShown && <StickyRsvpBar label="Answer this date">

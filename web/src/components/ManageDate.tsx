@@ -10,6 +10,7 @@ import { useAction } from "../lib/useAction";
 import { useKeptDraft } from "../lib/unsavedChanges";
 import { useLoad } from "../lib/useLoad";
 import type { RevisionConflict } from "../lib/useRevisionSave";
+import { formatEventDay } from "../lib/when";
 import { isObject } from "../lib/wireValues";
 import { DateEditor, type DateDraftHold } from "./DateEditor";
 import { useDateEditorToggle } from "./ManagedDateEditor";
@@ -26,6 +27,7 @@ interface ManageDateProps {
   date: string;
   // The date the page shows (its occurrence id), which the managed read must answer; absent while the page has none.
   occurrenceId?: number;
+  startsAt?: string;
   endsAt?: string;
   // What the date page's latest load says (lib/manageAuthority); manager content renders only while granted.
   authority: ManageAuthority;
@@ -53,12 +55,32 @@ export function ManageDate(props: ManageDateProps) {
 // and the row the page shows. Nothing read, typed or asked under one is shown or sent under another.
 const failedUnder = new WeakMap<object, string>();
 
-function ManageDateTools({ eventId, date, occurrenceId, endsAt, authority, onDateChanged, onCancelled, onConflict, onOpenEditor, onGone, onRetryPage }: ManageDateProps) {
+function ManageDateTools({ eventId, date, occurrenceId, startsAt, endsAt, authority, onDateChanged, onCancelled, onConflict, onOpenEditor, onGone, onRetryPage }: ManageDateProps) {
   const headingId = useId();
   const home = useFocusHome<HTMLElement>();
   const location = useLocation();
-  const beginCancel = useConfirm();
+  const deadline = endsAt === undefined ? NaN : Date.parse(endsAt);
+  const [expiredDeadline, setExpiredDeadline] = useState<number | null>(null);
+  const canCancel = startsAt !== undefined && deadline > Date.now() && expiredDeadline !== deadline;
+  const beginCancel = useConfirm(canCancel ? startsAt : null);
   const cancellation = useAction();
+
+  useEffect(() => {
+    if (!canCancel) return;
+    let timer: number;
+
+    const check = () => {
+      const left = deadline - Date.now();
+
+      if (left <= 0) setExpiredDeadline(deadline);
+      // A date can be farther out than the browser's 32-bit timer delay.
+      else timer = window.setTimeout(check, Math.min(left, 2_147_483_647));
+    };
+
+    check();
+
+    return () => window.clearTimeout(timer);
+  }, [canCancel, deadline]);
 
   // The toggle and the editor's endings, as on the event and group pages: while the date's save is on its way (also
   // with the editor off the screen for an authority check) the toggle is off and an editor shown again stays as it was.
@@ -172,15 +194,26 @@ function ManageDateTools({ eventId, date, occurrenceId, endsAt, authority, onDat
     setManaging(false);
   };
 
-  const canCancel = endsAt !== undefined && Date.parse(endsAt) > Date.now();
-
   function cancelDate() {
+    if (!canCancel || startsAt === undefined || Date.now() >= deadline) return;
     const action = beginCancel();
-    const title = `Cancel this date on ${date}?`;
+    const title = `Cancel this date on ${formatEventDay(startsAt)}?`;
     void cancellation.run(async () => {
-      if (!(await action.ask({ title, confirmLabel: "Cancel this date", cancelLabel: "Keep this date", tone: "danger", native: title })) || !action.current()) return false;
+      if (!(await action.ask({ title, confirmLabel: "Cancel this date", cancelLabel: "Keep this date", tone: "danger", native: title })) || !action.current() || Date.now() >= deadline) return false;
 
-      await Events.cancelOccurrence(eventId, date);
+      try {
+        await Events.cancelOccurrence(eventId, date);
+      } catch (cause) {
+        if (!editReadRefused(cause)) throw cause;
+
+        if (action.here()) {
+          closeEditor();
+          closeRoster();
+          onConflict("gone");
+        }
+
+        return false;
+      }
 
       if (action.here()) onCancelled();
     }, { fallback: "We couldn't cancel that date." });
