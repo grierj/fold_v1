@@ -52,8 +52,8 @@ type testHooks struct {
 	// insert, given the open transaction (#263). It mirrors
 	// messageLimitAfterCount (#260). It is nil in production and sends no
 	// statement.
-	guestVerifyAfterCount func(*gorm.DB)
-	guestPasswordWorkDone func()
+	guestVerifyAfterCount  func(*gorm.DB)
+	wrapGuestPasswordCheck func(func(string) bool) func(string) bool
 	// invitationBeforeHash runs in apiAcceptInvitation after the early
 	// full-group refusal and before the password is hashed, with no
 	// transaction open.

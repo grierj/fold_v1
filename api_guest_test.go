@@ -1383,7 +1383,13 @@ func TestGuestRegistrationWorkAndThrottleGates(t *testing.T) {
 				seedThrottle("guestreg:site", publicSignupSiteLimit)
 			}
 			workCalls := 0
-			app.hooks.guestPasswordWorkDone = func() { workCalls++ }
+			app.hooks.wrapGuestPasswordCheck = func(check func(string) bool) func(string) bool {
+				return func(password string) bool {
+					result := check(password)
+					workCalls++
+					return result
+				}
+			}
 			lookedUp := false
 			const callback = "guest:observe-account-lookup"
 			if err := app.DB.Callback().Query().Before("gorm:query").Register(callback, func(db *gorm.DB) {
