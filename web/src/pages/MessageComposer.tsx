@@ -7,7 +7,7 @@ import { ApiError } from "../api/core";
 import { Messages, previewHTMLPath } from "../api/messages";
 import type { AudienceChange, AudienceSummary, ComposeOptions, Message, MessageAudience, MessagePreview, MessageReview } from "../types";
 import { ERROR_COPY, errorCode, errorText, type ErrorCode } from "../lib/errors";
-import { audienceKey, audienceLabel, changeLines, confirmLine, confirmPushLine, fromAudience, guardianLine, historyLine, historyTeenLine, isOneEvent, notMovedLine, prefillChoice, pushHistoryLine, retryQuestion, reviewRefusal, saveListLine, statusLabel, stillScheduledLine, toAudience, type AudienceChoice, type ReviewRefusal } from "../lib/messages";
+import { audienceKey, audienceLabel, changeLines, confirmLine, confirmPushLine, fromAudience, guardianLine, historyLine, historyTeenLine, isOneEvent, listLimitLine, notMovedLine, prefillChoice, pushHistoryLine, retryQuestion, reviewRefusal, saveListLine, statusLabel, stillScheduledLine, toAudience, type AudienceChoice, type ReviewRefusal } from "../lib/messages";
 import { reminderAudience, reminderDateText, reminderName } from "../lib/reminders";
 import { RefusedSaveLine, useRefusedSave } from "../lib/refusedSave";
 import { outcomeOf } from "../lib/rosterWrites";
@@ -580,6 +580,15 @@ function Composer({ options, zone, opened, edit = false, params, refusal, back, 
       }
 
       await place(e, "We couldn't save the message.");
+      const stored = known.current;
+
+      // A scheduled message's new list is saved at the time it has, so that is the day whose limit refused it, whatever
+      // day the form shows: the question is withdrawn and the form says which day, and what to do first.
+      if (errorCode(e) === "message_daily_limit" && stored?.status === "scheduled") {
+        setConfirm(null);
+
+        return listLimitLine(stored.scheduledAt, zone);
+      }
 
       return false;
     }

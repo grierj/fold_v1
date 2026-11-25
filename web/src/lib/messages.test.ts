@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { composeOptions, recipients, summary } from "../test/compose";
 import { ApiError } from "../api/core";
-import { AUDIENCE_LABEL_MAX, AUDIENCE_LABEL_WIDTH_EM, audienceLabel, audienceLabels, changeLines, confirmLine, confirmPushLine, emptyChoice, failedLine, fromAudience, guardianLine, historyLine, historyTeenLine, isOneEvent, prefillChoice, pushBadge, pushHistoryLine, pushLine, labelWidthEm, notMovedLine, retryQuestion, reviewRefusal, shortLabel, statusLabel, stillScheduledLine, summaryLine, teenLine, toAudience } from "./messages";
+import { AUDIENCE_LABEL_MAX, AUDIENCE_LABEL_WIDTH_EM, audienceLabel, audienceLabels, changeLines, confirmLine, confirmPushLine, emptyChoice, failedLine, fromAudience, guardianLine, historyLine, historyTeenLine, isOneEvent, prefillChoice, pushBadge, pushHistoryLine, pushLine, labelWidthEm, listLimitLine, notMovedLine, retryQuestion, reviewRefusal, shortLabel, statusLabel, stillScheduledLine, summaryLine, teenLine, toAudience } from "./messages";
 
 describe("audiences", () => {
   it("turns the picker's choice into the API's audience and back", () => {
@@ -83,6 +83,8 @@ describe("counts", () => {
       expect(stillScheduledLine(null, "Asia/Kolkata")).toBe("Its time has come, so it goes out as soon as you save this, to whoever is on the list.");
       expect(notMovedLine("2026-11-05T16:00:00Z", "Asia/Kolkata")).toBe("It is still scheduled on Thu, Nov 5 at 9:30 PM GMT+5:30.");
       expect(notMovedLine("2026-11-02T17:59:00Z", "Asia/Kolkata")).toBe("It is still waiting to send.");
+      expect(listLimitLine("2026-11-05T16:00:00Z", "Asia/Kolkata")).toBe("Who gets this has not changed. The limit is for when it is scheduled now, on Thu, Nov 5 at 9:30 PM GMT+5:30. Move it to another day first, then change who gets it.");
+      expect(listLimitLine("2026-11-02T17:59:00Z", "Asia/Kolkata")).toBe("Who gets this has not changed.");
     } finally {
       vi.useRealTimers();
     }

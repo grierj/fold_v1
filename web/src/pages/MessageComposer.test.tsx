@@ -1281,6 +1281,20 @@ describe("a scheduled message's new list is the sender's to confirm", () => {
     expect(ask).not.toHaveTextContent(/doesn't change when/);
   });
 
+  it("says which day's limit refused a new list, and withdraws the question", async () => {
+    const user = userEvent.setup();
+    await editLeadersOnly(user);
+    fireEvent.change(screen.getByLabelText("Time"), { target: { value: "10:30" } });
+    await user.click(screen.getByRole("button", { name: "Schedule" }));
+    const ask = await screen.findByRole("group", { name: "Change who gets this to 1 person?" });
+    vi.mocked(Messages.update).mockRejectedValue(new ApiError(400, "limit", { code: "message_daily_limit" }));
+    await user.click(within(ask).getByRole("button", { name: "Save the change" }));
+    expect(await screen.findByText(ERROR_COPY.message_daily_limit)).toBeInTheDocument();
+    expect(screen.getByText(/^Who gets this has not changed\. The limit is for when it is scheduled now, on .*\. Move it to another day first, then change who gets it\.$/)).toBeInTheDocument();
+    expect(screen.queryByRole("group", { name: /Change who gets this/ })).toBeNull();
+    expect(Messages.schedule).not.toHaveBeenCalled();
+  });
+
   it("withdraws the question when the save is refused for the people chosen", async () => {
     const user = userEvent.setup();
     await editLeadersOnly(user);

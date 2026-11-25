@@ -606,6 +606,16 @@ export function stillScheduledLine(at: string | null, zone: string): string {
   return "Its time has come, so it goes out as soon as you save this, to whoever is on the list.";
 }
 
+// listLimitLine is what the composer adds when a scheduled message's new list was refused by the day's limit: the list
+// is saved at the time the message has, so that day is the one that is full, whatever day the form shows.
+export function listLimitLine(at: string | null, zone: string): string {
+  const unchanged = "Who gets this has not changed.";
+
+  if (!at || Date.parse(at) <= Date.now()) return unchanged;
+
+  return `${unchanged} The limit is for when it is scheduled now, ${whenPhrase(at, zone)}. Move it to another day first, then change who gets it.`;
+}
+
 // notMovedLine is what the composer adds when a new time for a scheduled message was refused: where that leaves it.
 export function notMovedLine(at: string | null, zone: string): string {
   return at && Date.parse(at) > Date.now() ? `It is still scheduled ${whenPhrase(at, zone)}.` : "It is still waiting to send.";
