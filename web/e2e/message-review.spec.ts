@@ -9,13 +9,14 @@ const NOTICE = "This message changed while you were editing, so your changes cou
 
 const withId = schema.looseObject({ id: schema.number() });
 
-// A group Lee leads, approved, with one member besides Lee.
+// A group Lee leads, approved, with one member besides Lee. One request context holds one sign-in at a time, so each
+// person signs in again right before what they do.
 async function leesGroup(request: APIRequestContext, name: string) {
   const lee = await apiAs(request, "lee");
-  const grier = await apiAs(request, "grier");
   const { group } = schema.parse(schema.looseObject({ group: withId }), await lee("POST", "/groups", { name, visibility: "public", location: "Hall", tags: [] }));
-  await grier("POST", `/admin/groups/${group.id}/approve`, {});
+  await (await apiAs(request, "grier"))("POST", `/admin/groups/${group.id}/approve`, {});
   const join = async (display: string) => {
+    const grier = await apiAs(request, "grier");
     const handle = `review-${Date.now()}-${Math.floor(Math.random() * 1e6)}`;
     const { user } = schema.parse(schema.looseObject({ user: withId }), await grier("POST", "/admin/users", { name: display, email: email(handle), password: PASSWORD, ageBand: "adult" }));
     await grier("POST", `/admin/groups/${group.id}/members`, { userId: user.id, role: "member" });
