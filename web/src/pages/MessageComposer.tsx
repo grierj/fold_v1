@@ -131,9 +131,10 @@ export function MessageComposerPage() {
   const church = useChurchZoneLoad();
   const zone = church.zone ?? browserTimeZone();
   const [options, setOptions] = useState<ComposeOptions | null>(null);
-  // The message one opening of the composer starts from (null for a new one), and the opening's number: each read of
-  // another message mounts a new Composer, whose saves name the read it opened with.
-  const [opening, setOpening] = useState<{ message: Message | null; n: number } | null>(null);
+  // The message one opening of the composer starts from (null for a new one), the opening's number, and whether it opens
+  // in the editor: each read of another message, and each Edit press, mounts a new Composer, whose saves name the read
+  // it opened with.
+  const [opening, setOpening] = useState<{ message: Message | null; n: number; edit?: boolean } | null>(null);
   // The message the composer shows, a new draft once its first save lands included, so that address is not read again.
   const shown = useRef<number | null>(null);
   const [loadError, setLoadError] = useState<{ text: string; missing: boolean } | null>(null);
@@ -153,6 +154,7 @@ export function MessageComposerPage() {
     if (!id) {
       if (opening === null || shown.current !== null) {
         shown.current = null;
+        refusal.clear();
         setOpening((o) => ({ message: null, n: (o?.n ?? 0) + 1 }));
       }
 
@@ -165,6 +167,7 @@ export function MessageComposerPage() {
       .then(({ message: m }) => {
         if (!alive) return;
         shown.current = m.id;
+        refusal.clear();
         setOpening((o) => ({ message: m, n: (o?.n ?? 0) + 1 }));
       })
       .catch((e) => { if (alive) setLoadError({ text: errorText(e, "We couldn't open this message."), missing: errorCode(e) === "not_found" }); });
@@ -196,23 +199,31 @@ export function MessageComposerPage() {
   }
 
   return page(
-    <Composer key={opening.n} options={options} zone={zone} opened={opening.message} params={params} refusal={refusal} back={back}
+    <Composer key={opening.n} options={options} zone={zone} opened={opening.message} edit={opening.edit} params={params} refusal={refusal} back={back}
       onShown={(m) => { shown.current = m; }}
+      onEdit={(m) => {
+        refusal.clear();
+        setOpening((o) => ({ message: m, n: (o?.n ?? 0) + 1, edit: true }));
+      }}
       onGone={() => setLoadError({ text: "", missing: true })} />,
   );
 }
 
 // Composer is one opening of a message, from the read the page made (or a new one). It stays open after its saves and
 // sends, so each save names what the last outcome left (useRevisionSave's `stays`).
-function Composer({ options, zone, opened, params, refusal, back, onShown, onGone }: {
+function Composer({ options, zone, opened, edit = false, params, refusal, back, onShown, onEdit, onGone }: {
   options: ComposeOptions;
   zone: string;
   opened: Message | null;
+  // Opens in the editor (the Edit press), whatever the message's status.
+  edit?: boolean;
   params: URLSearchParams;
   refusal: ReturnType<typeof useRefusedSave>;
   back: React.ReactNode;
   // The message the composer shows now (a new draft's first save).
   onShown: (id: number) => void;
+  // Edit, from the message on screen: a new opening, so the saves name the read it shows.
+  onEdit: (m: Message) => void;
   // The message is not there, or not this person's, any more.
   onGone: () => void;
 }) {
@@ -234,8 +245,7 @@ function Composer({ options, zone, opened, params, refusal, back, onShown, onGon
   const start = opened ? formTime(opened, zone) : null;
   const firstChoice = opened ? fromAudience(opened.audience, options) : prefillChoice(params, options);
   const [message, setMessage] = useState<Message | null>(opened);
-  const [editing, setEditing] = useState(opened ? opened.status === "draft" && opened.editable : true);
-  const [editorKey, setEditorKey] = useState(0);
+  const [editing, setEditing] = useState(opened ? edit || (opened.status === "draft" && opened.editable) : true);
 
   const [choice, setChoice] = useState<AudienceChoice>(firstChoice);
   const [subject, setSubject] = useState(opened?.subject ?? "");
@@ -313,27 +323,11 @@ function Composer({ options, zone, opened, params, refusal, back, onShown, onGon
     if (previewN) previewSection.current?.scrollIntoView?.({ block: "start" });
   }, [previewN]);
 
-  function startFrom(m: Message, edit: boolean) {
-    const c = fromAudience(m.audience, options);
-    const s = formTime(m, zone);
-    setChoice(c);
-    setSubject(m.subject);
-    setPushAlert(m.pushAlert);
-    setBody(m.bodyHtml);
-    setSaved({ subject: m.subject, body: null, key: audienceKey(toAudience(c)), pushAlert: m.pushAlert });
-    setWhen(s.when);
-
-    if (s.when === "later") {
-      setDay(s.day);
-      setTime(s.time);
-    }
-
-    setEditorKey((k) => k + 1);
-    setEditing(edit);
+  // Leaves the editor for the message as the page shows it; Edit opens a new Composer from it (onEdit).
+  function closeEditor() {
+    setEditing(false);
     setErrors({});
     setConfirm(null);
-
-    if (edit) refusal.clear();
   }
 
   // The save was refused and not sent again (DEC-163): the editor closes on its own and the page shows the message as
@@ -351,7 +345,7 @@ function Composer({ options, zone, opened, params, refusal, back, onShown, onGon
     }
 
     setMessage(m);
-    startFrom(m, false);
+    closeEditor();
     refusal.refused(why);
   }
 
@@ -423,7 +417,7 @@ function Composer({ options, zone, opened, params, refusal, back, onShown, onGon
         markSaved();
         known.current = m;
         setMessage(m);
-        startFrom(m, false);
+        closeEditor();
         setErrors({ form: text });
       } catch {
         if (alive.current) show({ form: text });
@@ -441,6 +435,7 @@ function Composer({ options, zone, opened, params, refusal, back, onShown, onGon
     if (!audience) throw new Error("save needs an audience");
 
     refusal.clear();
+    lastRead.current = null;
     const draft = { subject: subject.trim(), bodyHtml: body, audience, pushAlert };
     const creating = messageId.current === null;
 
@@ -715,7 +710,7 @@ function Composer({ options, zone, opened, params, refusal, back, onShown, onGon
     if (!message) return;
 
     if (dirty && !window.confirm("Stop editing? Your unsaved changes will be lost.")) return;
-    startFrom(message, false);
+    closeEditor();
   }
 
   function submit(e: FormEvent) {
@@ -793,7 +788,7 @@ function Composer({ options, zone, opened, params, refusal, back, onShown, onGon
       {formError && <FormError>{formError}</FormError>}
       {message.editable && (
         <FormActions>
-          <Button variant="primary" layout="w-full sm:w-auto" disabled={action.running} onClick={() => startFrom(message, true)}>Edit</Button>
+          <Button variant="primary" layout="w-full sm:w-auto" disabled={action.running} onClick={() => onEdit(message)}>Edit</Button>
           <Button variant="danger-outline" layout="w-full sm:w-auto" disabled={action.running} onClick={cancelMessage}>
             {doing("cancel") ? "Cancelling…" : "Cancel message"}
           </Button>
@@ -829,7 +824,7 @@ function Composer({ options, zone, opened, params, refusal, back, onShown, onGon
           ? "Insert field adds each person's first name, or the event's title, time and links."
           : "Insert field adds each person's first name."} error={errors.body}>
           <Suspense fallback={<Skeleton kind="lines" label="Loading the editor…" />}>
-            <RichTextEditor key={editorKey} value={body} onChange={setBody} onReady={onEditorReady} oneEvent={oneEvent} pictures={{ messageId: message?.id ?? null, save: saveForPicture }} />
+            <RichTextEditor value={body} onChange={setBody} onReady={onEditorReady} oneEvent={oneEvent} pictures={{ messageId: message?.id ?? null, save: saveForPicture }} />
           </Suspense>
         </Field>
         <div className="flex flex-wrap gap-2">
