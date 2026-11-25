@@ -11,37 +11,48 @@ import type { RevisionConflict } from "./useRevisionSave";
 //
 // A control that stays on screen (a room control) passes no `load`: it already shows what its own read found when it
 // calls `refused`, so the line comes at once.
+//
+// What was refused is a save, or a send whose form was saved before it (the message composer's confirmation): the line
+// then says the message was not sent, never that changes could not be saved.
 export function useRefusedSave(load?: Pick<Load<unknown>, "loading" | "data" | "retry">) {
-  const pending = useRef<RevisionConflict | null>(null);
-  const [why, setWhy] = useState<RevisionConflict | null>(null);
+  const pending = useRef<Refusal | null>(null);
+  const [refusal, setRefusal] = useState<Refusal | null>(null);
   const line = useRef<HTMLParagraphElement>(null);
   useEffect(() => {
     if (!pending.current || load?.loading) return;
-    setWhy(pending.current);
+    setRefusal(pending.current);
     pending.current = null;
   }, [load?.loading, load?.data]);
   useLayoutEffect(() => {
-    if (why) line.current?.focus();
-  }, [why]);
+    if (refusal) line.current?.focus();
+  }, [refusal]);
 
   return {
-    why,
+    why: refusal?.why ?? null,
+    what: refusal?.what ?? "save",
     line,
-    refused(reason: RevisionConflict) {
+    refused(why: RevisionConflict, what: Refused = "save") {
       if (!load) {
-        setWhy(reason);
+        setRefusal({ why, what });
 
         return;
       }
 
-      pending.current = reason;
+      pending.current = { why, what };
       void load.retry();
     },
     clear() {
       pending.current = null;
-      setWhy(null);
+      setRefusal(null);
     },
   };
+}
+
+type Refused = "save" | "send";
+
+interface Refusal {
+  why: RevisionConflict;
+  what: Refused;
 }
 
 // The line for the screen the page shows: `canManage` is whether the viewer may still manage the `noun` shown; leave it
@@ -53,19 +64,30 @@ export function RefusedSaveLine({ save, noun, canManage, about, choosing }: { sa
 
   const text = choosing
     ? `${choiceRefused(choosing)} This is the ${noun} as it is now.`
-    : canManage === undefined
-      ? "Your changes could not be saved."
-      : save.why === "changed"
-        ? `This ${noun} changed while you were editing, so your changes could not be saved. This is the ${noun} as it is now.`
-        : canManage
-          ? `Your changes could not be saved. This is the ${noun} as it is now.`
-          : `You can no longer manage this ${noun}, so your changes could not be saved.`;
+    : save.what === "send"
+      ? sendRefused(save.why, noun, canManage)
+      : canManage === undefined
+        ? "Your changes could not be saved."
+        : save.why === "changed"
+          ? `This ${noun} changed while you were editing, so your changes could not be saved. This is the ${noun} as it is now.`
+          : canManage
+            ? `Your changes could not be saved. This is the ${noun} as it is now.`
+            : `You can no longer manage this ${noun}, so your changes could not be saved.`;
 
   return (
     <p ref={save.line} role="status" tabIndex={-1} className="mb-4 scroll-mt-4 rounded-lg border border-border bg-sunken px-4 py-3 text-sm outline-none">
       {about ? `${about}. ${text}` : text}
     </p>
   );
+}
+
+// A send refused after its form was saved: nothing the person typed was lost, so the line says only that it did not go.
+function sendRefused(why: RevisionConflict, noun: string, canManage: boolean | undefined): string {
+  if (canManage === undefined) return `This ${noun} could not be sent.`;
+
+  if (why === "changed") return `This ${noun} changed somewhere else, so it was not sent. This is the ${noun} as it is now.`;
+
+  return canManage ? `This ${noun} could not be sent. This is the ${noun} as it is now.` : `You can no longer manage this ${noun}, so it was not sent.`;
 }
 
 // What a control that stays on screen says when someone else's change refused a choice (`choosing`, as "This date's

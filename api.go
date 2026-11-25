@@ -142,6 +142,7 @@ func (a *App) registerAPIRoutes(r *gin.Engine) {
 	v1.GET("/messages/:id", a.apiAuth(), a.apiGetMessage)
 	v1.PUT("/messages/:id", a.apiAuth(), a.apiUpdateMessage)
 	v1.POST("/messages/:id/schedule", a.apiAuth(), a.apiScheduleMessage)
+	v1.GET("/messages/:id/review", a.apiAuth(), a.apiReviewMessage)
 	v1.POST("/messages/:id/cancel", a.apiAuth(), a.apiCancelMessage)
 	v1.POST("/messages/:id/images", a.apiAuth(), a.apiUploadMessageImage)
 	v1.GET("/messages/:id/read", a.apiAuth(), a.apiReadMessage)

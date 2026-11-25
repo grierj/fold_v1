@@ -14,6 +14,7 @@ import { ERROR_COPY } from "../lib/errors";
 import { polyfillEditorLayout } from "../test/editor";
 import { adminRecipients, composeOptions, message, recipients, reminderMessage, summary } from "../test/compose";
 import { wallClock, wallToInstant } from "../lib/when";
+import type { AudienceChange, MessageReview } from "../types";
 import { MessageComposerPage } from "./MessageComposer";
 
 // Two days ahead on the church's clock, within the year the API allows.
@@ -25,7 +26,7 @@ const render = renderWithAuth(() => ({ user: { id: 2, name: "Lee Leader", displa
 
 stubService(Site, () => ({ get: vi.fn().mockResolvedValue({ name: "Grace", timezone: "America/Boise" }) }));
 
-stubService(Messages, () => ({ options: vi.fn(), audiencePreview: vi.fn(), get: vi.fn(), create: vi.fn(), update: vi.fn(), schedule: vi.fn(), cancel: vi.fn(), preview: vi.fn(), test: vi.fn(), recipients: vi.fn(), retry: vi.fn(), uploadImage: vi.fn() }));
+stubService(Messages, () => ({ options: vi.fn(), audiencePreview: vi.fn(), get: vi.fn(), create: vi.fn(), update: vi.fn(), review: vi.fn(), schedule: vi.fn(), cancel: vi.fn(), preview: vi.fn(), test: vi.fn(), recipients: vi.fn(), retry: vi.fn(), uploadImage: vi.fn() }));
 
 beforeAll(polyfillEditorLayout);
 
@@ -48,8 +49,10 @@ beforeEach(() => {
   vi.mocked(Messages.options).mockResolvedValue(composeOptions());
   vi.mocked(Messages.audiencePreview).mockResolvedValue({ summary: summary() });
   vi.mocked(Messages.get).mockResolvedValue({ message: message() });
-  vi.mocked(Messages.update).mockImplementation(async (id, d) => ({ message: message({ id: Number(id), subject: d.subject, bodyHtml: d.bodyHtml, audience: d.audience }) }));
-  vi.mocked(Messages.create).mockImplementation(async (d) => ({ message: message({ id: 9, subject: d.subject, bodyHtml: d.bodyHtml, audience: d.audience }) }));
+  let saves = 0;
+  vi.mocked(Messages.update).mockImplementation(async (id, d) => ({ message: message({ id: Number(id), subject: d.subject, bodyHtml: d.bodyHtml, audience: d.audience, pushAlert: d.pushAlert, revision: `1.r${++saves}` }) }));
+  vi.mocked(Messages.create).mockImplementation(async (d) => ({ message: message({ id: 9, subject: d.subject, bodyHtml: d.bodyHtml, audience: d.audience, pushAlert: d.pushAlert, revision: `1.r${++saves}` }) }));
+  vi.mocked(Messages.review).mockResolvedValue({ review: { summary: summary(), reached: 2, token: "review-1" } });
   vi.mocked(Messages.preview).mockResolvedValue({ preview: { subject: "Bring a friend", text: "Hi Lee\n\nYou're getting messages from leaders" } });
   vi.mocked(Messages.test).mockResolvedValue({ ok: true });
   vi.mocked(Messages.recipients).mockResolvedValue(recipients());
@@ -64,7 +67,7 @@ describe("MessageComposerPage", () => {
     open("/messages/new?group=7");
     expect(await screen.findByRole("heading", { name: "New message", level: 1 })).toBeInTheDocument();
     expect(screen.getByRole("combobox", { name: "Send to" })).toHaveValue("group:7");
-    expect(await screen.findByText("3 people; 1 won't get it: 1 turned off messages from leaders")).toBeInTheDocument();
+    expect(await screen.findByText("3 people; 1 won't get the email: 1 turned off messages from leaders")).toBeInTheDocument();
     expect(Messages.audiencePreview).toHaveBeenCalledWith({ type: "group", groupId: 7, roles: ["member", "leader"] });
     // One primary action.
     await editorReady();
@@ -97,7 +100,8 @@ describe("MessageComposerPage", () => {
     expect(Messages.get).not.toHaveBeenCalled();
     expect(screen.getByRole("textbox", { name: "Subject" })).toHaveValue("Snacks");
     await user.click(screen.getByRole("button", { name: "Save draft" }));
-    await waitFor(() => expect(Messages.update).toHaveBeenCalledWith(9, expect.objectContaining({ subject: "Snacks" })));
+    // The next save names the read the first one left.
+    await waitFor(() => expect(Messages.update).toHaveBeenCalledWith(9, expect.objectContaining({ subject: "Snacks" }), "1.r1", undefined));
   });
 
   it("adds a picture to a new message by saving the draft first", async () => {
@@ -185,7 +189,7 @@ describe("MessageComposerPage", () => {
 
   it("schedules for a picked time after confirming the count", async () => {
     const user = userEvent.setup();
-    vi.mocked(Messages.schedule).mockImplementation(async (id, at) => ({ message: message({ id: Number(id), status: "scheduled", scheduledAt: at ?? null }), summary: summary() }));
+    vi.mocked(Messages.schedule).mockImplementation(async (id, send) => ({ message: message({ id: Number(id), status: "scheduled", scheduledAt: send.scheduledAt ?? null, revision: "1.sched" }) }));
     open("/messages/5");
     await editorReady();
     await user.click(screen.getByRole("radio", { name: "Pick a date and time" }));
@@ -197,7 +201,7 @@ describe("MessageComposerPage", () => {
     const ask = await screen.findByRole("group", { name: /^Send to 2 people on / });
     expect(Messages.schedule).not.toHaveBeenCalled();
     await user.click(within(ask).getByRole("button", { name: "Schedule" }));
-    expect(Messages.schedule).toHaveBeenCalledWith(5, wallToInstant(day, "09:30", "America/Boise"));
+    expect(Messages.schedule).toHaveBeenCalledWith(5, { revision: "1.r1", review: "review-1", scheduledAt: wallToInstant(day, "09:30", "America/Boise") });
     expect(await screen.findByText(/^Scheduled for /)).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Edit" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Cancel message" })).toHaveClass("btn-danger-outline");
@@ -230,7 +234,7 @@ describe("MessageComposerPage", () => {
     const user = userEvent.setup();
     open("/messages/5");
     await editorReady();
-    vi.mocked(Messages.audiencePreview).mockResolvedValue({ summary: summary({ people: 1, eligible: 0, teens: 0, skipped: { "no email address": 1 } }) });
+    vi.mocked(Messages.review).mockResolvedValue({ review: { summary: summary({ people: 1, eligible: 0, teens: 0, skipped: { "no email address": 1 } }), reached: 0, token: "review-1" } });
     await user.click(screen.getByRole("button", { name: "Send now" }));
     expect(await screen.findByText(ERROR_COPY.message_nobody)).toBeInTheDocument();
   });
@@ -307,17 +311,24 @@ describe("MessageComposerPage", () => {
     expect(Messages.get).toHaveBeenCalledTimes(2);
   });
 
-  it("reads a message again when its people changed under the schedule press", async () => {
+  it("reads a message again when it changed under the send press, and says so", async () => {
     const user = userEvent.setup();
-    vi.mocked(Messages.schedule).mockRejectedValueOnce(new ApiError(409, "this message was changed somewhere else", { code: "message_changed" }));
+    vi.mocked(Messages.schedule).mockRejectedValueOnce(new ApiError(409, "this message changed somewhere else", { code: "message_changed" }));
     open("/messages/5");
     await editorReady();
     await user.click(screen.getByRole("button", { name: "Send now" }));
     const ask = await screen.findByRole("group", { name: "Send to 2 people now?" });
     vi.mocked(Messages.get).mockClear();
+    vi.mocked(Messages.get).mockResolvedValue({ message: message({ subject: "The office's words", revision: "1.other" }) });
     await user.click(within(ask).getByRole("button", { name: "Send now" }));
-    expect(await screen.findByText(ERROR_COPY.message_changed)).toBeInTheDocument();
+    // The form was saved before the send was asked about, so the line says only that it was not sent.
+    const line = await screen.findByText("This message changed somewhere else, so it was not sent. This is the message as it is now.");
+    expect(line).toHaveAttribute("role", "status");
+    expect(line).toHaveFocus();
+    expect(screen.getByRole("heading", { name: "The office's words", level: 1 })).toBeInTheDocument();
+    expect(screen.queryByRole("textbox", { name: "Subject" })).toBeNull();
     expect(Messages.get).toHaveBeenCalledWith(5);
+    expect(Messages.schedule).toHaveBeenCalledTimes(1);
   });
 
   it("waits for the church's zone before filling a scheduled time", async () => {
@@ -683,17 +694,46 @@ describe("push notification too", () => {
     expect(screen.queryByRole("checkbox", { name: /Push notification too/ })).toBeNull();
     expect(screen.queryByText(/also gets? a push notification/)).toBeNull();
     await user.click(screen.getByRole("button", { name: "Save draft" }));
-    await waitFor(() => expect(Messages.update).toHaveBeenCalledWith(5, expect.objectContaining({ pushAlert: false })));
+    await waitFor(() => expect(Messages.update).toHaveBeenCalledWith(5, expect.objectContaining({ pushAlert: false }), "1.r0", undefined));
   });
 
   it("says how many also get a push when it asks before sending", async () => {
     const user = userEvent.setup();
-    vi.mocked(Messages.audiencePreview).mockResolvedValue({ summary: summary({ push: 2 }) });
+    vi.mocked(Messages.review).mockResolvedValue({ review: { summary: summary({ push: 2 }), reached: 2, token: "review-1" } });
     vi.mocked(Messages.get).mockResolvedValue({ message: message({ subject: "Snacks", bodyHtml: "<p>Bring some</p>" }) });
     open("/messages/5");
     await editorReady();
     await user.click(screen.getByRole("button", { name: "Send now" }));
     expect(await screen.findByText("2 people get a push notification too.")).toBeInTheDocument();
+  });
+
+  it("asks about everyone the message reaches, someone who gets only the push included", async () => {
+    const user = userEvent.setup();
+    vi.mocked(Messages.review).mockResolvedValue({ review: { summary: summary({ eligible: 2, push: 3 }), reached: 3, token: "review-1" } });
+    vi.mocked(Messages.get).mockResolvedValue({ message: message({ subject: "Snacks", bodyHtml: "<p>Bring some</p>" }) });
+    open("/messages/5");
+    await editorReady();
+    await user.click(screen.getByRole("button", { name: "Send now" }));
+    expect(await screen.findByText("Send to 3 people now?")).toBeInTheDocument();
+    expect(screen.getByText("3 of them get a push notification; 1 gets only the push.")).toBeInTheDocument();
+  });
+
+  it("drops the list it showed and counts again when the people chosen are refused", async () => {
+    const user = userEvent.setup();
+    vi.mocked(Messages.get).mockResolvedValue({ message: message({ subject: "Snacks", bodyHtml: "<p>Bring some</p>" }) });
+    vi.mocked(Messages.schedule).mockRejectedValueOnce(new ApiError(400, "nobody", { code: "message_nobody" }));
+    open("/messages/5");
+    await editorReady();
+    // The picker has counted, so what follows is a second count, not its first.
+    await waitFor(() => expect(Messages.audiencePreview).toHaveBeenCalled());
+    await user.click(screen.getByRole("button", { name: "Send now" }));
+    const ask = await screen.findByRole("group", { name: /^Send to / });
+    const counts = vi.mocked(Messages.audiencePreview).mock.calls.length;
+    vi.mocked(Messages.audiencePreview).mockResolvedValue({ summary: summary({ people: 1, eligible: 0, teens: 0, skipped: { "no email address": 1 }, recipients: [] }) });
+    await user.click(within(ask).getByRole("button", { name: "Send now" }));
+    expect(await screen.findByText(ERROR_COPY.message_nobody)).toBeInTheDocument();
+    await waitFor(() => expect(vi.mocked(Messages.audiencePreview).mock.calls.length).toBe(counts + 1));
+    expect(await screen.findByText(/^1 person; 1 won't get the email: /)).toBeInTheDocument();
   });
 
   it("shows each person's push on their own row, with a count apart from the email", async () => {
@@ -727,5 +767,706 @@ describe("push notification too", () => {
       "Opal Opted· Didn't get it: turned off messages from leaders" + "Push sent",
       "And 1 more",
     ]);
+  });
+});
+
+// An edit and a send name what the sender saw (DEC-169): the save names the read it was made from, the send the text
+// it was pressed on and the review its confirmation showed.
+describe("the message names what was saved and reviewed", () => {
+  const changed = (over: { review: MessageReview; change: AudienceChange }) => new ApiError(409, "who gets this message changed", { code: "message_list_changed", ...JSON.parse(JSON.stringify(over)) });
+
+  it("names each save's read: a landed save moves it, a refusal with nothing changed goes again by itself", async () => {
+    const user = userEvent.setup();
+    open("/messages/5");
+    await editorReady();
+    await user.click(screen.getByRole("button", { name: "Save draft" }));
+    expect(await screen.findByText("Draft saved.")).toBeInTheDocument();
+    expect(Messages.update).toHaveBeenLastCalledWith(5, expect.anything(), "1.r0", undefined);
+    // Something the form does not write moved the token meanwhile: read once, nothing the form writes changed, so the
+    // same save goes again under the new one.
+    await user.type(screen.getByRole("textbox", { name: "Subject" }), "!");
+    vi.mocked(Messages.update).mockRejectedValueOnce(new ApiError(409, "changed", { code: "message_changed" }));
+    vi.mocked(Messages.get).mockResolvedValue({ message: message({ revision: "1.other" }) });
+    await user.click(screen.getByRole("button", { name: "Save draft" }));
+    await waitFor(() => expect(Messages.update).toHaveBeenLastCalledWith(5, expect.anything(), "1.other", undefined));
+    expect(Messages.update).toHaveBeenNthCalledWith(2, 5, expect.anything(), "1.r1", undefined);
+    expect(await screen.findByText("Draft saved.")).toBeInTheDocument();
+    expect(screen.queryByText(/could not be saved/)).toBeNull();
+  });
+
+  it("closes the editor and says so when someone else changed the message", async () => {
+    const user = userEvent.setup();
+    open("/messages/5");
+    await editorReady();
+    await user.type(screen.getByRole("textbox", { name: "Subject" }), "!");
+    vi.mocked(Messages.update).mockRejectedValueOnce(new ApiError(409, "changed", { code: "message_changed" }));
+    vi.mocked(Messages.get).mockResolvedValue({ message: message({ subject: "The office's words", revision: "1.other" }) });
+    await user.click(screen.getByRole("button", { name: "Save draft" }));
+    const line = await screen.findByText("This message changed while you were editing, so your changes could not be saved. This is the message as it is now.");
+    expect(line).toHaveAttribute("role", "status");
+    expect(line).toHaveFocus();
+    expect(screen.getByRole("heading", { name: "The office's words", level: 1 })).toBeInTheDocument();
+    expect(screen.queryByRole("textbox", { name: "Subject" })).toBeNull();
+    expect(Messages.update).toHaveBeenCalledTimes(1);
+    // Editing again starts from what is stored, and the line goes.
+    await user.click(screen.getByRole("button", { name: "Edit" }));
+    expect(await screen.findByRole("textbox", { name: "Subject" })).toHaveValue("The office's words");
+    expect(screen.queryByText(/could not be saved/)).toBeNull();
+  });
+
+  it("ends a save whose answer was lost as already stored, never as a second save", async () => {
+    const user = userEvent.setup();
+    open("/messages/5");
+    await editorReady();
+    await user.clear(screen.getByRole("textbox", { name: "Subject" }));
+    await user.type(screen.getByRole("textbox", { name: "Subject" }), "Snacks");
+    vi.mocked(Messages.update).mockRejectedValueOnce(new ApiError(502, "bad gateway", {}, true));
+    await user.click(screen.getByRole("button", { name: "Save draft" }));
+    expect(await screen.findByText(/We couldn't save the message/)).toBeInTheDocument();
+    // It was stored: the next press is refused, and the read shows this save.
+    const stored = message({ subject: "Snacks", revision: "1.stored" });
+    vi.mocked(Messages.update).mockRejectedValueOnce(new ApiError(409, "changed", { code: "message_changed" }));
+    vi.mocked(Messages.get).mockResolvedValue({ message: stored });
+    await user.click(screen.getByRole("button", { name: "Save draft" }));
+    expect(await screen.findByText("Draft saved.")).toBeInTheDocument();
+    expect(Messages.update).toHaveBeenCalledTimes(2);
+    // The next save names what the read found.
+    await user.click(screen.getByRole("button", { name: "Save draft" }));
+    await waitFor(() => expect(Messages.update).toHaveBeenLastCalledWith(5, expect.anything(), "1.stored", undefined));
+  });
+
+  it("never starts a save twice", async () => {
+    const user = userEvent.setup();
+    let answer!: (v: Awaited<ReturnType<typeof Messages.update>>) => void;
+    vi.mocked(Messages.update).mockReturnValueOnce(new Promise((r) => { answer = r; }));
+    open("/messages/5");
+    await editorReady();
+    const draft = screen.getByRole("button", { name: "Save draft" });
+    await user.click(draft);
+    expect(await screen.findByRole("button", { name: "Saving…" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Send now" })).toBeDisabled();
+    fireEvent.click(screen.getByRole("button", { name: "Saving…" }));
+    fireEvent.submit(screen.getByRole("form"));
+    expect(Messages.update).toHaveBeenCalledTimes(1);
+    await act(async () => answer({ message: message({ revision: "1.r9" }) }));
+    expect(await screen.findByText("Draft saved.")).toBeInTheDocument();
+  });
+
+  it("does nothing with a refusal that arrives after the person left", async () => {
+    const user = userEvent.setup();
+    let refuse!: (e: ApiError) => void;
+    vi.mocked(Messages.update).mockReturnValueOnce(new Promise((_, r) => { refuse = r; }));
+    const router = open("/messages/5");
+    await editorReady();
+    await user.click(screen.getByRole("button", { name: "Save draft" }));
+    await act(async () => { await router.navigate("/messages"); });
+    vi.mocked(Messages.get).mockClear();
+    await act(async () => refuse(new ApiError(409, "changed", { code: "message_changed" })));
+    expect(Messages.get).not.toHaveBeenCalled();
+    expect(screen.getByText("Messages list")).toBeInTheDocument();
+  });
+
+  it("names the save's revision and the review on the send", async () => {
+    const user = userEvent.setup();
+    vi.mocked(Messages.schedule).mockResolvedValue({ message: message({ status: "scheduled", scheduledAt: new Date().toISOString(), revision: "1.sched" }) });
+    open("/messages/5");
+    await editorReady();
+    await user.click(screen.getByRole("button", { name: "Send now" }));
+    await user.click(within(await screen.findByRole("group", { name: "Send to 2 people now?" })).getByRole("button", { name: "Send now" }));
+    expect(Messages.review).toHaveBeenCalledWith(5);
+    expect(Messages.schedule).toHaveBeenCalledWith(5, { revision: "1.r1", review: "review-1", scheduledAt: undefined });
+    expect(await screen.findByText(/^Waiting to send|^Scheduled for|^Sending/)).toBeInTheDocument();
+  });
+
+  it("shows how the list changed, and sends to it as it is now; a second change shows again", async () => {
+    const user = userEvent.setup();
+    vi.mocked(Messages.schedule)
+      .mockRejectedValueOnce(changed({ review: { summary: summary({ eligible: 3 }), reached: 3, token: "review-2" }, change: { added: ["Pat Lee"], addedMore: 0, dropped: ["Sam Roe"], droppedUnnamed: 1 } }))
+      .mockRejectedValueOnce(changed({ review: { summary: summary({ eligible: 4 }), reached: 4, token: "review-3" }, change: { added: ["Kim Ng"], addedMore: 0, dropped: [], droppedUnnamed: 0 } }))
+      .mockResolvedValueOnce({ message: message({ status: "scheduled", scheduledAt: new Date().toISOString(), revision: "1.sched" }) });
+    open("/messages/5");
+    await editorReady();
+    await user.click(screen.getByRole("button", { name: "Send now" }));
+    await user.click(within(await screen.findByRole("group", { name: "Send to 2 people now?" })).getByRole("button", { name: "Send now" }));
+    const step = await screen.findByRole("group", { name: "The list of people who get this has changed since you looked." });
+    expect(step).toHaveTextContent("Pat Lee will now get this.");
+    expect(step).toHaveTextContent("2 people will no longer get it: Sam Roe and 1 other.");
+    expect(step).toHaveTextContent("Send to 3 people now?");
+    expect(step).toHaveAccessibleDescription(expect.stringContaining("Pat Lee will now get this."));
+    const go = within(step).getByRole("button", { name: "Send to the list as it is now" });
+    expect(go).toHaveClass("btn-primary");
+    // Focus is on the line that says what changed, so a key still held from the refused press chooses nothing.
+    expect(within(step).getByText("The list of people who get this has changed since you looked.")).toHaveFocus();
+    expect(document.querySelectorAll(".btn-primary")).toHaveLength(1);
+    await user.click(go);
+    expect(Messages.schedule).toHaveBeenLastCalledWith(5, { revision: "1.r1", review: "review-2", scheduledAt: undefined });
+    const again = await screen.findByRole("group", { name: "The list of people who get this has changed since you looked." });
+    expect(again).toHaveTextContent("Kim Ng will now get this.");
+    expect(again).not.toHaveTextContent("no longer");
+    await user.click(within(again).getByRole("button", { name: "Send to the list as it is now" }));
+    expect(Messages.schedule).toHaveBeenLastCalledWith(5, { revision: "1.r1", review: "review-3", scheduledAt: undefined });
+    expect(await screen.findByRole("heading", { name: "Bring a friend", level: 1 })).toBeInTheDocument();
+    expect(Messages.schedule).toHaveBeenCalledTimes(3);
+  });
+
+  it("goes back to the whole list of the fresh review, open, when the sender asks to review it, with no count to wait for", async () => {
+    const user = userEvent.setup();
+    const fresh = summary({ people: 2, eligible: 2, skipped: {}, recipients: [{ name: "Pat Lee", teen: false }, { name: "Tia Teen", teen: true }] });
+    vi.mocked(Messages.schedule).mockRejectedValueOnce(changed({ review: { summary: fresh, reached: 2, token: "review-2" }, change: { added: [], addedMore: 0, dropped: [], droppedUnnamed: 1 } }));
+    open("/messages/5");
+    await editorReady();
+    await screen.findByText(/^3 people;/);
+    await user.click(screen.getByRole("button", { name: "Send now" }));
+    await user.click(within(await screen.findByRole("group", { name: "Send to 2 people now?" })).getByRole("button", { name: "Send now" }));
+    const step = await screen.findByRole("group", { name: "The list of people who get this has changed since you looked." });
+    expect(step).toHaveTextContent("1 person will no longer get it.");
+    const counted = vi.mocked(Messages.audiencePreview).mock.calls.length;
+    await user.click(within(step).getByRole("button", { name: "Review the whole list" }));
+    expect(screen.queryByRole("group", { name: /changed since you looked/ })).toBeNull();
+    const list = screen.getByText("See who's on the list");
+    expect(list.closest("details")).toHaveAttribute("open");
+    expect(list).toHaveFocus();
+    expect(within(requiredElement(list.closest("details"), HTMLDetailsElement)).getByText("Pat Lee")).toBeInTheDocument();
+    expect(screen.getByText("2 people; everyone on the list will get it.")).toBeInTheDocument();
+    expect(vi.mocked(Messages.audiencePreview).mock.calls.length).toBe(counted);
+    expect(Messages.schedule).toHaveBeenCalledTimes(1);
+  });
+
+  it("asks again with a fresh review when the server needs one", async () => {
+    const user = userEvent.setup();
+    vi.mocked(Messages.schedule)
+      .mockRejectedValueOnce(new ApiError(409, "check who gets this", { code: "message_review_needed", review: JSON.parse(JSON.stringify({ summary: summary({ eligible: 2 }), reached: 2, token: "review-2" })) }))
+      .mockResolvedValueOnce({ message: message({ status: "scheduled", scheduledAt: new Date().toISOString(), revision: "1.sched" }) });
+    open("/messages/5");
+    await editorReady();
+    await user.click(screen.getByRole("button", { name: "Send now" }));
+    await user.click(within(await screen.findByRole("group", { name: "Send to 2 people now?" })).getByRole("button", { name: "Send now" }));
+    const ask = await screen.findByRole("group", { name: "Send to 2 people now?" });
+    expect(ask).toHaveTextContent("We checked who gets it again, so this is the list as it is now.");
+    await user.click(within(ask).getByRole("button", { name: "Send now" }));
+    expect(Messages.schedule).toHaveBeenLastCalledWith(5, { revision: "1.r1", review: "review-2", scheduledAt: undefined });
+  });
+
+  it("settles a send whose answer was lost as sent on the next press, never sending twice", async () => {
+    const user = userEvent.setup();
+    vi.mocked(Messages.schedule)
+      .mockRejectedValueOnce(new ApiError(502, "bad gateway", {}, true))
+      .mockRejectedValueOnce(new ApiError(409, "changed", { code: "message_changed" }));
+    open("/messages/5");
+    await editorReady();
+    await user.click(screen.getByRole("button", { name: "Send now" }));
+    await user.click(within(await screen.findByRole("group", { name: "Send to 2 people now?" })).getByRole("button", { name: "Send now" }));
+    expect(await screen.findByText(/couldn't tell whether it went out/)).toBeInTheDocument();
+    const ask = screen.getByRole("group", { name: "Send to 2 people now?" });
+    vi.mocked(Messages.get).mockResolvedValue({ message: message({ status: "scheduled", scheduledAt: new Date().toISOString(), editable: true, revision: "1.sched" }) });
+    await user.click(within(ask).getByRole("button", { name: "Send now" }));
+    expect(await screen.findByRole("heading", { name: "Bring a friend", level: 1 })).toBeInTheDocument();
+    expect(screen.queryByText(/could not be saved/)).toBeNull();
+    expect(screen.queryByRole("textbox", { name: "Subject" })).toBeNull();
+    expect(Messages.schedule).toHaveBeenCalledTimes(2);
+  });
+
+  it("settles a lost send now that is already going out without an error", async () => {
+    const user = userEvent.setup();
+    vi.mocked(Messages.schedule)
+      .mockRejectedValueOnce(new TypeError("Failed to fetch"))
+      .mockRejectedValueOnce(new ApiError(409, "sending", { code: "message_locked" }));
+    open("/messages/5");
+    await editorReady();
+    await user.click(screen.getByRole("button", { name: "Send now" }));
+    await user.click(within(await screen.findByRole("group", { name: "Send to 2 people now?" })).getByRole("button", { name: "Send now" }));
+    const ask = await screen.findByRole("group", { name: "Send to 2 people now?" });
+    vi.mocked(Messages.get).mockResolvedValue({ message: message({ status: "sending", scheduledAt: new Date().toISOString(), editable: false, revision: undefined }) });
+    await user.click(within(ask).getByRole("button", { name: "Send now" }));
+    expect(await screen.findByText("Sending")).toBeInTheDocument();
+    expect(screen.queryByText(ERROR_COPY.message_locked)).toBeNull();
+  });
+
+  it("after a send refused because someone changed the message, Edit starts from what is stored and saves on one press", async () => {
+    const user = userEvent.setup();
+    vi.mocked(Messages.schedule).mockRejectedValueOnce(new ApiError(409, "changed", { code: "message_changed" }));
+    open("/messages/5");
+    await editorReady();
+    await user.click(screen.getByRole("button", { name: "Send now" }));
+    const ask = await screen.findByRole("group", { name: "Send to 2 people now?" });
+    vi.mocked(Messages.get).mockResolvedValue({ message: message({ subject: "The office's words", revision: "1.other" }) });
+    await user.click(within(ask).getByRole("button", { name: "Send now" }));
+    await screen.findByText(/changed somewhere else, so it was not sent/);
+    vi.mocked(Messages.update).mockClear();
+    await user.click(screen.getByRole("button", { name: "Edit" }));
+    const subject = await screen.findByRole("textbox", { name: "Subject" });
+    expect(subject).toHaveValue("The office's words");
+    await user.type(subject, "!");
+    await user.click(screen.getByRole("button", { name: "Save draft" }));
+    expect(await screen.findByText("Draft saved.")).toBeInTheDocument();
+    expect(Messages.update).toHaveBeenCalledTimes(1);
+    expect(Messages.update).toHaveBeenCalledWith(5, expect.objectContaining({ subject: "The office's words!" }), "1.other", undefined);
+    expect(screen.queryByText(/could not be saved/)).toBeNull();
+  });
+
+  it("says the message is not here when a save finds it gone, even after an earlier read", async () => {
+    const user = userEvent.setup();
+    open("/messages/5");
+    await editorReady();
+    await user.type(screen.getByRole("textbox", { name: "Subject" }), "!");
+    vi.mocked(Messages.update).mockRejectedValueOnce(new ApiError(409, "changed", { code: "message_changed" }));
+    vi.mocked(Messages.get).mockResolvedValue({ message: message({ revision: "1.other" }) });
+    await user.click(screen.getByRole("button", { name: "Save draft" }));
+    expect(await screen.findByText("Draft saved.")).toBeInTheDocument();
+    vi.mocked(Messages.update).mockRejectedValueOnce(new ApiError(404, "message not found", { code: "not_found" }));
+    await user.click(screen.getByRole("button", { name: "Save draft" }));
+    expect(await screen.findByText("This message isn't here")).toBeInTheDocument();
+    expect(screen.getByText("Your changes could not be saved.")).toHaveFocus();
+  });
+
+  it("does nothing with a refusal that arrives after another message was opened", async () => {
+    const user = userEvent.setup();
+    let refuse!: (e: ApiError) => void;
+    vi.mocked(Messages.update).mockReturnValueOnce(new Promise((_, r) => { refuse = r; }));
+    const router = open("/messages/5");
+    await editorReady();
+    await user.click(screen.getByRole("button", { name: "Save draft" }));
+    vi.mocked(Messages.get).mockResolvedValue({ message: message({ id: 6, subject: "Another one", revision: "1.six" }) });
+    await act(async () => { await router.navigate("/messages/6"); });
+    expect(await screen.findByRole("textbox", { name: "Subject" })).toHaveValue("Another one");
+    vi.mocked(Messages.get).mockClear();
+    await act(async () => refuse(new ApiError(409, "changed", { code: "message_changed" })));
+    expect(Messages.get).not.toHaveBeenCalled();
+    expect(screen.getByRole("textbox", { name: "Subject" })).toHaveValue("Another one");
+    expect(screen.queryByText(/could not be saved/)).toBeNull();
+  });
+
+  it("does nothing with a send's answer that arrives after the person left", async () => {
+    const user = userEvent.setup();
+    let refuse!: (e: ApiError) => void;
+    vi.mocked(Messages.schedule).mockReturnValueOnce(new Promise((_, r) => { refuse = r; }));
+    const router = open("/messages/5");
+    await editorReady();
+    await user.click(screen.getByRole("button", { name: "Send now" }));
+    await user.click(within(await screen.findByRole("group", { name: "Send to 2 people now?" })).getByRole("button", { name: "Send now" }));
+    await act(async () => { await router.navigate("/messages"); });
+    vi.mocked(Messages.get).mockClear();
+    vi.mocked(Messages.review).mockClear();
+    await act(async () => refuse(new ApiError(409, "changed", { code: "message_list_changed" })));
+    expect(Messages.get).not.toHaveBeenCalled();
+    expect(Messages.review).not.toHaveBeenCalled();
+    expect(screen.getByText("Messages list")).toBeInTheDocument();
+  });
+});
+
+describe("every name and count on screen is the review's", () => {
+  const changed = (over: { review: MessageReview; change: AudienceChange }) => new ApiError(409, "who gets this message changed", { code: "message_list_changed", ...JSON.parse(JSON.stringify(over)) });
+
+  it("shows the review's list in the confirmation and the picker, until the audience is changed", async () => {
+    const user = userEvent.setup();
+    const pat = summary({ recipients: [{ name: "Pat Lee", teen: false }, { name: "Opal Opted", teen: false, skipped: "won't get this" }, { name: "Tia Teen", teen: true }] });
+    vi.mocked(Messages.review).mockResolvedValue({ review: { summary: pat, reached: 2, token: "review-1" } });
+    open("/messages/5");
+    await editorReady();
+    await screen.findByText(/^3 people;/);
+    await user.click(screen.getByText("See who's on the list"));
+    expect(screen.getByText("Ann Adult")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Send now" }));
+    const ask = await screen.findByRole("group", { name: "Send to 2 people now?" });
+    await user.click(within(ask).getByText("See who's on the list"));
+    expect(within(ask).getByText("Pat Lee")).toBeInTheDocument();
+    // The picker shows the same review: Ann, whom the token does not hold, is gone from the screen.
+    expect(screen.queryByText("Ann Adult")).toBeNull();
+    expect(screen.getAllByText("Pat Lee")).toHaveLength(2);
+    // Changing the audience withdraws the question, and the picker counts the new audience itself.
+    vi.mocked(Messages.audiencePreview).mockResolvedValue({ summary: summary({ people: 1, eligible: 1, skipped: {}, recipients: [{ name: "Lee Leader", teen: false }] }) });
+    await user.click(screen.getByRole("button", { name: "Members" }));
+    expect(screen.queryByRole("group", { name: "Send to 2 people now?" })).toBeNull();
+    expect(await screen.findByText("1 person; everyone on the list will get it.")).toBeInTheDocument();
+    expect(screen.queryByText("Pat Lee")).toBeNull();
+  });
+
+  it("counts the people the changed list reaches, as many as it names, a push-only joiner included", async () => {
+    const user = userEvent.setup();
+    vi.mocked(Messages.schedule).mockRejectedValueOnce(changed({ review: { summary: summary({ eligible: 2, push: 1 }), reached: 3, token: "review-2" }, change: { added: ["Pat Lee"], addedMore: 0, dropped: [], droppedUnnamed: 0 } }));
+    open("/messages/5");
+    await editorReady();
+    await user.click(screen.getByRole("button", { name: "Send now" }));
+    await user.click(within(await screen.findByRole("group", { name: "Send to 2 people now?" })).getByRole("button", { name: "Send now" }));
+    const step = await screen.findByRole("group", { name: "The list of people who get this has changed since you looked." });
+    expect(step).toHaveTextContent("Pat Lee will now get this.");
+    expect(step).toHaveTextContent("Send to 3 people now?");
+  });
+
+  it("chooses nothing for a key still held when a refusal replaces the question", async () => {
+    const user = userEvent.setup();
+    vi.mocked(Messages.schedule)
+      .mockRejectedValueOnce(changed({ review: { summary: summary({ eligible: 3 }), reached: 3, token: "review-2" }, change: { added: ["Pat Lee"], addedMore: 0, dropped: [], droppedUnnamed: 0 } }))
+      .mockRejectedValueOnce(new ApiError(409, "check who gets this", { code: "message_review_needed", review: JSON.parse(JSON.stringify({ summary: summary({ eligible: 3 }), reached: 3, token: "review-3" })) }));
+    open("/messages/5");
+    await editorReady();
+    await user.click(screen.getByRole("button", { name: "Send now" }));
+    await screen.findByRole("group", { name: "Send to 2 people now?" });
+    expect(screen.getByRole("button", { name: "Send now" })).toHaveFocus();
+    await user.keyboard("{Enter}");
+    const step = await screen.findByRole("group", { name: "The list of people who get this has changed since you looked." });
+    await user.keyboard("{Enter}{Enter}");
+    expect(Messages.schedule).toHaveBeenCalledTimes(1);
+    expect(step).toBeInTheDocument();
+    await user.click(within(step).getByRole("button", { name: "Send to the list as it is now" }));
+    const again = await screen.findByRole("group", { name: "Send to 3 people now?" });
+    expect(within(again).getByText("We checked who gets it again, so this is the list as it is now.")).toHaveFocus();
+    await user.keyboard("{Enter}{Enter}");
+    expect(Messages.schedule).toHaveBeenCalledTimes(2);
+  });
+
+  it("treats a schedule moved somewhere else as a conflict, never sending it back to the old time", async () => {
+    const user = userEvent.setup();
+    const at = new Date(Date.now() + 3 * 864e5).toISOString();
+    const scheduled = message({ status: "scheduled", scheduledAt: at });
+    vi.mocked(Messages.get).mockResolvedValue({ message: scheduled });
+    vi.mocked(Messages.update).mockImplementation(async (_id, d) => ({ message: { ...scheduled, subject: d.subject, revision: "1.r1" } }));
+    vi.mocked(Messages.schedule).mockRejectedValueOnce(new ApiError(409, "changed", { code: "message_changed" }));
+    open("/messages/5");
+    await user.click(await screen.findByRole("button", { name: "Edit" }));
+    await editorReady();
+    await user.click(screen.getByRole("button", { name: "Schedule" }));
+    const ask = await screen.findByRole("group", { name: /^Send to 2 people/ });
+    // Someone moves it three hours later; nothing else changes.
+    vi.mocked(Messages.get).mockResolvedValue({ message: { ...scheduled, scheduledAt: new Date(Date.parse(at) + 3 * 36e5).toISOString(), revision: "1.moved" } });
+    await user.click(within(ask).getByRole("button", { name: "Schedule" }));
+    expect(await screen.findByText("This message changed somewhere else, so it was not sent. This is the message as it is now.")).toHaveFocus();
+    expect(Messages.review).toHaveBeenCalledTimes(1);
+    expect(Messages.schedule).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("a scheduled message's new list is the sender's to confirm", () => {
+  const at = () => new Date(Date.now() + 3 * 864e5).toISOString();
+  const needed = (review: MessageReview) => new ApiError(409, "check who gets this", { code: "message_review_needed", review: JSON.parse(JSON.stringify(review)) });
+  const proposal: MessageReview = { summary: summary({ people: 1, eligible: 1, skipped: {}, recipients: [{ name: "Lee Leader", teen: false }] }), reached: 1, token: "proposal-1" };
+
+  async function editLeadersOnly(user: ReturnType<typeof userEvent.setup>) {
+    const scheduled = message({ status: "scheduled", scheduledAt: at() });
+    vi.mocked(Messages.get).mockResolvedValue({ message: scheduled });
+    vi.mocked(Messages.update).mockImplementation(async (_id, d, _revision, review) => {
+      if (!review) throw needed(proposal);
+
+      return { message: { ...scheduled, audience: d.audience, revision: "1.r1" }, review: "saved-list" };
+    });
+    open("/messages/5");
+    await user.click(await screen.findByRole("button", { name: "Edit" }));
+    await editorReady();
+    await user.click(screen.getByRole("button", { name: "Members" }));
+  }
+
+  for (const press of [
+    { button: "Preview", check: () => expect(Messages.preview).toHaveBeenCalledWith(5) },
+    { button: "Send a test to me", check: () => expect(Messages.test).toHaveBeenCalledWith(5) },
+  ]) {
+    it(`asks before ${press.button} saves it, says it stays scheduled, then goes on`, async () => {
+      const user = userEvent.setup();
+      await editLeadersOnly(user);
+      await user.click(screen.getByRole("button", { name: press.button }));
+      const ask = await screen.findByRole("group", { name: "Change who gets this to 1 person?" });
+      expect(ask).toHaveTextContent(/Saving this doesn't change when it goes out: on .*, to whoever is on the list then\./);
+      expect(within(ask).getByText("Change who gets this to 1 person?")).toHaveFocus();
+      expect(Messages.preview).not.toHaveBeenCalled();
+      expect(Messages.test).not.toHaveBeenCalled();
+      await user.keyboard("{Enter}");
+      expect(Messages.update).toHaveBeenCalledTimes(1);
+      await user.click(within(ask).getByRole("button", { name: "Save the change" }));
+      await waitFor(press.check);
+      expect(Messages.update).toHaveBeenLastCalledWith(5, expect.objectContaining({ audience: { type: "group", groupId: 7, roles: ["leader"] } }), "1.r0", "proposal-1");
+      expect(Messages.schedule).not.toHaveBeenCalled();
+      expect(screen.queryByRole("group", { name: /Change who gets this/ })).toBeNull();
+    });
+  }
+
+  it("counts everyone the new list reaches in its question", async () => {
+    const user = userEvent.setup();
+    await editLeadersOnly(user);
+    vi.mocked(Messages.update).mockRejectedValue(needed({ summary: summary({ eligible: 2, push: 1 }), reached: 3, token: "proposal-2" }));
+    await user.click(screen.getByRole("button", { name: "Preview" }));
+    expect(await screen.findByRole("group", { name: "Change who gets this to 3 people?" })).toBeInTheDocument();
+  });
+
+  // Schedule on a scheduled message whose list changed: the list is saved first, at the time it has.
+  async function saveListBySchedule(user: ReturnType<typeof userEvent.setup>, newTime?: string) {
+    await editLeadersOnly(user);
+
+    if (newTime) fireEvent.change(screen.getByLabelText("Time"), { target: { value: newTime } });
+    await user.click(screen.getByRole("button", { name: "Schedule" }));
+    const ask = await screen.findByRole("group", { name: "Change who gets this to 1 person?" });
+    expect(ask).toHaveTextContent(/Saving this doesn't change when it goes out: on /);
+    expect(Messages.schedule).not.toHaveBeenCalled();
+    await user.click(within(ask).getByRole("button", { name: "Save the change" }));
+  }
+
+  it("saves the new list on a Schedule press and asks nothing more when the time is the one it has", async () => {
+    const user = userEvent.setup();
+    await saveListBySchedule(user);
+    expect(await screen.findByRole("heading", { name: "Bring a friend", level: 1 })).toBeInTheDocument();
+    expect(Messages.update).toHaveBeenLastCalledWith(5, expect.objectContaining({ audience: { type: "group", groupId: 7, roles: ["leader"] } }), "1.r0", "proposal-1");
+    expect(Messages.schedule).not.toHaveBeenCalled();
+    expect(screen.queryByRole("group", { name: /^Send to / })).toBeNull();
+  });
+
+  it("asks the send's own question for a new time once the list is saved, with the list just confirmed, and a held key sends nothing", async () => {
+    const user = userEvent.setup();
+    vi.mocked(Messages.schedule).mockImplementation(async (id, send) => ({ message: message({ id: Number(id), status: "scheduled", scheduledAt: send.scheduledAt ?? null, revision: "1.sched" }) }));
+    await saveListBySchedule(user, "10:30");
+    const ask = await screen.findByRole("group", { name: /^Send to 1 person on / });
+    expect(within(ask).getByText(/^Send to 1 person on /)).toHaveFocus();
+    await user.keyboard("{Enter}");
+    expect(Messages.schedule).not.toHaveBeenCalled();
+    expect(Messages.review).not.toHaveBeenCalled();
+    await user.click(within(ask).getByRole("button", { name: "Schedule" }));
+    await waitFor(() => expect(Messages.schedule).toHaveBeenCalledWith(5, expect.objectContaining({ revision: "1.r1", review: "saved-list" })));
+    expect(await screen.findByRole("heading", { name: "Bring a friend", level: 1 })).toBeInTheDocument();
+  });
+
+  it("leaves the saved list at its old time when the new time is refused, having asked about each", async () => {
+    const user = userEvent.setup();
+    vi.mocked(Messages.schedule).mockRejectedValueOnce(new ApiError(409, "limit", { code: "message_daily_limit" }));
+    await saveListBySchedule(user, "10:30");
+    await user.click(within(await screen.findByRole("group", { name: /^Send to 1 person on / })).getByRole("button", { name: "Schedule" }));
+    expect(await screen.findByText("You've already sent 5 messages to these people for that day, counting scheduled ones. Choose another day, or ask an admin to send it.")).toBeInTheDocument();
+    expect(screen.getByText(/^It is still scheduled on /)).toBeInTheDocument();
+    expect(Messages.update).toHaveBeenCalledTimes(2);
+    expect(Messages.schedule).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps the schedule's question on screen when its answer is lost after a confirmed new list, and the next press ends as sent", async () => {
+    const user = userEvent.setup();
+    vi.mocked(Messages.schedule)
+      .mockRejectedValueOnce(new ApiError(502, "bad gateway", {}, true))
+      .mockRejectedValueOnce(new ApiError(409, "changed", { code: "message_changed" }));
+    await saveListBySchedule(user, "10:30");
+    await user.click(within(await screen.findByRole("group", { name: /^Send to 1 person on / })).getByRole("button", { name: "Schedule" }));
+    expect(await screen.findByText(/couldn't tell whether it went out/)).toBeInTheDocument();
+    const ask = screen.getByRole("group", { name: /^Send to 1 person on / });
+    const formAt = vi.mocked(Messages.schedule).mock.calls[0][1].scheduledAt ?? null;
+    vi.mocked(Messages.get).mockResolvedValue({ message: message({ status: "scheduled", scheduledAt: formAt, audience: { type: "group", groupId: 7, roles: ["leader"] }, revision: "1.sched" }) });
+    await user.click(within(ask).getByRole("button", { name: "Schedule" }));
+    expect(await screen.findByRole("heading", { name: "Bring a friend", level: 1 })).toBeInTheDocument();
+    expect(screen.queryByText(/could not be/)).toBeNull();
+    expect(Messages.schedule).toHaveBeenCalledTimes(2);
+    expect(Messages.schedule).toHaveBeenLastCalledWith(5, expect.objectContaining({ revision: "1.r1", review: "saved-list" }));
+    expect(Messages.update).toHaveBeenCalledTimes(2);
+  });
+
+  it("ends as sent when the press after a lost answer is refused for its time, the message having gone as asked", async () => {
+    const user = userEvent.setup();
+    vi.mocked(Messages.schedule)
+      .mockRejectedValueOnce(new ApiError(502, "bad gateway", {}, true))
+      .mockRejectedValueOnce(new ApiError(400, "when", { code: "message_when" }));
+    await saveListBySchedule(user, "10:30");
+    await user.click(within(await screen.findByRole("group", { name: /^Send to 1 person on / })).getByRole("button", { name: "Schedule" }));
+    expect(await screen.findByText(/couldn't tell whether it went out/)).toBeInTheDocument();
+    const formAt = vi.mocked(Messages.schedule).mock.calls[0][1].scheduledAt ?? null;
+    vi.mocked(Messages.get).mockResolvedValue({ message: message({ status: "scheduled", scheduledAt: formAt, audience: { type: "group", groupId: 7, roles: ["leader"] }, revision: "1.sched" }) });
+    await user.click(within(screen.getByRole("group", { name: /^Send to 1 person on / })).getByRole("button", { name: "Schedule" }));
+    expect(await screen.findByRole("heading", { name: "Bring a friend", level: 1 })).toBeInTheDocument();
+    expect(screen.queryByText(ERROR_COPY.message_when)).toBeNull();
+  });
+
+  it("says a message whose time has come could start sending at any time, before the save or after", async () => {
+    const user = userEvent.setup();
+    const due = message({ status: "scheduled", scheduledAt: new Date(Date.now() - 30_000).toISOString() });
+    vi.mocked(Messages.get).mockResolvedValue({ message: due });
+    vi.mocked(Messages.update).mockRejectedValue(needed(proposal));
+    open("/messages/5");
+    await user.click(await screen.findByRole("button", { name: "Edit" }));
+    await editorReady();
+    await user.click(screen.getByRole("button", { name: "Members" }));
+    await user.click(screen.getByRole("button", { name: "Preview" }));
+    const ask = await screen.findByRole("group", { name: "Change who gets this to 1 person?" });
+    expect(ask).toHaveTextContent("This message is due and could start sending at any time. If you save before it starts, it will go to the new list.");
+    expect(ask).not.toHaveTextContent(/doesn't change when/);
+  });
+
+  it("says nothing about where the message stands when a new time is refused before the message is read", async () => {
+    const user = userEvent.setup();
+    vi.mocked(Messages.schedule).mockRejectedValueOnce(new ApiError(400, "when", { code: "message_when" }));
+    await saveListBySchedule(user, "10:30");
+    await user.click(within(await screen.findByRole("group", { name: /^Send to 1 person on / })).getByRole("button", { name: "Schedule" }));
+    expect(await screen.findByText(ERROR_COPY.message_when)).toBeInTheDocument();
+    expect(screen.queryByText(/^It is still /)).toBeNull();
+  });
+
+  it("says which day's limit refused a new list, and withdraws the question", async () => {
+    const user = userEvent.setup();
+    await editLeadersOnly(user);
+    fireEvent.change(screen.getByLabelText("Time"), { target: { value: "10:30" } });
+    await user.click(screen.getByRole("button", { name: "Schedule" }));
+    const ask = await screen.findByRole("group", { name: "Change who gets this to 1 person?" });
+    vi.mocked(Messages.update).mockRejectedValue(new ApiError(400, "limit", { code: "message_daily_limit" }));
+    await user.click(within(ask).getByRole("button", { name: "Save the change" }));
+    expect(await screen.findByText(ERROR_COPY.message_daily_limit)).toBeInTheDocument();
+    expect(screen.getByText(/^Who gets this has not changed\. The limit is for when it is scheduled now, on .*\. Move it to another day first, then change who gets it\.$/)).toBeInTheDocument();
+    expect(screen.queryByRole("group", { name: /Change who gets this/ })).toBeNull();
+    expect(Messages.schedule).not.toHaveBeenCalled();
+  });
+
+  it("says only the limit when a save that changed no list is refused by it", async () => {
+    const user = userEvent.setup();
+    const scheduled = message({ status: "scheduled", scheduledAt: at() });
+    vi.mocked(Messages.get).mockResolvedValue({ message: scheduled });
+    vi.mocked(Messages.update).mockRejectedValue(new ApiError(400, "limit", { code: "message_daily_limit" }));
+    open("/messages/5");
+    await user.click(await screen.findByRole("button", { name: "Edit" }));
+    await editorReady();
+    await user.type(screen.getByRole("textbox", { name: "Subject" }), "!");
+    await user.click(screen.getByRole("button", { name: "Preview" }));
+    expect(await screen.findByText(ERROR_COPY.message_daily_limit)).toBeInTheDocument();
+    expect(screen.queryByText(/Who gets this has not changed/)).toBeNull();
+  });
+
+  it("withdraws the question when the save is refused for the people chosen", async () => {
+    const user = userEvent.setup();
+    await editLeadersOnly(user);
+    await user.click(screen.getByRole("button", { name: "Preview" }));
+    const ask = await screen.findByRole("group", { name: "Change who gets this to 1 person?" });
+    vi.mocked(Messages.update).mockRejectedValue(new ApiError(400, "nobody", { code: "message_nobody" }));
+    await user.click(within(ask).getByRole("button", { name: "Save the change" }));
+    expect(await screen.findByText(ERROR_COPY.message_nobody)).toBeInTheDocument();
+    expect(screen.queryByRole("group", { name: /Change who gets this/ })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Save the change" })).toBeNull();
+  });
+
+  it("asks nothing more when the time is unchanged, even once it is under a minute away", async () => {
+    const user = userEvent.setup();
+    const soon = message({ status: "scheduled", scheduledAt: new Date(Date.now() + 100_000).toISOString() });
+    vi.mocked(Messages.get).mockResolvedValue({ message: soon });
+    vi.mocked(Messages.update).mockImplementation(async (_id, d, _revision, review) => {
+      if (!review) throw needed(proposal);
+
+      return { message: { ...soon, audience: d.audience, revision: "1.r1" }, review: "saved-list" };
+    });
+    open("/messages/5");
+    await user.click(await screen.findByRole("button", { name: "Edit" }));
+    await editorReady();
+    await user.click(screen.getByRole("button", { name: "Members" }));
+    await user.click(screen.getByRole("button", { name: "Schedule" }));
+    const ask = await screen.findByRole("group", { name: "Change who gets this to 1 person?" });
+    const real = Date.now();
+    const clock = vi.spyOn(Date, "now").mockImplementation(() => real + 60_000);
+
+    try {
+      await user.click(within(ask).getByRole("button", { name: "Save the change" }));
+      expect(await screen.findByRole("heading", { name: "Bring a friend", level: 1 })).toBeInTheDocument();
+      expect(screen.queryByRole("group", { name: /^Send to / })).toBeNull();
+      expect(Messages.schedule).not.toHaveBeenCalled();
+    } finally {
+      clock.mockRestore();
+    }
+  });
+
+  it("shows the message as it is when the press after a lost answer finds it sent at a time the server set", async () => {
+    const user = userEvent.setup();
+    vi.mocked(Messages.schedule)
+      .mockRejectedValueOnce(new ApiError(502, "bad gateway", {}, true))
+      .mockRejectedValueOnce(new ApiError(400, "when", { code: "message_when" }));
+    await saveListBySchedule(user, "10:30");
+    await user.click(within(await screen.findByRole("group", { name: /^Send to 1 person on / })).getByRole("button", { name: "Schedule" }));
+    expect(await screen.findByText(/couldn't tell whether it went out/)).toBeInTheDocument();
+    const stored = new Date(Date.now() - 90_000).toISOString();
+    vi.mocked(Messages.get).mockResolvedValue({ message: message({ status: "sent", sentAt: stored, scheduledAt: stored, editable: false, audience: { type: "group", groupId: 7, roles: ["leader"] }, revision: "1.sent" }) });
+    await user.click(within(screen.getByRole("group", { name: /^Send to 1 person on / })).getByRole("button", { name: "Schedule" }));
+    expect(await screen.findByRole("heading", { name: "Bring a friend", level: 1 })).toBeInTheDocument();
+    expect(screen.queryByText(ERROR_COPY.message_when)).toBeNull();
+    expect(screen.queryByRole("button", { name: "Schedule" })).toBeNull();
+  });
+
+  it("is a conflict, not a fresh question, when the stored time moved while the question was open", async () => {
+    const user = userEvent.setup();
+    await editLeadersOnly(user);
+    await user.click(screen.getByRole("button", { name: "Preview" }));
+    const ask = await screen.findByRole("group", { name: "Change who gets this to 1 person?" });
+    vi.mocked(Messages.update).mockRejectedValue(new ApiError(409, "changed", { code: "message_changed" }));
+    vi.mocked(Messages.get).mockResolvedValue({ message: message({ status: "scheduled", scheduledAt: new Date(Date.now() + 5 * 864e5).toISOString(), revision: "1.moved" }) });
+    await user.click(within(ask).getByRole("button", { name: "Save the change" }));
+    expect(await screen.findByText(/This message changed while you were editing, so your changes could not be saved\./)).toBeInTheDocument();
+    expect(Messages.update).toHaveBeenCalledTimes(2);
+    expect(Messages.preview).not.toHaveBeenCalled();
+  });
+
+  it("leaves it scheduled for its old list when the sender goes back, with the edit still in the form", async () => {
+    const user = userEvent.setup();
+    await editLeadersOnly(user);
+    await user.click(screen.getByRole("button", { name: "Preview" }));
+    const ask = await screen.findByRole("group", { name: "Change who gets this to 1 person?" });
+    await user.click(within(ask).getByRole("button", { name: "Go back" }));
+    expect(screen.queryByRole("group", { name: /Change who gets this/ })).toBeNull();
+    expect(screen.getByRole("button", { name: "Members" })).toHaveAttribute("aria-pressed", "false");
+    expect(Messages.update).toHaveBeenCalledTimes(1);
+    expect(Messages.preview).not.toHaveBeenCalled();
+  });
+
+  it("saves the words alone without asking", async () => {
+    const user = userEvent.setup();
+    const scheduled = message({ status: "scheduled", scheduledAt: at() });
+    vi.mocked(Messages.get).mockResolvedValue({ message: scheduled });
+    vi.mocked(Messages.update).mockResolvedValue({ message: { ...scheduled, subject: "Bring a friend!", revision: "1.r1" } });
+    open("/messages/5");
+    await user.click(await screen.findByRole("button", { name: "Edit" }));
+    await editorReady();
+    await user.type(screen.getByRole("textbox", { name: "Subject" }), "!");
+    await user.click(screen.getByRole("button", { name: "Preview" }));
+    await waitFor(() => expect(Messages.preview).toHaveBeenCalledWith(5));
+    expect(screen.queryByRole("group", { name: /Change who gets this/ })).toBeNull();
+  });
+});
+
+describe("an editor the person moved away from", () => {
+  it("is gone as soon as the address names another message, and its late discard goes nowhere", async () => {
+    const user = userEvent.setup();
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+    let discarded!: (v: Awaited<ReturnType<typeof Messages.cancel>>) => void;
+    vi.mocked(Messages.cancel).mockReturnValueOnce(new Promise((r) => { discarded = r; }));
+    const router = open("/messages/5");
+    await editorReady();
+    await user.click(screen.getByRole("button", { name: "Discard draft" }));
+    let opened!: (v: Awaited<ReturnType<typeof Messages.get>>) => void;
+    vi.mocked(Messages.get).mockReturnValueOnce(new Promise((r) => { opened = r; }));
+    await act(async () => { await router.navigate("/messages/6"); });
+    // Message 6 is still loading: nothing of message 5's editor is there to press.
+    expect(screen.queryByRole("textbox", { name: "Subject" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Send now" })).toBeNull();
+    await act(async () => discarded({ message: message({ status: "cancelled", editable: false }) }));
+    expect(router.state.location.pathname).toBe("/messages/6");
+    await act(async () => opened({ message: message({ id: 6, subject: "Another one", revision: "1.six" }) }));
+    expect(await screen.findByRole("textbox", { name: "Subject" })).toHaveValue("Another one");
+    expect(router.state.location.pathname).toBe("/messages/6");
+  });
+
+  it("reads a just-saved draft again when the person comes back to its address before another message loaded", async () => {
+    const user = userEvent.setup();
+    const router = open("/messages/new?event=3");
+    await editorReady();
+    await user.type(screen.getByRole("textbox", { name: "Subject" }), "Snacks");
+    await user.click(screen.getByRole("button", { name: "Save draft" }));
+    await waitFor(() => expect(router.state.location.pathname).toBe("/messages/9"));
+    expect(Messages.get).not.toHaveBeenCalled();
+    vi.mocked(Messages.get).mockReturnValueOnce(new Promise(() => {}));
+    await act(async () => { await router.navigate("/messages/6"); });
+    vi.mocked(Messages.get).mockResolvedValue({ message: message({ id: 9, subject: "Snacks", revision: "1.r1" }) });
+    await act(async () => { await router.navigate("/messages/9"); });
+    expect(await screen.findByRole("textbox", { name: "Subject" })).toHaveValue("Snacks");
+    expect(Messages.get).toHaveBeenLastCalledWith(9);
+  });
+
+  it("opens a new message when the person goes to it while another message was still loading", async () => {
+    const router = open("/messages/5");
+    await editorReady();
+    vi.mocked(Messages.get).mockReturnValueOnce(new Promise(() => {}));
+    await act(async () => { await router.navigate("/messages/6"); });
+    await act(async () => { await router.navigate("/messages/new"); });
+    expect(await screen.findByRole("heading", { name: "New message", level: 1 })).toBeInTheDocument();
+    expect(screen.getByRole("textbox", { name: "Subject" })).toHaveValue("");
+  });
+
+  it("opens a blank message after a saved one when the address moves to a new one", async () => {
+    const router = open("/messages/5");
+    expect(await editorReady()).toBeInTheDocument();
+    await act(async () => { await router.navigate("/messages/new"); });
+    expect(await screen.findByRole("heading", { name: "New message", level: 1 })).toBeInTheDocument();
+    expect(screen.getByRole("textbox", { name: "Subject" })).toHaveValue("");
   });
 });

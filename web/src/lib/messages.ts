@@ -1,6 +1,8 @@
+import { array, boolean, minLength, number, object, optional, pipe, record, safeParse, string } from "valibot";
+import { ApiError } from "../api/core";
 import { isCallable } from "./wireValues";
 import { people } from "./plural";
-import type { AudienceRole, AudienceStatus, AudienceSummary, ComposeOptions, HistoryStatus, Message, MessageAudience, MessageHistoryPush, MessagePushCounts, MessagePushWait, MessageRecipientCounts, MessageRecipients } from "../types";
+import type { AudienceChange, AudienceRole, AudienceStatus, AudienceSummary, ComposeOptions, HistoryStatus, Message, MessageAudience, MessageHistoryPush, MessagePushCounts, MessagePushWait, MessageRecipientCounts, MessageRecipients, MessageReview } from "../types";
 import { formatShortDay, formatWhenIn } from "./when";
 import { registrationStatusLabel } from "./status";
 
@@ -30,6 +32,7 @@ export const ROLE_CHOICES: { id: AudienceRole; label: string }[] = [
 const DEFAULT_STATUSES: AudienceStatus[] = ["going", "waitlisted"];
 const DEFAULT_ROLES: AudienceRole[] = ["member", "leader"];
 
+/** @public tested directly: the picker before anything is chosen. */
 export const emptyChoice = (): AudienceChoice => ({ target: "", dates: "all", statuses: DEFAULT_STATUSES, roles: DEFAULT_ROLES });
 
 export function toAudience(c: AudienceChoice): MessageAudience | null {
@@ -389,7 +392,7 @@ const REASONS = new Map<string, [one: string, many: string]>([
   ["guest, hasn't asked for updates", ["is a guest who hasn't asked for updates", "are guests who haven't asked for updates"]],
 ]);
 
-// summaryLine is the live count: "142 people; 9 won't get it: 6 turned off
+// summaryLine is the live count: "142 people; 9 won't get the email: 6 turned off
 // messages from leaders, 3 have no email address".
 export function summaryLine(s: AudienceSummary): string {
   if (s.people === 0) return "No one is on this list yet.";
@@ -397,7 +400,7 @@ export function summaryLine(s: AudienceSummary): string {
 
   if (skipped === 0) return `${people(s.people)}; everyone on the list will get it.`;
 
-  return `${people(s.people)}; ${skipped} won't get it: ${reasonList(s.skipped)}`;
+  return `${people(s.people)}; ${skipped} won't get the email: ${reasonList(s.skipped)}`;
 }
 
 // reasonList is "6 turned off messages from leaders, 3 have no email
@@ -563,9 +566,59 @@ export function pushHistoryLine(c: MessagePushCounts | undefined): string {
 // confirmLine is the question before sending: "Send to 133 people now?"
 export function confirmLine(eligible: number, at: string | null, zone: string): string {
   if (!at) return `Send to ${people(eligible)} now?`;
+
+  return `Send to ${people(eligible)} ${whenPhrase(at, zone)}?`;
+}
+
+// "today at 9:00 AM", "tomorrow at 9:00 AM", "on Tue, Nov 26 at 9:00 AM".
+function whenPhrase(at: string, zone: string): string {
   const when = formatWhenIn(at, zone);
 
-  return `Send to ${people(eligible)} ${/^(Today|Tomorrow) /.test(when) ? when[0].toLowerCase() + when.slice(1) : `on ${when}`}?`;
+  return /^(Today|Tomorrow) /.test(when) ? when[0].toLowerCase() + when.slice(1) : `on ${when}`;
+}
+
+// confirmPushLine says who gets the push, under a question that counts everyone the message reaches: the people it
+// reaches beyond those who get the email get only the push.
+export function confirmPushLine(review: Pick<MessageReview, "summary" | "reached">): string {
+  const { push, eligible } = review.summary;
+  const only = review.reached - eligible;
+  const all = `${push} ${push === 1 ? "person gets" : "people get"} a push notification too.`;
+
+  if (only <= 0) return all;
+
+  return only === push
+    ? `${only} of them ${only === 1 ? "gets" : "get"} only the push notification.`
+    : `${push} of them get a push notification; ${only} ${only === 1 ? "gets" : "get"} only the push.`;
+}
+
+// saveListLine is the question before an edit changes who a scheduled message goes to (DEC-169): "Change who gets this
+// to 9 people?"
+export function saveListLine(n: number): string {
+  return `Change who gets this to ${people(n)}?`;
+}
+
+// stillScheduledLine says what saving a scheduled message's new list does to its time: nothing. at is when it is
+// scheduled for; once that has come, the message may start sending at any moment, before the save or after it, so the
+// line promises neither. The line for a time ahead stays true if that time comes while the question is open.
+export function stillScheduledLine(at: string | null, zone: string): string {
+  if (at && Date.parse(at) > Date.now()) return `Saving this doesn't change when it goes out: ${whenPhrase(at, zone)}, to whoever is on the list then.`;
+
+  return "This message is due and could start sending at any time. If you save before it starts, it will go to the new list.";
+}
+
+// listLimitLine is what the composer adds when a scheduled message's new list was refused by the day's limit: the list
+// is saved at the time the message has, so that day is the one that is full, whatever day the form shows.
+export function listLimitLine(at: string | null, zone: string): string {
+  const unchanged = "Who gets this has not changed.";
+
+  if (!at || Date.parse(at) <= Date.now()) return unchanged;
+
+  return `${unchanged} The limit is for when it is scheduled now, ${whenPhrase(at, zone)}. Move it to another day first, then change who gets it.`;
+}
+
+// notMovedLine is what the composer adds when a new time for a scheduled message was refused: where that leaves it.
+export function notMovedLine(at: string | null, zone: string): string {
+  return at && Date.parse(at) > Date.now() ? `It is still scheduled ${whenPhrase(at, zone)}.` : "It is still waiting to send.";
 }
 
 // statusLabel names a message's state in words, never by color alone. A
@@ -610,3 +663,65 @@ export const MERGE_FIELDS: { field: string; label: string; event: boolean }[] = 
   { field: "event_link", label: "Event page link", event: true },
   { field: "manage_link", label: "Link to their sign-up", event: true },
 ];
+
+const wireReview = object({
+  summary: object({
+    people: number(),
+    eligible: number(),
+    teens: number(),
+    skipped: record(string(), number()),
+    push: number(),
+    recipients: array(object({ name: string(), teen: boolean(), skipped: optional(string()), push: optional(boolean()) })),
+    more: boolean(),
+  }),
+  reached: number(),
+  token: pipe(string(), minLength(1)),
+});
+
+const wireRefusal = object({
+  review: wireReview,
+  change: optional(object({ added: array(string()), addedMore: number(), dropped: array(string()), droppedUnnamed: number() })),
+});
+
+// A send confirmation the server did not take (DEC-169): `message_list_changed` carries what changed since the review
+// it named, `message_review_needed` only a fresh review; both carry the fresh one. Anything else, or a body without
+// them, is no such answer.
+export interface ReviewRefusal {
+  review: MessageReview;
+  change: AudienceChange | null;
+}
+
+export function reviewRefusal(cause: unknown): ReviewRefusal | null {
+  if (!(cause instanceof ApiError) || (cause.code !== "message_list_changed" && cause.code !== "message_review_needed")) return null;
+  const parsed = safeParse(wireRefusal, cause.data);
+
+  if (!parsed.success) return null;
+
+  const change = cause.code === "message_list_changed" ? parsed.output.change ?? null : null;
+
+  return { review: parsed.output.review, change };
+}
+
+// "Sam Roe", "Sam Roe and Pat Lee", "Sam Roe, Pat Lee and 2 others".
+function namesAnd(names: string[], others: number): string {
+  const all = others > 0 ? [...names, others === 1 ? "1 other" : `${others} others`] : names;
+
+  return all.length <= 1 ? all.join("") : `${all.slice(0, -1).join(", ")} and ${all[all.length - 1]}`;
+}
+
+// changeLines says how the list changed since the sender looked, one line for who will now get it and one for who
+// will no longer: "Pat Lee will now get this." and "2 people will no longer get it: Sam Roe and 1 other." Never why.
+export function changeLines(change: AudienceChange): string[] {
+  const lines: string[] = [];
+
+  if (change.added.length > 0) lines.push(`${namesAnd(change.added, change.addedMore)} will now get this.`);
+  else if (change.addedMore > 0) lines.push(`${people(change.addedMore)} will now get this.`);
+
+  const gone = change.dropped.length + change.droppedUnnamed;
+
+  if (gone === 1 && change.dropped.length === 1) lines.push(`${change.dropped[0]} will no longer get it.`);
+  else if (gone > 0 && change.dropped.length === 0) lines.push(`${people(gone)} will no longer get it.`);
+  else if (gone > 0) lines.push(`${people(gone)} will no longer get it: ${namesAnd(change.dropped, change.droppedUnnamed)}.`);
+
+  return lines;
+}

@@ -903,7 +903,7 @@ var errMessageRetryDailyLimit = apiErr(http.StatusBadRequest, "message_retry_dai
 // scheduled, sending or sent messages for au's people on when's church day.
 // Every read uses db. The caller holds the actor's users row (lockActorIn
 // with actorNoKeyUpdate) in db's transaction: for a non-admin that actor is
-// the message's author (loadOwnMessage for schedule and edit, loadMessage for
+// the message's author (lockOwnMessageIn for schedule and edit, loadMessage for
 // an announcement's retry), so at READ COMMITTED the count's snapshot includes
 // every schedule committed by an earlier holder of the lock. me is the freshly
 // locked row; admins have no limit.

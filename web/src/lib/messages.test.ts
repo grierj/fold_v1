@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { composeOptions, recipients, summary } from "../test/compose";
-import { AUDIENCE_LABEL_MAX, AUDIENCE_LABEL_WIDTH_EM, audienceLabel, audienceLabels, confirmLine, emptyChoice, failedLine, fromAudience, guardianLine, historyLine, historyTeenLine, isOneEvent, prefillChoice, pushBadge, pushHistoryLine, pushLine, labelWidthEm, retryQuestion, shortLabel, statusLabel, summaryLine, teenLine, toAudience } from "./messages";
+import { ApiError } from "../api/core";
+import { AUDIENCE_LABEL_MAX, AUDIENCE_LABEL_WIDTH_EM, audienceLabel, audienceLabels, changeLines, confirmLine, confirmPushLine, emptyChoice, failedLine, fromAudience, guardianLine, historyLine, historyTeenLine, isOneEvent, prefillChoice, pushBadge, pushHistoryLine, pushLine, labelWidthEm, listLimitLine, notMovedLine, retryQuestion, reviewRefusal, shortLabel, statusLabel, stillScheduledLine, summaryLine, teenLine, toAudience } from "./messages";
 
 describe("audiences", () => {
   it("turns the picker's choice into the API's audience and back", () => {
@@ -43,8 +44,8 @@ describe("audiences", () => {
 describe("counts", () => {
   it("reads the live count with each reason as the API names it", () => {
     expect(summaryLine(summary({ people: 142, eligible: 133, skipped: { "turned off messages from leaders": 6, "no email address": 3 } })))
-      .toBe("142 people; 9 won't get it: 6 turned off messages from leaders, 3 have no email address");
-    expect(summaryLine(summary({ people: 2, eligible: 1, skipped: { "no email address": 1 } }))).toBe("2 people; 1 won't get it: 1 has no email address");
+      .toBe("142 people; 9 won't get the email: 6 turned off messages from leaders, 3 have no email address");
+    expect(summaryLine(summary({ people: 2, eligible: 1, skipped: { "no email address": 1 } }))).toBe("2 people; 1 won't get the email: 1 has no email address");
     expect(summaryLine(summary({ people: 1, eligible: 1, skipped: {} }))).toBe("1 person; everyone on the list will get it.");
     expect(summaryLine(summary({ people: 0, eligible: 0, skipped: {} }))).toBe("No one is on this list yet.");
     expect(teenLine(summary({ teens: 0 }))).toBe("");
@@ -60,6 +61,30 @@ describe("counts", () => {
       expect(confirmLine(133, null, "America/Boise")).toBe("Send to 133 people now?");
       expect(confirmLine(1, "2026-11-05T16:00:00Z", "America/Boise")).toMatch(/^Send to 1 person on Thu, Nov 5 at 9:00 AM( MST)?\?$/);
       expect(confirmLine(1, "2026-11-05T16:00:00Z", "Asia/Kolkata")).toBe("Send to 1 person on Thu, Nov 5 at 9:30 PM GMT+5:30?");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("says who gets the push under a question that counts everyone reached", () => {
+    expect(confirmPushLine({ summary: summary({ eligible: 2, push: 2 }), reached: 2 })).toBe("2 people get a push notification too.");
+    expect(confirmPushLine({ summary: summary({ eligible: 2, push: 1 }), reached: 2 })).toBe("1 person gets a push notification too.");
+    expect(confirmPushLine({ summary: summary({ eligible: 2, push: 1 }), reached: 3 })).toBe("1 of them gets only the push notification.");
+    expect(confirmPushLine({ summary: summary({ eligible: 2, push: 3 }), reached: 3 })).toBe("3 of them get a push notification; 1 gets only the push.");
+  });
+
+  it("says saving a scheduled message's list leaves its time alone, and that a due one goes out", () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-11-02T18:00:00Z"));
+
+    try {
+      expect(stillScheduledLine("2026-11-05T16:00:00Z", "Asia/Kolkata")).toBe("Saving this doesn't change when it goes out: on Thu, Nov 5 at 9:30 PM GMT+5:30, to whoever is on the list then.");
+      expect(stillScheduledLine("2026-11-02T17:59:00Z", "Asia/Kolkata")).toBe("This message is due and could start sending at any time. If you save before it starts, it will go to the new list.");
+      expect(stillScheduledLine(null, "Asia/Kolkata")).toBe("This message is due and could start sending at any time. If you save before it starts, it will go to the new list.");
+      expect(notMovedLine("2026-11-05T16:00:00Z", "Asia/Kolkata")).toBe("It is still scheduled on Thu, Nov 5 at 9:30 PM GMT+5:30.");
+      expect(notMovedLine("2026-11-02T17:59:00Z", "Asia/Kolkata")).toBe("It is still waiting to send.");
+      expect(listLimitLine("2026-11-05T16:00:00Z", "Asia/Kolkata")).toBe("Who gets this has not changed. The limit is for when it is scheduled now, on Thu, Nov 5 at 9:30 PM GMT+5:30. Move it to another day first, then change who gets it.");
+      expect(listLimitLine("2026-11-02T17:59:00Z", "Asia/Kolkata")).toBe("Who gets this has not changed.");
     } finally {
       vi.useRealTimers();
     }
@@ -375,5 +400,29 @@ describe("audienceLabels (#288)", () => {
       expect(count(label)).toBeLessThanOrEqual(AUDIENCE_LABEL_MAX);
       expect(labelWidthEm(label)).toBeLessThanOrEqual(AUDIENCE_LABEL_WIDTH_EM);
     }
+  });
+});
+
+describe("a changed list (DEC-169)", () => {
+  const change = (added: string[], dropped: string[], addedMore = 0, droppedUnnamed = 0) => ({ added, addedMore, dropped, droppedUnnamed });
+
+  it("names who will now get it and who will no longer, counting the rest, never why", () => {
+    expect(changeLines(change(["Pat Lee"], ["Sam Roe"], 0, 1))).toEqual(["Pat Lee will now get this.", "2 people will no longer get it: Sam Roe and 1 other."]);
+    expect(changeLines(change(["Pat Lee", "Kim Ng", "Bo Bell"], []))).toEqual(["Pat Lee, Kim Ng and Bo Bell will now get this."]);
+    expect(changeLines(change(["Pat Lee"], [], 3))).toEqual(["Pat Lee and 3 others will now get this."]);
+    expect(changeLines(change([], ["Sam Roe"]))).toEqual(["Sam Roe will no longer get it."]);
+    expect(changeLines(change([], [], 0, 1))).toEqual(["1 person will no longer get it."]);
+    expect(changeLines(change([], [], 0, 4))).toEqual(["4 people will no longer get it."]);
+    expect(changeLines(change([], ["Sam Roe", "Ann Adult"], 0, 2))).toEqual(["4 people will no longer get it: Sam Roe, Ann Adult and 2 others."]);
+  });
+
+  it("reads the refusal's body, and nothing else, as a refused confirmation", () => {
+    const review = JSON.parse(JSON.stringify({ summary: summary(), reached: 2, token: "t" }));
+    const listChanged = new ApiError(409, "x", { code: "message_list_changed", review, change: change(["Pat Lee"], []) });
+    expect(reviewRefusal(listChanged)).toEqual({ review, change: change(["Pat Lee"], []) });
+    expect(reviewRefusal(new ApiError(409, "x", { code: "message_review_needed", review }))).toEqual({ review, change: null });
+    expect(reviewRefusal(new ApiError(409, "x", { code: "message_list_changed", review: { ...review, token: "" } }))).toBeNull();
+    expect(reviewRefusal(new ApiError(409, "x", { code: "message_changed", review }))).toBeNull();
+    expect(reviewRefusal(new ApiError(502, "x", {}, true))).toBeNull();
   });
 });

@@ -244,10 +244,13 @@ type messageResponseJSON struct {
 	Message messageJSON `json:"message"`
 }
 
-// messageScheduledResponseJSON answers scheduling: the message and who it will reach.
-type messageScheduledResponseJSON struct {
-	Message messageJSON         `json:"message"`
-	Summary audienceSummaryJSON `json:"summary"`
+// messageEditResponseJSON answers an edit: the message, and, when the edit
+// changed a scheduled message's list and the sender confirmed it (DEC-169),
+// the token of that list for the revision the edit left, which a schedule
+// press right after names, so it asks nothing twice.
+type messageEditResponseJSON struct {
+	Message messageJSON `json:"message"`
+	Review  string      `json:"review,omitempty"`
 }
 
 type messageReadResponseJSON struct {
@@ -264,6 +267,31 @@ type messageTestResponseJSON struct {
 
 type audienceSummaryResponseJSON struct {
 	Summary audienceSummaryJSON `json:"summary"`
+}
+
+// messageReviewJSON is a review of who a message reaches (DEC-169): the
+// summary the picker shows, how many people it reaches by any channel (the
+// email, or a push for someone only a push reaches), and the sealed token the
+// confirmation names.
+type messageReviewJSON struct {
+	Summary audienceSummaryJSON `json:"summary"`
+	Reached int                 `json:"reached"`
+	Token   string              `json:"token"`
+}
+
+type messageReviewResponseJSON struct {
+	Review messageReviewJSON `json:"review"`
+}
+
+// audienceChangeJSON is how who a message reaches changed since the review a
+// confirmation named: who it now reaches and did not (named, with AddedMore
+// past the first 100), and who it no longer reaches (named while the audience
+// still lists them, the rest only counted). It never says why.
+type audienceChangeJSON struct {
+	Added          []string `json:"added"`
+	AddedMore      int      `json:"addedMore"`
+	Dropped        []string `json:"dropped"`
+	DroppedUnnamed int      `json:"droppedUnnamed"`
 }
 
 type groupListResponseJSON struct {

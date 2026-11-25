@@ -359,12 +359,12 @@ func TestMessageDraftScheduleCancel(t *testing.T) {
 		t.Fatalf("admin: %d", w.Code)
 	}
 	for _, when := range []time.Time{time.Now().Add(-time.Hour), time.Now().AddDate(2, 0, 0)} {
-		if w := f.leader.do("POST", path+"/schedule", map[string]any{"scheduledAt": when}, true); w.Code != http.StatusBadRequest {
+		if w := f.leader.do("POST", path+"/schedule", confirmedSend(t, f.leader, path, map[string]any{"scheduledAt": when}), true); w.Code != http.StatusBadRequest {
 			t.Fatalf("schedule at %v: %d", when, w.Code)
 		}
 	}
 	when := time.Now().Add(48 * time.Hour).UTC().Truncate(time.Second)
-	w = f.leader.do("POST", path+"/schedule", map[string]any{"scheduledAt": when}, true)
+	w = f.leader.do("POST", path+"/schedule", confirmedSend(t, f.leader, path, map[string]any{"scheduledAt": when}), true)
 	decodeJSON(t, w, &out)
 	if w.Code != http.StatusOK || out.Message.Status != models.MessageScheduled || !out.Message.ScheduledAt.Equal(when) {
 		t.Fatalf("schedule: %d %s", w.Code, w.Body.String())
@@ -375,10 +375,10 @@ func TestMessageDraftScheduleCancel(t *testing.T) {
 	}
 	// Still editable while scheduled, but only into something that could
 	// still go out; the count follows the audience, and the edit is audited.
-	if w := f.leader.do("PUT", path, map[string]any{"subject": "", "bodyHtml": "", "audience": aud}, true); w.Code != http.StatusBadRequest {
+	if w := f.leader.do("PUT", path, namedEdit(t, f.leader, path, map[string]any{"subject": "", "bodyHtml": "", "audience": aud}), true); w.Code != http.StatusBadRequest {
 		t.Fatalf("emptying a scheduled message: %d %s", w.Code, w.Body.String())
 	}
-	if w := f.leader.do("PUT", path, map[string]any{"subject": "Next week, again", "bodyHtml": "<p>Changed</p>", "audience": map[string]any{"type": "group", "groupId": f.group.ID, "roles": []string{"leader"}}}, true); w.Code != http.StatusOK {
+	if w := f.leader.do("PUT", path, confirmedEdit(t, f.leader, path, map[string]any{"subject": "Next week, again", "bodyHtml": "<p>Changed</p>", "audience": map[string]any{"type": "group", "groupId": f.group.ID, "roles": []string{"leader"}}}), true); w.Code != http.StatusOK {
 		t.Fatalf("edit scheduled: %d %s", w.Code, w.Body.String())
 	}
 	f.app.DB.First(&row, m.ID)
@@ -386,7 +386,7 @@ func TestMessageDraftScheduleCancel(t *testing.T) {
 		t.Fatalf("scheduled edit: %+v, audited %d", row, auditCount(t, f.app, audit.MessageEdited))
 	}
 	// What is stored is bounded, not just what was sent: escaping grows it.
-	if w := f.leader.do("PUT", path, map[string]any{"subject": "x", "bodyHtml": "<p>" + strings.Repeat("&", 60000) + "</p>", "audience": aud}, true); w.Code != http.StatusBadRequest ||
+	if w := f.leader.do("PUT", path, namedEdit(t, f.leader, path, map[string]any{"subject": "x", "bodyHtml": "<p>" + strings.Repeat("&", 60000) + "</p>", "audience": aud}), true); w.Code != http.StatusBadRequest ||
 		!strings.Contains(w.Body.String(), "message_body") {
 		t.Fatalf("too long once escaped: %d %s", w.Code, w.Body.String())
 	}
@@ -405,7 +405,7 @@ func TestMessageDraftScheduleCancel(t *testing.T) {
 	solo := activeGroup(t, f.app, f.leaderUser, "Just me", models.VisibilityPublic, "")
 	f.app.DB.Model(&models.User{}).Where("id = ?", f.leaderUser.ID).Update("email", "")
 	decodeJSON(t, f.leader.do("POST", "/api/v1/messages", map[string]any{"subject": "Hi", "bodyHtml": "<p>Hi</p>", "audience": map[string]any{"type": "group", "groupId": solo.ID}}, true), &out)
-	if w := f.leader.do("POST", "/api/v1/messages/"+itoa(out.Message.ID)+"/schedule", map[string]any{}, true); w.Code != http.StatusBadRequest ||
+	if w := f.leader.do("POST", "/api/v1/messages/"+itoa(out.Message.ID)+"/schedule", confirmedSend(t, f.leader, "/api/v1/messages/"+itoa(out.Message.ID), map[string]any{}), true); w.Code != http.StatusBadRequest ||
 		!strings.Contains(w.Body.String(), "message_nobody") {
 		t.Fatalf("nobody: %d %s", w.Code, w.Body.String())
 	}
@@ -523,12 +523,12 @@ func TestMessagePushAlertDefaultsOn(t *testing.T) {
 		t.Fatal("pushAlert left out isn't on")
 	}
 	id := itoa(out.Message.ID)
-	decodeJSON(t, f.leader.do("PUT", "/api/v1/messages/"+id, map[string]any{"subject": "Hi", "bodyHtml": "<p>Hi</p>", "audience": aud, "pushAlert": false}, true), &out)
+	decodeJSON(t, f.leader.do("PUT", "/api/v1/messages/"+id, namedEdit(t, f.leader, "/api/v1/messages/"+id, map[string]any{"subject": "Hi", "bodyHtml": "<p>Hi</p>", "audience": aud, "pushAlert": false}), true), &out)
 	var m models.Message
 	if f.app.DB.First(&m, out.Message.ID); out.Message.PushAlert || m.PushAlert {
 		t.Fatalf("pushAlert false: %v %v", out.Message.PushAlert, m.PushAlert)
 	}
-	decodeJSON(t, f.leader.do("PUT", "/api/v1/messages/"+id, map[string]any{"subject": "Hi again", "bodyHtml": "<p>Hi</p>", "audience": aud}, true), &out)
+	decodeJSON(t, f.leader.do("PUT", "/api/v1/messages/"+id, namedEdit(t, f.leader, "/api/v1/messages/"+id, map[string]any{"subject": "Hi again", "bodyHtml": "<p>Hi</p>", "audience": aud}), true), &out)
 	if f.app.DB.First(&m, out.Message.ID); out.Message.PushAlert || m.PushAlert || m.Subject != "Hi again" {
 		t.Fatalf("an update that leaves pushAlert out changed it: %v %v", out.Message.PushAlert, m.PushAlert)
 	}
@@ -560,7 +560,7 @@ func TestMessagePushOnlyIsRefused(t *testing.T) {
 		Message messageJSON `json:"message"`
 	}
 	decodeJSON(t, f.leader.do("POST", "/api/v1/messages", map[string]any{"subject": "Hi", "bodyHtml": "<p>Hi</p>", "audience": aud}, true), &out)
-	w := f.leader.do("PUT", "/api/v1/messages/"+itoa(out.Message.ID), map[string]any{"channel": "push", "subject": "Hi", "bodyHtml": "<p>Hi</p>", "audience": aud}, true)
+	w := f.leader.do("PUT", "/api/v1/messages/"+itoa(out.Message.ID), namedEdit(t, f.leader, "/api/v1/messages/"+itoa(out.Message.ID), map[string]any{"channel": "push", "subject": "Hi", "bodyHtml": "<p>Hi</p>", "audience": aud}), true)
 	if w.Code != http.StatusBadRequest || errorCodeOf(w) != "message_push_only" {
 		t.Fatalf("update: %d %s", w.Code, w.Body.String())
 	}
@@ -665,8 +665,7 @@ func TestMessageListAndWriteRepliesReadOneSnapshot(t *testing.T) {
 		{"message reply", func(t *testing.T, f composeFixture) (func() *httptest.ResponseRecorder, func(tx *gorm.DB) error, func(*App, *gin.Context)) {
 			id := draft(t, f)
 			return func() *httptest.ResponseRecorder {
-					return f.admin.do("PUT", "/api/v1/messages/"+itoa(id), map[string]any{"subject": "Edited by the office", "bodyHtml": "<p>Hello</p>",
-						"audience": map[string]any{"type": policy.AudienceGroup, "groupId": f.group.ID}}, true)
+					return f.admin.do("POST", "/api/v1/messages/"+itoa(id)+"/cancel", nil, true)
 				},
 				func(tx *gorm.DB) error {
 					return tx.Model(&models.User{}).Where("id = ?", f.leaderUser.ID).Update("display_name", secret).Error

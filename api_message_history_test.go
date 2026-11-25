@@ -451,7 +451,7 @@ func TestMessageRetryDailyLimitFailedRowsPriorDay(t *testing.T) {
 		t.Fatalf("after retry: %+v", m)
 	}
 	path := f.draft(t, f.leader, "One more", "<p>Hi</p>", aud)
-	if w := f.leader.do("POST", path+"/schedule", map[string]any{}, true); w.Code != http.StatusBadRequest || errorCodeOf(w) != "message_daily_limit" {
+	if w := f.leader.do("POST", path+"/schedule", confirmedSend(t, f.leader, path, map[string]any{}), true); w.Code != http.StatusBadRequest || errorCodeOf(w) != "message_daily_limit" {
 		t.Fatalf("a further schedule: %d %s", w.Code, w.Body.String())
 	}
 	if got := f.countedOn(t, f.group.ID, time.Now()); got != int64(dailyMessagesPerGroup) {
@@ -485,7 +485,7 @@ func TestMessageRetryAndScheduleSerialize(t *testing.T) {
 	path := f.draft(t, f.leader, "Draft", "<p>Hi</p>", aud)
 	other := loginAPI(t, f.app, "leader", "password1234")
 	retry := bgDo(f.leader, "POST", "/api/v1/messages/"+itoa(stuck.ID)+"/retry", nil)
-	schedule := bgDo(other, "POST", path+"/schedule", map[string]any{})
+	schedule := bgDo(other, "POST", path+"/schedule", confirmedSend(t, other, path, map[string]any{}))
 	r, s := awaitResult(t, retry), awaitResult(t, schedule)
 	retried, scheduled := r.code == http.StatusOK, s.code == http.StatusOK
 	if retried == scheduled {

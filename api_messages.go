@@ -61,6 +61,10 @@ type messageJSON struct {
 	// its status reads "Waiting to go out" only while some are; 0 for
 	// anything else.
 	PushWaiting int `json:"pushWaiting"`
+	// Revision is the message's token (messageRevisionIn) as the fields beside
+	// it were read, which an edit and a send name; only for a viewer who may
+	// edit it.
+	Revision string `json:"revision,omitempty"`
 }
 
 // messageReminderJSON is the date an automatic reminder is for: "Automatic
@@ -118,7 +122,7 @@ var (
 	errMessageBody     = apiErr(http.StatusBadRequest, "message_body", "write a message of under about "+thousands(maxMessageText)+" characters")
 	errMessageNobody   = apiErr(http.StatusBadRequest, "message_nobody", "no one would get this message; choose people who can get email")
 	errMessageLocked   = apiErr(http.StatusConflict, "message_locked", "this message is already sending or sent, so it can't change")
-	errMessageChanged  = apiErr(http.StatusConflict, "message_changed", "this message was changed somewhere else; check it and try again")
+	errMessageChanged  = apiErr(http.StatusConflict, "message_changed", "this message changed somewhere else, so it could not be saved or sent; check it and try again")
 	errMessageWhen     = apiErr(http.StatusBadRequest, "message_when", "pick a time from now to a year ahead")
 	errMessageChannel  = apiErr(http.StatusBadRequest, "message_channel", "texting isn't set up yet; send this as an email")
 	errMessageNotYours = apiErr(http.StatusForbidden, "message_not_yours", "you can't send to those people")
@@ -281,8 +285,7 @@ func (a *App) presentMessage(c *gin.Context, id uint, surface string) (messageJS
 		if a.hooks.readerAuthorized != nil {
 			a.hooks.readerAuthorized(surface)
 		}
-		facts, err := loadMessageFactsIn(tx, []models.Message{m})
-		out = toMessageJSON(&m, me, facts)
+		out, err = a.messageJSONIn(tx, me, &m)
 		return err
 	}, readSnapshot)
 	switch {
@@ -296,6 +299,33 @@ func (a *App) presentMessage(c *gin.Context, id uint, surface string) (messageJS
 		return out, true
 	}
 	return messageJSON{}, false
+}
+
+// messageJSONIn is m presented to me on tx: its facts and, when me may edit
+// it, its revision, read in the same snapshot as m (or under its row lock).
+func (a *App) messageJSONIn(tx *gorm.DB, me *models.User, m *models.Message) (messageJSON, error) {
+	facts, err := loadMessageFactsIn(tx, []models.Message{*m})
+	if err != nil {
+		return messageJSON{}, err
+	}
+	out := toMessageJSON(m, me, facts)
+	if out.Editable {
+		if out.Revision, err = a.messageRevisionIn(tx, m.ID); err != nil {
+			return messageJSON{}, err
+		}
+	}
+	return out, nil
+}
+
+// writtenMessageJSONIn is the answer to a write of message id, built in the
+// write's transaction under the locks it took (the actor and the message), so
+// the fields and the revision are the ones this write left.
+func (a *App) writtenMessageJSONIn(tx *gorm.DB, me *models.User, id uint) (messageJSON, error) {
+	var m models.Message
+	if err := tx.First(&m, id).Error; err != nil {
+		return messageJSON{}, err
+	}
+	return a.messageJSONIn(tx, me, &m)
 }
 
 func (a *App) respondMessage(c *gin.Context, status int, m *models.Message) {
@@ -322,29 +352,16 @@ func canComposeIn(db *gorm.DB, me *models.User) (bool, error) {
 	return policy.CanComposeMessages(asPerson(me), leads, hosts > 0), nil
 }
 
-// checkAudience normalizes au and answers whether me may send to it, and
-// who it reaches; false means the error response was sent.
-func (a *App) checkAudience(c *gin.Context, me *models.User, au *audienceJSON) ([]uint, bool) {
-	ids, err := a.resolveAudience(me, au, time.Now())
-	return ids, answerAudience(c, me, err)
-}
-
-// answerAudience answers a resolveAudience error for me; true means there was
-// none.
+// answerAudience answers a resolveAudienceIn error for me (audienceError);
+// true means there was none.
 func answerAudience(c *gin.Context, me *models.User, err error) bool {
-	switch {
-	case errors.Is(err, errAudienceInvalid):
-		fail(c, errAudienceInvalid)
-	case errors.Is(err, errAudienceGone) && policy.IsAdmin(asPerson(me)):
-		fail(c, errAudienceGone)
-	case errors.Is(err, errAudienceGone), errors.Is(err, errAudienceRefused):
-		// Only an admin learns a target is gone; anyone else hears what a
-		// target that isn't theirs answers, so ids can't be probed.
-		fail(c, errMessageNotYours)
-	case err != nil:
-		jsonError(c, http.StatusInternalServerError, "could not check who gets this message")
-	default:
+	switch err = audienceError(me, err); {
+	case err == nil:
 		return true
+	case isAPIError(err):
+		fail(c, err)
+	default:
+		jsonError(c, http.StatusInternalServerError, "could not check who gets this message")
 	}
 	return false
 }
@@ -386,19 +403,12 @@ func (a *App) summarizeAudienceFor(c *gin.Context, au *audienceJSON) (audienceSu
 // errAudienceRefused: me may not message that audience (policy).
 var errAudienceRefused = errors.New("not allowed to message that audience")
 
-// resolveAudience normalizes au, checks that me may message it
+// resolveAudienceIn normalizes au, checks on db that me may message it
 // (policy.CanMessageAudience) and returns who it reaches; an event audience
 // reaches only the registrants a date they may still see puts in it
-// (audienceSeers). The handlers and
-// message.send (at send time, PLAN 7.1 step 1) share it. Errors are
-// errAudienceInvalid, errAudienceGone, errAudienceRefused or a database
-// error.
-func (a *App) resolveAudience(me *models.User, au *audienceJSON, now time.Time) ([]uint, error) {
-	return a.resolveAudienceIn(a.DB, me, au, now)
-}
-
-// resolveAudienceIn is resolveAudience on db, so a caller inside a
-// transaction reads the audience on its own connection.
+// (audienceSeers). The handlers, the review and message.send (at send time,
+// PLAN 7.1 step 1) share it. Errors are errAudienceInvalid, errAudienceGone,
+// errAudienceRefused or a database error.
 func (a *App) resolveAudienceIn(db *gorm.DB, me *models.User, au *audienceJSON, now time.Time) ([]uint, error) {
 	if err := au.normalize(); err != nil {
 		return nil, errAudienceInvalid
@@ -616,16 +626,17 @@ type messageBody struct {
 	Audience audienceJSON `json:"audience"`
 	// PushAlert is "Push notification too"; missing means on (DEC-123).
 	PushAlert *bool `json:"pushAlert"`
+	// Revision names the read an edit was made from (PUT only).
+	Revision string `json:"revision"`
+	// Review is the token of the list the sender confirmed, for an edit that
+	// changes a scheduled message's audience or push switch (PUT only).
+	Review string `json:"review"`
 }
 
-// apply validates and copies a draft's fields onto m; false means the
-// error response was sent. The HTML is sanitized before it is stored.
-func (a *App) applyMessageBody(c *gin.Context, me *models.User, m *models.Message) bool {
-	var body messageBody
-	if err := c.ShouldBindJSON(&body); err != nil {
-		jsonError(c, http.StatusBadRequest, "invalid request")
-		return false
-	}
+// applyMessageBodyIn validates body and copies it onto m, checking on tx that
+// me may message its audience; the HTML is sanitized before it is stored. The
+// errors are the refusals in words, or a failed read.
+func (a *App) applyMessageBodyIn(tx *gorm.DB, me *models.User, m *models.Message, body messageBody) error {
 	if body.Channel == "" {
 		body.Channel = "email"
 	}
@@ -633,40 +644,33 @@ func (a *App) applyMessageBody(c *gin.Context, me *models.User, m *models.Messag
 	// channel of its own, so asking for channel "push" is refused in
 	// words. Any other channel isn't set up yet.
 	if strings.EqualFold(strings.TrimSpace(body.Channel), models.DeliveryPush) {
-		fail(c, errMessagePushOnly)
-		return false
+		return errMessagePushOnly
 	}
 	if body.Channel != "email" {
-		fail(c, errMessageChannel)
-		return false
+		return errMessageChannel
 	}
 	subject := strings.TrimSpace(body.Subject)
 	if utf8.RuneCountInString(subject) > maxMessageSubject || strings.ContainsAny(subject, "\r\n") {
-		fail(c, errMessageSubject)
-		return false
+		return errMessageSubject
 	}
 	// Bound the input before sanitizing it, then what is stored: escaping
 	// and link addresses can make either longer (the CHECKs count characters).
 	if len(body.BodyHTML) > 4*maxMessageHTML {
-		fail(c, errMessageBody)
-		return false
+		return errMessageBody
 	}
 	clean := content.SanitizeHTML(body.BodyHTML)
 	text := content.PlainText(clean)
 	if utf8.RuneCountInString(clean) > maxMessageHTML || utf8.RuneCountInString(text) > maxMessageText {
-		fail(c, errMessageBody)
-		return false
+		return errMessageBody
 	}
 	if !ownPictures(clean, m.ID) {
-		fail(c, errMessageImage)
-		return false
+		return errMessageImage
 	}
-	if _, ok := a.checkAudience(c, me, &body.Audience); !ok {
-		return false
+	if _, err := a.resolveAudienceIn(tx, me, &body.Audience, a.now()); err != nil {
+		return audienceError(me, err)
 	}
 	if err := mergeFieldError(subject+"\n"+clean, body.Audience); err != nil {
-		fail(c, err)
-		return false
+		return err
 	}
 	aud, _ := json.Marshal(body.Audience)
 	m.Channel, m.Subject, m.BodyHTML, m.BodyText, m.Audience = body.Channel, subject, clean, text, string(aud)
@@ -677,7 +681,7 @@ func (a *App) applyMessageBody(c *gin.Context, me *models.User, m *models.Messag
 	case m.ID == 0:
 		m.PushAlert = true
 	}
-	return true
+	return nil
 }
 
 // ownPictures: every picture in sanitized HTML was uploaded to message id.
@@ -693,59 +697,68 @@ func ownPictures(clean string, id uint) bool {
 	return true
 }
 
-// sendable checks that m could go out now: a subject, a body and at least
-// one person who can get it. It answers who it reaches; false means the
-// error response was sent.
-func (a *App) sendable(c *gin.Context, m *models.Message) (audienceJSON, audienceSummaryJSON, bool) {
-	var au audienceJSON
+// sendableIn checks, on tx, that m could go out now for me: a subject, a
+// body and at least one person who gets the email. It answers its audience,
+// the summary and who it reaches (messageReachIn).
+func (a *App) sendableIn(tx *gorm.DB, me *models.User, m *models.Message) (audienceJSON, audienceSummaryJSON, audienceReach, error) {
 	if m.Subject == "" {
-		fail(c, errMessageSubject)
-		return au, audienceSummaryJSON{}, false
+		return audienceJSON{}, audienceSummaryJSON{}, audienceReach{}, errMessageSubject
 	}
 	if strings.TrimSpace(m.BodyText) == "" {
-		fail(c, errMessageBody)
-		return au, audienceSummaryJSON{}, false
+		return audienceJSON{}, audienceSummaryJSON{}, audienceReach{}, errMessageBody
 	}
-	_ = json.Unmarshal([]byte(m.Audience), &au)
-	s, ok := a.summarizeAudienceFor(c, &au)
-	if !ok {
-		return au, s, false
+	au, s, reach, err := a.messageReachIn(tx, me, m)
+	if err != nil {
+		return au, s, reach, audienceError(me, err)
 	}
 	if s.Eligible == 0 {
-		fail(c, errMessageNobody)
-		return au, s, false
+		return au, s, reach, errMessageNobody
 	}
-	return au, s, true
+	return au, s, reach, nil
 }
 
+// apiCreateMessage saves a new draft. The answer is built in the write's
+// transaction, so its revision is the one this create left.
 func (a *App) apiCreateMessage(c *gin.Context) {
-	me := apiUser(c)
-	if ok, err := a.canCompose(me); err != nil || !ok {
-		fail(c, errMessageNotYours)
+	var body messageBody
+	if err := c.ShouldBindJSON(&body); err != nil {
+		jsonError(c, http.StatusBadRequest, "invalid request")
 		return
 	}
-	m := models.Message{AuthorID: &me.ID, Status: policy.MessageCreateDraft.To(), Category: models.MessageCategoryAnnouncement}
-	if !a.applyMessageBody(c, me, &m) {
-		return
-	}
-	pushAlert := m.PushAlert
+	var out messageJSON
 	err := a.DB.Transaction(func(tx *gorm.DB) error {
+		me, err := lockActorIn(tx, apiUser(c), actorShare)
+		if err != nil {
+			return err
+		}
+		if ok, err := canComposeIn(tx, me); err != nil {
+			return err
+		} else if !ok {
+			return errMessageNotYours
+		}
+		m := models.Message{AuthorID: &me.ID, Status: policy.MessageCreateDraft.To(), Category: models.MessageCategoryAnnouncement}
+		if err := a.applyMessageBodyIn(tx, me, &m, body); err != nil {
+			return err
+		}
+		pushAlert := m.PushAlert
 		if err := tx.Create(&m).Error; err != nil {
 			return err
 		}
 		// GORM leaves a false bool with a default out of the INSERT (and
 		// reads the column's true back into m).
 		if !pushAlert {
-			return tx.Model(&models.Message{}).Where("id = ?", m.ID).Update("push_alert", false).Error
+			if err := tx.Model(&models.Message{}).Where("id = ?", m.ID).Update("push_alert", false).Error; err != nil {
+				return err
+			}
 		}
-		return nil
-	})
+		out, err = a.writtenMessageJSONIn(tx, me, m.ID)
+		return err
+	}, readCommitted)
 	if err != nil {
-		jsonError(c, http.StatusInternalServerError, "could not save the message")
+		answerMessageError(c, err, "could not save the message")
 		return
 	}
-	m.PushAlert = pushAlert
-	a.respondMessage(c, http.StatusCreated, &m)
+	c.JSON(http.StatusCreated, messageResponseJSON{Message: out})
 }
 
 // loadMessage finds a message whose page and history the viewer may see
@@ -975,54 +988,84 @@ func editable(c *gin.Context, m *models.Message) bool {
 	return true
 }
 
-// apiUpdateMessage edits a draft or a scheduled message; the audience is
-// checked again, since roles change.
+// lockOwnMessageIn starts a composer write on tx, which runs at Read
+// Committed so a read after a lock wait sees what committed during it: the
+// session's user (lockActorIn, which also serializes the daily limit's count
+// with the write, #260), then message id FOR UPDATE, then the right to change
+// it and whether move's rule still allows its status, judged on the rows as
+// locked (ownMessageIn). The caller compares the revision next.
+func lockOwnMessageIn(tx *gorm.DB, session *models.User, id uint, move policy.MessageMove) (*models.User, *models.Message, error) {
+	me, err := lockActorIn(tx, session, actorNoKeyUpdate)
+	if err != nil {
+		return nil, nil, err
+	}
+	var m models.Message
+	if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&m, id).Error; errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, nil, errMessageNotFound
+	} else if err != nil {
+		return nil, nil, err
+	}
+	if err := ownMessageIn(tx, me, &m, move); err != nil {
+		return nil, nil, err
+	}
+	return me, &m, nil
+}
+
+// apiUpdateMessage edits a draft or a scheduled message. It names the read it
+// was made from (revision, DEC-169): under the locks, after the authority and
+// status rules and before anything else, an older one is refused with
+// message_changed and nothing written. The audience is checked again, since
+// roles change; a scheduled message stays scheduled only while it could still
+// go out, and its count follows the new audience. An edit that changes a
+// scheduled message's audience or push switch writes nothing until the sender
+// confirms who the proposal reaches (review, checkReview): without a token
+// that opens it is message_review_needed, with another set
+// message_list_changed, each with a fresh review of the proposal.
 func (a *App) apiUpdateMessage(c *gin.Context) {
-	m, ok := a.loadOwnMessage(c)
-	if !ok || !editable(c, m) {
+	id, ok := messageIDParam(c)
+	if !ok {
 		return
 	}
-	me := apiUser(c)
-	if !a.applyMessageBody(c, me, m) {
+	var body messageBody
+	if err := c.ShouldBindJSON(&body); err != nil {
+		jsonError(c, http.StatusBadRequest, "invalid request")
 		return
 	}
-	fields := map[string]any{"channel": m.Channel, "subject": m.Subject, "body_html": m.BodyHTML, "body_text": m.BodyText,
-		"audience": m.Audience, "push_alert": m.PushAlert, "updated_at": time.Now()}
-	// A scheduled message stays scheduled only while it could still go out,
-	// and its count follows the new audience.
-	scheduled := m.Status == models.MessageScheduled
 	var (
-		au audienceJSON
-		s  audienceSummaryJSON
+		out      messageEditResponseJSON
+		proposal *listProposal
 	)
-	if scheduled {
-		au, s, ok = a.sendable(c, m)
-		if !ok {
-			return
-		}
-		fields["recipient_count"] = s.Eligible
-	}
-	isAuthor := m.AuthorID != nil && *m.AuthorID == me.ID
 	err := a.DB.Transaction(func(tx *gorm.DB) error {
+		me, m, err := lockOwnMessageIn(tx, apiUser(c), id, policy.MessageEdit)
+		if err != nil {
+			return err
+		}
+		if err := a.checkMessageRevision(tx, m.ID, body.Revision); err != nil {
+			return err
+		}
+		was := *m
+		if err := a.applyMessageBodyIn(tx, me, m, body); err != nil {
+			return err
+		}
+		fields := map[string]any{"channel": m.Channel, "subject": m.Subject, "body_html": m.BodyHTML, "body_text": m.BodyText,
+			"audience": m.Audience, "push_alert": m.PushAlert, "updated_at": time.Now()}
+		scheduled := was.Status == models.MessageScheduled
+		var confirmed *audienceReach
 		if scheduled {
-			// The author's row serializes the daily limit's count with the
-			// write (#260); the message is read again under its own lock, and
-			// the new audience counts from the date it is now scheduled for.
-			fresh, err := lockActorIn(tx, me, actorNoKeyUpdate)
+			au, s, reach, err := a.sendableIn(tx, me, m)
 			if err != nil {
 				return err
 			}
-			var cur models.Message
-			if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Select("id, status, scheduled_at").First(&cur, m.ID).Error; err != nil {
-				if errors.Is(err, gorm.ErrRecordNotFound) {
-					return errLocked
+			if listMoved(&was, m) {
+				proposal = &listProposal{audience: m.Audience, push: m.PushAlert}
+				if err := a.checkReview(body.Review, me, m, body.Revision, reach); err != nil {
+					return err
 				}
-				return err
+				confirmed = &reach
 			}
-			if cur.Status != m.Status || cur.ScheduledAt == nil {
-				return errLocked
-			}
-			if full, err := a.dailyLimitReached(tx, fresh, m.ID, au, *cur.ScheduledAt); err != nil {
+			fields["recipient_count"] = s.Eligible
+			// The new audience counts from the date it is scheduled for.
+			if full, err := a.dailyLimitReached(tx, me, m.ID, au, *m.ScheduledAt); err != nil {
 				return err
 			} else if full {
 				return errMessageDailyLimit
@@ -1031,89 +1074,85 @@ func (a *App) apiUpdateMessage(c *gin.Context) {
 				a.hooks.messageLimitAfterCount(tx)
 			}
 		}
-		if moved, err := moveMessage(tx, m.ID, policy.MessageEdit, fields, "status = ?", m.Status); err != nil {
+		if moved, err := moveMessage(tx, m.ID, policy.MessageEdit, fields, "status = ?", was.Status); err != nil {
 			return err
 		} else if !moved {
 			return errLocked
 		}
 		// Changing what is already scheduled, or someone else's message, is
 		// worth a record; a draft's own edits are not.
-		if !scheduled && isAuthor {
-			return nil
+		isAuthor := m.AuthorID != nil && *m.AuthorID == me.ID
+		if scheduled || !isAuthor {
+			if err := audit.Write(tx, audit.Entry{Actor: &me.ID, Action: audit.MessageEdited, TargetType: "message", TargetID: m.ID,
+				Meta: map[string]any{"status": was.Status, "byOther": !isAuthor}, IP: c.ClientIP()}); err != nil {
+				return err
+			}
 		}
-		return audit.Write(tx, audit.Entry{Actor: &me.ID, Action: audit.MessageEdited, TargetType: "message", TargetID: m.ID,
-			Meta: map[string]any{"status": m.Status, "byOther": !isAuthor}, IP: c.ClientIP()})
-	})
-	if errors.Is(err, errLocked) {
-		fail(c, errMessageLocked)
-		return
-	}
-	var ae *apiError
-	if errors.As(err, &ae) {
-		fail(c, err)
+		if out.Message, err = a.writtenMessageJSONIn(tx, me, m.ID); err != nil {
+			return err
+		}
+		if confirmed != nil {
+			out.Review, err = a.sealMessageReview(confirmed.reached, me.ID, m, out.Message.Revision)
+		}
+		return err
+	}, readCommitted)
+	var refused reviewDidNotHold
+	if errors.As(err, &refused) {
+		a.answerReviewRefusal(c, id, proposal, refused)
 		return
 	}
 	if err != nil {
-		jsonError(c, http.StatusInternalServerError, "could not save the message")
+		answerMessageError(c, err, "could not save the message")
 		return
 	}
-	a.respondMessage(c, http.StatusOK, m)
+	c.JSON(http.StatusOK, out)
 }
 
 // apiScheduleMessage sets a draft (or a scheduled message) to go out at a
-// time, or now. It needs a subject, a body and at least one person who can
-// get it; M3.5 sends it.
+// time, or now. It names the text it was pressed on (revision) and the review
+// its confirmation showed (review, DEC-169), compared under the locks in that
+// order: an older revision is message_changed; a review that is not of who the
+// message reaches now is answered from a fresh one (answerReviewRefusal).
+// Nothing is scheduled and no job queued then. It needs a subject, a body and
+// at least one person who gets the email; M3.5 sends it to the list as it
+// stands when it goes. The answer is the message alone and names no one.
 func (a *App) apiScheduleMessage(c *gin.Context) {
-	m, ok := a.loadOwnMessage(c)
-	if !ok || !editable(c, m) {
+	id, ok := messageIDParam(c)
+	if !ok {
 		return
 	}
 	var body struct {
 		ScheduledAt *time.Time `json:"scheduledAt"`
+		Revision    string     `json:"revision"`
+		Review      string     `json:"review"`
 	}
 	if err := c.ShouldBindJSON(&body); err != nil {
 		jsonError(c, http.StatusBadRequest, "invalid request")
 		return
 	}
 	now := time.Now()
-	when := now
-	if body.ScheduledAt != nil {
-		when = body.ScheduledAt.UTC()
-		if when.Before(now.Add(-time.Minute)) || when.After(now.Add(maxScheduleAhead)) {
-			fail(c, errMessageWhen)
-			return
-		}
-		if when.Before(now) {
-			when = now
-		}
-	}
-	me := apiUser(c)
-	au, s, ok := a.sendable(c, m)
-	if !ok {
+	when, err := scheduleWhen(body.ScheduledAt, now)
+	if err != nil {
+		fail(c, err)
 		return
 	}
-	err := a.DB.Transaction(func(tx *gorm.DB) error {
-		// The author's row serializes the daily limit's count with the write
-		// (#260); no messages row is locked or written before it.
-		fresh, err := lockActorIn(tx, me, actorNoKeyUpdate)
+	var out messageJSON
+	err = a.DB.Transaction(func(tx *gorm.DB) error {
+		me, m, err := lockOwnMessageIn(tx, apiUser(c), id, policy.MessageSchedule)
 		if err != nil {
 			return err
 		}
-		var cur models.Message
-		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Select("id, status, audience").First(&cur, m.ID).Error; err != nil {
-			if errors.Is(err, gorm.ErrRecordNotFound) {
-				return errLocked
-			}
+		if err := a.checkMessageRevision(tx, m.ID, body.Revision); err != nil {
 			return err
 		}
-		if !policy.MessageSchedule.Allows(cur.Status) {
-			return errLocked
+		au, s, reach, err := a.sendableIn(tx, me, m)
+		if err != nil {
+			return err
 		}
-		// The count below judges the audience that was validated.
-		if cur.Audience != m.Audience {
-			return errMessageChanged
+		if err := a.checkReview(body.Review, me, m, body.Revision, reach); err != nil {
+			return err
 		}
-		if full, err := a.dailyLimitReached(tx, fresh, m.ID, au, when); err != nil {
+		if full, err := a.dailyLimitReached(tx, me, m.ID, au, when); err != nil {
 			return err
 		} else if full {
 			return errMessageDailyLimit
@@ -1130,25 +1169,23 @@ func (a *App) apiScheduleMessage(c *gin.Context) {
 		if err := enqueueMessageSend(tx, m.ID, when); err != nil {
 			return err
 		}
-		return audit.Write(tx, audit.Entry{Actor: &me.ID, Action: audit.MessageScheduled, TargetType: "message", TargetID: m.ID,
-			Meta: map[string]any{"audience": au.Type, "recipients": s.Eligible, "at": when}, IP: c.ClientIP()})
-	})
-	if errors.Is(err, errLocked) {
-		fail(c, errMessageLocked)
-		return
-	}
-	var ae *apiError
-	if errors.As(err, &ae) {
-		fail(c, err)
+		if err := audit.Write(tx, audit.Entry{Actor: &me.ID, Action: audit.MessageScheduled, TargetType: "message", TargetID: m.ID,
+			Meta: map[string]any{"audience": au.Type, "recipients": s.Eligible, "at": when}, IP: c.ClientIP()}); err != nil {
+			return err
+		}
+		out, err = a.writtenMessageJSONIn(tx, me, m.ID)
+		return err
+	}, readCommitted)
+	var refused reviewDidNotHold
+	if errors.As(err, &refused) {
+		a.answerReviewRefusal(c, id, nil, refused)
 		return
 	}
 	if err != nil {
-		jsonError(c, http.StatusInternalServerError, "could not schedule the message")
+		answerMessageError(c, err, "could not schedule the message")
 		return
 	}
-	if out, ok := a.freshMessageJSON(c, m); ok {
-		c.JSON(http.StatusOK, messageScheduledResponseJSON{Message: out, Summary: s})
-	}
+	c.JSON(http.StatusOK, messageResponseJSON{Message: out})
 }
 
 var errLocked = errors.New("message locked")

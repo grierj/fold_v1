@@ -25,7 +25,8 @@ export function message(over: Partial<Message> = {}): Message {
   return {
     id: 5, channel: "email", status: "draft", subject: "Bring a friend", bodyHtml: "<p>Hi {{first_name}}</p>",
     audience: { type: "group", groupId: 7, roles: ["member", "leader"] }, scheduledAt: null, sentAt: null,
-    authorName: "Lee Leader", editable: true, updatedAt: "2026-10-31T15:00:00Z", error: "", failedCount: 0, category: "announcement", displaySubject: "", pushAlert: true, ...over,
+    authorName: "Lee Leader", editable: true, updatedAt: "2026-10-31T15:00:00Z", error: "", failedCount: 0, category: "announcement", displaySubject: "", pushAlert: true,
+    revision: "1.r0", ...over,
   };
 }
 

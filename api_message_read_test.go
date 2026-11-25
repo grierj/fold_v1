@@ -669,7 +669,7 @@ func TestReadPageHiddenSeriesManyGrantsInvalidBeforeValid(t *testing.T) {
 func TestReadPageShowsOwnPictures(t *testing.T) {
 	f := newMessageImageFixture(t)
 	id, url := f.pictureDraft(t, "Our picnic table")
-	if w := f.leader.do("POST", "/api/v1/messages/"+itoa(id)+"/schedule", map[string]any{}, true); w.Code != http.StatusOK {
+	if w := f.leader.do("POST", "/api/v1/messages/"+itoa(id)+"/schedule", confirmedSend(t, f.leader, "/api/v1/messages/"+itoa(id), map[string]any{}), true); w.Code != http.StatusOK {
 		t.Fatalf("schedule: %d %s", w.Code, w.Body.String())
 	}
 	runMessageJobs(t, f.app)

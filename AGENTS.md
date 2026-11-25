@@ -228,10 +228,11 @@ section or decision; check it still exists.
   moves are tables in `internal/policy/room_lifecycle.go`; a status changes only through
   `changeBookings` or `moveRoomRequest`/`moveRoomRequestsWhere` (`room_status.go`). Every writer of a date's booking
   holds its event's row lock first; a pick of a date's room or of the series room names its read (DEC-167).
-- An event's series and visibility saves, the group form's save and the two room picks name their read (DEC-162,
-  DEC-163, DEC-166, DEC-167): the token is built and compared only in `edit_revision.go`
+- An event's series and visibility saves, the group form's save, the two room picks and a message's edit and send name
+  their read (DEC-162, DEC-163, DEC-166, DEC-167, DEC-169): the token is built and compared only in `edit_revision.go`
   (`eventRevision`/`checkEventRevision`, `groupRevisionIn`/`checkGroupRevision`,
-  `dateRoomRevisionIn`/`checkDateRoomRevision`, inside the write transaction under the row lock). A token of a row with
+  `dateRoomRevisionIn`/`checkDateRoomRevision`, `messageRevisionIn`/`checkMessageRevision`, inside the write
+  transaction under the row lock). A token of a row with
   no counter column is `rowRevisionIn` over a `revisionRows` (the table's kind letter, its timestamptz columns as
   epochs), read in the snapshot that read the fields beside it; a new table adds a `revisionRows`, never a column. The
   single-date edit names its read too, with its own token (`dateToken`, `api_date_edits.go`, DEC-164). Every form sends
@@ -239,7 +240,10 @@ section or decision; check it still exists.
   screen after a save (the room controls) passes `stays`, so the next save names what the last outcome left. The date
   editor's comparison is `dateFields` (`web/src/lib/editBase.ts`), the group form's `groupFields`
   (`web/src/components/GroupEditor.tsx`, which mounts once per opening and changes the cover only after the details
-  are saved). An editor a refusal closes hands it to `useRefusedSave` (`web/src/lib/refusedSave.tsx`), which reads the
+  are saved), the composer's `messageFields` (`web/src/pages/MessageComposer.tsx`, whose editor mounts once per opened
+  message). A message's send also names the review its confirmation showed: a sealed set of who it reaches
+  (`messages_review.go`), compared under the message's lock (`checkReview`), a changed set answered with the change
+  (`message_list_changed`); so does an edit that changes a scheduled message's audience or push switch. An editor a refusal closes hands it to `useRefusedSave` (`web/src/lib/refusedSave.tsx`), which reads the
   page from nothing and says the changes could not be saved with `RefusedSaveLine`; a control that stays open (the
   room controls) shows the read it made and says so at the field with the same line (`choosing`).
 - Registrations: seat decisions go through `registration_seats.go` (`poolFits`, `seatChange`,
@@ -450,7 +454,7 @@ table), and a new area gets a new file there and a row in that table, not a row 
 | Token contrast: text 4.5:1, control edges 3:1 | `npm run contrast` (in CI) |
 | The entry JS chunk stays under its gzip budget; rarely needed libraries load with `import()` | `npm run bundle-size` (in CI) |
 | Seat counts never overrun under concurrent registration | `TestConcurrentGoingRespectsCapacity` |
-| A save that takes a revision (a series, an event's visibility, the group form, a date's room, the series room) checks it with the one shared check inside its write transaction, and a check that reads its row reads it through that transaction (DEC-163, DEC-166, DEC-167) | `TestSavesCheckTheirRevisionInTheirTransaction`, `TestEditRevisionGuardCatchesABypass` |
+| A save that takes a revision (a series, an event's visibility, the group form, a date's room, the series room, a message's edit and send) checks it with the one shared check inside its write transaction, and a check that reads its row reads it through that transaction (DEC-163, DEC-166, DEC-167, DEC-169) | `TestSavesCheckTheirRevisionInTheirTransaction`, `TestEditRevisionGuardCatchesABypass` |
 | Secrets in URLs never reach the access log | `TestAccessLogKeepsSecretsOut` |
 | Tests sit next to their code | `TestTestFilesSitNextToTheirSource` |
 | Source guards read the whole production tree, not a directory glob | `internal/guardkit` tests, `TestContactRequestTextGuardReadsTheRealTree` |
