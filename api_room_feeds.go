@@ -101,13 +101,17 @@ func (a *App) apiAdminCreateRoomFeed(c *gin.Context) {
 		jsonError(c, http.StatusInternalServerError, "could not make the calendar link")
 		return
 	}
-	me := apiUser(c)
-	tok := models.RoomFeedToken{RoomID: room.ID, TokenHash: hashToken(raw), CreatedBy: &me.ID}
+	tok := models.RoomFeedToken{RoomID: room.ID, TokenHash: hashToken(raw)}
 	err = a.DB.Transaction(func(tx *gorm.DB) error {
 		// The room row serializes two admins making a link at once.
 		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&models.Room{}, room.ID).Error; err != nil {
 			return err
 		}
+		actor, err := lockRoomManagerIn(tx, apiUser(c), actorRead)
+		if err != nil {
+			return err
+		}
+		tok.CreatedBy = &actor.ID
 		res := tx.Model(&models.RoomFeedToken{}).Where("room_id = ? AND revoked_at IS NULL", room.ID).Update("revoked_at", time.Now().UTC())
 		if res.Error != nil {
 			return res.Error
@@ -115,9 +119,13 @@ func (a *App) apiAdminCreateRoomFeed(c *gin.Context) {
 		if err := tx.Create(&tok).Error; err != nil {
 			return err
 		}
-		return audit.Write(tx, audit.Entry{Actor: &me.ID, Action: audit.RoomFeedCreated, TargetType: "room", TargetID: room.ID,
+		return audit.Write(tx, audit.Entry{Actor: &actor.ID, Action: audit.RoomFeedCreated, TargetType: "room", TargetID: room.ID,
 			Meta: map[string]any{"replaced": res.RowsAffected > 0}, IP: c.ClientIP()})
-	})
+	}, readCommitted)
+	if isAPIError(err) {
+		fail(c, err)
+		return
+	}
 	if err != nil {
 		jsonError(c, http.StatusInternalServerError, "could not make the calendar link")
 		return
@@ -132,14 +140,21 @@ func (a *App) apiAdminRevokeRoomFeed(c *gin.Context) {
 	if !ok {
 		return
 	}
-	me := apiUser(c)
 	err := a.DB.Transaction(func(tx *gorm.DB) error {
+		actor, err := lockRoomManagerIn(tx, apiUser(c), actorShare)
+		if err != nil {
+			return err
+		}
 		res := tx.Model(&models.RoomFeedToken{}).Where("room_id = ? AND revoked_at IS NULL", room.ID).Update("revoked_at", time.Now().UTC())
 		if res.Error != nil || res.RowsAffected == 0 {
 			return res.Error
 		}
-		return audit.Write(tx, audit.Entry{Actor: &me.ID, Action: audit.RoomFeedRevoked, TargetType: "room", TargetID: room.ID, IP: c.ClientIP()})
-	})
+		return audit.Write(tx, audit.Entry{Actor: &actor.ID, Action: audit.RoomFeedRevoked, TargetType: "room", TargetID: room.ID, IP: c.ClientIP()})
+	}, readCommitted)
+	if isAPIError(err) {
+		fail(c, err)
+		return
+	}
 	if err != nil {
 		jsonError(c, http.StatusInternalServerError, "could not turn off the calendar link")
 		return

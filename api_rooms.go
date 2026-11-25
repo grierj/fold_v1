@@ -93,6 +93,17 @@ func (a *App) roomManager() gin.HandlerFunc {
 	}
 }
 
+func lockRoomManagerIn(tx *gorm.DB, session *models.User, mode actorLock) (*models.User, error) {
+	actor, err := lockActorIn(tx, session, mode)
+	if err != nil {
+		return nil, err
+	}
+	if !policy.CanManageRooms(asPerson(actor)) {
+		return nil, errSecuritySession
+	}
+	return actor, nil
+}
+
 type roomJSON struct {
 	ID                     uint   `json:"id"`
 	Name                   string `json:"name"`
@@ -275,22 +286,28 @@ func (a *App) apiAdminCreateRoom(c *gin.Context) {
 		fail(c, err)
 		return
 	}
-	me := apiUser(c)
 	var revision string
 	err := a.DB.Transaction(func(tx *gorm.DB) error {
+		actor, err := lockRoomManagerIn(tx, apiUser(c), actorShare)
+		if err != nil {
+			return err
+		}
 		if err := tx.Create(&room).Error; err != nil {
 			return err
 		}
-		if err := audit.Write(tx, audit.Entry{Actor: &me.ID, Action: audit.RoomCreated, TargetType: "room", TargetID: room.ID,
+		if err := audit.Write(tx, audit.Entry{Actor: &actor.ID, Action: audit.RoomCreated, TargetType: "room", TargetID: room.ID,
 			Meta: map[string]any{"name": room.Name, "building": room.Building}, IP: c.ClientIP()}); err != nil {
 			return err
 		}
-		var err error
 		revision, err = a.roomRevisionIn(tx, room.ID)
 		return err
-	})
+	}, readCommitted)
 	if roomNameTaken(err) {
 		fail(c, errRoomNameTaken)
+		return
+	}
+	if isAPIError(err) {
+		fail(c, err)
 		return
 	}
 	if err != nil {
@@ -317,7 +334,6 @@ func (a *App) apiAdminUpdateRoom(c *gin.Context) {
 		jsonError(c, http.StatusBadRequest, "invalid request")
 		return
 	}
-	me := apiUser(c)
 	var room models.Room
 	var revision string
 	errNotFound := errors.New("not found")
@@ -330,12 +346,9 @@ func (a *App) apiAdminUpdateRoom(c *gin.Context) {
 			}
 			return err
 		}
-		actor, err := lockActorIn(tx, me, actorRead)
+		actor, err := lockRoomManagerIn(tx, apiUser(c), actorRead)
 		if err != nil {
 			return err
-		}
-		if !policy.CanManageRooms(asPerson(actor)) {
-			return errSecuritySession
 		}
 		if err := a.checkRoomRevision(tx, room.ID, body.Revision); err != nil {
 			return err
@@ -348,7 +361,7 @@ func (a *App) apiAdminUpdateRoom(c *gin.Context) {
 			if err := tx.Save(&room).Error; err != nil {
 				return err
 			}
-			if err := audit.Write(tx, audit.Entry{Actor: &me.ID, Action: audit.RoomUpdated, TargetType: "room", TargetID: room.ID,
+			if err := audit.Write(tx, audit.Entry{Actor: &actor.ID, Action: audit.RoomUpdated, TargetType: "room", TargetID: room.ID,
 				Meta: map[string]any{"changed": changed}, IP: c.ClientIP()}); err != nil {
 				return err
 			}
@@ -389,14 +402,21 @@ func (a *App) setRoomSwitch(c *gin.Context, key, action string) (enabled, ok boo
 		jsonError(c, http.StatusBadRequest, "invalid request")
 		return false, false
 	}
-	me := apiUser(c)
 	err := a.DB.Transaction(func(tx *gorm.DB) error {
+		actor, err := lockRoomManagerIn(tx, apiUser(c), actorShare)
+		if err != nil {
+			return err
+		}
 		if err := setSettingIn(tx, key, strconv.FormatBool(*body.Enabled)); err != nil {
 			return err
 		}
-		return audit.Write(tx, audit.Entry{Actor: &me.ID, Action: action,
+		return audit.Write(tx, audit.Entry{Actor: &actor.ID, Action: action,
 			TargetType: "setting", Meta: map[string]any{"enabled": *body.Enabled}, IP: c.ClientIP()})
-	})
+	}, readCommitted)
+	if isAPIError(err) {
+		fail(c, err)
+		return false, false
+	}
 	if err != nil {
 		jsonError(c, http.StatusInternalServerError, "could not save the setting")
 		return false, false

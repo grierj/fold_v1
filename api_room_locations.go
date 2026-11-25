@@ -91,7 +91,6 @@ func (a *App) apiAdminMatchLocation(c *gin.Context) {
 		jsonError(c, http.StatusBadRequest, "pick a location and a room")
 		return
 	}
-	me := apiUser(c)
 	booked, series := 0, 0
 	busy := []matchBusyJSON{}
 	busyTotal := 0
@@ -105,21 +104,24 @@ func (a *App) apiAdminMatchLocation(c *gin.Context) {
 			ORDER BY 1`, loc, loc).Scan(&candidates).Error; err != nil {
 			return err
 		}
-		if len(candidates) == 0 {
-			return nil
-		}
 		var evs []models.Event
-		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("id IN ?", candidates).Order("id").Find(&evs).Error; err != nil {
+		if len(candidates) != 0 {
+			if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("id IN ?", candidates).Order("id").Find(&evs).Error; err != nil {
+				return err
+			}
+		}
+		actor, err := lockRoomManagerIn(tx, apiUser(c), actorRead)
+		if err != nil {
 			return err
+		}
+		if len(evs) == 0 {
+			return nil
 		}
 		eventIDs := make([]uint, len(evs))
 		titles := make(map[uint]string, len(evs))
 		for i, e := range evs {
 			eventIDs[i] = e.ID
 			titles[e.ID] = e.Title
-		}
-		if len(eventIDs) == 0 {
-			return nil
 		}
 		var occs []models.EventOccurrence
 		if err := tx.Raw(`SELECT o.* `+unbookedDatesSQL+` AND lower(`+effectiveLocationSQL+`) = lower(btrim(?)) AND o.event_id IN ?
@@ -134,7 +136,7 @@ func (a *App) apiAdminMatchLocation(c *gin.Context) {
 			return err
 		}
 		for i := range occs {
-			result, err := placeBooking(tx, &occs[i], room, room.DefaultSetupMinutes, room.DefaultTeardownMinutes, placement{by: &me.ID})
+			result, err := placeBooking(tx, &occs[i], room, room.DefaultSetupMinutes, room.DefaultTeardownMinutes, placement{by: &actor.ID})
 			if err != nil {
 				return err
 			}
@@ -153,12 +155,14 @@ func (a *App) apiAdminMatchLocation(c *gin.Context) {
 			return res.Error
 		}
 		series = int(res.RowsAffected)
-		return audit.Write(tx, audit.Entry{Actor: &me.ID, Action: audit.RoomLocationMatched, TargetType: "room", TargetID: room.ID,
+		return audit.Write(tx, audit.Entry{Actor: &actor.ID, Action: audit.RoomLocationMatched, TargetType: "room", TargetID: room.ID,
 			Meta: map[string]any{"location": loc, "booked": booked, "busy": busyTotal, "series": series}, IP: c.ClientIP()})
-	})
+	}, readCommitted)
 	switch {
 	case errors.Is(err, errRoomGone):
 		jsonError(c, http.StatusNotFound, "room not found")
+	case isAPIError(err):
+		fail(c, err)
 	case err != nil:
 		jsonError(c, http.StatusInternalServerError, "could not book the room")
 	default:
