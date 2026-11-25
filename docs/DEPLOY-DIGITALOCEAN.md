@@ -326,30 +326,44 @@ doctl compute droplet-action snapshot "$DROPLET_ID" \
   --snapshot-name "fold-$(date +%Y%m%d)"
 ```
 
-**Nightly `pg_dump`** is the consistent database copy. Cron runs
-`/opt/fold/backup.sh` at 02:30. It writes mode-600 files in
-`/var/backups/fold`:
+**Nightly `pg_dump`** is the consistent database copy. After backup cutover, the
+`backup` Compose service runs at 02:30 in its configured time zone and writes the
+dump and uploads archive to the `backups` volume. If the host cron still makes
+the backups, it runs `/opt/fold/backup.sh` at 02:30 and writes mode-600 archives
+to `/var/backups/fold`. Both producers write:
 
 - `fold-YYYYMMDD-HHMM.dump` from `pg_dump -Fc` of database `fold`
-- `uploads-YYYYMMDD-HHMM.tgz` from the `fold_uploads` volume
-- `LAST_OK` after a successful run
+- `uploads-YYYYMMDD-HHMM.tgz` from the uploads volume
 
-Fold's Compose stack always declares the uploads volume, so a run that cannot find it makes no backup and fails
-(exit 1, `LAST_OK` unchanged, nothing published or uploaded). The message says whether the volume does not exist or
-Docker could not be asked; a dump without its photos is never made quietly. Expiry still runs.
+After a successful run, the service writes `LAST_OK` in the `backup-status`
+volume. The host script writes it in `/var/backups/fold`.
 
-Daily files are kept for 14 days. A dump whose name falls on the 1st of
-the month is kept for 180 days. Run one now:
+Fold's Compose stack always declares the uploads volume. If the host script
+cannot find it, the script exits 1 without publishing or uploading a backup.
+`LAST_OK` stays unchanged and expiry still runs. The error says whether the
+volume is missing or Docker could not answer.
+
+Daily files are kept for 14 days by default. A dump whose name falls on the 1st
+of the month is kept for 180 days. To make and test a backup after cutover, run:
+
+```bash
+sudo docker compose --project-directory /opt/fold exec backup backup.sh now
+sudo docker compose --project-directory /opt/fold exec backup backup.sh restore-test
+```
+
+The service tests the newest complete pair. It checks the uploads archive,
+restores the dump into `fold_backup_scratch`, and drops that scratch database.
+Run the test after the first real backup and again after the first upgrade.
+
+If the host cron is in charge, use the host commands:
 
 ```bash
 sudo /opt/fold/backup.sh
 sudo /opt/fold/backup.sh --restore-test
 ```
 
-`--restore-test` loads the newest dump into a database named
-`fold_restore_test`, counts public tables, and drops that database. It
-does not replace the live `fold` database. Run it after the first real
-dump and again after the first upgrade.
+The host test loads the newest host dump into `fold_restore_test`, counts
+public tables, and drops that scratch database.
 
 **Offsite.** A disk in the same region is not a backup of the region.
 Encrypted offsite upload is optional and its completion is deferred (DEC-152).
@@ -521,9 +535,9 @@ Offsite, `backup.sh` never looks in the bucket: each run uploads into a folder o
 upload fails the run exits 1, keeps the local pair and leaves `LAST_OK` as it was, and the next run takes a new
 folder. The key it uses needs permission to write under `fold/` and nothing else.
 
-Practice with `backup.sh --restore-test` before you need a real restore; it
-loads the newest dump into a throwaway database and never touches `fold`. It
-does not rehearse `restore.sh`.
+Practice with the [backup test above](#5-backups-and-a-restore-test) before you need a real
+restore. It checks your backup. The development drill below rehearses
+`restore.sh` itself.
 
 The full `restore-drill.sh` is a development verification, not a routine backup
 check. Run it only when changes have a high chance of altering the restore behavior it checks,
@@ -691,12 +705,12 @@ step up to smoke fails, Caddy and the app are stopped again, the phase is
 own only when the count is exactly zero. Otherwise it stops after the recovery
 instance is running, prints `SITE IS CLOSED` and exits 3.
 
-**Backups are suspended during recovery.** While `recovery.lock` exists,
-`backup.sh` (and the 02:30 cron run) exits 75 without a dump, a restore test,
-expiry or an offsite upload, and nothing retries it. `LAST_OK` goes stale and
-old dumps are not expired until the first backup after reopen. That first
-backup is not automatic: run `sudo /opt/fold/backup.sh` by hand once the site
-is reopened. `backup.sh` uses its own `backup.lock`, never `ops.lock`.
+**Backups are suspended during recovery.** While `recovery.lock` exists, a
+backup or restore test exits 75 and expiry is paused. After reopening the
+site, make a fresh backup by hand. If the Compose service is in charge, run
+`sudo docker compose --project-directory /opt/fold exec backup backup.sh now`.
+If the host cron is in charge, run `sudo /opt/fold/backup.sh`. Both use
+`backup.lock` to coordinate with recovery.
 
 **One operation at a time, and never delete a lock.** Another provision,
 upgrade, rollback or restore exits 75 while one runs; `/opt/fold/ops.owner`
