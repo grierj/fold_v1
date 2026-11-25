@@ -22,8 +22,7 @@ interface Audience {
 }
 
 export interface VisibilityDraftHold {
-  opened: Audience;
-  revision?: string;
+  base: { audience: Audience; revision?: string };
   value: Visibility;
   reason: string;
   reset: boolean;
@@ -82,13 +81,18 @@ export function EventVisibilityControl({
   // Another run in the same panel is on its way.
   locked?: boolean;
 }) {
-  const [held] = useState(() => hold?.current);
-  const [opened] = useState(() => held?.opened ?? { visibility, leaderOpened, groupVisibility });
-  const baseRevision = held ? held.revision : revision;
-  const initialChoice = choiceFor(opened.visibility, churchWide);
-  const [value, setValue] = useState<Visibility>(() => held?.value ?? initialChoice);
-  const [reason, setReason] = useState(() => held?.reason ?? "");
-  const [lost] = useState<LostSend>(() => held?.lost ?? { current: false });
+  const [opening] = useState<VisibilityDraftHold>(() => hold?.current ?? {
+    base: { audience: { visibility, leaderOpened, groupVisibility }, revision },
+    value: choiceFor(visibility, churchWide),
+    reason: "",
+    reset: false,
+    lost: { current: false },
+  });
+
+  const { base, lost } = opening;
+  const initialChoice = choiceFor(base.audience.visibility, churchWide);
+  const [value, setValue] = useState(opening.value);
+  const [reason, setReason] = useState(opening.reason);
   const saved = useRef(false);
   // One run covers the preview and the commit, from Save or from the review's confirm.
   const own = useAction();
@@ -98,7 +102,7 @@ export function EventVisibilityControl({
   // replaces this control, so a later choice would be lost without a word.
   const frozen = busy || locked;
   const [error, setError] = useState<string | null>(null);
-  const [resetOverrides, setResetOverrides] = useState(() => held?.reset ?? false);
+  const [resetOverrides, setResetOverrides] = useState(opening.reset);
   const [futureOverrides, setFutureOverrides] = useState(0);
   const saveButton = useRef<HTMLButtonElement>(null);
   // Keeps keyboard focus when a stale answer or a sign-up update closes the review, or disables Save under it.
@@ -127,8 +131,8 @@ export function EventVisibilityControl({
   // when an earlier press stored it and its answer was lost (a reset that leaves both the visibility and the
   // leader-opened mark as they were leaves the revision, so only one that changed either is refused).
   const send = useRevisionSave<Audience, { visibility: Visibility; leaderOpened: boolean; groupVisibility: Visibility | null }>({
-    opened,
-    revision: baseRevision,
+    opened: base.audience,
+    revision: base.revision,
     read: async () => {
       const stored = await Events.get(eventId);
 
@@ -143,7 +147,7 @@ export function EventVisibilityControl({
   useLayoutEffect(() => {
     if (!hold) return;
     const keep = !saved.current && (value !== initialChoice || reason !== "" || resetOverrides || lost.current);
-    hold.current = keep ? { opened, revision: baseRevision, value, reason, reset: resetOverrides, lost } : null;
+    hold.current = keep ? { base, value, reason, reset: resetOverrides, lost } : null;
   });
 
   // `mark` is the session roster sequence the request behind the review was sent at.

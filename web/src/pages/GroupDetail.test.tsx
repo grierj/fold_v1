@@ -16,6 +16,8 @@ import type { EventOccurrence, GroupDetailResponse, GroupSummary, Household, Occ
 import { occurrence } from "../test/occurrence";
 import { Site } from "../api/site";
 import { HOST_EVENTS, kept409, keptRead, READ_OUTCOMES, runHostCase } from "../test/keptPanel";
+import { ConfirmProvider } from "../components/ui/ConfirmDialog";
+import { useLeaveQuestion } from "../lib/leaveQuestion";
 import { UnsavedChangesBlocker } from "../lib/unsavedChanges";
 import { endsFor, removedRow, ROSTER_ENDS, ROSTER_OPS, startHeld, watchChecks, writeAfterTheCheck } from "../test/rosterOps";
 import { GroupDetail } from "./GroupDetail";
@@ -1405,6 +1407,63 @@ describe("GroupDetail: the date question in the app's dialog", () => {
     await userEvent.click(within(await screen.findByRole("dialog", { name: "Save this date?" })).getByRole("button", { name: "Cancel" }));
     expect(edits.sent).toHaveLength(2);
     expect(edits.sent.map((s) => s.consent)).toEqual([undefined, undefined]);
+    expect(window.confirm).not.toHaveBeenCalled();
+  });
+
+  it("asks before leaving a group with date consent open and sends no consent when leaving", async () => {
+    const confirm = vi.mocked(window.confirm).mockReturnValueOnce(false).mockReturnValueOnce(true);
+
+    const router = createMemoryRouter([
+      { path: "/groups/:id", element: <><UnsavedChangesBlocker /><GroupDetail /></> },
+      { path: "/elsewhere", element: <p>Elsewhere</p> },
+    ], { initialEntries: ["/groups/1"] });
+
+    render(<RouterProvider router={router} />);
+    await ask();
+    const question = await screen.findByRole("dialog", { name: "Save this date?" });
+    const yes = within(question).getByRole("button", { name: "Save and notify" });
+
+    await act(() => router.navigate("/elsewhere"));
+    expect(confirm).toHaveBeenCalledExactlyOnceWith("Leave without saving? Your changes will be lost.");
+    expect(question).toBeInTheDocument();
+    expect(edits.sent).toHaveLength(1);
+
+    await act(() => router.navigate("/elsewhere"));
+    expect(await screen.findByText("Elsewhere")).toBeInTheDocument();
+    expect(question).not.toBeInTheDocument();
+    await userEvent.click(yes);
+    expect(edits.sent).toHaveLength(1);
+  });
+
+  it("keeps consent safe when a separate group leave dialog owns navigation", async () => {
+    function GroupLeavePrompt() {
+      useLeaveQuestion();
+
+      return null;
+    }
+
+    const router = createMemoryRouter([
+      { path: "/groups/:id", element: <><UnsavedChangesBlocker /><ConfirmProvider><GroupLeavePrompt /></ConfirmProvider><GroupDetail /></> },
+      { path: "/elsewhere", element: <p>Elsewhere</p> },
+    ], { initialEntries: ["/groups/1"] });
+
+    render(<RouterProvider router={router} />);
+    await ask();
+    const question = await screen.findByRole("dialog", { name: "Save this date?" });
+    const yes = within(question).getByRole("button", { name: "Save and notify" });
+
+    await act(() => router.navigate("/elsewhere"));
+    const leave = await screen.findByRole("dialog", { name: "Leave without saving?" });
+    expect(question.closest("[inert]")).not.toBeNull();
+    await userEvent.click(within(leave).getByRole("button", { name: "Keep editing" }));
+    expect(await screen.findByRole("dialog", { name: "Save this date?" })).toBe(question);
+
+    await act(() => router.navigate("/elsewhere"));
+    await userEvent.click(await screen.findByRole("button", { name: "Leave without saving" }));
+    expect(await screen.findByText("Elsewhere")).toBeInTheDocument();
+    expect(question).not.toBeInTheDocument();
+    await userEvent.click(yes);
+    expect(edits.sent).toHaveLength(1);
     expect(window.confirm).not.toHaveBeenCalled();
   });
 

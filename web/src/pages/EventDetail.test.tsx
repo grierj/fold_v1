@@ -2627,6 +2627,73 @@ describe("EventDetail when a series save meets someone else's change", () => {
     else expect(Events.update).toHaveBeenCalledExactlyOnceWith(7, expect.objectContaining({ title: "Hybrid study night", revision: "r1" }));
   });
 
+  it("keeps the opening visibility revision across a quiet reread and a series save", async () => {
+    const quiet: EventDetailResponse = {
+      ...opened,
+      event: { ...opened.event, revision: "r2" },
+      occurrences: [occurrence({ title: "Fresh date title" })],
+    };
+
+    const stored: EventDetailResponse = { ...quiet, event: { ...quiet.event, title: "Hybrid study night", revision: "r3" } };
+    vi.mocked(Events.get).mockResolvedValueOnce(opened).mockResolvedValueOnce(quiet).mockResolvedValue(stored);
+    vi.mocked(Events.update).mockResolvedValue({ event: stored.event });
+    vi.mocked(Events.setVisibility).mockResolvedValue({ event: { ...stored.event, visibility: "private", revision: "r4" } });
+    vi.mocked(Events.register).mockResolvedValue({ registration: {
+      registrationId: 32, userId: 2, eventId: 7, occurrenceId: 1, date: "2026-12-01", status: "maybe",
+      guestCount: 0, childcareCount: 0, childcareAgesNote: "", waitlistPosition: null, attendanceMode: "in_person",
+    }, people: [] });
+    renderInMain();
+    await userEvent.click(await screen.findByRole("button", { name: "Edit event" }));
+    await userEvent.click(screen.getByRole("radio", { name: /^Private/ }));
+    await userEvent.click(screen.getByRole("button", { name: "Maybe" }));
+    await screen.findByRole("heading", { name: "Fresh date title" });
+    expect(screen.getByRole("radio", { name: /^Private/ })).toBeChecked();
+
+    await userEvent.type(screen.getByLabelText("Title"), " night");
+    await userEvent.click(screen.getByRole("button", { name: "Save series" }));
+    await screen.findByRole("heading", { name: "Hybrid study night", level: 1 });
+    expect(screen.getByRole("radio", { name: /^Private/ })).toBeChecked();
+    await userEvent.click(screen.getByRole("button", { name: "Save visibility" }));
+
+    expect(Events.setVisibility).toHaveBeenCalledExactlyOnceWith(7, expect.objectContaining({ visibility: "private", revision: "r1" }));
+  });
+
+  it.each(["allowed", "revoked"])("hides both drafts until a renewed session's read settles as %s", async (result) => {
+    const fresh = deferred<EventDetailResponse>();
+    vi.mocked(Events.get).mockResolvedValueOnce(opened).mockReturnValueOnce(fresh.promise);
+    let sessionCredential: Credential | null = credential;
+
+    const renderSession = renderWithAuth(() => ({ user: { id: 2 }, credential: sessionCredential }));
+    const tree = () => <MemoryRouter initialEntries={["/events/7"]}><Routes><Route path="/events/:id" element={<EventDetail />} /></Routes></MemoryRouter>;
+    const view = renderSession(tree());
+    await userEvent.click(await screen.findByRole("button", { name: "Edit event" }));
+    await userEvent.type(screen.getByLabelText("Title"), " night");
+    await userEvent.click(screen.getByRole("radio", { name: /^Private/ }));
+
+    sessionCredential = null;
+    view.rerender(tree());
+    showsNothingOfTheEvent();
+
+    sessionCredential = { ...credential, token: "renewed" };
+    view.rerender(tree());
+    await waitFor(() => expect(Events.get).toHaveBeenCalledTimes(2));
+    showsNothingOfTheEvent();
+
+    const allowed = result === "allowed";
+    await act(async () => fresh.resolve({
+      ...opened, canManage: allowed, canSetVisibility: allowed, event: { ...opened.event, revision: "r2" },
+    }));
+    await screen.findByRole("heading", { name: "Hybrid study", level: 1 });
+
+    if (allowed) {
+      expect(screen.getByLabelText("Title")).toHaveValue("Hybrid study night");
+      expect(screen.getByRole("radio", { name: /^Private/ })).toBeChecked();
+    } else {
+      expect(screen.queryByLabelText("Title")).not.toBeInTheDocument();
+      expect(screen.queryByRole("button", { name: "Edit event" })).not.toBeInTheDocument();
+    }
+  });
+
   it("keeps a lost series answer across a visibility save so the old draft is never sent under a newer revision", async () => {
     const stored: EventDetailResponse = {
       ...opened, event: { ...opened.event, visibility: "private", revision: "r2" },

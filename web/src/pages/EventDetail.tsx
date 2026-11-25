@@ -64,7 +64,7 @@ function EventDetailContent() {
   // Its "Edit series" / "Edit event" links here with ?edit=series (DEC-161). Read once, so neither a reload after a
   // save nor Close opens the editor again while the person stays here.
   const editAsked = useRef(searchParams.get("edit") === "series");
-  const { user, loading: authLoading, isAdmin, canCompose } = useAuth();
+  const { user, loading: authLoading, isAdmin, canCompose, credential } = useAuth();
   const { people, error: householdError, retry: retryHousehold } = useHousehold(user);
   const [deleteError, setDeleteError] = useState<string | null>(null);
   // From the first ask until the DELETE answers: the menu cannot start a second one.
@@ -111,8 +111,20 @@ function EventDetailContent() {
   // until this page shows an answer asked for after it.
   const settling = useRosterSettled({ epoch: load.epoch, dataEpoch: load.dataEpoch, reload: () => refreshDates() }, (eventId) => eventId === Number(id));
 
-  const page = load.data ?? null;
-  const loading = load.loading;
+  const auth = useMemo(() => ({ credential, role: user?.role, loading: authLoading }), [credential, user?.role, authLoading]);
+  const readFor = useRef(auth);
+  const authPending = auth.loading || (credential === null && readFor.current.credential !== null && !!user);
+  const rechecking = authPending || readFor.current !== auth;
+  const { retry } = load;
+
+  useLayoutEffect(() => {
+    if (authPending || readFor.current === auth) return;
+    readFor.current = auth;
+    void retry();
+  }, [authPending, auth, retry]);
+
+  const page = rechecking ? null : load.data ?? null;
+  const loading = rechecking || load.loading;
   const missing = load.error instanceof ApiError && load.error.status === 404;
   useLayoutEffect(() => {
     if (authLoading || loading) return;
@@ -335,8 +347,7 @@ function EventDetailContent() {
           />
           {canSetVisibility && (
             <EventVisibilityControl
-              // The group's audience is part of what the control shows and of the revision it sends: a read that
-              // changes it starts the control again, so the two always come from the same read.
+              // A new audience refreshes the control. An unsaved choice still names the read it opened with.
               key={`${event.id}-${event.visibility}-${event.leaderOpened}-${event.groupVisibility ?? ""}`}
               eventId={event.id}
               hold={visibilityDraft}
