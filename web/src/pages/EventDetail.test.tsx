@@ -891,6 +891,23 @@ describe("EventDetail: the event visibility review and the series editor's panel
     await userEvent.click(screen.getByRole("radio", { name: /^Invite only/ }));
   }
 
+  it("drops the event and editor immediately when reading the override count is refused", async () => {
+    const count = deferred<Awaited<ReturnType<typeof Events.visibilityImpact>>>();
+    const fresh = deferred<EventDetailResponse>();
+    vi.mocked(Events.visibilityImpact).mockReturnValueOnce(count.promise);
+    vi.mocked(Events.get).mockResolvedValueOnce(groupEvent).mockReturnValueOnce(fresh.promise);
+    renderPage();
+    await userEvent.click(await screen.findByRole("button", { name: "Edit event" }));
+    expect(screen.getByLabelText("Title")).toHaveValue("Hybrid study");
+
+    await act(async () => count.reject(new ApiError(404, "missing", { code: "not_found" })));
+    expect(screen.queryByText("Hybrid study")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("Title")).not.toBeInTheDocument();
+    await act(async () => fresh.reject(new ApiError(500, "offline")));
+    expect(await screen.findByRole("heading", { name: "Event unavailable" })).toBeInTheDocument();
+    expect(screen.queryByText("Hybrid study")).not.toBeInTheDocument();
+  });
+
   for (const op of ROSTER_OPS) {
     it(`a panel ${op} that begins during the preview's await opens no review and sends nothing`, async () => {
       await openSeries();

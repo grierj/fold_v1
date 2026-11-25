@@ -1,4 +1,5 @@
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { createContext, useCallback, useContext, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { ApiError } from "../api/core";
 import type { Load } from "./useLoad";
 import type { RevisionConflict } from "./useRevisionSave";
 
@@ -27,28 +28,51 @@ export function useRefusedSave(load?: Pick<Load<unknown>, "loading" | "data" | "
     if (refusal) line.current?.focus();
   }, [refusal]);
 
-  return {
-    why: refusal?.why ?? null,
-    what: refusal?.what ?? "save",
-    line,
-    refused(why: RevisionConflict, what: Refused = "save") {
-      if (!load) {
-        setRefusal({ why, what });
+  const retry = load?.retry;
 
-        return;
-      }
+  const refused = useCallback((why: RevisionConflict, what: Refused = "save") => {
+    if (!retry) {
+      setRefusal({ why, what });
 
-      pending.current = { why, what };
-      void load.retry();
-    },
-    clear() {
-      pending.current = null;
-      setRefusal(null);
-    },
-  };
+      return;
+    }
+
+    pending.current = { why, what };
+    void retry();
+  }, [retry]);
+
+  const clear = useCallback(() => {
+    pending.current = null;
+    setRefusal(null);
+  }, []);
+
+  return { why: refusal?.why ?? null, what: refusal?.what ?? "save", line, refused, clear };
 }
 
-type Refused = "save" | "send";
+type Refused = "save" | "send" | "action";
+
+// Use for a request about the page's resource. Feature-specific refusals such as room_gone or rooms_off stay with the control.
+export function resourceRefused(cause: unknown): boolean {
+  return cause instanceof ApiError && (
+    (cause.status === 403 && cause.code === "not_allowed") ||
+    (cause.status === 404 && (cause.code === "not_found" || cause.code === "invalid"))
+  );
+}
+
+type Refresh = (intent: "read" | "write") => void;
+
+export const ResourceRefusal = createContext<Refresh | null>(null);
+
+export function useResourceRefusal() {
+  const refresh = useContext(ResourceRefusal);
+
+  return useCallback((cause: unknown, intent: "read" | "write" = "write") => {
+    if (!refresh || !resourceRefused(cause)) return false;
+    refresh(intent);
+
+    return true;
+  }, [refresh]);
+}
 
 interface Refusal {
   why: RevisionConflict;
@@ -64,7 +88,9 @@ export function RefusedSaveLine({ save, noun, canManage, about, choosing }: { sa
 
   const text = choosing
     ? `${choiceRefused(choosing)} This is the ${noun} as it is now.`
-    : save.what === "send"
+    : save.what === "action"
+      ? "Your last action could not be completed."
+      : save.what === "send"
       ? sendRefused(save.why, noun, canManage)
       : canManage === undefined
         ? "Your changes could not be saved."

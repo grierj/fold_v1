@@ -84,6 +84,28 @@ beforeEach(async () => {
 // The editor's own manager read of a date this group lists: the panel's read plus the group it belongs to.
 const forGroup = (read: OccurrenceResponse): OccurrenceResponse => ({ occurrence: { ...read.occurrence, groupId: 1, groupName: "Family group", groupVisibility: "public" } });
 
+it("drops the group while rechecking after a date's cancellation is refused", async () => {
+  const shown = { ...page, canManage: true };
+  const fresh = deferred<GroupDetailResponse>();
+  vi.mocked(Groups.get).mockResolvedValueOnce(shown).mockReturnValueOnce(fresh.promise);
+  vi.mocked(Events.cancelOccurrence).mockRejectedValueOnce(new ApiError(403, "refused", { code: "not_allowed" }));
+  const prompt = vi.spyOn(window, "confirm").mockReturnValue(true);
+
+  try {
+    open();
+    await userEvent.click(await screen.findByRole("button", { name: /^More for .* on 2026-12-01$/ }));
+    await userEvent.click(screen.getByRole("menuitem", { name: "Cancel this date" }));
+    await waitFor(() => expect(Groups.get).toHaveBeenCalledTimes(2));
+    expect(screen.queryByRole("heading", { name: "Family group" })).not.toBeInTheDocument();
+    await act(async () => fresh.resolve(page));
+    expect(await screen.findByRole("heading", { name: "Family group" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /^More for .* on 2026-12-01$/ })).not.toBeInTheDocument();
+    expect(screen.getByText("Your last action could not be completed.")).toHaveFocus();
+  } finally {
+    prompt.mockRestore();
+  }
+});
+
 it("fetches the household once and refetches all date state after a batch", async () => {
   vi.mocked(Events.register).mockResolvedValue({ registration: null, people: [{ registrationId: 9, personId: 3, registeredBy: 2, status: "going", attendanceMode: "in_person", waitlistPosition: null, childcareRequested: false }] });
   open(); await userEvent.click(await screen.findByRole("checkbox", { name: "Mary" }));

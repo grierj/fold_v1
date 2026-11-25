@@ -61,7 +61,7 @@ export function SeriesRoomField({ eventId, idPrefix, onChanged, onGone }: {
   onGone: () => void;
 }) {
   // A church with rooms off, or a site we can't read, sees no rooms control at all.
-  const { enabled, off, list, loading, loadError } = useRoomPicker(() => SeriesRooms.list(eventId), [eventId]);
+  const { enabled, off, list, loading, loadError } = useRoomPicker(() => SeriesRooms.list(eventId), [eventId], onGone);
 
   if (off) return <RoomsOffLine />;
 

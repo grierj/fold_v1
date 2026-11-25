@@ -64,7 +64,7 @@ export function RoomField({ eventId, date, idPrefix, onChanged, onGone, focusOnL
 }) {
   const id = `${idPrefix}-room`;
   // A church with rooms off, or a site we can't read, sees no rooms control at all.
-  const { enabled, off, list, loading, loadError } = useRoomPicker(() => DateRooms.list(eventId, date), [eventId, date]);
+  const { enabled, off, list, loading, loadError } = useRoomPicker(() => DateRooms.list(eventId, date), [eventId, date], onGone);
 
   const focused = useRef(false);
   useEffect(() => {

@@ -8,7 +8,7 @@ import { Badge } from "../components/ui/Badge";
 import { useRosterActivityOf, useRosterSettled } from "../lib/rosterWrites";
 import { useHousehold } from "../lib/useHousehold";
 import { canDemoteLeader, canMakeLeader, canAskForContact, canRegisterAsGuest, canRemoveMember, groupCanSchedule, isActiveAdult } from "../lib/can";
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { ApiError } from "../api/core";
 import { Events } from "../api/events";
@@ -36,7 +36,7 @@ import { Illustration } from "../components/ui/Illustration";
 import { Skeleton } from "../components/ui/Skeleton";
 import { focalPosition, prepareUpload } from "../lib/image";
 import { formatDayFull, formatTime, formatWhen } from "../lib/when";
-import { RefusedSaveLine, useRefusedSave } from "../lib/refusedSave";
+import { RefusedSaveLine, ResourceRefusal, resourceRefused, useRefusedSave, useResourceRefusal } from "../lib/refusedSave";
 import type { RevisionConflict } from "../lib/useRevisionSave";
 import { errorText } from "../lib/errors";
 import { useLoad } from "../lib/useLoad";
@@ -107,6 +107,7 @@ function EventRow({
   const [cancelling, setCancelling] = useState(false);
   const [cancelError, setCancelError] = useState<string | null>(null);
   const dateEditor = useDateEditorToggle({ onEditDate, onChanged, onDateConflict, onTerminalRefresh });
+  const refreshRefusal = useResourceRefusal();
   const time = formatTime(instance.startsAt);
   const loc = placeLine(instance.room, instance.location);
   const name = instance.title || groupName;
@@ -120,7 +121,7 @@ function EventRow({
       await Events.cancelOccurrence(instance.eventId, instance.date);
       onCancelled(instance.eventId, instance.date);
     } catch (e) {
-      setCancelError(errorText(e, "We couldn't cancel that date."));
+      if (!refreshRefusal(e)) setCancelError(errorText(e, "We couldn't cancel that date."));
     } finally {
       setCancelling(false);
     }
@@ -283,17 +284,27 @@ function GroupDetailContent() {
   // reappear, and only the newest request may commit anything.
   const load = useLoad(() => fetchGroup(id ?? "", loadedDates.current + (continuing.current ? 1 : 0)), [id], { enabled: !!id });
 
-  // The same hold on a date's Edit after a roster write as the event page's (useRosterSettled); questions here stay the
-  // browser's own, except a date editor's, which asks in its own ConfirmProvider. This page lists every date of its
-  // group's events, so a write on any event counts: a read on its way may hold the date.
-  const settling = useRosterSettled({ epoch: load.epoch, dataEpoch: load.dataEpoch, reload: () => void load.reload() }, () => true);
   // A date's save refused and not sent again (DEC-164): which date, for the line above the dates.
   const dateRefused = useRefusedSave(load);
   const [refusedDate, setRefusedDate] = useState<{ eventId: number; date: string } | null>(null);
   // The group form's save refused and not sent again (DEC-166).
   const groupRefused = useRefusedSave(load);
 
+  const { retry } = load;
+  const { refused } = groupRefused;
+
+  const refreshRefusal = useCallback((intent: "read" | "write") => {
+    setEditing(false);
+    setDepartureTarget(null);
+
+    if (intent === "write") refused("gone", "action");
+    else void retry();
+  }, [refused, retry]);
+
   const detail = load.data ?? null;
+  const settling = useRosterSettled({ epoch: load.epoch, dataEpoch: load.dataEpoch, reload: () => void load.reload() }, () => true);
+
+
   useEffect(() => { if (detail) loadedDates.current = detail.upcomingEvents.length; }, [detail]);
 
   // Where focus that the read after Save group dropped goes once the page shows that read: the group's menu, else
@@ -345,7 +356,10 @@ function GroupDetailContent() {
         nextCursor: next.nextCursor,
       } : old);
     } catch (e) {
-      if (load.epoch() === stamp) setMoreFailure({ text: errorText(e, "We couldn't load this group."), epoch: stamp });
+      if (load.epoch() !== stamp) return;
+
+      if (resourceRefused(e)) refreshRefusal("read");
+      else setMoreFailure({ text: errorText(e, "We couldn't load this group."), epoch: stamp });
     } finally {
       continuing.current = false;
       setLoadingMore(false);
@@ -438,7 +452,8 @@ function GroupDetailContent() {
       await Groups.join(id!);
       await load.retry();
     } catch (e) {
-      setJoinError(errorText(e, "That didn't work."));
+      if (resourceRefused(e)) refreshRefusal("write");
+      else setJoinError(errorText(e, "That didn't work."));
     } finally {
       setJoinBusy(false);
     }
@@ -519,7 +534,8 @@ function GroupDetailContent() {
       await Groups.setRole(id!, memberId, role);
       await load.retry();
     } catch (e) {
-      setMemberError(errorText(e, "We couldn't change that role."));
+      if (resourceRefused(e)) refreshRefusal("write");
+      else setMemberError(errorText(e, "We couldn't change that role."));
     } finally {
       setMemberBusy(false);
     }
@@ -540,7 +556,8 @@ function GroupDetailContent() {
       await Groups.requestDeletion(id!);
       await load.retry();
     } catch (e) {
-      setMemberError(errorText(e, "We couldn't send the deletion request."));
+      if (resourceRefused(e)) refreshRefusal("write");
+      else setMemberError(errorText(e, "We couldn't send the deletion request."));
     } finally {
       setMemberBusy(false);
     }
@@ -554,7 +571,8 @@ function GroupDetailContent() {
       await Groups.cancelDeletion(id!);
       await load.retry();
     } catch (e) {
-      setMemberError(errorText(e, "We couldn't cancel the request."));
+      if (resourceRefused(e)) refreshRefusal("write");
+      else setMemberError(errorText(e, "We couldn't cancel the request."));
     } finally {
       setMemberBusy(false);
     }
@@ -582,7 +600,7 @@ function GroupDetailContent() {
   }
 
   return (
-    <div className="fold-page">
+    <ResourceRefusal.Provider value={refreshRefusal}><div className="fold-page">
       {/* No overflow-hidden: group menus can extend beyond the photo header. */}
       <div className="fold-cover relative flex min-h-48 items-end rounded-lg bg-inverse sm:min-h-56">
         <img
@@ -933,10 +951,10 @@ function GroupDetailContent() {
           subjectId={departureTarget.subjectId}
           allowNote={departureTarget.allowNote}
           onCancel={() => setDepartureTarget(null)}
-          onUnavailable={async () => { await refresh(); }}
+          onUnavailable={async () => { await load.retry(); }}
           onCompleted={completedDeparture}
         />
       )}
-    </div>
+    </div></ResourceRefusal.Provider>
   );
 }

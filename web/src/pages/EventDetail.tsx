@@ -2,7 +2,7 @@ import { canRegisterAsGuest } from "../lib/can";
 import { Form } from "../components/ui/Form";
 import { useHousehold } from "../lib/useHousehold";
 import { SeriesEditor } from "../components/SeriesEditor";
-import { lazy, Suspense, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { ApiError } from "../api/core";
 import { Events } from "../api/events";
@@ -20,7 +20,7 @@ import { Button, ButtonLink } from "../components/ui/Button";
 import { ExternalLinkIcon } from "../components/icons";
 import { EventVisibilityControl } from "../components/EventVisibility";
 import type { RevisionConflict } from "../lib/useRevisionSave";
-import { RefusedSaveLine, useRefusedSave } from "../lib/refusedSave";
+import { RefusedSaveLine, ResourceRefusal, resourceRefused, useRefusedSave, useResourceRefusal } from "../lib/refusedSave";
 import { RsvpButtons } from "../components/RsvpButtons";
 import { GuestRegistrationForm } from "../components/GuestRegistrationForm";
 import { DateActions } from "../components/DateActions";
@@ -103,10 +103,6 @@ function EventDetailContent() {
   // only the newest request may commit anything.
   const load = useLoad(() => Events.get(id ?? ""), [id], { enabled: !!id });
 
-  // A roster write on one of its dates (a row's, or a kept-dates panel's inside an editor) holds that date's Edit
-  // until this page shows an answer asked for after it.
-  const settling = useRosterSettled({ epoch: load.epoch, dataEpoch: load.dataEpoch, reload: () => refreshDates() }, (eventId) => eventId === Number(id));
-
   const page = load.data ?? null;
   const loading = load.loading;
   useLayoutEffect(() => {
@@ -129,6 +125,21 @@ function EventDetailContent() {
     if (!document.activeElement || document.activeElement === document.body) editButton.current?.focus();
   }, [editing]);
   const refusedSave = useRefusedSave(load);
+  const { retry } = load;
+  const { refused } = refusedSave;
+
+  const refreshRefusal = useCallback((intent: "read" | "write") => {
+    setEditing(false);
+    setPickRequest(null);
+    setRoomsRevision((n) => n + 1);
+
+    if (intent === "write") refused("gone", "action");
+    else void retry();
+  }, [refused, retry]);
+
+  // A roster write holds that date's Edit until the page shows a read asked for after the write.
+  const settling = useRosterSettled({ epoch: load.epoch, dataEpoch: load.dataEpoch, reload: () => refreshDates() }, (eventId) => eventId === Number(id));
+
   // A date's save refused and not sent again (DEC-164): which date, for the line above the dates.
   const dateRefused = useRefusedSave(load);
   const [refusedDate, setRefusedDate] = useState<{ eventId: number; date: string } | null>(null);
@@ -233,7 +244,10 @@ function EventDetailContent() {
       // Only the page that asked moves on: someone who went elsewhere meanwhile stays there.
       if (action.here()) navigate("/", { replace: true });
     } catch (e) {
-      if (action.here()) setDeleteError(errorText(e, "We couldn't delete the event."));
+      if (!action.here()) return;
+
+      if (resourceRefused(e)) refreshRefusal("write");
+      else setDeleteError(errorText(e, "We couldn't delete the event."));
     } finally {
       deletingNow.current = false;
       setDeleting(false);
@@ -241,7 +255,7 @@ function EventDetailContent() {
   }
 
   return (
-    <div className="fold-page fold-page-narrow">
+    <ResourceRefusal.Provider value={refreshRefusal}><div className="fold-page fold-page-narrow">
       {/* Edit series and More sit beside the title as secondary actions; an event page has no primary one (DEC-63, DEC-65). */}
       <div className="fold-page-header">
         <div className="min-w-0">
@@ -375,7 +389,7 @@ function EventDetailContent() {
           />}
         </CompactDates>
       </div>
-    </div>
+    </div></ResourceRefusal.Provider>
   );
 }
 
@@ -433,6 +447,7 @@ function DateRow({
   const navigate = useNavigate();
   const { canCompose } = useAuth();
   const dateEditor = useDateEditorToggle({ onEditDate, onChanged, onDateConflict, onTerminalRefresh });
+  const refreshRefusal = useResourceRefusal();
   const [managing, setManaging] = useState(manageRequested);
   const manageRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
@@ -488,7 +503,7 @@ function DateRow({
       // Stays "Cancelling…" until the refresh takes the date away.
       onChanged();
     } catch (e) {
-      setCancelError(errorText(e, "We couldn't cancel that date."));
+      if (!refreshRefusal(e)) setCancelError(errorText(e, "We couldn't cancel that date."));
       cancelNow.current = false;
       setCancelStep(null);
     }
@@ -587,6 +602,8 @@ function HostEditor({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  const refreshRefusal = useResourceRefusal();
+
   async function add(e: React.FormEvent) {
     e.preventDefault();
 
@@ -599,7 +616,7 @@ function HostEditor({
       setEmail("");
       onChanged();
     } catch (err) {
-      setError(errorText(err, "We couldn't add that host."));
+      if (!refreshRefusal(err)) setError(errorText(err, "We couldn't add that host."));
     } finally {
       setBusy(false);
     }
@@ -613,7 +630,7 @@ function HostEditor({
       await Events.removeHost(eventId, userId);
       onChanged();
     } catch (err) {
-      setError(errorText(err, "We couldn't remove that host."));
+      if (!refreshRefusal(err)) setError(errorText(err, "We couldn't remove that host."));
     } finally {
       setBusy(false);
     }

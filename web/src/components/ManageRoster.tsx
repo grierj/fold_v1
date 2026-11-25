@@ -10,6 +10,7 @@ import { RequestContactButton } from "./RequestContactButton";
 import { Events } from "../api/events";
 import { attendeeSubject } from "../lib/attendee";
 import type { PersonSearchResult, Attendee, EventOccurrence } from "../types";
+import { useResourceRefusal } from "../lib/refusedSave";
 import { errorCode, errorText } from "../lib/errors";
 import { AttendeeDetails } from "./AttendeeDetails";
 import { Button } from "./ui/Button";
@@ -41,6 +42,7 @@ export function ManageRoster({ instance, onChanged, gate, onRecheck, onClose, he
   const Heading = headingLevel === 3 ? "h3" : "h4";
   const Subheading = headingLevel === 3 ? "h4" : "h5";
   const { user } = useAuth();
+  const refreshRefusal = useResourceRefusal();
   const [busy, setBusy] = useState<number | "add" | null>(null);
   const [email, setEmail] = useState("");
   const [adding, setAdding] = useState((instance.attendees?.length ?? 0) <= 6);
@@ -129,7 +131,8 @@ export function ManageRoster({ instance, onChanged, gate, onRecheck, onClose, he
       onChanged?.();
     } catch (e) {
       end(rosterWriteFailure(e));
-      setError(errorText(e, "We couldn't update that registration."));
+
+      if (!refreshRefusal(e)) setError(errorText(e, "We couldn't update that registration."));
     }
     finally { setBusy(null); }
   }
@@ -170,6 +173,8 @@ export function ManageRoster({ instance, onChanged, gate, onRecheck, onClose, he
     }
     catch (e) {
       end(rosterWriteFailure(e));
+
+      if (refreshRefusal(e)) return;
 
       if (["date_add_approval_required", "teen_add_approval_required"].includes(errorCode(e) ?? "")) {
         if (selection) { setApprovalRequired({ overCapacity }); setError("They need to approve this date. Choose Ask to add to send an ask using your selected person and options."); }
