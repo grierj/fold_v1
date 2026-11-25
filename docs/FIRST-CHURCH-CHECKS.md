@@ -4,6 +4,10 @@ These need real phones, real mail providers, a real domain or a real server, whi
 
 Each item says what to do, what you should see, and the milestone it came from.
 
+## Journey performance (#419)
+
+- [ ] On an iPhone and an Android phone over a typical church connection, open the group directory, open an event date and use its RSVP controls, load more dates in a group, and open Edit group as a leader. Record the model, browser, connection, and which action or layout shift made you wait or miss a tap.
+
 ## Web push (M3.13)
 
 Follow the directions page at `/notifications/setup` literally, on each device below. Record the iOS version you used.
