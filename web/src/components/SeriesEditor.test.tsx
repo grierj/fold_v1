@@ -404,7 +404,7 @@ describe("SeriesEditor form layout (DEC-95)", () => {
 
     it("has no one-date Room for a series, whatever the date", async () => {
       roomsOn();
-      vi.mocked(SeriesRooms.list).mockResolvedValue({ revision: "r1", rooms: [], dates: 3, defaultRoom: null, needsRoom: [], pending: 0 });
+      vi.mocked(SeriesRooms.list).mockResolvedValue({ revision: "r1", rooms: [], dates: 3, defaultRoom: null, ownRooms: [], needsRoom: [], pending: 0 });
       vi.mocked(DateRooms.list).mockClear();
       render(<SeriesEditor series={{ ...single, recurrenceRule: "FREQ=WEEKLY;BYDAY=TU" }} roomDate="2026-12-01" idPrefix="room-series" onSaved={() => {}} />);
       await screen.findByRole("button", { name: "Save series" });
@@ -414,7 +414,7 @@ describe("SeriesEditor form layout (DEC-95)", () => {
 
     it("gives a series Room for every date beside Location, only while rooms are on", async () => {
       roomsOn();
-      vi.mocked(SeriesRooms.list).mockResolvedValue({ revision: "r1", rooms: [], dates: 10, defaultRoom: null, needsRoom: [], pending: 0 });
+      vi.mocked(SeriesRooms.list).mockResolvedValue({ revision: "r1", rooms: [], dates: 10, defaultRoom: null, ownRooms: [], needsRoom: [], pending: 0 });
       const series = { ...single, recurrenceRule: "FREQ=WEEKLY;BYDAY=TU" };
       const { unmount } = render(<SeriesEditor series={series} idPrefix="room-hint" onSaved={() => {}} />);
       const room = await screen.findByRole("combobox", { name: /^Room for every date/ });
@@ -677,8 +677,8 @@ describe("SeriesEditor and the read it opened with", () => {
     forgetSite();
     vi.mocked(Site.get).mockResolvedValue({ name: "Fold", timezone: "UTC", selfSignup: "off", roomsEnabled: true, pushEnabled: true });
     const hall = { id: 1, name: "Fellowship Hall", building: "Main", capacity: 80, features: "", restricted: false, busyDates: 0, tooSmall: false };
-    vi.mocked(SeriesRooms.list).mockResolvedValue({ revision: "r1", rooms: [hall], dates: 10, defaultRoom: null, needsRoom: [], pending: 0 });
-    vi.mocked(SeriesRooms.set).mockResolvedValue({ event: { id: 7, revision: "r2" }, defaultRoom: { id: 1, name: "Fellowship Hall", building: "Main" }, booked: 10, lost: [], kept: 0, pending: 0, doubleBooked: 0 });
+    vi.mocked(SeriesRooms.list).mockResolvedValue({ revision: "r1", rooms: [hall], dates: 10, defaultRoom: null, ownRooms: [], needsRoom: [], pending: 0 });
+    vi.mocked(SeriesRooms.set).mockResolvedValue({ event: { id: 7, revision: "r2" }, defaultRoom: { id: 1, name: "Fellowship Hall", building: "Main" }, booked: 10, lost: [], kept: 0, keptRooms: [], changed: 0, pending: 0, doubleBooked: 0 });
     vi.mocked(Events.update).mockRejectedValueOnce(changed()).mockResolvedValueOnce({ event: stored });
     vi.mocked(Events.get).mockResolvedValue(readOf(stored));
     const onSaved = vi.fn();

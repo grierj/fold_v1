@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { SeriesRooms } from "../api/rooms";
 import { errorText } from "../lib/errors";
 import { choiceRefused } from "../lib/refusedSave";
+import { LIST_SHOWN } from "../lib/roomLabels";
 import { useLoad } from "../lib/useLoad";
 import { useRoomsEnabled } from "../lib/useSite";
 import { formatDayLong } from "../lib/when";
@@ -11,9 +12,6 @@ import { roomsTurnedOff } from "./useRoomPicker";
 import { Button } from "./ui/Button";
 import { FormError } from "./ui/Field";
 import { AlertCircleIcon } from "./icons";
-
-// A long list shows its first rows; the rest wait behind one button.
-const SHOWN = 10;
 
 const OFF_LIST = "It is no longer listed under “Dates that need a room”.";
 
@@ -108,7 +106,7 @@ export function NeedsRoomList({ eventId, revision, hasDate, onPick, onGone }: {
   }
 
   if (needs.length === 0) return <>{notes}</>;
-  const rows = all ? needs : needs.slice(0, SHOWN);
+  const rows = all ? needs : needs.slice(0, LIST_SHOWN);
 
   return (
     <>
@@ -171,7 +169,7 @@ export function NeedsRoomList({ eventId, revision, hasDate, onPick, onGone }: {
             );
           })}
         </ul>
-        {!all && needs.length > SHOWN && (
+        {!all && needs.length > LIST_SHOWN && (
           <div className="mt-3">
             <Button variant="link" onClick={() => setAll(true)}>Show all {needs.length}</Button>
           </div>

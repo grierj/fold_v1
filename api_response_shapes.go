@@ -146,12 +146,15 @@ type revisionRefJSON struct {
 }
 
 // seriesRoomsJSON is GET /events/:id/rooms. Revision is the event's token
-// (eventRevision) a series pick sends.
+// (eventRevision) a series pick sends. Pending counts the series room's
+// dates waiting for an admin; a date waiting for a room of its own is in
+// OwnRooms.
 type seriesRoomsJSON struct {
 	Revision    string              `json:"revision"`
 	Rooms       []seriesRoomJSON    `json:"rooms"`
 	Dates       int                 `json:"dates"`
 	DefaultRoom *occurrenceRoomJSON `json:"defaultRoom"`
+	OwnRooms    []ownRoomJSON       `json:"ownRooms"`
 	NeedsRoom   []needsRoomJSON     `json:"needsRoom"`
 	Pending     int                 `json:"pending"`
 	Suggestions roomSuggestionsJSON `json:"suggestions"`

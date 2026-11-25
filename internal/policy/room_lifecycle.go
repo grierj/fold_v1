@@ -47,10 +47,8 @@ func RoomBookingStates() []RoomBookingState {
 // status, whether request_id names a room request that is still pending,
 // and allow_overlap. The request matters only to a requested booking and
 // allow_overlap only to a confirmed one, as in every reader: the exclusion
-// constraint and heldByOverlap read confirmed rows alone, and only the series
-// picker's count reads a rejected booking's request (it counts one whose
-// request is still pending as waiting, a combination no writer leaves). So the combinations no writer leaves behind
-// map as follows: confirmed with a pending request (a booking between its
+// constraint and heldByOverlap read confirmed rows alone. So the combinations
+// no writer leaves behind map as follows: confirmed with a pending request (a booking between its
 // insert and its move to waiting, or confirmed before its request's own row
 // moves) is confirmed; requested with allow_overlap is waiting or lost;
 // rejected with a pending request or allow_overlap is rejected. An unknown

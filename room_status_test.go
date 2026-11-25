@@ -515,27 +515,44 @@ func TestRoomBookingStateSQLMatchesGo(t *testing.T) {
 		})
 	})
 
-	// The series picker counts a date as waiting by its request alone, so a
-	// rejected booking whose request is still pending would count as waiting
-	// where every other reader calls it rejected. No writer leaves that
-	// combination (a rejection moves the request in the same transaction);
-	// this pins how the picker reads it.
+	// The series picker judges each date by its state: without a series room
+	// a date that holds or waits for its room has a room of its own (DEC-168);
+	// in the series room a waiting one is the series' pending date. A lost or
+	// rejected one needs a room either way.
 	t.Run("the series picker", func(t *testing.T) {
-		for _, c := range combos {
-			var out seriesRoomsJSON
-			decodeJSON(t, f.leader.do("GET", "/api/v1/events/"+itoa(c.ev.ID)+"/rooms", nil, false), &out)
-			wantPending, wantNeeds := 0, 0
-			switch s := c.state(); {
-			case s == policy.RoomBookingWaiting, s == policy.RoomBookingRejected && c.request == models.RoomRequestPending:
-				wantPending = 1
-			case s == policy.RoomBookingLost, s == policy.RoomBookingRejected:
-				wantNeeds = 1
-			}
-			if out.Pending != wantPending || len(out.NeedsRoom) != wantNeeds {
-				t.Errorf("%v (%s): pending %d, needs a room %v; want %d and %d", c, c.state(), out.Pending, out.NeedsRoom, wantPending, wantNeeds)
-			}
-			if wantNeeds == 1 && len(out.NeedsRoom) == 1 && out.NeedsRoom[0].Status != c.status {
-				t.Errorf("%v: needs a room as %q", c, out.NeedsRoom[0].Status)
+		for _, inSeriesRoom := range []bool{false, true} {
+			for _, c := range combos {
+				if inSeriesRoom {
+					gormMust(t, f.app.DB.Model(&models.Event{}).Where("id = ?", c.ev.ID).Update("default_room_id", c.room.ID))
+				}
+				var out seriesRoomsJSON
+				decodeJSON(t, f.leader.do("GET", "/api/v1/events/"+itoa(c.ev.ID)+"/rooms", nil, false), &out)
+				wantPending, wantNeeds, wantOwn := 0, 0, 0
+				s := c.state()
+				switch {
+				case !s.HoldsRoom() && s != policy.RoomBookingWaiting:
+					wantNeeds = 1
+				case c.overlap:
+					// Only an admin may change a booking with allow_overlap: listed for a leader either way.
+					wantOwn = 1
+				case !inSeriesRoom:
+					wantOwn = 1
+				case s == policy.RoomBookingWaiting:
+					wantPending = 1
+				}
+				if out.Pending != wantPending || len(out.NeedsRoom) != wantNeeds || len(out.OwnRooms) != wantOwn {
+					t.Errorf("%v (%s), in the series room %v: pending %d, needs a room %v, own rooms %v; want %d, %d and %d",
+						c, s, inSeriesRoom, out.Pending, out.NeedsRoom, out.OwnRooms, wantPending, wantNeeds, wantOwn)
+				}
+				if wantNeeds == 1 && len(out.NeedsRoom) == 1 && out.NeedsRoom[0].Status != c.status {
+					t.Errorf("%v: needs a room as %q", c, out.NeedsRoom[0].Status)
+				}
+				if wantOwn == 1 && len(out.OwnRooms) == 1 {
+					o := out.OwnRooms[0]
+					if o.Waiting != (s == policy.RoomBookingWaiting) || o.MayChange == c.overlap || o.Room.ID != c.room.ID || o.Date != feedDate(f.startOn) {
+						t.Errorf("%v: listed as %+v", c, o)
+					}
+				}
 			}
 		}
 	})

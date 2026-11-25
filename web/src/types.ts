@@ -1206,13 +1206,27 @@ export interface NeedsRoom {
   status: "requested" | "rejected";
 }
 
+// A future date a change of the series room leaves as it is unless the person names it (DEC-168): a room of its own,
+// or a booking that holds or waits and only an admin may change (`mayChange` false).
+export interface OwnRoom {
+  date: string;
+  room: OccurrenceRoom;
+  // Waiting for an admin's approval: it holds nothing yet.
+  waiting: boolean;
+  mayChange: boolean;
+}
+
 // What booking a whole series did (M2.1c), and the event's revision the next pick sends.
 export interface SeriesBooking {
   event: RevisionRef;
   defaultRoom: OccurrenceRoom | null;
   booked: number;
   lost: string[];
+  // Listed dates this pick left with their room, each in `keptRooms`.
   kept: number;
+  keptRooms: OwnRoom[];
+  // Named dates whose own room this pick released; where they ended is in the counts beside it.
+  changed: number;
   // Dates waiting on an admin's approval (M2.1d).
   pending: number;
   // Of the dates booked, those an admin's reason booked over another booking.
@@ -1756,12 +1770,14 @@ export interface RevisionRef {
   revision: string;
 }
 
-// GET /events/:id/rooms (M2.1c). `revision` is the event's, which a series pick sends.
+// GET /events/:id/rooms (M2.1c). `revision` is the event's, which a series pick sends. `pending` counts the series
+// room's dates waiting for an admin; a date waiting for a room of its own is in `ownRooms`.
 export interface SeriesRoomsResponse {
   revision: string;
   rooms: SeriesRoom[];
   dates: number;
   defaultRoom: OccurrenceRoom | null;
+  ownRooms: OwnRoom[];
   needsRoom: NeedsRoom[];
   pending: number;
   suggestions?: RoomSuggestions;

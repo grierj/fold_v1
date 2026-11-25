@@ -447,16 +447,12 @@ func pickDateRoom(tx *gorm.DB, p datePick) error {
 	var old models.RoomBooking
 	hadOld := tx.Where("occurrence_id = ?", occ.ID).First(&old).Error == nil
 	if hadOld {
-		// A booking only an admin could make (a restricted room, or a
-		// double-booking) is only an admin's to change or release.
-		if !policy.CanDoubleBookRoom(me) {
-			var oldRoom models.Room
-			if err := tx.First(&oldRoom, old.RoomID).Error; err != nil {
-				return err
-			}
-			if oldRoom.Restricted || old.AllowOverlap {
-				return errBookingAdminOnly
-			}
+		var oldRoom models.Room
+		if err := tx.First(&oldRoom, old.RoomID).Error; err != nil {
+			return err
+		}
+		if !policy.CanChangeBooking(me, oldRoom.Restricted, old.AllowOverlap) {
+			return errBookingAdminOnly
 		}
 		if err := tx.Delete(&old).Error; err != nil {
 			return err

@@ -4,12 +4,15 @@ import { SeriesRooms } from "../api/rooms";
 import { useAuth } from "../auth";
 import { roomName } from "../lib/place";
 import { RefusedSaveLine, useRefusedSave } from "../lib/refusedSave";
-import { busyDatesNote, NO_ROOM, seriesBookingMessage, seriesRoomLabel, seriesStoredMessage } from "../lib/roomLabels";
+import {
+  busyDatesNote, includeLabel, LIST_SHOWN, NO_ROOM, ownRoomNote, ownRoomsFor, ownRoomsLead, seriesBookingMessage, seriesRoomLabel, seriesStoredMessage,
+} from "../lib/roomLabels";
 import { count } from "../lib/plural";
 import { useAction } from "../lib/useAction";
 import { answerNames, useRevisionSave } from "../lib/useRevisionSave";
+import { formatDayLong } from "../lib/when";
 import type { SeriesBooking, SeriesRoomsResponse } from "../types";
-import { Field, FormError, Select } from "./ui/Field";
+import { Checkbox, Field, FormError, Select } from "./ui/Field";
 import { Button } from "./ui/Button";
 import { DoubleBookPrompt, useOverlapReason } from "./DoubleBookPrompt";
 import { RoomOptions } from "./RoomOptions";
@@ -34,7 +37,9 @@ const answerFields = (res: SeriesBooking | null): SeriesRoomFields => ({
 });
 
 // What a pick compares: the dates that need a room only for "Book anyway", which books over them. A plain pick leaves
-// each date to the server (booked, waiting, busy or kept), and intends whatever it stored.
+// each date to the server (booked, waiting, busy or kept), and intends whatever it stored. The dates with a room of
+// their own are never compared: without the box ticked the server keeps every one of them, and with it the request
+// names the dates shown, so a list that changed since can only leave more of them as they are (DEC-168).
 const compared = (value: SeriesRoomFields, overBusy: boolean): Partial<SeriesRoomFields> => (overBusy ? value : { roomId: value.roomId });
 
 // Every send was refused while the series room stayed as it was: the control says its ordinary refusal.
@@ -97,11 +102,15 @@ function SeriesRoomControl({ eventId, id, read, show, onChanged, onGone }: {
   const suggestions = read.suggestions ?? null;
   // The select's choice, not yet booked; a read that shows another series room starts it again.
   const [pick, setPick] = useState(current ? String(current.id) : NO_ROOM);
+  // Also change the listed dates this person may change: each pick is its own choice, so a new read clears it.
+  const [include, setInclude] = useState(false);
+  const [allListed, setAllListed] = useState(false);
   const [shown, setShown] = useState(read);
 
   if (read !== shown) {
     setShown(read);
     setPick(current ? String(current.id) : NO_ROOM);
+    setInclude(false);
   }
 
   // An admin's answer for dates that are busy: the room to resend with a reason.
@@ -152,7 +161,7 @@ function SeriesRoomControl({ eventId, id, read, show, onChanged, onGone }: {
     if (pending) document.getElementById(reasonId)?.focus();
   }, [pending, reasonId]);
 
-  function send(roomId: number | null, overlapReason?: string) {
+  function send(roomId: number | null, overlapReason?: string, includeDates?: string[]) {
     refusal.clear();
     void action.run(async () => {
       lastAnswer.current = null;
@@ -161,7 +170,8 @@ function SeriesRoomControl({ eventId, id, read, show, onChanged, onGone }: {
 
       try {
         sent = await save(async (revision) => {
-          const res = await SeriesRooms.set(eventId, overlapReason ? { roomId, overlapReason } : { roomId }, revision);
+          const body = overlapReason ? { roomId, overlapReason } : includeDates ? { roomId, includeDates } : { roomId };
+          const res = await SeriesRooms.set(eventId, body, revision);
           lastAnswer.current = res;
 
           return res;
@@ -198,6 +208,7 @@ function SeriesRoomControl({ eventId, id, read, show, onChanged, onGone }: {
         ...read,
         revision: res.event.revision,
         defaultRoom: res.defaultRoom,
+        ownRooms: res.keptRooms,
         needsRoom: res.defaultRoom ? res.lost.map((date) => ({ date, roomName: res.defaultRoom?.name ?? "", status: "requested" })) : [],
         pending: res.defaultRoom ? res.pending : 0,
       });
@@ -215,17 +226,17 @@ function SeriesRoomControl({ eventId, id, read, show, onChanged, onGone }: {
   }
 
   function apply() {
-    if (action.running || pick === value) return;
+    if (action.running || (pick === value && !including)) return;
+
+    const dates = including ? changeable.map((o) => o.date) : undefined;
 
     if (pick === NO_ROOM) {
-      send(null);
+      send(null, undefined, dates);
 
       return;
     }
 
-    const room = rooms.find((r) => String(r.id) === pick);
-
-    if (room) send(room.id);
+    if (chosen) send(chosen.id, undefined, dates);
   }
 
   function bookAnyway() {
@@ -245,6 +256,12 @@ function SeriesRoomControl({ eventId, id, read, show, onChanged, onGone }: {
   const chosen = pick === NO_ROOM ? null : (rooms.find((r) => String(r.id) === pick) ?? null);
   const needsCount = read.needsRoom.length;
   const status = action.state.status === "done" ? action.state.text : "";
+  const listed = ownRoomsFor(read.ownRooms, pick === NO_ROOM ? null : Number(pick));
+  const changeable = listed.filter((o) => o.mayChange);
+  // The box changes the listed dates to a room this person may book, or, stopping the series room, releases them; with
+  // no series room and none chosen there is nothing to do.
+  const offerInclude = changeable.length > 0 && (pick === NO_ROOM ? value !== NO_ROOM : chosen !== null);
+  const including = include && offerInclude;
 
   return (
     <>
@@ -252,7 +269,7 @@ function SeriesRoomControl({ eventId, id, read, show, onChanged, onGone }: {
         id={id}
         label="Room for every date"
         optional
-        hint="Choose a room, then book it for every upcoming date. If bookings need an admin's approval, they wait for one. A date already booked in a room of its own keeps it, but a date whose own room is still waiting for approval gets this room instead. “No series room” releases the rooms it booked."
+        hint="Choose a room, then book it for every upcoming date. If bookings need an admin's approval, they wait for one. A date with a room of its own, booked or waiting for approval, keeps it unless you choose to change it too. “No series room” releases the rooms the series booked."
       >
         <Select value={pick} disabled={busy} aria-busy={busy || undefined} onChange={(e) => choose(e.target.value)}>
           <option value={NO_ROOM}>No series room</option>
@@ -261,7 +278,23 @@ function SeriesRoomControl({ eventId, id, read, show, onChanged, onGone }: {
         </Select>
       </Field>
       <RefusedSaveLine save={refusal} noun="room" choosing="The room for every date" />
-      <Button variant="secondary" disabled={busy || pick === value} onClick={apply}>
+      {listed.length > 0 && (
+        <div className="space-y-2 text-sm">
+          <p>{ownRoomsLead(listed.length, including)}</p>
+          <ul className="space-y-1">
+            {(allListed ? listed : listed.slice(0, LIST_SHOWN)).map((o) => (
+              <li key={o.date} className="wrap-anywhere">
+                <span className="font-semibold">{formatDayLong(o.date)}</span>: <span className="text-text-muted">{ownRoomNote(o)}</span>
+              </li>
+            ))}
+          </ul>
+          {!allListed && listed.length > LIST_SHOWN && <Button variant="link" onClick={() => setAllListed(true)}>Show all {listed.length}</Button>}
+          {offerInclude && (
+            <Checkbox label={includeLabel(chosen, changeable.length, listed.length)} checked={include} disabled={busy} onChange={(e) => setInclude(e.target.checked)} />
+          )}
+        </div>
+      )}
+      <Button variant="secondary" disabled={busy || (pick === value && !including)} onClick={apply}>
         {pick === NO_ROOM ? "Stop the series room" : "Book for every date"}
       </Button>
       <div role="status" className="space-y-2 empty:hidden">
