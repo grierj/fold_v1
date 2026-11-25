@@ -298,6 +298,9 @@ type composeMount struct {
 	Source   string `json:"source"`
 	Target   string `json:"target"`
 	ReadOnly bool   `json:"read_only"`
+	Volume   struct {
+		NoCopy bool `json:"nocopy"`
+	} `json:"volume"`
 }
 
 type composeResolved struct {
@@ -483,8 +486,8 @@ func TestComposeVolumeBoundaries(t *testing.T) {
 	cfg := resolveCompose(t, composeFixtureEnv())
 	app, backup := cfg.Services["app"], cfg.Services["backup"]
 
-	if m, ok := backup.mount("/data"); !ok || m.Source != "uploads" || !m.ReadOnly {
-		t.Errorf("backup must mount uploads read-only at /data: %+v", m)
+	if m, ok := backup.mount("/data"); !ok || m.Source != "uploads" || !m.ReadOnly || !m.Volume.NoCopy {
+		t.Errorf("backup must mount uploads read-only at /data and leave initialization to the app: %+v", m)
 	}
 	if m, ok := backup.mount("/backups"); !ok || m.Source != "backups" || m.ReadOnly {
 		t.Errorf("backup must write the backups volume at /backups: %+v", m)
@@ -492,8 +495,8 @@ func TestComposeVolumeBoundaries(t *testing.T) {
 	if m, ok := backup.mount("/backup-status"); !ok || m.Source != "backup-status" || m.ReadOnly {
 		t.Errorf("backup must write the backup-status volume: %+v", m)
 	}
-	if m, ok := app.mount("/data"); !ok || m.Source != "uploads" || m.ReadOnly {
-		t.Errorf("the app keeps writing uploads at /data: %+v", m)
+	if m, ok := app.mount("/data"); !ok || m.Source != "uploads" || m.ReadOnly || m.Volume.NoCopy {
+		t.Errorf("the app must initialize and write the uploads volume at /data: %+v", m)
 	}
 	if m, ok := app.mount("/backup-status"); !ok || m.Source != "backup-status" || !m.ReadOnly {
 		t.Errorf("the app may only read the backup status: %+v", m)

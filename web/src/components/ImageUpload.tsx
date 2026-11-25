@@ -16,6 +16,8 @@ export function ImageUpload({
   aspectClass,
   onFile,
   onFocal,
+  previewSelection = true,
+  saving,
   keyboardFocal,
   placeholderSrc,
   placeholderName,
@@ -27,13 +29,16 @@ export function ImageUpload({
   aspectClass: string; // e.g. "aspect-square" or "aspect-video"
   onFile: (file: File | null) => void;
   onFocal: (f: { x: number; y: number }) => void;
+  previewSelection?: boolean;
+  saving?: boolean;
   keyboardFocal?: boolean;
   // The stand-in shown while there is no image: what people will see instead
   // (a group's pattern cover), or the person's initials for an avatar.
   placeholderSrc?: string;
   placeholderName?: string;
 }) {
-  const [preview, setPreview] = useState<string | null>(initialUrl ?? null);
+  const [selection, setSelection] = useState<string | null>(null);
+  const preview = selection ?? initialUrl;
   const [focal, setFocal] = useState(initialFocal);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -41,9 +46,9 @@ export function ImageUpload({
 
   useEffect(() => {
     return () => {
-      if (preview && preview.startsWith("blob:")) URL.revokeObjectURL(preview);
+      if (selection) URL.revokeObjectURL(selection);
     };
-  }, [preview]);
+  }, [selection]);
 
   async function pick(e: React.ChangeEvent<HTMLInputElement>) {
     const f = e.target.files?.[0];
@@ -55,8 +60,8 @@ export function ImageUpload({
 
     try {
       const resized = await prepareUpload(f, maxDim);
-      const url = URL.createObjectURL(resized);
-      setPreview(url);
+
+      if (previewSelection) setSelection(URL.createObjectURL(resized));
       onFile(resized);
     } catch {
       setError("Could not process that image.");
@@ -66,11 +71,12 @@ export function ImageUpload({
   }
 
   function clear() {
-    setPreview(initialUrl ?? null);
+    setSelection(null);
     onFile(null);
   }
 
   function pointFromClick(e: React.MouseEvent<HTMLDivElement>) {
+    if (saving) return;
     const rect = e.currentTarget.getBoundingClientRect();
     setPoint({
       x: Math.min(100, Math.max(0, Math.round(((e.clientX - rect.left) / rect.width) * 100))),
@@ -85,7 +91,7 @@ export function ImageUpload({
 
   const chooser = (
     <>
-      <Button variant="secondary" onClick={() => inputRef.current?.click()} disabled={busy}>
+      <Button variant="secondary" onClick={() => inputRef.current?.click()} disabled={busy || saving}>
         {busy ? "Processing…" : preview ? "Choose different image" : "Choose photo"}
       </Button>
       <HiddenFileInput ref={inputRef} accept="image/jpeg,image/png,image/gif" onChange={pick} />
@@ -145,9 +151,7 @@ export function ImageUpload({
       )}
       <div className="flex gap-2 mt-2">
         {chooser}
-        <Button variant="secondary" onClick={clear}>
-          Clear
-        </Button>
+        {previewSelection && <Button variant="secondary" onClick={clear}>Clear</Button>}
       </div>
       {error && <FormError layout="mt-1">{error}</FormError>}
     </div>
