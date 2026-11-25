@@ -45,11 +45,13 @@ where only the server's marker shows work as usual. A copy under a page path
 never reaches the server; over HTTPS a copy can only have the plain name,
 since `__Host-` forbids any path but `/` and any domain.
 Its response carries `Fold-Session-Checked: v2 <M> <user id | anon>`.
+If the cookie cannot be verified, bootstrap issues a fresh anonymous cookie
+and CSRF token. This lets a browser sign in again after the signing key changes.
 
 A participating request sends `Fold-Session-Check: v2` and its pinned T as
 `X-CSRF-Token`, on reads as well as writes. The server compares T with the
 cookie the request carried before it mints anything: a missing cookie, a
-cookie with no T, a different T, or a doubled header answers the usual
+cookie that cannot be verified, a cookie with no T, a different T, or a doubled header answers the usual
 `403 session_expired` with no `Set-Cookie`. A route that takes part
 acknowledges a usable answer with `Fold-Session-Checked: v2 <M> <viewer>`,
 naming the viewer its deciding read judged, on a success and on an actionable
