@@ -46,3 +46,36 @@ credentials, personal data, or exploit instructions.
   the date's room. Product: **3**. The issue is intentionally not fixed.
 - Evidence: `apiSetDateRoom` in `api_room_bookings.go`; `lockManagedEventIn` in `api_events.go` reads the
   actor after the lock for the authority decision only.
+
+## Repeated room changes send repeated notices to an event's other runners
+
+- Date: 2026-11-24. Reviewed revision: `57cbf523d7b6ea966b294cee1afc2f2ae760f526` (PR #491).
+- Each real change of an event's room plans writes one `room.changed` notice to the event's other leaders
+  or hosts, and its email where they allow event email. A leader, host or admin who changes a room over and
+  over sends as many. Push has its own limits; email is not coalesced.
+- Likelihood: **2/10**. The sender must be someone trusted to run the event and must make real changes
+  repeatedly.
+- Severity: **2/10**. The recipients are the event's few runners, and every change is audited.
+  Product: **4**. The issue is intentionally not fixed.
+- Evidence: `notifyDateRoomChanged` and `notifySeriesRoomChanged` in `notices_rooms.go`.
+
+## A disabled host of a church-wide event still gets a stored room notice
+
+- Date: 2026-11-24. Reviewed revision: `57cbf523d7b6ea966b294cee1afc2f2ae760f526` (PR #491).
+- `eventRunnerIDs` leaves out deleted hosts but not disabled ones, so a disabled host of a church-wide event
+  gets a stored `room.changed` row, as they already get `room.lost`. Email and push check the account's
+  status at delivery and send nothing.
+- Likelihood: **3/10**. A disabled account can keep its host rows while another runner changes the room.
+- Severity: **1/10**. The person cannot sign in; if the account is enabled again they are still a host of
+  that event. Product: **3**. The issue is intentionally not fixed.
+- Evidence: `eventRunnerIDs` in `api_registrations.go`; `lockRecipients` in `internal/notify/notify.go`.
+
+## A leader removed while a room change commits can get that one notice
+
+- Date: 2026-11-24. Reviewed revision: `57cbf523d7b6ea966b294cee1afc2f2ae760f526` (PR #491).
+- The recipients of `room.changed` are read inside the room change's transaction. A leader whose removal
+  commits after that read and before the change commits still gets the notice.
+- Likelihood: **1/10**. The removal must land inside one request.
+- Severity: **2/10**. The person ran the event a moment earlier and learns its title, who changed the room
+  and the date. Product: **2**. The issue is intentionally not fixed.
+- Evidence: `roomChangedTo` in `notices_rooms.go`.

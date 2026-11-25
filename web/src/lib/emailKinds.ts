@@ -5,7 +5,7 @@ import type { EmailKind } from "../types";
 // …"). The order is the order the server lists them in.
 export const EMAIL_KIND_COPY: Record<EmailKind["category"], { label: string; hint: string }> = {
   groups: { label: "Group updates", hint: "When your groups change or are approved" },
-  events: { label: "Event updates", hint: "Cancelled or restored dates you can see" },
+  events: { label: "Event updates", hint: "Cancelled or restored dates you can see, and room changes for events you run" },
   messages: { label: "Messages from leaders", hint: "Announcements from your group leaders, event hosts and church admins" },
   admin: { label: "Admin notices", hint: "For church admins" },
 };
