@@ -1,5 +1,4 @@
 import { useEffect, useRef, useState, type KeyboardEvent } from "react";
-import { ApiError } from "../api/core";
 import { DateRooms, type DateRoomInput } from "../api/rooms";
 import { useAuth } from "../auth";
 import { errorCode } from "../lib/errors";
@@ -8,7 +7,7 @@ import { RefusedSaveLine, useRefusedSave } from "../lib/refusedSave";
 import { NO_ROOM, roomOptionLabel } from "../lib/roomLabels";
 import { outcomeOf } from "../lib/rosterWrites";
 import { useAction } from "../lib/useAction";
-import { answerNames, useRevisionSave } from "../lib/useRevisionSave";
+import { answerNames, refusedAgain, useManagedSave } from "../lib/useRevisionSave";
 import type { DateRoomsResponse, RoomBooking, RoomBookingResponse } from "../types";
 import { Field, FormError, Input, Select } from "./ui/Field";
 import { Button } from "./ui/Button";
@@ -44,9 +43,6 @@ function compared(value: DateRoomFields, padding: boolean): DateRoomFields {
 
   return lost ? { roomId, lost } : { roomId };
 }
-
-// Every send was refused while nothing the pick writes changed: the control says its ordinary refusal.
-const refusedEverySend = () => new ApiError(409, "date room changed", { code: "date_room_changed" });
 
 // The Room control of "Edit this date" and the single-date "Edit event"
 // (M2.1b, DEC-95: beside Location, not under More options). Booking is its own
@@ -121,33 +117,30 @@ function DateRoomControl({ eventId, date, id, read, show, onChanged, onGone }: {
   const teardownRef = useRef<HTMLInputElement>(null);
   const { rooms, booking } = read;
   const suggestions = read.suggestions ?? null;
-  // The last read the protocol made and the last answer that landed, so the control shows what it judged.
-  const lastRead = useRef<DateRoomsResponse | null>(null);
-  const lastAnswer = useRef<RoomBookingResponse | null>(null);
-  const landedAnswer = () => lastAnswer.current;
 
-  const save = useRevisionSave<DateRoomFields, DateRoomFields>({
-    opened: roomFields(booking),
+  const save = useManagedSave<DateRoomsResponse, DateRoomFields, DateRoomFields, RoomBookingResponse>({
+    opened: read,
     revision: read.dateRoom.revision,
     read: async () => {
       const now = await DateRooms.list(eventId, date);
-      lastRead.current = now;
 
-      return { allowed: true, revision: now.dateRoom.revision, value: roomFields(now.booking) };
+      return { allowed: true, revision: now.dateRoom.revision, row: now };
     },
+    value: (r) => roomFields(r.booking),
+    stored: (res) => ({ ...read, booking: res.booking, dateRoom: res.dateRoom }),
     fields: (value) => compared(value, padding.current),
     answers: answerNames("dateRoom", read.dateRoom.id),
-    stays: () => roomFields(lastAnswer.current?.booking ?? null),
+    stays: true,
     gone: pickGone,
     changedCode: "date_room_changed",
-    onConflict: (why) => {
+    onConflict: (why, now) => {
       if (why === "gone") {
         onGone();
 
         return;
       }
 
-      if (lastRead.current) show(lastRead.current);
+      if (now) show(now);
       setPending(null);
       refusal.refused(why);
       onChanged?.(true);
@@ -169,20 +162,16 @@ function DateRoomControl({ eventId, date, id, read, show, onChanged, onGone }: {
   function send(body: DateRoomInput, intended: DateRoomFields, done: (b: RoomBooking | null) => string) {
     refusal.clear();
     void action.run(async () => {
-      lastAnswer.current = null;
       padding.current = body.setupMinutes !== undefined;
+      let stored: DateRoomsResponse | undefined;
 
       try {
-        const sent = await save(async (revision) => {
-          const res = await DateRooms.set(eventId, date, body, revision);
-          lastAnswer.current = res;
+        const { sent, row } = await save((revision) => DateRooms.set(eventId, date, body, revision), intended, body.overlapReason ?? "");
 
-          return res;
-        }, intended, body.overlapReason ?? "");
-
-        if (sent === "refused") throw refusedEverySend();
+        if (sent === "refused") throw refusedAgain("date_room_changed");
 
         if (sent !== "saved") return false;
+        stored = row;
       } catch (e) {
         if (roomsTurnedOff(e)) {
           setOff(true);
@@ -203,9 +192,6 @@ function DateRoomControl({ eventId, date, id, read, show, onChanged, onGone }: {
       }
 
       // Landed, the answer is what was stored; already stored by a send whose answer was lost, the read is.
-      const res = landedAnswer();
-      const stored = res ? { ...read, booking: res.booking, dateRoom: res.dateRoom } : lastRead.current;
-
       if (stored) show(stored);
       setPending(null);
       overlap.reset();
