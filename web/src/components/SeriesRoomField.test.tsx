@@ -147,7 +147,7 @@ it("shows the error, books nothing, and leaves the button to try again", async (
   show();
   await pickAndBook("1");
   expect(await screen.findByRole("alert")).toHaveTextContent("Only an admin can book that room.");
-  expect(screen.getByRole("button", { name: "Book for every date" })).toBeEnabled();
+  expect(screen.getByRole("button", { name: "Book for every date" })).toHaveAttribute("aria-disabled", "false");
   expect(screen.getByRole("status")).toBeEmptyDOMElement();
 });
 
@@ -227,20 +227,20 @@ it("names the button for what it does, and disables it when the choice is what i
   vi.mocked(SeriesRooms.list).mockResolvedValue({ revision: "r1", rooms: [hall, closet], dates: 10, defaultRoom: { id: 1, name: "Fellowship Hall", building: "Main" }, ownRooms: [], needsRoom: [], pending: 0 });
   show();
   const box = await select();
-  expect(screen.getByRole("button", { name: "Book for every date" })).toBeDisabled();
+  expect(screen.getByRole("button", { name: "Book for every date" })).toHaveAttribute("aria-disabled", "true");
   await userEvent.selectOptions(box, "3");
-  expect(screen.getByRole("button", { name: "Book for every date" })).toBeEnabled();
+  expect(screen.getByRole("button", { name: "Book for every date" })).toHaveAttribute("aria-disabled", "false");
   await userEvent.selectOptions(box, "none");
   expect(screen.queryByRole("button", { name: "Book for every date" })).not.toBeInTheDocument();
-  expect(screen.getByRole("button", { name: "Stop the series room" })).toBeEnabled();
+  expect(screen.getByRole("button", { name: "Stop the series room" })).toHaveAttribute("aria-disabled", "false");
   await userEvent.selectOptions(box, "1");
-  expect(screen.getByRole("button", { name: "Book for every date" })).toBeDisabled();
+  expect(screen.getByRole("button", { name: "Book for every date" })).toHaveAttribute("aria-disabled", "true");
 });
 
 it("disables the button with no series room and No series room chosen", async () => {
   show();
   await select();
-  expect(screen.getByRole("button", { name: "Stop the series room" })).toBeDisabled();
+  expect(screen.getByRole("button", { name: "Stop the series room" })).toHaveAttribute("aria-disabled", "true");
 });
 
 it("says before booking how many dates the chosen room is busy on, to anyone", async () => {
@@ -446,7 +446,7 @@ it("offers a plain pick without claiming what was booked when an all-busy confir
   await userEvent.type(reason, "Choir moved");
   await userEvent.click(screen.getByRole("button", { name: "Book anyway" }));
   await waitFor(() => expect(SeriesRooms.set).toHaveBeenCalledTimes(2));
-  await waitFor(() => expect(screen.getByRole("button", { name: "Book anyway" })).toBeEnabled());
+  await waitFor(() => expect(screen.getByRole("button", { name: "Book anyway" })).toHaveAttribute("aria-disabled", "false"));
   expect(screen.queryByText(allBusy)).not.toBeInTheDocument();
   expect(screen.getByRole("textbox", { name: /^Reason for double-booking/ })).toHaveValue("Choir moved");
   await userEvent.click(screen.getByRole("button", { name: "Book anyway" }));
@@ -647,16 +647,16 @@ it("books the series room again for the listed dates when only the box is ticked
   show();
   await select();
   const book = screen.getByRole("button", { name: "Book for every date" });
-  expect(book).toBeDisabled();
+  expect(book).toHaveAttribute("aria-disabled", "true");
   await userEvent.click(screen.getByRole("checkbox", { name: "Also change these dates to Fellowship Hall · Main" }));
-  expect(book).toBeEnabled();
+  expect(book).toHaveAttribute("aria-disabled", "false");
   await userEvent.click(book);
   expect(SeriesRooms.set).toHaveBeenCalledWith(7, { roomId: 1, includeDates: ["2026-12-08", "2026-12-15"] }, "r1");
   await waitForStatus("Booked for 1 date. Also changed 1 date that had a room of its own. 1 date keeps its own room.");
   // The list follows the answer, and the box starts clear for the next pick.
   expect(screen.getAllByRole("listitem").map((li) => li.textContent)).toEqual(["Tuesday, December 22: Chapel"]);
   expect(screen.getByRole("checkbox")).not.toBeChecked();
-  expect(screen.getByRole("button", { name: "Book for every date" })).toBeDisabled();
+  expect(screen.getByRole("button", { name: "Book for every date" })).toHaveAttribute("aria-disabled", "true");
   await pickAndBook("3");
   await waitFor(() => expect(SeriesRooms.set).toHaveBeenCalledTimes(2));
   expect(vi.mocked(SeriesRooms.set).mock.calls[1]).toEqual([7, { roomId: 3 }, "r2"]);
@@ -828,7 +828,7 @@ it("says why a pick was refused while a kept date waits on the series request, a
   const onChanged = show();
   await pickAndBook("2");
   expect(await screen.findByRole("alert")).toHaveTextContent("Only an admin can change this event's room request now, so the room for every date could not be changed.");
-  expect(screen.getByRole("button", { name: "Book for every date" })).toBeEnabled();
+  expect(screen.getByRole("button", { name: "Book for every date" })).toHaveAttribute("aria-disabled", "false");
   expect(await select()).toBeEnabled();
   expect(onGone).not.toHaveBeenCalled();
   expect(onChanged).not.toHaveBeenCalled();

@@ -220,7 +220,7 @@ function ProfileDetails() {
 
   return <div className="space-y-6">
     {user.accountType !== "teen" && <div className="space-y-4">
-      <ImageUpload key={user.avatarUrl || "none"} label="Profile picture" initialUrl={user.avatarUrl || undefined} initialFocal={{ x: focalX, y: focalY }} maxDim={512} aspectClass="aspect-square max-w-48!" placeholderName={publicName(user)} onFile={savePictureFile} onFocal={saveFocal} />
+      <ImageUpload key={user.avatarUrl || "none"} label="Profile picture" initialUrl={user.avatarUrl || undefined} initialFocal={{ x: focalX, y: focalY }} maxDim={512} aspectClass="aspect-square max-w-48!" placeholderName={publicName(user)} onFile={savePictureFile} onFocal={saveFocal} previewSelection={false} saving={pictureBusy} />
       <p className="text-xs text-text-muted mt-3">A new picture is saved as soon as you choose it.</p>
       {pictureStatus && <p role="status" className="text-success text-sm mt-3">{pictureStatus}</p>}
       {pictureError && <FormError layout="mt-3">{pictureError}</FormError>}

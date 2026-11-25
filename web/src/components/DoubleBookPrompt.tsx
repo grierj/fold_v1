@@ -47,7 +47,7 @@ export function DoubleBookPrompt({ reasonId, message, details, prompt, busy, onB
       <Field id={reasonId} label="Reason for double-booking" error={prompt.error}>
         <Textarea rows={2} maxLength={OVERLAP_REASON_MAX} value={prompt.reason} onChange={(e) => prompt.setReason(e.target.value)} />
       </Field>
-      <Button variant="secondary" disabled={busy} onClick={onBookAnyway}>Book anyway</Button>
+      <Button variant="secondary" aria-disabled={busy} onClick={onBookAnyway}>Book anyway</Button>
     </div>
   );
 }
