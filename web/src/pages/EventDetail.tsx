@@ -20,7 +20,7 @@ import { Button, ButtonLink } from "../components/ui/Button";
 import { ExternalLinkIcon } from "../components/icons";
 import { EventVisibilityControl, type VisibilityDraftHold } from "../components/EventVisibility";
 import type { RevisionConflict } from "../lib/useRevisionSave";
-import { RefusedSaveLine, ResourceRefusal, resourceRefused, useRefusedSave, useResourceRefusal } from "../lib/refusedSave";
+import { RefusedSaveLine, ResourceRefusal, resourceRefused, useRefusedSave, useResourceRefusal, type ResourceReadOutcome } from "../lib/refusedSave";
 import { RsvpButtons } from "../components/RsvpButtons";
 import { GuestRegistrationForm } from "../components/GuestRegistrationForm";
 import { DateActions } from "../components/DateActions";
@@ -46,6 +46,8 @@ import { useRosterSettled } from "../lib/rosterWrites";
 import { seriesSchedules } from "../lib/registration";
 
 const ManageRoster = lazy(() => import("../components/ManageRoster").then((module) => ({ default: module.ManageRoster })));
+
+type EditorRead = "visibility" | "room";
 
 // React generates new ids for unnamed choices on remount. Their labels and the button names survive the read.
 function editorFocusKey(control: Element): string {
@@ -91,11 +93,13 @@ function EventDetailContent() {
   const [editing, setEditing] = useState(false);
   const seriesDraft = useRef<SeriesDraftHold | null>(null);
   const visibilityDraft = useRef<VisibilityDraftHold | null>(null);
+  const refusedEditorReads = useRef(new Set<EditorRead>());
   useKeptDraft(() => seriesDraft.current !== null || visibilityDraft.current !== null, editing);
 
   const closeEditors = useCallback(() => {
     seriesDraft.current = null;
     visibilityDraft.current = null;
+    refusedEditorReads.current.clear();
     setEditing(false);
   }, []);
 
@@ -153,26 +157,34 @@ function EventDetailContent() {
   const readFor = useRef(auth);
   const authPending = auth.loading || (credential === null && readFor.current.credential !== null && !!user);
   const rechecking = authPending || readFor.current !== auth;
-  const { retry } = load;
+  const { retry, close } = load;
+
+  const retryEvent = useCallback(() => {
+    refusedEditorReads.current.clear();
+    void retry();
+  }, [retry]);
 
   useLayoutEffect(() => {
     if (authPending || readFor.current === auth) return;
     readFor.current = auth;
-    void retry();
-  }, [authPending, auth, retry]);
+    retryEvent();
+  }, [authPending, auth, retryEvent]);
 
-  const page = rechecking ? null : load.data ?? null;
+  const status = load.error instanceof ApiError ? load.error.status : null;
+  const missing = status === 404;
+  const denied = status === 403;
+  const page = rechecking || missing || denied ? null : load.data ?? null;
   const loading = rechecking || load.loading;
-  const missing = load.error instanceof ApiError && load.error.status === 404;
   useLayoutEffect(() => {
     if (authLoading || loading) return;
 
-    if (missing || (page && !page.canManage)) {
+    if (missing || denied || (page && !page.canManage)) {
       closeEditors();
     } else if (page && !page.canSetVisibility) {
       visibilityDraft.current = null;
+      refusedEditorReads.current.delete("visibility");
     }
-  }, [authLoading, loading, missing, page, closeEditors]);
+  }, [authLoading, loading, missing, denied, page, closeEditors]);
   useLayoutEffect(() => {
     if (!editAsked.current || !page || loading || authLoading) return;
     editAsked.current = false;
@@ -180,7 +192,7 @@ function EventDetailContent() {
     if (page.canManage) setEditing(true);
   }, [page, loading, authLoading]);
   useLayoutEffect(() => {
-    if (returnToEdit.current === null || loading || authLoading) return;
+    if (returnToEdit.current === null || loading || authLoading || !page) return;
     const key = returnToEdit.current;
     returnToEdit.current = null;
     const active = document.activeElement;
@@ -188,8 +200,9 @@ function EventDetailContent() {
     if (!active || active === document.body || active.id === "main") {
       const controls = editorRef.current?.querySelectorAll<HTMLElement>("input, select, textarea, button, [tabindex]") ?? [];
       const matches = key ? Array.from(controls).filter((el) => editorFocusKey(el) === key && !el.matches(":disabled")) : [];
-      const destination = matches.length === 1 ? matches[0] : editButton.current;
-      destination?.focus({ preventScroll: true });
+
+      if (matches.length === 1) matches[0].focus();
+      else editButton.current?.focus({ preventScroll: true });
     }
   }, [loading, authLoading, editing, page]);
   useLayoutEffect(() => {
@@ -203,15 +216,27 @@ function EventDetailContent() {
   const roomListRefused = useRef(false);
 
   const refreshRefusal = useCallback((intent: "read" | "write") => {
-    closeEditors();
     setPickRequest(null);
     setRoomsRevision((n) => n + 1);
 
-    if (intent === "write") refused("gone", "action");
-    else void retry();
+    if (intent === "write") {
+      closeEditors();
+      refused("gone", "action");
+    } else void retry();
   }, [closeEditors, refused, retry]);
 
-  const roomListRead = useCallback((outcome: "loaded" | "refused") => {
+  const editorRead = (source: EditorRead, outcome: ResourceReadOutcome) => {
+    if (outcome === "loaded") refusedEditorReads.current.delete(source);
+    else if (refusedEditorReads.current.has(source)) {
+      // Remounting the editor asks this child again. A second refusal supersedes the page read without starting another one.
+      close();
+    } else {
+      refusedEditorReads.current.add(source);
+      refreshRefusal("read");
+    }
+  };
+
+  const roomListRead = useCallback((outcome: ResourceReadOutcome) => {
     if (outcome === "loaded") roomListRefused.current = false;
     else if (!roomListRefused.current) {
       // This list opens by itself after a page read. A second refusal stays with the list.
@@ -297,7 +322,7 @@ function EventDetailContent() {
         <h1 className="text-3xl font-bold mb-6">Event unavailable</h1>
         <RefusedSaveLine save={refusedSave} noun="event" />
         <RefusedSaveLine save={dateRefused} noun="date" />
-        <ErrorNotice message={error ?? "We couldn't load this event."} onRetry={() => void load.retry()} />
+        <ErrorNotice message={error ?? "We couldn't load this event."} onRetry={retryEvent} />
       </div>
     );
   }
@@ -398,6 +423,7 @@ function EventDetailContent() {
             locationHint={event.churchWide ? undefined : "Leave it blank to use the group's location."}
             roomDate={single ? next.date : undefined}
             onRoomChanged={() => { setRoomsRevision((n) => n + 1); void load.reload(); }}
+            onRoomRead={(outcome) => editorRead("room", outcome)}
             onSaved={() => {
               parkFocus();
               setPanelUpdated(true);
@@ -426,6 +452,7 @@ function EventDetailContent() {
               visibility={event.visibility}
               leaderOpened={event.leaderOpened}
               revision={event.revision}
+              onRead={(outcome) => editorRead("visibility", outcome)}
               onSaved={() => {
                 parkFocus();
                 setPanelUpdated(true);
@@ -447,7 +474,7 @@ function EventDetailContent() {
           onPick={(d) => setPickRequest((r) => ({ date: d, seq: (r?.seq ?? 0) + 1 }))}
           onGone={() => closeOnConflict("gone")}
           onRead={roomListRead}
-          onRetryPage={() => refreshRefusal("read")}
+          onRecheckPage={() => refreshRefusal("read")}
         />
       )}
 

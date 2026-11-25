@@ -59,6 +59,8 @@ export function resourceRefused(cause: unknown): boolean {
   );
 }
 
+export type ResourceReadOutcome = "loaded" | "refused";
+
 type Refresh = (intent: "read" | "write") => void;
 
 export const ResourceRefusal = createContext<Refresh | null>(null);

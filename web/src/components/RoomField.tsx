@@ -3,7 +3,7 @@ import { DateRooms, type DateRoomInput } from "../api/rooms";
 import { useAuth } from "../auth";
 import { errorCode } from "../lib/errors";
 import { roomName } from "../lib/place";
-import { RefusedSaveLine, useRefusedSave } from "../lib/refusedSave";
+import { RefusedSaveLine, useRefusedSave, type ResourceReadOutcome } from "../lib/refusedSave";
 import { NO_ROOM, roomOptionLabel } from "../lib/roomLabels";
 import { outcomeOf } from "../lib/rosterWrites";
 import { useAction } from "../lib/useAction";
@@ -49,7 +49,7 @@ function compared(value: DateRoomFields, padding: boolean): DateRoomFields {
 // action with its own conflict answer, so a choice is saved at once and never
 // waits for the form's Save. While it loads or fails, the rest of the form
 // still works. It shows nothing while rooms are off.
-export function RoomField({ eventId, date, idPrefix, onChanged, onGone, focusOnLoad }: {
+export function RoomField({ eventId, date, idPrefix, onChanged, onGone, onRead, focusOnLoad }: {
   eventId: number;
   // The occurrence's original YYYY-MM-DD.
   date: string;
@@ -59,12 +59,13 @@ export function RoomField({ eventId, date, idPrefix, onChanged, onGone, focusOnL
   onChanged?: (refused?: boolean, stored?: RoomBooking | null) => void;
   // This person may no longer manage the date: the host does what it does then.
   onGone: () => void;
+  onRead?: (outcome: ResourceReadOutcome) => void;
   // Put the cursor in the Room select once the rooms load (a "Pick a room" action opened this).
   focusOnLoad?: boolean;
 }) {
   const id = `${idPrefix}-room`;
   // A church with rooms off, or a site we can't read, sees no rooms control at all.
-  const { enabled, off, list, loading, loadError } = useRoomPicker(() => DateRooms.list(eventId, date), [eventId, date], onGone);
+  const { enabled, off, list, loading, loadError } = useRoomPicker(() => DateRooms.list(eventId, date), [eventId, date], onGone, onRead);
 
   const focused = useRef(false);
   useEffect(() => {

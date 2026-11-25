@@ -2632,6 +2632,12 @@ describe("EventDetail when a series save meets someone else's change", () => {
     render(<main id="main" tabIndex={-1}><MemoryRouter initialEntries={["/events/7"]}><RosterWritesProvider><Routes><Route path="/events/:id" element={<EventDetail />} /></Routes></RosterWritesProvider></MemoryRouter></main>);
   }
 
+  async function draftBoth(button = "Edit event") {
+    await userEvent.click(await screen.findByRole("button", { name: button }));
+    await userEvent.type(screen.getByLabelText("Title"), " night");
+    await userEvent.click(screen.getByRole("radio", { name: /^Private/ }));
+  }
+
   // Opens the editor, types, and saves into a refusal whose read shows `editorRead`; the page's read after it is held.
   async function saveIntoRefusal(editorRead: () => Promise<EventDetailResponse>) {
     vi.mocked(Events.get).mockResolvedValueOnce(opened).mockImplementationOnce(editorRead);
@@ -2691,7 +2697,7 @@ describe("EventDetail when a series save meets someone else's change", () => {
     else expect(Events.update).toHaveBeenCalledExactlyOnceWith(7, expect.objectContaining({ title: "Hybrid study night", revision: "r1" }));
   });
 
-  it("closes a restored draft when its override count is refused after a series save", async () => {
+  it("restores a visibility draft when its override count is refused after a series save", async () => {
     const stored = { ...opened, event: { ...opened.event, title: "Hybrid study night", revision: "r2" } };
     const count = deferred<Awaited<ReturnType<typeof Events.visibilityImpact>>>();
     const recheck = deferred<EventDetailResponse>();
@@ -2718,12 +2724,157 @@ describe("EventDetail when a series save meets someone else's change", () => {
 
     await act(async () => recheck.resolve(stored));
     const edit = await screen.findByRole("button", { name: "Edit event" });
-    expect(edit).toHaveFocus();
-    expect(edit).toHaveAttribute("aria-expanded", "false");
-    await userEvent.keyboard("{Enter}");
+    expect(edit).toHaveAttribute("aria-expanded", "true");
     expect(await screen.findByLabelText("Title")).toHaveValue("Hybrid study night");
-    expect(screen.getByRole("radio", { name: /^Public/ })).toBeChecked();
+    const restored = screen.getByRole("radio", { name: /^Private/ });
+    expect(restored).toBeChecked();
+    expect(restored).toHaveFocus();
     expect(Events.setVisibility).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { canManage: true, canSetVisibility: true },
+    { canManage: true, canSetVisibility: false },
+    { canManage: false, canSetVisibility: false },
+  ])("restores only drafts the event read authorizes ($canManage, $canSetVisibility)", async (rights) => {
+    const count = deferred<Awaited<ReturnType<typeof Events.visibilityImpact>>>();
+    const fresh = deferred<EventDetailResponse>();
+    const current = { ...opened, ...rights, event: { ...opened.event, revision: "r2" } };
+    vi.mocked(Events.get).mockResolvedValueOnce(opened).mockReturnValueOnce(fresh.promise).mockResolvedValue(current);
+    vi.mocked(Events.visibilityImpact).mockReturnValueOnce(count.promise);
+    vi.mocked(Events.update).mockResolvedValue({ event: { ...current.event, title: "Hybrid study night", revision: "r3" } });
+    vi.mocked(Events.setVisibility).mockResolvedValue({ event: { ...current.event, visibility: "private", revision: "r4" } });
+    renderInMain();
+    await draftBoth();
+
+    await act(async () => count.reject(new ApiError(404, "missing", { code: "not_found" })));
+    await waitFor(() => expect(Events.get).toHaveBeenCalledTimes(2));
+    showsNothingOfTheEvent();
+
+    await act(async () => fresh.resolve(current));
+    await screen.findByRole("heading", { name: "Hybrid study", level: 1 });
+
+    if (!rights.canManage) {
+      expect(screen.getByRole("main")).toHaveFocus();
+      expect(screen.queryByRole("button", { name: "Edit event" })).not.toBeInTheDocument();
+      expect(screen.queryByLabelText("Title")).not.toBeInTheDocument();
+    } else {
+      expect(screen.getByLabelText("Title")).toHaveValue("Hybrid study night");
+      const focused = rights.canSetVisibility ? screen.getByRole("radio", { name: /^Private/ }) : screen.getByRole("button", { name: "Edit event" });
+      expect(focused).toHaveFocus();
+      await userEvent.click(screen.getByRole("button", { name: "Save series" }));
+      expect(Events.update).toHaveBeenCalledExactlyOnceWith(7, expect.objectContaining({ title: "Hybrid study night", revision: "r1" }));
+    }
+
+    if (rights.canSetVisibility) {
+      expect(await screen.findByRole("radio", { name: /^Private/ })).toBeChecked();
+      await userEvent.click(screen.getByRole("button", { name: "Save visibility" }));
+      expect(Events.setVisibility).toHaveBeenCalledExactlyOnceWith(7, expect.objectContaining({ visibility: "private", revision: "r1" }));
+    } else {
+      expect(screen.queryByRole("radio", { name: /^Private/ })).not.toBeInTheDocument();
+      expect(Events.setVisibility).not.toHaveBeenCalled();
+    }
+  });
+
+  it("stops automatic rechecks after a second refusal and keeps the page hidden until Try again", async () => {
+    const count = deferred<Awaited<ReturnType<typeof Events.visibilityImpact>>>();
+    const unavailable = new ApiError(403, "refused", { code: "not_allowed" });
+    vi.mocked(Events.get).mockResolvedValue(opened);
+    vi.mocked(Events.visibilityImpact).mockReturnValueOnce(count.promise).mockRejectedValue(unavailable);
+    renderInMain();
+    await draftBoth();
+
+    await act(async () => count.reject(unavailable));
+    expect(await screen.findByRole("heading", { name: "Event unavailable" })).toBeInTheDocument();
+    showsNothingOfTheEvent();
+    expect(screen.queryByText("Hall", { exact: true })).not.toBeInTheDocument();
+    expect(screen.getByRole("main")).toHaveFocus();
+    expect(Events.get).toHaveBeenCalledTimes(2);
+    expect(Events.visibilityImpact).toHaveBeenCalledTimes(2);
+
+    vi.mocked(Events.visibilityImpact).mockResolvedValue({ visibility: "public", currentVisibility: "public", tightened: [], leaderOpened: [] });
+    await userEvent.click(screen.getByRole("button", { name: "Try again" }));
+    expect(await screen.findByLabelText("Title")).toHaveValue("Hybrid study night");
+    const restored = screen.getByRole("radio", { name: /^Private/ });
+    expect(restored).toBeChecked();
+    expect(restored).toHaveFocus();
+    expect(Events.get).toHaveBeenCalledTimes(3);
+    expect(Events.visibilityImpact).toHaveBeenCalledTimes(3);
+    expect(Events.update).not.toHaveBeenCalled();
+    expect(Events.setVisibility).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { status: 403, code: "not_allowed", heading: "Event unavailable" },
+    { status: 404, code: "not_found", heading: "Event not found" },
+    { status: 500, code: "server_error", heading: "Event unavailable" },
+  ])("stays closed when the event access check answers $status", async ({ status, code, heading }) => {
+    const count = deferred<Awaited<ReturnType<typeof Events.visibilityImpact>>>();
+    const fresh = deferred<EventDetailResponse>();
+    vi.mocked(Events.get).mockResolvedValueOnce(opened).mockReturnValueOnce(fresh.promise).mockResolvedValue(theirs);
+    vi.mocked(Events.visibilityImpact).mockReturnValueOnce(count.promise);
+    renderInMain();
+    await draftBoth();
+    await act(async () => count.reject(new ApiError(403, "refused", { code: "not_allowed" })));
+    await waitFor(() => expect(Events.get).toHaveBeenCalledTimes(2));
+    await act(async () => fresh.reject(new ApiError(status, "event check failed", { code })));
+    expect(await screen.findByRole("heading", { name: heading })).toBeInTheDocument();
+    showsNothingOfTheEvent();
+    expect(screen.queryByText("Hall", { exact: true })).not.toBeInTheDocument();
+
+    if (status === 404) return;
+
+    await userEvent.click(screen.getByRole("button", { name: "Try again" }));
+    const edit = await screen.findByRole("button", { name: "Edit event" });
+
+    if (status === 403) {
+      expect(edit).toHaveAttribute("aria-expanded", "false");
+      await userEvent.click(edit);
+      expect(screen.getByLabelText("Title")).toHaveValue("Bible study");
+      expect(screen.getByRole("radio", { name: /^Public/ })).toBeChecked();
+    } else {
+      expect(edit).toHaveAttribute("aria-expanded", "true");
+      expect(screen.getByLabelText("Title")).toHaveValue("Hybrid study night");
+      expect(screen.getByRole("radio", { name: /^Private/ })).toBeChecked();
+    }
+  });
+
+  it.each([
+    { inline: false, button: "Edit event", recurrenceRule: "" },
+    { inline: true, button: "Edit series", recurrenceRule: "FREQ=WEEKLY;COUNT=3" },
+  ])("restores both drafts when the event read still authorizes them after a room read is refused (inline: $inline)", async ({ inline, button, recurrenceRule }) => {
+    const room = deferred<Awaited<ReturnType<typeof DateRooms.list>>>();
+    const fresh = deferred<EventDetailResponse>();
+    vi.mocked(Events.get).mockResolvedValueOnce({ ...opened, event: { ...opened.event, recurrenceRule } }).mockReturnValueOnce(fresh.promise);
+    const site = vi.spyOn(Site, "get").mockResolvedValue({ name: "Fold", timezone: "UTC", selfSignup: "off", roomsEnabled: true, pushEnabled: true });
+    const roomRead = vi.spyOn(DateRooms, "list").mockReturnValueOnce(room.promise).mockResolvedValue({ rooms: [], booking: null, dateRoom: { id: 1, revision: "r2" } });
+
+    const listRead = vi.spyOn(SeriesRooms, "list").mockResolvedValue({
+      revision: "r2", rooms: [], dates: 1, defaultRoom: null, ownRooms: [], pending: 0,
+      needsRoom: inline ? [{ date: "2026-12-15", roomName: "Fellowship Hall", status: "requested" }] : [],
+    });
+
+    try {
+      renderInMain();
+      await draftBoth(button);
+
+      if (inline) await userEvent.click(await screen.findByRole("button", { name: /^Pick a room for / }));
+      await waitFor(() => expect(roomRead).toHaveBeenCalledOnce());
+
+      await act(async () => room.reject(new ApiError(403, "refused", { code: "not_allowed" })));
+      await waitFor(() => expect(Events.get).toHaveBeenCalledTimes(2));
+      showsNothingOfTheEvent();
+
+      await act(async () => fresh.resolve({ ...theirs, event: { ...theirs.event, recurrenceRule } }));
+      expect(await screen.findByRole("combobox", { name: inline ? /^Room for every date/ : /^Room/ })).toBeInTheDocument();
+      expect(screen.getByLabelText("Title")).toHaveValue("Hybrid study night");
+      expect(screen.getByRole("radio", { name: /^Private/ })).toBeChecked();
+      expect(screen.queryByText(UNSAVED)).not.toBeInTheDocument();
+    } finally {
+      site.mockRestore();
+      roomRead.mockRestore();
+      listRead.mockRestore();
+    }
   });
 
   it("keeps the opening visibility revision across a quiet reread and a series save", async () => {

@@ -1,8 +1,7 @@
-import { resourceRefused } from "../lib/refusedSave";
 import { useEffect, useRef, useState } from "react";
 import { SeriesRooms } from "../api/rooms";
 import { errorText } from "../lib/errors";
-import { choiceRefused } from "../lib/refusedSave";
+import { choiceRefused, resourceRefused, type ResourceReadOutcome } from "../lib/refusedSave";
 import { useLoad } from "../lib/useLoad";
 import { useRoomsEnabled } from "../lib/useSite";
 import { formatDayLong } from "../lib/when";
@@ -38,7 +37,7 @@ function leftList(day: string, pick: { refused: boolean; stored: RoomBooking | n
 // date, and otherwise the one-date Room control right under the row (the page
 // lists only the next few months; this list reaches further). It shows
 // nothing while rooms are off or when every date has its room.
-export function NeedsRoomList({ eventId, revision, hasDate, onPick, onGone, onRead, onRetryPage }: {
+export function NeedsRoomList({ eventId, revision, hasDate, onPick, onGone, onRead, onRecheckPage }: {
   eventId: number;
   // Changes whenever a room or date on the page changes, to ask again.
   revision: number;
@@ -47,8 +46,8 @@ export function NeedsRoomList({ eventId, revision, hasDate, onPick, onGone, onRe
   onPick: (date: string) => void;
   // A row's Room control found this person may no longer manage the date: the page does what it does then.
   onGone: () => void;
-  onRead: (outcome: "loaded" | "refused") => void;
-  onRetryPage: () => void;
+  onRead: (outcome: ResourceReadOutcome) => void;
+  onRecheckPage: () => void;
 }) {
   // Null until the site settings are read; they don't change while this is open.
   // A church with rooms off, or a site we can't read, sees no list at all.
@@ -107,7 +106,7 @@ export function NeedsRoomList({ eventId, revision, hasDate, onPick, onGone, onRe
     return (
       <div className="mt-6 space-y-2">
         <FormError>{error}</FormError>
-        <Button variant="secondary" onClick={resourceRefused(list.error) ? onRetryPage : list.retry}>Try again</Button>
+        <Button variant="secondary" onClick={resourceRefused(list.error) ? onRecheckPage : list.retry}>Try again</Button>
       </div>
     );
   }
@@ -164,6 +163,7 @@ export function NeedsRoomList({ eventId, revision, hasDate, onPick, onGone, onRe
 
                       setOwn((c) => c + 1);
                     }}
+                      onRead={(outcome) => { if (outcome === "refused") onRecheckPage(); }}
                       onGone={() => {
                         watching.current = null;
                         setOpen(null);

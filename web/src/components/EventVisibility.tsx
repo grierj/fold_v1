@@ -1,6 +1,6 @@
 import { useRosterActivityOf } from "../lib/rosterWrites";
 import { Form } from "./ui/Form";
-import { useEffect, useId, useLayoutEffect, useRef, useState, type RefObject } from "react";
+import { useEffect, useEffectEvent, useId, useLayoutEffect, useRef, useState, type RefObject } from "react";
 import { ApiError } from "../api/core";
 import { Events } from "../api/events";
 import type { Visibility, VisibilityImpact } from "../types";
@@ -11,7 +11,7 @@ import { decisionImpact, reviewOutdated } from "../lib/visibilityConsent";
 import { ROSTER_STALE, ROSTER_WAITING, visibilityRank } from "../lib/visibilityChange";
 import { useFocusHome, useKeepFocusHome, useLockedFocus } from "../lib/focusHome";
 import { useAction, type Action } from "../lib/useAction";
-import { useResourceRefusal } from "../lib/refusedSave";
+import { resourceRefused, type ResourceReadOutcome } from "../lib/refusedSave";
 import { answerNames, lostAuthority, useRevisionSave, type LostSend, type RevisionConflict } from "../lib/useRevisionSave";
 import { Checkbox, Choices, Field, FormError, Input, Radio } from "./ui/Field";
 import { Button } from "./ui/Button";
@@ -60,6 +60,7 @@ export function EventVisibilityControl({
   churchWide,
   revision,
   onSaved,
+  onRead,
   onConflict,
   hold,
   action: shared,
@@ -74,6 +75,7 @@ export function EventVisibilityControl({
   // The event page's revision when this control opened.
   revision?: string;
   onSaved: () => void;
+  onRead?: (outcome: ResourceReadOutcome) => void;
   hold?: RefObject<VisibilityDraftHold | null>;
   // The save was refused and not sent again: the page shows the event as it is now.
   onConflict?: (why: RevisionConflict) => void;
@@ -120,15 +122,22 @@ export function EventVisibilityControl({
     if (waiting && document.activeElement === saveButton.current) home.moveHere();
   }, [waiting, home]);
   const lockFocus = useLockedFocus(home, frozen);
-  const refreshRefusal = useResourceRefusal();
+  const reportRead = useEffectEvent((outcome: ResourceReadOutcome) => onRead?.(outcome));
   useEffect(() => {
     let live = true;
-    Promise.resolve(Events.visibilityImpact(eventId, visibility)).then((impact) => { if (live) setFutureOverrides(impact?.futureOverrides ?? 0); }).catch((cause: unknown) => {
-      if (live) refreshRefusal(cause, "read");
-    });
+    Promise.resolve(Events.visibilityImpact(eventId, visibility)).then(
+      (impact) => {
+        if (!live) return;
+        setFutureOverrides(impact?.futureOverrides ?? 0);
+        reportRead("loaded");
+      },
+      (cause: unknown) => {
+        if (live && resourceRefused(cause)) reportRead("refused");
+      },
+    );
 
     return () => { live = false; };
-  }, [eventId, visibility, refreshRefusal]);
+  }, [eventId, visibility]);
 
   // What this save can write: the audience and whether it is leader-opened, which follows the group's. The page's
   // read lists 90 days of dates and a reset reaches every later one, so a refused reset is always a conflict, also

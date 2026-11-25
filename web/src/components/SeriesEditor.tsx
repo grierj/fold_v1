@@ -22,6 +22,7 @@ import { answerNames, useRevisionSave, type LostSend, type RevisionConflict } fr
 import { useFocusHome, useLockedFocus } from "../lib/focusHome";
 import { KeptDates } from "./KeptDates";
 import { useKeptRefusal } from "./keptRefusal";
+import type { ResourceReadOutcome } from "../lib/refusedSave";
 import { optionFieldOfError, validateEventOptions, type EventOptionValues, type OptionErrors } from "./eventOptionValues";
 import type { EventInput, VideoProvider, VideoReveal } from "../types";
 
@@ -144,6 +145,7 @@ export function SeriesEditor({
   onSaved,
   onClose,
   onRoomChanged,
+  onRoomRead,
   onAuthorityLost,
   onConflict,
   action: shared,
@@ -160,6 +162,7 @@ export function SeriesEditor({
   onClose?: () => void;
   // The room was booked or released (its own action, not part of Save).
   onRoomChanged?: () => void;
+  onRoomRead?: (outcome: ResourceReadOutcome) => void;
   // The kept-dates panel's read was refused: this person may no longer manage the event.
   onAuthorityLost?: () => void;
   // The save was refused and not sent again: the page shows the event as it is now (DEC-161, DEC-162).
@@ -386,9 +389,9 @@ export function SeriesEditor({
         <Field id={`s-loc-${idPrefix}`} label="Location" optional hint={locationHint}>
           <Input value={location} onChange={(e) => setLocation(e.target.value)} />
         </Field>
-        {seriesRoom && <SeriesRoomField eventId={instance.eventId} idPrefix={idPrefix} onChanged={onRoomChanged} onGone={() => onConflict?.("gone")} />}
+        {seriesRoom && <SeriesRoomField eventId={instance.eventId} idPrefix={idPrefix} onChanged={onRoomChanged} onRead={onRoomRead} onGone={() => onConflict?.("gone")} />}
         {openedRoomDate && !seriesRoom && (
-          <RoomField eventId={instance.eventId} date={openedRoomDate} idPrefix={idPrefix} onChanged={onRoomChanged} onGone={() => onConflict?.("gone")} />
+          <RoomField eventId={instance.eventId} date={openedRoomDate} idPrefix={idPrefix} onChanged={onRoomChanged} onRead={onRoomRead} onGone={() => onConflict?.("gone")} />
         )}
         <EventOptions
           idPrefix={idPrefix}
