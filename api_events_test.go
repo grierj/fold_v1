@@ -15,6 +15,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"reflect"
+	"slices"
 	"sort"
 	"strings"
 	"testing"
@@ -1603,6 +1604,66 @@ func TestDatePageTellsACancelledAnswerFromNoAnswerAndACancelledDate(t *testing.T
 	}
 	apiDo(t, without, "GET", path(dates[1]), nil, http.StatusNotFound)
 	apiDo(t, withAnswer, "GET", path(dates[1])+"/calendar.ics", nil, http.StatusNotFound)
+}
+
+func TestCancelOccurrenceChecksEndAndAuditsTheDecision(t *testing.T) {
+	f := newDateEditFixture(t)
+	path := "/api/v1/events/" + itoa(f.event.ID) + "/cancel"
+	cancel := func(t *testing.T, i, status int) {
+		t.Helper()
+		apiDo(t, f.admin, "POST", path, map[string]any{"date": f.date(i)}, status)
+	}
+
+	t.Run("a date at its end stays scheduled", func(t *testing.T) {
+		f.app.clock = func() time.Time { return f.dates[0].EndsAt }
+		cancel(t, 0, http.StatusConflict)
+		if got := occurrenceRow(t, f.app, f.dates[0].ID); got.Status != models.OccurrenceScheduled {
+			t.Fatalf("the ended date was cancelled: %+v", got)
+		}
+		if rows, _ := auditRows(t, f.app, audit.EventDatesCancelled); len(rows) != 0 {
+			t.Fatalf("the refusal wrote a cancellation audit: %+v", rows)
+		}
+	})
+
+	t.Run("an underway date can be cancelled once", func(t *testing.T) {
+		f.app.clock = func() time.Time { return f.dates[1].StartsAt.Add(time.Minute) }
+		cancel(t, 1, http.StatusOK)
+		cancel(t, 1, http.StatusOK)
+		if got := occurrenceRow(t, f.app, f.dates[1].ID); got.Status != models.OccurrenceCancelled || got.CancelSource != models.CancelSourceManual {
+			t.Fatalf("the date stayed on: %+v", got)
+		}
+		if rows, _ := auditRows(t, f.app, audit.EventDatesCancelled); len(rows) != 1 || rows[0].TargetID != f.event.ID || rows[0].ActorID == nil || *rows[0].ActorID != f.adminUser.ID {
+			t.Fatalf("cancellation audit: %+v", rows)
+		}
+	})
+
+	t.Run("a manual cancellation can take precedence over the series", func(t *testing.T) {
+		eventPath := "/api/v1/events/" + itoa(f.event.ID)
+		apiDo(t, f.admin, "PUT", eventPath, seriesBody(t, f.admin, eventPath, map[string]any{"recurrenceRule": "FREQ=WEEKLY;COUNT=2"}), http.StatusOK)
+		if got := occurrenceRow(t, f.app, f.dates[2].ID); got.CancelSource != models.CancelSourceSeries {
+			t.Fatalf("the series did not cancel the date: %+v", got)
+		}
+		cancel(t, 2, http.StatusOK)
+		if got := occurrenceRow(t, f.app, f.dates[2].ID); got.CancelSource != models.CancelSourceManual {
+			t.Fatalf("the date was not cancelled manually: %+v", got)
+		}
+		rows, _ := auditRows(t, f.app, audit.EventDatesCancelled)
+		if len(rows) != 3 {
+			t.Fatalf("expected separate audit rows for each decision: %+v", rows)
+		}
+		for i, wantSource := range []string{models.CancelSourceManual, models.CancelSourceSeries, models.CancelSourceManual} {
+			var meta struct {
+				IDs    []uint `json:"occurrenceIds"`
+				Source string `json:"source"`
+			}
+			if err := json.Unmarshal([]byte(rows[i].MetaJSON), &meta); err != nil || meta.Source != wantSource {
+				t.Fatalf("cancellation audit %d: %+v (%v)", i, meta, err)
+			}
+			if i > 0 && !slices.Contains(meta.IDs, f.dates[2].ID) {
+				t.Fatalf("cancellation audit %d omitted the date: %+v", i, meta)
+			}
+		}
+	})
 }
 
 // occurrencesForEvents is occurrencesForEventsErr for tests that only look

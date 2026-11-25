@@ -1271,6 +1271,9 @@ func (a *App) apiUpdateEvent(c *gin.Context) {
 		if err := recordSeriesClocks(tx, &locked, x, occs, addedDays, now, oldSchedule); err != nil {
 			return err
 		}
+		if err := auditDateCancellation(tx, me.ID, c.ClientIP(), ev.ID, models.CancelSourceSeries, cancelled); err != nil {
+			return err
+		}
 		err = notifyOccurrences(tx, me.ID, cancelled, notify.OccurrenceCancelled)
 		if err != nil {
 			return err
@@ -1593,6 +1596,8 @@ func deleteEventRows(tx *gorm.DB, eventIDs []uint) error {
 	return closeEmptyRoomRequests(tx)
 }
 
+var errDateCancelEnded = apiErr(http.StatusConflict, "date_cancel_ended", "This date has already ended.")
+
 func (a *App) apiCancelOccurrence(c *gin.Context) {
 	ev, ok := a.loadManagedEvent(c)
 	if !ok {
@@ -1609,35 +1614,40 @@ func (a *App) apiCancelOccurrence(c *gin.Context) {
 		fail(c, errSeriesDateInvalid)
 		return
 	}
-	var occ models.EventOccurrence
-	if err := a.DB.Where("event_id = ? AND original_date = ?", ev.ID, body.Date).First(&occ).Error; err != nil {
-		jsonError(c, http.StatusNotFound, "that date is not on this event")
-		return
-	}
 	err := a.contactMutation(contactChange{EventID: ev.ID}, func(tx *gorm.DB) error {
 		actor, _, _, err := lockManagedEventIn(tx, apiUser(c), ev.ID)
 		if err != nil {
 			return err
 		}
-		res := tx.Model(&models.EventOccurrence{}).Where("id = ? AND status <> ?", occ.ID, models.OccurrenceCancelled).
-			Updates(map[string]any{"status": models.OccurrenceCancelled, "cancel_source": models.CancelSourceManual})
-		if res.Error != nil || res.RowsAffected == 0 {
-			if res.Error == nil {
-				// Already cancelled: nobody is told twice. A person asking for
-				// this date to be cancelled makes it theirs, so a later series
-				// edit will not bring it back.
-				res.Error = tx.Model(&models.EventOccurrence{}).
-					Where("id = ? AND status = ? AND cancel_source = ?", occ.ID, models.OccurrenceCancelled, models.CancelSourceSeries).
-					Update("cancel_source", models.CancelSourceManual).Error
+		var occ models.EventOccurrence
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
+			Where("event_id = ? AND original_date = ?", ev.ID, body.Date).First(&occ).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return errOccurrenceNotFound
 			}
-			return res.Error
-		}
-		err = notifyOccurrences(tx, actor.ID, []uint{occ.ID}, notify.OccurrenceCancelled)
-		if err != nil {
 			return err
 		}
-		// A cancelled date frees its room (9.2).
-		return releaseRoomBookings(tx, []uint{occ.ID})
+		alreadyCancelled := occ.Status == models.OccurrenceCancelled
+		if alreadyCancelled && occ.CancelSource != models.CancelSourceSeries {
+			return nil
+		}
+		if !occ.EndsAt.After(a.now()) {
+			return errDateCancelEnded
+		}
+		if err := tx.Model(&occ).Updates(map[string]any{"status": models.OccurrenceCancelled, "cancel_source": models.CancelSourceManual}).Error; err != nil {
+			return err
+		}
+		ids := []uint{occ.ID}
+		if err := auditDateCancellation(tx, actor.ID, c.ClientIP(), ev.ID, models.CancelSourceManual, ids); err != nil {
+			return err
+		}
+		if alreadyCancelled {
+			return nil
+		}
+		if err := notifyOccurrences(tx, actor.ID, ids, notify.OccurrenceCancelled); err != nil {
+			return err
+		}
+		return releaseRoomBookings(tx, ids)
 	})
 	if err != nil {
 		answerEventWrite(c, err, "could not cancel")
@@ -1704,6 +1714,14 @@ func (a *App) apiRetiredDatePut(c *gin.Context) {
 		err = ackErr
 	}
 	fail(c, err)
+}
+
+func auditDateCancellation(tx *gorm.DB, actor uint, ip string, eventID uint, source string, ids []uint) error {
+	if len(ids) == 0 {
+		return nil
+	}
+	return audit.Write(tx, audit.Entry{Actor: &actor, Action: audit.EventDatesCancelled, TargetType: "event", TargetID: eventID,
+		Meta: map[string]any{"occurrenceIds": ids, "source": source}, IP: ip})
 }
 
 // restoreSeriesDates records dates a series edit just brought back and tells

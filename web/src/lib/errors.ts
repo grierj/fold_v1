@@ -167,6 +167,7 @@ export const ERROR_COPY = {
   event_full: "This event is full.",
   party_too_big: "There aren't enough seats left for everyone in your party. Try fewer guests.",
   too_many_guests: "That's more guests than this event allows. Try fewer.",
+  date_cancel_ended: "This date has already ended.",
   date_closed: "This date isn't open for registration anymore.",
   date_changed: "This date may have changed since you opened it. Check it and save again.",
   event_changed: "This event may have changed since you opened it, so your changes could not be saved. Check it and try again.",

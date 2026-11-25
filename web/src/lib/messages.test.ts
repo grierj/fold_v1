@@ -193,6 +193,8 @@ describe("push words", () => {
       .toBe("Push notifications: 3 waiting · 2 devices gone · 2 over the hourly limit");
     expect(pushHistoryLine({ sent: 0, waiting: [], missed: {} })).toBe("");
     expect(pushHistoryLine(undefined)).toBe("");
+    expect(pushHistoryLine({ sent: 0, waiting: [], missed: { "delivery could not be confirmed": 2 } }))
+      .toBe("Push notifications: 2 unconfirmed");
   });
 
   it("words one person's push on their history row", () => {
@@ -200,6 +202,7 @@ describe("push words", () => {
     expect(pushBadge({ status: "waiting", until: "8:00 AM" })).toBe("Push waiting until 8:00 AM");
     expect(pushBadge({ status: "waiting" })).toBe("Push waiting");
     expect(pushBadge({ status: "missed" })).toBe("Push didn't go out");
+    expect(pushBadge({ status: "missed", reason: "delivery could not be confirmed" })).toBe("Push delivery unconfirmed");
     expect(pushBadge({ status: "missed", reason: "push turned off by the church" })).toBe("Push didn't go out: notifications turned off by the church");
   });
 });

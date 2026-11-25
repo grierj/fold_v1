@@ -116,6 +116,7 @@ var auditIPAttribution = map[string][]auditIPRule{
 	audit.VisibilityChanged:             auditIPOrdinary,
 	audit.EventCreated:                  auditIPOrdinary,
 	audit.EventDeleted:                  auditIPOrdinary,
+	audit.EventDatesCancelled:           auditIPOrdinary,
 	audit.EventDatesRestored:            auditIPOrdinary,
 	audit.EventHostAdded:                auditIPOrdinary,
 	audit.EventHostRemoved:              auditIPOrdinary,

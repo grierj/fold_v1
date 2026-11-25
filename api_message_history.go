@@ -151,7 +151,7 @@ func recipientCountsIn(db *gorm.DB, id uint) (recipientCountsJSON, map[string]in
 			case models.RecipientQueued:
 				waiting[pushWaitUntil(g.Reason)] += g.N
 			default:
-				c.Push.Missed[g.Reason] += g.N
+				c.Push.Missed[pushMissReason(g.Reason)] += g.N
 			}
 			continue
 		}
@@ -215,8 +215,16 @@ func historyStatus(status, reason, errText string, admin bool) (string, string) 
 	return historyMissed, whyFor(status, reason, errText)
 }
 
+func pushMissReason(reason string) string {
+	if reason == "didn't go out" {
+		return pushWhyUnconfirmed
+	}
+	return reason
+}
+
 // pushHistoryStatus is a person's push in the history's terms: sent,
-// waiting (until when), or missed with its reason (admins only).
+// waiting (until when), or missed. Any manager can see uncertainty about
+// delivery. Other individual reasons are visible to admins.
 func pushHistoryStatus(status, reason string, admin bool) *historyPushJSON {
 	switch status {
 	case models.RecipientSent:
@@ -226,7 +234,8 @@ func pushHistoryStatus(status, reason string, admin bool) *historyPushJSON {
 		return &historyPushJSON{Status: historyWaiting, Until: pushWaitUntil(reason)}
 	}
 	h := &historyPushJSON{Status: historyMissed}
-	if admin {
+	reason = pushMissReason(reason)
+	if admin || reason == pushWhyUnconfirmed {
 		h.Reason = reason
 	}
 	return h
