@@ -286,7 +286,7 @@ func (a *App) claimAndSendNotification(ctx context.Context, id uint) error {
 		var txErr error
 		outcome, txErr = a.sendHeldNotification(tx, ctx, id)
 		return txErr
-	})
+	}, readCommitted)
 	if err != nil {
 		return err
 	}
@@ -297,7 +297,7 @@ func (a *App) claimAndSendNotification(ctx context.Context, id uint) error {
 }
 
 // sendHeldNotification runs inside the claim transaction. The mail is
-// built only from the notification row re-read after the claim. A fact
+// built from the notification row re-read after the claim. A fact
 // read that fails returns the error and writes nothing, so the transaction
 // rolls back. A transient send stores its reason, puts the row back to
 // queued, and returns the error after the transaction commits. The last
@@ -355,6 +355,10 @@ func (a *App) sendHeldNotification(tx *gorm.DB, ctx context.Context, id uint) (o
 		if _, err := jobs.EnqueueMany(tx, copies); err != nil {
 			return nil, err
 		}
+	}
+	n.EmailTitle, n.EmailBody, err = noticeEmailText(tx, &n, k, n.EmailTitle, n.EmailBody)
+	if err != nil {
+		return nil, err
 	}
 	msg := a.notificationEmailMessage(&n, u, k, footer)
 	sendCtx, cancel := context.WithTimeout(ctx, deliverSendTimeout)

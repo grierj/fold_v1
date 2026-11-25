@@ -154,16 +154,20 @@ var erasureResidueRules = []erasureResidueRule{
 		Plan: []residueAnchor{{residueInventory, `(?m)^\| O-13 \|[^|]*\|\s*\*\*Settled as a documented limitation\*\*`}},
 		Why:  "the church's address, typed by an admin"},
 
-	// Names inside other people's notices (O-16, RS-5): a notice is rendered
-	// once with no variables kept, so there is nothing to re-render, and finding
-	// a name in free text is forbidden (3, rule 1). The text may stay in the row
-	// it was written in.
+	// O-16 (RS-5) allows names in the stored bell and email text of the
+	// original row. T26 describes the name-free email after erasure.
 	{RuleID: "O-16", Table: "Notification", Column: "body", Owner: residueU, Fate: residueMay,
 		Plan: []residueAnchor{{residueInventory, `(?m)^\| O-16 \|[^|]*\|\s*\*\*Confirmed`}},
 		Why:  "a name in the body of a notice another person already received (RS-5)"},
 	{RuleID: "O-16-title", Table: "Notification", Column: "title", Owner: residueU, Fate: residueMay,
 		Plan: []residueAnchor{{residueInventory, `(?m)^\| O-16 \|[^|]*\|\s*\*\*Confirmed`}},
 		Why:  "a name in the title of a notice another person already received (RS-5)"},
+	{RuleID: "O-16-email-body", Table: "Notification", Column: "email_body", Owner: residueU, Fate: residueMay,
+		Plan: []residueAnchor{{residueInventory, `(?m)^\| O-16 \|[^|]*\|\s*\*\*Confirmed[^|]*stored bell and email title and body`}},
+		Why:  "a name in the stored email body of another person's notice (RS-5)"},
+	{RuleID: "O-16-email-title", Table: "Notification", Column: "email_title", Owner: residueU, Fate: residueMay,
+		Plan: []residueAnchor{{residueInventory, `(?m)^\| O-16 \|[^|]*\|\s*\*\*Confirmed[^|]*stored bell and email title and body`}},
+		Why:  "a name in the stored email title of another person's notice (RS-5)"},
 
 	// Messages the person wrote (O-8, RS-11): the subject and body stay as the
 	// church's record of what was written and what was (or was never) sent.

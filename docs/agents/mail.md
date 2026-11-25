@@ -27,6 +27,15 @@ suppressions. The guards named here are parse-only; each test file states its ow
   skips it. If the sender holds the lock first, Dismiss waits. Once a successful send commits,
   the row stays sent. A provider can still accept mail before the sender's transaction fails,
   leaving that acceptance unrecorded.
+- A kind that emails a person's name declares its source and name-free text in the notice registry.
+  Direct delivery checks those IDs after claiming the email row at Read Committed. A guardian
+  copy checks them in its existing eligibility snapshot and still uses the bell copy rules.
+  An erasure committed before that read takes effect for the attempt. An email already in flight
+  may still reach the provider. Every attempt reads again and a failed read retries.
+- Registration notices put the named household person's ID in private notice data. A zero
+  records that the text names no household person. Older registration notices lack that ID and
+  use the name-free text. The direct email still has its stored Fold link. Guardian copies
+  keep their own footer and unsubscribe. See O-16 and T26 in the erasure inventory.
 
 ## Optional email choices
 

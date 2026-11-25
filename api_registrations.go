@@ -473,8 +473,9 @@ func registrationNotice(tx *gorm.DB, kind string, ev *models.Event, o *models.Ev
 	end := noticeEnd(o)
 	m := notify.Msg{
 		Kind: kind, To: []uint{userID}, SubjectType: "occurrence", SubjectID: o.ID, Link: link, Vars: vars,
-		Data:      map[string]any{"eventId": ev.ID, "date": models.FormatCalendarDate(o.OriginalDate)},
-		ExpiresAt: &end,
+		HouseholdPersonID: reg.HouseholdPersonID,
+		Data:              map[string]any{"eventId": ev.ID, "date": models.FormatCalendarDate(o.OriginalDate)},
+		ExpiresAt:         &end,
 	}
 	return m, facts.canSeeDate(userID, ev, o), nil
 }

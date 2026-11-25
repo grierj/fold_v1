@@ -68,10 +68,13 @@ type Msg struct {
 	SubjectID   uint
 	Link        string // an internal path, starting with "/"
 	Vars        Vars
-	Data        map[string]any // small and non-sensitive
-	DedupeKey   string         // optional: a second Send with it is a no-op
-	GroupKey    string         // batching key for kinds with a BatchWindow
-	ExpiresAt   *time.Time     // after this the row shows under Archived only
+	// HouseholdPersonID identifies the person named by Vars.Person in a
+	// registration notice, even when the recipient cannot see the date.
+	HouseholdPersonID *uint
+	Data              map[string]any // small and non-sensitive
+	DedupeKey         string         // optional: a second Send with it is a no-op
+	GroupKey          string         // batching key for kinds with a BatchWindow
+	ExpiresAt         *time.Time     // after this the row shows under Archived only
 	// SuppressActions drops the kind's inline actions for this row
 	// (DEC-44: a teen or flagged account request is Review-only). The
 	// endpoint still checks eligibility itself; this only hides the
@@ -267,12 +270,25 @@ func Send(tx *gorm.DB, m Msg) ([]uint, error) {
 	}
 	data := "{}"
 	stored := m.Data
-	if kind := badgeKind(m.Vars.SubjectKind); kind != "" {
+	badge := badgeKind(m.Vars.SubjectKind)
+	if badge != "" || k.namedEmail.source == emailHousehold {
 		stored = make(map[string]any, len(m.Data)+1)
 		for key, v := range m.Data {
 			stored[key] = v
 		}
-		stored[DataSubjectKind] = kind
+		if badge != "" {
+			stored[DataSubjectKind] = badge
+		}
+		if k.namedEmail.source == emailHousehold {
+			switch {
+			case m.Vars.Person == "":
+				stored[emailHouseholdPersonKey] = uint(0)
+			case m.HouseholdPersonID != nil && *m.HouseholdPersonID != 0:
+				stored[emailHouseholdPersonKey] = *m.HouseholdPersonID
+			default:
+				delete(stored, emailHouseholdPersonKey)
+			}
+		}
 	}
 	if len(stored) > 0 {
 		b, err := json.Marshal(stored)

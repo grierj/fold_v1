@@ -105,8 +105,55 @@ func categoryOfScope(scope string) (string, bool) {
 	return strings.CutPrefix(scope, categoryScopePrefix)
 }
 
+// noticeEmailText checks only the identities expressed by the notice's
+// template. Finding a name in a title or note by matching free text would
+// guess whose name it was (erasure inventory §3).
+func noticeEmailText(tx *gorm.DB, n *models.Notification, k notify.Kind, title, body string) (string, string, error) {
+	names, check := k.EmailNames(n)
+	if !check {
+		return title, body, nil
+	}
+	if names.Known {
+		live, err := noticeNamesAvailable(tx, names)
+		if err != nil {
+			return "", "", err
+		}
+		if live {
+			return title, body, nil
+		}
+	}
+	return names.Title, names.Body, nil
+}
+
+func noticeNamesAvailable(tx *gorm.DB, names notify.EmailNames) (bool, error) {
+	if id := names.HouseholdPersonID; id != 0 {
+		// An ordinary removal can soft-delete a household person while
+		// keeping their name. Erasure scrubs it. Check for a tombstone on
+		// the linked account too, in case its household scrub is pending.
+		var named bool
+		err := tx.Raw(`SELECT EXISTS (
+			SELECT 1 FROM household_people p
+			WHERE p.id = ? AND (p.first_name <> '' OR p.last_name <> '')
+			AND NOT EXISTS (SELECT 1 FROM users WHERE id = p.converted_user_id AND deleted_at IS NOT NULL)
+			AND NOT EXISTS (
+				SELECT 1 FROM users WHERE deleted_at IS NOT NULL AND id IN (
+					SELECT approved_user_id FROM account_requests
+					WHERE household_person_id = p.id AND `+stagedConversionSQL+`
+				)
+			)
+		)`, id).Row().Scan(&named)
+		return named, err
+	}
+	if len(names.UserIDs) == 0 {
+		return true, nil
+	}
+	var live int64
+	err := tx.Model(&models.User{}).Where("id IN ?", names.UserIDs).Count(&live).Error
+	return live == int64(len(names.UserIDs)), err
+}
+
 // notificationEmailMessage is the mail notify.deliver sends: the
-// stored email text, the absolute link, and, for an optional kind, the
+// chosen email text, the absolute link, and, for an optional kind, the
 // footer and one-click unsubscribe. A spam complaint stops optional mail,
 // not required notices (DEC-112). Required mail never offers an unsubscribe.
 func (a *App) notificationEmailMessage(n *models.Notification, u *models.User, k notify.Kind, footer footerFacts) mail.Message {
