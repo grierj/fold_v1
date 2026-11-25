@@ -417,6 +417,8 @@ export function RoomsTab({ rooms, error, reload, load, onSaved }: {
   const refusal = useRefusedSave(load);
   // The room whose save was refused, which the line names.
   const [refusedId, setRefusedId] = useState<{ id: number; name: string } | null>(null);
+  // The page goes to the refused room once, when the rooms are read again; after that the filters and the pager lead.
+  const follow = useRef(false);
   // While a form or panel is open, switching would drop its edits, and while a save is on its way its answer must reach
   // the room it was made for: the openers, the filters and the pages wait.
   const locked = open !== null || feedOpen !== null || busyId !== null;
@@ -462,6 +464,7 @@ export function RoomsTab({ rooms, error, reload, load, onSaved }: {
     setFeedOpen(null);
     setQuery("");
     setBuilding("");
+    follow.current = true;
     setStatus("");
     setRefusedId({ id: room.id, name: room.name });
     refusal.refused(why);
@@ -479,7 +482,9 @@ export function RoomsTab({ rooms, error, reload, load, onSaved }: {
   const refusedAt = refusal.why && refusedId ? matching.findIndex((r) => r.id === refusedId.id) : -1;
   const refusedPage = refusedAt < 0 ? null : Math.floor(refusedAt / ROOMS_PER_PAGE) + 1;
   useEffect(() => {
-    if (refusedPage !== null) setPage(refusedPage);
+    if (!follow.current || refusedPage === null) return;
+    follow.current = false;
+    setPage(refusedPage);
   }, [refusedPage]);
   const refusedName = refusedId ? rooms?.find((r) => r.id === refusedId.id)?.name ?? refusedId.name : undefined;
   const line = <RefusedSaveLine save={refusal} noun="room" canManage={rooms ? true : undefined} about={refusedName} />;

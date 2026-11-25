@@ -806,6 +806,25 @@ it("shows the room a refused edit names on the page it is on", async () => {
   expect(screen.queryByRole("group", { name: "Room 01" })).not.toBeInTheDocument();
 });
 
+it("lets the building filter start at its first page after a refusal took the list to the room's page", async () => {
+  withRooms(true);
+  const many: Room[] = Array.from({ length: 51 }, (_, i) => ({ ...hall, id: i + 1, building: i < 1 ? "North" : "South", name: `Room ${String(i + 1).padStart(2, "0")}`, revision: `rev-${i + 1}` }));
+  vi.mocked(AdminRooms.list).mockResolvedValueOnce({ rooms: many, needApproval: false })
+    .mockResolvedValue({ rooms: many.map((r) => (r.id === 51 ? { ...r, capacity: 12, revision: "rev-51b" } : r)), needApproval: false });
+  vi.mocked(AdminRooms.update).mockRejectedValue(new ApiError(409, "room changed", { code: "room_changed" }));
+  render(<MemoryRouter initialEntries={["/admin?tab=rooms"]}><AdminPage /></MemoryRouter>);
+  await userEvent.click(await screen.findByRole("button", { name: "Next rooms" }));
+  await userEvent.click(await screen.findByRole("button", { name: "Next rooms" }));
+  await userEvent.click(await screen.findByRole("button", { name: "Edit Room 51" }));
+  await userEvent.type(screen.getByLabelText(/^Name/), "b");
+  await userEvent.click(screen.getByRole("button", { name: "Save room" }));
+  expect(await screen.findByText(/^Room 51\. This room changed while you were editing/)).toHaveFocus();
+  expect(screen.getByRole("group", { name: "Room 51" })).toBeInTheDocument();
+  await userEvent.selectOptions(screen.getByLabelText("Building"), "South");
+  expect(await screen.findByRole("group", { name: "Room 02" })).toBeInTheDocument();
+  expect(screen.queryByRole("group", { name: "Room 51" })).not.toBeInTheDocument();
+});
+
 it("falls back to Approvals for a bookmarked Rooms tab when rooms are off", async () => {
   render(<MemoryRouter initialEntries={["/admin?tab=rooms"]}><AdminPage /></MemoryRouter>);
   expect(await screen.findByText(request.name)).toBeInTheDocument();
