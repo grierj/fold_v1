@@ -299,11 +299,11 @@ func (a *App) answerReviewRefusal(c *gin.Context, id uint, confirmed []uint) {
 
 // audienceChange is who reach adds to confirmed and who it drops, nil when
 // neither. A person added is in the audience now, so the summary names them.
-// A person dropped is named only while the summary still lists them (still in
-// the audience, now skipped); anyone else (gone from the audience, erased, or
-// no longer someone the sender reaches by name) is only counted. No reason is
-// given for anyone. Each list holds the first maxAudiencePreview names by
-// name, and the rest are counted.
+// A person dropped is named only while the summary's list still shows them
+// (still in the audience, now skipped, and within the list's cap); anyone else
+// (gone from the audience, erased, or past the cap) is only counted. No reason
+// is given for anyone. The added list holds the first maxAudiencePreview names
+// by name, and the rest are counted.
 func audienceChange(confirmed []uint, reach audienceReach) *audienceChangeJSON {
 	was := map[uint]bool{}
 	for _, id := range confirmed {
@@ -321,8 +321,8 @@ func audienceChange(confirmed []uint, reach audienceReach) *audienceChangeJSON {
 		if now[id] {
 			continue
 		}
-		if name, ok := reach.named[id]; ok {
-			out.Dropped = append(out.Dropped, name)
+		if reach.listed[id] {
+			out.Dropped = append(out.Dropped, reach.named[id])
 		} else {
 			out.DroppedUnnamed++
 		}
@@ -331,9 +331,7 @@ func audienceChange(confirmed []uint, reach audienceReach) *audienceChangeJSON {
 		return nil
 	}
 	out.Added, out.AddedMore = firstNames(out.Added)
-	var more int
-	out.Dropped, more = firstNames(out.Dropped)
-	out.DroppedUnnamed += more
+	out.Dropped, _ = firstNames(out.Dropped)
 	return &out
 }
 

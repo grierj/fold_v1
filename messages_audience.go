@@ -453,17 +453,23 @@ func (a *App) summarizeAudience(db *gorm.DB, ids []uint, reasons bool) (audience
 // write (preparedRowsIn): reached holds, in id order, each person with an
 // email row that goes out and, when the message asks for push, each with a
 // push row; a person is in it once, whatever the channels. named is the name
-// of everyone the summary lists.
+// of everyone in the audience; listed is who the summary's capped list shows.
 type audienceReach struct {
 	reached []uint
 	named   map[uint]string
+	listed  map[uint]bool
 }
 
 // audienceReachIn is summarizeAudience with who it reaches; pushAlert is the
 // message's "Push notification too".
 func (a *App) audienceReachIn(db *gorm.DB, ids []uint, reasons, pushAlert bool) (audienceSummaryJSON, audienceReach, error) {
 	out := audienceSummaryJSON{Skipped: map[string]int{}, Recipients: []audienceRecipientJSON{}}
-	reach := audienceReach{reached: []uint{}, named: map[uint]string{}}
+	reach := audienceReach{reached: []uint{}, named: map[uint]string{}, listed: map[uint]bool{}}
+	type row struct {
+		id uint
+		r  audienceRecipientJSON
+	}
+	var rows []row
 	facts, err := recipientFacts(db, ids, notify.CatMessages)
 	if err != nil {
 		return out, reach, err
@@ -500,13 +506,17 @@ func (a *App) audienceReachIn(db *gorm.DB, ids []uint, reasons, pushAlert bool) 
 				r.Skipped = skipHidden
 			}
 		}
-		out.Recipients = append(out.Recipients, r)
+		rows = append(rows, row{f.User.ID, r})
 	}
-	sort.SliceStable(out.Recipients, func(i, j int) bool {
-		return strings.ToLower(out.Recipients[i].Name) < strings.ToLower(out.Recipients[j].Name)
+	sort.SliceStable(rows, func(i, j int) bool {
+		return strings.ToLower(rows[i].r.Name) < strings.ToLower(rows[j].r.Name)
 	})
-	if len(out.Recipients) > maxAudiencePreview {
-		out.Recipients, out.More = out.Recipients[:maxAudiencePreview], true
+	if len(rows) > maxAudiencePreview {
+		rows, out.More = rows[:maxAudiencePreview], true
+	}
+	for _, row := range rows {
+		out.Recipients = append(out.Recipients, row.r)
+		reach.listed[row.id] = true
 	}
 	return out, reach, nil
 }

@@ -360,9 +360,10 @@ func TestMessageConfirmationCountsWhoLeft(t *testing.T) {
 	}
 }
 
-// The named lists hold the first 100 names; the rest are counted.
+// The added list holds the first 100 names and counts the rest; a person
+// dropped is named only when the summary's list shows them.
 func TestAudienceChangeCapsItsNames(t *testing.T) {
-	reach := audienceReach{named: map[uint]string{}}
+	reach := audienceReach{named: map[uint]string{}, listed: map[uint]bool{}}
 	var confirmed []uint
 	for i := uint(1); i <= 250; i++ {
 		reach.named[i] = fmt.Sprintf("Person %03d", i)
@@ -370,6 +371,7 @@ func TestAudienceChangeCapsItsNames(t *testing.T) {
 			reach.reached = append(reach.reached, i)
 		} else {
 			confirmed = append(confirmed, i)
+			reach.listed[i] = i <= 160
 		}
 	}
 	confirmed = append(confirmed, 900, 901)
@@ -377,12 +379,43 @@ func TestAudienceChangeCapsItsNames(t *testing.T) {
 	if len(got.Added) != maxAudiencePreview || got.AddedMore != 20 || got.Added[0] != "Person 001" {
 		t.Fatalf("added: %d named, %d more, first %q", len(got.Added), got.AddedMore, got.Added[0])
 	}
-	if len(got.Dropped) != maxAudiencePreview || got.DroppedUnnamed != 30+2 {
+	if len(got.Dropped) != 40 || got.Dropped[0] != "Person 121" || got.DroppedUnnamed != 90+2 {
 		t.Fatalf("dropped: %d named, %d unnamed", len(got.Dropped), got.DroppedUnnamed)
 	}
 	if audienceChange(reach.reached, reach) != nil {
 		t.Fatal("no change is nil")
 	}
+}
+
+// The picker lists the first 100 people by name. Someone past that who turns
+// off messages between the review and the confirmation is only counted: the
+// list the sender can see never showed them.
+func TestMessageConfirmationCountsWhoThePickerDoesNotList(t *testing.T) {
+	f := newComposeFixture(t)
+	for i := 0; i < maxAudiencePreview; i++ {
+		u := models.User{Email: testEmail(fmt.Sprintf("filler%03d", i)), Role: models.RoleMember, Name: fmt.Sprintf("Aaa %03d", i), Status: models.UserActive}
+		gormMust(t, f.app.DB.Create(&u))
+		addMember(t, f.app, &u, f.group, models.MembershipMember)
+	}
+	zed := newTestUser(t, f.app, "zed", "password1234", models.RoleMember)
+	gormMust(t, f.app.DB.Model(zed).Update("display_name", "Zzz Last"))
+	addMember(t, f.app, zed, f.group, models.MembershipMember)
+	path := f.draft(t, f.leader, "Hello", "<p>Hi</p>", map[string]any{"type": "group", "groupId": f.group.ID})
+	revision := revisionOf(t, f.leader, path)
+	review := takeReview(t, f.leader, path)
+	if !review.Summary.More {
+		t.Fatalf("the list is not capped: %d people", review.Summary.People)
+	}
+	if w := loginAPI(t, f.app, zed.Name, "password1234").do("PUT", "/api/v1/me/notification-settings", map[string]any{"category": "messages", "off": true}, true); w.Code != http.StatusOK {
+		t.Fatalf("opt out: %d", w.Code)
+	}
+	w := confirmSend(f.leader, path, revision, review.Token, nil)
+	got := decodeReview(t, w)
+	if w.Code != http.StatusConflict || got.Code != "message_list_changed" || got.Change == nil ||
+		len(got.Change.Dropped) != 0 || got.Change.DroppedUnnamed != 1 || strings.Contains(w.Body.String(), "Zzz") {
+		t.Fatalf("someone past the list's cap: %d %s", w.Code, w.Body.String())
+	}
+	stillDraft(t, f, path)
 }
 
 // Every audience the composer can make reviews and sends; push counts in the
