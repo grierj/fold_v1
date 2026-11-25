@@ -466,7 +466,7 @@ func pickDateRoom(tx *gorm.DB, p datePick) error {
 		if !hadOld {
 			return nil
 		}
-		if err := settleDatePick(tx, ev, occ, user.ID, before, roomHeld{}); err != nil {
+		if err := settleDatePick(tx, ev, occ, user.ID, before, roomHeld{}, hadOld); err != nil {
 			return err
 		}
 		return audit.Write(tx, audit.Entry{Actor: &user.ID, Action: audit.RoomBookingReleased, TargetType: "occurrence", TargetID: occ.ID,
@@ -520,7 +520,7 @@ func pickDateRoom(tx *gorm.DB, p datePick) error {
 			return err
 		}
 	}
-	if err := settleDatePick(tx, ev, occ, user.ID, before, roomHeldAfter(room.ID, result)); err != nil {
+	if err := settleDatePick(tx, ev, occ, user.ID, before, roomHeldAfter(room.ID, result), hadOld); err != nil {
 		return err
 	}
 	action := audit.RoomBookingBooked
@@ -538,14 +538,18 @@ func pickDateRoom(tx *gorm.DB, p datePick) error {
 	return audit.Write(tx, audit.Entry{Actor: &user.ID, Action: action, TargetType: "occurrence", TargetID: occ.ID, Meta: meta, IP: p.ip})
 }
 
-// settleDatePick tells the event's other runners what the pick did, then
-// closes the requests the old booking may have been the last date of. The
-// notices lock their recipients before any admin's task is closed: an erasure
-// takes the person's user row and then their notices, a closed task included,
-// so the other way round the two could wait on each other (settleRoomDecision).
-func settleDatePick(tx *gorm.DB, ev *models.Event, occ *models.EventOccurrence, actor uint, before, after roomHeld) error {
+// settleDatePick tells the event's other runners what the pick did, then,
+// when it released an old booking, closes the requests that booking may have
+// been the last date of. The notices lock their recipients before any admin's
+// task is closed: an erasure takes the person's user row and then their
+// notices, a closed task included, so the other way round the two could wait
+// on each other (settleRoomDecision).
+func settleDatePick(tx *gorm.DB, ev *models.Event, occ *models.EventOccurrence, actor uint, before, after roomHeld, released bool) error {
 	if err := notifyDateRoomChanged(tx, ev, occ, actor, before, after); err != nil {
 		return err
+	}
+	if !released {
+		return nil
 	}
 	return closeEmptyRoomRequests(tx)
 }

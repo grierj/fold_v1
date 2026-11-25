@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"slices"
@@ -504,5 +505,99 @@ func TestRoomChangedNoticeSerializesWithAdminLeaderErasure(t *testing.T) {
 				settle(t, s)
 			})
 		})
+	}
+}
+
+// The day is written in each recipient's own zone (DEC-58).
+func TestRoomChangedDateIsInTheRecipientsZone(t *testing.T) {
+	f := newBookingFixture(t)
+	co, _ := f.coLeader(t)
+	far, err := time.LoadLocation("Pacific/Kiritimati") // UTC+14: the next calendar day
+	if err != nil {
+		t.Fatal(err)
+	}
+	gormMust(t, f.app.DB.Model(&models.User{}).Where("id = ?", f.leaderUser.ID).Update("timezone", far.String()))
+	if code, body := f.book(t, co, f.eventA, map[string]any{"roomId": f.hall.ID}); code != http.StatusOK {
+		t.Fatalf("pick: %d %s", code, body)
+	}
+	want := "coleader booked a room for " + formatWhen(f.startOn, far) + "."
+	if n := lastRoomChanged(t, f.app, f.leaderUser.ID, 1); n.Body != want || strings.Contains(n.Body, f.startOn.Format("Mon, Jan 2")) {
+		t.Fatalf("body %q, want %q", n.Body, want)
+	}
+}
+
+// Delivery: every room.changed row is emailed; only a row with dates left
+// needing a room is pushed, and the hourly reconcile leaves the others be.
+func TestRoomChangedPushesOnlyForDatesNeedingARoom(t *testing.T) {
+	f := newBookingFixture(t)
+	co, _ := f.coLeader(t)
+	useFakePush(t, f.app)
+	pushConsentRow(t, f.app, f.leaderUser, "all", models.ConsentOptedIn)
+	newPushDevice(t, f.app, f.leaderUser, "phone")
+	if code, body := f.book(t, f.leader, f.eventA, map[string]any{"roomId": f.hall.ID}); code != http.StatusOK {
+		t.Fatalf("book A: %d %s", code, body)
+	}
+	co.holdNotices = true
+	series := createFeedEvent(t, f.leader, f.group, "Weekly", f.startOn.Add(30*time.Minute), "FREQ=WEEKLY;COUNT=3")
+	if code, body := f.book(t, co, f.eventB, map[string]any{"roomId": newRoom(t, f, "Chapel").ID}); code != http.StatusOK {
+		t.Fatalf("one date: %d %s", code, body)
+	}
+	if code, out := f.seriesRoom(t, co, series, map[string]any{"roomId": f.hall.ID}); code != http.StatusOK || len(out.Lost) != 1 {
+		t.Fatalf("series: %d %+v", code, out)
+	}
+	rows := roomChangedOf(t, f.app, f.leaderUser.ID)
+	if len(rows) != 2 || rows[0].PushTitle != "" || rows[1].PushTitle == "" {
+		t.Fatalf("rows %+v", rows)
+	}
+	drainNotices(t, f.app)
+	for i, n := range rows {
+		if d := emailDeliveryOf(t, f.app, n.ID); d.Status != models.DeliverySent {
+			t.Fatalf("row %d: email %q", i, d.Status)
+		}
+		if got, want := len(pushJobsFor(t, f.app, n.ID)), i; got != want {
+			t.Fatalf("row %d: %d push jobs, want %d", i, got, want)
+		}
+	}
+	if err := f.app.reconcileNotifications(context.Background(), time.Now().Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if got := len(pushJobsFor(t, f.app, rows[0].ID)); got != 0 {
+		t.Fatalf("the reconcile queued %d pushes for a row that does not push", got)
+	}
+	if status, _ := pushDelivery(t, f.app, rows[0].ID); status != "" {
+		t.Fatalf("a row that does not push has a push delivery %q", status)
+	}
+}
+
+// Erasing the person who changed the room leaves the other leader's notice
+// as it leaves an admin's room.requested task by the same person: the name in
+// the text may stay (O-16), the data carries the event and its dates only.
+func TestRoomChangedAfterTheActorIsErased(t *testing.T) {
+	f := newBookingFixture(t)
+	co, coUser := f.coLeader(t)
+	approvalOn(t, f)
+	if code, body := f.book(t, co, f.eventA, map[string]any{"roomId": f.hall.ID}); code != http.StatusOK {
+		t.Fatalf("pick: %d %s", code, body)
+	}
+	apiDo(t, f.admin, "DELETE", "/api/v1/admin/users/"+itoa(coUser.ID), nil, http.StatusOK)
+	changed := lastRoomChanged(t, f.app, f.leaderUser.ID, 1)
+	var task models.Notification
+	gormMust(t, f.app.DB.Where("kind = ? AND user_id IN (SELECT id FROM users WHERE email = ?)", notify.RoomRequested, testEmail("admin")).First(&task))
+	if (changed.ActorID == nil) != (task.ActorID == nil) || (changed.ActorID != nil && *changed.ActorID != *task.ActorID) {
+		t.Fatalf("actor ids differ: room.changed %v, room.requested %v", changed.ActorID, task.ActorID)
+	}
+	if !strings.HasPrefix(changed.Body, "coleader ") || !strings.HasPrefix(task.Title, "coleader ") {
+		t.Fatalf("the names: %q / %q", changed.Body, task.Title)
+	}
+	var data map[string]any
+	if err := json.Unmarshal([]byte(changed.Data), &data); err != nil {
+		t.Fatal(err)
+	}
+	if len(data) != 2 || data["eventId"] == nil || data["date"] != feedDate(f.startOn) {
+		t.Fatalf("data %v", data)
+	}
+	all := strings.Join([]string{changed.Title, changed.Body, changed.EmailTitle, changed.EmailBody, changed.PushTitle, changed.PushBody, changed.Data}, "\n")
+	if strings.Contains(all, "@") || strings.Contains(all, coUser.Email) {
+		t.Fatalf("contact detail in %q", all)
 	}
 }
