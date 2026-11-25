@@ -11,6 +11,9 @@ promises.
 
 - Transport and cookies: HTTPS through Caddy. Session cookies are Secure, HttpOnly and
   SameSite=Lax, and expire after 7 days. Passwords use bcrypt (DEC-90).
+- The managed database restore ends every browser session when the restored build
+  uses the session signing epoch. Ordinary restarts keep sessions. A rollback to a
+  build without the epoch can accept cookies it previously issued.
 - Trusted proxies (C17): Gin trusts `X-Forwarded-For` only from `FOLD_TRUSTED_PROXIES`. The
   default is the Compose network's fixed subnet, `172.30.0.0/24`. Fold refuses to start with a
   `/0` range. **Not built, no milestone yet:** an Admin > System page that shows the IP Fold sees,

@@ -302,6 +302,12 @@ changing it turns off notifications on everyone's devices. To change it, stop
 every app container, change it once, then start them: containers with
 different secrets reject each other's sign-ins and confirmations.
 
+The first upgrade to a release with the browser-session signing epoch asks
+everyone to sign in again. Later ordinary restarts keep sessions. Use the
+current installed restore tools and an epoch-aware release to end browser
+sessions on restore. Recovery stays at level 3, so a permitted rollback to an
+older release can accept cookies that release previously issued.
+
 The Compose network is `172.30.0.0/24`, which is the default
 `FOLD_TRUSTED_PROXIES`. Change the subnet and that variable together.
 
@@ -616,7 +622,9 @@ In order, `restore.sh`:
    `fold` (it waits up to 120 seconds for a running `backup.sh` dump to finish,
    otherwise it stops with the services still stopped).
 3. Restores the dump into a new database, `fold_restore_<id>`, in one
-   transaction. If that fails, `fold` has not been touched. The failed database
+   transaction. Clears the restored browser-session signing epoch before the
+   swap, so everyone signs in again when the restored site opens with a release
+   that uses the epoch. If either step fails, `fold` has not been touched. The failed database
    is dropped and the phase is `collect-failed`; run `--abort` to reopen the
    original, or `--resume` to try again.
 4. Counts the accounts the dump would bring back: the accounts that are deleted
@@ -851,7 +859,26 @@ Pin every upgrade to an image tag or a git commit. `:latest` is refused.
 Read the release notes first. `README.md` records operator steps (for
 example the `SESSION_SECRET` length).
 
-Run the installed `/opt/fold/upgrade.sh`. It uses its enforcing copy in
+For the first upgrade to a release with the browser-session signing epoch,
+prepare a separate trusted checkout of the release at `/root/fold-release`.
+For a build-based install, leave `/root/fold` at the deployed commit and fetch
+the target into it without checking it out. Run the matching image or build
+command below with `/root/fold-release/deploy/digitalocean/upgrade.sh` in
+place of `/opt/fold/upgrade.sh` and keep `--source-dir /root/fold`. This
+installs the release's tools and lets the script record the deployed commit
+for rollback before it checks out the target. The earlier installed script
+can upgrade the app while retaining its old restore tools.
+
+After the upgrade, check both installed copies against the release checkout.
+Each comparison succeeds silently. If either differs, finish the upgrade from
+the release checkout before restoring a dump.
+
+```bash
+sudo cmp /root/fold-release/deploy/digitalocean/restore.sh /opt/fold/restore.sh
+sudo cmp /root/fold-release/deploy/digitalocean/restore.sh /opt/fold/deploy-tools/restore.sh
+```
+
+For subsequent upgrades, run the installed `/opt/fold/upgrade.sh`. It uses its enforcing copy in
 `/opt/fold/deploy-tools`, checks the target before backup or checkout, and
 runs that copy's provisioner. A target checkout supplies build inputs, never
 the provisioner. A script run by hand from an older checkout can bypass these

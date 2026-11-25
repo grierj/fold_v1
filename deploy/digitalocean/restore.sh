@@ -1025,6 +1025,8 @@ collect() {
   # A retry never keeps a file from an earlier attempt or an earlier recovery.
   deleted_list_drop || fail 'could not remove an old recovery-deleted.txt; phase kept, nothing restored. Wait, then --resume'
   if ! dc exec -T db pg_restore -U church -d "$R" --no-owner --no-acl --single-transaction --exit-on-error <"$DUMP"; then collect_failed; fi
+  # A restored site must never boot with the archive's browser-session key.
+  if ! pg "$R" -q -c "DELETE FROM settings WHERE key = 'session_signing_epoch'"; then collect_failed; fi
   # Fold's user deletion is soft deletion (apiAdminDeleteUser tx.Delete(u),
   # User embeds gorm.DeletedAt). No production path hard-deletes users.
   # One stream; the live read is one statement, so one snapshot. Selection
