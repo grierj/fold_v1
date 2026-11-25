@@ -3,7 +3,7 @@ import { AdminRooms, type RoomInput } from "../../api/rooms";
 import type { Room, RoomResponse } from "../../types";
 import type { Load } from "../../lib/useLoad";
 import { RefusedSaveLine, useRefusedSave } from "../../lib/refusedSave";
-import { answerNames, refusedAgain, useManagedSave, useRevisionSave, type RevisionConflict } from "../../lib/useRevisionSave";
+import { answerNames, refusedAgain, useManagedSave, type RevisionConflict } from "../../lib/useRevisionSave";
 import { usePage } from "../../lib/usePage";
 import { PageCount, Pagination } from "../ui/Pagination";
 import { SearchBox } from "../ui/SearchBox";
@@ -287,11 +287,7 @@ function RoomRow({ room, locked, feedOpen, onBusy, onStart, onEdit, onFeed, onCl
 }) {
   const [error, setError] = useState<string | null>(null);
   const refusal = useRefusedSave();
-  const lastAnswer = useRef<RoomResponse | null>(null);
-  const lastRead = useRef<Room | undefined>(undefined);
   const mounted = useRef(true);
-  const answered = () => lastAnswer.current;
-  const found = () => lastRead.current;
 
   useEffect(() => {
     mounted.current = true;
@@ -299,27 +295,24 @@ function RoomRow({ room, locked, feedOpen, onBusy, onStart, onEdit, onFeed, onCl
     return () => { mounted.current = false; };
   }, []);
 
-  const save = useRevisionSave<Room | undefined, { active: boolean } | null>({
+  const save = useManagedSave<Room | undefined, Room | undefined, { active: boolean } | null, RoomResponse>({
     opened: room,
     revision: room.revision,
-    read: async () => {
-      const now = await readRoom(room.id);
-      lastRead.current = now.row;
-
-      return { allowed: now.allowed, revision: now.revision, value: now.row };
-    },
+    read: () => readRoom(room.id),
+    value: (r) => r,
+    stored: (res) => res.room,
     fields: activeOf,
     answers: answerNames("room", room.id),
-    stays: () => lastAnswer.current?.room,
+    stays: true,
     changedCode: "room_changed",
-    onConflict: (why) => {
+    onConflict: (why, found) => {
       if (why === "gone") {
         onGone();
 
         return;
       }
 
-      if (lastRead.current) onSaved(lastRead.current);
+      if (found) onSaved(found);
       refusal.refused(why);
     },
   });
@@ -329,24 +322,16 @@ function RoomRow({ room, locked, feedOpen, onBusy, onStart, onEdit, onFeed, onCl
     setError(null);
     refusal.clear();
     onStart();
-    lastAnswer.current = null;
-    lastRead.current = undefined;
     const verb = active ? "reactivate" : "deactivate";
 
     try {
-      const sent = await save(async (revision) => {
-        const res = await AdminRooms.update(room.id, { active }, revision);
-        lastAnswer.current = res;
-
-        return res;
-      }, { ...room, active });
+      const { sent, row: stored } = await save((revision) => AdminRooms.update(room.id, { active }, revision), { ...room, active });
 
       if (sent === "refused") throw refusedAgain("room_changed");
 
       if (sent !== "saved" || !mounted.current) return;
-      // Saved: by its answer, or by a read that found the room as this press would leave it.
-      const stored = answered()?.room ?? found();
 
+      // Saved: by its answer, or by a read that found the room as this press would leave it.
       if (stored) onSaved(stored);
       onStatus(`“${stored?.name ?? room.name}” ${verb}d.`);
     } catch (e) {
