@@ -5,7 +5,7 @@ import type { GuardianTeen } from "../types";
 import { errorText } from "../lib/errors";
 import { useAction } from "../lib/useAction";
 import { useNewestRead } from "../lib/newestRead";
-import { useFocusHome, useLockedFocus } from "../lib/focusHome";
+import { useFocusHome, useKeepFocusHome, useLockedFocus } from "../lib/focusHome";
 import { Button } from "./ui/Button";
 import { Field, FormError, Input, Select } from "./ui/Field";
 import { ErrorNotice } from "./ErrorNotice";
@@ -30,6 +30,7 @@ function TeenConsentControls({ teen, onChanged }: { teen: GuardianTeen; onChange
   // removes every action: focus waits on the teen's section and goes to what replaced it, never the page.
   const home = useFocusHome<HTMLDivElement>();
   useLockedFocus(home, action.running);
+  useKeepFocusHome(home);
 
   useLayoutEffect(() => {
     if (stale || !refocus.current) return;

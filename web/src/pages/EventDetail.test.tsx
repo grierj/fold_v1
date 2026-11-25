@@ -1346,6 +1346,32 @@ describe("EventDetail asks every question in the app's dialog", () => {
     expect(await screen.findByText("Elsewhere page")).toBeInTheDocument();
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
   });
+  it("asks before leaving a date draft while its visibility question is open", async () => {
+    const router = createMemoryRouter([{
+      element: <><UnsavedChangesBlocker /><Outlet /></>,
+      children: [
+        { path: "/events/:id", element: <EventDetail /> },
+        { path: "/elsewhere", element: <p>Elsewhere page</p> },
+      ],
+    }], { initialEntries: ["/events/7"] });
+
+    render(<RouterProvider router={router} />);
+    await userEvent.click(await screen.findByRole("button", { name: "More for 2026-12-01" }));
+    await userEvent.click(screen.getByRole("menuitem", { name: "Edit this date" }));
+    const selected = await screen.findByRole("radio", { name: /^Private/ });
+    await userEvent.click(selected);
+    edits.answer(challenge(2));
+    await userEvent.click(screen.getByRole("button", { name: "Save this date" }));
+    await screen.findByRole("dialog", { name: "Save this date?" });
+    await act(() => router.navigate("/elsewhere"));
+    const leave = await screen.findByRole("dialog", { name: "Leave without saving?" });
+    expect(screen.queryByRole("dialog", { name: "Save this date?" })).not.toBeInTheDocument();
+    await userEvent.click(within(leave).getByRole("button", { name: "Keep editing" }));
+    expect(selected).toBeChecked();
+    expect(edits.sent).toHaveLength(1);
+    expect(router.state.location.pathname).toBe("/events/7");
+  });
+
   it("holds Delete from the first ask until the DELETE answers, and a late success never moves someone who went elsewhere", async () => {
     const held = deferred<unknown>();
     vi.mocked(Events.delete).mockReturnValue(held.promise);
@@ -2568,6 +2594,74 @@ describe("EventDetail when a series save meets someone else's change", () => {
     expect(screen.queryByRole("button", { name: "Save visibility" })).not.toBeInTheDocument();
     expect(screen.queryByRole("textbox", { name: "Title" })).not.toBeInTheDocument();
   }
+
+  it.each(["series", "visibility"] as const)("restores the sibling draft after a %s save and a fresh authorized read", async (first) => {
+    const fresh = deferred<EventDetailResponse>();
+    const afterSeries = first === "series";
+
+    const stored: EventDetailResponse = {
+      ...opened,
+      event: { ...opened.event, title: afterSeries ? "Hybrid study night" : opened.event.title, visibility: afterSeries ? "public" : "private", revision: "r2" },
+    };
+
+    vi.mocked(Events.get).mockResolvedValueOnce(opened).mockReturnValueOnce(fresh.promise).mockResolvedValue(stored);
+    vi.mocked(Events.update).mockResolvedValue({ event: stored.event });
+    vi.mocked(Events.setVisibility).mockResolvedValue({ event: stored.event });
+    renderInMain();
+    await userEvent.click(await screen.findByRole("button", { name: "Edit event" }));
+    expect(screen.getByRole("form", { name: "Edit event" })).toContainElement(screen.getByLabelText("Title"));
+    await userEvent.type(screen.getByLabelText("Title"), " night");
+    await userEvent.click(screen.getByRole("radio", { name: /^Private/ }));
+    await userEvent.click(screen.getByRole("button", { name: afterSeries ? "Save series" : "Save visibility" }));
+    await waitFor(() => expect(Events.get).toHaveBeenCalledTimes(2));
+    showsNothingOfTheEvent();
+
+    await act(async () => fresh.resolve(stored));
+    expect(await screen.findByLabelText("Title")).toHaveValue("Hybrid study night");
+    expect(screen.getByRole("radio", { name: /^Private/ })).toBeChecked();
+
+    // A draft still names its original read, while the sibling's new form opens from the fresh read.
+    await userEvent.click(screen.getByRole("button", { name: afterSeries ? "Save visibility" : "Save series" }));
+
+    if (afterSeries) expect(Events.setVisibility).toHaveBeenCalledExactlyOnceWith(7, expect.objectContaining({ visibility: "private", revision: "r1" }));
+    else expect(Events.update).toHaveBeenCalledExactlyOnceWith(7, expect.objectContaining({ title: "Hybrid study night", revision: "r1" }));
+  });
+
+  it("keeps a lost series answer across a visibility save so the old draft is never sent under a newer revision", async () => {
+    const stored: EventDetailResponse = {
+      ...opened, event: { ...opened.event, visibility: "private", revision: "r2" },
+    };
+
+    vi.mocked(Events.get).mockResolvedValueOnce(opened).mockResolvedValue(stored);
+    vi.mocked(Events.update).mockRejectedValueOnce(new TypeError("Failed to fetch")).mockRejectedValueOnce(changed());
+    vi.mocked(Events.setVisibility).mockResolvedValueOnce({ event: stored.event });
+    renderInMain();
+    await userEvent.click(await screen.findByRole("button", { name: "Edit event" }));
+    await userEvent.type(screen.getByLabelText("Title"), " night{Enter}");
+    await screen.findByRole("alert");
+    await userEvent.click(screen.getByRole("radio", { name: /^Private/ }));
+    await userEvent.click(screen.getByRole("button", { name: "Save visibility" }));
+    await waitFor(() => expect(Events.get).toHaveBeenCalledTimes(2));
+    await userEvent.click(await screen.findByRole("button", { name: "Save series" }));
+    expect(await screen.findByText(NOTICE)).toBeInTheDocument();
+    expect(Events.update).toHaveBeenCalledTimes(2);
+    expect(screen.queryByLabelText("Title")).not.toBeInTheDocument();
+  });
+
+  it("drops held drafts if the read after saving visibility takes away management", async () => {
+    const stored: EventDetailResponse = { ...opened, canManage: false, canSetVisibility: false };
+    vi.mocked(Events.get).mockResolvedValueOnce(opened).mockResolvedValueOnce(stored);
+    vi.mocked(Events.setVisibility).mockResolvedValueOnce({ event: { ...opened.event, visibility: "private", revision: "r2" } });
+    renderInMain();
+    await userEvent.click(await screen.findByRole("button", { name: "Edit event" }));
+    await userEvent.type(screen.getByLabelText("Title"), " night");
+    await userEvent.click(screen.getByRole("radio", { name: /^Private/ }));
+    await userEvent.click(screen.getByRole("button", { name: "Save visibility" }));
+    await waitFor(() => expect(screen.queryByRole("button", { name: "Edit event" })).not.toBeInTheDocument());
+    expect(await screen.findByRole("heading", { name: "Hybrid study" })).toBeInTheDocument();
+    expect(screen.queryByLabelText("Title")).not.toBeInTheDocument();
+    expect(Events.update).not.toHaveBeenCalled();
+  });
 
   it("closes the editor, reads the page from nothing, says so once it is shown and gives focus to Edit; opening the editor clears it", async () => {
     const after = await saveIntoRefusal(async () => theirs);

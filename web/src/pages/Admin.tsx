@@ -1,5 +1,6 @@
 import { publicName } from "../lib/can";
 import { Form } from "../components/ui/Form";
+import { useAction } from "../lib/useAction";
 import { AddRequestForm } from "../components/AddRequestForm";
 import { PeoplePicker } from "../components/ui/PeoplePicker";
 import type { PersonSearchResult } from "../types";
@@ -953,6 +954,7 @@ function UsersTab({ users, reload }: { users: User[]; reload: () => void }) {
   const [editingId, setEditingId] = useState<number | null>(null);
   const [resetId, setResetId] = useState<number | null>(null);
   const [consentId, setConsentId] = useState<number | null>(null);
+  const consentAction = useAction();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [feedStatus, setFeedStatus] = useState("");
@@ -1177,7 +1179,7 @@ function UsersTab({ users, reload }: { users: User[]; reload: () => void }) {
                   {resetId === u.id && (
                     <PasswordReset user={u} onDone={() => setResetId(null)} />
                   )}
-                  {consentId === u.id && <Suspense fallback={<p role="status">Loading consent…</p>}><TeenConsentPanel user={u} onUpdated={reload} onClose={() => setConsentId(null)} /></Suspense>}
+                  {consentId === u.id && <Suspense fallback={<p role="status">Loading consent…</p>}><TeenConsentPanel user={u} action={consentAction} onUpdated={reload} onClose={() => setConsentId(null)} /></Suspense>}
                   {leaving?.id === u.id && (
                     <DeleteUserPanel
                       target={u}
@@ -1222,7 +1224,7 @@ function UsersTab({ users, reload }: { users: User[]; reload: () => void }) {
                       { label: "Edit", onSelect: () => { setEditingId(u.id); setResetId(null); setCreating(false); } },
                       { label: "Contact access history", onSelect: () => void openContactHistory(u), disabled: busy },
                       { label: "Copy person ID", onSelect: () => void copyPersonId(u), disabled: busy },
-                      ...(u.accountType === "teen" || u.hasTeenConsentHistory ? [{ label: u.accountType === "teen" ? "Manage consent" : "Consent history", onSelect: () => { setConsentId(u.id); setEditingId(null); setResetId(null); setCreating(false); } }] : []),
+                      ...(u.accountType === "teen" || u.hasTeenConsentHistory ? [{ label: u.accountType === "teen" ? "Manage consent" : "Consent history", disabled: consentAction.running, onSelect: () => { consentAction.reset(); setConsentId(u.id); setEditingId(null); setResetId(null); setCreating(false); } }] : []),
                       { label: "Reset password", onSelect: () => { setResetId(u.id); setEditingId(null); setCreating(false); } },
                       ...(u.emailSuppression ? [{ label: "Start emailing again", onSelect: () => void clearSuppression(u), disabled: busy }] : []),
                       { label: "Revoke calendar link", onSelect: () => void revokeCalendarLink(u), danger: true, disabled: busy },

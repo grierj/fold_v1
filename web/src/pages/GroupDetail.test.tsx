@@ -84,6 +84,35 @@ beforeEach(async () => {
 // The editor's own manager read of a date this group lists: the panel's read plus the group it belongs to.
 const forGroup = (read: OccurrenceResponse): OccurrenceResponse => ({ occurrence: { ...read.occurrence, groupId: 1, groupName: "Family group", groupVisibility: "public" } });
 
+it("keeps focus in the page while Try again reads the group", async () => {
+  const fresh = deferred<GroupDetailResponse>();
+  vi.mocked(Groups.get).mockRejectedValueOnce(new ApiError(500, "offline")).mockReturnValueOnce(fresh.promise);
+  render(<main id="main" tabIndex={-1}><MemoryRouter initialEntries={["/groups/1"]}><Routes><Route path="/groups/:id" element={<GroupDetail />} /></Routes></MemoryRouter></main>);
+  (await screen.findByRole("button", { name: "Try again" })).focus();
+  await userEvent.keyboard("{Enter}");
+  expect(screen.getByRole("main")).toHaveFocus();
+  await act(async () => fresh.resolve(page));
+  expect(await screen.findByRole("heading", { name: "Upcoming events" })).toHaveFocus();
+});
+
+it("keeps focus in the event list when a fresh read replaces a focused date row", async () => {
+  const shown = { ...page, canManage: true, upcomingEvents: [occurrence({ id: 1, title: "Week one" })] };
+  const fresh = deferred<GroupDetailResponse>();
+  vi.mocked(Households.mine).mockResolvedValue({ household: null });
+  vi.mocked(Groups.get).mockResolvedValueOnce(shown).mockReturnValueOnce(fresh.promise);
+  vi.mocked(Events.register).mockResolvedValue({ registration: {
+    registrationId: 12, userId: 2, eventId: 7, occurrenceId: 1, date: "2026-12-01", status: "going",
+    guestCount: 0, childcareCount: 0, childcareAgesNote: "", waitlistPosition: null, attendanceMode: "in_person",
+  }, people: [] });
+  open();
+  await userEvent.click(await screen.findByRole("button", { name: "Going" }));
+  await waitFor(() => expect(Groups.get).toHaveBeenCalledTimes(2));
+  screen.getByRole("button", { name: "More for Week one on 2026-12-01" }).focus();
+  await act(async () => fresh.resolve({ ...shown, upcomingEvents: [occurrence({ id: 2, title: "Week two", date: "2026-12-08" })] }));
+  expect(await screen.findByRole("button", { name: "More for Week two on 2026-12-08" })).toBeInTheDocument();
+  expect(screen.getByRole("group", { name: "Upcoming events" })).toHaveFocus();
+});
+
 it("fetches the household once and refetches all date state after a batch", async () => {
   vi.mocked(Events.register).mockResolvedValue({ registration: null, people: [{ registrationId: 9, personId: 3, registeredBy: 2, status: "going", attendanceMode: "in_person", waitlistPosition: null, childcareRequested: false }] });
   open(); await userEvent.click(await screen.findByRole("checkbox", { name: "Mary" }));
@@ -1659,17 +1688,21 @@ describe("the group visibility review", () => {
     expect(document.activeElement).toBe(confirm);
   });
 
-  it("refuses the review's confirm while Save group is checking again", async () => {
+  it("holds the draft during review and lets the person edit it after Cancel", async () => {
     const dialog = await openReview();
-    const again = deferred<ReturnType<typeof impact>>();
-    vi.mocked(Groups.visibilityImpact).mockReturnValueOnce(again.promise);
-    await userEvent.click(screen.getByRole("button", { name: "Save group" }));
-    expect(Groups.visibilityImpact).toHaveBeenCalledTimes(2);
-    const confirm = within(dialog).getByRole("button", { name: /^(Make the group invite-only|Saving…)$/ });
-    expect(confirm).toBeDisabled();
-    fireEvent.click(confirm);
+    const name = screen.getByLabelText("Group name");
+    const save = screen.getByRole("button", { name: "Save group" });
+    expect(name).toBeDisabled();
+    expect(save).toBeDisabled();
+    await userEvent.type(name, " Three");
+    expect(name).toHaveValue("Family group Two");
+    expect(Groups.visibilityImpact).toHaveBeenCalledOnce();
     expect(Groups.update).not.toHaveBeenCalled();
-    await act(async () => { again.resolve(impact("public", A)); await again.promise; });
+
+    await userEvent.click(within(dialog).getByRole("button", { name: "Cancel" }));
+    expect(save).toHaveFocus();
+    await userEvent.type(name, " Three");
+    expect(name).toHaveValue("Family group Two Three");
   });
 
   it("a failed save is not shown again after Cancel and Edit group", async () => {

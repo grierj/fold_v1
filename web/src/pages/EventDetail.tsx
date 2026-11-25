@@ -1,7 +1,7 @@
 import { canRegisterAsGuest } from "../lib/can";
 import { Form } from "../components/ui/Form";
 import { useHousehold } from "../lib/useHousehold";
-import { SeriesEditor } from "../components/SeriesEditor";
+import { SeriesEditor, type SeriesDraftHold } from "../components/SeriesEditor";
 import { lazy, Suspense, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { ApiError } from "../api/core";
@@ -18,7 +18,7 @@ import { composePath, EMAIL_GOING } from "../components/messages/composeLinks";
 import { Field, FormError, Input } from "../components/ui/Field";
 import { Button, ButtonLink } from "../components/ui/Button";
 import { ExternalLinkIcon } from "../components/icons";
-import { EventVisibilityControl } from "../components/EventVisibility";
+import { EventVisibilityControl, type VisibilityDraftHold } from "../components/EventVisibility";
 import type { RevisionConflict } from "../lib/useRevisionSave";
 import { RefusedSaveLine, useRefusedSave } from "../lib/refusedSave";
 import { RsvpButtons } from "../components/RsvpButtons";
@@ -39,6 +39,7 @@ import { Skeleton } from "../components/ui/Skeleton";
 import { applyActorRsvpResults, type ActorRsvpResult, type SeriesFeedbackSignal } from "../lib/rsvpFeedback";
 import { useRsvpMutationGate, type RsvpMutationGate } from "../lib/useRsvpMutationGate";
 import { ConfirmProvider, useConfirm, usePageFacts } from "../components/ui/ConfirmDialog";
+import { useKeptDraft } from "../lib/unsavedChanges";
 import { useLeaveQuestion } from "../lib/leaveQuestion";
 import { useRosterSettled } from "../lib/rosterWrites";
 import { seriesSchedules } from "../lib/registration";
@@ -47,10 +48,11 @@ const ManageRoster = lazy(() => import("../components/ManageRoster").then((modul
 
 export function EventDetail() {
   const { id } = useParams<{ id: string }>();
+  const { user } = useAuth();
 
   // Another event must never inherit the editor, feedback, pending loads or an open question.
   // Questions on this page ask in the app's dialog, never the browser's.
-  return <ConfirmProvider key={id}><EventDetailContent /></ConfirmProvider>;
+  return <ConfirmProvider key={`${user?.id ?? "anonymous"}:${id}`}><EventDetailContent /></ConfirmProvider>;
 }
 
 function EventDetailContent() {
@@ -69,8 +71,10 @@ function EventDetailContent() {
   const [deleting, setDeleting] = useState(false);
   const deletingNow = useRef(false);
   const [editing, setEditing] = useState(false);
-  // The series editor and the visibility control share a panel that a save closes: while either runs, the other
-  // is locked and the panel stays open, so neither's answer is lost.
+  const seriesDraft = useRef<SeriesDraftHold | null>(null);
+  const visibilityDraft = useRef<VisibilityDraftHold | null>(null);
+  useKeptDraft(() => seriesDraft.current !== null || visibilityDraft.current !== null, editing);
+  // The sibling is locked while a save runs so the read can restore exactly the draft the person last saw.
   const seriesAction = useAction();
   const visibilityAction = useAction();
   const panelBusy = seriesAction.running || visibilityAction.running;
@@ -109,6 +113,18 @@ function EventDetailContent() {
 
   const page = load.data ?? null;
   const loading = load.loading;
+  const missing = load.error instanceof ApiError && load.error.status === 404;
+  useLayoutEffect(() => {
+    if (authLoading || loading) return;
+
+    if (missing || (page && !page.canManage)) {
+      seriesDraft.current = null;
+      visibilityDraft.current = null;
+      setEditing(false);
+    } else if (page && !page.canSetVisibility) {
+      visibilityDraft.current = null;
+    }
+  }, [authLoading, loading, missing, page]);
   useLayoutEffect(() => {
     if (!editAsked.current || !page || loading || authLoading) return;
     editAsked.current = false;
@@ -132,8 +148,7 @@ function EventDetailContent() {
   // A date's save refused and not sent again (DEC-164): which date, for the line above the dates.
   const dateRefused = useRefusedSave(load);
   const [refusedDate, setRefusedDate] = useState<{ eventId: number; date: string } | null>(null);
-  const notFound = load.error instanceof ApiError && load.error.status === 404;
-  const error = load.error && !notFound ? errorText(load.error, "We couldn't load this event.") : null;
+  const error = load.error && !missing ? errorText(load.error, "We couldn't load this event.") : null;
   const setPage = load.setData;
 
   // After a date changes, here or from another page: the dates that need a room are asked for again with the
@@ -161,10 +176,16 @@ function EventDetailContent() {
   // on its own (DEC-161, DEC-163).
   function closeOnConflict(why: RevisionConflict) {
     parkFocus();
-    setEditing(false);
+    closeEditors();
     setRoomsRevision((n) => n + 1);
     dateRefused.clear();
     refusedSave.refused(why);
+  }
+
+  function closeEditors() {
+    seriesDraft.current = null;
+    visibilityDraft.current = null;
+    setEditing(false);
   }
 
   // A date editor's save was refused and not sent again: the row closed it, and the page reads from nothing and says so.
@@ -192,7 +213,7 @@ function EventDetailContent() {
     );
   }
 
-  if (notFound) {
+  if (missing) {
     return <Missing title="Event not found" body="It may have been cancelled or removed, or it may be private." notice={<><RefusedSaveLine save={refusedSave} noun="event" /><RefusedSaveLine save={dateRefused} noun="date" /></>} />;
   }
 
@@ -250,7 +271,12 @@ function EventDetailContent() {
         </div>
         {canManage && (
           <div className="flex w-full gap-2 sm:w-auto sm:shrink-0">
-            <Button ref={editButton} variant="secondary" layout="flex-1 sm:flex-none" aria-expanded={editing} disabled={panelBusy} onClick={() => { refusedSave.clear(); setEditing((v) => !v); }}>
+            <Button ref={editButton} variant="secondary" layout="flex-1 sm:flex-none" aria-expanded={editing} disabled={panelBusy} onClick={() => {
+              refusedSave.clear();
+
+              if (editing) closeEditors();
+              else setEditing(true);
+            }}>
               {event.recurrenceRule ? "Edit series" : "Edit event"}
             </Button>
             <Menu label="More event actions" items={[
@@ -287,20 +313,22 @@ function EventDetailContent() {
         <div ref={editorRef} className="mt-4">
           <SeriesEditor
             series={{ ...event, eventId: event.id }}
+            hold={seriesDraft}
             idPrefix={`ev${event.id}`}
             locationHint={event.churchWide ? undefined : "Leave it blank to use the group's location."}
             roomDate={single ? next.date : undefined}
             onRoomChanged={() => { setRoomsRevision((n) => n + 1); void load.reload(); }}
             onSaved={() => {
               parkFocus();
-              setEditing(false);
+
+              if (!visibilityDraft.current) closeEditors();
               setRoomsRevision((n) => n + 1);
               void load.retry();
             }}
             onConflict={closeOnConflict}
             onClose={() => {
               closedPanel.current = true;
-              setEditing(false);
+              closeEditors();
             }}
             action={seriesAction}
             locked={visibilityAction.running}
@@ -311,6 +339,7 @@ function EventDetailContent() {
               // changes it starts the control again, so the two always come from the same read.
               key={`${event.id}-${event.visibility}-${event.leaderOpened}-${event.groupVisibility ?? ""}`}
               eventId={event.id}
+              hold={visibilityDraft}
               churchWide={event.churchWide}
               groupName={event.groupName}
               groupVisibility={event.groupVisibility}

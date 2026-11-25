@@ -8,6 +8,7 @@ export function EmptyState({
   action,
   illustration,
   level,
+  titleRef,
   framed = true,
 }: {
   title: string;
@@ -15,6 +16,7 @@ export function EmptyState({
   action?: ReactNode;
   illustration?: ReactNode;
   level?: 1 | 2;
+  titleRef?: (title: HTMLElement | null) => void;
   framed?: boolean;
 }) {
   const Title = level === 1 ? "h1" : level === 2 ? "h2" : "p";
@@ -29,7 +31,7 @@ export function EmptyState({
     >
       {illustration && <div className="w-16 shrink-0">{illustration}</div>}
       <div className="min-w-0 w-full">
-        <Title className="text-lg font-semibold text-text">{title}</Title>
+        <Title ref={titleRef} tabIndex={titleRef ? -1 : undefined} className="text-lg font-semibold text-text">{title}</Title>
         {body && <p className="mt-2 text-sm text-text-muted max-w-prose">{body}</p>}
         {action && (
           <div className="mt-4 flex w-full flex-col gap-3 sm:w-auto sm:flex-row">{action}</div>

@@ -8,6 +8,7 @@ import { PageCount, Pagination } from "./ui/Pagination";
 import { SearchBox } from "./ui/SearchBox";
 import { EmptyState } from "./ui/EmptyState";
 import { registrationStatusLabel } from "../lib/status";
+import { useFocusHome, useKeepFocusHome } from "../lib/focusHome";
 import { ConfirmShown } from "./ui/ConfirmDialog";
 
 // Small schedules keep direct answers. Longer schedules share one compact,
@@ -23,6 +24,9 @@ export function CompactDates({ dates, requested, requestVersion = 0, loadedOnly 
   const handledRequest = useRef("");
   const [visited, setVisited] = useState<Set<number>>(() => new Set());
   const dense = dates.length > 6;
+  const focusedRow = useRef<Element | null>(null);
+  const home = useFocusHome<HTMLDivElement>(() => focusedRow.current?.isConnected !== false);
+  useKeepFocusHome(home);
 
   const labels = useMemo(() => new Map(dates.map((d) => {
     const when = dateLine(d.startsAt, d.endsAt), place = placeLine(d.room, d.location);
@@ -57,7 +61,9 @@ export function CompactDates({ dates, requested, requestVersion = 0, loadedOnly 
     paging.go(Math.floor(index / 12) + 1);
   }, [requested, requestVersion, query, dates, paging]);
 
-  return <div className={dense ? undefined : "space-y-4"}>
+  return <div ref={home.ref} role="group" aria-label={noun === "events" ? "Upcoming events" : "Upcoming dates"}
+    tabIndex={-1} onFocusCapture={(event) => { focusedRow.current = event.target.closest("[data-date-row]"); }}
+    className={dense ? "outline-none" : "space-y-4 outline-none"}>
     {dense && <>
     <SearchBox label={loadedOnly ? "Search loaded events or dates" : "Search events or dates"} value={query} onChange={setQuery} />
     {loadedOnly && <p className="text-sm text-text-muted mt-2">Search covers the dates loaded below. Load more dates to search further ahead.</p>}
@@ -68,7 +74,7 @@ export function CompactDates({ dates, requested, requestVersion = 0, loadedOnly 
       const opened = open === d.id;
       const { when, place } = labels.get(d.id)!;
 
-      return <div key={d.id} hidden={dense && !visible.has(d.id)} className={dense ? "border-b border-border py-3" : undefined}>
+      return <div key={d.id} data-date-row hidden={dense && !visible.has(d.id)} className={dense ? "border-b border-border py-3" : undefined}>
         {dense && <div className="flex items-start justify-between gap-3">
           <div className="min-w-0 break-words">
             <p className="font-semibold">{d.title || "Event"}</p>
