@@ -869,9 +869,24 @@ sudo /opt/fold/upgrade.sh \
   --source-dir /root/fold
 ```
 
-For mirrored images, pass the mirror's app reference to `--image` and the
-corresponding backup reference to `--backup-image`. If you omit
-`--backup-image`, the saved `FOLD_BACKUP_IMAGE` stays in effect.
+For the first upgrade with mirrored images, check out the trusted release that
+introduces `--backup-image` in `/root/fold`. Run its upgrade script so it can
+install the matching tools and recognize the new flag:
+
+```bash
+sudo /root/fold/deploy/digitalocean/upgrade.sh \
+  --image registry.example.com/church/fold:x.y.z \
+  --backup-image registry.example.com/church/fold-backup:x.y.z \
+  --source-dir /root/fold
+```
+
+Later upgrades can use `/opt/fold/upgrade.sh`. Omitting `--backup-image`
+keeps the saved `FOLD_BACKUP_IMAGE`. Before changing that setting, record its
+previous value, including whether it was unset. If the replacement backup
+image fails, use `sudoedit /opt/fold/.env` before rollback. Restore the
+previous `FOLD_BACKUP_IMAGE` line, or remove it if the backup previously
+followed the version-based default. The rollback command restores the app pin
+from `release.prev` and reads the backup selection from `.env`.
 
 On a build-based install, name the commit:
 
