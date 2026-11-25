@@ -577,6 +577,20 @@ function whenPhrase(at: string, zone: string): string {
   return /^(Today|Tomorrow) /.test(when) ? when[0].toLowerCase() + when.slice(1) : `on ${when}`;
 }
 
+// confirmPushLine says who gets the push, under a question that counts everyone the message reaches: the people it
+// reaches beyond those who get the email get only the push.
+export function confirmPushLine(review: Pick<MessageReview, "summary" | "reached">): string {
+  const { push, eligible } = review.summary;
+  const only = review.reached - eligible;
+  const all = `${push} ${push === 1 ? "person gets" : "people get"} a push notification too.`;
+
+  if (only <= 0) return all;
+
+  return only === push
+    ? `${only} of them ${only === 1 ? "gets" : "get"} only the push notification.`
+    : `${push} of them get a push notification; ${only} ${only === 1 ? "gets" : "get"} only the push.`;
+}
+
 // saveListLine is the question before an edit changes who a scheduled message goes to (DEC-169): "Change who gets this
 // to 9 people?"
 export function saveListLine(n: number): string {

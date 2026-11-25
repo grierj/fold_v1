@@ -707,6 +707,17 @@ describe("push notification too", () => {
     expect(await screen.findByText("2 people get a push notification too.")).toBeInTheDocument();
   });
 
+  it("asks about everyone the message reaches, someone who gets only the push included", async () => {
+    const user = userEvent.setup();
+    vi.mocked(Messages.review).mockResolvedValue({ review: { summary: summary({ eligible: 2, push: 3 }), reached: 3, token: "review-1" } });
+    vi.mocked(Messages.get).mockResolvedValue({ message: message({ subject: "Snacks", bodyHtml: "<p>Bring some</p>" }) });
+    open("/messages/5");
+    await editorReady();
+    await user.click(screen.getByRole("button", { name: "Send now" }));
+    expect(await screen.findByText("Send to 3 people now?")).toBeInTheDocument();
+    expect(screen.getByText("3 of them get a push notification; 1 gets only the push.")).toBeInTheDocument();
+  });
+
   it("shows each person's push on their own row, with a count apart from the email", async () => {
     viewer.isAdmin = true;
     const user = userEvent.setup();
@@ -1148,6 +1159,14 @@ describe("a scheduled message's new list is the sender's to confirm", () => {
       expect(screen.queryByRole("group", { name: /Change who gets this/ })).toBeNull();
     });
   }
+
+  it("counts everyone the new list reaches in its question", async () => {
+    const user = userEvent.setup();
+    await editLeadersOnly(user);
+    vi.mocked(Messages.update).mockRejectedValue(needed({ summary: summary({ eligible: 2, push: 1 }), reached: 3, token: "proposal-2" }));
+    await user.click(screen.getByRole("button", { name: "Preview" }));
+    expect(await screen.findByRole("group", { name: "Change who gets this to 3 people?" })).toBeInTheDocument();
+  });
 
   it("asks once before Schedule saves the new list, then schedules with the list it confirmed", async () => {
     const user = userEvent.setup();

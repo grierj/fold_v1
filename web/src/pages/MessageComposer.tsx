@@ -7,7 +7,7 @@ import { ApiError } from "../api/core";
 import { Messages, previewHTMLPath } from "../api/messages";
 import type { AudienceChange, AudienceSummary, ComposeOptions, Message, MessageAudience, MessagePreview, MessageReview } from "../types";
 import { ERROR_COPY, errorCode, errorText, type ErrorCode } from "../lib/errors";
-import { audienceKey, audienceLabel, changeLines, confirmLine, fromAudience, guardianLine, historyLine, historyTeenLine, isOneEvent, prefillChoice, pushHistoryLine, retryQuestion, reviewRefusal, saveListLine, statusLabel, stillScheduledLine, toAudience, type AudienceChoice, type ReviewRefusal } from "../lib/messages";
+import { audienceKey, audienceLabel, changeLines, confirmLine, confirmPushLine, fromAudience, guardianLine, historyLine, historyTeenLine, isOneEvent, prefillChoice, pushHistoryLine, retryQuestion, reviewRefusal, saveListLine, statusLabel, stillScheduledLine, toAudience, type AudienceChoice, type ReviewRefusal } from "../lib/messages";
 import { reminderAudience, reminderDateText, reminderName } from "../lib/reminders";
 import { RefusedSaveLine, useRefusedSave } from "../lib/refusedSave";
 import { outcomeOf } from "../lib/rosterWrites";
@@ -998,13 +998,13 @@ function Composer({ options, zone, opened, edit = false, params, refusal, back, 
       ) : asking ? (
         <div role="group" aria-labelledby={`${ids.when}-c`} className="space-y-3 rounded-lg border border-primary-border bg-primary-subtle p-4">
           <p ref={asking.again ? undefined : confirmLead} id={`${ids.when}-c`} tabIndex={-1} className="font-semibold text-primary-on-subtle outline-none">
-            {savingList ? saveListLine(asking.review.summary.eligible) : confirmLine(asking.review.summary.eligible, asking.at, zone)}
+            {savingList ? saveListLine(asking.review.reached) : confirmLine(asking.review.reached, asking.at, zone)}
           </p>
           {asking.again && <p ref={confirmLead} role="status" tabIndex={-1} className="text-sm text-primary-on-subtle outline-none">We checked who gets it again, so this is the list as it is now.</p>}
           {savingList
             ? <p className="text-sm text-primary-on-subtle">To {audience ? audienceLabel(audience, options) : "the people you chose"}. {stillScheduledLine(asking.storedAt, zone)}</p>
             : <p className="text-sm text-primary-on-subtle">To {audience ? audienceLabel(audience, options) : "the people you chose"}. You can change or cancel it until it starts sending.</p>}
-          {pushOn && asking.review.summary.push > 0 && <p className="text-sm text-primary-on-subtle">{asking.review.summary.push} {asking.review.summary.push === 1 ? "person gets" : "people get"} a push notification too.</p>}
+          {pushOn && asking.review.summary.push > 0 && <p className="text-sm text-primary-on-subtle">{confirmPushLine(asking.review)}</p>}
           <RecipientList summary={asking.review.summary} push={pushOn} />
           <FormActions>
             <Button ref={confirmButton} variant="primary" layout="w-full sm:w-auto" disabled={action.running} onClick={confirmed}>

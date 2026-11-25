@@ -46,3 +46,16 @@ credentials, personal data, or exploit instructions.
   the date's room. Product: **3**. The issue is intentionally not fixed.
 - Evidence: `apiSetDateRoom` in `api_room_bookings.go`; `lockManagedEventIn` in `api_events.go` reads the
   actor after the lock for the authority decision only.
+
+## A review's names stay on screen after the sender loses the right to send
+
+- Date: 2026-11-24. Reviewed revision: `9bef52e2a9d13cdfc4272534d862691d540a1517` (PR #486).
+- The composer keeps the review it last took (who gets the message, by name) so the picker and the
+  confirmation show one list. When a leader or host loses the right to message that audience and the
+  confirmation answers `message_not_yours`, the question closes but the picker goes on showing that
+  review until the page is left.
+- Likelihood: **2/10**. The right must be taken away between the review and the confirmation, and the
+  person must stay on the page.
+- Severity: **2/10**. The person saw those names while they were allowed to; nothing new comes from the
+  server, and nothing is stored in the browser. Product: **4**. The issue is intentionally not fixed.
+- Evidence: `reviewed` in `web/src/pages/MessageComposer.tsx`; `web/src/components/messages/AudiencePicker.tsx`.
