@@ -88,7 +88,7 @@ it("offers an invitation after an unavailable email add and sends it to that add
   vi.mocked(Invitations.create).mockResolvedValue({ invitation: testInvitation() });
   panel(); await openPanel(); await useEmail("new@example.com");
   await userEvent.click(screen.getByRole("button", { name: "Add member" }));
-  expect(await screen.findByText("We couldn't add them by email. You can invite them to Fold.")).toBeInTheDocument();
+  expect(await screen.findByText("We couldn't add them by email. If they need a Fold account, you can send an invitation.")).toBeInTheDocument();
   expect(screen.queryByRole("alert")).not.toBeInTheDocument();
   await userEvent.click(screen.getByRole("button", { name: "Send invitation" }));
   expect(Invitations.create).toHaveBeenCalledExactlyOnceWith({ email: "new@example.com", groupId: 1, overLimit: false });

@@ -146,7 +146,7 @@ export const ERROR_COPY = {
   needs_host_successor: "Some church-wide events this person hosts alone still need a new host, or the list changed. Check the host for each event and try again.",
 
   group_full: "This group is full.",
-  group_member_email_unavailable: "We couldn't add them by email. You can invite them to Fold.",
+  group_member_email_unavailable: "We couldn't add them by email. If they need a Fold account, you can send an invitation.",
   invite_only: "This group is invite only. Ask a leader to invite you.",
   cannot_join: "You can't join this group. Ask a leader if you think that's a mistake.",
   members_only: "Only members can see who's in this group.",
