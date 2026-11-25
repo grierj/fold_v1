@@ -302,6 +302,12 @@ changing it turns off notifications on everyone's devices. To change it, stop
 every app container, change it once, then start them: containers with
 different secrets reject each other's sign-ins and confirmations.
 
+The first upgrade to a release with the browser-session signing epoch asks
+everyone to sign in again. Later ordinary restarts keep sessions. Use the
+current installed restore tools and an epoch-aware release to end browser
+sessions on restore. Recovery stays at level 3, so a permitted rollback to an
+older release can accept cookies that release previously issued.
+
 The Compose network is `172.30.0.0/24`, which is the default
 `FOLD_TRUSTED_PROXIES`. Change the subnet and that variable together.
 
@@ -602,7 +608,9 @@ In order, `restore.sh`:
    `fold` (it waits up to 120 seconds for a running `backup.sh` dump to finish,
    otherwise it stops with the services still stopped).
 3. Restores the dump into a new database, `fold_restore_<id>`, in one
-   transaction. If that fails, `fold` has not been touched. The failed database
+   transaction. Clears the restored browser-session signing epoch before the
+   swap, so everyone signs in again when the restored site opens with a release
+   that uses the epoch. If either step fails, `fold` has not been touched. The failed database
    is dropped and the phase is `collect-failed`; run `--abort` to reopen the
    original, or `--resume` to try again.
 4. Counts the accounts the dump would bring back: the accounts that are deleted

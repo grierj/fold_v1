@@ -192,6 +192,11 @@ section at the end of `checks.sh`.
 - `restore.sh --dump` restores into a fresh database swapped in whole and keeps the public site
   closed and background deliveries paused in a worker-free private recovery instance until
   `--reopen`. It never restores into the live `fold` database.
+- Collection removes `session_signing_epoch` from the staging database before the swap.
+  `bootRestoreFence` creates a random epoch when the row is absent. The cookie signing key
+  comes from that epoch and `SESSION_SECRET`. Ordinary restarts retain the epoch.
+  Recovery stays at level 3. A rollback to a build without this check can accept cookies
+  that the older build previously issued.
 - `--uploads` restores the matching uploads archive inside the fence. Before reopen,
   `fold restore settle-uploads` empties erased and unowned avatar folders; active accounts'
   folders remain. A target without the required `restoreUploads` capability is refused.
