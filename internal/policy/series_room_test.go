@@ -31,6 +31,10 @@ func TestSeriesRoomChange(t *testing.T) {
 		b.PickInUse = true
 		return b
 	}
+	over := func(b SeriesDateBooking) SeriesDateBooking {
+		b.BooksOver = true
+		return b
+	}
 	for _, tc := range []struct {
 		name         string
 		p            *Person
@@ -66,6 +70,9 @@ func TestSeriesRoomChange(t *testing.T) {
 		{"a date that follows the series room is not kept by it", leader, inUse(at(RoomBookingConfirmed, hall)), &hall, &annex, true, SeriesFollows},
 		{"an admin's named restricted room keeps it too", admin, inUse(nursery), &hall, &chapel, true, SeriesKeptInUse},
 		{"stopping releases a lost booking in the series room", leader, at(RoomBookingLost, hall), &hall, nil, false, SeriesFollows},
+		{"Book anyway leaves a date that waits for the room to its request", admin, over(at(RoomBookingWaiting, hall)), &hall, &hall, false, SeriesLeftAlone},
+		{"Book anyway books a date that lost the room", admin, over(at(RoomBookingLost, hall)), &hall, &hall, false, SeriesFollows},
+		{"Book anyway moves a waiting date of the old series room", admin, over(at(RoomBookingWaiting, hall)), &hall, &chapel, false, SeriesFollows},
 	} {
 		if got := SeriesRoomChange(tc.p, tc.b, tc.series, tc.pick, tc.named); got != tc.want {
 			t.Errorf("%s: got %q, want %q", tc.name, got, tc.want)
@@ -84,8 +91,9 @@ func TestSeriesRoomListIsWhatAChangeKeeps(t *testing.T) {
 			for _, room := range rooms {
 				for _, restricted := range []bool{false, true} {
 					for _, overlap := range []bool{false, true} {
-						for _, inUse := range []bool{false, true} {
-							b := SeriesDateBooking{State: s, RoomID: room, Restricted: restricted, AllowOverlap: overlap, PickInUse: inUse}
+						for _, how := range [][2]bool{{false, false}, {true, false}, {false, true}} {
+							inUse := how[0]
+							b := SeriesDateBooking{State: s, RoomID: room, Restricted: restricted, AllowOverlap: overlap, PickInUse: inUse, BooksOver: how[1]}
 							for _, series := range pointers {
 								for _, pick := range pointers {
 									shown := b.Listed(p, series) && !(pick != nil && room == *pick && s.HoldsRoom())

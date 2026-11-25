@@ -107,7 +107,7 @@ describe("dates with a room of their own", () => {
     expect(seriesBookingMessage(res({ pending: 1, changed: 1 }))).toBe("Sent to an admin for approval: 1 date. Also changed 1 date that had a room of its own.");
     expect(seriesBookingMessage(res({ defaultRoom: null, changed: 1 }))).toBe("Series room released. Also released the room of 1 date that had its own.");
     expect(seriesBookingMessage(res({ defaultRoom: null, changed: 2 }))).toBe("Series room released. Also released the rooms of 2 dates that had their own.");
-    expect(seriesBookingMessage(res({ booked: 3, changed: 1, keptInUse: 1 }))).toBe("Booked for 3 dates. Also changed 1 date that had a room of its own. 1 date keeps its own room because Fellowship Hall · Main is in use then.");
-    expect(seriesBookingMessage(res({ booked: 3, keptInUse: 2, kept: 1 }))).toBe("Booked for 3 dates. 2 dates keep their own room because Fellowship Hall · Main is in use then. 1 date keeps its own room.");
+    expect(seriesBookingMessage(res({ booked: 3, changed: 1, keptInUse: 1 }))).toBe("Booked for 3 dates. Also changed 1 date that had a room of its own. 1 date was left as it is because Fellowship Hall · Main is in use then.");
+    expect(seriesBookingMessage(res({ booked: 3, keptInUse: 2, kept: 1 }))).toBe("Booked for 3 dates. 2 dates were left as they are because Fellowship Hall · Main is in use then. 1 date keeps its own room.");
   });
 });

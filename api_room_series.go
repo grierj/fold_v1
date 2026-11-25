@@ -352,7 +352,8 @@ type seriesPick struct {
 // was before the pick: a date with a room of its own keeps it unless the pick
 // names it and the room picked is free then, and a booking only an admin
 // could make stays unless an admin is booking. A busy date keeps a requested
-// booking (DEC-103) unless an admin's reason double-books it.
+// booking (DEC-103) unless an admin's reason double-books it; that reason
+// leaves a date that waits for the room to its request.
 //
 // With approval on (DEC-102), a leader's or host's free dates wait on one
 // request for the whole series (DEC-106); busy ones are lost as above. The
@@ -426,6 +427,7 @@ func bookWholeSeries(tx *gorm.DB, ev *models.Event, pick seriesPick, user *model
 	keepsSeriesRequest := false
 	for _, b := range current {
 		j := b.judged()
+		j.BooksOver = reason != ""
 		if room != nil && reason == "" && named[b.Date] {
 			o := occByID[b.OccurrenceID]
 			busy, err := rooms.BusyCounts(tx, []uint{room.ID}, []rooms.Window{{Start: o.StartsAt, End: o.EndsAt, OccurrenceID: o.ID}}, 0)

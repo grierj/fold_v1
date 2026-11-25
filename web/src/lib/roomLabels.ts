@@ -162,7 +162,8 @@ export function seriesBookingMessage(res: SeriesBooking): string {
   }
 
   if (res.keptInUse > 0 && res.defaultRoom !== null) {
-    parts.push(`${dates(res.keptInUse)} ${res.keptInUse === 1 ? "keeps its" : "keep their"} own room because ${roomName(res.defaultRoom)} is in use then.`);
+    // "Left as it is", not "keeps its room": the date may hold a room or still wait for one.
+    parts.push(`${dates(res.keptInUse)} ${res.keptInUse === 1 ? "was left as it is" : "were left as they are"} because ${roomName(res.defaultRoom)} is in use then.`);
   }
 
   if (res.kept > 0) parts.push(keptLine(res.kept, res.keptWaiting));

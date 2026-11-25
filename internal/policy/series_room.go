@@ -16,6 +16,9 @@ type SeriesDateBooking struct {
 	// PickInUse: another booking holds the room picked at this date, and the
 	// pick does not book over it (no admin's reason).
 	PickInUse bool
+	// BooksOver: the pick is an admin's "Book anyway", which asked only
+	// about the dates with no room.
+	BooksOver bool
 }
 
 // holdsOrWaits: the booking holds its room, or waits for an admin's
@@ -60,8 +63,10 @@ const (
 	// admin may change it.
 	SeriesKept SeriesRoomOutcome = "keeps its room"
 	// SeriesLeftAlone: it holds nothing and is not the change's to replace:
-	// a lost or rejected booking only an admin may change, or, when the
-	// series room stops, one in another room than the series room.
+	// a lost or rejected booking only an admin may change; when the series
+	// room stops, one in another room than the series room; or, for a pick
+	// that books over others, one that waits for the room picked (its request
+	// decides it).
 	SeriesLeftAlone SeriesRoomOutcome = "left as it is"
 )
 
@@ -86,6 +91,8 @@ func SeriesRoomChange(p *Person, b SeriesDateBooking, seriesRoom, pick *uint, na
 		}
 		return SeriesIncluded
 	case pick == nil && (seriesRoom == nil || b.RoomID != *seriesRoom):
+		return SeriesLeftAlone
+	case pick != nil && b.BooksOver && b.RoomID == *pick && b.State == RoomBookingWaiting:
 		return SeriesLeftAlone
 	}
 	return SeriesFollows

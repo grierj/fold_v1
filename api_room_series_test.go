@@ -922,6 +922,38 @@ func TestSeriesPickKeepsARequestOnlyAnAdminCanChange(t *testing.T) {
 	noOrphanRequests(t, f.app)
 }
 
+// "Book anyway" books over others only where the pick left a date with no
+// room, which is what its prompt counted: a date that waits for the room keeps
+// its request for an admin to decide.
+func TestSeriesBookAnywayLeavesAWaitingDateToItsRequest(t *testing.T) {
+	f := newBookingFixture(t)
+	start := f.startOn.AddDate(0, 0, 1)
+	series := createFeedEvent(t, f.leader, f.group, "Choir", start, "FREQ=WEEKLY;COUNT=2")
+	other := createFeedEvent(t, f.leader, f.group, "Band", start, "FREQ=WEEKLY;COUNT=2")
+	first, second := feedDate(start), feedDate(start.AddDate(0, 0, 7))
+	approvalOn(t, f)
+	roomPickOK(t, f.leader, "/api/v1/events/"+itoa(series.ID)+"/dates/"+first+"/room", map[string]any{"roomId": f.hall.ID})
+	if code, out := f.seriesRoom(t, f.admin, other, map[string]any{"roomId": f.hall.ID}); code != http.StatusOK || out.Booked != 2 {
+		t.Fatalf("the band's hall: %d %+v", code, out)
+	}
+
+	out := seriesPickFrom(t, f.admin, series, seriesRoomsRead(t, f.admin, series), map[string]any{"roomId": f.hall.ID})
+	if out.Kept != 1 || out.KeptWaiting != 1 || len(out.Lost) != 1 || out.Booked != 0 {
+		t.Fatalf("the pick: %+v, want the waiting date kept and one date with no room", out)
+	}
+	out = seriesPickFrom(t, f.admin, series, seriesRoomsRead(t, f.admin, series), map[string]any{"roomId": f.hall.ID, "overlapReason": "Choir moved"})
+	if out.Booked != 1 || out.DoubleBooked != 1 {
+		t.Fatalf("book anyway: %+v, want the one date its prompt counted", out)
+	}
+	if room, status, waiting, _ := dateBookingOf(t, f.app, series, first); room != f.hall.ID || status != models.BookingRequested || !waiting {
+		t.Fatalf("the waiting date: %d %s waiting %v, want it still waiting for the hall", room, status, waiting)
+	}
+	if _, status, _, _ := dateBookingOf(t, f.app, series, second); status != models.BookingConfirmed {
+		t.Fatalf("the busy date: %s, want it booked", status)
+	}
+	noOrphanRequests(t, f.app)
+}
+
 // Including a date never leaves it with no room: a named date whose new room is
 // in use then keeps the room it has, untouched, and is not counted as changed.
 func TestSeriesPickKeepsANamedDateWhoseNewRoomIsInUse(t *testing.T) {
