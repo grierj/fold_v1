@@ -98,7 +98,7 @@ interface RoomAvailabilityInput {
 export const SeriesRooms = {
   list: (eventId: Id) => api<SeriesRoomsResponse>(path`/events/${eventId}/rooms`),
   // `includeDates`: the dates with a room of their own the control showed, to change too (DEC-168).
-  set: (eventId: Id, body: { roomId: number | null; overlapReason?: string; includeDates?: string[] }, revision: string | undefined) =>
+  set: (eventId: Id, body: { roomId: number | null; overlapReason?: string; includeDates?: string[]; reviewedBusyDates?: string[] }, revision: string | undefined) =>
     api<SeriesBooking>(path`/events/${eventId}/room`, { method: "PUT", body: { ...body, revision } }),
   // Rooms for an event not yet created: the create form sends its date
   // fields (and groupId for a group event, and the visibility chosen, which

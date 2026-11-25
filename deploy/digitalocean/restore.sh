@@ -607,7 +607,7 @@ reap_uploads_helpers() {
     [[ "$found" == "$(get .nonce)" ]] || { echo "foreign uploads helper $id nonce=$found; nothing removed or started" >&2; return 1; }
   done <<<"$ids"
   while IFS= read -r id; do
-    [[ -z "$id" ]] || docker rm -f "$id" >/dev/null 2>&1 || [[ -z "$(docker ps -aq --filter "id=$id")" ]] || return 1
+    [[ -z "$id" ]] || docker rm -fv "$id" >/dev/null 2>&1 || [[ -z "$(docker ps -aq --filter "id=$id")" ]] || return 1
   done <<<"$ids"
   ids="$(uploads_helper_ids)" || return 1
   [[ -z "$ids" ]]
@@ -656,7 +656,7 @@ uploads_preflight() {
     [[ -n "$id" ]] || continue
     running="$(docker inspect --format '{{.State.Running}}' "$id")" || fail 'cannot inspect an uploads helper; nothing stopped'
     [[ "$running" != true ]] || fail 'an uploads helper is still running without a recovery lock (a killed earlier restore). Stop and remove it, then retry; nothing stopped'
-    docker rm -f "$id" >/dev/null || fail 'cannot remove an exited uploads helper; nothing stopped'
+    docker rm -fv "$id" >/dev/null || fail 'cannot remove an exited uploads helper; nothing stopped'
   done <<<"$ids"
   UP_NONCE="$nonce"; UP_IMAGE="$bimage"; UP_VOLUME="$vol_name"; UP_ARCHIVE="$UPLOADS"
   out="$(uploads_helper validate '' uploads-validate)" || fail 'the uploads archive failed validation or the uploads volume has too little room; nothing stopped'

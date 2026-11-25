@@ -3580,6 +3580,7 @@ func legacyAttemptLifecycle(t *testing.T) {
 		if got := r.state(id, gone.ID); got != attemptUnknown {
 			t.Fatalf("state %v, want unknown", got)
 		}
+		r.rig.awaitReleased(r.rig.pidOf("idle_in_transaction_session_timeout"), 10*time.Second)
 		if r.reasonOf(int64(req.ID)) != "" || len(r.decisionRows()) != 1 || r.receipts() != 1 {
 			t.Fatal("the commit the server received was not saved exactly once")
 		}

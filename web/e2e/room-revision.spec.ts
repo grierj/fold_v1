@@ -106,8 +106,11 @@ test("a series pick of the room someone else already set books the date they rel
   await pickDateRoom(other, event.id, date, { roomId: null });
 
   await field.selectOption(String(loft.id));
-  await page.getByRole("button", { name: "Book for every date" }).click();
+  const book = page.getByRole("button", { name: "Book for every date" });
+  await book.focus();
+  await page.keyboard.press("Enter");
   await expect(page.getByRole("status").filter({ hasText: "Booked for 1 date." })).toBeVisible();
+  await expect(book).toBeFocused();
   await expect(page.getByText(/is saved|changed while you were choosing/)).toHaveCount(0);
   // The page behind reads again: the first date's card names the room.
   await expect(page.getByRole("article").first()).toContainText(`Loft ${suffix}`);
