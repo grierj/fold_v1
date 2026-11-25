@@ -2908,7 +2908,14 @@ Malformed, expired, wrong-actor or unavailable selections fail with 400 code
 Existing add endpoints accept `selectionId` in place of the legacy target:
 
 - `POST /groups/:id/members`: exactly one of `selectionId`, `email`; retain
-  `overLimit` and existing group management/capacity rules.
+  `overLimit` and existing group management/capacity rules. Email adds use the
+  same active account filter as the name picker. Leaders can add adults who
+  share their contact details with leaders or use their own email address.
+  Admins can add any selectable adult. Contact grants are used through the
+  audited reveal route.
+  Unavailable email targets and requests over the email limit answer 400
+  `group_member_email_unavailable`. The limit is 30 per actor and 100 per client
+  IP per minute. The invitation remains a separate action.
 - `POST /admin/groups/:id/members`: exactly one of `selectionId`, `userId`;
   retain `role`, `overLimit` and admin authorization.
 - `POST /events/:id/registrations/add`: `selectionId` instead of `userId`,
@@ -2922,10 +2929,10 @@ leadership/over-limit and registration audit rows remain; no-op adds do not log 
 new addition. Audit failure rolls back the membership change.
 
 Every ordinary direct manager-initiated teen account add through these
-endpoints (including email, raw-ID and admin paths) fails closed with 409 code
-`teen_add_approval_required`. Use a separate Ask to add; direct endpoints do not
-auto-create asks. Teen self-RSVP, household, proxy, consent conversion and
-invitation flows retain their own rules.
+endpoints fails closed. Email adds give the same unavailable response as other
+ineligible email targets. Selection and raw-ID adds return 409
+`teen_add_approval_required`. Use a separate Ask to add. Teen self-RSVP,
+household, proxy, consent conversion and invitation flows follow their own rules.
 
 Picker copy (client-owned):
 

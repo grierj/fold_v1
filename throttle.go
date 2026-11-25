@@ -176,6 +176,29 @@ func (a *App) throttleHit(ctx context.Context, key throttleKey, window time.Dura
 	return failures, err
 }
 
+const (
+	groupMemberEmailUserLimit = 30
+	groupMemberEmailIPLimit   = 100
+)
+
+func (a *App) groupMemberEmailAllowed(ctx context.Context, actor *models.User, ip string) (bool, error) {
+	allowed := false
+	err := a.DB.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		// Keep the owned key's write ordered with account erasure.
+		if _, err := lockActorIn(tx, actor, actorShare); err != nil {
+			return err
+		}
+		hits, _, err := countThrottleHit(tx, groupMemberEmailUserKey(actor.ID), time.Minute)
+		if err != nil || hits > groupMemberEmailUserLimit {
+			return err
+		}
+		hits, _, err = countThrottleHit(tx, groupMemberEmailIPKey(ip), time.Minute)
+		allowed = hits <= groupMemberEmailIPLimit
+		return err
+	})
+	return allowed, err
+}
+
 // inviteSendAllowed is the invitation send limit: ordinary invitations and
 // household-conversion mail (resends included) share it. Audits are
 // durable counters; refused ordinary invitations spend only the actor budget.
