@@ -111,6 +111,7 @@ func captureErasureSetsIn(tx *gorm.DB, s *erasureSubject) error {
 			UNION ALL
 			SELECT a.target_id FROM audit_logs a
 			WHERE a.action = 'invitation.created' AND a.target_type = 'invitation'
+			  AND a.target_id > 0
 			  AND (a.meta_json->>'email')::citext = ?
 			  AND NOT EXISTS (SELECT 1 FROM invitations i WHERE i.id = a.target_id)
 			  AND NOT EXISTS (SELECT 1 FROM audit_logs accepted
