@@ -65,10 +65,9 @@ type registrationRule struct {
 	// keeps: the move may also leave the status as it is and write other
 	// columns (a household person's childcare cleared).
 	keeps bool
-	// through is a status the move may write before its last write, in the
-	// same transaction: applyRegistrationBatch frees a held seat first by
-	// saving the row as declined.
-	through []string
+	// releasesSeat allows an interim going → declined write in the same
+	// transaction before the final move.
+	releasesSeat bool
 }
 
 var (
@@ -84,14 +83,12 @@ var (
 // since its selection, so it starts from any status.
 var registrationRules = map[RegistrationMove]registrationRule{
 	RegAnswer: {
-		from:    []string{RegNone, RegGoing, RegMaybe, RegDeclined, RegCancelled, RegWaitlisted},
-		to:      answerOutcomes,
-		through: []string{RegDeclined},
+		from: []string{RegNone, RegGoing, RegMaybe, RegDeclined, RegCancelled, RegWaitlisted},
+		to:   answerOutcomes,
 	},
 	RegUndoSeriesAnswer: {
-		from:    answerOutcomes,
-		to:      []string{RegGoing, RegMaybe, RegDeclined, RegCancelled, RegWaitlisted},
-		through: []string{RegDeclined},
+		from: answerOutcomes,
+		to:   []string{RegGoing, RegMaybe, RegDeclined, RegCancelled, RegWaitlisted},
 	},
 	RegConfirmGuest: {
 		from: []string{RegNone, RegGoing, RegMaybe, RegDeclined, RegCancelled, RegWaitlisted},
@@ -101,8 +98,8 @@ var registrationRules = map[RegistrationMove]registrationRule{
 	RegPromote:         {from: []string{RegWaitlisted}, to: []string{RegGoing}},
 	RegAddByManager:    {from: append([]string{RegNone}, allRegStatuses...), to: []string{RegGoing}},
 	RegRemoveByManager: {from: []string{RegGoing, RegMaybe, RegDeclined, RegWaitlisted}, to: []string{RegRemoved}},
-	RegLeaveGroup:      {from: CurrentRegStatuses, to: []string{RegCancelled}, through: []string{RegDeclined}},
-	RegRemoveFromGroup: {from: CurrentRegStatuses, to: []string{RegRemoved}, through: []string{RegDeclined}},
+	RegLeaveGroup:      {from: CurrentRegStatuses, to: []string{RegCancelled}, releasesSeat: true},
+	RegRemoveFromGroup: {from: CurrentRegStatuses, to: []string{RegRemoved}, releasesSeat: true},
 	RegMorePrivate:     {from: CurrentRegStatuses, to: []string{RegCancelled}},
 	RegHouseholdPersonChanged: {
 		from:  allRegStatuses,
@@ -139,5 +136,5 @@ func (m RegistrationMove) Allows(from, to string) bool {
 // AllowsStep: the move may write to before its last write (applyRegistrationBatch's
 // seat release), which is anything it may end in or pass through.
 func (m RegistrationMove) AllowsStep(from, to string) bool {
-	return m.Allows(from, to) || (m.StartsFrom(from) && slices.Contains(registrationRules[m].through, to))
+	return m.Allows(from, to) || (registrationRules[m].releasesSeat && from == RegGoing && to == RegDeclined)
 }

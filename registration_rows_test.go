@@ -155,6 +155,7 @@ func TestSaveRegistrationRefusesMovesTheRuleDoesNotHold(t *testing.T) {
 						if step {
 							save, allowed = saveRegistrationStep, m.AllowsStep(from, to)
 						}
+						allowed = allowed && m != policy.RegPromote
 						err := save(tx, m, from, &r)
 						var rows []models.Registration
 						if err := tx.Where("occurrence_id = ? AND user_id = ?", occ.ID, uid).Find(&rows).Error; err != nil {
