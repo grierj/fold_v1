@@ -248,7 +248,7 @@ func TestBoiseWeeklyKeepsLocalTime(t *testing.T) {
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("bad zone: %d %s", w.Code, w.Body.String())
 	}
-	w = admin.do("PUT", "/api/v1/admin/timezone", map[string]any{"timezone": "America/Boise"}, true)
+	w = admin.do("PUT", "/api/v1/admin/timezone", adminSettingBody(admin, "/api/v1/admin/timezone", "timezone", "America/Boise"), true)
 	if w.Code != http.StatusOK {
 		t.Fatalf("set zone: %d %s", w.Code, w.Body.String())
 	}
@@ -2550,7 +2550,7 @@ func TestCreateEventRechecksAfterHeldBody(t *testing.T) {
 					want = http.StatusNotFound
 				}
 			case "demoted admin":
-				apiDo(t, admin, "PUT", "/api/v1/admin/users/"+itoa(actor.ID), map[string]any{"role": models.RoleMember}, http.StatusOK)
+				apiDo(t, admin, "PUT", "/api/v1/admin/users/"+itoa(actor.ID), adminEditBody(admin, actor.ID, map[string]any{"role": models.RoleMember}), http.StatusOK)
 				want = http.StatusUnauthorized
 			case "disabled account":
 				apiDo(t, admin, "PUT", "/api/v1/admin/users/"+itoa(actor.ID), map[string]any{"status": models.UserDisabled}, http.StatusOK)
@@ -3034,7 +3034,7 @@ func TestDeleteEventRechecksAfterContactGate(t *testing.T) {
 	before := eventRow(t, f.app, f.event.ID)
 	gate := holdContactGate(t, f.app)
 	demotion := queueContact(func() *httptest.ResponseRecorder {
-		return f.admin.do("PUT", "/api/v1/admin/users/"+itoa(f.user.ID), map[string]any{"role": models.RoleMember}, true)
+		return f.admin.do("PUT", "/api/v1/admin/users/"+itoa(f.user.ID), adminEditBody(f.admin, f.user.ID, map[string]any{"role": models.RoleMember}), true)
 	})
 	waitContactWaiters(t, f.app, 1)
 	deletion := queueContact(func() *httptest.ResponseRecorder {

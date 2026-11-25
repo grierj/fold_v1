@@ -245,6 +245,7 @@ func (a *App) registerAPIRoutes(r *gin.Engine) {
 	v1.DELETE("/groups/:id/cover", a.apiAuth(), a.apiDeleteGroupCover)
 
 	v1.GET("/site", a.apiSite)
+	v1.GET("/admin/timezone", a.apiAuth(), a.apiAdmin(), a.apiAdminGetTimezone)
 	v1.PUT("/admin/timezone", a.apiAuth(), a.apiAdmin(), a.apiSetTimezone)
 	// Rooms (M2.1a): every room route is 404 while rooms are off (9.1).
 	v1.PUT("/admin/settings/rooms", a.apiAuth(), a.roomManager(), a.apiSetRoomsEnabled)

@@ -100,7 +100,7 @@ func TestTeenConversionApprovalConsentAndFreshLink(t *testing.T) {
 				t.Fatal(err)
 			}
 			// The stored association survives an account email change.
-			apiDo(t, admin, "PUT", "/api/v1/admin/users/"+itoa(f.user.ID), map[string]string{"email": first + "-changed@example.com"}, 200)
+			apiDo(t, admin, "PUT", "/api/v1/admin/users/"+itoa(f.user.ID), adminEditBody(admin, f.user.ID, map[string]string{"email": first + "-changed@example.com"}), 200)
 			grant := func() {
 				apiDo(t, admin, "POST", consentPath(&f.user), map[string]string{"scope": "account", "status": "granted", "evidenceText": "Signed paper consent"}, 200)
 			}

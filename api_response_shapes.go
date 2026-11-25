@@ -174,6 +174,7 @@ type badgeJSON struct {
 }
 
 type userJSON struct {
+	Revision     string  `json:"revision,omitempty"`
 	ID           uint    `json:"id"`
 	Name         string  `json:"name"`
 	DisplayName  string  `json:"displayName"`
@@ -501,6 +502,7 @@ type jitsiLinkResponseJSON struct {
 
 type timezoneResponseJSON struct {
 	Timezone string `json:"timezone"`
+	Revision string `json:"revision"`
 }
 
 type calendarFeedResponseJSON struct {
@@ -519,7 +521,8 @@ type settingOnResponseJSON struct {
 }
 
 type settingAddressResponseJSON struct {
-	Address string `json:"address"`
+	Address  string `json:"address"`
+	Revision string `json:"revision"`
 }
 
 type selfSignupResponseJSON struct {

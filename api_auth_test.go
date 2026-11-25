@@ -152,7 +152,7 @@ func TestEmailLoginAnyCaseAndOnlyWithPassword(t *testing.T) {
 	if err := app.DB.Create(&models.User{Email: "ALICE@example.com", Name: "x"}).Error; err == nil {
 		t.Fatal("database accepted a duplicate email")
 	}
-	w = admin.do("PUT", "/api/v1/admin/users/"+itoa(created.User.ID), map[string]string{"email": "alice@EXAMPLE.com"}, true)
+	w = admin.do("PUT", "/api/v1/admin/users/"+itoa(created.User.ID), adminEditBody(admin, created.User.ID, map[string]string{"email": "alice@EXAMPLE.com"}), true)
 	if w.Code != http.StatusConflict {
 		t.Fatalf("change to taken email: got %d, want 409", w.Code)
 	}
@@ -275,13 +275,13 @@ func TestChangesEndOtherSessions(t *testing.T) {
 			return a.do("POST", "/api/v1/admin/users/"+itoa(id)+"/password", map[string]string{"password": "another-password"}, true).Code
 		}},
 		{"role", func(a *apiClient, id uint) int {
-			return a.do("PUT", "/api/v1/admin/users/"+itoa(id), map[string]string{"role": "admin"}, true).Code
+			return a.do("PUT", "/api/v1/admin/users/"+itoa(id), adminEditBody(a, id, map[string]string{"role": "admin"}), true).Code
 		}},
 		{"disable", func(a *apiClient, id uint) int {
 			return a.do("PUT", "/api/v1/admin/users/"+itoa(id), map[string]string{"status": "disabled"}, true).Code
 		}},
 		{"email", func(a *apiClient, id uint) int {
-			return a.do("PUT", "/api/v1/admin/users/"+itoa(id), map[string]string{"email": "new-alice@example.com"}, true).Code
+			return a.do("PUT", "/api/v1/admin/users/"+itoa(id), adminEditBody(a, id, map[string]string{"email": "new-alice@example.com"}), true).Code
 		}},
 	}
 	for _, tc := range cases {

@@ -2263,7 +2263,7 @@ func TestVisibilityConsentLifecycleMatrix(t *testing.T) {
 			apiDo(t, f.admin, "POST", "/api/v1/groups/"+itoa(f.gid)+"/members", map[string]any{"email": p.o1.Email}, http.StatusOK)
 		}},
 		{"7 an outsider becomes an admin", all, func(t *testing.T, f *vcFixture, p *lifecyclePeople) {
-			apiDo(t, f.admin, "PUT", "/api/v1/admin/users/"+itoa(p.o1.ID), map[string]any{"role": models.RoleAdmin}, http.StatusOK)
+			apiDo(t, f.admin, "PUT", "/api/v1/admin/users/"+itoa(p.o1.ID), adminEditBody(f.admin, p.o1.ID, map[string]any{"role": models.RoleAdmin}), http.StatusOK)
 		}},
 		{"9 a guest's sign-up is redeemed", all, func(t *testing.T, f *vcFixture, p *lifecyclePeople) {
 			body := guestBody("Guest Visitor", "guest-visitor@example.com", true)
@@ -2597,7 +2597,7 @@ func TestVisibilityConsentSerializesWithLifecycleWriters(t *testing.T) {
 		{"a gate taker: an outsider becomes an admin", true,
 			func(t *testing.T, f *vcFixture, p *lifecyclePeople) func() error {
 				return func() error {
-					return doExpect(f.admin, "PUT", "/api/v1/admin/users/"+itoa(p.o1.ID), map[string]any{"role": models.RoleAdmin}, http.StatusOK)
+					return doExpect(f.admin, "PUT", "/api/v1/admin/users/"+itoa(p.o1.ID), adminEditBody(f.admin, p.o1.ID, map[string]any{"role": models.RoleAdmin}), http.StatusOK)
 				}
 			},
 			func(t *testing.T, f *vcFixture, p *lifecyclePeople) {

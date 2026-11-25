@@ -389,14 +389,7 @@ func (a *App) setRoomSwitch(c *gin.Context, key, action string) (enabled, ok boo
 		jsonError(c, http.StatusBadRequest, "invalid request")
 		return false, false
 	}
-	me := apiUser(c)
-	err := a.DB.Transaction(func(tx *gorm.DB) error {
-		if err := setSettingIn(tx, key, strconv.FormatBool(*body.Enabled)); err != nil {
-			return err
-		}
-		return audit.Write(tx, audit.Entry{Actor: &me.ID, Action: action,
-			TargetType: "setting", Meta: map[string]any{"enabled": *body.Enabled}, IP: c.ClientIP()})
-	})
+	err := a.saveSetting(c, key, strconv.FormatBool(*body.Enabled), action, map[string]any{"enabled": *body.Enabled})
 	if err != nil {
 		jsonError(c, http.StatusInternalServerError, "could not save the setting")
 		return false, false

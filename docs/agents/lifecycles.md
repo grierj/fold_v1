@@ -166,6 +166,9 @@ chosen when the row is made, or is a setting that may change to any value its ow
   draft. "Dates that need a room" says what a row's own pick left when the row leaves the list
   (booked, waiting for an admin, released), and after a refused pick only that the choice could
   not be saved and the date is no longer listed.
+- The three admin settings editors (#482) share `RevisedSetting`. A save returns the value and its
+  new revision. A conflict discards the draft and reads the setting again. The admin account
+  editor uses the same protocol, then closes and reloads the users list after a conflict.
 - The message composer (DEC-169) mounts its editor once per message it opens and stays open after
   its saves (`stays`); a new draft's first save creates it through the same hook. The page shows
   an editor only while the address names its message, so an editor the person moved away from

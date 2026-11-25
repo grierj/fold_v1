@@ -305,3 +305,47 @@ func (a *App) checkRoomRevision(tx *gorm.DB, id uint, given string) error {
 	}
 	return checkEditRevision(given, current, errRoomChanged)
 }
+
+var (
+	errSettingChanged   = apiErr(http.StatusConflict, "setting_changed", "the setting changed since this edit was based on it")
+	errAdminUserChanged = apiErr(http.StatusConflict, "admin_user_changed", "the account changed since this edit was based on it")
+)
+
+// The audit id distinguishes a save from one that changed the value and then
+// put it back. Only the setting's own audit action advances it. The anchor row
+// also gives an unset setting a token that no other setting can use.
+func (a *App) settingRevisionIn(tx *gorm.DB, setting revisedSetting) (value, revision string, err error) {
+	var digest string
+	var last int64
+	err = tx.Raw(`
+		SELECT coalesce(s.value, ''), md5(coalesce(to_jsonb(s)::text, 'null')),
+		       coalesce((SELECT max(id) FROM audit_logs WHERE action = ?), 0)
+		FROM (VALUES (?::text)) AS k(key)
+		LEFT JOIN settings s ON s.key = k.key
+	`, setting.action, setting.key).Row().Scan(&value, &digest, &last)
+	if err != nil {
+		return "", "", err
+	}
+	return value, a.editRevision("s"+setting.key, digest, last), nil
+}
+
+func (a *App) checkSettingRevision(tx *gorm.DB, setting revisedSetting, given string) error {
+	_, current, err := a.settingRevisionIn(tx, setting)
+	if err != nil {
+		return err
+	}
+	return checkEditRevision(given, current, errSettingChanged)
+}
+
+// Credentials change the session version. The password hash itself has no
+// place in an edit token.
+var adminUserRevisionRows = revisionRows{table: "users", kind: "u", key: "id",
+	instants: []string{"updated_at", "deleted_at"}, omit: []string{"created_at", "password_hash"}}
+
+func (a *App) checkAdminUserRevision(tx *gorm.DB, id uint, given string) error {
+	current, err := a.rowRevisionIn(tx, adminUserRevisionRows, id)
+	if err != nil {
+		return err
+	}
+	return checkEditRevision(given, current, errAdminUserChanged)
+}
