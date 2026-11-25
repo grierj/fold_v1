@@ -385,7 +385,6 @@ export function VisibilityField({
         {choices.map((c) => (
           <Radio
             key={c.value}
-            id={`${id}-${c.value}`}
             name={id}
             value={c.value}
             label={`${c.label}${!churchWide && c.value === groupVisibility ? " (same as the group)" : ""}`}

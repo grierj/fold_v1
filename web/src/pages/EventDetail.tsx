@@ -46,6 +46,23 @@ import { seriesSchedules } from "../lib/registration";
 
 const ManageRoster = lazy(() => import("../components/ManageRoster").then((module) => ({ default: module.ManageRoster })));
 
+// React generates new ids for unnamed choices on remount. Their labels and the button names survive the read.
+function editorFocusKey(control: Element): string {
+  if (control instanceof HTMLInputElement && (control.type === "checkbox" || control.type === "radio")) {
+    const label = control.getAttribute("aria-label") || control.labels?.[0]?.textContent;
+
+    if (label) return `${control.type}:${control.name}:${label}`;
+  }
+
+  if (control instanceof HTMLButtonElement) {
+    const label = control.getAttribute("aria-label") || control.textContent;
+
+    if (label) return `button:${label}`;
+  }
+
+  return control.id;
+}
+
 export function EventDetail() {
   const { id } = useParams<{ id: string }>();
   const { user } = useAuth();
@@ -79,7 +96,7 @@ function EventDetailContent() {
   const visibilityAction = useAction();
   const panelBusy = seriesAction.running || visibilityAction.running;
   const editButton = useRef<HTMLButtonElement>(null);
-  // An empty id returns to the opener. A recheck can restore a field only if it still belongs to the editor.
+  // An empty key returns to the opener. Only a control present in the restored editor can take focus.
   const returnToEdit = useRef<string | null>(null);
   // Close took the focused control with the panel: focus goes back to Edit series, never the page body.
   const closedPanel = useRef(false);
@@ -97,7 +114,7 @@ function EventDetailContent() {
     const active = document.activeElement;
 
     if (!editor && active && editorRef.current?.contains(active)) {
-      returnToEdit.current = active.id;
+      returnToEdit.current = editorFocusKey(active);
       document.getElementById("main")?.focus({ preventScroll: true });
     }
 
@@ -156,12 +173,14 @@ function EventDetailContent() {
   }, [page, loading, authLoading]);
   useLayoutEffect(() => {
     if (returnToEdit.current === null || loading || authLoading) return;
-    const field = document.getElementById(returnToEdit.current);
+    const key = returnToEdit.current;
     returnToEdit.current = null;
     const active = document.activeElement;
 
     if (!active || active === document.body || active.id === "main") {
-      const destination = field && editorRef.current?.contains(field) ? field : editButton.current;
+      const controls = editorRef.current?.querySelectorAll<HTMLElement>("input, select, textarea, button, [tabindex]") ?? [];
+      const matches = key ? Array.from(controls).filter((el) => editorFocusKey(el) === key && !el.matches(":disabled")) : [];
+      const destination = matches.length === 1 ? matches[0] : editButton.current;
       destination?.focus({ preventScroll: true });
     }
   }, [loading, authLoading, editing, page]);

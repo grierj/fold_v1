@@ -2658,7 +2658,7 @@ describe("EventDetail when a series save meets someone else's change", () => {
     expect(Events.setVisibility).toHaveBeenCalledExactlyOnceWith(7, expect.objectContaining({ visibility: "private", revision: "r1" }));
   });
 
-  it.each(["allowed", "moved focus", "revoked"])("hides both drafts until a renewed session's read settles as %s", async (result) => {
+  it.each(["allowed", "checkbox", "button", "moved focus", "revoked"])("hides both drafts until a renewed session's read settles as %s", async (result) => {
     const fresh = deferred<EventDetailResponse>();
     vi.mocked(Events.get).mockResolvedValueOnce(opened).mockReturnValueOnce(fresh.promise);
     let sessionCredential: Credential | null = credential;
@@ -2670,7 +2670,16 @@ describe("EventDetail when a series save meets someone else's change", () => {
     await userEvent.type(screen.getByLabelText("Title"), " night");
     await userEvent.click(screen.getByRole("radio", { name: /^Private/ }));
 
-    expect(screen.getByRole("radio", { name: /^Private/ })).toHaveFocus();
+    const focusedControl = () => {
+      if (result === "checkbox") return screen.getByRole("checkbox", { name: /^Remote attendance/ });
+
+      if (result === "button") return screen.getByRole("button", { name: "Save series" });
+
+      return screen.getByRole("radio", { name: /^Private/ });
+    };
+
+    focusedControl().focus();
+    expect(focusedControl()).toHaveFocus();
     sessionCredential = null;
     view.rerender(tree());
     showsNothingOfTheEvent();
@@ -2690,7 +2699,7 @@ describe("EventDetail when a series save meets someone else's change", () => {
     await screen.findByRole("heading", { name: "Hybrid study", level: 1 });
 
     if (allowed) {
-      const destination = result === "moved focus" ? screen.getByRole("button", { name: "Outside the editor" }) : screen.getByRole("radio", { name: /^Private/ });
+      const destination = result === "moved focus" ? screen.getByRole("button", { name: "Outside the editor" }) : focusedControl();
       expect(destination).toHaveFocus();
       expect(screen.getByLabelText("Title")).toHaveValue("Hybrid study night");
       expect(screen.getByRole("radio", { name: /^Private/ })).toBeChecked();
