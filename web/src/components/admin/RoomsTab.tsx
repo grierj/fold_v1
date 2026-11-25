@@ -476,9 +476,17 @@ export function RoomsTab({ rooms, error, reload, load, onSaved }: {
     setStatus("");
   }
 
+  // The refused line says "this is the room as it is now" about the list below it: once the person searches, filters or
+  // pages, that list is another one, so the line goes.
+  function looking(next: number) {
+    refusal.clear();
+    setRefusedId(null);
+    setPage(next);
+  }
+
   const ordered = [...(rooms ?? [])].sort((a, b) => a.building.localeCompare(b.building) || Number(b.active) - Number(a.active) || a.name.localeCompare(b.name));
   const matching = ordered.filter((r) => (!building || r.building === building) && `${r.name} ${r.building} ${r.features}`.toLowerCase().includes(query.trim().toLowerCase()));
-  const paging = usePage(matching, query + building, ROOMS_PER_PAGE, { page, onChange: setPage });
+  const paging = usePage(matching, query + building, ROOMS_PER_PAGE, { page, onChange: looking });
   const refusedAt = refusal.why && refusedId ? matching.findIndex((r) => r.id === refusedId.id) : -1;
   const refusedPage = refusedAt < 0 ? null : Math.floor(refusedAt / ROOMS_PER_PAGE) + 1;
   useEffect(() => {
@@ -507,8 +515,8 @@ export function RoomsTab({ rooms, error, reload, load, onSaved }: {
         <div><Button variant="secondary" data-opener="new" disabled={locked} onClick={startAdding}>Add room</Button></div>
       )}
       {rooms.length > 0 && <div className="flex flex-wrap items-end gap-3">
-        <div className="min-w-48 flex-1"><SearchBox label="Search rooms" value={query} onChange={(q) => { setQuery(q); setPage(1); }} disabled={locked} /></div>
-        <Field label="Building"><Select value={building} onChange={(e) => { setBuilding(e.target.value); setPage(1); }} disabled={locked} options={[{ value: "", label: "All buildings" }, ...[...new Set(rooms.map((r) => r.building).filter(Boolean))].sort().map((b) => ({ value: b, label: b }))]} /></Field>
+        <div className="min-w-48 flex-1"><SearchBox label="Search rooms" value={query} onChange={(q) => { setQuery(q); looking(1); }} disabled={locked} /></div>
+        <Field label="Building"><Select value={building} onChange={(e) => { setBuilding(e.target.value); looking(1); }} disabled={locked} options={[{ value: "", label: "All buildings" }, ...[...new Set(rooms.map((r) => r.building).filter(Boolean))].sort().map((b) => ({ value: b, label: b }))]} /></Field>
       </div>}
       <PageCount paging={paging} noun="rooms" />
       {rooms.length > 0 && matching.length === 0 && <EmptyState title="No rooms match" body="Try another name or choose another building." />}

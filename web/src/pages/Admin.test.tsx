@@ -823,6 +823,39 @@ it("lets the building filter start at its first page after a refusal took the li
   await userEvent.selectOptions(screen.getByLabelText("Building"), "South");
   expect(await screen.findByRole("group", { name: "Room 02" })).toBeInTheDocument();
   expect(screen.queryByRole("group", { name: "Room 51" })).not.toBeInTheDocument();
+  // The list below is no longer the one the line spoke of, so the line is gone.
+  expect(screen.queryByText(/This room changed while you were editing/)).not.toBeInTheDocument();
+});
+
+// A refused edit of room 26, on page two of 26 rooms: the line shows over that room.
+async function refusedOnPageTwo() {
+  withRooms(true);
+  const many: Room[] = Array.from({ length: 26 }, (_, i) => ({ ...hall, id: i + 1, name: `Room ${String(i + 1).padStart(2, "0")}`, revision: `rev-${i + 1}` }));
+  vi.mocked(AdminRooms.list).mockResolvedValueOnce({ rooms: many, needApproval: false })
+    .mockResolvedValue({ rooms: many.map((r) => (r.id === 26 ? { ...r, capacity: 12, revision: "rev-26b" } : r)), needApproval: false });
+  vi.mocked(AdminRooms.update).mockRejectedValue(new ApiError(409, "room changed", { code: "room_changed" }));
+  render(<MemoryRouter initialEntries={["/admin?tab=rooms"]}><AdminPage /></MemoryRouter>);
+  await userEvent.click(await screen.findByRole("button", { name: "Next rooms" }));
+  await userEvent.click(await screen.findByRole("button", { name: "Edit Room 26" }));
+  await userEvent.type(screen.getByLabelText(/^Name/), "b");
+  await userEvent.click(screen.getByRole("button", { name: "Save room" }));
+  expect(await screen.findByText(/^Room 26\. This room changed while you were editing/)).toHaveFocus();
+}
+
+it("drops the refused line when the person pages away from that room", async () => {
+  await refusedOnPageTwo();
+  await userEvent.click(screen.getByRole("button", { name: "Previous rooms" }));
+  expect(await screen.findByRole("group", { name: "Room 01" })).toBeInTheDocument();
+  expect(screen.queryByText(/This room changed while you were editing/)).not.toBeInTheDocument();
+});
+
+it("drops the refused line when the person searches away, and clearing the search starts at the first page", async () => {
+  await refusedOnPageTwo();
+  await userEvent.type(screen.getByLabelText("Search rooms"), "Room 0");
+  expect(screen.queryByText(/This room changed while you were editing/)).not.toBeInTheDocument();
+  expect(screen.queryByRole("group", { name: "Room 26" })).not.toBeInTheDocument();
+  await userEvent.clear(screen.getByLabelText("Search rooms"));
+  expect(await screen.findByRole("group", { name: "Room 01" })).toBeInTheDocument();
 });
 
 it("falls back to Approvals for a bookmarked Rooms tab when rooms are off", async () => {
