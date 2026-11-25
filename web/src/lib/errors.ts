@@ -185,6 +185,7 @@ export const ERROR_COPY = {
   visibility_not_allowed: "That visibility isn't available for this event. Pick another.",
   cannot_host: "That account can't host an event.",
   teen_host: "Hosts need to be adults.",
+  date_add_person_not_found: "We couldn't find that person. Check the email address and try again.",
   no_account: "There's no account with that email. Check the spelling, or invite them first.",
   invalid_duration: "An event can last from 1 minute to 7 days.",
   recurrence_too_many: "That repeat rule makes too many dates. Choose a rule that repeats at most a few times a day.",

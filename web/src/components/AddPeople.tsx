@@ -1,5 +1,7 @@
 import { isString } from "../lib/wireValues";
 import { useEffect, useId, useRef, useState } from "react";
+import { ApiError } from "../api/core";
+import { useResourceRefusal } from "../lib/refusedSave";
 import { Groups } from "../api/groups";
 import { Invitations } from "../api/invitations";
 import type { PersonSearchResult } from "../types";
@@ -11,7 +13,7 @@ import { Form } from "./ui/Form";
 import { PeoplePicker } from "./ui/PeoplePicker";
 
 // DEC-99 keeps the email and invitation fallback beside the DEC-78 name picker.
-export function AddPeople({ groupId, groupName, memberCount, memberLimit, canSearch, onAdded }: {
+export function AddPeople({ groupId, groupName, memberCount, memberLimit, canSearch, onAdded, restoredEmail, onEmailUnavailable }: {
   groupId: number;
   groupName: string;
   memberCount: number;
@@ -20,18 +22,21 @@ export function AddPeople({ groupId, groupName, memberCount, memberLimit, canSea
   canSearch: boolean;
   // Refresh the roster without unmounting the panel.
   onAdded: () => Promise<void> | void;
+  restoredEmail?: string | null;
+  onEmailUnavailable?: (email: string) => void;
 }) {
-  const [open, setOpen] = useState(false);
-  const [mode, setMode] = useState<"name" | "email">(canSearch ? "name" : "email");
+  const [open, setOpen] = useState(!!restoredEmail);
+  const [mode, setMode] = useState<"name" | "email">(canSearch && !restoredEmail ? "name" : "email");
   const [selection, setSelection] = useState<PersonSearchResult | null>(null);
   const [askPerson, setAskPerson] = useState<PersonSearchResult | null>(null);
-  const [email, setEmail] = useState("");
-  const [inviteFor, setInviteFor] = useState<string | null>(null);
+  const [email, setEmail] = useState(restoredEmail ?? "");
+  const [inviteFor, setInviteFor] = useState(restoredEmail ?? null);
   const [overLimit, setOverLimit] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [status, setStatus] = useState<string | null>(null);
   const panelId = useId();
+  const refreshRefusal = useResourceRefusal();
   const full = memberLimit !== null && memberCount >= memberLimit;
 
   // The link that switched modes is gone once the other form shows, so focus
@@ -75,8 +80,26 @@ export function AddPeople({ groupId, groupName, memberCount, memberLimit, canSea
       setStatus(`Added ${label}.`);
       await onAdded();
     } catch (err) {
-      if (isString(target) && errorCode(err) === "group_member_email_unavailable") setInviteFor(target);
-      else setError(errorText(err, "We couldn't add that person."));
+      if (isString(target) && err instanceof ApiError) {
+        const unavailable = err.status === 400 && err.code === "group_member_email_unavailable";
+        const notFound = err.status === 404 && err.code === "not_found";
+
+        // Both replies can mean the group went away. A 404 needs a fresh read
+        // before it can offer an invitation.
+        if (onEmailUnavailable && (unavailable || notFound)) {
+          onEmailUnavailable(target);
+
+          return;
+        }
+
+        if (unavailable) {
+          setInviteFor(target);
+
+          return;
+        }
+      }
+
+      if (!refreshRefusal(err)) setError(errorText(err, "We couldn't add that person."));
     } finally {
       setBusy(false);
     }
@@ -120,7 +143,7 @@ export function AddPeople({ groupId, groupName, memberCount, memberLimit, canSea
       setEmail("");
       setOverLimit(false);
     } catch (err) {
-      setError(errorText(err, "We couldn't send the invitation."));
+      if (!refreshRefusal(err)) setError(errorText(err, "We couldn't send the invitation."));
     } finally {
       setBusy(false);
     }

@@ -1602,6 +1602,10 @@ POST /api/v1/events/:id/registrations/add     → 200 {} | 403 | 404 | 409  (lea
          guestCount?, attendanceMode?, childcareRequested?, overCapacity?}
 ```
 
+A date add returns 404 `date_add_person_not_found` if the email or user ID does
+not resolve to an eligible account, including when the account becomes unavailable
+before the write. The missing date or event still returns 404 `not_found`.
+
 `registration`: `{userId, eventId, occurrenceId, date, status, guestCount,
 waitlistPosition}`. `waitlistPosition` is null unless the person is
 waitlisted. One row per (user, occurrence); PUT is idempotent. The date must

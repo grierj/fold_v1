@@ -9,6 +9,7 @@ import { Link, MemoryRouter, Route, RouterProvider, Routes, createMemoryRouter, 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ApiError, type Credential } from "../api/core";
 import { Events } from "../api/events";
+import { Adds } from "../api/adds";
 import { GroupCover, Groups } from "../api/groups";
 import { Households } from "../api/households";
 import { People } from "../api/people";
@@ -32,11 +33,13 @@ const actor: TestSession = {
   canCompose: false,
 };
 
-const render = renderWithAuth(() => ({ user: actor.user, loading: false, isAdmin: false, canCompose: actor.canCompose }));
+const render = renderWithAuth(() => ({ user: actor.user, loading: false, isAdmin: actor.user?.role === "admin", canCompose: actor.canCompose }));
 
 stubService(People, () => ({ search: vi.fn() }));
 
-stubService(Groups, () => ({ get: vi.fn(), update: vi.fn(), visibilityImpact: vi.fn(), addMember: vi.fn(), join: vi.fn(), departurePreview: vi.fn(), confirmDeparture: vi.fn(), memberDeparturePreview: vi.fn(), confirmMemberDeparture: vi.fn() }));
+stubService(Adds, () => ({ create: vi.fn() }));
+
+stubService(Groups, () => ({ get: vi.fn(), update: vi.fn(), visibilityImpact: vi.fn(), addMember: vi.fn(), setRole: vi.fn(), join: vi.fn(), departurePreview: vi.fn(), confirmDeparture: vi.fn(), memberDeparturePreview: vi.fn(), confirmMemberDeparture: vi.fn() }));
 
 stubService(GroupCover, () => ({ upload: vi.fn(), remove: vi.fn() }));
 
@@ -83,6 +86,28 @@ beforeEach(async () => {
 
 // The editor's own manager read of a date this group lists: the panel's read plus the group it belongs to.
 const forGroup = (read: OccurrenceResponse): OccurrenceResponse => ({ occurrence: { ...read.occurrence, groupId: 1, groupName: "Family group", groupVisibility: "public" } });
+
+it("drops the group while rechecking after a date's cancellation is refused", async () => {
+  const shown = { ...page, canManage: true };
+  const fresh = deferred<GroupDetailResponse>();
+  vi.mocked(Groups.get).mockResolvedValueOnce(shown).mockReturnValueOnce(fresh.promise);
+  vi.mocked(Events.cancelOccurrence).mockRejectedValueOnce(new ApiError(403, "refused", { code: "not_allowed" }));
+  const prompt = vi.spyOn(window, "confirm").mockReturnValue(true);
+
+  try {
+    open();
+    await userEvent.click(await screen.findByRole("button", { name: /^More for .* on 2026-12-01$/ }));
+    await userEvent.click(screen.getByRole("menuitem", { name: "Cancel this date" }));
+    await waitFor(() => expect(Groups.get).toHaveBeenCalledTimes(2));
+    expect(screen.queryByRole("heading", { name: "Family group" })).not.toBeInTheDocument();
+    await act(async () => fresh.resolve(page));
+    expect(await screen.findByRole("heading", { name: "Family group" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /^More for .* on 2026-12-01$/ })).not.toBeInTheDocument();
+    expect(screen.getByText("Your last action could not be completed.")).toHaveFocus();
+  } finally {
+    prompt.mockRestore();
+  }
+});
 
 it("fetches the household once and refetches all date state after a batch", async () => {
   vi.mocked(Events.register).mockResolvedValue({ registration: null, people: [{ registrationId: 9, personId: 3, registeredBy: 2, status: "going", attendanceMode: "in_person", waitlistPosition: null, childcareRequested: false }] });
@@ -278,6 +303,119 @@ it("shows supplied roster contact without reconstructing hidden members' details
   expect(screen.getByText("Hidden adult")).toBeInTheDocument();
   expect(screen.getByText("Teen member")).toBeInTheDocument();
   expect(screen.queryByRole("button", { name: /contact/i })).not.toBeInTheDocument();
+});
+
+it("checks the group from nothing after a by-name add is refused", async () => {
+  const fresh = deferred<GroupDetailResponse>();
+  vi.mocked(Groups.get).mockResolvedValueOnce({ ...page, canManage: true }).mockReturnValueOnce(fresh.promise);
+  vi.mocked(People.search).mockResolvedValue({ state: "results", people: [{ selectionId: "opaque", displayName: "Pat", teen: false, sharedGroups: [], otherGroups: [] }] });
+  vi.mocked(Groups.addMember).mockRejectedValueOnce(new ApiError(403, "refused", { code: "not_allowed" }));
+
+  open();
+  await userEvent.click(await screen.findByRole("tab", { name: "Members" }));
+  await userEvent.click(screen.getByRole("button", { name: "Add people" }));
+  await userEvent.type(within(screen.getByRole("region", { name: "Add people" })).getByRole("combobox"), "Pat");
+  await userEvent.click(await screen.findByRole("option", { name: /Pat/ }));
+  await userEvent.click(screen.getByRole("button", { name: "Add member" }));
+  await waitFor(() => expect(Groups.get).toHaveBeenCalledTimes(2));
+  expect(screen.queryByRole("heading", { name: "Family group" })).not.toBeInTheDocument();
+  await act(async () => fresh.resolve(page));
+  expect(await screen.findByText("Your last action could not be completed.")).toHaveFocus();
+  expect(screen.queryByRole("button", { name: "Add people" })).not.toBeInTheDocument();
+});
+
+it.each([
+  { status: 404, groupStatus: "active", role: "member" },
+  { status: 400, groupStatus: "active", role: "member" },
+  { status: 400, groupStatus: "archived", role: "member" },
+  { status: 404, groupStatus: "archived", role: "admin" },
+] as const)("rechecks a refused email add ($status) for a $role when the group is $groupStatus", async ({ status, groupStatus, role }) => {
+  actor.user = testUser({ id: 2, role });
+  const shown = { ...page, canManage: true };
+  const fresh = deferred<GroupDetailResponse>();
+  vi.mocked(Groups.get).mockResolvedValueOnce(shown).mockReturnValueOnce(fresh.promise);
+  vi.mocked(Groups.addMember).mockRejectedValueOnce(new ApiError(status, "unavailable", {
+    code: status === 404 ? "not_found" : "group_member_email_unavailable",
+  }));
+
+  open();
+  await userEvent.click(await screen.findByRole("tab", { name: "Members" }));
+  await userEvent.click(screen.getByRole("button", { name: "Add people" }));
+  await userEvent.click(screen.getByRole("button", { name: "Use an email instead" }));
+  await userEvent.type(screen.getByRole("textbox", { name: "Email address" }), "sam@example.com");
+  await userEvent.click(screen.getByRole("button", { name: "Add member" }));
+  await waitFor(() => expect(Groups.get).toHaveBeenCalledTimes(2));
+  expect(screen.queryByRole("heading", { name: "Family group" })).not.toBeInTheDocument();
+  expect(screen.queryByRole("textbox", { name: "Email address" })).not.toBeInTheDocument();
+  await act(async () => fresh.resolve({ ...shown, group: { ...shown.group, status: groupStatus } }));
+
+  if (groupStatus === "archived") {
+    expect(screen.queryByRole("button", { name: "Send invitation" })).not.toBeInTheDocument();
+    expect(screen.queryByDisplayValue("sam@example.com")).not.toBeInTheDocument();
+
+    if (role === "admin") {
+      await userEvent.click(screen.getByRole("button", { name: "Add people" }));
+      await userEvent.click(screen.getByRole("button", { name: "Use an email instead" }));
+      await userEvent.type(screen.getByRole("textbox", { name: "Email address" }), "other@example.com");
+      await userEvent.click(screen.getByRole("button", { name: "Add member" }));
+      expect(Groups.addMember).toHaveBeenLastCalledWith(1, "other@example.com");
+    } else {
+      expect(screen.queryByRole("button", { name: "Add people" })).not.toBeInTheDocument();
+    }
+
+    return;
+  }
+
+  expect(await screen.findByRole("textbox", { name: "Email address" })).toHaveValue("sam@example.com");
+  expect(screen.getByRole("button", { name: "Send invitation" })).toBeInTheDocument();
+});
+
+it("checks the group again when a nested ask to add is refused", async () => {
+  const fresh = deferred<GroupDetailResponse>();
+  vi.mocked(Groups.get).mockResolvedValueOnce({ ...page, canManage: true }).mockReturnValueOnce(fresh.promise);
+  vi.mocked(People.search).mockResolvedValue({ state: "results", people: [{ selectionId: "teen", displayName: "Pat", teen: true, sharedGroups: [], otherGroups: [] }] });
+  vi.mocked(Adds.create).mockRejectedValueOnce(new ApiError(403, "unavailable", { code: "add_request_unavailable" }));
+
+  open();
+  await userEvent.click(await screen.findByRole("tab", { name: "Members" }));
+  await userEvent.click(screen.getByRole("button", { name: "Add people" }));
+  await userEvent.type(within(screen.getByRole("region", { name: "Add people" })).getByRole("combobox"), "Pat");
+  await userEvent.click(await screen.findByRole("option", { name: /Pat/ }));
+  await userEvent.click(screen.getByRole("button", { name: "Ask to add" }));
+  await userEvent.click(screen.getByRole("button", { name: "Send ask to add" }));
+  await waitFor(() => expect(Groups.get).toHaveBeenCalledTimes(2));
+  expect(screen.queryByRole("heading", { name: "Family group" })).not.toBeInTheDocument();
+  expect(screen.queryByRole("region", { name: "Ask to add" })).not.toBeInTheDocument();
+  await act(async () => fresh.reject(new ApiError(404, "missing", { code: "not_found" })));
+  expect(await screen.findByRole("heading", { name: "Group not found" })).toBeInTheDocument();
+  expect(screen.getByText("Your last action could not be completed.")).toHaveFocus();
+});
+
+it("says a refused role reply is unconfirmed and shows the role from the fresh read", async () => {
+  const pat = {
+    id: 3, name: "Pat", role: "member" as const,
+    avatarUrl: "", avatarFocalX: 50, avatarFocalY: 50, joinedAt: "", admin: false,
+  };
+
+  const shown = { ...page, canManage: true, members: [pat] };
+  const fresh = deferred<GroupDetailResponse>();
+  vi.mocked(Groups.get).mockResolvedValueOnce(shown).mockReturnValueOnce(fresh.promise);
+  vi.mocked(Groups.setRole).mockRejectedValueOnce(new ApiError(403, "refused", { code: "not_allowed" }));
+  const prompt = vi.spyOn(window, "confirm").mockReturnValue(true);
+
+  try {
+    open();
+    await userEvent.click(await screen.findByRole("tab", { name: "Members" }));
+    await userEvent.click(screen.getByRole("button", { name: "More for Pat" }));
+    await userEvent.click(screen.getByRole("menuitem", { name: "Make leader" }));
+    await waitFor(() => expect(Groups.get).toHaveBeenCalledTimes(2));
+    expect(screen.queryByText("Pat")).not.toBeInTheDocument();
+    await act(async () => fresh.resolve({ ...shown, members: [{ ...pat, role: "leader" }] }));
+    expect(await screen.findByText("We couldn't confirm the role change.")).toHaveFocus();
+    expect(screen.getByText("leader", { exact: true })).toBeInTheDocument();
+  } finally {
+    prompt.mockRestore();
+  }
 });
 
 it.each(["group_full", "teen_add_approval_required", "people_selection_unavailable"])("adds by name and only retries the actual member limit: %s", async (code) => {
