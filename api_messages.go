@@ -352,7 +352,7 @@ func canComposeIn(db *gorm.DB, me *models.User) (bool, error) {
 	return policy.CanComposeMessages(asPerson(me), leads, hosts > 0), nil
 }
 
-// answerAudience answers a resolveAudience error for me (audienceError);
+// answerAudience answers a resolveAudienceIn error for me (audienceError);
 // true means there was none.
 func answerAudience(c *gin.Context, me *models.User, err error) bool {
 	switch err = audienceError(me, err); {
@@ -403,19 +403,12 @@ func (a *App) summarizeAudienceFor(c *gin.Context, au *audienceJSON) (audienceSu
 // errAudienceRefused: me may not message that audience (policy).
 var errAudienceRefused = errors.New("not allowed to message that audience")
 
-// resolveAudience normalizes au, checks that me may message it
+// resolveAudienceIn normalizes au, checks on db that me may message it
 // (policy.CanMessageAudience) and returns who it reaches; an event audience
 // reaches only the registrants a date they may still see puts in it
-// (audienceSeers). The handlers and
-// message.send (at send time, PLAN 7.1 step 1) share it. Errors are
-// errAudienceInvalid, errAudienceGone, errAudienceRefused or a database
-// error.
-func (a *App) resolveAudience(me *models.User, au *audienceJSON, now time.Time) ([]uint, error) {
-	return a.resolveAudienceIn(a.DB, me, au, now)
-}
-
-// resolveAudienceIn is resolveAudience on db, so a caller inside a
-// transaction reads the audience on its own connection.
+// (audienceSeers). The handlers, the review and message.send (at send time,
+// PLAN 7.1 step 1) share it. Errors are errAudienceInvalid, errAudienceGone,
+// errAudienceRefused or a database error.
 func (a *App) resolveAudienceIn(db *gorm.DB, me *models.User, au *audienceJSON, now time.Time) ([]uint, error) {
 	if err := au.normalize(); err != nil {
 		return nil, errAudienceInvalid
