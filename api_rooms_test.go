@@ -14,8 +14,68 @@ import (
 	"fold/internal/audit"
 	"fold/models"
 
+	"github.com/gin-gonic/gin"
 	"gorm.io/gorm"
 )
+
+func TestRoomAdminWritesRequireCurrentAdmin(t *testing.T) {
+	f := newBookingFixture(t)
+	approvalOn(t, f)
+	if code, body := f.book(t, f.leader, f.eventA, map[string]any{"roomId": f.hall.ID}); code != http.StatusOK {
+		t.Fatalf("request a room: %d %s", code, body)
+	}
+	reqID := itoa(listRequests(t, f.admin)[0].ID)
+	roomID := itoa(f.hall.ID)
+	feedPath := "/api/v1/admin/rooms/" + roomID + "/feed"
+	apiDo(t, f.admin, "POST", feedPath, nil, http.StatusOK)
+	var admin models.User
+	if err := f.app.DB.Where("role = ?", models.RoleAdmin).First(&admin).Error; err != nil {
+		t.Fatal(err)
+	}
+	oldSession := admin
+	oldSession.SessionVersion++
+	oldRole := *f.leaderUser
+	oldRole.Role = models.RoleAdmin
+
+	for _, route := range []struct {
+		name, method, id, body string
+		handle                 gin.HandlerFunc
+	}{
+		{"create room", "POST", "", `{"name":"Additional room"}`, f.app.apiAdminCreateRoom},
+		{"edit room", "PUT", roomID, `{"name":"Updated hall"}`, f.app.apiAdminUpdateRoom},
+		{"set rooms", "PUT", "", `{"enabled":false}`, f.app.apiSetRoomsEnabled},
+		{"set room approval", "PUT", "", `{"enabled":false}`, f.app.apiSetRoomApproval},
+		{"confirm room request", "POST", reqID, `{}`, f.app.apiConfirmRoomRequest},
+		{"reject room request", "POST", reqID, `{}`, f.app.apiRejectRoomRequest},
+		{"match location", "POST", "", `{"location":"Hall","roomId":` + roomID + `}`, f.app.apiAdminMatchLocation},
+		{"create room feed", "POST", roomID, "", f.app.apiAdminCreateRoomFeed},
+		{"revoke room feed", "DELETE", roomID, "", f.app.apiAdminRevokeRoomFeed},
+	} {
+		t.Run(route.name, func(t *testing.T) {
+			for _, session := range []*models.User{&oldSession, &oldRole} {
+				w := httptest.NewRecorder()
+				c, _ := gin.CreateTestContext(w)
+				c.Request = httptest.NewRequest(route.method, "/", strings.NewReader(route.body))
+				c.Set("apiUser", session)
+				c.AddParam("id", route.id)
+				route.handle(c)
+				if w.Code != http.StatusUnauthorized {
+					t.Fatalf("decision status = %d, want 401", w.Code)
+				}
+			}
+		})
+	}
+	if !f.app.roomsEnabled() || !boolSettingIn(f.app.DB, settingRoomApproval, false) ||
+		len(listRequests(t, f.admin)) != 1 {
+		t.Fatal("a refused write changed a room switch or the request")
+	}
+	if n := contactCount(t, f.app, &models.RoomFeedToken{}, "room_id = ?", f.hall.ID); n != 1 {
+		t.Fatalf("room feed tokens = %d, want one", n)
+	}
+	if tok, err := activeRoomFeed(f.app.DB, f.hall.ID); err != nil || tok == nil {
+		t.Fatalf("original room feed is no longer active: %v", err)
+	}
+}
 
 // Rooms are invisible until an admin turns them on (9.1, M2.1a); then only
 // admins manage them, names are unique per building, and nothing is deleted.

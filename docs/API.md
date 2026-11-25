@@ -2118,6 +2118,9 @@ erases no identity data, which is later M7.4 work, and M7.4 is not complete.
 
 Rooms are optional (PLAN 9.1). While the `rooms_enabled` setting is off, every room route answers 404, for anyone, and `GET /api/v1/site` reports `roomsEnabled: false`.
 
+Room admin writes recheck the actor's session and role in their transaction.
+They return `401` if the admin can no longer act.
+
 ```
 PUT  /api/v1/admin/settings/rooms {enabled: boolean} → 200 {roomsEnabled}   (admin; audited setting.rooms_enabled_changed)
 GET  /api/v1/admin/rooms            → 200 {rooms: [room]}                 (admin; active first, then building and name)
