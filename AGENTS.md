@@ -238,7 +238,12 @@ section or decision; check it still exists.
   single-date edit names its read too, with its own token (`dateToken`, `api_date_edits.go`, DEC-164). Every form sends
   it through `web/src/lib/useRevisionSave.ts`, which owns the read-and-compare after a refusal; a control that stays on
   screen after a save (the room controls, a room's Deactivate and Reactivate) passes `stays`, so the next save names
-  what the last outcome left. The date
+  what the last outcome left. A form or control that shows the stored row after an outcome saves through its
+  `useManagedSave`, which hands back that row from the write's answer or from the read after a refusal (no
+  `lastAnswer`/`lastRead` beside it; the room editor and its Deactivate and Reactivate, the two room controls). A form
+  that needs no row back (the series editor, an event's visibility, the group form) uses the plain hook, and so do the
+  composer (its first save creates the draft) and the date editor (it keeps its draft while off screen). A form that throws when
+  every send was refused with nothing changed throws `refusedAgain(code)`. The date
   editor's comparison is `dateFields` (`web/src/lib/editBase.ts`), the group form's `groupFields`
   (`web/src/components/GroupEditor.tsx`, which mounts once per opening and changes the cover only after the details
   are saved), the composer's `messageFields` (`web/src/pages/MessageComposer.tsx`, whose editor mounts once per opened
