@@ -6,6 +6,7 @@ import { Events } from "../api/events";
 import { editBaseOf, editReadRefused } from "../lib/editBase";
 import { useFocusHome, useKeepFocusHome } from "../lib/focusHome";
 import type { ManageAuthority } from "../lib/manageAuthority";
+import { useAction } from "../lib/useAction";
 import { useKeptDraft } from "../lib/unsavedChanges";
 import { useLoad } from "../lib/useLoad";
 import type { RevisionConflict } from "../lib/useRevisionSave";
@@ -14,8 +15,9 @@ import { DateEditor, type DateDraftHold } from "./DateEditor";
 import { useDateEditorToggle } from "./ManagedDateEditor";
 import { ErrorNotice } from "./ErrorNotice";
 import { Button, ButtonLink } from "./ui/Button";
-import { ConfirmProvider, usePageFacts } from "./ui/ConfirmDialog";
+import { ConfirmProvider, useConfirm, usePageFacts } from "./ui/ConfirmDialog";
 import { Skeleton } from "./ui/Skeleton";
+import { FormError } from "./ui/Field";
 
 const ManageRoster = lazy(() => import("./ManageRoster").then((module) => ({ default: module.ManageRoster })));
 
@@ -24,10 +26,12 @@ interface ManageDateProps {
   date: string;
   // The date the page shows (its occurrence id), which the managed read must answer; absent while the page has none.
   occurrenceId?: number;
+  endsAt?: string;
   // What the date page's latest load says (lib/manageAuthority); manager content renders only while granted.
   authority: ManageAuthority;
   // The page's quiet reload, after this date changed here.
   onDateChanged: () => void;
+  onCancelled: () => void;
   // A save was refused and not sent again: the editor closed, and the page reads from nothing and says so (DEC-164),
   // until the editor opens again (onOpenEditor).
   onConflict: (why: RevisionConflict) => void;
@@ -49,10 +53,12 @@ export function ManageDate(props: ManageDateProps) {
 // and the row the page shows. Nothing read, typed or asked under one is shown or sent under another.
 const failedUnder = new WeakMap<object, string>();
 
-function ManageDateTools({ eventId, date, occurrenceId, authority, onDateChanged, onConflict, onOpenEditor, onGone, onRetryPage }: ManageDateProps) {
+function ManageDateTools({ eventId, date, occurrenceId, endsAt, authority, onDateChanged, onCancelled, onConflict, onOpenEditor, onGone, onRetryPage }: ManageDateProps) {
   const headingId = useId();
   const home = useFocusHome<HTMLElement>();
   const location = useLocation();
+  const beginCancel = useConfirm();
+  const cancellation = useAction();
 
   // The toggle and the editor's endings, as on the event and group pages: while the date's save is on its way (also
   // with the editor off the screen for an authority check) the toggle is off and an editor shown again stays as it was.
@@ -127,7 +133,7 @@ function ManageDateTools({ eventId, date, occurrenceId, authority, onDateChanged
   }, [refresh, onDateChanged]);
 
   // The one facts call under this provider: a question started under one answer never submits under another.
-  usePageFacts(JSON.stringify({ authority, owner, data: current?.occurrence ?? null }));
+  usePageFacts(JSON.stringify({ authority, owner, endsAt, data: current?.occurrence ?? null }));
   // A recheck, the gate closing or a write's retry removes the focused control in this component's render.
   useKeepFocusHome(home);
 
@@ -166,6 +172,20 @@ function ManageDateTools({ eventId, date, occurrenceId, authority, onDateChanged
     setManaging(false);
   };
 
+  const canCancel = endsAt !== undefined && Date.parse(endsAt) > Date.now();
+
+  function cancelDate() {
+    const action = beginCancel();
+    const title = `Cancel this date on ${date}?`;
+    void cancellation.run(async () => {
+      if (!(await action.ask({ title, confirmLabel: "Cancel this date", cancelLabel: "Keep this date", tone: "danger", native: title })) || !action.current()) return false;
+
+      await Events.cancelOccurrence(eventId, date);
+
+      if (action.here()) onCancelled();
+    }, { fallback: "We couldn't cancel that date." });
+  }
+
   const data = current?.occurrence;
   // The editor's base: the managed read, for the date the page shows, with its revision.
   const opener = occurrenceId !== undefined ? { eventId, date, occurrenceId } : null;
@@ -184,7 +204,9 @@ function ManageDateTools({ eventId, date, occurrenceId, authority, onDateChanged
         <ButtonLink variant="link" to={`/events/${eventId}`}>Open the event page</ButtonLink>
         <Button variant="secondary" aria-expanded={editing} disabled={dateEditor.saving} onClick={toggleEditor}>Edit this date</Button>
         <Button variant="secondary" aria-expanded={managing} onClick={() => (managing ? closeRoster() : setManaging(true))}>Manage sign-ups</Button>
+        {canCancel && <Button variant="danger-outline" onClick={cancelDate} disabled={cancellation.running || dateEditor.saving}>Cancel this date</Button>}
       </div>
+      {cancellation.state.status === "failed" && <FormError>{cancellation.state.text}</FormError>}
       {(editing || managing) && (failure != null
         ? <ErrorNotice message="We couldn't load this date's details. What you typed is kept." onRetry={() => void managed.retry()} />
         : !data || gate.closed
