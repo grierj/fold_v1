@@ -218,7 +218,7 @@
   .input[type="range"] { accent-color: var(--color-primary); }
   .btn-secondary:active, .btn-ghost:active, .btn-link:active { @apply bg-primary-subtle text-primary-on-subtle; }
   .btn-danger-outline:active { @apply bg-danger-subtle; }
-  .btn-secondary:disabled, .btn-danger-outline:disabled, .btn-ghost:disabled, .btn-link:disabled { @apply bg-sunken text-text-muted cursor-not-allowed; }
+  .btn-secondary:is(:disabled, [aria-disabled="true"]), .btn-danger-outline:disabled, .btn-ghost:disabled, .btn-link:disabled { @apply bg-sunken text-text-muted cursor-not-allowed; }
   .btn-primary:focus-visible, .btn-primary-inverse:focus-visible { outline-offset: 3px; }
   .input[readonly] { @apply bg-sunken text-text-muted cursor-default; }
   /* A radio or checkbox row: the whole row is the label, 44px tall, with a

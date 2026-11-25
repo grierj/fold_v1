@@ -280,7 +280,7 @@ function SeriesRoomControl({ eventId, id, read, show, onChanged, onGone }: {
           )}
         </div>
       )}
-      <Button variant="secondary" disabled={busy || (pick === value && !including)} onClick={apply}>
+      <Button variant="secondary" aria-disabled={busy || (pick === value && !including)} onClick={apply}>
         {pick === NO_ROOM ? "Stop the series room" : "Book for every date"}
       </Button>
       <div role="status" className="space-y-2 empty:hidden">
