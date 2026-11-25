@@ -241,10 +241,13 @@ type messageResponseJSON struct {
 	Message messageJSON `json:"message"`
 }
 
-// messageScheduledResponseJSON answers scheduling: the message and who it will reach.
-type messageScheduledResponseJSON struct {
-	Message messageJSON         `json:"message"`
-	Summary audienceSummaryJSON `json:"summary"`
+// messageEditResponseJSON answers an edit: the message, and, when the edit
+// changed a scheduled message's list and the sender confirmed it (DEC-169),
+// the token of that list for the revision the edit left, which a schedule
+// press right after names, so it asks nothing twice.
+type messageEditResponseJSON struct {
+	Message messageJSON `json:"message"`
+	Review  string      `json:"review,omitempty"`
 }
 
 type messageReadResponseJSON struct {
@@ -264,9 +267,12 @@ type audienceSummaryResponseJSON struct {
 }
 
 // messageReviewJSON is a review of who a message reaches (DEC-169): the
-// summary the picker shows, and the sealed token the send confirmation names.
+// summary the picker shows, how many people it reaches by any channel (the
+// email, or a push for someone only a push reaches), and the sealed token the
+// confirmation names.
 type messageReviewJSON struct {
 	Summary audienceSummaryJSON `json:"summary"`
+	Reached int                 `json:"reached"`
 	Token   string              `json:"token"`
 }
 

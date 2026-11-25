@@ -55,9 +55,11 @@ suppressions. The guards named here are parse-only; each test file states its ow
   when it is the same; a change is answered with who now gets it (named) and who no longer does
   (named only while the audience still lists them, otherwise counted; never why). There is no
   second notion of audience: the review reads `resolveAudienceIn` and `audienceReachIn`, as the
-  preview and the send count do. The check is at the confirmation only: a scheduled message goes
-  to the list as it stands when it goes out, guardian copies are added then and are not part of
-  the review, and nothing holds or prompts a scheduled send.
+  preview and the send count do. The same check covers an edit that changes a scheduled message's
+  audience or push switch (`PUT /messages/:id`): it writes nothing until the sender confirms who the
+  proposal reaches. The check is at composition only: a scheduled message goes to the list as it
+  stands when it goes out, guardian copies are added then and are not part of the review, and a
+  membership change while it waits holds or prompts nothing.
 - **A claimed batch row** (a reminder or an event audience's announcement) decides and fills from
   one statement (`loadDateFacts`, `decideDatedRow`) on its claim transaction, which is pinned to
   Read Committed (`readCommitted`): the claim, the early status check, the choice

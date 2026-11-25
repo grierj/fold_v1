@@ -161,11 +161,17 @@ chosen when the row is made, or is a setting that may change to any value its ow
   (booked, waiting for an admin, released), and after a refused pick only that the choice could
   not be saved and the date is no longer listed.
 - The message composer (DEC-169) mounts its editor once per message it opens and stays open after
-  its saves (`stays`); a new draft's first save creates it through the same hook. Its send is not
-  a save of the hook's: the confirmation names the save's revision and the review it showed, a
-  `message_list_changed` answer replaces the confirmation with the change, and a press whose
-  answer was lost is settled by the next one, judged by what a send changes (the status and the
-  scheduled time, `wentOut`), never by the text, which a send leaves alone.
+  its saves (`stays`); a new draft's first save creates it through the same hook. The page shows
+  an editor only while the address names its message, so an editor the person moved away from
+  can't act. Its send is not a save of the hook's: the confirmation names the save's revision and
+  the review it showed, a `message_list_changed` answer replaces the confirmation with the change,
+  and a press whose answer was lost is settled by the next one, judged by what a send changes (the
+  status and the scheduled time, `wentOut`), never by the text, which a send leaves alone. A
+  `message_changed` answer to a send is someone else's change when the status or the scheduled
+  time moved since the question was asked, and the page then says the message was not sent
+  (`RefusedSaveLine`'s send wording). A save of a scheduled message that changes its list is
+  answered with a review of the proposal; the confirmation sends the save again with its token and
+  the press that asked goes on (Schedule names the token the save's answer gives, so it asks once).
 - `web/src/components/ui/Form.tsx` validates; the submit lifecycle is `web/src/lib/useAction.ts`
   (idle, running, failed, done). It refuses a second run while one is on its way, always leaves
   running, words a throw with `errorText`, and keeps a follow-up step (a reload after the save)

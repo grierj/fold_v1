@@ -39,8 +39,12 @@ func takeReview(t *testing.T, c *apiClient, path string) messageReviewJSON {
 
 func revisionOf(t *testing.T, c *apiClient, path string) string {
 	t.Helper()
+	w := c.do("GET", path, nil, false)
+	if w.Code != http.StatusOK {
+		t.Fatalf("read %s: %d %s", path, w.Code, w.Body.String())
+	}
 	var out messageResponseJSON
-	decodeJSON(t, c.do("GET", path, nil, false), &out)
+	decodeJSON(t, w, &out)
 	if out.Message.Revision == "" {
 		t.Fatalf("no revision for %s", path)
 	}
@@ -198,10 +202,14 @@ func TestMessageSendNamesItsText(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("send: %d %s", w.Code, w.Body.String())
 	}
-	var out messageScheduledResponseJSON
+	var out messageResponseJSON
 	decodeJSON(t, w, &out)
-	if out.Message.Status != models.MessageScheduled || out.Message.Revision == "" || out.Message.Revision == now || out.Summary.Eligible != fresh.Summary.Eligible {
+	if out.Message.Status != models.MessageScheduled || out.Message.Revision == "" || out.Message.Revision == now {
 		t.Fatalf("scheduled: %+v", out)
+	}
+	// The answer names no one: its count is the one stored under the lock.
+	if strings.Contains(w.Body.String(), `"summary"`) || strings.Contains(w.Body.String(), `"recipients"`) {
+		t.Fatalf("the schedule answer names people: %s", w.Body.String())
 	}
 	if jobCountFor(t, f.app, kindMessageSend, idOfPath(t, path)) != 1 {
 		t.Fatal("no send job")
@@ -299,7 +307,9 @@ func TestMessageConfirmationNamesAJoiner(t *testing.T) {
 // Between the review and the confirmation, one person leaves the group, one
 // turns off messages from leaders, one is disabled and one is erased. Each is
 // refused. Whoever the audience still lists is named (as the picker names
-// them); whoever left or was erased is only counted. No answer gives a reason.
+// them); whoever left or was erased is only counted. The change gives no
+// reason, and a leader's answer gives no one's reason anywhere: the summary is
+// the picker's, which shows each person's reason to an admin only.
 func TestMessageConfirmationCountsWhoLeft(t *testing.T) {
 	reasons := []string{skipNotActive, skipOptedOut, skipNoEmail, skipNotWorking, skipComplained, skipGuest, skipHidden, "won't", "opted", "disabled", "erased", "deleted", "left"}
 	for _, sender := range []string{"leader", "admin"} {
@@ -349,6 +359,11 @@ func TestMessageConfirmationCountsWhoLeft(t *testing.T) {
 				for _, why := range reasons {
 					if strings.Contains(strings.ToLower(string(change)), strings.ToLower(why)) {
 						t.Fatalf("the change gives a reason (%q): %s", why, change)
+					}
+				}
+				for _, r := range got.Review.Summary.Recipients {
+					if sender == "leader" && r.Skipped != "" && r.Skipped != skipHidden {
+						t.Fatalf("a leader's answer gives %s's reason: %q", r.Name, r.Skipped)
 					}
 				}
 				if !tc.named && strings.Contains(w.Body.String(), "Robin") {
@@ -505,21 +520,25 @@ func TestScheduledMessageGoesToTheListAtSendTime(t *testing.T) {
 	}
 }
 
-// A revocation that commits while an edit or a send waits for the author's
-// row is a 401 with nothing written, on a pool whose default is Repeatable
+// A revocation that commits while a create, an edit or a send waits for the
+// author's row is a 401 with nothing written, on a pool whose default is Repeatable
 // Read too: the handler pins Read Committed.
 func TestMessageWritesSeeARevocationAfterTheirLockWait(t *testing.T) {
 	for _, repeatable := range []bool{false, true} {
-		for _, route := range []string{"edit", "send"} {
+		for _, route := range []string{"create", "edit", "send"} {
 			t.Run(fmt.Sprintf("%s repeatable=%v", route, repeatable), func(t *testing.T) {
 				f := newComposeFixture(t)
 				aud := map[string]any{"type": "group", "groupId": f.group.ID}
 				path := f.draft(t, f.leader, "Before", "<p>Hi</p>", aud)
-				body := confirmedSend(f.leader, path, map[string]any{})
-				method, target := "POST", path+"/schedule"
-				if route == "edit" {
+				body := confirmedSend(t, f.leader, path, map[string]any{})
+				method, target, lock := "POST", path+"/schedule", "%users%FOR NO KEY UPDATE%"
+				switch route {
+				case "edit":
 					method, target = "PUT", path
-					body = namedEdit(f.leader, path, map[string]any{"subject": "After", "bodyHtml": "<p>Hi</p>", "audience": aud})
+					body = namedEdit(t, f.leader, path, map[string]any{"subject": "After", "bodyHtml": "<p>Hi</p>", "audience": aud})
+				case "create":
+					target, lock = "/api/v1/messages", "%users%FOR SHARE%"
+					body = map[string]any{"subject": "Created", "bodyHtml": "<p>Hi</p>", "audience": aud}
 				}
 				orig := f.app.DB
 				hold := holdUserRow(t, f.app, f.leaderUser.ID)
@@ -528,7 +547,7 @@ func TestMessageWritesSeeARevocationAfterTheirLockWait(t *testing.T) {
 					t.Cleanup(func() { f.app.DB = orig })
 				}
 				res := bgDo(f.leader, method, target, body)
-				waitForAuthorLock(t, f.app)
+				waitForLockedUsersQuery(t, f.app, lock)
 				gormMust(t, hold.Exec("UPDATE users SET session_version = session_version + 1 WHERE id = ?", f.leaderUser.ID))
 				gormMust(t, hold.Commit())
 				if r := awaitResult(t, res); r.code != http.StatusUnauthorized {
@@ -536,8 +555,10 @@ func TestMessageWritesSeeARevocationAfterTheirLockWait(t *testing.T) {
 				}
 				var m models.Message
 				gormMust(t, orig.First(&m, idOfPath(t, path)))
-				if m.Subject != "Before" || m.Status != models.MessageDraft {
-					t.Fatalf("a revoked %s wrote: %+v", route, m)
+				var made int64
+				gormMust(t, orig.Model(&models.Message{}).Where("subject = ?", "Created").Count(&made))
+				if m.Subject != "Before" || m.Status != models.MessageDraft || made != 0 {
+					t.Fatalf("a revoked %s wrote: %+v (created %d)", route, m, made)
 				}
 			})
 		}
@@ -546,31 +567,155 @@ func TestMessageWritesSeeARevocationAfterTheirLockWait(t *testing.T) {
 
 // confirmedSend is the body of a schedule press as the sender's confirmation
 // sends it (DEC-169): extra, with the message's revision as c reads it now
-// and a review c takes now. A read that fails leaves its part out, so a
-// refusal decided before them is still the answer.
-func confirmedSend(c *apiClient, path string, extra map[string]any) map[string]any {
-	out := namedEdit(c, path, extra)
-	if w := c.do("GET", path+"/review", nil, false); w.Code == http.StatusOK {
-		var r messageReviewResponseJSON
-		if json.Unmarshal(w.Body.Bytes(), &r) == nil {
-			out["review"] = r.Review.Token
-		}
-	}
+// and a review c takes now. Either read failing fails the test.
+func confirmedSend(t *testing.T, c *apiClient, path string, extra map[string]any) map[string]any {
+	t.Helper()
+	out := namedEdit(t, c, path, extra)
+	out["review"] = takeReview(t, c, path).Token
 	return out
 }
 
 // namedEdit is body with the message's revision as c reads it now, the read an
-// editor opened with.
-func namedEdit(c *apiClient, path string, body map[string]any) map[string]any {
+// editor opened with. A read that fails, or has no revision, fails the test.
+func namedEdit(t *testing.T, c *apiClient, path string, body map[string]any) map[string]any {
+	t.Helper()
 	out := maps.Clone(body)
 	if out == nil {
 		out = map[string]any{}
 	}
-	if w := c.do("GET", path, nil, false); w.Code == http.StatusOK {
-		var r messageResponseJSON
-		if json.Unmarshal(w.Body.Bytes(), &r) == nil && r.Message.Revision != "" {
-			out["revision"] = r.Message.Revision
-		}
-	}
+	out["revision"] = revisionOf(t, c, path)
 	return out
+}
+
+// confirmedEdit is the body of an edit of a scheduled message's list as the
+// composer sends it once the sender confirmed it (DEC-169): body with the
+// revision c reads now and the token of the review its first PUT answered,
+// which writes nothing. Any other answer to that PUT fails the test.
+func confirmedEdit(t *testing.T, c *apiClient, path string, body map[string]any) map[string]any {
+	t.Helper()
+	out := namedEdit(t, c, path, body)
+	w := c.do("PUT", path, out, true)
+	got := decodeReview(t, w)
+	if w.Code != http.StatusConflict || got.Code != "message_review_needed" || got.Review.Token == "" {
+		t.Fatalf("an edit of a scheduled message's list: %d %s", w.Code, w.Body.String())
+	}
+	out["review"] = got.Review.Token
+	return out
+}
+
+// Preview, "Send a test to me" and the first press of Schedule or Send now
+// each save a scheduled message through PUT /messages/:id, so this table is
+// all three at the server. An edit that changes who a scheduled message
+// reaches (its audience, or its push switch) writes nothing until the sender
+// confirms the proposed list; any other edit, and a draft's, saves as before.
+func TestScheduledListEditNeedsTheSendersConfirmation(t *testing.T) {
+	everyone := map[string]any{"type": "group", "groupId": "GROUP", "roles": []string{"member", "leader"}}
+	for _, tc := range []struct {
+		name string
+		edit map[string]any
+		// asks: the first PUT is message_review_needed with a review of the
+		// proposal, whose eligible count is asked.
+		asks  bool
+		count int
+		draft bool
+		// joins: someone joins the group before the edit (a membership
+		// change while it waits never prompts by itself).
+		joins bool
+	}{
+		{name: "the audience", edit: map[string]any{"audience": map[string]any{"type": "group", "groupId": "GROUP", "roles": []string{"leader"}}}, asks: true, count: 1},
+		{name: "the push switch", edit: map[string]any{"pushAlert": false}, asks: true, count: 2},
+		{name: "the same audience in another order", edit: map[string]any{"audience": map[string]any{"type": "group", "groupId": "GROUP", "roles": []string{"leader", "member"}}}},
+		{name: "the words only", edit: map[string]any{"subject": "New words"}},
+		{name: "the words only, after someone joined", edit: map[string]any{"subject": "New words"}, joins: true},
+		{name: "a draft's audience", edit: map[string]any{"audience": map[string]any{"type": "group", "groupId": "GROUP", "roles": []string{"leader"}}}, draft: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newComposeFixture(t)
+			pushConsentRow(t, f.app, f.opted, "all", models.ConsentOptedIn)
+			newPushDevice(t, f.app, f.opted, "opted-phone")
+			group := func(aud map[string]any) map[string]any {
+				out := maps.Clone(aud)
+				out["groupId"] = f.group.ID
+				return out
+			}
+			path := f.draft(t, f.leader, "Later", "<p>Hi</p>", group(everyone))
+			later := time.Now().Add(48 * time.Hour).Truncate(time.Second)
+			if !tc.draft {
+				if w := confirmSend(f.leader, path, revisionOf(t, f.leader, path), takeReview(t, f.leader, path).Token, map[string]any{"scheduledAt": later}); w.Code != http.StatusOK {
+					t.Fatalf("schedule: %d %s", w.Code, w.Body.String())
+				}
+			}
+			if tc.joins {
+				addMember(t, f.app, newTestUser(t, f.app, "joiner", "password1234", models.RoleMember), f.group, models.MembershipMember)
+			}
+			body := map[string]any{"subject": "Later", "bodyHtml": "<p>Hi</p>", "audience": group(everyone), "pushAlert": true}
+			for k, v := range tc.edit {
+				if aud, ok := v.(map[string]any); ok {
+					v = group(aud)
+				}
+				body[k] = v
+			}
+			var before models.Message
+			gormMust(t, f.app.DB.First(&before, idOfPath(t, path)))
+			opened := revisionOf(t, f.leader, path)
+			w := f.leader.do("PUT", path, namedEdit(t, f.leader, path, body), true)
+			if !tc.asks {
+				var out messageEditResponseJSON
+				decodeJSON(t, w, &out)
+				if w.Code != http.StatusOK || out.Review != "" {
+					t.Fatalf("an edit that needs no confirmation: %d %s", w.Code, w.Body.String())
+				}
+				return
+			}
+			got := decodeReview(t, w)
+			if w.Code != http.StatusConflict || got.Code != "message_review_needed" || got.Change != nil || got.Review.Token == "" || got.Review.Summary.Eligible != tc.count {
+				t.Fatalf("the first PUT: %d %s", w.Code, w.Body.String())
+			}
+			// Nothing written: the sender who goes back keeps the old list
+			// scheduled for its time.
+			var after models.Message
+			gormMust(t, f.app.DB.First(&after, before.ID))
+			if after.Audience != before.Audience || after.PushAlert != before.PushAlert || after.Subject != before.Subject || after.Status != models.MessageScheduled ||
+				!after.ScheduledAt.Equal(*before.ScheduledAt) || revisionOf(t, f.leader, path) != opened || auditCountFor(t, f.app, audit.MessageEdited, before.ID) != 0 {
+				t.Fatalf("a refused edit wrote: %+v", after)
+			}
+			// A token of the stored list, or of the proposal at another
+			// revision, does not confirm the proposal.
+			body["revision"] = opened
+			for name, token := range map[string]string{"the stored list's": takeReview(t, f.leader, path).Token, "garbled": got.Review.Token[:len(got.Review.Token)-4] + "AAAA"} {
+				body["review"] = token
+				if w := f.leader.do("PUT", path, body, true); errorCodeOf(w) != "message_review_needed" {
+					t.Fatalf("%s token: %d %s", name, w.Code, w.Body.String())
+				}
+			}
+			// Someone joins before the sender confirms: the change, named, and
+			// a fresh review of the proposal.
+			pat := newTestUser(t, f.app, "pat", "password1234", models.RoleMember)
+			gormMust(t, f.app.DB.Model(pat).Update("display_name", "Pat Lee"))
+			addMember(t, f.app, pat, f.group, models.MembershipLeader)
+			body["review"] = got.Review.Token
+			w = f.leader.do("PUT", path, body, true)
+			changed := decodeReview(t, w)
+			if w.Code != http.StatusConflict || changed.Code != "message_list_changed" || changed.Change == nil || strings.Join(changed.Change.Added, ",") != "Pat Lee" ||
+				changed.Review.Summary.Eligible != tc.count+1 {
+				t.Fatalf("a joiner before the confirmation: %d %s", w.Code, w.Body.String())
+			}
+			// Confirmed: saved, still scheduled for its time, with the token of
+			// that list for the revision it left, which a schedule press names.
+			body["review"] = changed.Review.Token
+			w = f.leader.do("PUT", path, body, true)
+			var saved messageEditResponseJSON
+			decodeJSON(t, w, &saved)
+			if w.Code != http.StatusOK || saved.Review == "" || saved.Message.Status != models.MessageScheduled || !saved.Message.ScheduledAt.Equal(later) {
+				t.Fatalf("the confirmed edit: %d %s", w.Code, w.Body.String())
+			}
+			gormMust(t, f.app.DB.First(&after, before.ID))
+			if after.RecipientCount != tc.count+1 || auditCountFor(t, f.app, audit.MessageEdited, before.ID) != 1 {
+				t.Fatalf("the confirmed edit stored: %+v", after)
+			}
+			if w := confirmSend(f.leader, path, saved.Message.Revision, saved.Review, map[string]any{"scheduledAt": later}); w.Code != http.StatusOK {
+				t.Fatalf("a schedule press with the edit's token: %d %s", w.Code, w.Body.String())
+			}
+		})
+	}
 }

@@ -1,4 +1,4 @@
-import { useEffect, useId, useRef, useState } from "react";
+import { useEffect, useId, useRef, useState, type Ref } from "react";
 import { Messages } from "../../api/messages";
 import type { AudienceRecipient, AudienceSummary, ComposeOptions } from "../../types";
 import { errorText } from "../../lib/errors";
@@ -22,16 +22,19 @@ const LISTED_DATES = 10;
 // counts only: the API never sends an address (DEC-31). A count that comes
 // back after a newer change is dropped. push: "Push notification too" is
 // on (and the church allows it), so the count says who also gets a push
-// and the list marks them with a phone and words (M3.13d2). reviewing:
-// bumped when the sender asks to review the whole list (DEC-169), which
-// counts again and opens the list.
-export function AudiencePicker({ options, choice, onChange, error, id, push = false, reviewing = 0 }: {
+// and the list marks them with a phone and words (M3.13d2). reviewed: the
+// summary of the review the composer last took of this audience (DEC-169),
+// shown in place of the picker's own count, so every name and count on
+// screen is the one the sender confirms. reviewing: bumped when the sender
+// asks to review the whole list, which opens it.
+export function AudiencePicker({ options, choice, onChange, error, id, push = false, reviewed = null, reviewing = 0 }: {
   options: ComposeOptions;
   choice: AudienceChoice;
   onChange: (c: AudienceChoice) => void;
   error?: string;
   id: string;
   push?: boolean;
+  reviewed?: AudienceSummary | null;
   reviewing?: number;
 }) {
   const chipsLabel = useId();
@@ -57,7 +60,7 @@ export function AudiencePicker({ options, choice, onChange, error, id, push = fa
 
     return () => clearTimeout(timer);
     // audience is derived from key, so key alone says when to count again.
-  }, [key, reviewing]);
+  }, [key]);
 
   useEffect(() => {
     const details = list.current;
@@ -90,8 +93,8 @@ export function AudiencePicker({ options, choice, onChange, error, id, push = fa
   const groupLabel = (i: number) => labels[i].label;
   const eventLabel = (i: number) => labels[options.groups.length + i].label;
   const datesListed = choice.dates === "all" || !!event?.dates.some((d) => String(d.occurrenceId) === choice.dates);
-  const current = summary?.key === key ? summary.summary : null;
-  const failed = countError?.key === key ? countError.text : "";
+  const current = reviewed ?? (summary?.key === key ? summary.summary : null);
+  const failed = reviewed ? "" : countError?.key === key ? countError.text : "";
   const isGroup = kind === "group";
   const chips = isGroup ? ROLE_CHOICES : STATUS_CHOICES;
   const picked: string[] = isGroup ? choice.roles : choice.statuses;
@@ -172,16 +175,23 @@ export function AudiencePicker({ options, choice, onChange, error, id, push = fa
           {teenLine(current) && <p className="text-text-muted">{teenLine(current)}</p>}
         </>}
       </div>
-      {current && current.recipients.length > 0 && (
-        <details ref={list}>
-          <summary className="inline-flex min-h-11 cursor-pointer items-center text-sm font-semibold text-primary">See who's on the list</summary>
-          <ul className="mt-2 divide-y divide-border rounded-md border border-border bg-surface text-sm">
-            {current.recipients.map((r, i) => <RecipientRow key={`${r.name}-${i}`} r={r} push={push} />)}
-            {current.more && <li className="px-3 py-2 text-text-muted">And {current.people - current.recipients.length} more</li>}
-          </ul>
-        </details>
-      )}
+      {current && <RecipientList ref={list} summary={current} push={push} />}
     </div>
+  );
+}
+
+// RecipientList is "See who's on the list" for one summary: the picker's, or the review a confirmation asks about.
+export function RecipientList({ summary, push, ref }: { summary: AudienceSummary; push: boolean; ref?: Ref<HTMLDetailsElement> }) {
+  if (summary.recipients.length === 0) return null;
+
+  return (
+    <details ref={ref}>
+      <summary className="inline-flex min-h-11 cursor-pointer items-center text-sm font-semibold text-primary">See who's on the list</summary>
+      <ul className="mt-2 divide-y divide-border rounded-md border border-border bg-surface text-sm">
+        {summary.recipients.map((r, i) => <RecipientRow key={`${r.name}-${i}`} r={r} push={push} />)}
+        {summary.more && <li className="px-3 py-2 text-text-muted">And {summary.people - summary.recipients.length} more</li>}
+      </ul>
+    </details>
   );
 }
 

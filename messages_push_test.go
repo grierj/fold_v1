@@ -231,7 +231,7 @@ func TestAnnouncementPushSkips(t *testing.T) {
 	if out.Message.PushAlert {
 		t.Fatal("pushAlert false was saved as true")
 	}
-	if w := f.leader.do("POST", "/api/v1/messages/"+itoa(out.Message.ID)+"/schedule", confirmedSend(f.leader, "/api/v1/messages/"+itoa(out.Message.ID), map[string]any{}), true); w.Code != http.StatusOK {
+	if w := f.leader.do("POST", "/api/v1/messages/"+itoa(out.Message.ID)+"/schedule", confirmedSend(t, f.leader, "/api/v1/messages/"+itoa(out.Message.ID), map[string]any{}), true); w.Code != http.StatusOK {
 		t.Fatalf("schedule: %d", w.Code)
 	}
 	runMessageJobs(t, f.app)

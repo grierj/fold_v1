@@ -638,7 +638,7 @@ func (f messageImageFixture) upload(t *testing.T, c *apiClient, id uint, data []
 func (f messageImageFixture) saveBody(t *testing.T, c *apiClient, id uint, groupID uint, body string) *httptest.ResponseRecorder {
 	t.Helper()
 	path := "/api/v1/messages/" + itoa(id)
-	return c.do("PUT", path, namedEdit(c, path, map[string]any{"subject": "Pictures", "bodyHtml": body, "audience": map[string]any{"type": "group", "groupId": groupID}}), true)
+	return c.do("PUT", path, namedEdit(t, c, path, map[string]any{"subject": "Pictures", "bodyHtml": body, "audience": map[string]any{"type": "group", "groupId": groupID}}), true)
 }
 
 func (f messageImageFixture) folder(t *testing.T, id uint) []string {
@@ -788,7 +788,7 @@ func TestMessageImagesArePrunedAtSendAndDiscard(t *testing.T) {
 	if n := len(f.folder(t, f.draft)); n != 2 {
 		t.Fatalf("after save: %d files", n)
 	}
-	if w := f.leader.do("POST", "/api/v1/messages/"+itoa(f.draft)+"/schedule", confirmedSend(f.leader, "/api/v1/messages/"+itoa(f.draft), map[string]any{}), true); w.Code != http.StatusOK {
+	if w := f.leader.do("POST", "/api/v1/messages/"+itoa(f.draft)+"/schedule", confirmedSend(t, f.leader, "/api/v1/messages/"+itoa(f.draft), map[string]any{}), true); w.Code != http.StatusOK {
 		t.Fatalf("schedule: %d %s", w.Code, w.Body.String())
 	}
 	runMessageJobs(t, f.app)

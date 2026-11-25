@@ -25,19 +25,23 @@ import (
 // The send confirmation names the list the sender reviewed (DEC-169). Send
 // now and Schedule first ask for a review: the summary the picker shows, and a
 // sealed token of who it reaches (audienceReach), bound to the sender, the
-// message and its revision. The confirmation sends the token back; under the
-// message's lock the server works out who it reaches again and schedules only
-// when that is the same set. Otherwise it answers what changed and a fresh
-// review. A scheduled message is never checked again when it goes out: it
-// goes to the list as it stands then.
+// message, its revision, and the audience and push switch reviewed. The
+// confirmation sends the token back; under the message's lock the server works
+// out who it reaches again and goes on only when that is the same set.
+// Otherwise it answers what changed and a fresh review. The same holds for an
+// edit of a scheduled message that changes its audience or push switch: its
+// first PUT is answered with a review of the proposal, and the sender confirms
+// it. A scheduled message is never checked again when it goes out: it goes to
+// the list as it stands then.
 
 var (
 	// errMessageListChanged: who the message reaches changed between the review
 	// and the confirmation. The answer carries the change and a fresh review.
-	errMessageListChanged = apiErr(http.StatusConflict, "message_list_changed", "who gets this message changed since you looked; check the list, then send it")
+	errMessageListChanged = apiErr(http.StatusConflict, "message_list_changed", "the list of people who get this message changed since you looked; check it, then try again")
 	// errMessageReviewNeeded: the confirmation's review is not one this message,
-	// this sender and this text can use. The answer carries a fresh review.
-	errMessageReviewNeeded = apiErr(http.StatusConflict, "message_review_needed", "check who gets this message before it goes")
+	// this sender, this text and this list can use (none, for an edit of a
+	// scheduled message's list). The answer carries a fresh review.
+	errMessageReviewNeeded = apiErr(http.StatusConflict, "message_review_needed", "check who gets this message, then try again")
 )
 
 // messageReviewPurpose names the review token's key and binding (deriveKey).
@@ -60,18 +64,40 @@ func (a *App) messageReviewCipher() (cipher.AEAD, error) {
 }
 
 // messageReviewBinding is what a token is good for: one sender, one message,
-// one revision of it. A revision carries the process generation, so a token
+// one revision of it, and the audience and push switch it reviewed (stored, or
+// proposed by an edit). A revision carries the process generation, so a token
 // from before a restart never opens.
-func messageReviewBinding(actorID, messageID uint, revision string) []byte {
-	return []byte(messageReviewPurpose + "|" + strconv.FormatUint(uint64(actorID), 10) + "|" + strconv.FormatUint(uint64(messageID), 10) + "|" + revision)
+func messageReviewBinding(actorID uint, m *models.Message, revision string) []byte {
+	return []byte(messageReviewPurpose + "|" + strconv.FormatUint(uint64(actorID), 10) + "|" + strconv.FormatUint(uint64(m.ID), 10) + "|" + revision +
+		"|" + audienceKeyOf(m.Audience) + "|" + strconv.FormatBool(m.PushAlert))
+}
+
+// audienceKeyOf is a stored or proposed audience in one canonical form: its
+// type's fields only, defaults filled, every set in one order. Two audiences
+// with the same key reach the same people.
+func audienceKeyOf(raw string) string {
+	var au audienceJSON
+	if json.Unmarshal([]byte(raw), &au) != nil || au.normalize() != nil {
+		return raw
+	}
+	slices.Sort(au.Roles)
+	slices.Sort(au.Statuses)
+	slices.Sort(au.EventIDs)
+	slices.Sort(au.UserIDs)
+	key, _ := json.Marshal(au)
+	return string(key)
+}
+
+// listMoved is whether an edit takes m from was to a different audience or push
+// switch: who a scheduled message reaches is then the sender's to confirm.
+func listMoved(was, m *models.Message) bool {
+	return was.PushAlert != m.PushAlert || audienceKeyOf(was.Audience) != audienceKeyOf(m.Audience)
 }
 
 // sealMessageReview seals reached (any order) for the binding. The plaintext
 // is the ids ascending, each as the uvarint of its gap from the one before.
-func (a *App) sealMessageReview(reached []uint, actorID, messageID uint, revision string) (string, error) {
-	ids := slices.Clone(reached)
-	slices.Sort(ids)
-	ids = slices.Compact(ids)
+func (a *App) sealMessageReview(reached []uint, actorID uint, m *models.Message, revision string) (string, error) {
+	ids := sortedReach(reached)
 	plain := make([]byte, 0, len(ids)*3)
 	var last uint64
 	for _, id := range ids {
@@ -86,13 +112,13 @@ func (a *App) sealMessageReview(reached []uint, actorID, messageID uint, revisio
 	if _, err := rand.Read(nonce); err != nil {
 		return "", err
 	}
-	return base64.RawURLEncoding.EncodeToString(crypt.Seal(nonce, nonce, plain, messageReviewBinding(actorID, messageID, revision))), nil
+	return base64.RawURLEncoding.EncodeToString(crypt.Seal(nonce, nonce, plain, messageReviewBinding(actorID, m, revision))), nil
 }
 
 // openMessageReview is the set a token sealed for this binding, ascending;
-// false when it does not open for it (another sender, message or revision,
-// another key, a garbled or empty token).
-func (a *App) openMessageReview(token string, actorID, messageID uint, revision string) ([]uint, bool) {
+// false when it does not open for it (another sender, message, revision or
+// list, another key, a garbled or empty token).
+func (a *App) openMessageReview(token string, actorID uint, m *models.Message, revision string) ([]uint, bool) {
 	if token == "" || len(token) > maxMessageReviewToken {
 		return nil, false
 	}
@@ -104,7 +130,7 @@ func (a *App) openMessageReview(token string, actorID, messageID uint, revision 
 	if err != nil || len(sealed) < crypt.NonceSize()+crypt.Overhead() {
 		return nil, false
 	}
-	plain, err := crypt.Open(nil, sealed[:crypt.NonceSize()], sealed[crypt.NonceSize():], messageReviewBinding(actorID, messageID, revision))
+	plain, err := crypt.Open(nil, sealed[:crypt.NonceSize()], sealed[crypt.NonceSize():], messageReviewBinding(actorID, m, revision))
 	if err != nil {
 		return nil, false
 	}
@@ -120,6 +146,27 @@ func (a *App) openMessageReview(token string, actorID, messageID uint, revision 
 		ids = append(ids, uint(last))
 	}
 	return ids, true
+}
+
+// reviewDidNotHold: the confirmation's token is not of who the message reaches
+// now. confirmed is the set it sealed, nil when it did not open; the handler
+// answers from a fresh review (answerReviewRefusal).
+type reviewDidNotHold struct{ confirmed []uint }
+
+func (reviewDidNotHold) Error() string { return "the confirmed review does not hold" }
+
+// checkReview is the one comparison of a confirmation (a schedule press, or an
+// edit of a scheduled message's list), made under the message's lock: token
+// must open for me, m as it would be saved and revision, and seal reach's set.
+func (a *App) checkReview(token string, me *models.User, m *models.Message, revision string, reach audienceReach) error {
+	set, opened := a.openMessageReview(token, me.ID, m, revision)
+	if !opened {
+		return reviewDidNotHold{}
+	}
+	if !slices.Equal(set, sortedReach(reach.reached)) {
+		return reviewDidNotHold{confirmed: set}
+	}
+	return nil
 }
 
 // messageReachIn is who m reaches for me now, read on tx: its audience as me
@@ -179,10 +226,19 @@ func ownMessageIn(db *gorm.DB, me *models.User, m *models.Message, move policy.M
 	return nil
 }
 
+// listProposal is the audience and push switch an edit of a scheduled message
+// would save, as applyMessageBodyIn stores them; a review of nil is of the
+// message as stored.
+type listProposal struct {
+	audience string
+	push     bool
+}
+
 // messageReviewIn is a review of message id for the session's user, in one
-// read-only snapshot tx: the user, the message, the right to send it, its
-// revision, who it reaches and their names, and the token of that set.
-func (a *App) messageReviewIn(tx *gorm.DB, session *models.User, id uint) (messageReviewJSON, audienceReach, error) {
+// read-only snapshot tx: the user, the message, the right to send it (or, for
+// a proposal, to change it), its revision, who it reaches and their names,
+// and the token of that set.
+func (a *App) messageReviewIn(tx *gorm.DB, session *models.User, id uint, proposal *listProposal) (messageReviewJSON, audienceReach, error) {
 	me, err := snapshotViewerIn(tx, session)
 	if err != nil {
 		return messageReviewJSON{}, audienceReach{}, err
@@ -196,19 +252,26 @@ func (a *App) messageReviewIn(tx *gorm.DB, session *models.User, id uint) (messa
 	} else if err != nil {
 		return messageReviewJSON{}, audienceReach{}, err
 	}
-	if err := ownMessageIn(tx, me, &m, policy.MessageSchedule); err != nil {
+	move := policy.MessageSchedule
+	if proposal != nil {
+		move = policy.MessageEdit
+	}
+	if err := ownMessageIn(tx, me, &m, move); err != nil {
 		return messageReviewJSON{}, audienceReach{}, err
 	}
 	revision, err := a.messageRevisionIn(tx, m.ID)
 	if err != nil {
 		return messageReviewJSON{}, audienceReach{}, err
 	}
+	if proposal != nil {
+		m.Audience, m.PushAlert = proposal.audience, proposal.push
+	}
 	_, s, reach, err := a.messageReachIn(tx, me, &m)
 	if err != nil {
 		return messageReviewJSON{}, audienceReach{}, audienceError(me, err)
 	}
-	token, err := a.sealMessageReview(reach.reached, me.ID, m.ID, revision)
-	return messageReviewJSON{Summary: s, Token: token}, reach, err
+	token, err := a.sealMessageReview(reach.reached, me.ID, &m, revision)
+	return messageReviewJSON{Summary: s, Reached: len(reach.reached), Token: token}, reach, err
 }
 
 // answerMessageError answers an error of the composer's own routes: a stale
@@ -239,7 +302,7 @@ func (a *App) apiReviewMessage(c *gin.Context) {
 	var out messageReviewJSON
 	err := a.DB.Transaction(func(tx *gorm.DB) error {
 		var err error
-		out, _, err = a.messageReviewIn(tx, apiUser(c), id)
+		out, _, err = a.messageReviewIn(tx, apiUser(c), id, nil)
 		return err
 	}, readSnapshot)
 	if err != nil {
@@ -275,18 +338,17 @@ func (r messageReviewRefusal) apiAnswer() *apiError {
 }
 
 // answerReviewRefusal answers a confirmation whose review did not hold, from
-// a fresh review in its own snapshot. confirmed is the set the sender
-// confirmed, nil when their token did not open.
-func (a *App) answerReviewRefusal(c *gin.Context, id uint, confirmed []uint) {
+// a fresh review (of proposal, for an edit) in its own snapshot.
+func (a *App) answerReviewRefusal(c *gin.Context, id uint, proposal *listProposal, refused reviewDidNotHold) {
 	var refusal messageReviewRefusal
 	err := a.DB.Transaction(func(tx *gorm.DB) error {
-		review, reach, err := a.messageReviewIn(tx, apiUser(c), id)
+		review, reach, err := a.messageReviewIn(tx, apiUser(c), id, proposal)
 		if err != nil {
 			return err
 		}
 		refusal = messageReviewRefusal{review: review}
-		if confirmed != nil {
-			refusal.change = audienceChange(confirmed, reach)
+		if refused.confirmed != nil {
+			refusal.change = audienceChange(refused.confirmed, reach)
 		}
 		return nil
 	}, readSnapshot)
@@ -344,9 +406,6 @@ func firstNames(names []string) ([]string, int) {
 	}
 	return names, 0
 }
-
-// sameReach is whether a and b, both ascending, hold the same people.
-func sameReach(a, b []uint) bool { return slices.Equal(a, b) }
 
 // sortedReach is reached ascending, for comparing with a token's set.
 func sortedReach(reached []uint) []uint {

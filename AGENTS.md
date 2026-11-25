@@ -242,8 +242,8 @@ section or decision; check it still exists.
   (`web/src/components/GroupEditor.tsx`, which mounts once per opening and changes the cover only after the details
   are saved), the composer's `messageFields` (`web/src/pages/MessageComposer.tsx`, whose editor mounts once per opened
   message). A message's send also names the review its confirmation showed: a sealed set of who it reaches
-  (`messages_review.go`), compared under the message's lock, a changed set answered with the change
-  (`message_list_changed`). An editor a refusal closes hands it to `useRefusedSave` (`web/src/lib/refusedSave.tsx`), which reads the
+  (`messages_review.go`), compared under the message's lock (`checkReview`), a changed set answered with the change
+  (`message_list_changed`); so does an edit that changes a scheduled message's audience or push switch. An editor a refusal closes hands it to `useRefusedSave` (`web/src/lib/refusedSave.tsx`), which reads the
   page from nothing and says the changes could not be saved with `RefusedSaveLine`; a control that stays open (the
   room controls) shows the read it made and says so at the field with the same line (`choosing`).
 - Registrations: seat decisions go through `registration_seats.go` (`poolFits`, `seatChange`,

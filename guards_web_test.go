@@ -165,7 +165,7 @@ var tsContracts = []struct {
 	{requestsResponseJSON[addRequestJSON]{}, "AddRequestsResponse"},
 	{requestsResponseJSON[contactRequestJSON]{}, "ContactRequestsResponse"},
 	{messageResponseJSON{}, "MessageResponse"},
-	{messageScheduledResponseJSON{}, "MessageScheduledResponse"},
+	{messageEditResponseJSON{}, "MessageEditResponse"},
 	{messageReadResponseJSON{}, "MessageReadResponse"},
 	{messagePreviewResponseJSON{}, "MessagePreviewResponse"},
 	{messageTestResponseJSON{}, "MessageTestResponse"},

@@ -566,9 +566,29 @@ export function pushHistoryLine(c: MessagePushCounts | undefined): string {
 // confirmLine is the question before sending: "Send to 133 people now?"
 export function confirmLine(eligible: number, at: string | null, zone: string): string {
   if (!at) return `Send to ${people(eligible)} now?`;
+
+  return `Send to ${people(eligible)} ${whenPhrase(at, zone)}?`;
+}
+
+// "today at 9:00 AM", "tomorrow at 9:00 AM", "on Tue, Nov 26 at 9:00 AM".
+function whenPhrase(at: string, zone: string): string {
   const when = formatWhenIn(at, zone);
 
-  return `Send to ${people(eligible)} ${/^(Today|Tomorrow) /.test(when) ? when[0].toLowerCase() + when.slice(1) : `on ${when}`}?`;
+  return /^(Today|Tomorrow) /.test(when) ? when[0].toLowerCase() + when.slice(1) : `on ${when}`;
+}
+
+// saveListLine is the question before an edit changes who a scheduled message goes to (DEC-169): "Change who gets this
+// to 9 people?"
+export function saveListLine(n: number): string {
+  return `Change who gets this to ${people(n)}?`;
+}
+
+// stillScheduledLine says what saving a scheduled message's new list does, and does not do: at is when it is scheduled
+// for, null once that time has come.
+export function stillScheduledLine(at: string | null, zone: string): string {
+  const when = at && Date.parse(at) > Date.now() ? ` ${whenPhrase(at, zone)}` : "";
+
+  return `It isn't sent now. It stays scheduled${when} and goes to whoever is on the list then.`;
 }
 
 // statusLabel names a message's state in words, never by color alone. A
@@ -624,6 +644,7 @@ const wireReview = object({
     recipients: array(object({ name: string(), teen: boolean(), skipped: optional(string()), push: optional(boolean()) })),
     more: boolean(),
   }),
+  reached: number(),
   token: pipe(string(), minLength(1)),
 });
 

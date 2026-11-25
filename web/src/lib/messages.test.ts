@@ -393,7 +393,7 @@ describe("a changed list (DEC-169)", () => {
   });
 
   it("reads the refusal's body, and nothing else, as a refused confirmation", () => {
-    const review = JSON.parse(JSON.stringify({ summary: summary(), token: "t" }));
+    const review = JSON.parse(JSON.stringify({ summary: summary(), reached: 2, token: "t" }));
     const listChanged = new ApiError(409, "x", { code: "message_list_changed", review, change: change(["Pat Lee"], []) });
     expect(reviewRefusal(listChanged)).toEqual({ review, change: change(["Pat Lee"], []) });
     expect(reviewRefusal(new ApiError(409, "x", { code: "message_review_needed", review }))).toEqual({ review, change: null });

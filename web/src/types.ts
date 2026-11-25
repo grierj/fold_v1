@@ -1936,9 +1936,11 @@ export interface AudienceSummaryResponse {
   summary: AudienceSummary;
 }
 
-// A review of who a message reaches (DEC-169): the picker's summary, and the sealed token the send confirmation names.
+// A review of who a message reaches (DEC-169): the picker's summary, how many people it reaches by any channel (the
+// email, or a push for someone only a push reaches), and the sealed token the confirmation names.
 export interface MessageReview {
   summary: AudienceSummary;
+  reached: number;
   token: string;
 }
 
@@ -2040,9 +2042,11 @@ export interface RoomApprovalResponse {
   needApproval: boolean;
 }
 
-export interface MessageScheduledResponse {
+// An edit's answer: the message, and when the edit changed a scheduled message's list and the sender confirmed it
+// (DEC-169), that list's token for the revision the edit left, which a schedule press right after names.
+export interface MessageEditResponse {
   message: Message;
-  summary: AudienceSummary;
+  review?: string;
 }
 
 export interface MessageReadResponse {
