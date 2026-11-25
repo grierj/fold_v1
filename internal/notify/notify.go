@@ -69,7 +69,7 @@ type Msg struct {
 	Link        string // an internal path, starting with "/"
 	Vars        Vars
 	// HouseholdPersonID identifies the person named by Vars.Person in a
-	// registration notice, even when the recipient cannot see the date.
+	// registration notice whose date the recipient can see.
 	HouseholdPersonID *uint
 	Data              map[string]any // small and non-sensitive
 	DedupeKey         string         // optional: a second Send with it is a no-op
@@ -271,7 +271,10 @@ func Send(tx *gorm.DB, m Msg) ([]uint, error) {
 	data := "{}"
 	stored := m.Data
 	badge := badgeKind(m.Vars.SubjectKind)
-	if badge != "" || k.namedEmail.source == emailHousehold {
+	// A concealed date keeps no delivery attribution. Without it email
+	// uses the name-free text, as it does for older rows.
+	trackHousehold := k.namedEmail.source == emailHousehold && m.SubjectType == "occurrence" && m.SubjectID != 0
+	if badge != "" || trackHousehold {
 		stored = make(map[string]any, len(m.Data)+1)
 		for key, v := range m.Data {
 			stored[key] = v
@@ -279,7 +282,7 @@ func Send(tx *gorm.DB, m Msg) ([]uint, error) {
 		if badge != "" {
 			stored[DataSubjectKind] = badge
 		}
-		if k.namedEmail.source == emailHousehold {
+		if trackHousehold {
 			switch {
 			case m.Vars.Person == "":
 				stored[emailHouseholdPersonKey] = uint(0)

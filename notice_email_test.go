@@ -156,6 +156,12 @@ func TestNotifyDeliverChecksHouseholdNamesAfterErasure(t *testing.T) {
 		gormMust(t, s.app.DB.Model(&legacy).UpdateColumn("data", string(data)))
 		m = sendNamedNotice(t, s.app, legacy, s.second)
 		assertNameFreeNotice(t, legacy, m, tc.fallback, person.FullName(), msg.Vars.ManageURL)
+		concealed := queueNamedNotice(t, s.app, withheldDate(msg))
+		if concealed.Data != "{}" || !strings.Contains(concealed.Title+concealed.Body, person.FullName()) {
+			t.Errorf("%s: concealed date stored unexpected metadata or lost its bell text: %+v", tc.kind, concealed)
+		}
+		m = sendNamedNotice(t, s.app, concealed, s.second)
+		assertNameFreeNotice(t, concealed, m, tc.fallback, person.FullName(), msg.Vars.ManageURL)
 		pending = append(pending, queueNamedNotice(t, s.app, msg))
 	}
 	gormMust(t, s.app.DB.Model(&person).UpdateColumn("converted_user_id", member.ID))
