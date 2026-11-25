@@ -740,3 +740,15 @@ it("offers no box while it asks an admin to book the busy dates anyway, which na
   expect(screen.getByText("Tuesday, December 8")).toBeInTheDocument();
   expect(screen.queryByRole("checkbox")).not.toBeInTheDocument();
 });
+
+it("says why a pick was refused while a kept date waits on the series request, and stays usable", async () => {
+  vi.mocked(SeriesRooms.list).mockResolvedValue(read({ defaultRoom: { id: 1, name: "Fellowship Hall", building: "Main" }, ownRooms: [ownRoom("2026-12-08", { waiting: true, mayChange: false, room: { id: 1, name: "Fellowship Hall", building: "Main" } })] }));
+  vi.mocked(SeriesRooms.set).mockRejectedValue(new ApiError(409, "kept", { code: "series_request_kept" }));
+  const onChanged = show();
+  await pickAndBook("2");
+  expect(await screen.findByRole("alert")).toHaveTextContent("The room for every date could not be changed: some dates are still waiting for an admin to approve a room only an admin can change. Only an admin can change this event's room request now.");
+  expect(screen.getByRole("button", { name: "Book for every date" })).toBeEnabled();
+  expect(await select()).toBeEnabled();
+  expect(onGone).not.toHaveBeenCalled();
+  expect(onChanged).not.toHaveBeenCalled();
+});
