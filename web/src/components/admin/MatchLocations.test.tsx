@@ -13,7 +13,7 @@ stubService(AdminRooms, () => ({ locations: vi.fn(), matchLocation: vi.fn() }));
 
 const room = (id: number, name: string, extra: Partial<Room> = {}): Room => ({
   id, name, building: "", capacity: null, features: "", notes: "", active: true, restricted: false,
-  defaultSetupMinutes: 0, defaultTeardownMinutes: 0, ...extra,
+  defaultSetupMinutes: 0, defaultTeardownMinutes: 0, revision: `rev-${id}`, ...extra,
 });
 
 const hall = room(1, "Fellowship Hall", { building: "Main" });

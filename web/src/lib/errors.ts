@@ -171,6 +171,7 @@ export const ERROR_COPY = {
   date_changed: "This date may have changed since you opened it. Check it and save again.",
   event_changed: "This event may have changed since you opened it, so your changes could not be saved. Check it and try again.",
   group_changed: "This group may have changed since you opened it, so your changes could not be saved. Check it and try again.",
+  room_changed: "This room may have changed since you opened it, so your changes could not be saved. Check it and try again.",
   date_room_changed: "This date's room changed while you were choosing, so your choice could not be saved. Check the room and try again.",
   date_needs_consent: "Saving this date would cancel some sign-ups. Check the question and save again.",
   date_kept_after_leaving: "Someone who left the group kept this date, so it can't end later yet. Remove anyone marked “Kept after leaving” below, then save again.",

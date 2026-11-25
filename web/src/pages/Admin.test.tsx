@@ -737,7 +737,7 @@ describe("Approvals: new groups", () => {
   });
 });
 
-const hall: Room = { id: 1, name: "Fellowship Hall", building: "Main", capacity: 80, features: "kitchen", notes: "", active: true, restricted: false, defaultSetupMinutes: 30, defaultTeardownMinutes: 0 };
+const hall: Room = { id: 1, name: "Fellowship Hall", building: "Main", capacity: 80, features: "kitchen", notes: "", active: true, restricted: false, defaultSetupMinutes: 30, defaultTeardownMinutes: 0, revision: "rev-1" };
 const withRooms = (roomsEnabled: boolean) => vi.mocked(Site.get).mockResolvedValue({ name: "Church", timezone: "America/Denver", selfSignup: "off", roomsEnabled, pushEnabled: true });
 
 it("shows no Rooms tab while rooms are off", async () => {
@@ -757,6 +757,21 @@ it("shows the Rooms tab after Groups, with its count, while rooms are on", async
   expect(tabs.indexOf("Rooms")).toBe(tabs.indexOf("Groups") + 1);
   await userEvent.click(tab);
   expect(await screen.findByText("Fellowship Hall")).toBeInTheDocument();
+});
+
+it("closes a room edit someone else's change refused, reads the rooms again and says so (DEC-171)", async () => {
+  withRooms(true);
+  vi.mocked(AdminRooms.list).mockResolvedValueOnce({ rooms: [hall], needApproval: false })
+    .mockResolvedValue({ rooms: [{ ...hall, name: "Main Hall", revision: "rev-1b" }], needApproval: false });
+  vi.mocked(AdminRooms.update).mockRejectedValue(new ApiError(409, "room changed", { code: "room_changed" }));
+  render(<MemoryRouter initialEntries={["/admin?tab=rooms"]}><AdminPage /></MemoryRouter>);
+  await userEvent.click(await screen.findByRole("button", { name: "Edit Fellowship Hall" }));
+  await userEvent.type(screen.getByLabelText(/^Name/), " 2");
+  await userEvent.click(screen.getByRole("button", { name: "Save room" }));
+  expect(await screen.findByText("Main Hall. This room changed while you were editing, so your changes could not be saved. This is the room as it is now.")).toHaveFocus();
+  expect(AdminRooms.update).toHaveBeenCalledWith(1, expect.objectContaining({ name: "Fellowship Hall 2" }), "rev-1");
+  expect(screen.getByRole("group", { name: "Main Hall" })).toBeInTheDocument();
+  expect(screen.queryByRole("form", { name: /Edit/ })).not.toBeInTheDocument();
 });
 
 it("falls back to Approvals for a bookmarked Rooms tab when rooms are off", async () => {
