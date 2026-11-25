@@ -53,6 +53,7 @@ type testHooks struct {
 	// messageLimitAfterCount (#260). It is nil in production and sends no
 	// statement.
 	guestVerifyAfterCount func(*gorm.DB)
+	guestPasswordWorkDone func()
 	// invitationBeforeHash runs in apiAcceptInvitation after the early
 	// full-group refusal and before the password is hashed, with no
 	// transaction open.

@@ -186,6 +186,9 @@ func (a *App) apiCreateGuestRegistration(c *gin.Context) {
 	// lookup or either address limit, even when that address is exhausted.
 	// IP/site limits and the honeypot above shed CPU without inspecting it.
 	(&models.User{}).CheckPassword("not a real password")
+	if hook := a.hooks.guestPasswordWorkDone; hook != nil {
+		hook()
+	}
 	var existing models.User
 	lookup := a.DB.Where("email = ?", email).Limit(1).Find(&existing)
 	if lookup.Error != nil {
