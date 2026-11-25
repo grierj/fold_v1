@@ -114,6 +114,7 @@ function SeriesRoomControl({ eventId, id, read, show, onChanged, onGone }: {
   }
 
   const [pending, setPending] = useState<{ roomId: number; dates: string[]; notice?: string } | null>(null);
+  const [beforeConfirmation, setBeforeConfirmation] = useState<SeriesRoomsResponse | null>(null);
   const available = useRef<HTMLButtonElement>(null);
   const overlap = useOverlapReason(reasonId);
 
@@ -165,6 +166,9 @@ function SeriesRoomControl({ eventId, id, read, show, onChanged, onGone }: {
     refusal.clear();
     void action.run(async () => {
       overBusy.current = confirmation !== undefined;
+
+      // A lost reply can leave the last read's counts out of date.
+      if (confirmation) setBeforeConfirmation(read);
 
       const body = confirmation
         ? { roomId, overlapReason: confirmation.reason, reviewedBusyDates: confirmation.dates }
@@ -257,6 +261,9 @@ function SeriesRoomControl({ eventId, id, read, show, onChanged, onGone }: {
   const hidden = current && !rooms.some((r) => r.id === current.id) ? current : null;
   const value = current ? String(current.id) : NO_ROOM;
   const chosen = pick === NO_ROOM ? null : (rooms.find((r) => String(r.id) === pick) ?? null);
+  const currentCapacity = chosen?.id === current?.id ? chosen?.capacity ?? null : null;
+  const capacityId = currentCapacity === null ? undefined : `${id}-capacity`;
+  const showReadSummary = read !== beforeConfirmation;
   const needsCount = read.needsRoom.length;
   const status = action.state.status === "done" ? action.state.text : "";
   const listed = ownRoomsFor(read.ownRooms, pick === NO_ROOM ? null : Number(pick));
@@ -278,11 +285,16 @@ function SeriesRoomControl({ eventId, id, read, show, onChanged, onGone }: {
         optional
         hint="Choose a room, then book it for every upcoming date. If bookings need an admin's approval, they wait for one. A date with a room of its own, booked or waiting for approval, keeps it unless you choose to change it too. “No series room” releases the rooms the series booked."
       >
-        <Select value={pick} disabled={busy} aria-busy={busy || undefined} onChange={(e) => choose(e.target.value)}>
+        <Select value={pick} disabled={busy} aria-busy={busy || undefined} aria-describedby={capacityId} onChange={(e) => choose(e.target.value)}>
           <option value={NO_ROOM}>No series room</option>
           {hidden && <option value={String(hidden.id)}>{roomName(hidden)}</option>}
           <RoomOptions rooms={rooms} suggestions={suggestions} label={(r, reason) => r.id === current?.id ? roomName(r) : seriesRoomLabel(r, dates, reason)} />
         </Select>
+        {currentCapacity !== null && (
+          <p id={capacityId} className="mt-1 text-sm text-text-muted">
+            {count(currentCapacity, "seat")}{chosen?.tooSmall ? ". This room may be too small." : "."}
+          </p>
+        )}
       </Field>
       <RefusedSaveLine save={refusal} noun="room" choosing="The room for every date" />
       {listed.length > 0 && (
@@ -310,10 +322,10 @@ function SeriesRoomControl({ eventId, id, read, show, onChanged, onGone }: {
           <p className="text-sm text-warning-on-subtle"><AlertCircleIcon className="mr-1 inline-block size-4 align-text-bottom" />{busyNote}</p>
         )}
         {status && <p className="text-sm text-text-muted">{status}</p>}
-        {!status && current && read.pending > 0 && (
+        {showReadSummary && !status && current && read.pending > 0 && (
           <p className="text-sm text-text-muted">Waiting for an admin to approve {roomName(current)} for {count(read.pending, "date")}.</p>
         )}
-        {current && dates > 0 && needsCount >= dates && (
+        {showReadSummary && current && dates > 0 && needsCount >= dates && (
           <p className="text-sm text-warning-on-subtle"><AlertCircleIcon className="mr-1 inline-block size-4 align-text-bottom" />Not booked on any date yet: every date is busy.</p>
         )}
       </div>
