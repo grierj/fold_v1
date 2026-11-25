@@ -463,11 +463,14 @@ export function guardianLine(c: Pick<MessageRecipientCounts, "guardianCopies" | 
 export const failedLine = (failed: number, copies: number) =>
   failed > 0 || copies === 0 ? `${people(failed)} didn't get this` : `${guardianCopies(copies)} didn't go out`;
 
+const UNCONFIRMED_PUSH_LABEL = "Push delivery unconfirmed";
+
 export const HISTORY_WORDS: Record<HistoryStatus, string> = {
   sent: "Sent",
   delivered: "Delivered",
   missed: "Didn't get it",
   waiting: "Waiting",
+  unconfirmed: UNCONFIRMED_PUSH_LABEL,
 };
 
 // retryQuestion is the confirm before "Try again" (DEC-131), in the
@@ -538,7 +541,7 @@ export function pushBadge(p: MessageHistoryPush): string {
       return p.until ? `Push waiting until ${p.until}` : "Push waiting";
   }
 
-  if (p.reason === "delivery could not be confirmed") return "Push delivery unconfirmed";
+  if (p.reason === "delivery could not be confirmed") return UNCONFIRMED_PUSH_LABEL;
 
   return p.reason ? `Push didn't go out: ${PUSH_REASONS.get(p.reason)?.[0] ?? p.reason}` : "Push didn't go out";
 }

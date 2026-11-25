@@ -70,10 +70,11 @@ type pushWaitJSON struct {
 // Each person's status as the history lists it. A leader or host can't tell
 // a bounce, a complaint, a failure or a skip apart: all are "missed".
 const (
-	historySent      = "sent"
-	historyDelivered = "delivered"
-	historyMissed    = "missed"
-	historyWaiting   = "waiting"
+	historySent        = "sent"
+	historyDelivered   = "delivered"
+	historyMissed      = "missed"
+	historyWaiting     = "waiting"
+	historyUnconfirmed = "unconfirmed"
 )
 
 // historyRecipientJSON is one row: a name and a Teen badge, the status,
@@ -246,6 +247,7 @@ func pushHistoryStatus(status, reason string, admin bool) *historyPushJSON {
 // with its teen; a leader or host never sees a guardian's name (DEC-132).
 func historyRecipientsIn(db *gorm.DB, id uint, admin bool) ([]historyRecipientJSON, bool, error) {
 	var rows []struct {
+		Channel         string
 		Status          string
 		Reason          string
 		Error           string
@@ -262,7 +264,7 @@ func historyRecipientsIn(db *gorm.DB, id uint, admin bool) ([]historyRecipientJS
 	// person's push row joined on (never a copy's). A push row with no
 	// email row beside it (a push reminder's, M3.13d3) is the person's row
 	// itself.
-	err := db.Raw(`SELECT r.status, r.reason, r.error, r.copy_of_user_id IS NOT NULL AS copy,
+	err := db.Raw(`SELECT r.channel, r.status, r.reason, r.error, r.copy_of_user_id IS NOT NULL AS copy,
 		u.name, u.display_name, u.account_type, COALESCE(t.name, '') AS teen_name, COALESCE(t.display_name, '') AS teen_display_name,
 		p.status AS push_status, p.reason AS push_reason
 		FROM message_recipients r JOIN users u ON u.id = r.user_id LEFT JOIN users t ON t.id = r.copy_of_user_id
@@ -281,6 +283,9 @@ func historyRecipientsIn(db *gorm.DB, id uint, admin bool) ([]historyRecipientJS
 		u := models.User{Name: r.Name, DisplayName: r.DisplayName}
 		h := historyRecipientJSON{Name: u.PublicName(), Teen: r.AccountType == models.AccountTeen && !r.Copy}
 		h.Status, h.Reason = historyStatus(r.Status, r.Reason, r.Error, admin)
+		if r.Channel == models.DeliveryPush && h.Status == historyMissed && pushMissReason(r.Reason) == pushWhyUnconfirmed {
+			h.Status, h.Reason = historyUnconfirmed, ""
+		}
 		if r.PushStatus != nil {
 			reason := ""
 			if r.PushReason != nil {

@@ -2393,8 +2393,10 @@ A message's `error` follows DEC-52. Fold's own plain texts reach everyone as the
 
 When a push has no recorded outcome and its jobs have ended, history reports
 `delivery could not be confirmed` for that push. The count and personal push
-badge can show this to anyone who can read the history. Other individual
-push reasons are available to admins. An unconfirmed push is never resent.
+badge can show this to anyone who can read the history. If the person has
+only a push row, the recipient's history `status` is `unconfirmed`. Other
+individual push reasons are available to admins. An unconfirmed push is
+never resent.
 
 `canRetry` shows "Try again" (DEC-131): the message is `sent` or `failed` with failed rows (guardian copies included), or failed before anyone was chosen because it couldn't be got ready, and its author is active and may still write to its audience. `retry` checks the same, then in one transaction sets only the `failed` rows back to `queued` (clearing their error), the message to `sending` (clearing its error), queues `message.deliver_batch` jobs for those rows under fresh keys, and audits `message.retried` with the count. Rows that were sent, delivered, bounced or skipped are never queued again, so nobody it reached gets it twice. A message that never got ready goes back to `scheduled` for now and `message.send` prepares it from the start. Whoever presses it, an admin included, it goes out in the author's name, so the author's rights are what is checked: an author who can no longer write to these people is 403 `message_retry_refused` and nothing changes. A message that is already going out again (someone else pressed it first) is 409 `message_retry_sending`, "It's already sending again."; one with nothing to retry is 409 `message_nothing_to_retry`. An announcement retry counts toward the leader's daily group-message limit on the church day it goes out; the message itself is excluded from the count, so retrying it on the same day does not use a second slot. Admins remain exempt.
 
