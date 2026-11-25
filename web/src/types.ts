@@ -1494,8 +1494,7 @@ export interface AudienceRecipient {
   name: string;
   teen: boolean;
   skipped?: string;
-  // They get the email and have notifications on, so "Push notification
-  // too" reaches them.
+  // They have notifications on, so "Push notification too" reaches them.
   push?: boolean;
 }
 
@@ -1506,9 +1505,10 @@ export interface AudienceSummary {
   eligible: number;
   teens: number;
   skipped: Record<string, number>;
-  // Of those who get it, how many also get a push notification (0 when
-  // the church turned notifications off). Having none isn't a skip.
+  // How many can get a push notification, including people skipped for email.
   push: number;
+  // Of those who can get a push notification, how many are skipped for email.
+  pushOnly: number;
   // The first 100 by name; more says there are others.
   recipients: AudienceRecipient[];
   more: boolean;
