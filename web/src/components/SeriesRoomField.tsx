@@ -218,12 +218,14 @@ function SeriesRoomControl({ eventId, id, read, show, onChanged, onGone }: {
     }, { fallback: "We couldn't update the room." });
   }
 
-  // The box is a choice about the option chosen: a new option starts it clear.
+  // The box is a choice about the option chosen: a new option starts it clear. The last pick's result goes too: beside
+  // another option its counts would read as what that option will do.
   function choose(value: string) {
     setPick(value);
     setInclude(false);
     setPending(null);
     overlap.clearError();
+    action.reset();
   }
 
   function apply() {
@@ -262,7 +264,7 @@ function SeriesRoomControl({ eventId, id, read, show, onChanged, onGone }: {
   // no series room and none chosen there is nothing to do. Book anyway names no dates, so the box goes while it is asked.
   const offerInclude = changeable.length > 0 && !pending && (pick === NO_ROOM ? value !== NO_ROOM : chosen !== null);
   const including = include && offerInclude;
-  const busyNote = chosen && pick !== value ? busyDatesNote(chosen, dates, "edit", listed.length > 0) : null;
+  const busyNote = chosen && pick !== value ? busyDatesNote(chosen, dates, "edit", read.ownRooms.length > 0) : null;
 
   if (off) return <RoomsOffLine refused />;
 

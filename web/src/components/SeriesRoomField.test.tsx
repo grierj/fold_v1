@@ -716,6 +716,24 @@ it("says only how many dates the room is in use on while some dates keep their o
   expect(screen.queryByText(/It will be booked|will be listed/)).not.toBeInTheDocument();
 });
 
+it("promises no bookings either when a date's own room is the room being picked", async () => {
+  vi.mocked(SeriesRooms.list).mockResolvedValue(read({ ownRooms: [ownRoom("2026-12-08")] }));
+  show();
+  await userEvent.selectOptions(await select(), "2");
+  expect(ownList()).not.toBeInTheDocument();
+  expect(screen.getByText("Chapel is in use on 2 of 10 dates.")).toBeInTheDocument();
+  expect(screen.queryByText(/It will be booked|will be listed/)).not.toBeInTheDocument();
+});
+
+it("drops the last pick's result when another option is chosen", async () => {
+  vi.mocked(SeriesRooms.set).mockResolvedValue(booking({ booked: 8, kept: 2 }));
+  show();
+  await pickAndBook("2");
+  await waitForStatus("Booked for 8 dates. 2 dates keep their own room.");
+  await userEvent.selectOptions(await select(), "3");
+  expect(screen.queryByText(/keep their own room/)).not.toBeInTheDocument();
+});
+
 it("clears the box when the choice changes, so a tick for one room never releases rooms", async () => {
   vi.mocked(SeriesRooms.list).mockResolvedValue(read({ defaultRoom: { id: 1, name: "Fellowship Hall", building: "Main" }, ownRooms: [ownRoom("2026-12-08")] }));
   vi.mocked(SeriesRooms.set).mockResolvedValue(booking({ defaultRoom: null, booked: 0, kept: 1 }));
@@ -746,7 +764,7 @@ it("says why a pick was refused while a kept date waits on the series request, a
   vi.mocked(SeriesRooms.set).mockRejectedValue(new ApiError(409, "kept", { code: "series_request_kept" }));
   const onChanged = show();
   await pickAndBook("2");
-  expect(await screen.findByRole("alert")).toHaveTextContent("The room for every date could not be changed: some dates are still waiting for an admin to approve a room only an admin can change. Only an admin can change this event's room request now.");
+  expect(await screen.findByRole("alert")).toHaveTextContent("Only an admin can change this event's room request now, so the room for every date could not be changed.");
   expect(screen.getByRole("button", { name: "Book for every date" })).toBeEnabled();
   expect(await select()).toBeEnabled();
   expect(onGone).not.toHaveBeenCalled();
