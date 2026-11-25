@@ -1,6 +1,7 @@
 import { isString } from "../lib/wireValues";
 import { useEffect, useId, useRef, useState } from "react";
 import { ApiError } from "../api/core";
+import { useResourceRefusal } from "../lib/refusedSave";
 import { Groups } from "../api/groups";
 import { Invitations } from "../api/invitations";
 import type { PersonSearchResult } from "../types";
@@ -11,12 +12,8 @@ import { Checkbox, Field, FormError, Input } from "./ui/Field";
 import { Form } from "./ui/Form";
 import { PeoplePicker } from "./ui/PeoplePicker";
 
-// One "Add people" panel on a group's Members tab (DEC-99). It starts with the
-// name search (DEC-78's main path, including Ask to add for a teen). "Use an
-// email instead" switches to one email field: it tries to add an existing
-// account first, and when there is none, offers the invitation for that same
-// email. Every call and rule is the one the three old forms used.
-export function AddPeople({ groupId, groupName, memberCount, memberLimit, canSearch, onAdded }: {
+// The email and invitation fallback (DEC-99) sits beside the name picker (DEC-78).
+export function AddPeople({ groupId, groupName, memberCount, memberLimit, canSearch, onAdded, restoredEmail, onEmailUnavailable }: {
   groupId: number;
   groupName: string;
   memberCount: number;
@@ -25,19 +22,21 @@ export function AddPeople({ groupId, groupName, memberCount, memberLimit, canSea
   canSearch: boolean;
   // Refresh the roster without unmounting the panel.
   onAdded: () => Promise<void> | void;
+  restoredEmail?: string | null;
+  onEmailUnavailable?: (email: string) => void;
 }) {
-  const [open, setOpen] = useState(false);
-  const [mode, setMode] = useState<"name" | "email">(canSearch ? "name" : "email");
+  const [open, setOpen] = useState(!!restoredEmail);
+  const [mode, setMode] = useState<"name" | "email">(canSearch && !restoredEmail ? "name" : "email");
   const [selection, setSelection] = useState<PersonSearchResult | null>(null);
   const [askPerson, setAskPerson] = useState<PersonSearchResult | null>(null);
-  const [email, setEmail] = useState("");
-  // The email we found no account for; the invitation goes to exactly this address.
-  const [inviteFor, setInviteFor] = useState<string | null>(null);
+  const [email, setEmail] = useState(restoredEmail ?? "");
+  const [inviteFor, setInviteFor] = useState(restoredEmail ?? null);
   const [overLimit, setOverLimit] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [status, setStatus] = useState<string | null>(null);
   const panelId = useId();
+  const refreshRefusal = useResourceRefusal();
   const full = memberLimit !== null && memberCount >= memberLimit;
 
   // The link that switched modes is gone once the other form shows, so focus
@@ -81,8 +80,24 @@ export function AddPeople({ groupId, groupName, memberCount, memberLimit, canSea
       setStatus(`Added ${label}.`);
       await onAdded();
     } catch (err) {
-      if (isString(target) && err instanceof ApiError && err.status === 404) setInviteFor(target);
-      else if (errorCode(err) === "teen_add_approval_required" && isString(target)) {
+      const code = errorCode(err);
+
+      const unavailable = err instanceof ApiError && (
+        (err.status === 400 && err.code === "group_member_email_unavailable") ||
+        (err.status === 404 && err.code === "not_found")
+      );
+
+      if (isString(target) && unavailable) {
+        // Either answer can also mean the group went away during the add.
+        if (onEmailUnavailable) onEmailUnavailable(target);
+        else setInviteFor(target);
+
+        return;
+      }
+
+      if (refreshRefusal(err)) return;
+
+      if (code === "teen_add_approval_required" && isString(target)) {
         setError("Select this person by name, then choose Ask to add. An email address cannot be used to send an ask.");
       } else setError(errorText(err, "We couldn't add that person."));
     } finally {
@@ -128,7 +143,7 @@ export function AddPeople({ groupId, groupName, memberCount, memberLimit, canSea
       setEmail("");
       setOverLimit(false);
     } catch (err) {
-      setError(errorText(err, "We couldn't send the invitation."));
+      if (!refreshRefusal(err)) setError(errorText(err, "We couldn't send the invitation."));
     } finally {
       setBusy(false);
     }
@@ -174,7 +189,7 @@ export function AddPeople({ groupId, groupName, memberCount, memberLimit, canSea
               </Form>
               {inviteFor && (
                 <div className="space-y-3 rounded-lg border border-border bg-sunken p-3">
-                  <p role="status" className="text-sm">No account uses that email. Invite them to Fold?</p>
+                  <p role="status" className="text-sm">We couldn't add them by email. If they need a Fold account, you can send an invitation.</p>
                   {full && (
                     <Checkbox label="Invite over the limit anyway" description="This group is full. Going over the limit is logged."
                       checked={overLimit} onChange={(e) => setOverLimit(e.target.checked)} />

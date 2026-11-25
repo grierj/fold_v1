@@ -260,6 +260,7 @@ function GroupDetailContent() {
   const [joinBusy, setJoinBusy] = useState(false);
   const [memberBusy, setMemberBusy] = useState(false);
   const [memberError, setMemberError] = useState<string | null>(null);
+  const pendingInviteEmail = useRef<string | null>(null);
   const [departureTarget, setDepartureTarget] = useState<{ subjectId?: number; allowNote: boolean } | null>(null);
   const [departureStatus, setDepartureStatus] = useState<string | null>(null);
   const [seriesFeedback, setSeriesFeedback] = useState<SeriesFeedbackSignal | null>(null);
@@ -293,11 +294,11 @@ function GroupDetailContent() {
   const { retry } = load;
   const { refused } = groupRefused;
 
-  const refreshRefusal = useCallback((intent: "read" | "write") => {
+  const refreshRefusal = useCallback((intent: "read" | "write", what: "action" | "role" = "action") => {
     setEditing(false);
     setDepartureTarget(null);
 
-    if (intent === "write") refused("gone", "action");
+    if (intent === "write") refused("gone", what);
     else void retry();
   }, [refused, retry]);
 
@@ -324,6 +325,9 @@ function GroupDetailContent() {
 
   const loading = load.loading;
   const notFound = load.error instanceof ApiError && load.error.status === 404;
+  useLayoutEffect(() => {
+    if (detail || notFound) pendingInviteEmail.current = null;
+  }, [detail, notFound]);
   const error = load.error && !notFound ? errorText(load.error, "We couldn't load this group.") : null;
   const setDetail = load.setData;
   const moreError = moreFailure && moreFailure.epoch === load.epoch() ? moreFailure.text : null;
@@ -534,7 +538,7 @@ function GroupDetailContent() {
       await Groups.setRole(id!, memberId, role);
       await load.retry();
     } catch (e) {
-      if (resourceRefused(e)) refreshRefusal("write");
+      if (resourceRefused(e)) refreshRefusal("write", "role");
       else setMemberError(errorText(e, "We couldn't change that role."));
     } finally {
       setMemberBusy(false);
@@ -864,6 +868,11 @@ function GroupDetailContent() {
                     {canManage && <div className="mb-4"><AddPeople
                       groupId={group.id} groupName={group.name} memberCount={group.memberCount} memberLimit={group.memberLimit}
                       canSearch={isActiveAdult(user)} onAdded={async () => { await refresh(); }}
+                      restoredEmail={pendingInviteEmail.current}
+                      onEmailUnavailable={(email) => {
+                        pendingInviteEmail.current = email;
+                        refreshRefusal("write");
+                      }}
                     /></div>}
                     <PeopleList rows={members ?? []} noun="members" filters={[
                       { value: "leader", label: "Leaders", matches: (m) => m.role === "leader" },
@@ -951,7 +960,7 @@ function GroupDetailContent() {
           subjectId={departureTarget.subjectId}
           allowNote={departureTarget.allowNote}
           onCancel={() => setDepartureTarget(null)}
-          onUnavailable={async () => { await load.retry(); }}
+          onUnavailable={async () => { await refresh(); }}
           onCompleted={completedDeparture}
         />
       )}

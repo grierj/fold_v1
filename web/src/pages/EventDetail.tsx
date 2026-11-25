@@ -127,6 +127,7 @@ function EventDetailContent() {
   const refusedSave = useRefusedSave(load);
   const { retry } = load;
   const { refused } = refusedSave;
+  const roomListRefused = useRef(false);
 
   const refreshRefusal = useCallback((intent: "read" | "write") => {
     setEditing(false);
@@ -136,6 +137,15 @@ function EventDetailContent() {
     if (intent === "write") refused("gone", "action");
     else void retry();
   }, [refused, retry]);
+
+  const roomListRead = useCallback((outcome: "loaded" | "refused") => {
+    if (outcome === "loaded") roomListRefused.current = false;
+    else if (!roomListRefused.current) {
+      // This list opens by itself after a page read. A second refusal stays with the list.
+      roomListRefused.current = true;
+      refreshRefusal("read");
+    }
+  }, [refreshRefusal]);
 
   // A roster write holds that date's Edit until the page shows a read asked for after the write.
   const settling = useRosterSettled({ epoch: load.epoch, dataEpoch: load.dataEpoch, reload: () => refreshDates() }, (eventId) => eventId === Number(id));
@@ -350,6 +360,7 @@ function EventDetailContent() {
           hasDate={(d) => occurrences.some((o) => o.date === d)}
           onPick={(d) => setPickRequest((r) => ({ date: d, seq: (r?.seq ?? 0) + 1 }))}
           onGone={() => closeOnConflict("gone")}
+          onRead={roomListRead}
         />
       )}
 

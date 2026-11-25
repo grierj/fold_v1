@@ -13,7 +13,7 @@ export function outcomeOf(cause: unknown): WriteOutcome {
 
 // How a roster write (Remove, promote, restore, add) failed. "lost": a readable 401, 403 or 404, so this person
 // may no longer manage the date. "unsure": what outcomeOf calls unsure, so it may have been stored. "answered":
-// any other readable answer (event_full, date_add_approval_required, a validation error): nothing changed.
+// any other readable answer, including a missing add target: nothing changed.
 export type RosterWriteFailure = "lost" | "unsure" | "answered";
 
 /** @public how a roster write ended, as tests end one through a store. */
@@ -22,7 +22,7 @@ export type RosterWriteEnd = "stored" | RosterWriteFailure;
 export function rosterWriteFailure(cause: unknown): RosterWriteFailure {
   if (outcomeOf(cause) === "unsure") return "unsure";
 
-  return cause instanceof ApiError && [401, 403, 404].includes(cause.status) ? "lost" : "answered";
+  return cause instanceof ApiError && cause.code !== "date_add_person_not_found" && [401, 403, 404].includes(cause.status) ? "lost" : "answered";
 }
 
 // A roster write started, or ended (`end` set), on `key` (`${eventId}:${date}`) of event `eventId`.

@@ -998,6 +998,20 @@ describe("EventDetail dates that need a room", () => {
     vi.spyOn(DateRooms, "list").mockResolvedValue({ rooms: [], booking: null, dateRoom: { id: 70, revision: "r1" } });
   });
 
+  it("checks the event again when the room list is refused and avoids a reload loop", async () => {
+    const fresh = deferred<EventDetailResponse>();
+    const shown = { ...page, canManage: true };
+    vi.mocked(Events.get).mockResolvedValueOnce(shown).mockReturnValueOnce(fresh.promise);
+    vi.spyOn(SeriesRooms, "list").mockRejectedValue(new ApiError(403, "refused", { code: "not_allowed" }));
+    renderPage();
+    await waitFor(() => expect(Events.get).toHaveBeenCalledTimes(2));
+    expect(screen.queryByRole("heading", { name: "Hybrid study" })).not.toBeInTheDocument();
+    await act(async () => fresh.resolve(shown));
+    expect(await screen.findByRole("heading", { name: "Hybrid study" })).toBeInTheDocument();
+    expect(await screen.findByRole("button", { name: "Try again" })).toBeInTheDocument();
+    expect(Events.get).toHaveBeenCalledTimes(2);
+  });
+
   it("lists them for a manager and opens that date's editor from Pick a room", async () => {
     needs({ date: "2026-12-08", roomName: "Fellowship Hall", status: "requested" });
     renderPage();
@@ -1265,6 +1279,27 @@ describe("EventDetail asks every question in the app's dialog", () => {
     await userEvent.click(within(asked).getByRole("button", { name: "Add over capacity" }));
     await waitFor(() => expect(Events.restoreRegistration).toHaveBeenCalledWith(7, "2026-12-01", { userId: 4 }, "in_person", true));
     expect(Events.restoreRegistration).toHaveBeenCalledOnce();
+  });
+
+  it("keeps the roster and focuses the email so an address can be corrected after a missing-person reply", async () => {
+    vi.mocked(Events.addRegistration).mockRejectedValueOnce(new ApiError(404, "missing", { code: "date_add_person_not_found" }))
+      .mockResolvedValueOnce({});
+    renderPage();
+    const people = await roster();
+    const email = people.getByRole("textbox", { name: "Add someone" });
+    await userEvent.type(email, "sma@example.com");
+    await userEvent.click(people.getByRole("button", { name: "Add" }));
+
+    expect(email).toHaveValue("sma@example.com");
+    expect(email).toHaveFocus();
+    expect(email).toHaveAccessibleDescription(/Check the email address/);
+    expect(Events.get).toHaveBeenCalledOnce();
+    expect(screen.queryByText("Your last action could not be completed.")).not.toBeInTheDocument();
+
+    await userEvent.clear(email);
+    await userEvent.type(email, "sam@example.com");
+    await userEvent.click(people.getByRole("button", { name: "Add" }));
+    expect(Events.addRegistration).toHaveBeenLastCalledWith(7, "2026-12-01", "sam@example.com", undefined);
   });
 
   it("asks again after seats fill during an add, and a no keeps the refusal", async () => {

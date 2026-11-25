@@ -1170,6 +1170,17 @@ func TestChildcareCapacityAndStoredRequests(t *testing.T) {
 	}
 }
 
+func TestManagerAddDistinguishesMissingPersonFromMissingDate(t *testing.T) {
+	app := testApp(t)
+	admin, gid := openGroup(t, app, "Add by email")
+	id, date := seedChildcareEvent(t, app, admin, gid, nil, nil, false)
+	parent := newTestUser(t, app, "added parent", "password1234", models.RoleMember)
+	path := "/api/v1/events/" + itoa(id) + "/registrations/add"
+	wantCode(t, "unknown email", admin.do("POST", path, map[string]any{"date": date, "email": "typo@example.com"}, true), http.StatusNotFound, "date_add_person_not_found")
+	wantCode(t, "missing date", admin.do("POST", path, map[string]any{"date": "2001-01-01", "email": parent.Email}, true), http.StatusNotFound, "not_found")
+	apiDo(t, admin, "POST", path, map[string]any{"date": date, "email": parent.Email}, http.StatusOK)
+}
+
 func TestChildcareRegistrationValidationAndManagerAdd(t *testing.T) {
 	app := testApp(t)
 	admin, gid := openGroup(t, app, "ChildcareAdd")

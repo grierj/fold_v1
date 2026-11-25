@@ -49,12 +49,12 @@ export function useRefusedSave(load?: Pick<Load<unknown>, "loading" | "data" | "
   return { why: refusal?.why ?? null, what: refusal?.what ?? "save", line, refused, clear };
 }
 
-type Refused = "save" | "send" | "action";
+type Refused = "save" | "send" | "action" | "role";
 
 // Use for a request about the page's resource. Feature-specific refusals such as room_gone or rooms_off stay with the control.
 export function resourceRefused(cause: unknown): boolean {
   return cause instanceof ApiError && (
-    (cause.status === 403 && cause.code === "not_allowed") ||
+    (cause.status === 403 && (cause.code === "not_allowed" || cause.code === "add_request_unavailable")) ||
     (cause.status === 404 && (cause.code === "not_found" || cause.code === "invalid"))
   );
 }
@@ -88,7 +88,9 @@ export function RefusedSaveLine({ save, noun, canManage, about, choosing }: { sa
 
   const text = choosing
     ? `${choiceRefused(choosing)} This is the ${noun} as it is now.`
-    : save.what === "action"
+    : save.what === "role"
+      ? "We couldn't confirm the role change."
+      : save.what === "action"
       ? "Your last action could not be completed."
       : save.what === "send"
       ? sendRefused(save.why, noun, canManage)

@@ -28,7 +28,9 @@ event, group or date pages. Background: DEC-48, DEC-156, DEC-157, DEC-158, PLAN 
 On an event, group or date page, a control that receives a missing resource or management refusal
 asks the page to read again from nothing (`ResourceRefusal`). The previous answer leaves the screen
 while the read runs. A refused write leaves a focused notice after the read. A feature-specific
-refusal, such as rooms being turned off, stays with the control.
+refusal, such as rooms being turned off, stays with the control. A date add with an unknown email
+leaves the roster and email field in place. An unavailable group email add checks the group again
+before restoring the invitation option and address.
 
 ## Consent (DEC-158)
 
