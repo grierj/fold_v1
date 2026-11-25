@@ -571,15 +571,18 @@ function Composer({ options, zone, opened, edit = false, params, refusal, back, 
 
     if (!m) return false;
 
-    if (list) setConfirm(null);
-
     // The sender just confirmed this list, and the save's answer seals it for the text it left: the schedule goes on
-    // without asking the same question again.
+    // without asking the same question again, and its question stays on screen, so a lost answer settles as any send's.
     const token = savedReview.current;
 
     if (k === "send" && list && token) {
-      return send({ ...list, kind: "send", revision: m.revision, value: valueOf(m), status: m.status, storedAt: m.scheduledAt, review: { ...list.review, token }, change: null, again: false });
+      const next: Asked = { ...list, kind: "send", revision: m.revision, value: valueOf(m), status: m.status, storedAt: m.scheduledAt, review: { ...list.review, token }, change: null, again: false };
+      setConfirm(next);
+
+      return send(next);
     }
+
+    if (list) setConfirm(null);
 
     try {
       if (k === "draft") return "Draft saved.";
