@@ -101,7 +101,7 @@ export function ownRoomsFor(list: OwnRoom[], roomId: number | null): OwnRoom[] {
 export function ownRoomsLead(n: number, including: boolean): string {
   const have = n === 1 ? "1 date has a room of its own" : `${n} dates have a room of their own`;
 
-  return including ? `${have}:` : `${have} and will keep ${n === 1 ? "it" : "them"}:`;
+  return including ? `${have}:` : `${have} and will keep it:`;
 }
 
 // One listed date's room, as the date's own place names it, and what holds it back.

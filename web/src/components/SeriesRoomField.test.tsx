@@ -512,7 +512,7 @@ it("says before the pick that the dates with their own room keep it, waiting one
   vi.mocked(SeriesRooms.list).mockResolvedValue(read({ ownRooms: [ownRoom("2026-12-08"), ownRoom("2026-12-15", { waiting: true, room: { id: 3, name: "Closet", building: "Annex" } })] }));
   show();
   await userEvent.selectOptions(await select(), "1");
-  expect(screen.getByText("2 dates have a room of their own and will keep them:")).toBeInTheDocument();
+  expect(screen.getByText("2 dates have a room of their own and will keep it:")).toBeInTheDocument();
   const rows = screen.getAllByRole("listitem").map((li) => li.textContent);
   expect(rows).toEqual(["Tuesday, December 8: Chapel", "Tuesday, December 15: Closet · Annex — waiting for an admin's approval"]);
   const box = screen.getByRole("checkbox", { name: "Also change these dates to Fellowship Hall · Main" });

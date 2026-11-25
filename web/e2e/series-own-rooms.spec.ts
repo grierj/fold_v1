@@ -47,7 +47,7 @@ test("a series room change keeps the dates with their own room, lists them, and 
     await page.getByRole("button", { name: "Edit series" }).click();
     const field = page.getByRole("combobox", { name: /^Room for every date/ });
     await field.selectOption(String(loft.id));
-    await expect(page.getByText("2 dates have a room of their own and will keep them:")).toBeVisible();
+    await expect(page.getByText("2 dates have a room of their own and will keep it:")).toBeVisible();
     await expect(page.getByRole("listitem").filter({ hasText: `Parlor ${suffix} — waiting for an admin's approval` })).toHaveCount(1);
     await expect(page.getByRole("listitem").filter({ hasText: `Parlor ${suffix}` })).toHaveCount(2);
     const box = page.getByRole("checkbox", { name: `Also change these dates to Loft ${suffix}` });
@@ -62,7 +62,7 @@ test("a series room change keeps the dates with their own room, lists them, and 
     }
 
     // The same room again, with the box ticked: both dates change.
-    await expect(page.getByText("2 dates have a room of their own and will keep them:")).toBeVisible();
+    await expect(page.getByText("2 dates have a room of their own and will keep it:")).toBeVisible();
     await box.check();
     await expect(page.getByText("2 dates have a room of their own:")).toBeVisible();
     await checkState(page, "series-own-rooms", "included");

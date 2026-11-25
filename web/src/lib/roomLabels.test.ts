@@ -77,7 +77,7 @@ describe("dates with a room of their own", () => {
 
   it("words the list, each date's room and the box", () => {
     expect(ownRoomsLead(1, false)).toBe("1 date has a room of its own and will keep it:");
-    expect(ownRoomsLead(3, false)).toBe("3 dates have a room of their own and will keep them:");
+    expect(ownRoomsLead(3, false)).toBe("3 dates have a room of their own and will keep it:");
     expect(ownRoomsLead(3, true)).toBe("3 dates have a room of their own:");
     expect(ownRoomNote(own({ room: { id: 3, name: "Annex", building: "East" } }))).toBe("Annex · East");
     expect(ownRoomNote(own({ waiting: true }))).toBe("Chapel — waiting for an admin's approval");
