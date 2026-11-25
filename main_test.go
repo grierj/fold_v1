@@ -505,9 +505,10 @@ func TestServeBootStepComesFirst(t *testing.T) {
 	for _, v := range serveBootProblems(src) {
 		t.Error(v)
 	}
+	bootFailure := "if err := app.bootRestoreFence(); err != nil {\n\t\tfmt.Fprintln(stderr, \"fold:\", err)\n\t\treturn "
 	for name, mutated := range map[string]string{
 		"the router before the boot": strings.Replace(src, "if err := app.bootRestoreFence(); err != nil {", "_ = app.setupRouter()\n\tif err := app.bootRestoreFence(); err != nil {", 1),
-		"a zero exit on failure":     strings.Replace(src, "fmt.Fprintln(stderr, \"fold:\", err)\n\t\treturn 1\n\t}\n\tready, err := app.setupComplete()", "fmt.Fprintln(stderr, \"fold:\", err)\n\t\treturn 0\n\t}\n\tready, err := app.setupComplete()", 1),
+		"a zero exit on failure":     strings.Replace(src, bootFailure+"1", bootFailure+"0", 1),
 		"no boot":                    strings.Replace(src, "app.bootRestoreFence()", "app.initAttempts()", 1),
 	} {
 		if mutated == src {
