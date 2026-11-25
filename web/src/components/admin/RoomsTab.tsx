@@ -1,7 +1,7 @@
 import { Fragment, useEffect, useRef, useState } from "react";
 import { ApiError } from "../../api/core";
 import { AdminRooms, type RoomInput } from "../../api/rooms";
-import type { AdminRoomsResponse, Room, RoomResponse } from "../../types";
+import type { Room, RoomResponse } from "../../types";
 import type { Load } from "../../lib/useLoad";
 import { RefusedSaveLine, useRefusedSave } from "../../lib/refusedSave";
 import { answerNames, useRevisionSave, type RevisionConflict, type RevisionRead } from "../../lib/useRevisionSave";
@@ -107,11 +107,10 @@ function createBody(form: RoomForm): RoomInput {
 // Every send was refused while nothing the save writes changed: the control says its ordinary refusal.
 const refusedEverySend = () => new ApiError(409, "room changed", { code: "room_changed" });
 
-// The room as one read of the list shows it, or undefined when the list has no such room. `keep` gets the read.
-async function readRoom(id: number, keep: (list: AdminRoomsResponse, room: Room | undefined) => void): Promise<RevisionRead<Room | undefined>> {
-  const list = await AdminRooms.list();
-  const room = list.rooms.find((r) => r.id === id);
-  keep(list, room);
+// The room as one read of the list shows it, or undefined when the list has no such room. `keep` gets it.
+async function readRoom(id: number, keep: (room: Room | undefined) => void): Promise<RevisionRead<Room | undefined>> {
+  const room = (await AdminRooms.list()).rooms.find((r) => r.id === id);
+  keep(room);
 
   return { allowed: room !== undefined, revision: room?.revision, value: room };
 }
@@ -134,7 +133,7 @@ function RoomEditor({ room, onSaved, onConflict, onCancel }: {
   const send = useRevisionSave<Room | undefined, ReturnType<typeof roomFields> | null>({
     opened,
     revision: opened.revision,
-    read: () => readRoom(opened.id, (_, r) => { lastRead.current = r; }),
+    read: () => readRoom(opened.id, (r) => { lastRead.current = r; }),
     fields: (r) => (r ? roomFields(r) : null),
     answers: answerNames("room", opened.id),
     onConflict,
@@ -215,10 +214,9 @@ function RoomFormPanel({ room, submit, onSaved, onCancel }: {
     try {
       const saved = await submit(form);
 
-      if (!saved) return;
-
-      // A save that lands after the form went (the tab was left) still updates the list.
-      if (mounted.current) markSaved();
+      // A save that lands after the form went (the tab was left) hands nothing on: the rows shown since name their reads.
+      if (!saved || !mounted.current) return;
+      markSaved();
       onSaved(saved);
     } catch (err) {
       if (!mounted.current) return;
@@ -280,8 +278,9 @@ const activeOf = (r: Room | undefined) => (r ? { active: r.active } : null);
 
 // One room in the list, with its Deactivate or Reactivate. That is a control that stays on screen (DEC-171): it names
 // the read the row shows, and after each outcome the next press names what that outcome left (`stays`). A conflict
-// shows the rooms as its read found them and says so at the row.
-function RoomRow({ room, locked, feedOpen, onBusy, onStart, onEdit, onFeed, onCloseFeed, onSaved, onShown, onStatus, onGone }: {
+// shows the room as its read found it and says so at the row. It hands the list only its own room, since every other
+// row's press names the read that row shows, and nothing once it has left the screen.
+function RoomRow({ room, locked, feedOpen, onBusy, onStart, onEdit, onFeed, onCloseFeed, onSaved, onStatus, onGone }: {
   room: Room;
   // A form or panel is open, or a save is on its way: nothing here may start.
   locked: boolean;
@@ -293,7 +292,6 @@ function RoomRow({ room, locked, feedOpen, onBusy, onStart, onEdit, onFeed, onCl
   onFeed: () => void;
   onCloseFeed: () => void;
   onSaved: (room: Room) => void;
-  onShown: (list: AdminRoomsResponse) => void;
   onStatus: (status: string) => void;
   // This person may no longer manage rooms.
   onGone: () => void;
@@ -301,14 +299,21 @@ function RoomRow({ room, locked, feedOpen, onBusy, onStart, onEdit, onFeed, onCl
   const [error, setError] = useState<string | null>(null);
   const refusal = useRefusedSave();
   const lastAnswer = useRef<RoomResponse | null>(null);
-  const lastRead = useRef<AdminRoomsResponse | null>(null);
+  const lastRead = useRef<Room | undefined>(undefined);
+  const mounted = useRef(true);
   const answered = () => lastAnswer.current;
-  const readList = () => lastRead.current;
+  const found = () => lastRead.current;
+
+  useEffect(() => {
+    mounted.current = true;
+
+    return () => { mounted.current = false; };
+  }, []);
 
   const save = useRevisionSave<Room | undefined, { active: boolean } | null>({
     opened: room,
     revision: room.revision,
-    read: () => readRoom(room.id, (list) => { lastRead.current = list; }),
+    read: () => readRoom(room.id, (r) => { lastRead.current = r; }),
     fields: activeOf,
     answers: answerNames("room", room.id),
     stays: () => lastAnswer.current?.room,
@@ -320,7 +325,7 @@ function RoomRow({ room, locked, feedOpen, onBusy, onStart, onEdit, onFeed, onCl
         return;
       }
 
-      if (lastRead.current) onShown(lastRead.current);
+      if (lastRead.current) onSaved(lastRead.current);
       refusal.refused(why);
     },
   });
@@ -331,7 +336,7 @@ function RoomRow({ room, locked, feedOpen, onBusy, onStart, onEdit, onFeed, onCl
     refusal.clear();
     onStart();
     lastAnswer.current = null;
-    lastRead.current = null;
+    lastRead.current = undefined;
     const verb = active ? "reactivate" : "deactivate";
 
     try {
@@ -344,18 +349,16 @@ function RoomRow({ room, locked, feedOpen, onBusy, onStart, onEdit, onFeed, onCl
 
       if (sent === "refused") throw refusedEverySend();
 
-      if (sent !== "saved") return;
+      if (sent !== "saved" || !mounted.current) return;
       // Saved: by its answer, or by a read that found the room as this press would leave it.
-      const answer = answered();
-      const list = readList();
+      const stored = answered()?.room ?? found();
 
-      if (answer) onSaved(answer.room);
-      else if (list) onShown(list);
-      onStatus(`“${answer?.room.name ?? list?.rooms.find((r) => r.id === room.id)?.name ?? room.name}” ${verb}d.`);
+      if (stored) onSaved(stored);
+      onStatus(`“${stored?.name ?? room.name}” ${verb}d.`);
     } catch (e) {
-      setError(errorText(e, `We couldn't ${verb} that room.`));
+      if (mounted.current) setError(errorText(e, `We couldn't ${verb} that room.`));
     } finally {
-      onBusy(false);
+      if (mounted.current) onBusy(false);
     }
   }
 
@@ -386,14 +389,12 @@ function RoomRow({ room, locked, feedOpen, onBusy, onStart, onEdit, onFeed, onCl
 
 // The list lives in AdminPage (it also feeds the tab count), so a save hands the room back and the one list updates.
 // `load` is that list's read: a refused edit closes its form and reads it from nothing (useRefusedSave).
-export function RoomsTab({ rooms, error, reload, load, onSaved, onShown }: {
+export function RoomsTab({ rooms, error, reload, load, onSaved }: {
   rooms: Room[] | null;
   error: string | null;
   reload: () => void;
   load: Pick<Load<unknown>, "loading" | "data" | "retry">;
   onSaved: (room: Room) => void;
-  // A refused save's read of the list: the page shows it.
-  onShown: (list: AdminRoomsResponse) => void;
 }) {
   // "new" is the add form; a number is the room being edited.
   const [open, setOpen] = useState<"new" | number | null>(null);
@@ -505,7 +506,6 @@ export function RoomsTab({ rooms, error, reload, load, onSaved, onShown }: {
             onFeed={() => { opening(); setFeedOpen(r.id); }}
             onCloseFeed={closeFeed}
             onSaved={onSaved}
-            onShown={onShown}
             onStatus={setStatus}
             onGone={() => refused(r, "gone")} />
         )}</Fragment>)}

@@ -32,7 +32,7 @@ import { PushEnabledSetting } from "../components/admin/PushEnabledSetting";
 import { ZonePicker } from "../components/ui/ZonePicker";
 import { FormActions } from "../components/ui/FormActions";
 import { AccountAgeFields } from "../components/AccountAgeFields";
-import type { AdminRoomsResponse, AgeBand, AccountRequest, DepartureConfirmation, GuardianLink, GuardianNomination, GroupSummary, Member, Room, User } from "../types";
+import type { AgeBand, AccountRequest, DepartureConfirmation, GuardianLink, GuardianNomination, GroupSummary, Member, Room, User } from "../types";
 import { useAuth } from "../auth";
 import { Menu } from "../components/ui/Menu";
 import { Avatar } from "../components/Avatar";
@@ -1546,7 +1546,6 @@ export function AdminPage() {
   const requestRemoved = useCallback((id: number) => setRequests((prev) => prev && prev.filter((r) => r.id !== id)), [setRequests]);
   const { setData: setRoomsData } = roomsLoad;
   const roomSaved = useCallback((room: Room) => setRoomsData((prev) => prev && { ...prev, rooms: sortRooms([...prev.rooms.filter((r) => r.id !== room.id), room]) }), [setRoomsData]);
-  const roomsShownAgain = useCallback((list: AdminRoomsResponse) => setRoomsData({ rooms: sortRooms(list.rooms), needApproval: list.needApproval === true }), [setRoomsData]);
   const setNeedApproval = useCallback((on: boolean) => setRoomsData((prev) => prev && { ...prev, needApproval: on }), [setRoomsData]);
   const { setData: setGroups } = groupsLoad;
   const groupDeleted = useCallback((id: number) => setGroups((prev) => prev && prev.filter((g) => g.id !== id)), [setGroups]);
@@ -1607,13 +1606,13 @@ export function AdminPage() {
         <div className="space-y-8">
           <RoomRequestsList requests={requests} needApproval={needApproval} error={requestsError}
             reload={requestsLoad.reload} onRemoved={requestRemoved}>
-            <RoomsTab rooms={rooms} error={roomsError} reload={roomsLoad.reload} load={roomsLoad} onSaved={roomSaved} onShown={roomsShownAgain} />
+            <RoomsTab rooms={rooms} error={roomsError} reload={roomsLoad.reload} load={roomsLoad} onSaved={roomSaved} />
           </RoomRequestsList>
           <MatchLocations rooms={rooms} />
         </div>
       ) : (
         <RoomsTab rooms={rooms} error={roomsEnabled === null ? siteError : roomsError}
-          reload={roomsEnabled === null ? retrySite : roomsLoad.reload} load={roomsLoad} onSaved={roomSaved} onShown={roomsShownAgain} />
+          reload={roomsEnabled === null ? retrySite : roomsLoad.reload} load={roomsLoad} onSaved={roomSaved} />
       ))}
       {tab === "users" && (
         usersLoad.loading ? <Skeleton kind="lines" /> : usersLoad.data ? (

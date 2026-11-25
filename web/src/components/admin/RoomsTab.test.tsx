@@ -47,8 +47,7 @@ function Harness({ initial }: { initial: Room[] | null }) {
   };
 
   return <RoomsTab rooms={rooms} error={error} reload={() => {}} load={load}
-    onSaved={(r) => setRooms((prev) => sortRooms([...(prev ?? []).filter((x) => x.id !== r.id), r]))}
-    onShown={(list) => setRooms(sortRooms(list.rooms))} />;
+    onSaved={(r) => setRooms((prev) => sortRooms([...(prev ?? []).filter((x) => x.id !== r.id), r]))} />;
 }
 
 beforeEach(() => {
@@ -391,6 +390,19 @@ describe("an edit someone else's change refused", () => {
     expect(AdminRooms.update).toHaveBeenCalledTimes(1);
   });
 
+  it("hands nothing to the list when its answer comes after the tab was left", async () => {
+    let answer: (r: { room: Room }) => void = () => {};
+    const onSaved = vi.fn();
+
+    vi.mocked(AdminRooms.update).mockReturnValue(new Promise((resolve) => { answer = resolve; }));
+    const { unmount } = render(<RoomsTab rooms={[hall]} error={null} reload={() => {}} load={{ loading: false, data: [hall], retry: async () => "loaded" as const }} onSaved={onSaved} />);
+    await editName("Great Hall");
+    unmount();
+    answer({ room: { ...hall, name: "Great Hall", revision: "rev-1b" } });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(onSaved).not.toHaveBeenCalled();
+  });
+
   it("keeps Cancel and the other openers waiting while a save is on its way", async () => {
     let answer: (r: { room: Room }) => void = () => {};
 
@@ -467,6 +479,35 @@ describe("a deactivation someone else's change refused", () => {
     await deactivate();
     expect(await screen.findByText("Fellowship Hall. Your changes could not be saved.")).toHaveFocus();
     expect(screen.getByText("We couldn't load the rooms.")).toBeInTheDocument();
+  });
+
+  it("changes only its own row, so another row's next press names the read that row shows", async () => {
+    const nursery = room(2, "Nursery");
+    vi.mocked(AdminRooms.update).mockRejectedValueOnce(changed())
+      .mockResolvedValueOnce({ room: { ...nursery, active: false, revision: "rev-2c" } });
+    // Someone else deactivated both rooms; this tab still shows them active.
+    vi.mocked(AdminRooms.list).mockResolvedValue(listOf({ ...hall, active: false, revision: "rev-1b" }, { ...nursery, active: false, revision: "rev-2b" }));
+    render(<Harness initial={[hall, nursery]} />);
+    await deactivate();
+    expect(await screen.findByText("“Fellowship Hall” deactivated.")).toBeInTheDocument();
+    expect(within(screen.getByRole("group", { name: "Nursery" })).queryByText("Inactive")).not.toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "More for Nursery" }));
+    await userEvent.click(screen.getByRole("menuitem", { name: "Deactivate Nursery" }));
+    expect(await screen.findByText("“Nursery” deactivated.")).toBeInTheDocument();
+    expect(screen.queryByText(/could not be saved/)).not.toBeInTheDocument();
+  });
+
+  it("hands nothing to the list when its answer comes after the tab was left", async () => {
+    let answer: (r: { room: Room }) => void = () => {};
+    const onSaved = vi.fn();
+
+    vi.mocked(AdminRooms.update).mockReturnValue(new Promise((resolve) => { answer = resolve; }));
+    const { unmount } = render(<RoomsTab rooms={[hall]} error={null} reload={() => {}} load={{ loading: false, data: [hall], retry: async () => "loaded" as const }} onSaved={onSaved} />);
+    await deactivate();
+    unmount();
+    answer({ room: { ...hall, active: false, revision: "rev-1b" } });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(onSaved).not.toHaveBeenCalled();
   });
 
   it("keeps Edit and Add room waiting while it is on its way", async () => {
