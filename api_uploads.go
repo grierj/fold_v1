@@ -41,9 +41,7 @@ var (
 	errImageTooLarge   = apiErr(http.StatusBadRequest, "image_too_large", "that image is too large to process")
 	errImageUnreadable = apiErr(http.StatusBadRequest, "file_unreadable", "cannot read file")
 	errImageWebP       = apiErr(http.StatusBadRequest, "image_unsupported", "WebP images are not supported; use a JPEG or PNG")
-	// errUploadBusy is the answer when every processing slot is taken. Nothing
-	// was saved; the client may try again.
-	errUploadBusy = apiErr(http.StatusServiceUnavailable, "upload_busy", "other pictures are being processed; try again in a moment")
+	errUploadBusy      = apiErr(http.StatusServiceUnavailable, "upload_busy", "other pictures are being processed; try again in a moment")
 	// errUploadCanceled is for a request whose client went away before or while
 	// its picture was read.
 	errUploadCanceled = apiErr(http.StatusRequestTimeout, "upload_canceled", "the upload was interrupted")
@@ -75,12 +73,12 @@ func imageRefusal(err error) error {
 // reads and normalizes the picture, and gives the slot back before returning,
 // so storage and database work never hold it. It runs after apiAuth, CSRF and
 // the handler's own policy check, so only a request that may upload can take a
-// slot. A full set of slots answers at once (errUploadBusy); there is no queue.
+// slot. An account can hold one slot. A refusal answers at once (errUploadBusy).
 // Admission bounds copying and decoding, not the multipart parse csrfMiddleware
 // already did for the whole request, which maxRequestBytes caps per request but
 // nothing caps across requests.
 func readImageUpload(c *gin.Context, field string) (*os.File, string, string, error) {
-	release, err := images.Admit()
+	release, err := images.Admit(apiUser(c).ID)
 	if err != nil {
 		return nil, "", "", imageRefusal(err)
 	}
