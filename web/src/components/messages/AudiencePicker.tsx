@@ -97,6 +97,7 @@ export function AudiencePicker({ options, choice, onChange, error, id, push = fa
   const eventLabel = (i: number) => labels[options.groups.length + i].label;
   const datesListed = choice.dates === "all" || !!event?.dates.some((d) => String(d.occurrenceId) === choice.dates);
   const current = reviewed ?? (summary?.key === counted ? summary.summary : null);
+  const pushCopy = current && push ? pushLine(current) : "";
   const failed = reviewed ? "" : countError?.key === counted ? countError.text : "";
   const isGroup = kind === "group";
   const chips = isGroup ? ROLE_CHOICES : STATUS_CHOICES;
@@ -174,7 +175,7 @@ export function AudiencePicker({ options, choice, onChange, error, id, push = fa
         {failed && <p className="text-text-muted">{failed}</p>}
         {current && <>
           <p className="font-medium text-text">{summaryLine(current)}</p>
-          {push && pushLine(current) && <p className="text-text-muted">{pushLine(current)}</p>}
+          {pushCopy && <p className="text-text-muted">{pushCopy}</p>}
           {teenLine(current) && <p className="text-text-muted">{teenLine(current)}</p>}
         </>}
       </div>

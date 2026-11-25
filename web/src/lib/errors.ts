@@ -1,6 +1,7 @@
 import { ApiError } from "../api/core";
 import type { KeptDateCount } from "../types";
 import { isJsonObject, isNumber, isString } from "./wireValues";
+import { formatEventDay } from "./when";
 
 // What people read when something goes wrong (UI makeover PR 4, DEC-61).
 // The API sends a stable code with every error; this is the only place
@@ -245,6 +246,10 @@ export const ERROR_COPY = {
 } as const;
 
 export type ErrorCode = keyof typeof ERROR_COPY;
+
+export function messageDailyLimitText(at: string | null, zone: string): string {
+  return ERROR_COPY.message_daily_limit.replace("for that day", at ? `on ${formatEventDay(at, zone)}` : "today");
+}
 
 const NETWORK = "We couldn't reach Fold. Check your connection and try again.";
 

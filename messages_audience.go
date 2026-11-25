@@ -429,7 +429,8 @@ type audienceSummaryJSON struct {
 	// an active account with push on for messages from leaders and a
 	// device, whether or not the email reaches them (DEC-122). Having no
 	// device isn't a skip. 0 when the church turned push off.
-	Push int `json:"push"`
+	Push     int `json:"push"`
+	PushOnly int `json:"pushOnly"`
 	// Recipients are the first 100 by name.
 	Recipients []audienceRecipientJSON `json:"recipients"`
 	More       bool                    `json:"more"`
@@ -494,6 +495,9 @@ func (a *App) audienceReachIn(db *gorm.DB, ids []uint, reasons, pushAlert bool) 
 		if pushOn[f.User.ID] {
 			r.Push = true
 			out.Push++
+			if r.Skipped != "" {
+				out.PushOnly++
+			}
 		}
 		if r.Skipped == "" {
 			out.Eligible++

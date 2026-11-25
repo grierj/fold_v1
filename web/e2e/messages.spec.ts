@@ -222,13 +222,13 @@ test("Push notification too is on by default, counted, and saved off", async ({ 
     const box = page.getByRole("checkbox", { name: /Push notification too/ });
     await expect(box).toBeChecked();
     await expect(page.getByRole("status").filter({ hasText: /^\d+ (people|person);/ })).toBeVisible();
-    await expect(page.getByText("1 also gets a push notification.")).toBeVisible();
+    await expect(page.getByText("1 person gets a push notification too.")).toBeVisible();
     await page.getByText("See who's on the list").click();
     await expect(page.getByRole("listitem").filter({ hasText: "Pia Pusher" })).toContainText("Push too");
     await expect(page.getByRole("listitem").filter({ hasText: "Lee Leader" })).not.toContainText("Push too");
 
     await box.uncheck();
-    await expect(page.getByText("1 also gets a push notification.")).toHaveCount(0);
+    await expect(page.getByText("1 person gets a push notification too.")).toHaveCount(0);
     await expect(page.getByText("Push too")).toHaveCount(0);
     await page.getByRole("textbox", { name: "Subject" }).fill(`Push off ${stamp}`);
     await page.getByRole("button", { name: "Save draft" }).click();
