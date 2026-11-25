@@ -80,7 +80,6 @@
 1.1 TestDefinitiveResponsesEndTheAttempt
 0.7 TestDeleteAccountHandsOverHosting
 1.3 TestDeletionDeadlineDuringARetry
-3.7 TestDeletionTrickledBody
 1.8 TestDepartureSnapshotIgnoresUnrelatedResourcesAndUsesCurrentPromotionMath
 2.8 TestErasedGuestIsNotRevivedByInvitationAcceptance
 2.8 TestErasureDeadlockWithGuestAdminNoticeRollsBackLoser

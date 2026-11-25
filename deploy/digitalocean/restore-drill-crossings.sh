@@ -1510,11 +1510,35 @@ real_prior_refused_at_start() {
   crossing_use_main
 }
 
+# Retry only a 500 whose log shows a stale PostgreSQL plan. A refusal from
+# the audit fence is already decisive. Keep the response body in the file.
+crossing_prior_http() { # jar base method path data out
+  local attempt since status window fenced=false stale=0
+  for ((attempt = 1; attempt <= 5; attempt++)); do
+    since="$(date -u +%Y-%m-%dT%H:%M:%S.%NZ)"
+    status="$(crossing_http "$@")" || return 1
+    [[ "$status" == 500 ]] || break
+    sleep 1
+    window="$(crossing_cdc logs --no-color --since "$since" app 2>&1)" || { printf '%s\n' "$window" >&2; return 1; }
+    if grep -qF "$CROSSING_AUDIT_REFUSAL" <<<"$window"; then fenced=true; break; fi
+    if ! grep -qF 'SQLSTATE 0A000' <<<"$window"; then break; fi
+    stale=$((stale+1))
+  done
+  printf '%s %s %s\n' "$status" "$fenced" "$stale"
+}
+
+crossing_prior_http_ok() { # jar base method path data out
+  local result status
+  result="$(crossing_prior_http "$@")" || return 1
+  status="${result%% *}"
+  [[ "$status" == 200 ]] || { echo "crossing: $3 $4 answered $status, want 200: $(head -c 300 "$6")" >&2; return 1; }
+}
+
 # C18 on a real host: the prior keeps serving while the candidate applies
 # 00015 beside it, and every visibility change it tries is refused.
 real_prior_running_across_upgrade() {
-  local cdir base jar mjar fixture g e5 r s p g3 e6 cid cbase cjar consent t0 since before after status attempt out ok results='[]' label method path body
-  local fenced stale audits notes i rev window
+  local cdir base jar mjar fixture g e5 r s p g3 e6 cid cbase cjar consent t0 before after status out ok results='[]' label method path body
+  local response fenced stale audits notes i rev
   crossing_prepare
   cdir="$(crossing_dir)"
   drill_step prior-running/provision
@@ -1554,22 +1578,9 @@ real_prior_running_across_upgrade() {
     body="$(crossing_with_revision "$jar" "$base" "$path" "$body")" || return 1
     before="$(crossing_visibility_state fold "$e5,$r,$s,$p,$e6")"
     t0="$(crossing_cpg fold -c 'SELECT now()')"
-    ok=false; fenced=false; stale=0
-    # A statement the prior prepared before 00009-00014 changed its columns
-    # fails once per connection with 0A000 before it reaches the fence; that
-    # attempt rolls back, and the request is sent again (at most five times)
-    # until the audit fence itself refuses it.
-    for ((attempt = 1; attempt <= 5; attempt++)); do
-      since="$(date -u +%Y-%m-%dT%H:%M:%S.%NZ)"
-      status="$(crossing_http "$jar" "$base" "$method" "$path" "$body" "$out")"
-      sleep 1
-      # Read whole, then searched: under pipefail, grep -q leaving early makes a
-      # match fail when Compose is still writing (SIGPIPE).
-      window="$(crossing_cdc logs --no-color --since "$since" app 2>&1)"
-      if grep -qF "$CROSSING_AUDIT_REFUSAL" <<<"$window"; then fenced=true; break; fi
-      if grep -qF 0A000 <<<"$window"; then stale=$((stale+1)); continue; fi
-      break
-    done
+    ok=false
+    response="$(crossing_prior_http "$jar" "$base" "$method" "$path" "$body" "$out")" || return 1
+    read -r status fenced stale <<<"$response"
     after="$(crossing_visibility_state fold "$e5,$r,$s,$p,$e6")"
     audits="$(crossing_cpg fold -c "SELECT count(*) FROM audit_logs WHERE at >= '$t0' AND (action LIKE 'event.visibility%' OR action IN ('registration.cancelled','event.created'))")"
     notes="$(crossing_cpg fold -c "SELECT count(*) FROM notifications WHERE created_at >= '$t0' AND subject_type = 'event' AND subject_id IN ($e5,$r,$s,$p,$e6)")"
@@ -1590,8 +1601,10 @@ zero-loser-group-tightening PUT /groups/$g3 {"visibility":"private"}
 EOF
   # The positive control: a write that changes no visibility still saves.
   # A series save names the read it was made from (DEC-162); the pinned older binaries have no revision and ignore it.
-  rev="$(crossing_http_want "$jar" "$base" GET "/events/$e6" '' 200 | jq -r '.event.revision // ""')"
-  crossing_http_want "$jar" "$base" PUT "/events/$e6" "$(jq -nc --arg d "$(crossing_day 7)" --arg r "$rev" '{title:"Crossing E6 renamed",startsLocal:($d+"T19:00"),durationMinutes:60,tzid:"UTC",revision:$r}')" 200 >/dev/null
+  crossing_prior_http_ok "$jar" "$base" GET "/events/$e6" '' "$out" || return 1
+  rev="$(jq -r '.event.revision // ""' "$out")"
+  body="$(jq -nc --arg d "$(crossing_day 7)" --arg r "$rev" '{title:"Crossing E6 renamed",startsLocal:($d+"T19:00"),durationMinutes:60,tzid:"UTC",revision:$r}')"
+  crossing_prior_http_ok "$jar" "$base" PUT "/events/$e6" "$body" "$out" || return 1
   [[ "$(crossing_cpg fold -c "SELECT title FROM events WHERE id = $e6")" == 'Crossing E6 renamed' ]]
   crossing_emit cases.jsonl --arg acceptance A-prior-running-across-upgrade --arg site "$CX_SITE" --argjson requests "$results" \
     '{kind:"positive", acceptance:$acceptance, id:"prior-running-across-upgrade", site:$site, fixture:false, requests:$requests, titleEdit:200,
