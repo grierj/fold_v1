@@ -27,7 +27,7 @@ describe("legacySaveFailure: a failed PUT", () => {
 
   it("answers a changed set with the save's own wording, never the deletion's", () => {
     const failure = legacySaveFailure(coded(409, "reason_review_changed"));
-    expect(failure).toEqual({ kind: "changed", text: "Some reasons changed since you loaded them. Check the marked ones, then save again." });
+    expect(failure).toEqual({ kind: "refresh", text: "These choices could not be saved because some reasons changed. Review the reasons shown before saving again." });
     expect(failure.text).not.toMatch(DELETION_WORDING);
     expect(failure.text).not.toBe(ERROR_COPY.reason_review_changed);
   });
@@ -63,7 +63,7 @@ describe("legacySaveFailure: a failed PUT", () => {
   ])("%s is uncertain: the same id is settled, and nothing says it was not saved", (_name, e, text) => {
     const failure = legacySaveFailure(e);
     expect(failure).toEqual({ kind: "uncertain", text });
-    expect(failure.text).not.toMatch(/weren't saved|not saved|nothing was saved/i);
+    expect(failure.text).not.toMatch(/could not be saved|weren't saved|not saved|nothing was saved/i);
   });
 });
 
@@ -87,9 +87,9 @@ describe("legacySettleStep: a settle answer", () => {
   it.each([
     ["applied", { result: "applied" }, { kind: "applied", text: "Saved." }],
     ["applied, whatever else it carries", { result: "applied", subjectDeleted: true, extra: 1 }, { kind: "applied", text: "Saved." }],
-    ["not_applied", { result: "not_applied" }, { kind: "not_applied", text: "These choices weren't saved. Reload to see what's left." }],
-    ["not_applied with subjectDeleted, which a save never gets and is ignored", { result: "not_applied", subjectDeleted: true }, { kind: "not_applied", text: "These choices weren't saved. Reload to see what's left." }],
-    ["history_unavailable", { result: "history_unavailable" }, { kind: "history", text: "Fold can't tell whether your earlier save finished. Reload to see what's left." }],
+    ["not_applied", { result: "not_applied" }, { kind: "not_applied", text: "These choices could not be saved." }],
+    ["not_applied with subjectDeleted, which a save never gets and is ignored", { result: "not_applied", subjectDeleted: true }, { kind: "not_applied", text: "These choices could not be saved." }],
+    ["history_unavailable", { result: "history_unavailable" }, { kind: "history", text: "Fold can't tell whether your earlier save finished." }],
     ["checking", { result: "checking" }, { kind: "still", text: STILL }],
   ])("%s", (_name, body, expected) => {
     expect(legacySettleStep(body)).toEqual(expected);

@@ -645,8 +645,8 @@ var uiRules = []uiRule{
 	},
 	{
 		name: "closeAndReopen",
-		fix:  "never tell a person to close and reopen something: when the UI no longer allows an action, it closes on its own (DEC-161)",
-		re:   regexp.MustCompile(`(?i)\bclose\b[^"'\x60<>{}]{0,40}?\b(re-?open|open (it|this|that) again)\b`),
+		fix:  "when a save is refused, read the latest values automatically and close a stale editor (DEC-161, DEC-163)",
+		re:   regexp.MustCompile(`(?i)\b(close\b[^"'\x60<>{}]{0,40}?\b(re-?open|open (it|this|that) again)|reload to see)\b`),
 		skip: func(_, line string) bool {
 			return strings.HasPrefix(strings.TrimSpace(line), "//")
 		},
@@ -763,6 +763,7 @@ func TestUIRatchetsCatchPastMistakes(t *testing.T) {
 		// SeriesEditor.tsx's finished state before DEC-161.
 		{"closeAndReopen", "web/src/components/SeriesEditor.tsx", `<p id={againId} className="-mt-3 text-sm text-text-muted">To change more, close this and open it again.</p>`},
 		{"closeAndReopen", "web/src/pages/X.tsx", `<p>Close the panel and reopen it to see the change.</p>`},
+		{"closeAndReopen", "web/src/pages/X.tsx", `<p>Reload to see what's left.</p>`},
 	}
 	for _, c := range cases {
 		if got := uiRatchetViolations(map[string]map[string]int{}, map[string]string{c.path: c.line}); len(got) == 0 || !strings.Contains(strings.Join(got, "\n"), c.rule) {
