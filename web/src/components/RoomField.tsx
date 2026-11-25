@@ -326,7 +326,7 @@ function DateRoomControl({ eventId, date, id, read, show, onChanged, onGone }: {
                     <Input ref={teardownRef} type="number" inputMode="numeric" min={0} max={240} value={teardown} onChange={(e) => setTeardown(e.target.value)} onKeyDown={onPaddingEnter} />
                   </Field>
                 </div>
-                <Button variant="secondary" disabled={busy} onClick={savePadding}>Save times</Button>
+                <Button variant="secondary" aria-disabled={busy} onClick={savePadding}>Save times</Button>
               </>
             )}
           </div>

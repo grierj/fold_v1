@@ -358,16 +358,6 @@ func (a *App) apiSetDateRoom(c *gin.Context) {
 		fail(c, errOverlapReasonTooLong)
 		return
 	}
-	if (body.SetupMinutes != nil || body.TeardownMinutes != nil) && !policy.CanAdjustBookingPadding(asPerson(apiUser(c))) {
-		fail(c, errBookingSetupAdminOnly)
-		return
-	}
-	for _, m := range []*int{body.SetupMinutes, body.TeardownMinutes} {
-		if m != nil && (*m < 0 || *m > rooms.MaxPaddingMinutes) {
-			fail(c, errInvalidSetupMinutes)
-			return
-		}
-	}
 	var out roomBookingResponseJSON
 	err := a.DB.Transaction(func(tx *gorm.DB) error {
 		// The event first: every writer of a date's booking holds it, so the
@@ -375,6 +365,14 @@ func (a *App) apiSetDateRoom(c *gin.Context) {
 		user, lockedEv, _, err := lockManagedEventIn(tx, apiUser(c), ev.ID)
 		if err != nil {
 			return err
+		}
+		if (body.SetupMinutes != nil || body.TeardownMinutes != nil) && !policy.CanAdjustBookingPadding(asPerson(user)) {
+			return errBookingSetupAdminOnly
+		}
+		for _, m := range []*int{body.SetupMinutes, body.TeardownMinutes} {
+			if m != nil && (*m < 0 || *m > rooms.MaxPaddingMinutes) {
+				return errInvalidSetupMinutes
+			}
 		}
 		ev = lockedEv
 		// Book against the date as it is under the lock: a reschedule or a

@@ -291,6 +291,29 @@ func TestCanSeeContact(t *testing.T) {
 	}
 }
 
+func TestCanAddGroupMemberByEmail(t *testing.T) {
+	for _, c := range []struct {
+		name    string
+		actor   *Person
+		self    bool
+		subject Contact
+		want    bool
+	}{
+		{"unhidden adult", adult, false, Contact{}, true},
+		{"hidden adult", adult, false, Contact{HideFromLeaders: true}, false},
+		{"hidden self", adult, true, Contact{HideFromLeaders: true}, true},
+		{"admin adding a hidden adult", admin, false, Contact{HideFromLeaders: true}, true},
+		{"admin adding a teen", admin, false, Contact{Teen: true}, false},
+		{"guardian adding a teen", adult, false, Contact{Teen: true, ConfirmedGuardian: true}, false},
+		{"teen actor", teen, false, Contact{}, false},
+		{"anonymous actor", nil, false, Contact{}, false},
+	} {
+		if got := CanAddGroupMemberByEmail(c.actor, c.self, c.subject); got != c.want {
+			t.Errorf("%s: got %v, want %v", c.name, got, c.want)
+		}
+	}
+}
+
 // Guard rails: the last admin can't be demoted or deleted; nobody demotes
 // or deletes themselves.
 func TestCanDemoteOrDelete(t *testing.T) {

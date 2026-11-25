@@ -50,9 +50,9 @@ promises.
   (DEC-52). The limits:
   - guest verification emails: 3 per address per hour and 10 per day, plus a per-IP budget (M1.4);
   - account requests and guest sign-ups: a site-wide cap of 100 an hour for each;
-  - leader invitations: 20 valid attempts per leader per rolling day, including refusals for an
-    existing account or a duplicate invitation; the leader's allowance is checked before any
-    address lookup (M1.2);
+  - leader invitations: 20 valid attempts per leader per rolling day, with 429 when the actor's
+    allowance runs out. A destination over its allowance gets the same acknowledgement as any
+    other valid destination. The leader's allowance is checked before any address lookup (DEC-172);
   - direct-contact and add requests: 10 open per requester (5.11, M1.11);
   - announcements: 5 emails per group (or church-wide event) per leader or host per church day;
     admins have no limit (M3.5);

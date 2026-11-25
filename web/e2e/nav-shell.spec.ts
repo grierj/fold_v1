@@ -276,7 +276,8 @@ async function failGroupChunk(page: Page, failures: number) {
   await page.evaluate(() => {
     document.documentElement.dataset.sameDocument = "yes";
   });
-  await page.getByRole("heading", { name: "Room 201 class" }).click();
+  // Start the route load without warming the chunk on pointer entry or focus.
+  await page.getByRole("heading", { name: "Room 201 class" }).dispatchEvent("click");
 
   return () => requests;
 }

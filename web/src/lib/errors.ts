@@ -82,6 +82,7 @@ export const ERROR_COPY = {
   room_busy: "That room is already booked then. Pick another room, or ask an admin.",
   room_restricted: "Only an admin can book that room.",
   room_gone: "That room isn't available anymore. Pick another room.",
+  series_busy_dates_changed: "The dates in use changed. Check the event for current bookings.",
   series_request_kept: "Only an admin can change this event's room request now, so the room for every date could not be changed.",
   booking_admin_only: "Only an admin can change this date's room. Ask an admin if it needs to change.",
   rooms_off: "Room booking has been turned off, so rooms can't be picked here now.",
@@ -146,6 +147,7 @@ export const ERROR_COPY = {
   needs_host_successor: "Some church-wide events this person hosts alone still need a new host, or the list changed. Check the host for each event and try again.",
 
   group_full: "This group is full.",
+  group_member_email_unavailable: "We couldn't add them by email. If they need a Fold account, you can send an invitation.",
   invite_only: "This group is invite only. Ask a leader to invite you.",
   cannot_join: "You can't join this group. Ask a leader if you think that's a mistake.",
   members_only: "Only members can see who's in this group.",

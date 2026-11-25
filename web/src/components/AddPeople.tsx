@@ -5,14 +5,14 @@ import { useResourceRefusal } from "../lib/refusedSave";
 import { Groups } from "../api/groups";
 import { Invitations } from "../api/invitations";
 import type { PersonSearchResult } from "../types";
-import { errorCode, errorText } from "../lib/errors";
+import { ERROR_COPY, errorCode, errorText } from "../lib/errors";
 import { AddRequestForm } from "./AddRequestForm";
 import { Button } from "./ui/Button";
 import { Checkbox, Field, FormError, Input } from "./ui/Field";
 import { Form } from "./ui/Form";
 import { PeoplePicker } from "./ui/PeoplePicker";
 
-// The email and invitation fallback (DEC-99) sits beside the name picker (DEC-78).
+// DEC-99 keeps the email and invitation fallback beside the DEC-78 name picker.
 export function AddPeople({ groupId, groupName, memberCount, memberLimit, canSearch, onAdded, restoredEmail, onEmailUnavailable }: {
   groupId: number;
   groupName: string;
@@ -80,26 +80,26 @@ export function AddPeople({ groupId, groupName, memberCount, memberLimit, canSea
       setStatus(`Added ${label}.`);
       await onAdded();
     } catch (err) {
-      const code = errorCode(err);
+      if (isString(target) && err instanceof ApiError) {
+        const unavailable = err.status === 400 && err.code === "group_member_email_unavailable";
+        const notFound = err.status === 404 && err.code === "not_found";
 
-      const unavailable = err instanceof ApiError && (
-        (err.status === 400 && err.code === "group_member_email_unavailable") ||
-        (err.status === 404 && err.code === "not_found")
-      );
+        // Both replies can mean the group went away. A 404 needs a fresh read
+        // before it can offer an invitation.
+        if (onEmailUnavailable && (unavailable || notFound)) {
+          onEmailUnavailable(target);
 
-      if (isString(target) && unavailable) {
-        // Either answer can also mean the group went away during the add.
-        if (onEmailUnavailable) onEmailUnavailable(target);
-        else setInviteFor(target);
+          return;
+        }
 
-        return;
+        if (unavailable) {
+          setInviteFor(target);
+
+          return;
+        }
       }
 
-      if (refreshRefusal(err)) return;
-
-      if (code === "teen_add_approval_required" && isString(target)) {
-        setError("Select this person by name, then choose Ask to add. An email address cannot be used to send an ask.");
-      } else setError(errorText(err, "We couldn't add that person."));
+      if (!refreshRefusal(err)) setError(errorText(err, "We couldn't add that person."));
     } finally {
       setBusy(false);
     }
@@ -137,8 +137,8 @@ export function AddPeople({ groupId, groupName, memberCount, memberLimit, canSea
     setStatus(null);
 
     try {
-      await Invitations.create({ email: inviteFor, groupId, overLimit });
-      setStatus(`Invitation sent to ${inviteFor}.`);
+      const result = await Invitations.create({ email: inviteFor, groupId, overLimit });
+      setStatus("message" in result ? result.message : `Invitation sent to ${inviteFor}.`);
       setInviteFor(null);
       setEmail("");
       setOverLimit(false);
@@ -189,7 +189,7 @@ export function AddPeople({ groupId, groupName, memberCount, memberLimit, canSea
               </Form>
               {inviteFor && (
                 <div className="space-y-3 rounded-lg border border-border bg-sunken p-3">
-                  <p role="status" className="text-sm">We couldn't add them by email. If they need a Fold account, you can send an invitation.</p>
+                  <p role="status" className="text-sm">{ERROR_COPY.group_member_email_unavailable}</p>
                   {full && (
                     <Checkbox label="Invite over the limit anyway" description="This group is full. Going over the limit is logged."
                       checked={overLimit} onChange={(e) => setOverLimit(e.target.checked)} />

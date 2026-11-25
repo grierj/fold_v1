@@ -28,26 +28,38 @@ const MaxConcurrentProcessing = 2
 // system, which is why the budget is as small as it is.
 const ProcessAllowanceBytes = 5 * MaxConcurrentProcessing * maxWorkingBytes / 2
 
-// ErrBusy means every processing slot is taken. It is an answer, not a queue:
-// a caller that is refused tells its client to try again.
+// ErrBusy means the account already has a slot or all slots are taken.
 var ErrBusy = errors.New("image processing is at capacity")
 
-var processing = make(chan struct{}, MaxConcurrentProcessing)
+var (
+	processingMu sync.Mutex
+	processing   = make(map[uint]struct{}, MaxConcurrentProcessing)
+)
 
-// Admit takes a processing slot without waiting, or returns ErrBusy. The
+// Admit takes a processing slot without waiting, with at most one per account. The
 // release it returns frees the slot once however often it is called. Hold the
 // slot from before the upload is read until ReadUpload returns, and no longer:
 // storage writes and database transactions do not need it. A cancelled request
 // keeps its slot until ReadUpload returns, because the decoders cannot be
 // stopped part way.
-func Admit() (release func(), err error) {
-	select {
-	case processing <- struct{}{}:
-	default:
+func Admit(accountID uint) (release func(), err error) {
+	processingMu.Lock()
+	_, busy := processing[accountID]
+	if busy || len(processing) == MaxConcurrentProcessing {
+		processingMu.Unlock()
 		return nil, ErrBusy
 	}
+	processing[accountID] = struct{}{}
+	processingMu.Unlock()
+
 	var once sync.Once
-	return func() { once.Do(func() { <-processing }) }, nil
+	return func() {
+		once.Do(func() {
+			processingMu.Lock()
+			delete(processing, accountID)
+			processingMu.Unlock()
+		})
+	}, nil
 }
 
 // ReadUpload validates a multipart image upload: real byte-count size limit and
