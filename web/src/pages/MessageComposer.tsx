@@ -774,8 +774,11 @@ function Composer({ options, zone, opened, edit = false, params, refusal, back, 
       setConfirm(null);
       await place(e, "We couldn't schedule the message.");
 
-      // A new time for a message already scheduled was refused: it says where that leaves it.
-      return asked.value.status === "scheduled" && errorCode(e) !== "message_locked" ? notMovedLine(asked.value.scheduledAt, zone) : false;
+      // A new time for a message already scheduled was refused: it says where that leaves it. Not for a refusal the
+      // server gives before it reads the message (the time asked for), or one that reads it again (it started sending).
+      const code = errorCode(e);
+
+      return asked.value.status === "scheduled" && code !== "message_locked" && code !== "message_when" ? notMovedLine(asked.value.scheduledAt, zone) : false;
     }
   }
 

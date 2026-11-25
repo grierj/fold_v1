@@ -598,12 +598,12 @@ export function saveListLine(n: number): string {
 }
 
 // stillScheduledLine says what saving a scheduled message's new list does to its time: nothing. at is when it is
-// scheduled for; once that has come (or was never ahead), the message is waiting to go and the save lets it. The line
-// for a time ahead stays true if that time comes while the question is open.
+// scheduled for; once that has come, the message may start sending at any moment, before the save or after it, so the
+// line promises neither. The line for a time ahead stays true if that time comes while the question is open.
 export function stillScheduledLine(at: string | null, zone: string): string {
   if (at && Date.parse(at) > Date.now()) return `Saving this doesn't change when it goes out: ${whenPhrase(at, zone)}, to whoever is on the list then.`;
 
-  return "Its time has come, so it goes out as soon as you save this, to whoever is on the list.";
+  return "This message is due and could start sending at any time. If you save before it starts, it will go to the new list.";
 }
 
 // listLimitLine is what the composer adds when a scheduled message's new list was refused by the day's limit: the list

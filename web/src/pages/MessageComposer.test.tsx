@@ -1226,7 +1226,7 @@ describe("a scheduled message's new list is the sender's to confirm", () => {
     vi.mocked(Messages.schedule).mockRejectedValueOnce(new ApiError(409, "limit", { code: "message_daily_limit" }));
     await saveListBySchedule(user, "10:30");
     await user.click(within(await screen.findByRole("group", { name: /^Send to 1 person on / })).getByRole("button", { name: "Schedule" }));
-    expect(await screen.findByText(ERROR_COPY.message_daily_limit)).toBeInTheDocument();
+    expect(await screen.findByText("You've already sent 5 messages to these people for that day, counting scheduled ones. Choose another day, or ask an admin to send it.")).toBeInTheDocument();
     expect(screen.getByText(/^It is still scheduled on /)).toBeInTheDocument();
     expect(Messages.update).toHaveBeenCalledTimes(2);
     expect(Messages.schedule).toHaveBeenCalledTimes(1);
@@ -1266,7 +1266,7 @@ describe("a scheduled message's new list is the sender's to confirm", () => {
     expect(screen.queryByText(ERROR_COPY.message_when)).toBeNull();
   });
 
-  it("says a message whose time has come goes out as soon as its new list is saved", async () => {
+  it("says a message whose time has come could start sending at any time, before the save or after", async () => {
     const user = userEvent.setup();
     const due = message({ status: "scheduled", scheduledAt: new Date(Date.now() - 30_000).toISOString() });
     vi.mocked(Messages.get).mockResolvedValue({ message: due });
@@ -1277,8 +1277,17 @@ describe("a scheduled message's new list is the sender's to confirm", () => {
     await user.click(screen.getByRole("button", { name: "Members" }));
     await user.click(screen.getByRole("button", { name: "Preview" }));
     const ask = await screen.findByRole("group", { name: "Change who gets this to 1 person?" });
-    expect(ask).toHaveTextContent("Its time has come, so it goes out as soon as you save this, to whoever is on the list.");
+    expect(ask).toHaveTextContent("This message is due and could start sending at any time. If you save before it starts, it will go to the new list.");
     expect(ask).not.toHaveTextContent(/doesn't change when/);
+  });
+
+  it("says nothing about where the message stands when a new time is refused before the message is read", async () => {
+    const user = userEvent.setup();
+    vi.mocked(Messages.schedule).mockRejectedValueOnce(new ApiError(400, "when", { code: "message_when" }));
+    await saveListBySchedule(user, "10:30");
+    await user.click(within(await screen.findByRole("group", { name: /^Send to 1 person on / })).getByRole("button", { name: "Schedule" }));
+    expect(await screen.findByText(ERROR_COPY.message_when)).toBeInTheDocument();
+    expect(screen.queryByText(/^It is still /)).toBeNull();
   });
 
   it("says which day's limit refused a new list, and withdraws the question", async () => {
