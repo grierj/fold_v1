@@ -24,6 +24,16 @@ promises.
   exact. Sign-in drops the old CSRF token, so the next request gets a new one.
 - Account tokens (password reset, invitation, email verification and cancellation): single use,
   stored hashed, valid 24 hours (`tokenTTL`).
+- Link retention (#433, Grier, Nov 25, 2026). Each church day, `cleanup.expired_links` deletes
+  guest signup and invitation rows 30 days after expiry and account token rows 30 days after
+  use, or after expiry if unused. An open household conversion invitation stays available for
+  Resend. Invitations referenced by account requests stay with those requests. Invitation audit
+  entries follow the existing audit and erasure rules. Erasure can use the creation audit email
+  to find a missing invitation if there is no acceptance audit. An accepted invitation without
+  an acceptance audit stays if its creation audit has an email because the row proves acceptance.
+  During the first rollout stage, the job also keeps unaccepted invitations whose creation audit
+  contains an email. A later release can prune those once a published release has the lookup and
+  every recovery target for data cleaned by the later release can use it.
 - No account enumeration (final review, finding 4; DEC-52): sign-up, guest registration, password
   reset and login give the same answer, at about the same cost (a dummy bcrypt check), whether or
   not the email has an account. The email itself carries the hint ("you already have an account;

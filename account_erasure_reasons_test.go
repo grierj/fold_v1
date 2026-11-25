@@ -1904,6 +1904,9 @@ func TestReasonReviewCensus(t *testing.T) {
 // signed numbers it checks before use; dateRoomRevisionIn (an unbooked date's
 // room token) filters to the room_booking.booked, .overlap and .released rows
 // of one occurrence and scans only the latest audit row's own id into a uint.
+// pruneExpiredLinks reads invitation creation and acceptance audits with
+// EXISTS outside the contact gate. It takes no audit or request row locks.
+// Each table's delete commits before the next one starts.
 //
 // legacySavePlanIn (T-301) is the deleted-accounts save's one row locker: inside
 // apiAdminLegacyReasonSave's fenced callback, under the exclusive gate, it locks
@@ -1946,6 +1949,7 @@ var reasonCensusPinned = map[string][]string{
 		"api_push.go:apiPushTest",
 		"api_registrations.go:previouslyRegisteredPerson",
 		"edit_revision.go:dateRoomRevisionIn",
+		"link_cleanup.go:pruneExpiredLinks",
 		"registration_access.go:loadAccessHistory",
 		"registration_subjects.go:appendRecoverableRegistrations",
 		"throttle.go:inviteSendAllowed",

@@ -968,6 +968,13 @@ failed migration exits non-zero and `smoke.sh` fails. Inspect the failure before
 choosing recovery. Rollback is subject to the recovery floor even after failed
 smoke.
 
+The daily job **Clearing old guest signups, account links and invitations** runs through Fold's
+workers. Find failures in Admin → System. The first release of this job keeps expired, unaccepted
+invitations whose creation audit still contains an email so older binaries can find that email
+during account erasure. Before enabling deletion of those invitations, publish the compatible
+lookup and verify that every release allowed to restore or reuse a database after that deletion
+has the lookup. A scripted rollback restores the pre-upgrade dump.
+
 ### Recovery refusal and interrupted operations
 
 Every scripted deploy, forward upgrade and rollback refuses a target below
