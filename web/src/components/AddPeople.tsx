@@ -114,8 +114,8 @@ export function AddPeople({ groupId, groupName, memberCount, memberLimit, canSea
     setStatus(null);
 
     try {
-      await Invitations.create({ email: inviteFor, groupId, overLimit });
-      setStatus(`Invitation sent to ${inviteFor}.`);
+      const result = await Invitations.create({ email: inviteFor, groupId, overLimit });
+      setStatus("message" in result ? result.message : `Invitation sent to ${inviteFor}.`);
       setInviteFor(null);
       setEmail("");
       setOverLimit(false);

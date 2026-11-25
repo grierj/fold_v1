@@ -2814,7 +2814,7 @@ func TestCreateEventSerializesWithGroupFirstWriters(t *testing.T) {
 				method, path, otherBody := "POST", "", map[string]any{}
 				if writer == "invitation" {
 					const email = "new-invitee@example.com"
-					apiDo(t, creator, "POST", "/api/v1/invitations", map[string]any{"email": email, "groupId": g.ID}, http.StatusCreated)
+					apiDo(t, creator, "POST", "/api/v1/invitations", map[string]any{"email": email, "groupId": g.ID}, http.StatusOK)
 					token := tokenInEmail(t, latestEmail(t, app, email))
 					otherClient = newAPIClient(t, app)
 					otherClient.fetchCSRF()

@@ -83,18 +83,28 @@ it("switches to one email field and adds an existing account", async () => {
   expect(screen.getByRole("combobox", { name: "Find a person by name" })).toBeInTheDocument();
 });
 
-it("offers an invitation after an unavailable email add and sends it to that address", async () => {
+it("shows the leader's acknowledgement after an unavailable email add and an invitation request", async () => {
   vi.mocked(Groups.addMember).mockRejectedValue(emailUnavailable());
-  vi.mocked(Invitations.create).mockResolvedValue({ invitation: testInvitation() });
+  const message = "Invitation request received. If they can accept it, they'll get an email with a link.";
+  vi.mocked(Invitations.create).mockResolvedValue({ message });
   panel(); await openPanel(); await useEmail("new@example.com");
   await userEvent.click(screen.getByRole("button", { name: "Add member" }));
   expect(await screen.findByText("We couldn't add them by email. If they need a Fold account, you can send an invitation.")).toBeInTheDocument();
   expect(screen.queryByRole("alert")).not.toBeInTheDocument();
   await userEvent.click(screen.getByRole("button", { name: "Send invitation" }));
   expect(Invitations.create).toHaveBeenCalledExactlyOnceWith({ email: "new@example.com", groupId: 1, overLimit: false });
-  expect(await screen.findByText("Invitation sent to new@example.com.")).toBeInTheDocument();
+  expect(await screen.findByText(message)).toHaveAttribute("role", "status");
   expect(screen.queryByRole("button", { name: "Send invitation" })).not.toBeInTheDocument();
   expect(screen.getByLabelText("Email address")).toHaveValue("");
+});
+
+it("confirms a completed admin invitation", async () => {
+  vi.mocked(Groups.addMember).mockRejectedValue(emailUnavailable());
+  vi.mocked(Invitations.create).mockResolvedValue({ invitation: testInvitation() });
+  panel(); await openPanel(); await useEmail("new@example.com");
+  await userEvent.click(screen.getByRole("button", { name: "Add member" }));
+  await userEvent.click(await screen.findByRole("button", { name: "Send invitation" }));
+  expect(await screen.findByText("Invitation sent to new@example.com.")).toBeInTheDocument();
 });
 
 it("drops the invitation offer when the email changes", async () => {
