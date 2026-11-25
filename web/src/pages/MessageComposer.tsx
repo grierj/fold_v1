@@ -583,8 +583,9 @@ function Composer({ options, zone, opened, edit = false, params, refusal, back, 
       const stored = known.current;
 
       // A scheduled message's new list is saved at the time it has, so that is the day whose limit refused it, whatever
-      // day the form shows: the question is withdrawn and the form says which day, and what to do first.
-      if (errorCode(e) === "message_daily_limit" && stored?.status === "scheduled") {
+      // day the form shows: the question is withdrawn and the form says which day, and what to do first. Only for a
+      // confirmed list: the server checks the day's limit on every scheduled edit, a words-only one included.
+      if (list && errorCode(e) === "message_daily_limit" && stored?.status === "scheduled") {
         setConfirm(null);
 
         return listLimitLine(stored.scheduledAt, zone);

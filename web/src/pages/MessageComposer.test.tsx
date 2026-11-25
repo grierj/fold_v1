@@ -1304,6 +1304,20 @@ describe("a scheduled message's new list is the sender's to confirm", () => {
     expect(Messages.schedule).not.toHaveBeenCalled();
   });
 
+  it("says only the limit when a save that changed no list is refused by it", async () => {
+    const user = userEvent.setup();
+    const scheduled = message({ status: "scheduled", scheduledAt: at() });
+    vi.mocked(Messages.get).mockResolvedValue({ message: scheduled });
+    vi.mocked(Messages.update).mockRejectedValue(new ApiError(400, "limit", { code: "message_daily_limit" }));
+    open("/messages/5");
+    await user.click(await screen.findByRole("button", { name: "Edit" }));
+    await editorReady();
+    await user.type(screen.getByRole("textbox", { name: "Subject" }), "!");
+    await user.click(screen.getByRole("button", { name: "Preview" }));
+    expect(await screen.findByText(ERROR_COPY.message_daily_limit)).toBeInTheDocument();
+    expect(screen.queryByText(/Who gets this has not changed/)).toBeNull();
+  });
+
   it("withdraws the question when the save is refused for the people chosen", async () => {
     const user = userEvent.setup();
     await editLeadersOnly(user);
