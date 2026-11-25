@@ -88,9 +88,9 @@ func TestEveryKindsPushTextIsLockScreenSafe(t *testing.T) {
 		{Actor: "Teen Tess", Person: "Kid Kai", Group: "Youth Group", Event: "Lock-in", When: "Fri, Dec 4 · 7:00 PM",
 			Place: "14 Elm Street", Change: "time", Visibility: "public", GroupVis: "private",
 			Note: "Call tess@example.com or 555-123-4567", Count: 3, SubjectKind: SubjectTeen,
-			ManageURL: "https://church.example/guest/manage/secret-token", VideoURL: "https://meet.example/room-9"},
+			ManageURL: "https://church.example/guest/manage/secret-token", VideoURL: "https://meet.example/room-9", NeedRoom: 3},
 		// A hidden adult: the caller left the group and place out.
-		{Actor: "Hidden Hal", Person: "Hidden Hal", Event: "Supper", When: "Tue 7pm", Note: "hal@example.com", Change: "place"},
+		{Actor: "Hidden Hal", Person: "Hidden Hal", Event: "Supper", When: "Tue 7pm", Note: "hal@example.com", Change: "place", NeedRoom: 1},
 		{},
 	}
 	never := []string{"Teen Tess", "Kid Kai", "Hidden Hal", "14 Elm Street", "secret-token", "meet.example", "Call tess", "hal@example.com", "(teen)", "teen"}
@@ -105,6 +105,13 @@ func TestEveryKindsPushTextIsLockScreenSafe(t *testing.T) {
 				continue
 			}
 			text := title + "\n" + body
+			// room.changed pushes only when dates were left needing a room.
+			if k.Key == RoomChanged && v.NeedRoom == 0 {
+				if ok || text != "\n" {
+					t.Errorf("%s with no date needing a room pushed %q", k.Key, text)
+				}
+				continue
+			}
 			if !ok || title == "" {
 				t.Errorf("%s pushes but rendered no title", k.Key)
 			}

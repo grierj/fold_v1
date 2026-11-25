@@ -10,7 +10,6 @@ import (
 	"unicode/utf8"
 
 	"fold/internal/audit"
-	"fold/internal/notify"
 	"fold/internal/policy"
 	"fold/internal/rooms"
 	"fold/models"
@@ -446,25 +445,29 @@ func pickDateRoom(tx *gorm.DB, p datePick) error {
 	}
 	var old models.RoomBooking
 	hadOld := tx.Where("occurrence_id = ?", occ.ID).First(&old).Error == nil
+	var before roomHeld
 	if hadOld {
-		var oldRoom models.Room
-		if err := tx.First(&oldRoom, old.RoomID).Error; err != nil {
+		rows, err := dateBookingsIn(tx, "b.id = ?", old.ID)
+		if err != nil {
 			return err
 		}
-		if !policy.CanChangeBooking(me, oldRoom.Restricted, old.AllowOverlap) {
+		if len(rows) != 1 {
+			return fmt.Errorf("date %d: booking %d not read back", occ.ID, old.ID)
+		}
+		if !policy.CanChangeBooking(me, rows[0].Restricted, old.AllowOverlap) {
 			return errBookingAdminOnly
 		}
+		before = roomHeldOf(old.RoomID, rows[0].judged().State)
 		if err := tx.Delete(&old).Error; err != nil {
-			return err
-		}
-		// The old booking may have been a request's last date.
-		if err := closeEmptyRoomRequests(tx); err != nil {
 			return err
 		}
 	}
 	if p.roomID == nil {
 		if !hadOld {
 			return nil
+		}
+		if err := settleDatePick(tx, ev, occ, user.ID, before, roomHeld{}, hadOld); err != nil {
+			return err
 		}
 		return audit.Write(tx, audit.Entry{Actor: &user.ID, Action: audit.RoomBookingReleased, TargetType: "occurrence", TargetID: occ.ID,
 			Meta: map[string]any{"roomId": old.RoomID, "eventId": ev.ID, "date": models.FormatCalendarDate(occ.OriginalDate)}, IP: p.ip})
@@ -517,6 +520,9 @@ func pickDateRoom(tx *gorm.DB, p datePick) error {
 			return err
 		}
 	}
+	if err := settleDatePick(tx, ev, occ, user.ID, before, roomHeldAfter(room.ID, result), hadOld); err != nil {
+		return err
+	}
 	action := audit.RoomBookingBooked
 	meta := map[string]any{"roomId": room.ID, "eventId": ev.ID, "date": models.FormatCalendarDate(occ.OriginalDate), "setupMinutes": setup, "teardownMinutes": teardown}
 	if req != nil {
@@ -530,6 +536,22 @@ func pickDateRoom(tx *gorm.DB, p datePick) error {
 		meta["previousRoomId"] = old.RoomID
 	}
 	return audit.Write(tx, audit.Entry{Actor: &user.ID, Action: action, TargetType: "occurrence", TargetID: occ.ID, Meta: meta, IP: p.ip})
+}
+
+// settleDatePick tells the event's other runners what the pick did, then,
+// when it released an old booking, closes the requests that booking may have
+// been the last date of. The notices lock their recipients before any admin's
+// task is closed: an erasure takes the person's user row and then their
+// notices, a closed task included, so the other way round the two could wait
+// on each other (settleRoomDecision).
+func settleDatePick(tx *gorm.DB, ev *models.Event, occ *models.EventOccurrence, actor uint, before, after roomHeld, released bool) error {
+	if err := notifyDateRoomChanged(tx, ev, occ, actor, before, after); err != nil {
+		return err
+	}
+	if !released {
+		return nil
+	}
+	return closeEmptyRoomRequests(tx)
 }
 
 // releaseRoomBookings frees the rooms of dates that were cancelled, in the
@@ -601,28 +623,6 @@ func moveRoomBookings(tx *gorm.DB, occurrenceIDs []uint) ([]string, error) {
 		}
 	}
 	return lost, nil
-}
-
-// notifyRoomLost tells the event's leaders (or a church-wide event's hosts)
-// which dates lost their room, in one notice (9.2). The person who moved
-// the date is told too (no Actor): the move saved, and a lost room is easy
-// to miss on a page that no longer shows it.
-func notifyRoomLost(tx *gorm.DB, ev *models.Event, dates []string) error {
-	to, err := eventRunnerIDs(tx, ev)
-	if err != nil {
-		return err
-	}
-	change := "1 date"
-	if len(dates) > 1 {
-		change = fmt.Sprintf("%d dates", len(dates))
-	}
-	_, err = notify.Send(tx, notify.Msg{
-		Kind: notify.RoomLost, To: to,
-		SubjectType: "event", SubjectID: ev.ID, Link: fmt.Sprintf("/events/%d", ev.ID),
-		Vars: notify.Vars{Event: ev.Title, Change: change}, // group-ok: the event's own leaders and hosts
-		Data: map[string]any{"eventId": ev.ID, "dates": dates},
-	})
-	return err
 }
 
 // placeLine is a date's place (PLAN 14.5 "Where rooms show"), as

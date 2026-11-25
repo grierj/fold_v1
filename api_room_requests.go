@@ -48,36 +48,6 @@ func openRoomRequest(tx *gorm.DB, eventID, roomID uint, by *uint, series bool) (
 	return &req, tx.Create(&req).Error
 }
 
-func notifyRoomRequested(tx *gorm.DB, req *models.RoomRequest, ev *models.Event, room *models.Room, dates int, actor *uint) error {
-	change := room.Name + " for 1 date"
-	if dates != 1 {
-		change = fmt.Sprintf("%s for %d dates", room.Name, dates)
-	}
-	admins, err := activeAdminIDs(tx)
-	if err != nil {
-		return err
-	}
-	asker, err := askerName(tx, actor)
-	if err != nil {
-		return err
-	}
-	_, err = notify.Send(tx, notify.Msg{
-		Kind: notify.RoomRequested, To: admins, Actor: actor,
-		SubjectType: "room_request", SubjectID: req.ID, Link: roomRequestsLink,
-		Vars:      notify.Vars{Actor: asker, Event: ev.Title, Change: change}, // group-ok: admin tasks go to admins
-		Data:      map[string]any{"requestId": req.ID, "eventId": ev.ID},
-		DedupeKey: fmt.Sprintf("room.requested:%d", req.ID),
-	})
-	return err
-}
-
-func askerName(tx *gorm.DB, id *uint) (string, error) {
-	if id == nil {
-		return "", nil
-	}
-	return nameOf(tx, *id)
-}
-
 // closeEmptyRoomRequests withdraws pending requests none of whose dates
 // still wait (re-picked, released or cancelled), and closes their tasks.
 func closeEmptyRoomRequests(tx *gorm.DB) error {
@@ -96,15 +66,13 @@ func closeEmptyRoomRequests(tx *gorm.DB) error {
 }
 
 // withdrawSeriesRequest withdraws eventID's pending series request, so a new
-// pick can open the one the event may have (idx_room_requests_one_series).
-// The caller holds the event's lock, which every decision takes before the
-// request's (lockRequest), so this needs no SKIP LOCKED.
-func withdrawSeriesRequest(tx *gorm.DB, eventID uint) error {
-	ids, err := moveRoomRequestsWhere(tx, policy.RoomRequestWithdrawSeries, "event_id = ? AND series", eventID)
-	if err != nil {
-		return err
-	}
-	return resolveWithdrawn(tx, ids)
+// pick can open the one the event may have (idx_room_requests_one_series),
+// and returns its id for the caller to close its task (resolveWithdrawn)
+// once its notices are written. The caller holds the event's lock, which
+// every decision takes before the request's (lockRequest), so this needs no
+// SKIP LOCKED.
+func withdrawSeriesRequest(tx *gorm.DB, eventID uint) ([]uint, error) {
+	return moveRoomRequestsWhere(tx, policy.RoomRequestWithdrawSeries, "event_id = ? AND series", eventID)
 }
 
 func resolveWithdrawn(tx *gorm.DB, ids []uint) error {
@@ -442,41 +410,4 @@ func settleRoomDecision(tx *gorm.DB, ev *models.Event, requestID, actor uint, ch
 	}
 	_, err := notify.Resolve(tx, notify.RoomRequested, requestID, &actor, resolution)
 	return err
-}
-
-// notifyRoomDecided tells the event's leaders (or hosts) what an admin
-// decided; the admin is the actor and isn't told.
-func notifyRoomDecided(tx *gorm.DB, ev *models.Event, actor uint, change, note string) error {
-	to, err := eventRunnerIDs(tx, ev)
-	if err != nil {
-		return err
-	}
-	_, err = notify.Send(tx, notify.Msg{
-		Kind: notify.RoomRequestDecided, To: to, Actor: &actor,
-		SubjectType: "event", SubjectID: ev.ID, Link: fmt.Sprintf("/events/%d", ev.ID),
-		Vars: notify.Vars{Event: ev.Title, Change: change, Note: note}, // group-ok: the event's own leaders and hosts
-		Data: map[string]any{"eventId": ev.ID},
-	})
-	return err
-}
-
-func dateCount(n int) string {
-	if n == 1 {
-		return "1 date"
-	}
-	return fmt.Sprintf("%d dates", n)
-}
-
-func isAre(n int) string {
-	if n == 1 {
-		return "1 date is"
-	}
-	return fmt.Sprintf("%d dates are", n)
-}
-
-func themIt(n int) string {
-	if n == 1 {
-		return "it"
-	}
-	return "them"
 }
