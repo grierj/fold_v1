@@ -998,18 +998,29 @@ describe("EventDetail dates that need a room", () => {
     vi.spyOn(DateRooms, "list").mockResolvedValue({ rooms: [], booking: null, dateRoom: { id: 70, revision: "r1" } });
   });
 
-  it("checks the event again when the room list is refused and avoids a reload loop", async () => {
+  it("rechecks the event after the first refused room list and again on manual retry", async () => {
     const fresh = deferred<EventDetailResponse>();
+    const retried = deferred<EventDetailResponse>();
     const shown = { ...page, canManage: true };
-    vi.mocked(Events.get).mockResolvedValueOnce(shown).mockReturnValueOnce(fresh.promise);
+    vi.mocked(Events.get).mockResolvedValueOnce(shown).mockReturnValueOnce(fresh.promise).mockReturnValueOnce(retried.promise);
     vi.spyOn(SeriesRooms, "list").mockRejectedValue(new ApiError(403, "refused", { code: "not_allowed" }));
     renderPage();
     await waitFor(() => expect(Events.get).toHaveBeenCalledTimes(2));
     expect(screen.queryByRole("heading", { name: "Hybrid study" })).not.toBeInTheDocument();
     await act(async () => fresh.resolve(shown));
     expect(await screen.findByRole("heading", { name: "Hybrid study" })).toBeInTheDocument();
-    expect(await screen.findByRole("button", { name: "Try again" })).toBeInTheDocument();
+    const tryAgain = await screen.findByRole("button", { name: "Try again" });
     expect(Events.get).toHaveBeenCalledTimes(2);
+    expect(SeriesRooms.list).toHaveBeenCalledTimes(2);
+
+    await userEvent.click(tryAgain);
+    await waitFor(() => expect(Events.get).toHaveBeenCalledTimes(3));
+    expect(screen.queryByRole("heading", { name: "Hybrid study" })).not.toBeInTheDocument();
+    await act(async () => retried.resolve({ ...shown, canManage: false }));
+    expect(await screen.findByRole("heading", { name: "Hybrid study" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Edit event" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Try again" })).not.toBeInTheDocument();
+    expect(SeriesRooms.list).toHaveBeenCalledTimes(2);
   });
 
   it("lists them for a manager and opens that date's editor from Pick a room", async () => {

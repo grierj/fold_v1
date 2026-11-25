@@ -361,6 +361,7 @@ function EventDetailContent() {
           onPick={(d) => setPickRequest((r) => ({ date: d, seq: (r?.seq ?? 0) + 1 }))}
           onGone={() => closeOnConflict("gone")}
           onRead={roomListRead}
+          onRetryPage={() => refreshRefusal("read")}
         />
       )}
 

@@ -1527,27 +1527,28 @@ func (a *App) apiAddRegistration(c *gin.Context) {
 		return
 	}
 	var target models.User
-	// A pruned guest keeps status=guest (never active); the add action is
-	// their way back in, so both statuses resolve here.
-	if body.SelectionID != "" {
+	missing := errAddTargetGone
+	var lookup *gorm.DB
+	switch {
+	case body.SelectionID != "":
 		id, err := a.parsePeopleSelection(body.SelectionID, apiUser(c).ID, a.now())
-		if err != nil || a.DB.Where("id = ? AND status = ? AND account_type IN ?", id, models.UserActive, []string{models.AccountAdult, models.AccountTeen}).First(&target).Error != nil {
+		if err != nil {
 			a.managerDateAddRefusal(c, errPeopleSelectionUnavailable)
 			return
 		}
-	} else if body.UserID != 0 {
-		if err := a.DB.Where("id = ? AND status IN ?", body.UserID,
-			[]string{models.UserActive, models.UserGuest}).First(&target).Error; err != nil {
-			a.managerDateAddRefusal(c, errAddTargetGone)
-			return
+		missing = errPeopleSelectionUnavailable
+		lookup = a.DB.Where("id = ? AND status = ? AND account_type IN ?", id, models.UserActive, []string{models.AccountAdult, models.AccountTeen})
+	case body.UserID != 0:
+		lookup = a.DB.Where("id = ? AND status IN ?", body.UserID, []string{models.UserActive, models.UserGuest})
+	default:
+		lookup = a.DB.Where("email = ? AND status IN ?", strings.TrimSpace(body.Email), []string{models.UserActive, models.UserGuest})
+	}
+	if err := lookup.First(&target).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			err = missing
 		}
-	} else {
-		// The leader UI adds by email; resolve it to the account.
-		if err := a.DB.Where("email = ? AND status IN ?", strings.TrimSpace(body.Email),
-			[]string{models.UserActive, models.UserGuest}).First(&target).Error; err != nil {
-			a.managerDateAddRefusal(c, errAddTargetGone)
-			return
-		}
+		a.managerDateAddRefusal(c, err)
+		return
 	}
 	var o models.EventOccurrence
 	if err := firstScheduledOn(a.DB, ev.ID, body.Date, &o); err != nil {
