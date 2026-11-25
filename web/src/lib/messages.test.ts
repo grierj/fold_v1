@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { composeOptions, recipients, summary } from "../test/compose";
 import { ApiError } from "../api/core";
-import { AUDIENCE_LABEL_MAX, AUDIENCE_LABEL_WIDTH_EM, audienceLabel, audienceLabels, changeLines, confirmLine, confirmPushLine, emptyChoice, failedLine, fromAudience, guardianLine, historyLine, historyTeenLine, isOneEvent, prefillChoice, pushBadge, pushHistoryLine, pushLine, labelWidthEm, retryQuestion, reviewRefusal, shortLabel, statusLabel, summaryLine, teenLine, toAudience } from "./messages";
+import { AUDIENCE_LABEL_MAX, AUDIENCE_LABEL_WIDTH_EM, audienceLabel, audienceLabels, changeLines, confirmLine, confirmPushLine, emptyChoice, failedLine, fromAudience, guardianLine, historyLine, historyTeenLine, isOneEvent, prefillChoice, pushBadge, pushHistoryLine, pushLine, labelWidthEm, retryQuestion, reviewRefusal, shortLabel, statusLabel, stillScheduledLine, summaryLine, teenLine, toAudience } from "./messages";
 
 describe("audiences", () => {
   it("turns the picker's choice into the API's audience and back", () => {
@@ -71,6 +71,19 @@ describe("counts", () => {
     expect(confirmPushLine({ summary: summary({ eligible: 2, push: 1 }), reached: 2 })).toBe("1 person gets a push notification too.");
     expect(confirmPushLine({ summary: summary({ eligible: 2, push: 1 }), reached: 3 })).toBe("1 of them gets only the push notification.");
     expect(confirmPushLine({ summary: summary({ eligible: 2, push: 3 }), reached: 3 })).toBe("3 of them get a push notification; 1 gets only the push.");
+  });
+
+  it("says saving a scheduled message's list leaves its time alone, and that a due one goes out", () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-11-02T18:00:00Z"));
+
+    try {
+      expect(stillScheduledLine("2026-11-05T16:00:00Z", "Asia/Kolkata")).toBe("Saving this doesn't change when it goes out: on Thu, Nov 5 at 9:30 PM GMT+5:30, to whoever is on the list then.");
+      expect(stillScheduledLine("2026-11-02T17:59:00Z", "Asia/Kolkata")).toBe("Its time has come, so it goes out as soon as you save this, to whoever is on the list.");
+      expect(stillScheduledLine(null, "Asia/Kolkata")).toBe("Its time has come, so it goes out as soon as you save this, to whoever is on the list.");
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("names every status in words", () => {

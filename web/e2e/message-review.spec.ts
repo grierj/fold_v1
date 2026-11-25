@@ -98,7 +98,7 @@ test("a scheduled message's new list is confirmed before Preview saves it, and g
   await page.getByRole("button", { name: "Preview" }).click();
   const ask = page.getByRole("group", { name: "Change who gets this to 1 person?" });
   await expect(ask).toBeVisible();
-  await expect(ask).toContainText("It isn't sent now. It stays scheduled");
+  await expect(ask).toContainText("Saving this doesn't change when it goes out");
   await expect(ask.getByText("Change who gets this to 1 person?")).toBeFocused();
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
   await ask.screenshot({ path: "/var/tmp/msgslice/scheduled-list-390.png" });

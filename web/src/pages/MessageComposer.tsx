@@ -170,7 +170,7 @@ export function MessageComposerPage() {
 
   useEffect(() => {
     if (!id) {
-      if (opening === null || shown.current !== null) {
+      if (opening === null || opening.message !== null || shown.current !== null) {
         shown.current = null;
         refusal.clear();
         setOpening((o) => ({ message: null, n: (o?.n ?? 0) + 1 }));
@@ -466,8 +466,9 @@ function Composer({ options, zone, opened, edit = false, params, refusal, back, 
       return;
     }
 
-    // The people chosen were refused: the list on screen is no longer who gets it.
+    // The people chosen were refused: the list on screen is no longer who gets it, and a question about it is withdrawn.
     if (field === "audience") {
+      setConfirm(null);
       setReviewed(null);
       setRecount((n) => n + 1);
     }
@@ -631,9 +632,10 @@ function Composer({ options, zone, opened, edit = false, params, refusal, back, 
 
   // The form asks for the time m is already scheduled for, to the minute the form shows.
   function keepsTime(m: Message): boolean {
-    const has = formTime(m, zone);
+    if (when !== "later" || m.status !== "scheduled" || !m.scheduledAt) return false;
+    const has = wallClock(m.scheduledAt, zone);
 
-    return when === "later" && has.when === "later" && has.day === day && has.time === time;
+    return has.day === day && has.time === time;
   }
 
   // Takes a review of who m reaches and asks before sending (DEC-169).
@@ -735,7 +737,8 @@ function Composer({ options, zone, opened, edit = false, params, refusal, back, 
 
         if (!alive.current) return false;
 
-        if (lost && wentOut(m, lost)) {
+        // It went as asked, or it is past editing (sent at a time the server set, say): the page shows it as it is.
+        if (lost && (wentOut(m, lost) || !m.editable)) {
           sent(m);
 
           return false;

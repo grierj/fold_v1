@@ -1164,7 +1164,7 @@ describe("a scheduled message's new list is the sender's to confirm", () => {
       await editLeadersOnly(user);
       await user.click(screen.getByRole("button", { name: press.button }));
       const ask = await screen.findByRole("group", { name: "Change who gets this to 1 person?" });
-      expect(ask).toHaveTextContent(/It isn't sent now\. It stays scheduled on .* and goes to whoever is on the list then\./);
+      expect(ask).toHaveTextContent(/Saving this doesn't change when it goes out: on .*, to whoever is on the list then\./);
       expect(within(ask).getByText("Change who gets this to 1 person?")).toHaveFocus();
       expect(Messages.preview).not.toHaveBeenCalled();
       expect(Messages.test).not.toHaveBeenCalled();
@@ -1193,7 +1193,7 @@ describe("a scheduled message's new list is the sender's to confirm", () => {
     if (newTime) fireEvent.change(screen.getByLabelText("Time"), { target: { value: newTime } });
     await user.click(screen.getByRole("button", { name: "Schedule" }));
     const ask = await screen.findByRole("group", { name: "Change who gets this to 1 person?" });
-    expect(ask).toHaveTextContent(/It isn't sent now\. It stays scheduled on /);
+    expect(ask).toHaveTextContent(/Saving this doesn't change when it goes out: on /);
     expect(Messages.schedule).not.toHaveBeenCalled();
     await user.click(within(ask).getByRole("button", { name: "Save the change" }));
   }
@@ -1263,6 +1263,77 @@ describe("a scheduled message's new list is the sender's to confirm", () => {
     await user.click(within(screen.getByRole("group", { name: /^Send to 1 person on / })).getByRole("button", { name: "Schedule" }));
     expect(await screen.findByRole("heading", { name: "Bring a friend", level: 1 })).toBeInTheDocument();
     expect(screen.queryByText(ERROR_COPY.message_when)).toBeNull();
+  });
+
+  it("says a message whose time has come goes out as soon as its new list is saved", async () => {
+    const user = userEvent.setup();
+    const due = message({ status: "scheduled", scheduledAt: new Date(Date.now() - 30_000).toISOString() });
+    vi.mocked(Messages.get).mockResolvedValue({ message: due });
+    vi.mocked(Messages.update).mockRejectedValue(needed(proposal));
+    open("/messages/5");
+    await user.click(await screen.findByRole("button", { name: "Edit" }));
+    await editorReady();
+    await user.click(screen.getByRole("button", { name: "Members" }));
+    await user.click(screen.getByRole("button", { name: "Preview" }));
+    const ask = await screen.findByRole("group", { name: "Change who gets this to 1 person?" });
+    expect(ask).toHaveTextContent("Its time has come, so it goes out as soon as you save this, to whoever is on the list.");
+    expect(ask).not.toHaveTextContent(/doesn't change when/);
+  });
+
+  it("withdraws the question when the save is refused for the people chosen", async () => {
+    const user = userEvent.setup();
+    await editLeadersOnly(user);
+    await user.click(screen.getByRole("button", { name: "Preview" }));
+    const ask = await screen.findByRole("group", { name: "Change who gets this to 1 person?" });
+    vi.mocked(Messages.update).mockRejectedValue(new ApiError(400, "nobody", { code: "message_nobody" }));
+    await user.click(within(ask).getByRole("button", { name: "Save the change" }));
+    expect(await screen.findByText(ERROR_COPY.message_nobody)).toBeInTheDocument();
+    expect(screen.queryByRole("group", { name: /Change who gets this/ })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Save the change" })).toBeNull();
+  });
+
+  it("asks nothing more when the time is unchanged, even once it is under a minute away", async () => {
+    const user = userEvent.setup();
+    const soon = message({ status: "scheduled", scheduledAt: new Date(Date.now() + 100_000).toISOString() });
+    vi.mocked(Messages.get).mockResolvedValue({ message: soon });
+    vi.mocked(Messages.update).mockImplementation(async (_id, d, _revision, review) => {
+      if (!review) throw needed(proposal);
+
+      return { message: { ...soon, audience: d.audience, revision: "1.r1" }, review: "saved-list" };
+    });
+    open("/messages/5");
+    await user.click(await screen.findByRole("button", { name: "Edit" }));
+    await editorReady();
+    await user.click(screen.getByRole("button", { name: "Members" }));
+    await user.click(screen.getByRole("button", { name: "Schedule" }));
+    const ask = await screen.findByRole("group", { name: "Change who gets this to 1 person?" });
+    const real = Date.now();
+    const clock = vi.spyOn(Date, "now").mockImplementation(() => real + 60_000);
+
+    try {
+      await user.click(within(ask).getByRole("button", { name: "Save the change" }));
+      expect(await screen.findByRole("heading", { name: "Bring a friend", level: 1 })).toBeInTheDocument();
+      expect(screen.queryByRole("group", { name: /^Send to / })).toBeNull();
+      expect(Messages.schedule).not.toHaveBeenCalled();
+    } finally {
+      clock.mockRestore();
+    }
+  });
+
+  it("shows the message as it is when the press after a lost answer finds it sent at a time the server set", async () => {
+    const user = userEvent.setup();
+    vi.mocked(Messages.schedule)
+      .mockRejectedValueOnce(new ApiError(502, "bad gateway", {}, true))
+      .mockRejectedValueOnce(new ApiError(400, "when", { code: "message_when" }));
+    await saveListBySchedule(user, "10:30");
+    await user.click(within(await screen.findByRole("group", { name: /^Send to 1 person on / })).getByRole("button", { name: "Schedule" }));
+    expect(await screen.findByText(/couldn't tell whether it went out/)).toBeInTheDocument();
+    const stored = new Date(Date.now() - 90_000).toISOString();
+    vi.mocked(Messages.get).mockResolvedValue({ message: message({ status: "sent", sentAt: stored, scheduledAt: stored, editable: false, audience: { type: "group", groupId: 7, roles: ["leader"] }, revision: "1.sent" }) });
+    await user.click(within(screen.getByRole("group", { name: /^Send to 1 person on / })).getByRole("button", { name: "Schedule" }));
+    expect(await screen.findByRole("heading", { name: "Bring a friend", level: 1 })).toBeInTheDocument();
+    expect(screen.queryByText(ERROR_COPY.message_when)).toBeNull();
+    expect(screen.queryByRole("button", { name: "Schedule" })).toBeNull();
   });
 
   it("is a conflict, not a fresh question, when the stored time moved while the question was open", async () => {
@@ -1341,6 +1412,16 @@ describe("an editor the person moved away from", () => {
     await act(async () => { await router.navigate("/messages/9"); });
     expect(await screen.findByRole("textbox", { name: "Subject" })).toHaveValue("Snacks");
     expect(Messages.get).toHaveBeenLastCalledWith(9);
+  });
+
+  it("opens a new message when the person goes to it while another message was still loading", async () => {
+    const router = open("/messages/5");
+    await editorReady();
+    vi.mocked(Messages.get).mockReturnValueOnce(new Promise(() => {}));
+    await act(async () => { await router.navigate("/messages/6"); });
+    await act(async () => { await router.navigate("/messages/new"); });
+    expect(await screen.findByRole("heading", { name: "New message", level: 1 })).toBeInTheDocument();
+    expect(screen.getByRole("textbox", { name: "Subject" })).toHaveValue("");
   });
 
   it("opens a blank message after a saved one when the address moves to a new one", async () => {
