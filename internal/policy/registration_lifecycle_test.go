@@ -46,8 +46,8 @@ func TestRegistrationMoves(t *testing.T) {
 		RegLeaveGroup:       {last: pairs(current, []string{RegCancelled}), step: pairs(current, []string{RegDeclined})},
 		RegRemoveFromGroup:  {last: pairs(current, []string{RegRemoved}), step: pairs(current, []string{RegDeclined})},
 		RegMorePrivate:      {last: pairs(current, []string{RegCancelled})},
-		RegHouseholdPersonChanged: {last: append(pairs(regStatuses, []string{RegCancelled}),
-			"going>going", "maybe>maybe", "declined>declined", "waitlisted>waitlisted", "removed>removed")},
+		RegHouseholdPersonChanged: {last: append(pairs(current, []string{RegCancelled}),
+			"going>going", "maybe>maybe", "waitlisted>waitlisted")},
 	}
 	moves := RegistrationMoves()
 	if len(moves) != len(want) {
