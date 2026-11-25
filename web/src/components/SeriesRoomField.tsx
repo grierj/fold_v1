@@ -1,5 +1,4 @@
 import { useEffect, useRef, useState } from "react";
-import { ApiError } from "../api/core";
 import { SeriesRooms } from "../api/rooms";
 import { useAuth } from "../auth";
 import { roomName } from "../lib/place";
@@ -9,7 +8,7 @@ import {
 } from "../lib/roomLabels";
 import { count } from "../lib/plural";
 import { useAction } from "../lib/useAction";
-import { answerNames, useRevisionSave } from "../lib/useRevisionSave";
+import { answerNames, refusedAgain, useManagedSave } from "../lib/useRevisionSave";
 import { formatDayLong } from "../lib/when";
 import type { OccurrenceRoom, SeriesBooking, SeriesDates, SeriesRoomsResponse } from "../types";
 import { Checkbox, Field, FormError, Select } from "./ui/Field";
@@ -43,9 +42,6 @@ const unseenOf = (reason: string, dates: string[] = []) => [reason, ...[...dates
 // their own are never compared: without the box ticked the server keeps every one of them, and with it the request
 // names the dates shown, so a list that changed since can only leave more of them as they are (DEC-168).
 const compared = (value: SeriesRoomFields, overBusy: boolean): Partial<SeriesRoomFields> => (overBusy ? value : { roomId: value.roomId });
-
-// Every send was refused while the series room stayed as it was: the control says its ordinary refusal.
-const refusedEverySend = () => new ApiError(409, "event changed", { code: "event_changed" });
 
 // The Room control of "Edit series" for a recurring series (M2.1c, DEC-95:
 // beside Location, not under More options). Booking is its own action and
@@ -117,41 +113,34 @@ function SeriesRoomControl({ eventId, id, read, show, onChanged, onGone }: {
   // An admin's answer for dates that are busy: the room to resend with a reason.
   const [pending, setPending] = useState<{ roomId: number; dates: number } | null>(null);
   const overlap = useOverlapReason(reasonId);
-  // The last read the protocol made and the last answer that landed, so the control shows what it judged.
-  const lastRead = useRef<SeriesRoomsResponse | null>(null);
-  const lastAnswer = useRef<SeriesBooking | null>(null);
-  const landedAnswer = () => lastAnswer.current;
 
   // Only an admin may double-book the dates a read shows busy in the room it booked, and only with a reason.
   const overBusyOffer = (shown: SeriesRoomsResponse, roomId: number | null) =>
     isAdmin && roomId !== null && shown.defaultRoom?.id === roomId && shown.needsRoom.length > 0 ? { roomId, dates: shown.needsRoom.length } : null;
 
-  const save = useRevisionSave<SeriesRoomFields, Partial<SeriesRoomFields>>({
-    opened: readFields(read),
+  const save = useManagedSave<SeriesRoomsResponse, SeriesRoomFields, Partial<SeriesRoomFields>, SeriesBooking>({
+    opened: read,
     revision: read.revision,
     read: async () => {
       const now = await SeriesRooms.list(eventId);
-      lastRead.current = now;
 
-      return { allowed: true, revision: now.revision, value: readFields(now) };
+      return { allowed: true, revision: now.revision, row: now };
     },
+    value: readFields,
+    // The next pick is chosen from the dates as the answer read them after this one, never from its counts. Each field is
+    // read from `after` by name: an answer without it (an older server's) fails here, and is never shown as the dates.
+    stored: (res) => ({ ...read, revision: res.event.revision, defaultRoom: res.defaultRoom, ownRooms: res.after.ownRooms, needsRoom: res.after.needsRoom, pending: res.after.pending }),
     fields: (value) => compared(value, overBusy.current),
     answers: answerNames("event", eventId),
-    stays: () => {
-      const res = lastAnswer.current;
-
-      return res ? fieldsOf(res.defaultRoom, res.after) : { roomId: null, needs: [] };
-    },
+    stays: true,
     writesMore: true,
     gone: pickGone,
-    onConflict: (why) => {
+    onConflict: (why, now) => {
       if (why === "gone") {
         onGone();
 
         return;
       }
-
-      const now = lastRead.current;
 
       if (now) show(now);
       // Booking over busy dates, the read's busy dates in the same room are asked about again; the reason stays.
@@ -169,18 +158,12 @@ function SeriesRoomControl({ eventId, id, read, show, onChanged, onGone }: {
   function send(roomId: number | null, overlapReason?: string, includeDates?: string[]) {
     refusal.clear();
     void action.run(async () => {
-      lastAnswer.current = null;
       overBusy.current = overlapReason !== undefined;
-      let sent;
+      const body = overlapReason ? { roomId, overlapReason } : includeDates ? { roomId, includeDates } : { roomId };
+      let outcome;
 
       try {
-        sent = await save(async (revision) => {
-          const body = overlapReason ? { roomId, overlapReason } : includeDates ? { roomId, includeDates } : { roomId };
-          const res = await SeriesRooms.set(eventId, body, revision);
-          lastAnswer.current = res;
-
-          return res;
-        }, { roomId, needs: [] }, unseenOf(overlapReason ?? "", includeDates));
+        outcome = await save((revision) => SeriesRooms.set(eventId, body, revision), { roomId, needs: [] }, unseenOf(overlapReason ?? "", includeDates));
       } catch (e) {
         if (roomsTurnedOff(e)) {
           setOff(true);
@@ -191,26 +174,24 @@ function SeriesRoomControl({ eventId, id, read, show, onChanged, onGone }: {
         throw e;
       }
 
-      if (sent === "refused") throw refusedEverySend();
+      const { sent, answer: res, row: now } = outcome;
+
+      if (sent === "refused") throw refusedAgain("event_changed");
 
       if (sent !== "saved") return false;
 
       overlap.reset();
       onChanged?.();
-      const res = landedAnswer();
+
+      if (now) show(now);
 
       if (!res) {
         // Already stored by a send whose answer was lost: the read shows it, and says what each date has.
-        const now = lastRead.current;
-
-        if (now) show(now);
         setPending(now && !overlapReason ? overBusyOffer(now, roomId) : null);
 
         return now ? seriesStoredMessage(now) : roomId === null ? "Series room released." : "The series room is saved.";
       }
 
-      // The next pick is chosen from the dates as the answer read them after this one, never from its counts.
-      show({ ...read, revision: res.event.revision, defaultRoom: res.defaultRoom, ...res.after });
       // Only an admin may double-book what stayed busy, and only with a reason.
       setPending(isAdmin && roomId !== null && !overlapReason && res.lost.length > 0 ? { roomId, dates: res.lost.length } : null);
 

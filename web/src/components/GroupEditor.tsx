@@ -8,7 +8,7 @@ import { useFocusHome, useKeepFocusHome, useLockedFocus } from "../lib/focusHome
 import { decisionImpact, reviewOutdated } from "../lib/visibilityConsent";
 import { ROSTER_STALE, visibilityRank } from "../lib/visibilityChange";
 import { errorText } from "../lib/errors";
-import { answerNames, lostAuthority, useRevisionSave, type RevisionConflict } from "../lib/useRevisionSave";
+import { answerNames, lostAuthority, refusedAgain, useRevisionSave, type RevisionConflict } from "../lib/useRevisionSave";
 import { FormError } from "./ui/Field";
 import { GroupForm, type GroupFormData } from "./GroupForm";
 import { GroupVisibilityReview } from "./GroupVisibilityReview";
@@ -46,9 +46,6 @@ export const decisionsKey = (decisions?: Record<string, OpenedDecision>) =>
 
 // The events a group review lists, whose sign-up updates withdraw it.
 const impactEventIds = (impact: VisibilityImpact) => [...impact.tightened, ...impact.leaderOpened].map((e) => e.id);
-
-// Every send was refused while nothing the form writes changed: the form says its ordinary refusal.
-const refusedEverySend = () => new ApiError(409, "group changed", { code: "group_changed" });
 
 // GroupEditor is one opening of the group form on the group page, with the visibility review its save may need
 // (DEC-48, DEC-158). It mounts once per opening: the save names the read it opened with (DEC-166), and a refusal is
@@ -271,7 +268,7 @@ export function GroupEditor({ group, action, onSaved, onConflict, onCancel }: {
       });
     }, intended, decisionsKey(openedEvents));
 
-    if (sent === "refused") throw refusedEverySend();
+    if (sent === "refused") throw refusedAgain("group_changed");
 
     if (sent !== "saved") return false;
     parkFocus();

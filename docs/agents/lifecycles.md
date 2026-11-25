@@ -140,7 +140,10 @@ chosen when the row is made, or is a setting that may change to any value its ow
   visibility, one date's edit, the group form, the two room controls, the message composer, the admin room editor
   and its Deactivate and Reactivate; DEC-162 to DEC-164, DEC-166, DEC-167, DEC-169, DEC-171) goes through `web/src/lib/useRevisionSave.ts`:
   sent, then on a refusal read once and done, sent again or handed to the page as a conflict,
-  which `web/src/lib/refusedSave.tsx` tells. A save counts only when its answer names what it
+  which `web/src/lib/refusedSave.tsx` tells. A form that shows the stored row after an outcome uses the same file's
+  `useManagedSave` (the room editor and its Deactivate and Reactivate, the two room controls), which
+  returns that row from the write's answer or from the read the protocol made, and gives a conflict the row the read
+  found. A save counts only when its answer names what it
   saved (`answerNames`); after a send with no answer, a refusal is never sent again under a newer
   revision until a save lands. Nothing about a save outlives the draft that sent it (the date
   editor keeps that no-answer mark with its held draft). A control that stays on screen and is

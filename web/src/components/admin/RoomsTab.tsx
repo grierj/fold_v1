@@ -1,10 +1,9 @@
 import { Fragment, useEffect, useRef, useState } from "react";
-import { ApiError } from "../../api/core";
 import { AdminRooms, type RoomInput } from "../../api/rooms";
 import type { Room, RoomResponse } from "../../types";
 import type { Load } from "../../lib/useLoad";
 import { RefusedSaveLine, useRefusedSave } from "../../lib/refusedSave";
-import { answerNames, useRevisionSave, type RevisionConflict, type RevisionRead } from "../../lib/useRevisionSave";
+import { answerNames, refusedAgain, useManagedSave, type RevisionConflict } from "../../lib/useRevisionSave";
 import { usePage } from "../../lib/usePage";
 import { PageCount, Pagination } from "../ui/Pagination";
 import { SearchBox } from "../ui/SearchBox";
@@ -106,19 +105,15 @@ function createBody(form: RoomForm): RoomInput {
   return body;
 }
 
-// Every send was refused while nothing the save writes changed: the control says its ordinary refusal.
-const refusedEverySend = () => new ApiError(409, "room changed", { code: "room_changed" });
-
-// The room as one read of the list shows it, or undefined when the list has no such room. `keep` gets it.
-async function readRoom(id: number, keep: (room: Room | undefined) => void): Promise<RevisionRead<Room | undefined>> {
+// The room as one read of the list shows it, or undefined when the list has no such room.
+async function readRoom(id: number) {
   const room = (await AdminRooms.list()).rooms.find((r) => r.id === id);
-  keep(room);
 
-  return { allowed: room !== undefined, revision: room?.revision, value: room };
+  return { allowed: room !== undefined, revision: room?.revision, row: room };
 }
 
 // RoomEditor is one opening of a room's edit form. It mounts once per opening: the save names the read the form opened
-// with (DEC-171), and a refusal is the shared protocol's (useRevisionSave). On a conflict the form closes and the tab
+// with (DEC-171), and a refusal is the shared protocol's (useManagedSave). On a conflict the form closes and the tab
 // reads the rooms from nothing (`onConflict`).
 function RoomEditor({ room, onSaved, onConflict, onCancel }: {
   room: Room;
@@ -127,15 +122,13 @@ function RoomEditor({ room, onSaved, onConflict, onCancel }: {
   onCancel: () => void;
 }) {
   const [opened] = useState(room);
-  const lastAnswer = useRef<RoomResponse | null>(null);
-  const lastRead = useRef<Room | undefined>(undefined);
-  const answered = () => lastAnswer.current;
-  const found = () => lastRead.current;
 
-  const send = useRevisionSave<Room | undefined, ReturnType<typeof roomFields> | null>({
+  const save = useManagedSave<Room | undefined, Room | undefined, ReturnType<typeof roomFields> | null, RoomResponse>({
     opened,
     revision: opened.revision,
-    read: () => readRoom(opened.id, (r) => { lastRead.current = r; }),
+    read: () => readRoom(opened.id),
+    value: (r) => r,
+    stored: (res) => res.room,
     fields: (r) => (r ? roomFields(r) : null),
     answers: answerNames("room", opened.id),
     onConflict,
@@ -144,7 +137,6 @@ function RoomEditor({ room, onSaved, onConflict, onCancel }: {
 
   async function submit(form: RoomForm): Promise<Room | null> {
     const body = editBody(form);
-    lastAnswer.current = null;
 
     const intended: Room = {
       ...opened,
@@ -154,19 +146,14 @@ function RoomEditor({ room, onSaved, onConflict, onCancel }: {
       defaultTeardownMinutes: body.defaultTeardownMinutes ?? 0,
     };
 
-    const sent = await send(async (revision) => {
-      const res = await AdminRooms.update(opened.id, body, revision);
-      lastAnswer.current = res;
+    const { sent, row } = await save((revision) => AdminRooms.update(opened.id, body, revision), intended);
 
-      return res;
-    }, intended);
-
-    if (sent === "refused") throw refusedEverySend();
+    if (sent === "refused") throw refusedAgain("room_changed");
 
     if (sent !== "saved") return null;
 
     // Saved: by its answer, or by a read that found the room as this save would leave it.
-    return answered()?.room ?? found() ?? intended;
+    return row ?? intended;
   }
 
   return <RoomFormPanel room={opened} submit={submit} onSaved={onSaved} onCancel={onCancel} />;
@@ -300,11 +287,7 @@ function RoomRow({ room, locked, feedOpen, onBusy, onStart, onEdit, onFeed, onCl
 }) {
   const [error, setError] = useState<string | null>(null);
   const refusal = useRefusedSave();
-  const lastAnswer = useRef<RoomResponse | null>(null);
-  const lastRead = useRef<Room | undefined>(undefined);
   const mounted = useRef(true);
-  const answered = () => lastAnswer.current;
-  const found = () => lastRead.current;
 
   useEffect(() => {
     mounted.current = true;
@@ -312,22 +295,24 @@ function RoomRow({ room, locked, feedOpen, onBusy, onStart, onEdit, onFeed, onCl
     return () => { mounted.current = false; };
   }, []);
 
-  const save = useRevisionSave<Room | undefined, { active: boolean } | null>({
+  const save = useManagedSave<Room | undefined, Room | undefined, { active: boolean } | null, RoomResponse>({
     opened: room,
     revision: room.revision,
-    read: () => readRoom(room.id, (r) => { lastRead.current = r; }),
+    read: () => readRoom(room.id),
+    value: (r) => r,
+    stored: (res) => res.room,
     fields: activeOf,
     answers: answerNames("room", room.id),
-    stays: () => lastAnswer.current?.room,
+    stays: true,
     changedCode: "room_changed",
-    onConflict: (why) => {
+    onConflict: (why, found) => {
       if (why === "gone") {
         onGone();
 
         return;
       }
 
-      if (lastRead.current) onSaved(lastRead.current);
+      if (found) onSaved(found);
       refusal.refused(why);
     },
   });
@@ -337,24 +322,16 @@ function RoomRow({ room, locked, feedOpen, onBusy, onStart, onEdit, onFeed, onCl
     setError(null);
     refusal.clear();
     onStart();
-    lastAnswer.current = null;
-    lastRead.current = undefined;
     const verb = active ? "reactivate" : "deactivate";
 
     try {
-      const sent = await save(async (revision) => {
-        const res = await AdminRooms.update(room.id, { active }, revision);
-        lastAnswer.current = res;
+      const { sent, row: stored } = await save((revision) => AdminRooms.update(room.id, { active }, revision), { ...room, active });
 
-        return res;
-      }, { ...room, active });
-
-      if (sent === "refused") throw refusedEverySend();
+      if (sent === "refused") throw refusedAgain("room_changed");
 
       if (sent !== "saved" || !mounted.current) return;
-      // Saved: by its answer, or by a read that found the room as this press would leave it.
-      const stored = answered()?.room ?? found();
 
+      // Saved: by its answer, or by a read that found the room as this press would leave it.
       if (stored) onSaved(stored);
       onStatus(`“${stored?.name ?? room.name}” ${verb}d.`);
     } catch (e) {
