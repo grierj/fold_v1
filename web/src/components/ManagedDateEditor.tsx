@@ -39,7 +39,7 @@ export function useDateEditorToggle({ onEditDate, onChanged, onDateUpdated, onDa
     editor: {
       saving: row.saving,
       onSaving: (saving: boolean) => {
-        if (saving) onDateUpdated?.(false);
+        onDateUpdated?.(false);
         setRow((r) => ({ ...r, saving }));
       },
       onSaved: () => {

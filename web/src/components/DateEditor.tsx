@@ -309,19 +309,18 @@ export function DateEditor({ opener, base, hold, onSaved, onSaving, pending = fa
     setSaving(true);
     onSaving?.(true);
     setError(null);
+    let saved = false;
 
     try {
       const sent = await send(write, intendedDateFields(openedFields, changes), reasonSent ?? "");
 
       if (sent === "saved") {
         // The answer may land while the host has this editor off the screen: the draft it holds is this one.
-        const mine = mounted.current || hold?.current?.opened === opened;
+        saved = mounted.current || hold?.current?.opened === opened;
         ended.current = true;
 
         if (hold?.current?.opened === opened) hold.current = null;
         kept.close();
-
-        if (mine) onSaved();
       } else if (sent === "refused") {
         setError("We couldn't update this date. Please try again.");
       }
@@ -357,6 +356,8 @@ export function DateEditor({ opener, base, hold, onSaved, onSaving, pending = fa
       // page asks first (DEC-98).
       else if (!ended.current && hold?.current?.opened === opened) hold.current.unsent = true;
     }
+
+    if (saved) onSaved();
   }
 
   // Leaving the page with a change typed and not sent asks first (DEC-98), as the series editor does.
