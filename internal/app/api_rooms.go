@@ -69,10 +69,8 @@ func (a *App) roomPickerOn() gin.HandlerFunc {
 	}
 }
 
-// roomsOnIn reads the rooms switch on tx: the room controls' gate
-// (roomPickerOn), and again in a control's snapshot, so what the read shows
-// comes from a state the switch was on in. A failed read is its error, never
-// errRoomsOff.
+// roomsOnIn reads the rooms switch for the room picker gate and the room
+// snapshots. A failed read returns its own error.
 func roomsOnIn(tx *gorm.DB) error {
 	on, err := boolSettingErrIn(tx, settingRoomsEnabled, false)
 	if err == nil && !on {
@@ -102,6 +100,39 @@ func lockRoomManagerIn(tx *gorm.DB, session *models.User, mode actorLock) (*mode
 		return nil, errSecuritySession
 	}
 	return actor, nil
+}
+
+func (a *App) readAdminRoomList(c *gin.Context, surface string, read func(*gorm.DB) error) bool {
+	var judged sessionJudgment
+	err := decidingSnapshot(a.DB.WithContext(c.Request.Context()), func(tx *gorm.DB) error {
+		if a.hooks.readerBegin != nil {
+			a.hooks.readerBegin(surface)
+		}
+		if err := roomsOnIn(tx); err != nil {
+			return err
+		}
+		me, err := lockRoomManagerIn(tx, apiUser(c), actorRead)
+		if err != nil {
+			return err
+		}
+		judged.judge(me)
+		if a.hooks.readerAuthorized != nil {
+			a.hooks.readerAuthorized(surface)
+		}
+		return read(tx)
+	})
+	if errors.Is(err, errRoomsOff) {
+		jsonError(c, http.StatusNotFound, "not found")
+		return false
+	}
+	if err == nil {
+		err = a.acknowledgeDecision(c, judged, true)
+	}
+	if err != nil {
+		fail(c, err)
+		return false
+	}
+	return true
 }
 
 type roomJSON struct {
