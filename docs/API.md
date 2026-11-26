@@ -638,6 +638,8 @@ true for the group's leaders and admins. Roster member: `{id, name, avatarUrl, a
 joinedAt, admin, email?, phone?}` (also `avatarFocalX/Y`) — `name` is the member's display name; `admin` marks church admins (DEC-38).
 Contact fields follow the context-specific rules below; unauthorized keys are
 omitted entirely, not returned as null or empty strings.
+The group detail, roster endpoint and role change reply order members by join
+time, earliest first, with ties ordered by membership ID.
 
 Create/update body: `{name, description, tags[], location,
 coverFocal: {x, y}, visibility, memberLimit}`, plus `revision` on update.
