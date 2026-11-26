@@ -49,7 +49,7 @@ export function useRefusedSave(load?: Pick<Load<unknown>, "loading" | "data" | "
   return { why: refusal?.why ?? null, what: refusal?.what ?? "save", line, refused, clear };
 }
 
-type Refused = "save" | "send" | "action" | "role";
+type Refused = "save" | "send" | "action" | "role" | "unconfirmed";
 
 // Use for a request about the page's resource. Feature-specific refusals such as room_gone or rooms_off stay with the control.
 export function resourceRefused(cause: unknown): boolean {
@@ -90,6 +90,8 @@ export function RefusedSaveLine({ save, noun, canManage, about, choosing }: { sa
 
   const text = choosing
     ? `${choiceRefused(choosing)} This is the ${noun} as it is now.`
+    : save.what === "unconfirmed"
+      ? "We couldn't confirm your changes."
     : save.what === "role"
       ? "We couldn't confirm the role change."
       : save.what === "action"
