@@ -286,9 +286,10 @@ func TestGroupDeleteTellsASignUpCommittedWhileItWaited(t *testing.T) {
 }
 
 // Every writer that can wait behind a group delete gets a real refusal once
-// its lock is granted, never a 500: a join, a leave, a role change and an
-// admin's add (behind the contact gate and the group row) and Keep group
-// (behind the group row) find the group gone (404); a leader's add by email
+// its lock is granted, never a 500, and leaves no live event under the
+// deleted group: a join, a leave, a role change and an admin's add (behind
+// the contact gate and the group row), Keep group (behind the group row) and
+// a leader's new event find the group gone (404); a leader's add by email
 // answers as every unavailable add by email does (400, so it never says
 // whether the address has an account); a sign-up and a withdrawal (behind
 // their date) find the date gone (404). The hook starts each at the point
@@ -340,6 +341,11 @@ func TestGroupDeleteSettlesWritersInFlight(t *testing.T) {
 				return f.admin.do("POST", "/api/v1/admin/groups/"+itoa(f.group)+"/reject-deletion", nil, true)
 			}
 		}},
+		{"event creation", http.StatusNotFound, false, func(f groupDeleteFixture, _, _ *apiClient) writer {
+			return func() *httptest.ResponseRecorder {
+				return f.leader.do("POST", "/api/v1/groups/"+itoa(f.group)+"/events", map[string]any{"title": "Late", "startsLocal": feedStart(4).Format("2006-01-02T15:04"), "durationMinutes": 60, "tzid": "UTC"}, true)
+			}
+		}},
 		{"sign-up", http.StatusNotFound, false, func(f groupDeleteFixture, outsider, _ *apiClient) writer {
 			return answer(f, outsider, models.RegGoing)
 		}},
@@ -370,6 +376,11 @@ func TestGroupDeleteSettlesWritersInFlight(t *testing.T) {
 			w := awaitContactResponse(t, done)
 			if w.Code != tc.code {
 				t.Fatalf("the %s returned %d once the group was deleted, want %d: %s", tc.name, w.Code, tc.code, w.Body.String())
+			}
+			var live int64
+			gormMust(t, f.app.DB.Model(&models.Event{}).Where("group_id = ?", f.group).Count(&live))
+			if live != 0 {
+				t.Fatalf("%d live events are left under the deleted group", live)
 			}
 			if told := len(noticesSince(t, f.app, f.outsiders[0].ID, notify.EventDeleted, mark.notice)) == 1; told != tc.told {
 				t.Fatalf("the outsider was told %v, want %v", told, tc.told)
