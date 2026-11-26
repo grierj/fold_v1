@@ -16,12 +16,17 @@ export const journeyProfile = {
 const delta = (value) => value > 0 ? `+${value}` : String(value);
 const nonnegative = (value) => Number.isFinite(value) && value >= 0;
 
+/**
+ * @param {number} ms
+ * @param {number | undefined} change
+ * @param {{ ceilingMs: number, increaseMs: number }} limit
+ */
 export function timingFailures(ms, change, { ceilingMs, increaseMs }) {
   const reasons = [];
 
   if (ms > ceilingMs) reasons.push(`head median ${ms} ms exceeds ${ceilingMs} ms`);
 
-  if (change > increaseMs) reasons.push(`increase of +${change} ms exceeds +${increaseMs} ms`);
+  if (change !== undefined && change > increaseMs) reasons.push(`increase of +${change} ms exceeds +${increaseMs} ms`);
 
   return reasons;
 }

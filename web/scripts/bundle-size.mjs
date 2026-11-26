@@ -2,10 +2,12 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { gzipSync } from "node:zlib";
 
+/** @param {string} file */
 export function gzipBytes(file) {
   return gzipSync(readFileSync(file)).length;
 }
 
+/** @param {string} dist */
 export function eagerGzipBytes(dist) {
   const html = readFileSync(join(dist, "index.html"), "utf8");
   const entry = html.match(/<script[^>]+src="\/assets\/([^"]+\.js)"/)?.[1];
