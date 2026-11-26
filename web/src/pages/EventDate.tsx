@@ -529,7 +529,9 @@ function DateDetail({ id, date }: { id: string; date: string }) {
     }
   }, [guestOpen]);
 
-  if (tombstone) return <CancelledDate cancelled={tombstone} heading={heading} notice={<RefusedSaveLine save={refusedSave} noun="date" />} />;
+  const eventLink = cancelledHere && <ButtonLink variant="secondary" to={`/events/${id}`}>View event</ButtonLink>;
+
+  if (tombstone) return <CancelledDate cancelled={tombstone} heading={heading} notice={<><RefusedSaveLine save={refusedSave} noun="date" />{eventLink}</>} />;
 
   const when = occurrence ? dateLine(occurrence.startsAt, occurrence.endsAt) : "";
   const pressed = (status: AnswerStatus) => !!occurrence && (occurrence.myRegistration === status || (status === "going" && occurrence.myRegistration === "waitlisted"));
@@ -545,7 +547,7 @@ function DateDetail({ id, date }: { id: string; date: string }) {
       </div>
       {!loaded && !selfReading && <p role="status">Loading this date…</p>}
       {loaded && !occurrence && (cancelledHere
-        ? <div role="status"><EmptyState title="This date was cancelled" body="Your calendar shows the dates that are still on." /></div>
+        ? <div role="status"><EmptyState title="This date was cancelled" body="Your calendar shows the dates that are still on." action={eventLink} /></div>
         : <EmptyState title="This date is not available" body="Your invitation may have ended, or this date may not be available to you. Check your calendar for dates you can open." />)}
       {(occurrence || selfReading) && <section aria-label="This event date" className="space-y-6">
         {/* The six answers come first (M8.1 brief 5.1); everything else follows them. */}
