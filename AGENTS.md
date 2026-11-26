@@ -468,7 +468,7 @@ table), and a new area gets a new file there and a row in that table, not a row 
 | Selected chips are stronger than unselected; field errors are announced | `Chip.test.tsx`, `Field.test.tsx` |
 | A photo-less group's cover comes from `coverSrc` (DEC-66); empty states are never red | `web/src/lib/covers.test.ts`, `EmptyState.test.tsx` |
 | Token contrast: text 4.5:1, control edges 3:1 | `npm run contrast` (in CI) |
-| The entry JS chunk stays under its gzip budget; rarely needed libraries load with `import()` | `npm run bundle-size` (in CI) |
+| Browser journey medians meet their absolute and same-run increase limits | `journeys` CI job, required by `web` (limits and measurement method in `docs/agents/testing.md`) |
 | Seat counts never overrun under concurrent registration | `TestConcurrentGoingRespectsCapacity` |
 | A save that takes a revision (a series, an event's visibility, the group form, a date's room, the series room, a message's edit and send, an admin's room edit, a room calendar link change, a household's details, a household person, a grant of teen consent) checks it with the one shared check inside its write transaction, and a check that reads its row reads it through that transaction (DEC-163, DEC-166, DEC-167, DEC-169, DEC-171, DEC-174, DEC-176) | `TestSavesCheckTheirRevisionInTheirTransaction`, `TestEditRevisionGuardCatchesABypass` |
 | Secrets in URLs never reach the access log | `TestAccessLogKeepsSecretsOut` |
