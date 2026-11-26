@@ -689,8 +689,17 @@ func TestTombstoneUsersTriggerCensus(t *testing.T) {
 		WHERE tgrelid = 'users'::regclass AND NOT tgisinternal ORDER BY tgname`).Scan(&triggers).Error; err != nil {
 		t.Fatal(err)
 	}
-	if len(triggers) != 1 || triggers[0].Name != "push_devices_end_with_sessions" || !strings.Contains(triggers[0].Definition, "AFTER UPDATE OF session_version, status") {
+	want := []struct{ name, event, function string }{
+		{"push_devices_end_with_sessions", "AFTER UPDATE OF session_version, status", "EXECUTE FUNCTION push_devices_end_with_sessions()"},
+		{"users_erase_group_requester", "AFTER UPDATE OF deleted_at", "EXECUTE FUNCTION erase_group_requester()"},
+	}
+	if len(triggers) != len(want) {
 		t.Fatalf("revisit L2/L3 effects for every users trigger: %+v", triggers)
+	}
+	for i, trigger := range triggers {
+		if trigger.Name != want[i].name || !strings.Contains(trigger.Definition, want[i].event) || !strings.Contains(trigger.Definition, want[i].function) {
+			t.Fatalf("revisit L2/L3 effects for changed users trigger: %+v", trigger)
+		}
 	}
 }
 
