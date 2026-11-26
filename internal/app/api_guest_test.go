@@ -1411,7 +1411,7 @@ func TestGuestRegistrationWorkAndThrottleGates(t *testing.T) {
 				seedThrottle("guestreg:site", publicSignupSiteLimit)
 			}
 			workCalls := 0
-			app.hooks.wrapGuestPasswordCheck = func(check func(string) bool) func(string) bool {
+			app.hooks.wrapDummyPasswordCheck = func(check func(string) bool) func(string) bool {
 				return func(password string) bool {
 					result := check(password)
 					workCalls++
