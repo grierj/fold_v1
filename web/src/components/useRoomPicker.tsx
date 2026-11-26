@@ -8,13 +8,13 @@ import { Button } from "./ui/Button";
 import { FormError } from "./ui/Field";
 import { Skeleton } from "./ui/Skeleton";
 
-// A room read can stop at the public rooms switch before checking the viewer. Only /site can tell us the switch
-// is off in that case. Keep the pinned refusal as an error until the public setting answers.
+// A room read can stop at the public rooms switch before checking the viewer. Let /site settle before
+// surfacing a pinned refusal, so a screen that closes when booking turns off can close first.
 export async function readRooms<T>(answer: Promise<T>, pinned?: Credential | null): Promise<T> {
   try {
     return await answer;
   } catch (cause) {
-    if (pinned && credentialCurrent(pinned) && errorCode(cause) === "session_expired") recheckSite();
+    if (pinned && credentialCurrent(pinned) && errorCode(cause) === "session_expired") await recheckSite();
     throw cause;
   }
 }

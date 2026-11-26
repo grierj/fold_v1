@@ -29,20 +29,39 @@ export function adminRoomReadTests({ path, otherRead, evidence }: { path: string
           await page.screenshot({ path: testInfo.outputPath("rooms-on-390.png"), fullPage: true });
           await admin("PUT", "/admin/settings/rooms", { enabled: false });
 
+          const releaseSite = Promise.withResolvers<void>();
+          const siteUrl = "**/api/v1/site";
+          await page.route(siteUrl, async (route) => {
+            await releaseSite.promise;
+            await route.continue();
+          }, { times: 1 });
+
           try {
             const refused = page.waitForResponse(url);
+            const recheck = page.waitForRequest(siteUrl);
             dispatch.resolve();
             const response = await refused;
             expect(response.status()).toBe(404);
             expect(await response.headerValue("fold-session-checked")).toBeNull();
+            await recheck;
+            // The error from the rejected room response would render before /site answers.
+            await page.evaluate(() => new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
+            await expect(page.getByRole("alert").filter({ hasText: "Your session timed out" })).toHaveCount(0);
+            await expect(rooms).toHaveAttribute("aria-selected", "true");
+            const focused = path.endsWith("/locations") ? page.getByRole("tabpanel", { name: /^Rooms\b/ }) : rooms;
+            await focused.focus();
+            releaseSite.resolve();
+
+            const approvals = page.getByRole("tab", { name: /^Approvals\b/ });
             await expect(rooms).toHaveCount(0);
-            await expect(page.getByRole("tab", { name: /^Approvals\b/ })).toHaveAttribute("aria-selected", "true");
-            await expect(page.getByText("Your session timed out.")).toHaveCount(0);
+            await expect(approvals).toHaveAttribute("aria-selected", "true");
+            await expect(approvals).toBeFocused();
             const me = await page.request.get("/api/v1/auth/me");
             expect(me.ok()).toBe(true);
             expect(await me.json()).toMatchObject({ user: { email: email(login), role: "admin" } });
             await checkState(page, evidence, "rooms-off");
           } finally {
+            releaseSite.resolve();
             await admin("PUT", "/admin/settings/rooms", { enabled: true });
           }
         } else {
