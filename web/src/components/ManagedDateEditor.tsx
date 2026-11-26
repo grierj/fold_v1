@@ -1,3 +1,4 @@
+import { useEventReadPin } from "../lib/eventReadPin";
 import { useCallback, useRef, useState, type MutableRefObject } from "react";
 import { useLocation } from "react-router-dom";
 import { DateEditor, type DateDraftHold } from "./DateEditor";
@@ -78,7 +79,8 @@ export function ManagedDateEditor({ opener, pageFailed = false, saving = false, 
   const location = useLocation();
   const shown = useShownInList();
   const owner = `${location.key}|${opener.eventId}|${opener.date}|${opener.occurrenceId}|${opener.groupId ?? ""}`;
-  const read = useEditRead(opener, owner, shown && !pageFailed, onRefused);
+  const [pinned] = useEventReadPin();
+  const read = useEditRead(opener, owner, shown && !pageFailed, onRefused, pinned);
   const held = useRef<{ owner: string; hold: MutableRefObject<DateDraftHold | null> } | null>(null);
   // A remount keeps focus here, never on the page; while the editor is on screen its own form keeps it.
   const editorShown = useRef(false);

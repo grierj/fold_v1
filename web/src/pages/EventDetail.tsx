@@ -4,7 +4,7 @@ import { useHousehold } from "../lib/useHousehold";
 import { SeriesEditor, type SeriesDraftHold } from "../components/SeriesEditor";
 import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useParams, useSearchParams } from "react-router-dom";
-import { ApiError } from "../api/core";
+import { ApiError, bootstrapCredential, credentialCurrent } from "../api/core";
 import { Events } from "../api/events";
 import { useAuth } from "../auth";
 import { OccurrenceCard } from "../components/OccurrenceCard";
@@ -44,6 +44,7 @@ import { useLeaveQuestion } from "../lib/leaveQuestion";
 import { ManagerSaveStatus } from "../components/ui/ManagerSaveStatus";
 import { useRosterSettled } from "../lib/rosterWrites";
 import { seriesSchedules } from "../lib/registration";
+import { EventReadPin } from "../lib/eventReadPin";
 
 const ManageRoster = lazy(() => import("../components/ManageRoster").then((module) => ({ default: module.ManageRoster })));
 
@@ -85,7 +86,9 @@ function EventDetailContent() {
   // save nor Close opens the editor again while the person stays here.
   const editAsked = useRef(searchParams.get("edit") === "series");
   const { user, loading: authLoading, isAdmin, canCompose, credential } = useAuth();
-  const { people, error: householdError, retry: retryHousehold } = useHousehold(user);
+  const pin = !authLoading && credential?.verified && credential.viewer === (user?.id ?? null) && credentialCurrent(credential) ? credential : null;
+  const scope = useMemo(() => pin && { pin, role: user?.role }, [pin, user?.role]);
+  const { people, error: householdError, retry: retryHousehold } = useHousehold(user, pin);
   const [deleteError, setDeleteError] = useState<string | null>(null);
   // From the first ask until the DELETE answers: the menu cannot start a second one.
   const [deleting, setDeleting] = useState(false);
@@ -151,32 +154,29 @@ function EventDetailContent() {
   // `reload` keeps ordinary RSVP drafts mounted; `retry` (also what a terminal
   // refresh calls) drops the page at once, so protected data cannot linger, and
   // only the newest request may commit anything.
-  const load = useLoad(() => Events.get(id ?? ""), [id], { enabled: !!id });
+  const load = useLoad(async () => {
+    if (!pin || !id) throw new Error("An event read needs a verified session and an event.");
 
-  const auth = useMemo(() => ({ credential, role: user?.role, loading: authLoading }), [credential, user?.role, authLoading]);
-  const readFor = useRef(auth);
-  const authPending = auth.loading || (credential === null && readFor.current.credential !== null && !!user);
-  const rechecking = authPending || readFor.current !== auth;
+    return Events.get(id, pin);
+  }, [id], { enabled: !!id && !!pin, scope });
+
   const { retry, close } = load;
 
   const retryEvent = useCallback(() => {
     refusedEditorReads.current.clear();
-    void retry();
-  }, [retry]);
 
-  useLayoutEffect(() => {
-    if (authPending || readFor.current === auth) return;
-    readFor.current = auth;
-    retryEvent();
-  }, [authPending, auth, retryEvent]);
+    if (pin) void retry();
+    else void bootstrapCredential().catch(() => {});
+  }, [pin, retry]);
 
   const status = load.error instanceof ApiError ? load.error.status : null;
+  const sessionLost = load.error instanceof ApiError && load.error.code === "session_expired";
   const missing = status === 404;
-  const denied = status === 403;
-  const page = rechecking || missing || denied ? null : load.data ?? null;
-  const loading = rechecking || load.loading;
+  const denied = status === 401 || status === 403;
+  const page = !pin || missing || denied ? null : load.data ?? null;
+  const loading = authLoading || load.loading;
   useLayoutEffect(() => {
-    if (authLoading || loading) return;
+    if (!pin || loading || sessionLost) return;
 
     if (missing || denied || (page && !page.canManage)) {
       closeEditors();
@@ -184,7 +184,7 @@ function EventDetailContent() {
       visibilityDraft.current = null;
       refusedEditorReads.current.delete("visibility");
     }
-  }, [authLoading, loading, missing, denied, page, closeEditors]);
+  }, [pin, loading, sessionLost, missing, denied, page, closeEditors]);
   useLayoutEffect(() => {
     if (!editAsked.current || !page || loading || authLoading) return;
     editAsked.current = false;
@@ -214,8 +214,20 @@ function EventDetailContent() {
   const refusedSave = useRefusedSave(load);
   const { refused } = refusedSave;
   const roomListRefused = useRef(false);
+  // A date's save refused and not sent again (DEC-164): which date, for the line above the dates.
+  const [refusedDate, setRefusedDate] = useState<{ eventId: number; date: string } | null>(null);
+
+  useLayoutEffect(() => {
+    refusedEditorReads.current.clear();
+    roomListRefused.current = false;
+    setPickRequest(null);
+    setSeriesFeedback(null);
+    setRefusedDate(null);
+    setUpdatedDateId(null);
+  }, [scope]);
 
   const refreshRefusal = useCallback((intent: "read" | "write") => {
+    if (!credentialCurrent(pin)) return;
     setPickRequest(null);
     setRoomsRevision((n) => n + 1);
 
@@ -223,7 +235,7 @@ function EventDetailContent() {
       closeEditors();
       refused("gone", "action");
     } else void retry();
-  }, [closeEditors, refused, retry]);
+  }, [pin, closeEditors, refused, retry]);
 
   const editorRead = (source: EditorRead, outcome: ResourceReadOutcome) => {
     if (outcome === "loaded") refusedEditorReads.current.delete(source);
@@ -248,15 +260,14 @@ function EventDetailContent() {
   // A roster write holds that date's Edit until the page shows a read asked for after the write.
   const settling = useRosterSettled({ epoch: load.epoch, dataEpoch: load.dataEpoch, reload: () => refreshDates() }, (eventId) => eventId === Number(id));
 
-  // A date's save refused and not sent again (DEC-164): which date, for the line above the dates.
   const dateRefused = useRefusedSave(load);
-  const [refusedDate, setRefusedDate] = useState<{ eventId: number; date: string } | null>(null);
   const error = load.error && !missing ? errorText(load.error, "We couldn't load this event.") : null;
   const setPage = load.setData;
 
   // After a date changes, here or from another page: the dates that need a room are asked for again with the
   // event, since a moved date can lose its booking (NeedsRoomList keeps its own request).
   const refreshDates = () => {
+    if (!credentialCurrent(pin)) return;
     setRoomsRevision((n) => n + 1);
     void load.reload();
   };
@@ -267,7 +278,7 @@ function EventDetailContent() {
   const beginDelete = useConfirm();
   useLeaveQuestion();
 
-  function handleRsvp() { void load.reload(); }
+  function handleRsvp() { if (credentialCurrent(pin)) void load.reload(); }
 
   function parkFocus() {
     returnToEdit.current = "";
@@ -294,6 +305,7 @@ function EventDetailContent() {
   }
 
   function reportSeriesFeedback(eventId: number, date: string, actorResults: ActorRsvpResult[]) {
+    if (!credentialCurrent(pin)) return;
     const signal = { eventId, date, actorResults, revision: ++seriesFeedbackRevision.current };
     setPage((current) => current ? {
       ...current,
@@ -315,14 +327,14 @@ function EventDetailContent() {
     return <Missing title="Event not found" body="It may have been cancelled or removed, or it may be private." notice={<>{managerStatus}<RefusedSaveLine save={refusedSave} noun="event" /><RefusedSaveLine save={dateRefused} noun="date" /></>} />;
   }
 
-  if (!page) {
+  if (!page || !pin) {
     return (
       <div className="fold-page fold-page-narrow">
         {managerStatus}
         <h1 className="text-3xl font-bold mb-6">Event unavailable</h1>
         <RefusedSaveLine save={refusedSave} noun="event" />
         <RefusedSaveLine save={dateRefused} noun="date" />
-        <ErrorNotice message={error ?? "We couldn't load this event."} onRetry={retryEvent} />
+        <ErrorNotice message={error ?? (pin ? "We couldn't load this event." : "We couldn't check your session.")} onRetry={retryEvent} />
       </div>
     );
   }
@@ -346,7 +358,7 @@ function EventDetailContent() {
     const consequence = "This removes every date and its registrations.";
 
     try {
-      if (!(await action.ask({ title: question, body: consequence, confirmLabel: "Delete event", tone: "danger", native: `${question} ${consequence}` }))) return;
+      if (!(await action.ask({ title: question, body: consequence, confirmLabel: "Delete event", tone: "danger", native: `${question} ${consequence}` })) || !credentialCurrent(pin)) return;
       setDeleteError(null);
       await Events.delete(event.id);
 
@@ -364,7 +376,7 @@ function EventDetailContent() {
   }
 
   return (
-    <ResourceRefusal.Provider value={refreshRefusal}><div className="fold-page fold-page-narrow">
+    <EventReadPin.Provider value={[pin]}><ResourceRefusal.Provider value={refreshRefusal}><div className="fold-page fold-page-narrow">
       {managerStatus}
       {/* Edit series and More sit beside the title as secondary actions; an event page has no primary one (DEC-63, DEC-65). */}
       <div className="fold-page-header">
@@ -520,7 +532,7 @@ function EventDetailContent() {
           />}
         </CompactDates>
       </div>
-    </div></ResourceRefusal.Provider>
+    </div></ResourceRefusal.Provider></EventReadPin.Provider>
   );
 }
 

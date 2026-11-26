@@ -1,7 +1,8 @@
+import { useEventReadPin } from "../lib/eventReadPin";
 import { useRosterActivityOf } from "../lib/rosterWrites";
 import { Form } from "./ui/Form";
 import { useEffect, useEffectEvent, useId, useLayoutEffect, useRef, useState, type RefObject } from "react";
-import { ApiError } from "../api/core";
+import { ApiError, credentialCurrent } from "../api/core";
 import { Events } from "../api/events";
 import type { Visibility, VisibilityImpact } from "../types";
 import { GroupVisibilityReview } from "./GroupVisibilityReview";
@@ -84,6 +85,8 @@ export function EventVisibilityControl({
   // Another run in the same panel is on its way.
   locked?: boolean;
 }) {
+  const pin = useEventReadPin();
+
   const [opening] = useState<VisibilityDraftHold>(() => hold?.current ?? {
     base: { audience: { visibility, leaderOpened, groupVisibility }, revision },
     value: choiceFor(visibility, churchWide),
@@ -125,7 +128,7 @@ export function EventVisibilityControl({
   const reportRead = useEffectEvent((outcome: ResourceReadOutcome) => onRead?.(outcome));
   useEffect(() => {
     let live = true;
-    Promise.resolve(Events.visibilityImpact(eventId, visibility)).then(
+    Promise.resolve(Events.visibilityImpact(eventId, visibility, false, ...pin)).then(
       (impact) => {
         if (!live) return;
         setFutureOverrides(impact?.futureOverrides ?? 0);
@@ -137,7 +140,7 @@ export function EventVisibilityControl({
     );
 
     return () => { live = false; };
-  }, [eventId, visibility]);
+  }, [eventId, visibility, pin[0]]);
 
   // What this save can write: the audience and whether it is leader-opened, which follows the group's. The page's
   // read lists 90 days of dates and a reset reaches every later one, so a refused reset is always a conflict, also
@@ -147,7 +150,7 @@ export function EventVisibilityControl({
     opened: base.audience,
     revision: base.revision,
     read: async () => {
-      const stored = await Events.get(eventId);
+      const stored = await Events.get(eventId, ...pin);
 
       return { allowed: stored.canSetVisibility, revision: stored.event.revision, value: stored.event };
     },
@@ -218,6 +221,8 @@ export function EventVisibilityControl({
     void action.run(preview);
   }
 
+  const live = () => home.ref.current && (!pin[0] || credentialCurrent(pin[0]));
+
   async function preview(): Promise<false | void> {
     setError(null);
 
@@ -226,12 +231,12 @@ export function EventVisibilityControl({
       const mark = activity.mark();
 
       try {
-        impact = await Events.visibilityImpact(eventId, value, resetOverrides);
+        impact = await Events.visibilityImpact(eventId, value, resetOverrides, ...pin);
       } catch (err) {
-        if (!home.ref.current) return false;
+        if (!live()) return false;
 
         // The preview is refused like the save would be: the page closes the panel and says so.
-        if (err instanceof ApiError && lostAuthority(err)) {
+        if (err instanceof ApiError && lostAuthority(err) && !(pin[0] && err.code === "session_expired")) {
           onConflict?.("gone");
 
           return false;
@@ -242,7 +247,7 @@ export function EventVisibilityControl({
         return false;
       }
 
-      if (!home.ref.current) return false;
+      if (!live()) return false;
 
       if (moved(mark)) {
         stale();
@@ -266,7 +271,7 @@ export function EventVisibilityControl({
   }
 
   async function commit(consent: string): Promise<false | void> {
-    if (committing.current || activity.pendingFor([eventId]) > 0) return false;
+    if (!live() || committing.current || activity.pendingFor([eventId]) > 0) return false;
     committing.current = true;
     const mark = activity.mark();
     setError(null);

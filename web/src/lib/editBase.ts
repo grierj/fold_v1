@@ -1,5 +1,5 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
-import { ApiError, currentCredential } from "../api/core";
+import { ApiError, currentCredential, type Credential } from "../api/core";
 import { Events, type DateEditChanges } from "../api/events";
 import type { DateOwn, EventOccurrence, Visibility } from "../types";
 import type { RevisionRead } from "./useRevisionSave";
@@ -143,7 +143,7 @@ export function editBaseOf(o: EventOccurrence | undefined, opener: DateOpener): 
 }
 
 // The manager's read of one date: a participating read pinned to the credential this tab holds, when it holds one.
-const managedRead = (opener: DateOpener) => Events.managedDate(opener.eventId, opener.date, currentCredential() ?? undefined);
+const managedRead = (opener: DateOpener, pinned?: Credential) => Events.managedDate(opener.eventId, opener.date, pinned ?? currentCredential() ?? undefined);
 
 // The server said this person may not manage the date (a readable 401, 403 or 404). A credential the server no longer
 // recognizes is not a refusal of the date: the tab checks its credential, and the read can be asked again.
@@ -161,7 +161,7 @@ type EditRead =
 // the date, its row, its group): nothing read under one owner is shown under another, and a row hidden and shown
 // again, or a page that failed and loaded again, keeps the read it has. "denied": the server refused it, or it answered
 // another date than the list named (moved to another row or group, cancelled); the host checks its page again.
-export function useEditRead(opener: DateOpener, owner: string, open: boolean, onRefused: () => void): EditRead {
+export function useEditRead(opener: DateOpener, owner: string, open: boolean, onRefused: () => void, pinned?: Credential): EditRead {
   const [asked, setAsked] = useState(0);
   const [answer, setAnswer] = useState<{ owner: string; asked: number; result: EditBase | { refused: boolean } } | null>(null);
   const latest = useRef({ opener, onRefused });
@@ -175,13 +175,13 @@ export function useEditRead(opener: DateOpener, owner: string, open: boolean, on
   useEffect(() => {
     if (!open || answered) return;
     let current = true;
-    managedRead(latest.current.opener).then(
+    managedRead(latest.current.opener, pinned).then(
       (read) => { if (current) setAnswer({ owner, asked, result: editBaseOf(read.occurrence, latest.current.opener) ?? { refused: true } }); },
       (cause: unknown) => { if (current) setAnswer({ owner, asked, result: { refused: editReadRefused(cause) } }); },
     );
 
     return () => { current = false; };
-  }, [open, owner, asked, answered]);
+  }, [open, owner, asked, answered, pinned]);
 
   const refused = !!mine && "refused" in mine.result && mine.result.refused;
 
@@ -238,8 +238,8 @@ export function intendedDateFields(opened: DateFields, changes: DateEditChanges)
 
 // The manager's read again after a refused save, as useRevisionSave compares it: null for a read that opens no editor
 // (cancelled, moved to another row or group, malformed), which is a conflict.
-export async function readDateFields(opener: DateOpener): Promise<RevisionRead<DateFields | null>> {
-  const { occurrence } = await managedRead(opener);
+export async function readDateFields(opener: DateOpener, pinned?: Credential): Promise<RevisionRead<DateFields | null>> {
+  const { occurrence } = await managedRead(opener, pinned);
   const base = editBaseOf(occurrence, opener);
 
   return { allowed: true, revision: occurrence?.revision, value: base && dateFields(base) };

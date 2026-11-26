@@ -1,3 +1,4 @@
+import { useEventReadPin } from "../lib/eventReadPin";
 import { Form } from "./ui/Form";
 import { childcareBody, childcareFrom } from "./ChildcareField";
 import { useLayoutEffect, useRef, useState, type RefObject } from "react";
@@ -173,6 +174,7 @@ export function SeriesEditor({
   locked?: boolean;
 }) {
   // The sibling's save can remount this form. The draft still names the read it was made from (DEC-162).
+  const pin = useEventReadPin();
   const [held] = useState(() => hold?.current);
   const [instance] = useState(() => held?.opened ?? series);
   const [original] = useState(() => draftOf(instance));
@@ -204,7 +206,7 @@ export function SeriesEditor({
     opened: instance,
     revision: instance.revision,
     read: async () => {
-      const stored = await Events.get(instance.eventId);
+      const stored = await Events.get(instance.eventId, ...pin);
 
       return { allowed: stored.canManage, revision: stored.event.revision, value: stored.event };
     },

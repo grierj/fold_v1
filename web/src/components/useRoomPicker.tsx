@@ -1,11 +1,23 @@
 import { useEffect, useEffectEvent } from "react";
+import { credentialCurrent, type Credential } from "../api/core";
 import { resourceRefused, type ResourceReadOutcome } from "../lib/refusedSave";
 import { errorCode, errorText } from "../lib/errors";
 import { useLoad } from "../lib/useLoad";
-import { useRoomsEnabled } from "../lib/useSite";
+import { recheckSite, useRoomsEnabled } from "../lib/useSite";
 import { Button } from "./ui/Button";
 import { FormError } from "./ui/Field";
 import { Skeleton } from "./ui/Skeleton";
+
+// A room read can stop at the public rooms switch before checking the viewer. Only /site can tell us the switch
+// is off in that case. Keep the pinned refusal as an error until the public setting answers.
+export async function readRooms<T>(answer: Promise<T>, pinned?: Credential): Promise<T> {
+  try {
+    return await answer;
+  } catch (cause) {
+    if (pinned && credentialCurrent(pinned) && errorCode(cause) === "session_expired") recheckSite();
+    throw cause;
+  }
+}
 
 // What the room pickers share: a church with rooms off, or a site we can't
 // read, shows no rooms control at all; and the rooms load only while it is on.

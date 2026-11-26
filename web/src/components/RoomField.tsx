@@ -1,3 +1,4 @@
+import { useEventReadPin } from "../lib/eventReadPin";
 import { useEffect, useRef, useState, type KeyboardEvent } from "react";
 import { DateRooms, type DateRoomInput } from "../api/rooms";
 import { useAuth } from "../auth";
@@ -13,7 +14,7 @@ import { Field, FormError, Input, Select } from "./ui/Field";
 import { Button } from "./ui/Button";
 import { DoubleBookPrompt, useOverlapReason } from "./DoubleBookPrompt";
 import { RoomOptions } from "./RoomOptions";
-import { pickGone, RoomLoadStatus, RoomsOffLine, roomsTurnedOff, useRoomPicker } from "./useRoomPicker";
+import { pickGone, readRooms, RoomLoadStatus, RoomsOffLine, roomsTurnedOff, useRoomPicker } from "./useRoomPicker";
 import { AlertCircleIcon } from "./icons";
 
 // What a pick of a date's room writes, as the server stores it: the room the date holds or waits for, or none. A date
@@ -64,8 +65,9 @@ export function RoomField({ eventId, date, idPrefix, onChanged, onGone, onRead, 
   focusOnLoad?: boolean;
 }) {
   const id = `${idPrefix}-room`;
+  const pin = useEventReadPin();
   // A church with rooms off, or a site we can't read, sees no rooms control at all.
-  const { enabled, off, list, loading, loadError } = useRoomPicker(() => DateRooms.list(eventId, date), [eventId, date], onGone, onRead);
+  const { enabled, off, list, loading, loadError } = useRoomPicker(() => readRooms(DateRooms.list(eventId, date, ...pin), pin[0]), [eventId, date], onGone, onRead);
 
   const focused = useRef(false);
   useEffect(() => {
@@ -99,6 +101,7 @@ function DateRoomControl({ eventId, date, id, read, show, onChanged, onGone }: {
   onChanged?: (refused?: boolean, stored?: RoomBooking | null) => void;
   onGone: () => void;
 }) {
+  const pin = useEventReadPin();
   const { isAdmin } = useAuth();
   // Room booking was turned off since the control loaded: it says so in place of the picker.
   const [off, setOff] = useState(false);
@@ -123,7 +126,7 @@ function DateRoomControl({ eventId, date, id, read, show, onChanged, onGone }: {
     opened: read,
     revision: read.dateRoom.revision,
     read: async () => {
-      const now = await DateRooms.list(eventId, date);
+      const now = await readRooms(DateRooms.list(eventId, date, ...pin), pin[0]);
 
       return { allowed: true, revision: now.dateRoom.revision, row: now };
     },

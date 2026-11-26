@@ -1,3 +1,4 @@
+import { useEventReadPin } from "../lib/eventReadPin";
 import { outcomeOf, useRosterGate } from "../lib/rosterWrites";
 import { useCallback, useEffect, useState } from "react";
 import { Events } from "../api/events";
@@ -70,7 +71,8 @@ function KeptDateRead(props: ReadProps) {
 
 function KeptDateBody({ readKey, eventId, date, keptDates, home, onSelect, onRefused, onClose }: ReadProps) {
   // eventId and date are fixed for this instance: the shell's key holds both.
-  const load = useLoad(() => Events.managedDate(eventId, date).then((r) => r.occurrence), [eventId, date], { refreshOnFocus: true });
+  const pin = useEventReadPin();
+  const load = useLoad(() => Events.managedDate(eventId, date, ...pin).then((r) => r.occurrence), [eventId, date], { refreshOnFocus: true });
   // Roster writes on this date in flight for the session: the one starter of the read after a write.
   const gate = useRosterGate(eventId, date, load);
   const refusedNow = load.error != null && outcomeOf(load.error) === "refused";

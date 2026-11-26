@@ -41,6 +41,7 @@ export interface Load<T> {
 }
 
 interface State<T> {
+  scope?: object | null;
   data: T | undefined;
   error: unknown;
   loading: boolean;
@@ -51,6 +52,8 @@ interface State<T> {
 
 interface Options {
   enabled?: boolean;
+  // An authority change drops even a quiet answer in the render that observes it.
+  scope?: object | null;
   // Ask again, failing closed (like `retry`), whenever the window regains
   // focus: for a page whose rights may have changed while it was away.
   refreshOnFocus?: boolean;
@@ -63,10 +66,11 @@ interface Options {
 export function useLoad<T>(fn: () => Promise<T>, deps: DependencyList, options: Options = {}): Load<T> {
   const enabled = options.enabled !== false;
   const refreshOnFocus = options.refreshOnFocus === true;
-  const [state, setState] = useState<State<T>>({ data: undefined, error: null, loading: enabled, closed: false, dataEpoch: 0 });
+  const { scope } = options;
+  const [state, setState] = useState<State<T>>({ scope, data: undefined, error: null, loading: enabled, closed: false, dataEpoch: 0 });
   const [tick, setTick] = useState(0);
   const quiet = useRef(false);
-  const lastDeps = useRef<DependencyList | null>(null);
+  const lastRead = useRef<{ deps: DependencyList; scope: typeof scope } | null>(null);
   const latest = useRef(fn);
   latest.current = fn;
   const generation = useRef(0);
@@ -83,27 +87,27 @@ export function useLoad<T>(fn: () => Promise<T>, deps: DependencyList, options: 
     const run = ++generation.current;
 
     if (!enabled) {
-      setState((s) => (s.data === undefined && s.error === null && !s.loading ? s : { data: undefined, error: null, loading: false, closed: false, dataEpoch: 0 }));
+      setState((s) => (s.scope === scope && s.data === undefined && s.error === null && !s.loading ? s : { scope, data: undefined, error: null, loading: false, closed: false, dataEpoch: 0 }));
       settle("stale");
 
       return;
     }
 
     // A quiet reload keeps the old answer only under the same inputs.
-    const prev = lastDeps.current;
-    const sameDeps = prev !== null && prev.length === deps.length && deps.every((d, i) => Object.is(d, prev[i]));
-    lastDeps.current = deps;
+    const prev = lastRead.current;
+    const sameDeps = prev !== null && prev.scope === scope && prev.deps.length === deps.length && deps.every((d, i) => Object.is(d, prev.deps[i]));
+    lastRead.current = { deps, scope };
     const keep = quiet.current && sameDeps;
     quiet.current = false;
-    setState((s) => (keep ? (s.error === null && !s.closed ? s : { ...s, error: null, closed: false }) : { data: undefined, error: null, loading: true, closed: false, dataEpoch: 0 }));
+    setState((s) => (keep && s.scope === scope ? (s.error === null && !s.closed ? s : { ...s, error: null, closed: false }) : { scope, data: undefined, error: null, loading: true, closed: false, dataEpoch: 0 }));
     latest.current().then(
-      (data) => { if (generation.current === run) { setState({ data, error: null, loading: false, closed: false, dataEpoch: run }); settle("loaded"); } },
-      (cause: unknown) => { if (generation.current === run) { setState((s) => (keep ? { ...s, error: cause, loading: false, closed: false } : { data: undefined, error: cause, loading: false, closed: false, dataEpoch: 0 })); settle("failed"); } },
+      (data) => { if (generation.current === run) { setState({ scope, data, error: null, loading: false, closed: false, dataEpoch: run }); settle("loaded"); } },
+      (cause: unknown) => { if (generation.current === run) { setState((s) => (keep && s.scope === scope ? { ...s, error: cause, loading: false, closed: false } : { scope, data: undefined, error: cause, loading: false, closed: false, dataEpoch: 0 })); settle("failed"); } },
     );
 
     return () => { generation.current++; settle("stale"); };
     // Restarts on the caller's deps, which are not known statically.
-  }, [...deps, enabled, tick]);
+  }, [...deps, enabled, scope, tick]);
 
   // Asks still waiting for an effect run when the component goes away, and any made after it has gone (a save that
   // lands once its page is left): nothing will run to answer them, so they end stale, not never.
@@ -128,7 +132,7 @@ export function useLoad<T>(fn: () => Promise<T>, deps: DependencyList, options: 
     generation.current++;
     quiet.current = keepData;
 
-    if (!keepData) setState({ data: undefined, error: null, loading: true, closed: false, dataEpoch: 0 });
+    if (!keepData) setState((s) => ({ scope: s.scope, data: undefined, error: null, loading: true, closed: false, dataEpoch: 0 }));
     waiters.current.push(done);
     setTick((n) => n + 1);
   }), []);
@@ -149,7 +153,7 @@ export function useLoad<T>(fn: () => Promise<T>, deps: DependencyList, options: 
 
     // Nothing will answer the asks still waiting: they end stale now, not never.
     for (const done of [...waiters.current.splice(0), ...inflight.current.splice(0)]) done("stale");
-    setState({ data: undefined, error: null, loading: false, closed: true, dataEpoch: 0 });
+    setState((s) => ({ scope: s.scope, data: undefined, error: null, loading: false, closed: true, dataEpoch: 0 }));
   }, []);
 
   const epoch = useCallback(() => generation.current, []);
@@ -164,8 +168,8 @@ export function useLoad<T>(fn: () => Promise<T>, deps: DependencyList, options: 
   }, [refreshOnFocus, enabled, retry]);
 
   // Loading also covers the render before the effect has started the request.
-  const { closed, ...answer } = state;
-  const loading = state.loading || (enabled && !closed && state.data === undefined && state.error === null);
+  const { closed, data, error, dataEpoch, loading: pending } = state.scope === scope ? state : { data: undefined, error: null, loading: enabled, closed: false, dataEpoch: 0 };
+  const loading = pending || (enabled && !closed && data === undefined && error === null);
 
-  return { ...answer, loading, retry, reload, setData, close, epoch };
+  return { data, error, dataEpoch, loading, retry, reload, setData, close, epoch };
 }

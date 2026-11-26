@@ -121,12 +121,9 @@ interface Host {
   date?: string;
   // The guarded edits' transport, whose first answer is the kept 409.
   edits: EditSends;
-  // What the editor's own (pinned) manager read answers; the panel's reads are never pinned.
+  // What the editor's opening manager read answers.
   base: () => OccurrenceResponse;
 }
-
-// The panel's reads, apart from the editor's own.
-const panelReads = () => vi.mocked(Events.managedDate).mock.calls.filter((call) => call[2] === undefined).length;
 
 async function openRemove() {
   await userEvent.click(screen.getByRole("button", { name: "More for Old Name" }));
@@ -145,7 +142,8 @@ export async function runHostCase(event: HostEvent, outcome: ReadOutcome, host: 
   const until = event === "ii" ? new Date(Date.now() + 60_000).toISOString() : undefined;
   host.edits.answer(kept409([{ date, keptCount: 1 }]));
   const reads: Array<Promise<OccurrenceResponse>> = [Promise.resolve(event === "iii-a" ? keptRead(date, { keptCount: 0, attendees: [] }) : keptRead(date, { attendees: [keptPerson("Old Name"), careKid(until)] }))];
-  vi.mocked(Events.managedDate).mockImplementation((_id, _date, pinned) => (pinned ? Promise.resolve(host.base()) : reads.shift() ?? Promise.reject(new Error("no panel read expected"))));
+  const managedDate = vi.mocked(Events.managedDate);
+  managedDate.mockImplementationOnce(async () => host.base()).mockImplementation(() => reads.shift() ?? Promise.reject(new Error("no panel read expected")));
   await host.openAndSave();
   const loads = host.pageLoads();
   await screen.findByText(event === "iii-a" ? KEPT.nobodyOne : "Old Name");
@@ -178,14 +176,14 @@ export async function runHostCase(event: HostEvent, outcome: ReadOutcome, host: 
   const held = deferred<OccurrenceResponse>();
   const asksPage = event === "iv" || event.startsWith("lost-");
   reads.push(held.promise);
-  const before = panelReads();
+  const before = managedDate.mock.calls.length;
   const seen = observeKept([date]);
   await fire();
   const reread = asksPage ? loads + 1 : loads;
   expect(host.pageLoads()).toBe(reread);
   expect(keptForbiddenNow([date])).toEqual([]);
   expect(await screen.findByRole("region", { name: KEPT.home })).toHaveTextContent(KEPT.checking);
-  expect(panelReads()).toBe(before + 1);
+  expect(managedDate).toHaveBeenCalledTimes(before + 1);
   expect(minutes()).toHaveValue(150);
   seen.stop();
   seen.expectClean();

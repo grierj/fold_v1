@@ -1,3 +1,4 @@
+import { useEventReadPin } from "../lib/eventReadPin";
 import { useEffect, useRef, useState } from "react";
 import { SeriesRooms } from "../api/rooms";
 import { errorText } from "../lib/errors";
@@ -7,7 +8,7 @@ import { useRoomsEnabled } from "../lib/useSite";
 import { formatDayLong } from "../lib/when";
 import type { NeedsRoom, RoomBooking } from "../types";
 import { RoomField } from "./RoomField";
-import { roomsTurnedOff } from "./useRoomPicker";
+import { readRooms, roomsTurnedOff } from "./useRoomPicker";
 import { useShowAll } from "./useShowAll";
 import { Button } from "./ui/Button";
 import { FormError } from "./ui/Field";
@@ -63,7 +64,8 @@ export function NeedsRoomList({ eventId, revision, hasDate, onPick, onGone, onRe
   const lastPick = useRef<{ refused: boolean; stored: RoomBooking | null } | null>(null);
   const noticeRef = useRef<HTMLParagraphElement>(null);
 
-  const list = useLoad(() => SeriesRooms.list(eventId), [eventId], { enabled });
+  const pin = useEventReadPin();
+  const list = useLoad(() => readRooms(SeriesRooms.list(eventId, ...pin), pin[0]), [eventId], { enabled });
   // A change on the page, or in a row's own control, asks again without blanking the list.
   const stamp = `${revision}:${own}`;
   const asked = useRef(stamp);
@@ -99,6 +101,8 @@ export function NeedsRoomList({ eventId, revision, hasDate, onPick, onGone, onRe
   }, [notice]);
 
   const notes = notice && <p ref={noticeRef} tabIndex={-1} role="status" className="mt-6 text-sm text-text-muted outline-none">{notice}</p>;
+
+  if (!enabled) return null;
 
   if (roomsTurnedOff(list.error)) return <>{notes}</>;
 

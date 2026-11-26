@@ -58,6 +58,11 @@ export function invalidateSite(saved?: Partial<SiteInfo>) {
   else { generation++; set({ site: null, error: null, loading: false }); }
 }
 
+// Readers that hit the same changed setting share one refresh of the public answer.
+export function recheckSite() {
+  if (!state.loading) load();
+}
+
 // forgetSite drops the shared answer without asking again, for tests.
 /** @public test seam: drops the shared /site answer. */
 export function forgetSite() {
