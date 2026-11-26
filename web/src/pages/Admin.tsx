@@ -6,7 +6,7 @@ import { PeoplePicker } from "../components/ui/PeoplePicker";
 import type { PersonSearchResult } from "../types";
 import { ContactDetails } from "../components/ContactDetails";
 import { GroupDepartureDialog } from "../components/GroupDepartureDialog";
-import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { Badge } from "../components/ui/Badge";
 import { Tabs } from "../components/ui/Tabs";
 import { roleLabel, accountStatusLabel, groupStatusLabel } from "../lib/status";
@@ -58,13 +58,15 @@ import { Illustration } from "../components/ui/Illustration";
 import { Skeleton } from "../components/ui/Skeleton";
 import { ContactHistory } from "../api/contactHistory";
 import { formatShortDay } from "../lib/when";
+import { groupDeleteNotice } from "../lib/signedUp";
 
 type AdminTab = "approvals" | "groups" | "rooms" | "users" | "invite" | "settings" | "system";
 
 const TeenConsentPanel = lazy(() => import("../components/TeenConsentPanel"));
 
 
-type Decision = { kind: "approved" | "rejected"; id: number; name: string; leaderName: string };
+// What the admin just decided on a new group, or a deletion request that someone else ended first.
+type Decision = { kind: "approved" | "rejected"; id: number; name: string; leaderName: string } | { kind: "no_longer_open"; name: string };
 
 function PendingCard({ group, onDone }: { group: GroupSummary; onDone: (decision: Decision) => void }) {
   const [tags, setTags] = useState(group.tags.join(", "));
@@ -151,20 +153,35 @@ function PendingCard({ group, onDone }: { group: GroupSummary; onDone: (decision
   );
 }
 
-function DeletionCard({ group, onDone }: { group: GroupSummary; onDone: () => void }) {
+// The card's Delete and Keep group answer the leader's request. When the request is no longer open (the leader
+// withdrew it, someone joined, another admin kept or deleted the group) the server refuses and changes nothing, and the
+// card goes away while the queue reads again (onStale).
+function DeletionCard({ group, onDone, onStale }: { group: GroupSummary; onDone: () => void; onStale: () => void }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // The browser's prompt opens only after the count arrives: by then the card may be gone (the queue read again, or
+  // the admin left the tab), and then the press asks nothing.
+  const live = useRef(false);
+  useLayoutEffect(() => {
+    live.current = true;
+
+    return () => { live.current = false; };
+  }, []);
 
   async function approve() {
-    if (!confirm(`Delete “${group.name}”? This removes the group, its members, and its events.`)) return;
+    if (busy) return;
     setBusy(true);
     setError(null);
 
     try {
-      await Admin.deleteGroup(group.id);
+      const told = await groupDeleteNotice(group.id);
+
+      if (!live.current || !confirm(`Delete “${group.name}”? This removes the group, its members, and its events. ${told}`)) return;
+      await Admin.deleteGroup(group.id, true);
       onDone();
     } catch (e) {
-      setError(errorText(e, "We couldn't delete that."));
+      if (e instanceof ApiError && (e.code === "already_handled" || e.status === 404)) onStale();
+      else setError(errorText(e, "We couldn't delete that."));
     } finally {
       setBusy(false);
     }
@@ -178,7 +195,8 @@ function DeletionCard({ group, onDone }: { group: GroupSummary; onDone: () => vo
       await Admin.rejectDeletion(group.id);
       onDone();
     } catch (e) {
-      setError(errorText(e, "We couldn't keep the group."));
+      if (e instanceof ApiError && (e.code === "already_handled" || e.status === 404)) onStale();
+      else setError(errorText(e, "We couldn't keep the group."));
     } finally {
       setBusy(false);
     }
@@ -371,9 +389,15 @@ function ApprovalsTab({ onCount, onGroupDecided }: { onCount: (n: number) => voi
       <p role="status" aria-live="polite" className="sr-only">{announce}</p>
       {decision && (
         <p ref={decisionRef} role="status" tabIndex={-1} className="mb-4 rounded-lg border border-border bg-sunken px-4 py-3 text-sm focus:outline-none">
-          “{decision.name}” {decision.kind}. {decision.leaderName ? `${decision.leaderName} was told.` : "Its leaders were told."}
-          {decision.kind === "approved" && (
-            <>{" "}<Link to={`/groups/${decision.id}`} className="text-link">View group</Link></>
+          {decision.kind === "no_longer_open" ? (
+            `The request to delete “${decision.name}” is no longer open, so nothing was changed.`
+          ) : (
+            <>
+              “{decision.name}” {decision.kind}. {decision.leaderName ? `${decision.leaderName} was told.` : "Its leaders were told."}
+              {decision.kind === "approved" && (
+                <>{" "}<Link to={`/groups/${decision.id}`} className="text-link">View group</Link></>
+              )}
+            </>
           )}
         </p>
       )}
@@ -439,7 +463,15 @@ function ApprovalsTab({ onCount, onGroupDecided }: { onCount: (n: number) => voi
         <div className="space-y-4 mt-8">
           <h2 className="text-xl font-bold">Deletion requests</h2>
           {deletions.map((g) => (
-            <DeletionCard key={g.id} group={g} onDone={loadAfterOther} />
+            <DeletionCard
+              key={g.id}
+              group={g}
+              onDone={loadAfterOther}
+              onStale={() => {
+                setDecision({ kind: "no_longer_open", name: g.name });
+                void load();
+              }}
+            />
           ))}
         </div>
       )}
@@ -663,12 +695,16 @@ function GroupsTab({ users, groups, error, reload, onDeleted }: {
   }, [deleted]);
 
   async function deleteGroup(g: GroupSummary) {
-    if (!confirm(`Delete “${g.name}”? This removes the group, its members, and its events.`)) return;
     setDeletingId(g.id);
-    setDeleteError(null);
-    setDeleted("");
 
     try {
+      const told = await groupDeleteNotice(g.id);
+
+      // The prompt opens after the count arrives: by then the row may be off screen (another page or search, or the
+      // tab left), and then the press asks nothing.
+      if (!rowsShown.current.has(g.id) || !confirm(`Delete “${g.name}”? This removes the group, its members, and its events. ${told}`)) return;
+      setDeleteError(null);
+      setDeleted("");
       await Admin.deleteGroup(g.id);
       onDeleted(g.id);
       setDeleted(`“${g.name}” was deleted.`);
@@ -683,6 +719,12 @@ function GroupsTab({ users, groups, error, reload, onDeleted }: {
   const needle = query.trim().toLowerCase();
   const shown = sortGroups(groups ?? []).filter((g) => (!statusFilter || g.status === statusFilter) && (!needle || g.name.toLowerCase().includes(needle) || g.leaderName.toLowerCase().includes(needle)));
   const paging = usePage(shown, query + statusFilter);
+  const rowsShown = useRef(new Set<number>());
+  useLayoutEffect(() => {
+    rowsShown.current = new Set(paging.rows.map((g) => g.id));
+
+    return () => { rowsShown.current = new Set(); };
+  });
 
   if (!groups) return error ? <ErrorNotice message={error} onRetry={reload} /> : <Skeleton kind="lines" />;
 

@@ -1371,7 +1371,7 @@ var auditWriterCensus = map[string]string{
 	"api_groups.go:apiUpdateGroup":                                "804c44cd221b21859b3d37972b5bc701650208a3bda98b0c9ae057a58a9c2b99",
 	"api_groups.go:auditAndNotifyLeadership":                      "10cc718888efbfe112b1f9d198a48a9a9c7e8c74ba90ec721ad35ba8d555316c",
 	"api_groups.go:changeRoleIn":                                  "2bbe7152fb27b6fdc394965e6b8047c5cec5f0a6c7e7bab0e140bb9821076855",
-	"api_groups.go:deleteGroup":                                   "fec7d685ed8b3700c060f747c0c0bc2a1b758fef582f539ec837dd198058edbd",
+	"api_groups.go:deleteGroup":                                   "5d1010c9285d6e3ba16003c70f5f443fbbde3cbf8bd37a454806329283e4c012",
 	"api_guest.go:apiCancelGuestRegistration":                     "d92867ce53e9aa1d9e3f635bee6ae5946c7aa0fed892bebc76beba28bb017fbb",
 	"api_guest.go:createGuestUpgradeRequest":                      "d4efcca0c23809550c5f9d8996e03fad7134231186eb151392530f8a17e6341c",
 	"api_handoff.go:demoteEverywhere":                             "f8c19b38c31de43cb159e734182104c37d48a604e794b65c09b7d22b3483ba38",

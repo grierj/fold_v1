@@ -37,7 +37,7 @@ stubService(Groups, () => ({ list: vi.fn(), members: vi.fn().mockResolvedValue({
 
 stubService(AdminGroups, () => ({ list: vi.fn(), addMember: vi.fn() }));
 
-stubService(Admin, () => ({ pending: vi.fn().mockResolvedValue({ groups: [] }), deletions: vi.fn().mockResolvedValue({ groups: [] }), approve: vi.fn(), reject: vi.fn(), deleteGroup: vi.fn(), timezone: vi.fn().mockResolvedValue({ timezone: "America/Denver", revision: "site-zone" }), setTimezone: vi.fn(), churchAddress: vi.fn().mockResolvedValue({ address: "Grace Church", revision: "address" }), setChurchAddress: vi.fn(), guardianCopies: vi.fn().mockResolvedValue({ on: false }), setGuardianCopies: vi.fn(), replyTo: vi.fn().mockResolvedValue({ address: "", revision: "reply" }), setReplyTo: vi.fn(), pushEnabled: vi.fn().mockResolvedValue({ on: true }), setPushEnabled: vi.fn() }));
+stubService(Admin, () => ({ pending: vi.fn().mockResolvedValue({ groups: [] }), deletions: vi.fn().mockResolvedValue({ groups: [] }), approve: vi.fn(), reject: vi.fn(), deleteGroup: vi.fn(), deleteCount: vi.fn(), rejectDeletion: vi.fn(), timezone: vi.fn().mockResolvedValue({ timezone: "America/Denver", revision: "site-zone" }), setTimezone: vi.fn(), churchAddress: vi.fn().mockResolvedValue({ address: "Grace Church", revision: "address" }), setChurchAddress: vi.fn(), guardianCopies: vi.fn().mockResolvedValue({ on: false }), setGuardianCopies: vi.fn(), replyTo: vi.fn().mockResolvedValue({ address: "", revision: "reply" }), setReplyTo: vi.fn(), pushEnabled: vi.fn().mockResolvedValue({ on: true }), setPushEnabled: vi.fn() }));
 
 stubService(AdminJobs, () => ({ list: vi.fn(), retry: vi.fn(), dismiss: vi.fn() }));
 
@@ -84,6 +84,9 @@ beforeEach(() => {
   vi.mocked(Admin.approve).mockReset();
   vi.mocked(Admin.reject).mockReset();
   vi.mocked(Admin.deleteGroup).mockReset();
+  vi.mocked(Admin.deleteCount).mockReset().mockResolvedValue({ people: 0 });
+  vi.mocked(Admin.rejectDeletion).mockReset();
+  vi.mocked(Admin.deletions).mockReset().mockResolvedValue({ groups: [] });
   vi.mocked(ContactHistory.people).mockReset().mockResolvedValue({ people: [] });
   vi.mocked(AdminUsers.legacyReasonsProbe).mockReset().mockResolvedValue({ found: false });
   vi.mocked(AdminUsers.list).mockResolvedValue({ users: [] });
@@ -250,7 +253,7 @@ it("deletes a group from its More menu after the same confirm", async () => {
   render(<MemoryRouter initialEntries={["/admin?tab=groups"]}><AdminPage /></MemoryRouter>);
   await userEvent.click(await screen.findByRole("button", { name: "More for Choir" }));
   await userEvent.click(screen.getByRole("menuitem", { name: "Delete" }));
-  expect(confirmSpy).toHaveBeenCalledWith("Delete “Choir”? This removes the group, its members, and its events.");
+  expect(confirmSpy).toHaveBeenCalledWith("Delete “Choir”? This removes the group, its members, and its events. No one else will be notified.");
   expect(Admin.deleteGroup).not.toHaveBeenCalled();
   await userEvent.click(screen.getByRole("button", { name: "More for Choir" }));
   await userEvent.click(screen.getByRole("menuitem", { name: "Delete" }));
@@ -261,6 +264,100 @@ it("deletes a group from its More menu after the same confirm", async () => {
   await waitFor(() => expect(status).toHaveFocus());
   expect(screen.getByRole("tab", { name: "Groups, 1" })).toBeInTheDocument();
   expect(AdminGroups.list).toHaveBeenCalledTimes(1);
+});
+
+describe("a group delete's prompt says who will be notified", () => {
+  const lines: [string, number | Error, string][] = [
+    ["none", 0, "No one else will be notified."],
+    ["one", 1, "1 other person will be notified."],
+    ["many", 4, "4 other people will be notified."],
+    ["an unreadable count", new ApiError(500, "x"), "Anyone else who is a member or signed up for an upcoming date will be notified."],
+  ];
+
+  it.each(lines)("from the Groups tab, for %s, and sends no request marker", async (_, count, line) => {
+    vi.mocked(AdminGroups.list).mockResolvedValue({ groups: [group(3, "Choir")] });
+
+    if (count instanceof Error) vi.mocked(Admin.deleteCount).mockRejectedValue(count);
+    else vi.mocked(Admin.deleteCount).mockResolvedValue({ people: count });
+    vi.mocked(Admin.deleteGroup).mockResolvedValue({});
+    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(true);
+    render(<MemoryRouter initialEntries={["/admin?tab=groups"]}><AdminPage /></MemoryRouter>);
+    await userEvent.click(await screen.findByRole("button", { name: "More for Choir" }));
+    await userEvent.click(screen.getByRole("menuitem", { name: "Delete" }));
+    await waitFor(() => expect(confirmSpy).toHaveBeenCalledWith(`Delete “Choir”? This removes the group, its members, and its events. ${line}`));
+    expect(Admin.deleteCount).toHaveBeenCalledWith(3);
+    await waitFor(() => expect(Admin.deleteGroup).toHaveBeenCalledWith(3));
+  });
+
+  it.each(lines)("from a deletion request, for %s, and marks the delete as its answer", async (_, count, line) => {
+    vi.mocked(AdminAccountRequests.list).mockResolvedValue({ requests: [] });
+    vi.mocked(Admin.deletions).mockResolvedValueOnce({ groups: [group(5, "Solo", { deletionRequested: true })] }).mockResolvedValue({ groups: [] });
+
+    if (count instanceof Error) vi.mocked(Admin.deleteCount).mockRejectedValue(count);
+    else vi.mocked(Admin.deleteCount).mockResolvedValue({ people: count });
+    vi.mocked(Admin.deleteGroup).mockResolvedValue({});
+    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(true);
+    render(<MemoryRouter initialEntries={["/admin"]}><AdminPage /></MemoryRouter>);
+    await userEvent.click(await screen.findByRole("button", { name: "Delete group" }));
+    await waitFor(() => expect(confirmSpy).toHaveBeenCalledWith(`Delete “Solo”? This removes the group, its members, and its events. ${line}`));
+    await waitFor(() => expect(Admin.deleteGroup).toHaveBeenCalledWith(5, true));
+    await waitFor(() => expect(screen.queryByRole("link", { name: "Solo" })).not.toBeInTheDocument());
+  });
+
+  it("asks nothing when the row left the screen while the count was read", async () => {
+    vi.mocked(AdminGroups.list).mockResolvedValue({ groups: [group(3, "Choir"), group(4, "Youth")] });
+
+    let answer: (v: { people: number }) => void = () => {};
+
+    vi.mocked(Admin.deleteCount).mockReturnValue(new Promise((resolve) => { answer = resolve; }));
+    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(true);
+    render(<MemoryRouter initialEntries={["/admin?tab=groups"]}><AdminPage /></MemoryRouter>);
+    await userEvent.click(await screen.findByRole("button", { name: "More for Choir" }));
+    await userEvent.click(screen.getByRole("menuitem", { name: "Delete" }));
+    await userEvent.type(screen.getByRole("searchbox", { name: "Search groups" }), "Youth");
+    expect(screen.queryByRole("link", { name: "Choir" })).not.toBeInTheDocument();
+    await act(async () => { answer({ people: 2 }); });
+    expect(confirmSpy).not.toHaveBeenCalled();
+    expect(Admin.deleteGroup).not.toHaveBeenCalled();
+  });
+
+  it("asks nothing when the request's card left the screen while the count was read", async () => {
+    vi.mocked(AdminAccountRequests.list).mockResolvedValue({ requests: [] });
+    vi.mocked(Admin.deletions).mockResolvedValue({ groups: [group(5, "Solo", { deletionRequested: true })] });
+
+    let answer: (v: { people: number }) => void = () => {};
+
+    vi.mocked(Admin.deleteCount).mockReturnValue(new Promise((resolve) => { answer = resolve; }));
+    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(true);
+    render(<MemoryRouter initialEntries={["/admin"]}><AdminPage /></MemoryRouter>);
+    await userEvent.click(await screen.findByRole("button", { name: "Delete group" }));
+    await userEvent.click(screen.getByRole("tab", { name: /^Groups/ }));
+    await act(async () => { answer({ people: 2 }); });
+    expect(confirmSpy).not.toHaveBeenCalled();
+    expect(Admin.deleteGroup).not.toHaveBeenCalled();
+  });
+});
+
+describe("a deletion request that is no longer open", () => {
+  const handled = new ApiError(409, "This was already handled", { code: "already_handled", resolution: "withdrawn", resolvedBy: "" });
+
+  it.each([
+    ["Delete group", () => vi.mocked(Admin.deleteGroup).mockRejectedValue(handled)],
+    ["Keep group", () => vi.mocked(Admin.rejectDeletion).mockRejectedValue(handled)],
+  ])("%s takes the card away, reads the queue again and says nothing was changed", async (button, refuse) => {
+    refuse();
+    vi.mocked(AdminAccountRequests.list).mockResolvedValue({ requests: [] });
+    vi.mocked(Admin.deletions).mockResolvedValueOnce({ groups: [group(5, "Solo", { deletionRequested: true })] }).mockResolvedValue({ groups: [] });
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+    render(<MemoryRouter initialEntries={["/admin"]}><AdminPage /></MemoryRouter>);
+    await userEvent.click(await screen.findByRole("button", { name: button }));
+    const status = await screen.findByText("The request to delete “Solo” is no longer open, so nothing was changed.");
+    expect(status).toHaveAttribute("role", "status");
+    await waitFor(() => expect(status).toHaveFocus());
+    expect(screen.queryByRole("button", { name: "Delete group" })).not.toBeInTheDocument();
+    expect(Admin.deletions).toHaveBeenCalledTimes(2);
+    expect(screen.queryByText(/couldn't/)).not.toBeInTheDocument();
+  });
 });
 
 it("keeps the delete status line in the page, empty, before anything is deleted", async () => {

@@ -108,7 +108,7 @@ describe("icons by kind", () => {
     ["occurrence.changed", "calendar"], ["registration.promoted", "calendar"], ["waitlist.cutoff", "calendar"],
     ["account.requested", "person"], ["add.admin_review", "person"], ["household.link_pending", "person"],
     ["group.pending", "group"], ["group.approved", "check"],
-    ["membership.left", "group"], ["group.leadership_changed", "group"], ["group.rejected", "group"], ["group.deletion", "group"],
+    ["membership.left", "group"], ["group.leadership_changed", "group"], ["group.rejected", "group"], ["group.deletion", "group"], ["group.deleted", "group"],
     ["teen_consent.changed", "shield"], ["contact.admin_review", "shield"],
     ["something.new", "generic"],
   ];
