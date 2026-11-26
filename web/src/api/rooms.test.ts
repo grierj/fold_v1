@@ -2,7 +2,7 @@ import { afterEach, expect, it, vi } from "vitest";
 import { bootstrapAnswer, clearMarkerCookie, sentChecks, setMarkerCookie } from "../test/credential";
 import { readRooms } from "../components/useRoomPicker";
 import { deferred } from "../test/keptPanel";
-import type { RoomLocationsResponse, RoomRequestsResponse } from "../types";
+import type { AdminRoomsResponse, RoomLocationsResponse, RoomRequestsResponse } from "../types";
 import { bootstrapCredential, currentCredential, type Credential } from "./core";
 import { AdminRooms, RoomRequests } from "./rooms";
 
@@ -90,7 +90,8 @@ it.each([
   await bootstrapCredential();
 });
 
-const adminLists: Array<{ path: string; read: () => Promise<RoomLocationsResponse | RoomRequestsResponse> }> = [
+const adminLists: Array<{ path: string; read: () => Promise<AdminRoomsResponse | RoomLocationsResponse | RoomRequestsResponse> }> = [
+  { path: "/admin/rooms", read: AdminRooms.list },
   { path: "/admin/rooms/locations", read: AdminRooms.locations },
   { path: "/admin/room-requests", read: RoomRequests.list },
 ];
