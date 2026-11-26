@@ -126,7 +126,7 @@ describe("when calendar feed settings become unavailable", () => {
 
     if (write !== "none") {
       await userEvent.click(await screen.findByRole("button", { name: "Create calendar link" }));
-      expect(makeFeed).toHaveBeenCalledExactlyOnceWith(hall.id, "initial");
+      expect(makeFeed).toHaveBeenCalledExactlyOnceWith(hall.id, "initial", null);
     } else {
       expect(makeFeed).not.toHaveBeenCalled();
     }
@@ -586,7 +586,7 @@ describe("room calendar feed (M2.2b)", () => {
     await userEvent.click(screen.getByRole("menuitem", { name: "Calendar feed for Fellowship Hall" }));
     const panel = screen.getByRole("region", { name: "Calendar feed for Fellowship Hall" });
     expect(await within(panel).findByRole("button", { name: "Create calendar link" })).toBeInTheDocument();
-    expect(AdminRooms.getFeed).toHaveBeenCalledWith(1);
+    expect(AdminRooms.getFeed).toHaveBeenCalledWith(1, null);
     await userEvent.click(within(panel).getByRole("button", { name: "Done" }));
     expect(screen.queryByRole("region", { name: "Calendar feed for Fellowship Hall" })).toBeNull();
     expect(screen.getByRole("button", { name: "More for Fellowship Hall" })).toHaveFocus();

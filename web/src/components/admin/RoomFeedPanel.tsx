@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { ApiError } from "../../api/core";
 import { AdminRooms } from "../../api/rooms";
+import { useAuth } from "../../auth";
 import { errorCode } from "../../lib/errors";
 import { RefusedSaveLine, useRefusedSave } from "../../lib/refusedSave";
 import { outcomeOf } from "../../lib/rosterWrites";
@@ -9,7 +10,7 @@ import { Button } from "../ui/Button";
 import { SecretFeedLink, useSecretFeed } from "../SecretFeedLink";
 
 function feedGone(cause: unknown): boolean {
-  return cause instanceof ApiError && !cause.unreadable && [401, 403, 404].includes(cause.status);
+  return cause instanceof ApiError && !cause.unreadable && cause.code !== "session_expired" && [401, 403, 404].includes(cause.status);
 }
 
 export type RoomFeedClosure = "unavailable" | "refused" | "unconfirmed";
@@ -21,6 +22,9 @@ export function RoomFeedPanel({ room, onClose, onGone }: {
   onClose: () => void;
   onGone: (reason: RoomFeedClosure) => void;
 }) {
+  const { credential } = useAuth();
+  const [openedWith] = useState(credential);
+  const credentialChanged = credential !== openedWith;
   const headingRef = useRef<HTMLHeadingElement>(null);
   const uncertainRef = useRef<HTMLParagraphElement>(null);
   const refusal = useRefusedSave();
@@ -33,17 +37,17 @@ export function RoomFeedPanel({ room, onClose, onGone }: {
   }
 
   const feed = useSecretFeed({
-    load: async () => (await AdminRooms.getFeed(room.id)).feed,
+    load: async () => (await AdminRooms.getFeed(room.id, openedWith)).feed,
     deps: [room.id],
     create: async ({ revision }) => {
       start();
 
-      return (await AdminRooms.makeFeed(room.id, revision)).feed;
+      return (await AdminRooms.makeFeed(room.id, revision, openedWith)).feed;
     },
     revoke: async ({ revision }) => {
       start();
 
-      return (await AdminRooms.revokeFeed(room.id, revision)).feed;
+      return (await AdminRooms.revokeFeed(room.id, revision, openedWith)).feed;
     },
     failed: {
       load: "We couldn't load this room's calendar link.",
@@ -79,13 +83,14 @@ export function RoomFeedPanel({ room, onClose, onGone }: {
   const { loaded, loadError, loadCause } = feed;
   const gone = feedGone(loadCause);
   useEffect(() => {
-    if (gone) onGone(closeReason);
-  }, [gone, closeReason, onGone]);
+    if (credentialChanged) onClose();
+    else if (gone) onGone(closeReason);
+  }, [credentialChanged, gone, closeReason, onClose, onGone]);
   useEffect(() => {
     if (uncertain) uncertainRef.current?.focus();
   }, [uncertain, loaded, loadError]);
 
-  if (gone) return null;
+  if (credentialChanged || gone) return null;
 
   return (
     <section aria-labelledby={`room-feed-${room.id}`} className="bg-surface rounded-lg border border-border p-6 space-y-4 max-w-xl">

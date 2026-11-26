@@ -2352,6 +2352,8 @@ DELETE /api/v1/admin/rooms/:id/feed {revision} → 200 {feed: {hasToken: false, 
 
 Admins only. These routes return 404 `not_found` while rooms are off, including to signed-out callers. A missing room also returns 404. POST also returns 404 for a deactivated room. GET reads the link status and revision in the same snapshot as the admin and rooms switch. `createdAt` is null when the link is off.
 
+The browser pins all three operations to the credential that opened the panel. Only the deciding answer for that credential is used. A 404 from the pre-authentication rooms switch carries no acknowledgment. If the credential is still current, the browser can use a fresh public `/site` read to confirm that rooms are off.
+
 POST creates or replaces the one working link and records `room_feed.created`. DELETE turns off the reviewed link and records `room_feed.revoked` if a live link was revoked. Both require the `revision` from the last read or write, even when the link is off. A missing or stale revision returns 409 `room_feed_changed` with no change or audit row. Read the endpoint again to review the current status before making another choice.
 
 The raw URL appears only in the successful POST response. Fold stores the SHA-256 hash of the 32-byte random token and retains revoked rows as history. The feed itself is `GET /cal/rooms/<roomId>/<token>.ics` (ICS feeds below).

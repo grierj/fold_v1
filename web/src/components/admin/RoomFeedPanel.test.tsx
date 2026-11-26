@@ -1,11 +1,12 @@
-import { bootstrapAnswer } from "../../test/credential";
+import { bootstrapAnswer, clearMarkerCookie } from "../../test/credential";
+import { renderWithAuth } from "../../test/auth";
 import { stubService } from "../../test/service";
 import { AdminRooms } from "../../api/rooms";
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { ApiError } from "../../api/core";
+import { ApiError, bootstrapCredential } from "../../api/core";
 import type { Room } from "../../types";
 import { RoomFeedPanel } from "./RoomFeedPanel";
 
@@ -145,19 +146,25 @@ describe("RoomFeedPanel (M2.2b)", () => {
   });
 });
 
-afterEach(() => vi.unstubAllGlobals());
+afterEach(() => {
+  vi.unstubAllGlobals();
+  clearMarkerCookie();
+});
 
 it.each([200, 404])("recovers an unreadable %i write and status read through the room API", async (status) => {
+  const viewer = { token: "feed-test", user: { id: 7 } };
+  const headers = { "Fold-Session-Checked": "v2 m-feed-test 7" };
   const replies = [
-    Response.json({ feed: { hasToken: false, createdAt: null, revision: "off" } }),
+    Response.json({ feed: { hasToken: false, createdAt: null, revision: "off" } }, { headers }),
     new Response("<html>Unavailable</html>", { status }),
-    Response.json({ feed: { hasToken: true, createdAt: "2026-10-30T15:00:00Z" } }),
-    Response.json({ feed: { hasToken: true, createdAt: "2026-10-30T15:00:00Z", revision: "on" } }),
+    Response.json({ feed: { hasToken: true, createdAt: "2026-10-30T15:00:00Z" } }, { headers }),
+    Response.json({ feed: { hasToken: true, createdAt: "2026-10-30T15:00:00Z", revision: "on" } }, { headers }),
   ];
 
   const requests: string[] = [];
   vi.stubGlobal("fetch", vi.fn<typeof fetch>(async (url, init) => {
-    if (String(url).endsWith("/auth/bootstrap")) return bootstrapAnswer();
+    if (String(url).endsWith("/auth/bootstrap")) return bootstrapAnswer(viewer);
+    if (String(url).endsWith("/site")) return Response.json({ roomsEnabled: true });
 
     expect(String(url)).toBe("/api/v1/admin/rooms/7/feed");
     requests.push(init?.method ?? "GET");
@@ -167,8 +174,9 @@ it.each([200, 404])("recovers an unreadable %i write and status read through the
 
     return next;
   }));
+  const { credential } = await bootstrapCredential(true);
   const onGone = vi.fn();
-  render(<RoomFeedPanel room={hall} onClose={() => {}} onGone={onGone} />);
+  renderWithAuth(() => ({ credential }))(<RoomFeedPanel room={hall} onClose={() => {}} onGone={onGone} />);
   await userEvent.click(await screen.findByRole("button", { name: "Create calendar link" }));
   const retry = await screen.findByRole("button", { name: "Try again" });
   const message = screen.getByText(/couldn.t confirm whether your calendar link changed/);

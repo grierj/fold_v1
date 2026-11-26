@@ -15,7 +15,8 @@ import type {
   SeriesBooking,
   SeriesRoomsResponse,
 } from "../types";
-import { api, ApiError, path, type Credential, type Id } from "./core";
+import { api, ApiError, credentialCurrent, path, type Credential, type Id } from "./core";
+import { Site } from "./site";
 
 // Rooms (M2.1a). Everything answers 404 while rooms are off. On update, absent
 // fields keep their value and a null capacity clears the limit.
@@ -41,13 +42,28 @@ const feedAnswers = {
   DELETE: object({ feed: feedOff }),
 };
 
-async function roomFeed(id: Id, request: { method: "GET" } | { method: "POST" | "DELETE"; body: { revision: string } }): Promise<RoomFeedResponse> {
-  const answer = await api<unknown>(path`/admin/rooms/${id}/feed`, request);
+async function roomFeed(id: Id, request: { method: "GET" } | { method: "POST" | "DELETE"; body: { revision: string } }, pinned: Credential | null): Promise<RoomFeedResponse> {
+  const answer = await api<unknown>(path`/admin/rooms/${id}/feed`, { ...request, pinned });
   const parsed = safeParse(feedAnswers[request.method], answer);
 
   if (!parsed.success) throw new ApiError(502, "unreadable room calendar link", {}, true);
 
   return parsed.output;
+}
+
+async function getRoomFeed(id: Id, pinned: Credential | null): Promise<RoomFeedResponse> {
+  try {
+    return await roomFeed(id, { method: "GET" }, pinned);
+  } catch (cause) {
+    if (!(cause instanceof ApiError) || cause.code !== "session_expired" || !cause.unreadable || !credentialCurrent(pinned)) throw cause;
+
+    // The pre-authentication switch returns an unacknowledged 404. Only a fresh public
+    // settings read can confirm that the feed settings are unavailable on this credential.
+    const site = await Site.get().catch(() => null);
+    if (site?.roomsEnabled !== false || !credentialCurrent(pinned)) throw cause;
+
+    throw new ApiError(404, "room booking is turned off", { code: "rooms_off" });
+  }
 }
 
 export const AdminRooms = {
@@ -65,11 +81,11 @@ export const AdminRooms = {
     api<MatchLocationResponse>("/admin/rooms/locations/match", { method: "POST", body: { location, roomId } }),
   // A room's calendar-feed link (M2.2b): makeFeed returns the link once and
   // turns any old one off.
-  getFeed: (id: Id) => roomFeed(id, { method: "GET" }),
-  makeFeed: (id: Id, revision: string) =>
-    roomFeed(id, { method: "POST", body: { revision } }),
-  revokeFeed: (id: Id, revision: string) =>
-    roomFeed(id, { method: "DELETE", body: { revision } }),
+  getFeed: getRoomFeed,
+  makeFeed: (id: Id, revision: string, pinned: Credential | null) =>
+    roomFeed(id, { method: "POST", body: { revision } }, pinned),
+  revokeFeed: (id: Id, revision: string, pinned: Credential | null) =>
+    roomFeed(id, { method: "DELETE", body: { revision } }, pinned),
 };
 
 // Open room requests (M2.1d, DEC-106): one per booking action, a date or a whole
