@@ -45,7 +45,7 @@ type CommitFault int
 const (
 	CommitPass             CommitFault = iota
 	CommitHoldReply                    // (a) forward it, hold every reply until ReleaseReply
-	CommitForwardThenClose             // (b) forward it, then close the client before the reply
+	CommitForwardThenClose             // (b) forward it, drop the reply through ReadyForQuery, then close
 	CommitCloseUnforwarded             // (c) close both sides without forwarding it
 )
 
@@ -55,7 +55,7 @@ type RollbackFault int
 const (
 	RollbackPass             RollbackFault = iota
 	RollbackCloseUnforwarded               // (g) close without forwarding
-	RollbackForwardThenClose               // (g) forward, then close the client before the reply
+	RollbackForwardThenClose               // (g) forward it, drop the reply through ReadyForQuery, then close
 )
 
 // CancelFault is what the proxy does with a CancelRequest aimed at the
@@ -161,11 +161,6 @@ type Proxy struct {
 	pending *Faults
 	nextID  int
 
-	// afterForward (under mu), when set by a test in this package, runs after
-	// a transaction-ending message was sent to the server and before the
-	// client is cut, so a test can let the server's reply arrive first.
-	afterForward func(c *proxyConn)
-
 	replyGate, cancelGate, closeGate *gate
 	closed                           chan struct{}
 	closeOnce                        sync.Once
@@ -205,18 +200,6 @@ func NewProxy(t testing.TB) *Proxy {
 	}()
 	t.Cleanup(p.Close)
 	return p
-}
-
-func (p *Proxy) setAfterForward(f func(c *proxyConn)) {
-	p.mu.Lock()
-	p.afterForward = f
-	p.mu.Unlock()
-}
-
-func (p *Proxy) afterForwardHook() func(c *proxyConn) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	return p.afterForward
 }
 
 // Addr is the host:port to connect to.
@@ -356,17 +339,11 @@ type proxyConn struct {
 	faults         *Faults
 	heldTerminate  []byte
 	hasHeldTermin  bool
-	closeOnSync    bool
 	upstreamClosed bool
 
 	holdReply    atomic.Bool
 	clientClosed atomic.Bool
-	// suppress drops every server reply instead of forwarding it. It is set
-	// before the transaction-ending message is sent upstream, so no reply to
-	// it can reach the client first. suppressedReady counts the ReadyForQuery
-	// messages dropped this way.
-	suppress        atomic.Bool
-	suppressedReady atomic.Int32
+	suppress     atomic.Bool
 
 	// Extended-query state, kept by fromClient only: the SQL of each prepared
 	// statement and the statement each portal was bound from.
@@ -687,21 +664,6 @@ func (c *proxyConn) fromClient() {
 				continue
 			}
 			c.event(KindStatement, sql, ActionForwarded)
-		case 'S':
-			if writeMsg(c.upstream, typ, body) != nil {
-				return
-			}
-			c.mu.Lock()
-			cut := c.closeOnSync
-			c.mu.Unlock()
-			if cut {
-				if hook := c.p.afterForwardHook(); hook != nil {
-					hook(c)
-				}
-				c.closeClient()
-				return
-			}
-			continue
 		}
 		if writeMsg(c.upstream, typ, body) != nil {
 			return
@@ -723,28 +685,11 @@ func (c *proxyConn) endOfTransaction(typ byte, body []byte, sql, kind string, mo
 		c.event(KindStatement, sql, ActionForwarded)
 		c.event(kind, sql, ActionHeld)
 	case mode == thenClose && mode != 0:
-		// Drop the server's replies from before the message is sent, so
-		// none can reach the client ahead of the close; the server still
-		// runs the statement and its replies are read and discarded.
+		// Arm suppression before sending the command. For an extended
+		// Execute, the client loop still forwards Sync to get ReadyForQuery.
 		c.suppress.Store(true)
 		c.event(KindStatement, sql, ActionForwarded)
 		c.event(kind, sql, ActionForwarded)
-		if writeMsg(c.upstream, typ, body) != nil {
-			return true
-		}
-		if typ == 'Q' {
-			if hook := c.p.afterForwardHook(); hook != nil {
-				hook(c)
-			}
-			c.closeClient()
-			return true
-		}
-		// An Execute: the Sync after it still goes to the server, then the
-		// client is cut.
-		c.mu.Lock()
-		c.closeOnSync = true
-		c.mu.Unlock()
-		return false
 	default:
 		c.event(KindStatement, sql, ActionForwarded)
 		c.event(kind, sql, ActionForwarded)
@@ -757,16 +702,7 @@ func (c *proxyConn) fromServer() {
 		typ, body, err := readMsg(c.upstream)
 		if err != nil {
 			c.event(KindServerClosed, "", ActionForwarded)
-			// While replies are suppressed the client is cut by the
-			// fromClient side, after the afterForward hook has run: closing
-			// it here, microseconds after the dropped ReadyForQuery closed
-			// the server side, would end the client's call before a test
-			// could observe that the reply had reached the proxy first.
-			// fromClient always cuts it (closeClient), and handle's deferred
-			// close covers a failed write.
-			if !c.suppress.Load() {
-				c.client.Close()
-			}
+			c.closeClient()
 			return
 		}
 		if typ == 'K' && len(body) >= 8 {
@@ -808,8 +744,10 @@ func (c *proxyConn) fromServer() {
 		// next command before the write returns. Decide once for this frame.
 		if c.suppress.Load() {
 			if typ == 'Z' {
-				c.suppressedReady.Add(1)
+				// pgx can send a CancelRequest on connection loss. Wait for
+				// PostgreSQL to finish so the cut cannot cancel this command.
 				c.closeUpstream()
+				c.closeClient()
 			}
 		} else if !c.clientClosed.Load() {
 			if writeMsg(c.client, typ, body) == nil && typ == 'D' {
