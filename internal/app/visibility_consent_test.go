@@ -1508,7 +1508,7 @@ func TestConsentEpochCheckIsOrderedWithTheBoot(t *testing.T) {
 				}
 				time.Sleep(time.Duration(i*13%50) * time.Millisecond)
 				sender := clients[(i+1)%2]
-				var page eventPage
+				var page eventDetailResponseJSON
 				if gw := sender.do("GET", strings.TrimSuffix(path, "/visibility"), nil, false); gw.Code != http.StatusOK || json.Unmarshal(gw.Body.Bytes(), &page) != nil {
 					results <- result{path: path, err: fmt.Sprintf("read %d %s", gw.Code, gw.Body.String())}
 					return

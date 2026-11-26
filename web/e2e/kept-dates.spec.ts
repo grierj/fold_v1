@@ -300,7 +300,8 @@ test("flow 4: inside the cutoff, the event page and the group page each clear a 
 
   // On the group page the panel's provider asks its questions (the date editor has its own). A window focus rechecks the panel.
   await page.goto(`/groups/${groupId}`);
-  await page.getByRole("button", { name: `More for Window two ${suffix} on ${date}` }).click();
+  await page.getByRole("article", { name: `Window two ${suffix}`, exact: true })
+    .getByRole("button", { name: /^More for / }).click();
   await page.getByRole("menuitem", { name: "Edit this date" }).click();
   await setMinutes(page, 60, 90);
   await setMarker(page);
@@ -354,7 +355,8 @@ test("flow 6: a kept date made longer and invite-only on the group page asks onl
   const question = page.getByRole("dialog", { name: "Save this date?" });
 
   await signInTo(page, leaderLogin, `/groups/${groupId}`);
-  await page.getByRole("button", { name: `More for Members supper ${suffix} on ${date}` }).click();
+  await page.getByRole("article", { name: `Members supper ${suffix}`, exact: true })
+    .getByRole("button", { name: /^More for / }).click();
   await page.getByRole("menuitem", { name: "Edit this date" }).click();
   await setMinutes(page, 60, 90);
   await page.getByRole("radio", { name: /^Invite only/ }).click();

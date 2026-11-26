@@ -1132,7 +1132,7 @@ GET  /api/v1/events
      can see but whose group they cannot; from yesterday through 90 days)
 POST /api/v1/events                         → 201 {event}   (admin; church-wide)
      — listed hosts and the creator are checked again under row locks (below)
-GET  /api/v1/events/:id                     → 200 {event, occurrences, canManage, canSetVisibility}
+GET  /api/v1/events/:id                     → 200 {event, occurrences, canManage, canSetVisibility, restorableDates?}
 GET  /api/v1/groups/:id/events?from=2026-10-06&to=2027-01-06&cursor=&limit=
   → {events: [occurrence], truncated, hasMore, nextCursor}   (default: next 90 days, max 366-day window; 25 dates per page)
 POST /api/v1/groups/:id/events              → 201 {event} | 409 group_events_not_approved   (group leader or admin; only an active group, DEC-147)
@@ -1159,6 +1159,17 @@ POST /api/v1/events/:id/hosts               → 200 {hosts}   (admin; church-wid
 DELETE /api/v1/events/:id/hosts/:userId     → 200 {hosts}   (admin; refuses the last live host)
 POST /api/v1/events/:id/cancel              → 200 {} | 409 date_cancel_ended   (leader, host, or admin)
      body: {date: "YYYY-MM-DD"} — cancels that stored date before its end, including while underway
+POST /api/v1/events/:id/restore             → 200 {} | 409 date_changed   (leader, host, or admin)
+     body: {date: "YYYY-MM-DD", revision}
+     The event page gives managers restorableDates [{date, startsAt, revision}] for future dates
+     a person cancelled. The restore schedules that occurrence at its stored time even if the
+     series rule has changed. If the rule omits the stored date or time, later series edits keep
+     the restored date at its stored start and end. A stale revision, a started date, or a different
+     cancellation source answers 409. A repeat after success also answers 409. Read the event
+     again before acting.
+     Eligible Going, Maybe and Waitlisted answers keep their places. Lowering capacity preserves
+     existing parties. Ended grants stay ended. People still going or waitlisted receive the
+     usual event.restored notice, excluding the manager pressing Restore.
 PUT  /api/v1/events/:id/occurrences/:date   → 409 date_page_outdated  (leader, host, or admin; retired)
      edit payload: ignored after standard CSRF processing; writes nothing (see Cutover under Guarded date edit)
 GET  /api/v1/events/:id/occurrences/:date   → 200 {occurrence}  (leader, host, or admin; the date's edit base, scheduled or cancelled)
@@ -2279,7 +2290,7 @@ A tab opened before a server that requires `revision` sends none: its pick is re
 
 A booking copies the room's setup and teardown minutes (DEC-101); only an admin may send `setupMinutes`/`teardownMinutes` (0 to 240) to override them for this booking. `roomId: null` releases the date's room; booking another room replaces it. Setting a `roomId` for an event of a group that is not active (pending, archived or deleted) answers 409 `group_rooms_not_approved`, admins included (DEC-147); releasing is never refused. Confirmed bookings of one room never overlap once padded: the database refuses it, so of two concurrent bookings exactly one wins and the other gets 409 `room_busy`. An admin may book over a conflict by sending `overlapReason` (at most 500 characters); that booking is `doubleBooked`, audited as `room_booking.overlap` with the reason, and still counts as busy for everyone else. Booking and releasing are audited (`room_booking.booked`, `room_booking.released`). A pick that changes what the date holds (a room, a room waiting for an admin, or none) gives each of the event's other leaders or hosts one `room.changed` notice, in the same transaction (DEC-170): "*Name* booked a room for / asked for a room for / changed the room for / took the room off *day*", with "It's waiting for an admin's approval." when it waits. It never names the room; it does not push. A refused pick, or one that leaves the date holding what it held, writes none.
 
-Cancelling a date releases its room. Moving a date (a per-date reschedule or a series edit) moves its booking in the same transaction; if the room is taken at the new time, by a confirmed booking or an admin's double-booking, the booking becomes `requested`, holds nothing, and the event's leaders or hosts get one `room.lost` notice for that edit, the person who moved it included. A date a series edit cancelled lost its room then; a DEC-91 restore books it in the series room if there is one, and otherwise it comes back without one. A booking only an admin could make (a restricted room or a double-booking) can only be changed or released by an admin (403 `booking_admin_only`). Re-booking the same room keeps an admin's padding override. Bookings are written against the date as it is under its row lock, so a date cancelled or moved meanwhile answers 404 or books the new time. Event and date JSON carry `room?: {id, name, building}` for a confirmed booking, which the page shows as the place (typed location after it), and so do calendar files and feeds: the room and its building lead the ICS `LOCATION`, then any typed location.
+Cancelling a date releases its room. Moving a date (a per-date reschedule or a series edit) moves its booking in the same transaction; if the room is taken at the new time, by a confirmed booking or an admin's double-booking, the booking becomes `requested`, holds nothing, and the event's leaders or hosts get one `room.lost` notice for that edit, the person who moved it included. A restored date uses the current series room, subject to availability and approval. A room picked only for that date was released at cancellation. A booking only an admin could make (a restricted room or a double-booking) can only be changed or released by an admin (403 `booking_admin_only`). Re-booking the same room keeps an admin's padding override. Bookings are written against the date as it is under its row lock, so a date cancelled or moved meanwhile answers 404 or books the new time. Event and date JSON carry `room?: {id, name, building}` for a confirmed booking, which the page shows as the place (typed location after it), and so do calendar files and feeds: the room and its building lead the ICS `LOCATION`, then any typed location.
 
 ### Series rooms (M2.1c)
 
