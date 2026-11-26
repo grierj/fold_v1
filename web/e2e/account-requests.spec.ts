@@ -1,7 +1,7 @@
 import * as schema from "valibot";
 import { csrfFor } from "./helpers";
 import { expect, test } from "@playwright/test";
-import { apiAs, groupDetailPath, signIn, signOut } from "./helpers";
+import { apiAs, checkState, groupDetailPath, signIn, signOut } from "./helpers";
 
 // M1.3 in the browser: /join with the age gate, the login page's request
 // link, invite-a-friend wording, the admin queue and self-signup
@@ -143,4 +143,72 @@ test("a deletion request that ended while the admin looked is refused, and the c
   await expect(page.getByRole("link", { name })).toHaveCount(0);
   expect((await (await apiAs(request, "sam"))("GET", groupDetailPath(group.id))).group.id).toBe(group.id);
   await markAllRead(page);
+});
+
+test.describe("group deletion request decisions", () => {
+  test.use({ viewport: { width: 390, height: 844 } });
+
+  for (const { action, outcome } of [
+    { action: "Delete group", outcome: "deleted" },
+    { action: "Keep group", outcome: "kept" },
+  ]) {
+    test(`${action} moves keyboard focus to the outcome in Approvals`, async ({ page, request }) => {
+      const name = `Lone study to be ${outcome}`;
+      const lee = await apiAs(request, "lee");
+
+      const { group } = schema.parse(schema.looseObject({ group: schema.looseObject({ id: schema.number() }) }),
+        await lee("POST", "/groups", { name, visibility: "public", tags: [] }));
+
+      await (await apiAs(request, "grier"))("POST", `/admin/groups/${group.id}/approve`, {});
+      await (await apiAs(request, "lee"))("POST", `/groups/${group.id}/deletion-request`, {});
+
+      await signIn(page, "grier");
+      await page.goto("/admin");
+      const card = page.getByRole("group", { name: `Deletion request for ${name}` });
+      const link = card.getByRole("link", { name });
+      await expect(link).toBeVisible();
+      await checkState(page, `approvals-${outcome}`, "before");
+      await link.focus();
+      await page.keyboard.press("Tab");
+
+      if (outcome === "kept") await page.keyboard.press("Tab");
+      else page.once("dialog", (dialog) => { void dialog.accept(); });
+
+      await expect(card.getByRole("button", { name: action })).toBeFocused();
+      await page.keyboard.press("Enter");
+
+      const status = page.getByRole("status").filter({ hasText: `“${name}” was ${outcome}.` });
+      await expect(status).toBeFocused();
+      await expect(card).toHaveCount(0);
+      await checkState(page, `approvals-${outcome}`, "after");
+      await markAllRead(page);
+    });
+  }
+
+  test("a stale withdrawal refreshes the group's Members tab", async ({ page, request }) => {
+    const name = "Lone study with a withdrawn request";
+    const lee = await apiAs(request, "lee");
+
+    const { group } = schema.parse(schema.looseObject({ group: schema.looseObject({ id: schema.number() }) }),
+      await lee("POST", "/groups", { name, visibility: "public", tags: [] }));
+
+    await (await apiAs(request, "grier"))("POST", `/admin/groups/${group.id}/approve`, {});
+    const leader = await apiAs(request, "lee");
+    const path = `/groups/${group.id}/deletion-request`;
+
+    await leader("POST", path, {});
+    await signIn(page, "lee");
+    await page.goto(`/groups/${group.id}`);
+    await page.getByRole("tab", { name: "Members", exact: true }).click();
+    const cancel = page.getByRole("button", { name: "Cancel deletion request" });
+
+    await expect(cancel).toBeVisible();
+    await leader("DELETE", path);
+    await cancel.click();
+
+    await expect(page.getByText("The deletion request is no longer open.")).toBeVisible();
+    await expect(page.getByRole("button", { name: "Request deletion", exact: true })).toBeVisible();
+    await expect(cancel).toHaveCount(0);
+    await checkState(page, "withdrawal", "refused");
+  });
 });

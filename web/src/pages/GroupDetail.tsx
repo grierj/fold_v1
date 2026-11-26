@@ -618,7 +618,10 @@ function GroupDetailContent() {
       await Groups.cancelDeletion(id!);
       await load.retry();
     } catch (e) {
-      if (resourceRefused(e)) refreshRefusal("write");
+      if (e instanceof ApiError && e.code === "already_handled") {
+        setMemberError("The deletion request is no longer open.");
+        await load.retry();
+      } else if (resourceRefused(e)) refreshRefusal("write");
       else setMemberError(errorText(e, "We couldn't cancel the request."));
     } finally {
       setMemberBusy(false);
