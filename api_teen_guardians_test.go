@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"net/http"
 	"strings"
 	"testing"
@@ -113,5 +114,46 @@ func TestGuardianClaimIsUniformPendingAndLimited(t *testing.T) {
 	app.DB.Model(&models.GuardianLink{}).Count(&count)
 	if count != 1 {
 		t.Fatalf("duplicate links: %d", count)
+	}
+}
+
+func TestGuardianGrantFromAReadOlderThanAnAdminsRevokeIsRefused(t *testing.T) {
+	f := newConsentFamily(t)
+	apiDo(t, f.guardian, "POST", guardianConsentPath(f.link.ID), withGuardianRevision(t, f.guardian, f.link.ID, map[string]string{"scope": "account", "status": "granted"}), 200)
+	opened := guardianRevision(t, f.guardian, f.link.ID)
+	apiDo(t, f.admin, "POST", consentPath(f.teen), map[string]string{"scope": "account", "status": "revoked"}, 200)
+	before := f.trail(t)
+	refusedAsChanged(t, f.guardian.do("POST", guardianConsentPath(f.link.ID), map[string]string{"scope": "account", "status": "granted", "revision": opened}, true))
+	if after := f.trail(t); after != before || after.status != models.UserDisabled {
+		t.Fatalf("a refused grant wrote: before %+v, after %+v", before, after)
+	}
+	body := apiDo(t, f.guardian, "POST", guardianConsentPath(f.link.ID), withGuardianRevision(t, f.guardian, f.link.ID, map[string]string{"scope": "account", "status": "granted"}), 200)
+	var out guardianConsentChangedJSON
+	if err := json.Unmarshal([]byte(body), &out); err != nil {
+		t.Fatal(err)
+	}
+	card := out.GuardianTeen
+	if out.Teen.ID != f.teen.ID || out.Teen.Revision == "" || out.Teen.Revision != card.Revision || card.Revision != guardianRevision(t, f.guardian, f.link.ID) {
+		t.Fatalf("the answer names %+v and %+v, want the token the next read shows", out.Teen, card)
+	}
+	if card.LinkID != f.link.ID || !card.AccountConsent || card.Changes != 3 || !card.LastChangeYours {
+		t.Fatalf("the answer's card row is %+v, want account granted by this guardian after 3 changes", card)
+	}
+	if strings.Contains(body, "evidenceText") || strings.Contains(body, "grantedBy") {
+		t.Fatalf("the guardian's answer carries an admin's record: %s", body)
+	}
+	if after := f.trail(t); after.consents != before.consents+1 || after.status != models.UserActive {
+		t.Fatalf("the fresh grant did not land: %+v", after)
+	}
+	apiDo(t, f.guardian, "POST", guardianConsentPath(f.link.ID), map[string]string{"scope": "sms", "status": "granted", "revision": out.Teen.Revision}, 200)
+	// An admin's change is not the guardian's.
+	apiDo(t, f.admin, "POST", consentPath(f.teen), withConsentRevision(t, f.admin, f.teen, map[string]string{"scope": "photos", "status": "granted", "evidenceText": "Photo form"}), 200)
+	body = apiDo(t, f.guardian, "GET", "/api/v1/me/guardian-teens", nil, 200)
+	var list guardianTeensResponseJSON
+	if err := json.Unmarshal([]byte(body), &list); err != nil {
+		t.Fatal(err)
+	}
+	if len(list.Teens) != 1 || list.Teens[0].Changes != 5 || list.Teens[0].LastChangeYours {
+		t.Fatalf("the card after an admin's grant is %+v", list.Teens)
 	}
 }

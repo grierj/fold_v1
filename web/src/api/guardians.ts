@@ -1,4 +1,5 @@
 import type {
+  GuardianConsentChangedResponse,
   GuardianEmailPreview,
   GuardianLinkResponse,
   GuardianLinksResponse,
@@ -12,8 +13,9 @@ export type GuardianConsentScope = "account" | "sms" | "photos";
 export const Guardians = {
   teens: () => api<GuardianTeensResponse>("/me/guardian-teens"),
   claim: (email: string) => api<NoticeResponse>("/me/guardian-claims", { method: "POST", body: { email } }),
-  change: (linkId: Id, scope: GuardianConsentScope, status: "granted" | "revoked") =>
-    api<Record<string, never>>(path`/me/guardian-links/${linkId}/consents`, { method: "POST", body: { scope, status } }),
+  // `revision` is the read a grant was made from (DEC-176).
+  change: (linkId: Id, scope: GuardianConsentScope, status: "granted" | "revoked", revision: string | undefined) =>
+    api<GuardianConsentChangedResponse>(path`/me/guardian-links/${linkId}/consents`, { method: "POST", body: { scope, status, revision } }),
   email: (linkId: Id) => api<NoticeResponse>(path`/me/guardian-links/${linkId}/consent-email`, { method: "POST" }),
   preview: (token: string) => api<GuardianEmailPreview>(`/guardian-consent${query({ token })}`, { anonymousOK: true }),
   useEmail: (token: string) => api<Record<string, never>>("/guardian-consent", { method: "POST", body: { token }, anonymousOK: true }),

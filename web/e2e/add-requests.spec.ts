@@ -1,7 +1,7 @@
 import AxeBuilder from "@axe-core/playwright";
 import { expect, test, type Page } from "@playwright/test";
 import { mkdirSync, writeFileSync } from "node:fs";
-import { apiAs, email, fromMore, groupDetailPath, PASSWORD, signInTo, soon } from "./helpers";
+import { apiAs, grantTeenConsent, email, fromMore, groupDetailPath, PASSWORD, signInTo, soon } from "./helpers";
 import { measure } from "./ui-measure.mjs";
 
 const adminName = process.env.VERIFY_URL ? "verify-admin" : "grier";
@@ -28,7 +28,7 @@ test("group teen ask uses opaque selection, both approvals and neutral hidden pr
   test.setTimeout(180_000);
   const admin = await apiAs(request, adminName);
   const { user: teen } = await admin("POST", "/admin/users", { name: "Ask Teen", email: email("ask-teen"), password: PASSWORD, ageBand: "teen", birthDate: `${new Date().getUTCFullYear() - 15}-01-01` });
-  await admin("POST", `/admin/users/${teen.id}/teen-consents`, { scope: "account", status: "granted", evidenceText: "Parent signed the account consent form" });
+  await grantTeenConsent(admin, teen.id, "Parent signed the account consent form");
   const { group } = await admin("POST", "/groups", { name: "Private ask group", visibility: "invite_only", tags: [] });
   await signInTo(page, adminName, `/groups/${group.id}`);
 

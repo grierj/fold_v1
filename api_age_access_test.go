@@ -89,7 +89,7 @@ func TestPendingTeenBrowsesPubliclyWithoutAnAuthenticatedSession(t *testing.T) {
 	}
 	// Consent enables a fresh login, never a legacy pending cookie.
 	adminClient := loginAPI(t, app, "admin", "password1234")
-	apiDo(t, adminClient, "POST", consentPath(teen), map[string]string{"scope": "account", "status": "granted", "evidenceText": "Parent signed consent"}, 200)
+	apiDo(t, adminClient, "POST", consentPath(teen), withConsentRevision(t, adminClient, teen, map[string]string{"scope": "account", "status": "granted", "evidenceText": "Parent signed consent"}), 200)
 	apiDo(t, legacy, "GET", "/api/v1/auth/me", nil, 401)
 	if code, _ := tryLogin(t, app, "", teen.Email, "password1234"); code != 200 {
 		t.Fatalf("consented teen could not sign in: %d", code)

@@ -1188,7 +1188,7 @@ func newAuditLifecycle(t *testing.T, lifecycle string) auditLifecycle {
 	// is clock setup, shared with the age-rollover tests.
 	switch lifecycle {
 	case "L2", "L2_late_enable":
-		apiDo(t, kc, "POST", consentPath(&f.user), map[string]string{"scope": "account", "status": "granted", "evidenceText": "Signed consent"}, 200)
+		apiDo(t, kc, "POST", consentPath(&f.user), withConsentRevision(t, kc, &f.user, map[string]string{"scope": "account", "status": "granted", "evidenceText": "Signed consent"}), 200)
 		apiDo(t, lc, "POST", "/api/v1/admin/guardian-links/"+itoa(f.link.ID)+"/confirm", map[string]string{"checkNote": "Relationship verified"}, 200)
 		if lifecycle == "L2_late_enable" {
 			// An admin who enables the account long after completion is still a key (J5).
@@ -1210,7 +1210,7 @@ func newAuditLifecycle(t *testing.T, lifecycle string) auditLifecycle {
 			ec = admin
 		}
 		apiDo(t, admin, "PUT", "/api/v1/admin/users/"+itoa(f.user.ID), map[string]string{"status": "disabled"}, 200)
-		apiDo(t, kc, "POST", consentPath(&f.user), map[string]string{"scope": "account", "status": "granted", "evidenceText": "Signed consent"}, 200)
+		apiDo(t, kc, "POST", consentPath(&f.user), withConsentRevision(t, kc, &f.user, map[string]string{"scope": "account", "status": "granted", "evidenceText": "Signed consent"}), 200)
 		apiDo(t, lc, "POST", "/api/v1/admin/guardian-links/"+itoa(f.link.ID)+"/confirm", map[string]string{"checkNote": "Relationship verified"}, 200)
 		apiDo(t, ec, "PUT", "/api/v1/admin/users/"+itoa(f.user.ID), map[string]string{"status": "active"}, 200)
 	}

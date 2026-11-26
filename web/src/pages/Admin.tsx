@@ -1049,6 +1049,8 @@ function UsersTab({ load }: { load: Load<User[]> }) {
   const [resetId, setResetId] = useState<number | null>(null);
   const [consentId, setConsentId] = useState<number | null>(null);
   const consentAction = useAction();
+  // Which editor a refusal closed: the account editor or a teen's consent panel.
+  const [refusedWhat, setRefusedWhat] = useState("The account");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [feedStatus, setFeedStatus] = useState("");
@@ -1192,7 +1194,7 @@ function UsersTab({ load }: { load: Load<User[]> }) {
   const editingRow = creating || editingId !== null || resetId !== null || consentId !== null || leaving !== null;
 
   const refusalLine = <RefusedSaveLine save={refusal} noun="account"
-    about={refusal.why === "changed" ? "The account changed while you were editing" : undefined} />;
+    about={refusal.why === "changed" ? `${refusedWhat} changed while you were editing` : undefined} />;
 
   if (load.loading) return <Skeleton kind="lines" />;
 
@@ -1280,7 +1282,7 @@ function UsersTab({ load }: { load: Load<User[]> }) {
                     <UserForm
                       initial={u}
                       creating={false}
-                      onRefused={(why) => { setEditingId(null); refusal.refused(why); }}
+                      onRefused={(why) => { setEditingId(null); setRefusedWhat("The account"); refusal.refused(why); }}
                       onSaved={() => { setEditingId(null); reload(); }}
                       onCancel={() => setEditingId(null)}
                     />
@@ -1288,7 +1290,8 @@ function UsersTab({ load }: { load: Load<User[]> }) {
                   {resetId === u.id && (
                     <PasswordReset user={u} onDone={() => setResetId(null)} />
                   )}
-                  {consentId === u.id && <Suspense fallback={<p role="status">Loading consent…</p>}><TeenConsentPanel user={u} action={consentAction} onUpdated={reload} onClose={() => setConsentId(null)} /></Suspense>}
+                  {consentId === u.id && <Suspense fallback={<p role="status">Loading consent…</p>}><TeenConsentPanel user={u} action={consentAction} onUpdated={reload} onClose={() => setConsentId(null)}
+                    onRefused={(why) => { setConsentId(null); setRefusedWhat(`${publicName(u)}'s consent`); refusal.refused(why); }} /></Suspense>}
                   {leaving?.id === u.id && (
                     <DeleteUserPanel
                       target={u}
@@ -1334,7 +1337,7 @@ function UsersTab({ load }: { load: Load<User[]> }) {
                       { label: "Edit", onSelect: () => { refusal.clear(); setEditingId(u.id); setResetId(null); setCreating(false); } },
                       { label: "Contact access history", onSelect: () => void openContactHistory(u), disabled: busy },
                       { label: "Copy person ID", onSelect: () => void copyPersonId(u), disabled: busy },
-                      ...(u.accountType === "teen" || u.hasTeenConsentHistory ? [{ label: u.accountType === "teen" ? "Manage consent" : "Consent history", disabled: consentAction.running, onSelect: () => { consentAction.reset(); setConsentId(u.id); setEditingId(null); setResetId(null); setCreating(false); } }] : []),
+                      ...(u.accountType === "teen" || u.hasTeenConsentHistory ? [{ label: u.accountType === "teen" ? "Manage consent" : "Consent history", disabled: consentAction.running, onSelect: () => { refusal.clear(); consentAction.reset(); setConsentId(u.id); setEditingId(null); setResetId(null); setCreating(false); } }] : []),
                       { label: "Reset password", onSelect: () => { setResetId(u.id); setEditingId(null); setCreating(false); } },
                       ...(u.emailSuppression ? [{ label: "Start emailing again", onSelect: () => void clearSuppression(u), disabled: busy }] : []),
                       { label: "Revoke calendar link", onSelect: () => void revokeCalendarLink(u), danger: true, disabled: busy },

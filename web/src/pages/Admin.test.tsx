@@ -189,7 +189,7 @@ it("keeps the current consent panel in place while a change is in flight", async
   const first = user(42, "Tess Teen", { accountType: "teen", status: "pending_consent" });
   const second = user(43, "Lou Teen", { accountType: "teen", status: "pending_consent" });
   vi.mocked(AdminUsers.list).mockResolvedValue({ users: [first, second] });
-  vi.mocked(AdminTeenConsents.list).mockResolvedValue({ consents: [], administrativelyDisabled: false });
+  vi.mocked(AdminTeenConsents.list).mockResolvedValue({ consents: [], administrativelyDisabled: false, revision: "r1" });
   vi.mocked(AdminTeenConsents.change).mockReturnValueOnce(answer);
   render(<MemoryRouter initialEntries={["/admin?tab=users"]}><AdminPage /></MemoryRouter>);
   await userEvent.click(await screen.findByRole("button", { name: "More for Tess Teen" }));
@@ -203,9 +203,29 @@ it("keeps the current consent panel in place while a change is in flight", async
   await userEvent.click(manage);
   expect(screen.getByLabelText("Consent for Tess Teen")).toBeInTheDocument();
   expect(AdminTeenConsents.list).toHaveBeenCalledExactlyOnceWith(42);
-  await act(async () => finish({}));
+  await act(async () => finish({ teen: { id: 42, revision: "r2" }, consents: [], administrativelyDisabled: false }));
   expect(await screen.findByText("Account access consent granted.")).toBeInTheDocument();
   expect(screen.getByRole("menuitem", { name: "Manage consent" })).toBeEnabled();
+});
+
+it("closes the consent panel and says so when someone else changed the teen's consent since it opened", async () => {
+  const tess = user(42, "Tess Teen", { accountType: "teen", status: "pending_consent" });
+  vi.mocked(AdminUsers.list).mockResolvedValue({ users: [tess] });
+  vi.mocked(AdminTeenConsents.list).mockResolvedValueOnce({ consents: [], administrativelyDisabled: false, revision: "r1" })
+    .mockResolvedValue({ consents: [{ id: 5, teenUserId: 42, scope: "account", status: "revoked", grantedBy: 9, granterRole: "guardian", evidenceText: "", at: "2026-11-25T12:00:00Z" }], administrativelyDisabled: false, revision: "r2" });
+  vi.mocked(AdminTeenConsents.change).mockRejectedValue(new ApiError(409, "private", { code: "consent_changed" }));
+  render(<MemoryRouter initialEntries={["/admin?tab=users"]}><AdminPage /></MemoryRouter>);
+  await userEvent.click(await screen.findByRole("button", { name: "More for Tess Teen" }));
+  await userEvent.click(screen.getByRole("menuitem", { name: "Manage consent" }));
+  await userEvent.type(await screen.findByLabelText(/Consent evidence/), "Signed form");
+  await userEvent.click(screen.getByRole("button", { name: "Grant consent" }));
+  expect(await screen.findByText("Tess Teen's consent changed while you were editing. Your changes could not be saved.")).toHaveFocus();
+  expect(screen.queryByLabelText("Consent for Tess Teen")).not.toBeInTheDocument();
+  expect(AdminTeenConsents.change).toHaveBeenCalledOnce();
+  expect(AdminUsers.list).toHaveBeenCalledTimes(2);
+  await userEvent.click(screen.getByRole("button", { name: "More for Tess Teen" }));
+  await userEvent.click(screen.getByRole("menuitem", { name: "Manage consent" }));
+  expect(screen.queryByText(/changed while you were editing/)).not.toBeInTheDocument();
 });
 
 it("labels only the groups that need attention and keeps one action beside More", async () => {

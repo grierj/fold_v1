@@ -178,6 +178,7 @@ export const ERROR_COPY = {
   group_changed: "This group may have changed since you opened it, so your changes could not be saved. Check it and try again.",
   setting_changed: "This setting may have changed, so your changes could not be saved. Check it and try again.",
   admin_user_changed: "This account may have changed, so your changes could not be saved. Check it and try again.",
+  consent_changed: "This teen's consent changed since you opened it, so your change could not be saved. Check it and try again.",
   room_changed: "This room may have changed since you opened it, so your changes could not be saved. Check it and try again.",
   household_changed: "Your household may have changed since you opened it, so your changes could not be saved. Check it and try again.",
   household_person_changed: "This person's details may have changed since you opened them, so your changes could not be saved. Check them and try again.",

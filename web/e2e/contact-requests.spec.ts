@@ -2,7 +2,7 @@ import type { JsonValue } from "../src/lib/wireValues";
 import AxeBuilder from "@axe-core/playwright";
 import { expect, test, type Page } from "@playwright/test";
 import { mkdirSync, writeFileSync } from "node:fs";
-import { apiAs, email, fromMore, PASSWORD, saveGroup, signInTo, soon } from "./helpers";
+import { apiAs, grantTeenConsent, email, fromMore, PASSWORD, saveGroup, signInTo, soon } from "./helpers";
 import { measure } from "./ui-measure.mjs";
 
 test.use({ actionTimeout: 10_000 });
@@ -120,7 +120,7 @@ test("teen decisions work in both orders; guardian sees only active grants and c
   const admin = await apiAs(request, adminName);
   const { user: guardian } = await admin("POST", "/admin/users", { name: "Contact Guardian", email: email("contact-guardian"), password: PASSWORD, ageBand: "adult" });
   const { user: teen } = await admin("POST", "/admin/users", { name: "Contact Teen", email: email("contact-teen"), password: PASSWORD, ageBand: "teen", birthDate: `${new Date().getUTCFullYear() - 15}-01-01`, phone: "2085550143" });
-  await admin("POST", `/admin/users/${teen.id}/teen-consents`, { scope: "account", status: "granted", evidenceText: "Parent signed the account consent form" });
+  await grantTeenConsent(admin, teen.id, "Parent signed the account consent form");
   const guardianApi = await apiAs(request, "contact-guardian");
   await guardianApi("POST", "/me/guardian-claims", { email: teen.email });
   let adminAgain = await apiAs(request, adminName);
