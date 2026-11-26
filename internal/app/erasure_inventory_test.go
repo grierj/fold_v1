@@ -223,6 +223,7 @@ var erasureColumns = []erasureColumn{
 	{"groups", "status", "T11", "RET", []string{"T11"}},
 	{"groups", "visibility", "T11", "RET", []string{"T11"}},
 	{"groups", "deletion_requested", "T11", "RET", []string{"T11"}},
+	{"groups", "deletion_requester_id", "T11", "ANON", []string{"T11"}},
 	{"groups", "created_at", "T11", "RET", []string{"T11"}},
 	{"groups", "updated_at", "T11", "RET", []string{"T11"}},
 	{"groups", "deleted_at", "T11", "RET", []string{"T11"}},
