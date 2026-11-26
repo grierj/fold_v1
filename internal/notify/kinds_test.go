@@ -268,12 +268,13 @@ func TestOnlyLostSubjectKindsAreCopiedWithoutSubjectAccess(t *testing.T) {
 		if !k.AllowEmail || k.Required {
 			t.Errorf("%s must be optional email: %+v", key, k)
 		}
-		v := Vars{Event: "Retreat", Group: "Hidden group", Place: "Home", When: "Fri"}
-		title, body := k.Render(v)
-		pushTitle, pushBody, _ := k.RenderForPush(v)
-		for _, bad := range never {
-			if strings.Contains(title+body+pushTitle+pushBody, bad) {
-				t.Errorf("%s names %q: %q %q", key, bad, title+body, pushTitle+pushBody)
+		for _, v := range []Vars{{Event: "Retreat", Group: "Hidden group", Place: "Home", When: "Fri"}, {Group: "Hidden group", Place: "Home", When: "Fri"}} {
+			title, body := k.Render(v)
+			pushTitle, pushBody, _ := k.RenderForPush(v)
+			for _, bad := range never {
+				if strings.Contains(title+body+pushTitle+pushBody, bad) {
+					t.Errorf("%s names %q: %q %q", key, bad, title+body, pushTitle+pushBody)
+				}
 			}
 		}
 	}

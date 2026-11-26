@@ -3911,3 +3911,65 @@ func TestSeriesNullCapacityClearsTheLimit(t *testing.T) {
 		t.Fatalf("created with null: capacity %v guests %d", created.Event.Capacity, created.Event.GuestsAllowed)
 	}
 }
+
+// departedWithGrants is a former member of f's group holding live departure
+// grants, going, on each of these dates: they see the invite-only dates only
+// through the grants.
+func departedWithGrants(t *testing.T, f dateEditFixture, name string, dates ...uint) *models.User {
+	t.Helper()
+	w := newTestUser(t, f.app, name, "password1234", models.RoleMember)
+	membership := models.Membership{UserID: w.ID, GroupID: f.group, Role: models.MembershipMember, Status: models.MembershipActive}
+	gormMust(t, &gorm.DB{Error: f.app.DB.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Create(&membership).Error; err != nil {
+			return err
+		}
+		for _, occ := range dates {
+			r := models.Registration{UserID: &w.ID, OccurrenceID: occ, Status: models.RegGoing, Source: models.RegSourceAdmin, AttendanceMode: models.AttendanceInPerson}
+			if err := tx.Create(&r).Error; err != nil {
+				return err
+			}
+			if _, err := seedAccessGrantIn(tx, r.ID, accessGrant{Origin: policy.OccurrenceOriginDepartureSelf, DepartureMembershipID: &membership.ID, DepartureActorID: &w.ID}, &w.ID, time.Now().UTC()); err != nil {
+				return err
+			}
+		}
+		return nil
+	})})
+	gormMust(t, &gorm.DB{Error: f.app.contactMutation(contactChange{UserID: w.ID}, func(tx *gorm.DB) error {
+		return tx.Model(&models.Membership{}).Where("id = ?", membership.ID).Update("status", "removed").Error
+	})})
+	return w
+}
+
+// A holder of a live exact-date grant counts, and is told, as everyone else:
+// a date cancel tells them through the grant's end (occurrence.updated) and
+// an event delete with one nameless event.deleted, however many of its dates
+// they kept.
+func TestSignedUpCountIncludesGrantHolders(t *testing.T) {
+	f := newDateEditFixture(t)
+	w := departedWithGrants(t, f, "kept dates", f.dates[1].ID, f.dates[2].ID, f.dates[3].ID)
+	signUp(t, f.app, f.memberUser, f.dates[1].ID, models.RegGoing)
+
+	if got := signedUpCount(t, f.admin, f.event.ID, f.date(1)); got != 2 {
+		t.Fatalf("the date's count is %d, want 2", got)
+	}
+	mark := markNotices(t, f.app)
+	apiDo(t, f.admin, "POST", "/api/v1/events/"+itoa(f.event.ID)+"/cancel", map[string]any{"date": f.date(1)}, http.StatusOK)
+	cancelled, ended := toldSince(t, f.app, notify.OccurrenceCancelled, mark.notice), noticesSince(t, f.app, w.ID, notify.OccurrenceUpdated, mark.notice)
+	if cancelled != 1 || len(ended) != 1 {
+		t.Fatalf("the cancel told %d people and the grant holder %d times, want 1 and 1", cancelled, len(ended))
+	}
+
+	if got := signedUpCount(t, f.admin, f.event.ID, ""); got != 1 {
+		t.Fatalf("the delete's count is %d, want 1", got)
+	}
+	mark = markNotices(t, f.app)
+	apiDo(t, f.admin, "DELETE", "/api/v1/events/"+itoa(f.event.ID), nil, http.StatusOK)
+	drainNotices(t, f.app)
+	got := noticesSince(t, f.app, w.ID, notify.EventDeleted, mark.notice)
+	if len(got) != 1 || got[0].Title != "Cancelled: Church event" || got[0].SubjectID != nil {
+		t.Fatalf("the grant holder's deletion notices: %+v", got)
+	}
+	if n := noticesSince(t, f.app, w.ID, notify.OccurrenceUpdated, mark.notice); len(n) != 0 {
+		t.Fatalf("the grant holder was told twice: %+v", n)
+	}
+}
