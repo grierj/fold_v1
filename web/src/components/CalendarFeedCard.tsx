@@ -11,7 +11,7 @@ export function CalendarFeedCard({ showHeading = true }: { showHeading?: boolean
     load: async () => (await CalendarFeeds.get()).calendarFeed,
     deps: [],
     create: async () => (await CalendarFeeds.create(scope)).calendarFeed,
-    revoke: () => CalendarFeeds.revoke().then(() => undefined),
+    revoke: async () => (await CalendarFeeds.revoke()).calendarFeed,
     failed: {
       load: "We couldn't load your calendar link.",
       create: "We couldn't make your calendar link.",

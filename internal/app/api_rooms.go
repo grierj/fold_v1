@@ -45,22 +45,20 @@ func (a *App) roomsOn() gin.HandlerFunc {
 			c.Next()
 			return
 		}
-		jsonError(c, http.StatusNotFound, "not found")
+		fail(c, errRoomRouteHidden)
 		c.Abort()
 	}
 }
 
-// errRoomsOff: room booking is switched off. Only a room control's own routes
-// say so (roomPickerOn), so the control can tell it from the 404 that says its
-// person may no longer manage the event or date, which its host answers.
-var errRoomsOff = apiErr(http.StatusNotFound, "rooms_off", "room booking is turned off")
+// Only the event and date pickers distinguish a disabled switch from a missing resource.
+var (
+	errRoomsOff        = apiErr(http.StatusNotFound, "rooms_off", "room booking is turned off")
+	errRoomRouteHidden = apiErr(http.StatusNotFound, "", "not found")
+)
 
-// roomPickerOn is roomsOn for a room control's routes: they answer errRoomsOff,
-// and a failed read of the switch is a 500 the control offers to retry, never
-// rooms_off.
-func (a *App) roomPickerOn() gin.HandlerFunc {
+func (a *App) requireRooms(off *apiError) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		if err := roomsOnIn(a.DB); err != nil {
+		if err := roomsOnIn(a.DB, off); err != nil {
 			fail(c, err)
 			c.Abort()
 			return
@@ -69,12 +67,10 @@ func (a *App) roomPickerOn() gin.HandlerFunc {
 	}
 }
 
-// roomsOnIn reads the rooms switch for the room picker gate and the room
-// snapshots. A failed read returns its own error.
-func roomsOnIn(tx *gorm.DB) error {
+func roomsOnIn(tx *gorm.DB, off *apiError) error {
 	on, err := boolSettingErrIn(tx, settingRoomsEnabled, false)
 	if err == nil && !on {
-		return errRoomsOff
+		return off
 	}
 	return err
 }
@@ -103,7 +99,7 @@ func lockRoomManagerIn(tx *gorm.DB, session *models.User, mode actorLock) (*mode
 }
 
 func readRoomAdminIn(tx *gorm.DB, session *models.User) (*models.User, error) {
-	if err := roomsOnIn(tx); err != nil {
+	if err := roomsOnIn(tx, errRoomRouteHidden); err != nil {
 		return nil, err
 	}
 	return lockRoomManagerIn(tx, session, actorRead)
@@ -111,10 +107,6 @@ func readRoomAdminIn(tx *gorm.DB, session *models.User) (*models.User, error) {
 
 func (a *App) readAdminRoomList(c *gin.Context, surface string, read func(*gorm.DB) error) bool {
 	err := a.readAdminSnapshot(c, surface, readRoomAdminIn, read)
-	if errors.Is(err, errRoomsOff) {
-		jsonError(c, http.StatusNotFound, "not found")
-		return false
-	}
 	if err != nil {
 		fail(c, err)
 		return false

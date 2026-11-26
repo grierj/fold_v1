@@ -164,7 +164,7 @@ func (a *App) apiSeriesRooms(c *gin.Context) {
 	var out seriesRoomsJSON
 	var judged sessionJudgment
 	err := decidingSnapshot(a.DB.WithContext(c.Request.Context()), func(tx *gorm.DB) error {
-		if err := roomsOnIn(tx); err != nil {
+		if err := roomsOnIn(tx, errRoomsOff); err != nil {
 			return err
 		}
 		t, err := a.managedEventTargetIn(tx, apiUser(c), id, &judged)
