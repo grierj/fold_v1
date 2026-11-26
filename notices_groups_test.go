@@ -14,6 +14,7 @@ import (
 	"fold/models"
 
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 // wantGroupDeleted checks that uid got exactly one group.deleted since mark,
@@ -224,6 +225,24 @@ func TestGroupDeleteNamesNoHiddenGroupToOutsiders(t *testing.T) {
 	wantGroupDeleted(t, app, "the teen", teen.ID, nil, teen.Email, mark, "Supper club was deleted")
 }
 
+// A member is told the group's name only when they may see it: an archived
+// group is its leaders' alone (policy.CanSeeGroup), so a member of one is
+// told "One of your groups" with no name, subject or link, and the leader is
+// told its name.
+func TestGroupDeleteNamesAnArchivedGroupOnlyToItsLeaders(t *testing.T) {
+	f := newGroupDeleteFixture(t)
+	gormMust(t, f.app.DB.Model(&models.Group{}).Where("id = ?", f.group).Update("status", models.GroupArchived))
+	mark := markNotices(t, f.app)
+	apiDo(t, f.admin, "DELETE", f.deletePath(), nil, http.StatusOK)
+	drainNotices(t, f.app)
+	n := wantGroupDeleted(t, f.app, "the member", f.memberUser.ID, f.member, f.memberUser.Email, mark, "One of your groups was deleted")
+	if n.SubjectType != "" || n.SubjectID != nil {
+		t.Fatalf("the member's notice follows the group: subject %q %v", n.SubjectType, n.SubjectID)
+	}
+	noSecrets(t, f.app, "the member", f.memberUser.ID, f.memberUser.Email, mark, []string{"Supper club", "Group hall", "/groups/"})
+	wantGroupDeleted(t, f.app, "the leader", f.leaderUser.ID, f.leader, f.leaderUser.Email, mark, "Supper club was deleted")
+}
+
 // A refused delete tells nobody and keeps every row: a member's own try (the
 // admin routes refuse it) and an admin's on a group that is already gone.
 func TestRefusedGroupDeleteTellsNobody(t *testing.T) {
@@ -359,6 +378,33 @@ func TestGroupDeleteSettlesWritersInFlight(t *testing.T) {
 	}
 }
 
+// The delete takes its events' rows before their dates', the order an
+// ungated room pick takes (the event, then the date): a pick holding an event
+// finds the delete waiting on that event and holding none of its dates, so
+// the pick can take its date and finish, and neither waits on the other.
+func TestGroupDeleteTakesItsEventsBeforeTheirDates(t *testing.T) {
+	f := newGroupDeleteFixture(t)
+	pick := f.app.DB.Begin()
+	if pick.Error != nil {
+		t.Fatal(pick.Error)
+	}
+	defer pick.Rollback()
+	var ev models.Event
+	gormMust(t, pick.Clauses(clause.Locking{Strength: "UPDATE"}).First(&ev, f.open.ID))
+	deletion := queueContact(func() *httptest.ResponseRecorder { return f.admin.do("DELETE", f.deletePath(), nil, true) })
+	waitLockWaiters(t, f.app)
+	var date models.EventOccurrence
+	if err := pick.Raw("SELECT * FROM event_occurrences WHERE id = ? FOR UPDATE NOWAIT", f.openDates[0].ID).Scan(&date).Error; err != nil {
+		t.Fatalf("the delete holds a date while it waits for its event: %v", err)
+	}
+	if err := pick.Commit().Error; err != nil {
+		t.Fatal(err)
+	}
+	if w := awaitContactResponse(t, deletion); w.Code != http.StatusOK {
+		t.Fatalf("delete: %d %s", w.Code, w.Body.String())
+	}
+}
+
 // groupDeleteCount is what GET /admin/groups/:id/delete-count answers c.
 func groupDeleteCount(t *testing.T, c *apiClient, groupID uint) int {
 	t.Helper()
@@ -446,4 +492,16 @@ func TestGroupDeleteCountIsAnAdminsRead(t *testing.T) {
 	}
 	wantCode(t, "a session ended before the snapshot", w, http.StatusUnauthorized, "signed_out")
 	wantNoAck(t, "a session ended before the snapshot", w)
+
+	// A role read in the snapshot decides, not the middleware's: an admin
+	// demoted before it (here without the session bump a demotion makes) is
+	// refused too.
+	demoted := newTestUser(t, f.app, "demoted count admin", "password1234", models.RoleAdmin)
+	demotedClient := loginAPI(t, f.app, demoted.Name, "password1234")
+	f.app.hooks.readerBegin = func(surface string) {
+		if surface == "group delete count" {
+			gormMust(t, f.app.DB.Model(&models.User{}).Where("id = ?", demoted.ID).Update("role", models.RoleMember))
+		}
+	}
+	wantCode(t, "an admin demoted before the snapshot", demotedClient.do("GET", path, nil, false), http.StatusUnauthorized, "signed_out")
 }
