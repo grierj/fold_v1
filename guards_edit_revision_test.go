@@ -28,12 +28,12 @@ import (
 // ---------------------------------------------------------------------------
 
 // editRevisionCheckers is every handler that checks a save's revision, exactly.
-var editRevisionCheckers = []string{"apiAdminUpdateRoom", "apiAdminUpdateUser", "apiScheduleMessage", "apiSetDateRoom", "apiSetEventVisibility", "apiSetSeriesRoom", "apiUpdateEvent", "apiUpdateGroup", "apiUpdateMessage", "saveRevisedSetting"}
+var editRevisionCheckers = []string{"apiAdminUpdateRoom", "apiAdminUpdateUser", "apiScheduleMessage", "apiSetDateRoom", "apiSetEventVisibility", "apiSetSeriesRoom", "apiUpdateEvent", "apiUpdateGroup", "apiUpdateHouseholdPerson", "apiUpdateMessage", "apiUpdateMyHousehold", "saveRevisedSetting"}
 
-var editRevisionChecks = map[string]bool{"checkSettingRevision": true, "checkAdminUserRevision": true, "checkEventRevision": true, "checkGroupRevision": true, "checkDateRoomRevision": true, "checkMessageRevision": true, "checkRoomRevision": true, "checkEditRevision": true}
+var editRevisionChecks = map[string]bool{"checkSettingRevision": true, "checkAdminUserRevision": true, "checkEventRevision": true, "checkGroupRevision": true, "checkDateRoomRevision": true, "checkMessageRevision": true, "checkRoomRevision": true, "checkHouseholdRevision": true, "checkHouseholdPersonRevision": true, "checkEditRevision": true}
 
 // editRevisionReaders are the checks that read their row on the handle given.
-var editRevisionReaders = map[string]bool{"checkSettingRevision": true, "checkAdminUserRevision": true, "checkGroupRevision": true, "checkDateRoomRevision": true, "checkMessageRevision": true, "checkRoomRevision": true}
+var editRevisionReaders = map[string]bool{"checkSettingRevision": true, "checkAdminUserRevision": true, "checkGroupRevision": true, "checkDateRoomRevision": true, "checkMessageRevision": true, "checkRoomRevision": true, "checkHouseholdRevision": true, "checkHouseholdPersonRevision": true}
 
 var editRevisionTransactions = map[string]bool{"contactMutation": true, "Transaction": true}
 
@@ -199,13 +199,56 @@ func (a *App) saveRevisedSetting() {
 	}, readCommitted)
 }
 `
-	sound := guardkit.Sources{"a.go": visibility, "b.go": series, "c.go": group, "d.go": rooms, "e.go": messages, "f.go": roomEditor, "g.go": admin}
+	const households = `package main
+func (a *App) apiUpdateMyHousehold(c *gin.Context) {
+	a.DB.Transaction(func(tx *gorm.DB) error {
+		if !created {
+			if err := a.checkHouseholdRevision(tx, householdID, body.Revision); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
+func (a *App) apiUpdateHouseholdPerson(c *gin.Context) {
+	a.DB.Transaction(func(tx *gorm.DB) error {
+		return a.checkHouseholdPersonRevision(tx, person.ID, input.Revision)
+	})
+}
+`
+	sound := guardkit.Sources{"a.go": visibility, "b.go": series, "c.go": group, "d.go": rooms, "e.go": messages, "f.go": roomEditor, "g.go": admin, "h.go": households}
 	if bad := editRevisionProblems(sound.Parse(0)); len(bad) > 0 {
 		t.Fatalf("the sound shape was flagged: %v", bad)
 	}
 	sound["g.go"] = strings.Replace(admin, "checkSettingRevision(tx,", "checkSettingRevision(a.DB,", 1)
 	if bad := editRevisionProblems(sound.Parse(0)); len(bad) == 0 {
 		t.Error("a setting checked on the connection outside its transaction passed the guard")
+	}
+	sound["g.go"] = admin
+	for name, src := range map[string]string{
+		"a household save that skips the check":                                strings.Replace(households, "a.checkHouseholdRevision(tx, householdID, body.Revision)", "error(nil)", 1),
+		"a person save that skips the check":                                   strings.Replace(households, "return a.checkHouseholdPersonRevision(tx, person.ID, input.Revision)", "return nil", 1),
+		"a household save that reads its row outside its transaction's handle": strings.Replace(households, "checkHouseholdRevision(tx,", "checkHouseholdRevision(a.DB,", 1),
+		"a person save that reads its row outside its transaction's handle":    strings.Replace(households, "checkHouseholdPersonRevision(tx,", "checkHouseholdPersonRevision(a.DB,", 1),
+		"a person save checked before its transaction": `package main
+func (a *App) apiUpdateMyHousehold(c *gin.Context) {
+	a.DB.Transaction(func(tx *gorm.DB) error { return a.checkHouseholdRevision(tx, householdID, body.Revision) })
+}
+func (a *App) apiUpdateHouseholdPerson(c *gin.Context) {
+	if err := a.checkHouseholdPersonRevision(a.DB, person.ID, input.Revision); err != nil {
+		return
+	}
+	a.DB.Transaction(func(tx *gorm.DB) error { return nil })
+}
+`,
+	} {
+		if src == households {
+			t.Fatalf("%s: the mutation did not apply", name)
+		}
+		sound["h.go"] = src
+		if bad := editRevisionProblems(sound.Parse(0)); len(bad) == 0 {
+			t.Errorf("%s passed the guard", name)
+		}
 	}
 	for name, src := range map[string]string{
 		"a room edit that skips the check": `package main
@@ -227,7 +270,7 @@ func (a *App) apiAdminUpdateRoom(c *gin.Context) {
 }
 `,
 	} {
-		sources := guardkit.Sources{"a.go": visibility, "b.go": series, "c.go": group, "d.go": rooms, "e.go": messages, "f.go": src, "g.go": admin}
+		sources := guardkit.Sources{"a.go": visibility, "b.go": series, "c.go": group, "d.go": rooms, "e.go": messages, "f.go": src, "g.go": admin, "h.go": households}
 		if bad := editRevisionProblems(sources.Parse(0)); len(bad) == 0 {
 			t.Errorf("%s passed the guard", name)
 		}
@@ -272,7 +315,7 @@ func bookWholeSeries(tx *gorm.DB, ev *models.Event, body seriesBody) error {
 }
 `,
 	} {
-		sources := guardkit.Sources{"a.go": visibility, "b.go": series, "c.go": group, "d.go": src, "e.go": messages, "f.go": roomEditor, "g.go": admin}
+		sources := guardkit.Sources{"a.go": visibility, "b.go": series, "c.go": group, "d.go": src, "e.go": messages, "f.go": roomEditor, "g.go": admin, "h.go": households}
 		if bad := editRevisionProblems(sources.Parse(0)); len(bad) == 0 {
 			t.Errorf("%s passed the guard", name)
 		}
@@ -306,7 +349,7 @@ func (a *App) apiScheduleMessage(c *gin.Context) {
 }
 `,
 	} {
-		sources := guardkit.Sources{"a.go": visibility, "b.go": series, "c.go": group, "d.go": rooms, "e.go": src, "f.go": roomEditor, "g.go": admin}
+		sources := guardkit.Sources{"a.go": visibility, "b.go": series, "c.go": group, "d.go": rooms, "e.go": src, "f.go": roomEditor, "g.go": admin, "h.go": households}
 		if bad := editRevisionProblems(sources.Parse(0)); len(bad) == 0 {
 			t.Errorf("%s passed the guard", name)
 		}
@@ -367,7 +410,7 @@ func (a *App) apiSetGroup(c *gin.Context) {
 }
 `,
 	} {
-		sources := guardkit.Sources{"a.go": src, "b.go": series, "d.go": rooms, "e.go": messages, "f.go": roomEditor, "g.go": admin}
+		sources := guardkit.Sources{"a.go": src, "b.go": series, "d.go": rooms, "e.go": messages, "f.go": roomEditor, "g.go": admin, "h.go": households}
 		if !strings.Contains(src, "apiUpdateGroup") {
 			sources["c.go"] = group
 		}

@@ -205,9 +205,9 @@ func TestHouseholdConversionReservationsAndLifecycle(t *testing.T) {
 		t.Fatal("no cross-household admin invitation")
 	}
 	// A material edit invalidates; notes and photo consent do not.
-	apiDo(t, c, "PUT", "/api/v1/me/household/people/"+itoa(person.ID), map[string]any{"careNotes": "Private", "photoConsent": true}, http.StatusOK)
+	editMyPerson(t, c, person.ID, map[string]any{"careNotes": "Private", "photoConsent": true}, http.StatusOK)
 	apiDo(t, newAPIClient(t, app), "GET", "/api/v1/invitations/"+token, nil, http.StatusOK)
-	apiDo(t, c, "PUT", "/api/v1/me/household/people/"+itoa(person.ID), map[string]any{"firstName": "Maria"}, http.StatusOK)
+	editMyPerson(t, c, person.ID, map[string]any{"firstName": "Maria"}, http.StatusOK)
 	acceptConversion(t, app, token, http.StatusBadRequest)
 	token = inviteHouseholdPerson(t, app, c, person.ID, "delete@example.com")
 	apiDo(t, c, "DELETE", "/api/v1/me/household/people/"+itoa(person.ID), nil, http.StatusOK)
@@ -545,6 +545,7 @@ func TestHouseholdConversionCompetesWithHouseholdMutations(t *testing.T) {
 			eventID, date := seedCappedEvent(t, app, admin, gid, intPtr(1), true)
 			batchAnswer(t, c, eventID, date, map[string]any{"people": []map[string]any{{"personId": person.ID, "status": "going"}}}, http.StatusOK)
 			token := inviteHouseholdPerson(t, app, c, person.ID, "mutation@example.com")
+			revision := myPersonRevision(t, c, person.ID)
 			anon := newAPIClient(t, app)
 			anon.fetchCSRF()
 			var codes [2]int
@@ -565,7 +566,7 @@ func TestHouseholdConversionCompetesWithHouseholdMutations(t *testing.T) {
 				case "disable":
 					codes[1] = admin.do("PUT", "/api/v1/admin/users/"+itoa(holder.ID), map[string]any{"status": "disabled"}, true).Code
 				case "edit":
-					codes[1] = c.do("PUT", "/api/v1/me/household/people/"+itoa(person.ID), map[string]any{"firstName": "Changed"}, true).Code
+					codes[1] = c.do("PUT", "/api/v1/me/household/people/"+itoa(person.ID), withRevision(map[string]any{"firstName": "Changed"}, revision), true).Code
 				case "delete":
 					codes[1] = c.do("DELETE", "/api/v1/me/household/people/"+itoa(person.ID), nil, true).Code
 				case "resend":

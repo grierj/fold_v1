@@ -90,7 +90,7 @@ func (a *App) apiAdminGetHousehold(c *gin.Context) {
 }
 
 func (a *App) adminHouseholdResponse(c *gin.Context, household *models.Household, status int) {
-	out, err := a.toHouseholdJSON(household, apiUser(c))
+	out, err := a.toHouseholdJSON(household.ID, apiUser(c))
 	if err != nil {
 		jsonError(c, http.StatusInternalServerError, "could not load household")
 		return
@@ -223,7 +223,7 @@ func (a *App) apiAdminAddHouseholdPerson(c *gin.Context) {
 		a.adminHouseholdError(c, err)
 		return
 	}
-	row, err := a.householdPersonRow(a.DB, &person, apiUser(c))
+	row, err := a.householdPersonRow(person.ID, apiUser(c))
 	if err != nil {
 		jsonError(c, http.StatusInternalServerError, "could not load that person")
 		return

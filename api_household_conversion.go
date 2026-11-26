@@ -117,12 +117,26 @@ func (a *App) loadConversionBatch(tx *gorm.DB, actor *models.User, householdID u
 // householdPersonRow builds one person's JSON for a single-person response.
 // The conversion batch already holds the person's guardian links, so they
 // are not loaded a second time.
-func (a *App) householdPersonRow(tx *gorm.DB, person *models.HouseholdPerson, viewer *models.User) (householdPersonJSON, error) {
-	batch, err := a.loadConversionBatch(tx, viewer, person.HouseholdID, []uint{person.ID})
-	if err != nil {
-		return householdPersonJSON{}, err
-	}
-	return a.toHouseholdPersonJSON(person, batch.links[person.ID], viewer, batch)
+// householdPersonRow is the person id as one read-only snapshot shows it to
+// viewer, so the revision names the fields beside it.
+func (a *App) householdPersonRow(id uint, viewer *models.User) (row householdPersonJSON, err error) {
+	err = a.DB.Transaction(func(tx *gorm.DB) error {
+		var person models.HouseholdPerson
+		if err := tx.First(&person, id).Error; err != nil {
+			return err
+		}
+		revision, err := a.rowRevisionIn(tx, householdPersonRevisionRows, person.ID)
+		if err != nil {
+			return err
+		}
+		batch, err := a.loadConversionBatch(tx, viewer, person.HouseholdID, []uint{person.ID})
+		if err != nil {
+			return err
+		}
+		row, err = a.toHouseholdPersonJSON(&person, revision, batch.links[person.ID], viewer, batch)
+		return err
+	}, readSnapshot)
+	return row, err
 }
 
 // loadConversionBatchFor takes a relation the caller already knows, so

@@ -42,6 +42,7 @@ type householdPersonJSON struct {
 	GuardianLinkID          *uint           `json:"guardianLinkId,omitempty"`
 	ConvertedUserID         *uint           `json:"convertedUserId,omitempty"`
 	CreatedBy               uint            `json:"createdBy"`
+	Revision                string          `json:"revision"`
 }
 
 type householdAccountJSON struct {
@@ -56,6 +57,7 @@ type householdJSON struct {
 	Name      string                 `json:"name"`
 	Address   string                 `json:"address"`
 	CreatedBy uint                   `json:"createdBy"`
+	Revision  string                 `json:"revision"`
 	People    []householdPersonJSON  `json:"people"`
 	Accounts  []householdAccountJSON `json:"accounts"`
 }
@@ -123,19 +125,20 @@ func lockHouseholdSeat(tx *gorm.DB, me *models.User, noSeat error) (*models.User
 }
 
 // ensureHousehold loads the user's household, creating it on first use
-// (audited household.created). It answers and reports false on failure.
-func (a *App) ensureHousehold(c *gin.Context, u *models.User) (*models.Household, models.HouseholdAccount, bool) {
+// (audited household.created); created says this request made it. It answers
+// and reports false on failure.
+func (a *App) ensureHousehold(c *gin.Context, u *models.User) (_ *models.Household, _ models.HouseholdAccount, created, ok bool) {
 	if acct, found := householdAccountIn(a.DB, u.ID); found {
 		var household models.Household
 		if err := a.DB.First(&household, acct.HouseholdID).Error; err != nil {
 			jsonError(c, http.StatusInternalServerError, "could not load household")
-			return nil, acct, false
+			return nil, acct, false, false
 		}
-		return &household, acct, true
+		return &household, acct, false, true
 	}
 	if !policy.CanCreateHousehold(asPerson(u)) {
 		jsonError(c, http.StatusForbidden, "forbidden")
-		return nil, models.HouseholdAccount{}, false
+		return nil, models.HouseholdAccount{}, false, false
 	}
 	var household models.Household
 	var acct models.HouseholdAccount
@@ -148,7 +151,7 @@ func (a *App) ensureHousehold(c *gin.Context, u *models.User) (*models.Household
 			return err
 		}
 		if seat, found := householdAccountIn(tx, fresh.ID); found {
-			acct, household = seat, models.Household{}
+			acct, household, created = seat, models.Household{}, false
 			return tx.First(&household, seat.HouseholdID).Error
 		}
 		if !policy.CanCreateHousehold(asPerson(fresh)) {
@@ -158,7 +161,7 @@ func (a *App) ensureHousehold(c *gin.Context, u *models.User) (*models.Household
 		if err := tx.Create(&household).Error; err != nil {
 			return err
 		}
-		acct = models.HouseholdAccount{HouseholdID: household.ID, UserID: fresh.ID, Relation: models.HouseholdRelationGuardian}
+		acct, created = models.HouseholdAccount{HouseholdID: household.ID, UserID: fresh.ID, Relation: models.HouseholdRelationGuardian}, true
 		if err := tx.Create(&acct).Error; err != nil {
 			return err
 		}
@@ -167,36 +170,36 @@ func (a *App) ensureHousehold(c *gin.Context, u *models.User) (*models.Household
 	})
 	if isAPIError(err) {
 		fail(c, err)
-		return nil, models.HouseholdAccount{}, false
+		return nil, models.HouseholdAccount{}, false, false
 	}
 	if err != nil {
 		// A concurrent first use may have won the unique user row.
 		if acct, found := householdAccountIn(a.DB, u.ID); found {
 			var household models.Household
 			if ferr := a.DB.First(&household, acct.HouseholdID).Error; ferr == nil {
-				return &household, acct, true
+				return &household, acct, false, true
 			}
 		}
 		jsonError(c, http.StatusInternalServerError, "could not create household")
-		return nil, acct, false
+		return nil, acct, false, false
 	}
-	return &household, acct, true
+	return &household, acct, created, true
 }
 
 // manageMyHousehold is ensureHousehold plus policy.CanManageHousehold:
 // a teen household account sees the household exists but manages none of
 // it (403, section 6).
-func (a *App) manageMyHousehold(c *gin.Context) (*models.Household, bool) {
+func (a *App) manageMyHousehold(c *gin.Context) (_ *models.Household, created, ok bool) {
 	u := apiUser(c)
-	household, acct, ok := a.ensureHousehold(c, u)
+	household, acct, created, ok := a.ensureHousehold(c, u)
 	if !ok {
-		return nil, false
+		return nil, false, false
 	}
 	if !policy.CanManageHousehold(asPerson(u), householdRelOf(acct, true)) {
 		jsonError(c, http.StatusForbidden, "forbidden")
-		return nil, false
+		return nil, false, false
 	}
-	return household, true
+	return household, created, true
 }
 
 // loadGuardianLinks reads the guardian links of personIDs by person; a partial
@@ -237,7 +240,9 @@ func effectiveLink(links []models.GuardianLink) (string, *uint) {
 	return last.Status, &last.ID
 }
 
-func (a *App) toHouseholdPersonJSON(person *models.HouseholdPerson, links []models.GuardianLink, viewer *models.User, batch *conversionBatch) (householdPersonJSON, error) {
+// revision is the person's row token (householdPersonRevisionRows), read in
+// the snapshot that read person.
+func (a *App) toHouseholdPersonJSON(person *models.HouseholdPerson, revision string, links []models.GuardianLink, viewer *models.User, batch *conversionBatch) (householdPersonJSON, error) {
 	status, linkID := effectiveLink(links)
 	if person.Kind == models.HouseholdAdult {
 		// An adult needs no approval, whatever links a former kind left.
@@ -281,21 +286,38 @@ func (a *App) toHouseholdPersonJSON(person *models.HouseholdPerson, links []mode
 		CareNotes: notes, PhotoConsent: person.PhotoConsent,
 		LinkStatus: status, GuardianLinkID: linkID,
 		ConvertedUserID: person.ConvertedUserID, CreatedBy: person.CreatedBy,
+		Revision: revision,
 	}, nil
 }
 
-func (a *App) toHouseholdJSON(household *models.Household, viewer *models.User) (householdJSON, error) {
-	return a.toHouseholdJSONIn(a.DB, household, viewer, time.Now().UTC())
+// toHouseholdJSON is the household id as one read-only snapshot shows it to
+// viewer, so each revision names the fields beside it.
+func (a *App) toHouseholdJSON(id uint, viewer *models.User) (out householdJSON, err error) {
+	err = a.DB.Transaction(func(tx *gorm.DB) error {
+		var household models.Household
+		if err := tx.First(&household, id).Error; err != nil {
+			return err
+		}
+		out, err = a.toHouseholdJSONIn(tx, &household, viewer, time.Now().UTC())
+		return err
+	}, readSnapshot)
+	return out, err
 }
 
-// toHouseholdJSONIn is toHouseholdJSON read on db, with ages, care-note
-// windows and conversions decided at now.
+// toHouseholdJSONIn is the household as db shows it, with ages, care-note
+// windows and conversions decided at now. db is the snapshot that read
+// household.
 func (a *App) toHouseholdJSONIn(db *gorm.DB, household *models.Household, viewer *models.User, now time.Time) (householdJSON, error) {
 	out := householdJSON{
 		ID: household.ID, Name: household.Name, Address: household.Address,
 		CreatedBy: household.CreatedBy,
 		People:    []householdPersonJSON{}, Accounts: []householdAccountJSON{},
 	}
+	revision, err := a.rowRevisionIn(db, householdRevisionRows, household.ID)
+	if err != nil {
+		return out, err
+	}
+	out.Revision = revision
 	var people []models.HouseholdPerson
 	if err := db.Where("household_id = ? AND converted_user_id IS NULL", household.ID).Order("id").Find(&people).Error; err != nil {
 		return out, err
@@ -303,6 +325,10 @@ func (a *App) toHouseholdJSONIn(db *gorm.DB, household *models.Household, viewer
 	ids := make([]uint, 0, len(people))
 	for i := range people {
 		ids = append(ids, people[i].ID)
+	}
+	revisions, err := a.rowRevisionsIn(db, householdPersonRevisionRows, ids)
+	if err != nil {
+		return out, err
 	}
 	links, err := loadGuardianLinks(db, ids)
 	if err != nil {
@@ -346,7 +372,7 @@ func (a *App) toHouseholdJSONIn(db *gorm.DB, household *models.Household, viewer
 		}
 	}
 	for i := range people {
-		row, err := a.toHouseholdPersonJSON(&people[i], links[people[i].ID], viewer, batch)
+		row, err := a.toHouseholdPersonJSON(&people[i], revisions[people[i].ID], links[people[i].ID], viewer, batch)
 		if err != nil {
 			return out, err
 		}
@@ -492,14 +518,18 @@ func (a *App) apiGetMyHousehold(c *gin.Context) {
 	}
 }
 
+// apiUpdateMyHousehold saves the household's name and address. A save that
+// names a field names the read it was made from (revision), unless this
+// request made the household: there was no read to name.
 func (a *App) apiUpdateMyHousehold(c *gin.Context) {
-	household, ok := a.manageMyHousehold(c)
+	household, created, ok := a.manageMyHousehold(c)
 	if !ok {
 		return
 	}
 	var body struct {
-		Name    *string `json:"name"`
-		Address *string `json:"address"`
+		Name     *string `json:"name"`
+		Address  *string `json:"address"`
+		Revision string  `json:"revision"`
 	}
 	if err := c.ShouldBindJSON(&body); err != nil {
 		jsonError(c, http.StatusBadRequest, "invalid request body")
@@ -522,10 +552,10 @@ func (a *App) apiUpdateMyHousehold(c *gin.Context) {
 		}
 		updates["address"] = address
 	}
+	householdID := household.ID
 	if len(updates) > 0 {
 		// The household written is the one the locked seat names, which
 		// may differ from the one loaded before the transaction.
-		var householdID uint
 		if err := a.DB.Transaction(func(tx *gorm.DB) error {
 			fresh, seat, err := lockHouseholdSeat(tx, apiUser(c), errHouseholdForbidden)
 			if err != nil {
@@ -534,6 +564,11 @@ func (a *App) apiUpdateMyHousehold(c *gin.Context) {
 			householdID = seat.HouseholdID
 			if err := lockHousehold(tx, householdID); err != nil {
 				return err
+			}
+			if !created || householdID != household.ID {
+				if err := a.checkHouseholdRevision(tx, householdID, body.Revision); err != nil {
+					return err
+				}
 			}
 			if err := tx.Model(&models.Household{}).Where("id = ?", householdID).Updates(updates).Error; err != nil {
 				return err
@@ -548,14 +583,8 @@ func (a *App) apiUpdateMyHousehold(c *gin.Context) {
 			fail(c, err)
 			return
 		}
-		var saved models.Household
-		if err := a.DB.First(&saved, householdID).Error; err != nil {
-			jsonError(c, http.StatusInternalServerError, "could not load household")
-			return
-		}
-		household = &saved
 	}
-	out, err := a.toHouseholdJSON(household, apiUser(c))
+	out, err := a.toHouseholdJSON(householdID, apiUser(c))
 	if err != nil {
 		jsonError(c, http.StatusInternalServerError, "could not load your household")
 		return
@@ -694,7 +723,7 @@ func (a *App) parseHouseholdPersonInput(c *gin.Context, body householdPersonInpu
 // first use). A child or teen also gets a pending guardian link and the
 // admins a waiting task (DEC-32); an adult needs no approval.
 func (a *App) apiAddHouseholdPerson(c *gin.Context) {
-	if _, ok := a.manageMyHousehold(c); !ok {
+	if _, _, ok := a.manageMyHousehold(c); !ok {
 		return
 	}
 	me := apiUser(c)
@@ -735,7 +764,7 @@ func (a *App) apiAddHouseholdPerson(c *gin.Context) {
 		fail(c, err)
 		return
 	}
-	row, err := a.householdPersonRow(a.DB, &person, me)
+	row, err := a.householdPersonRow(person.ID, me)
 	if err != nil {
 		jsonError(c, http.StatusInternalServerError, "could not load that person")
 		return
@@ -777,18 +806,23 @@ func (a *App) loadMyHouseholdPerson(c *gin.Context) (*models.Household, *models.
 
 // apiUpdateHouseholdPerson edits a person in the user's household. A
 // kind change keeps DEC-32 true: becoming a child or teen starts a
-// pending guardian link, and becoming an adult revokes live links.
+// pending guardian link, and becoming an adult revokes live links. The save
+// names the read it was made from (revision).
 func (a *App) apiUpdateHouseholdPerson(c *gin.Context) {
 	_, person, ok := a.loadMyHouseholdPerson(c)
 	if !ok {
 		return
 	}
 	me := apiUser(c)
-	var body householdPersonInput
-	if err := c.ShouldBindJSON(&body); err != nil {
+	var input struct {
+		householdPersonInput
+		Revision string `json:"revision"`
+	}
+	if err := c.ShouldBindJSON(&input); err != nil {
 		jsonError(c, http.StatusBadRequest, "invalid request body")
 		return
 	}
+	body := input.householdPersonInput
 	updates, err := householdPersonFields(body)
 	if err != nil {
 		fail(c, err)
@@ -816,6 +850,9 @@ func (a *App) apiUpdateHouseholdPerson(c *gin.Context) {
 		}
 		if person.ConvertedUserID != nil {
 			return errConversionUnavailable
+		}
+		if err := a.checkHouseholdPersonRevision(tx, person.ID, input.Revision); err != nil {
+			return err
 		}
 		material := (body.FirstName != nil && strings.TrimSpace(*body.FirstName) != person.FirstName) ||
 			(body.LastName != nil && strings.TrimSpace(*body.LastName) != person.LastName) ||
@@ -895,12 +932,7 @@ func (a *App) apiUpdateHouseholdPerson(c *gin.Context) {
 		fail(c, err)
 		return
 	}
-	var fresh models.HouseholdPerson
-	if err := a.DB.First(&fresh, person.ID).Error; err != nil {
-		jsonError(c, http.StatusInternalServerError, "could not load that person")
-		return
-	}
-	row, err := a.householdPersonRow(a.DB, &fresh, me)
+	row, err := a.householdPersonRow(person.ID, me)
 	if err != nil {
 		jsonError(c, http.StatusInternalServerError, "could not load that person")
 		return

@@ -768,6 +768,32 @@ func getMyHousehold(t *testing.T, c *apiClient) householdJSON {
 	return body.Household
 }
 
+// myPersonRevision is the revision c's household read gives person id.
+func myPersonRevision(t *testing.T, c *apiClient, id uint) string {
+	t.Helper()
+	for _, p := range getMyHousehold(t, c).People {
+		if p.ID == id && p.Revision != "" {
+			return p.Revision
+		}
+	}
+	t.Fatalf("the household read has no revision for person %d", id)
+	return ""
+}
+
+// editMyPerson is PUT /me/household/people/:id with the revision c's
+// household read gives that person, answering want.
+func editMyPerson(t *testing.T, c *apiClient, id uint, body map[string]any, want int) string {
+	t.Helper()
+	return apiDo(t, c, "PUT", "/api/v1/me/household/people/"+itoa(id), withRevision(body, myPersonRevision(t, c, id)), want)
+}
+
+// editMyHousehold is PUT /me/household with the revision c's household read
+// gives, answering want.
+func editMyHousehold(t *testing.T, c *apiClient, body map[string]any, want int) string {
+	t.Helper()
+	return apiDo(t, c, "PUT", "/api/v1/me/household", withRevision(body, getMyHousehold(t, c).Revision), want)
+}
+
 func addMyPerson(t *testing.T, c *apiClient, body map[string]any) householdPersonJSON {
 	t.Helper()
 	w := c.do("POST", "/api/v1/me/household/people", body, true)
@@ -823,14 +849,14 @@ func TestMyHouseholdCreatedOnFirstUse(t *testing.T) {
 	}
 
 	// Editable name and address; an empty name is refused.
-	w := c.do("PUT", "/api/v1/me/household", map[string]string{"name": "The Smiths", "address": "1 Oak St"}, true)
+	w := c.do("PUT", "/api/v1/me/household", withRevision(map[string]any{"name": "The Smiths", "address": "1 Oak St"}, h.Revision), true)
 	if w.Code != http.StatusOK {
 		t.Fatalf("PUT /me/household: %d %s", w.Code, w.Body.String())
 	}
 	if h = getMyHousehold(t, c); h.Name != "The Smiths" || h.Address != "1 Oak St" {
 		t.Fatalf("edited household: %+v", h)
 	}
-	w = c.do("PUT", "/api/v1/me/household", map[string]string{"name": " "}, true)
+	w = c.do("PUT", "/api/v1/me/household", withRevision(map[string]any{"name": " "}, h.Revision), true)
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("empty household name: %d, want 400", w.Code)
 	}
@@ -943,7 +969,7 @@ func TestHouseholdPersonEditAndRemove(t *testing.T) {
 	child := addMyPerson(t, c, map[string]any{"firstName": "Kid", "kind": "child", "birthDate": "2021-01-02"})
 	path := "/api/v1/me/household/people/" + itoa(child.ID)
 
-	w := c.do("PUT", path, map[string]any{"firstName": "Kidd", "careNotes": "Asthma inhaler"}, true)
+	w := c.do("PUT", path, withRevision(map[string]any{"firstName": "Kidd", "careNotes": "Asthma inhaler"}, myPersonRevision(t, c, child.ID)), true)
 	if w.Code != http.StatusOK {
 		t.Fatalf("edit person: %d %s", w.Code, w.Body.String())
 	}
@@ -959,7 +985,7 @@ func TestHouseholdPersonEditAndRemove(t *testing.T) {
 	if _, _, waiting, _ := badge(t, admin, ""); waiting != 1 {
 		t.Fatalf("admin waiting before kind change: %d", waiting)
 	}
-	w = c.do("PUT", path, map[string]any{"kind": "adult", "birthDate": "1990-01-02"}, true)
+	w = c.do("PUT", path, withRevision(map[string]any{"kind": "adult", "birthDate": "1990-01-02"}, edited.Person.Revision), true)
 	decodeJSON(t, w, &edited)
 	if edited.Person.Kind != "adult" || edited.Person.LinkStatus != "none" {
 		t.Fatalf("adult after kind change: %+v", edited.Person)
@@ -1040,15 +1066,19 @@ func TestHouseholdRegistrationAgeAndLifecycle(t *testing.T) {
 	_, c, spouse, child := householdFamily(t, app, admin, "lifecycle")
 	result := batchAnswer(t, c, eventID, date, map[string]any{"people": []map[string]any{{"personId": spouse.ID, "status": "going"}, {"personId": child.ID, "status": "going", "childcareRequested": true}}}, http.StatusOK)
 	spousePath := "/api/v1/me/household/people/" + itoa(spouse.ID)
-	apiDo(t, c, "PUT", spousePath, map[string]any{"birthDate": ""}, http.StatusConflict)
-	apiDo(t, c, "PUT", "/api/v1/me/household/people/"+itoa(child.ID), map[string]any{"kind": "adult"}, http.StatusConflict)
+	if got := editMyPerson(t, c, spouse.ID, map[string]any{"birthDate": ""}, http.StatusConflict); !strings.Contains(got, "household_birth_date_required") {
+		t.Fatalf("clearing a signed-up adult's birth date: %s", got)
+	}
+	if got := editMyPerson(t, c, child.ID, map[string]any{"kind": "adult"}, http.StatusConflict); !strings.Contains(got, "household_age_mismatch") {
+		t.Fatalf("a child made an adult: %s", got)
+	}
 	apiDo(t, c, "POST", "/api/v1/me/household/people", map[string]any{"firstName": "Minor", "kind": "adult", "birthDate": "2020-01-01"}, http.StatusConflict)
 	unknown := addMyPerson(t, c, map[string]any{"firstName": "Unknown", "kind": "adult"})
 	if unknown.RegistrationEligibility != "birth_date_required" {
 		t.Fatalf("unknown adult eligibility %+v", unknown)
 	}
 	batchAnswer(t, c, eventID, date, map[string]any{"people": []map[string]any{{"personId": unknown.ID, "status": "going"}}}, http.StatusConflict)
-	apiDo(t, c, "PUT", "/api/v1/me/household/people/"+itoa(child.ID), map[string]any{"kind": "teen", "birthDate": "2012-01-01"}, http.StatusOK)
+	editMyPerson(t, c, child.ID, map[string]any{"kind": "teen", "birthDate": "2012-01-01"}, http.StatusOK)
 	var r models.Registration
 	if err := app.DB.First(&r, result.People[1].RegistrationID).Error; err != nil {
 		t.Fatal(err)
@@ -1080,7 +1110,7 @@ func TestHouseholdProfileNotesRequireGuardian(t *testing.T) {
 	if strings.Contains(raw, "Private allergy note") || strings.Contains(raw, `"careNotes"`) {
 		t.Fatalf("unguarded notes: %s", raw)
 	}
-	apiDo(t, other, "PUT", "/api/v1/me/household/people/"+itoa(child.ID), map[string]any{"firstName": "Kitty"}, http.StatusOK)
+	editMyPerson(t, other, child.ID, map[string]any{"firstName": "Kitty"}, http.StatusOK)
 	h = getMyHousehold(t, c)
 	found := false
 	for _, p := range h.People {
@@ -1993,22 +2023,38 @@ func newHWScene(t *testing.T, seeded bool) hwScene {
 // write to households or household_people it makes. firstWrite matches only
 // facts GORM has set before the step (F6): Table, Where, Dest.
 type hwRoute struct {
-	name       string
-	method     string
-	firstUse   bool // the member has no household yet
-	status     int
-	writes     map[string]int64 // audit rows a live request adds, by action
-	path       func(s hwScene) string
-	body       any
+	name     string
+	method   string
+	firstUse bool // the member has no household yet
+	status   int
+	writes   map[string]int64 // audit rows a live request adds, by action
+	path     func(s hwScene) string
+	body     map[string]any
+	// revised: the save names the household's (PUT household) or the
+	// person's (PUT person) revision, read just before it is sent.
+	revised    bool
 	firstWrite func(s hwScene) erasureTestPoint
 }
 
+func (r hwRoute) bodyFor(c *apiClient, s hwScene) any {
+	if r.body == nil {
+		return nil
+	}
+	if !r.revised {
+		return r.body
+	}
+	if r.path(s) == "/api/v1/me/household" {
+		return withRevision(r.body, getMyHousehold(c.t, c).Revision)
+	}
+	return withRevision(r.body, myPersonRevision(c.t, c, s.pid))
+}
+
 func (r hwRoute) send(c *apiClient, s hwScene) <-chan httpResult {
-	return bgDo(c, r.method, r.path(s), r.body)
+	return bgDo(c, r.method, r.path(s), r.bodyFor(c, s))
 }
 
 func (r hwRoute) do(c *apiClient, s hwScene) httpResult {
-	w := c.do(r.method, r.path(s), r.body, true)
+	w := c.do(r.method, r.path(s), r.bodyFor(c, s), true)
 	return httpResult{w.Code, w.Body.String()}
 }
 
@@ -2020,7 +2066,7 @@ var hwRoutes = []hwRoute{
 		name: "PUT household", method: "PUT", status: http.StatusOK,
 		writes: map[string]int64{audit.HouseholdUpdated: 1},
 		path:   func(hwScene) string { return "/api/v1/me/household" },
-		body:   map[string]any{"name": "Renamed", "address": "2 Elm St"},
+		body:   map[string]any{"name": "Renamed", "address": "2 Elm St"}, revised: true,
 		firstWrite: func(s hwScene) erasureTestPoint {
 			return erasureTestPoint{Processor: "update", Step: "gorm:update", Table: "households",
 				Where: &erasureTestWhere{SQL: "id = ?", Vars: map[int]any{0: s.hid}}}
@@ -2039,7 +2085,7 @@ var hwRoutes = []hwRoute{
 		name: "PUT person", method: "PUT", status: http.StatusOK,
 		writes: map[string]int64{audit.HouseholdPersonUpdated: 1},
 		path:   func(s hwScene) string { return "/api/v1/me/household/people/" + itoa(s.pid) },
-		body:   map[string]any{"firstName": "Changed"},
+		body:   map[string]any{"firstName": "Changed"}, revised: true,
 		firstWrite: func(hwScene) erasureTestPoint {
 			return erasureTestPoint{Processor: "update", Step: "gorm:update", Table: "household_people",
 				Assign: map[string]any{"first_name": "Changed"}}
@@ -2271,8 +2317,8 @@ func TestHouseholdConcurrentFirstUseMakesOneHousehold(t *testing.T) {
 		second.jar[name] = ck
 	}
 	blocker, commit := hwHoldUser(t, s.app, s.u.ID, "")
-	one := bgDo(s.c, "PUT", "/api/v1/me/household", map[string]any{"name": "One"})
-	two := bgDo(&second, "PUT", "/api/v1/me/household", map[string]any{"name": "Two"})
+	one := bgDo(s.c, "PUT", "/api/v1/me/household", map[string]any{})
+	two := bgDo(&second, "PUT", "/api/v1/me/household", map[string]any{})
 	waiters := hwWaiters(t, s.app, 2)
 	hwOneBlockedBy(t, s.app, waiters, blocker) // the other may queue behind its peer
 	commit()
