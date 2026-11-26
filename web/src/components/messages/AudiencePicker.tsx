@@ -27,12 +27,13 @@ const LISTED_DATES = 10;
 // shown in place of the picker's own count, so every name and count on
 // screen is the one the sender confirms. reviewing: bumped when the sender
 // asks to review the whole list, which opens it.
-export function AudiencePicker({ options, choice, onChange, error, id, push = false, reviewed = null, reviewing = 0, recount = 0 }: {
+export function AudiencePicker({ options, choice, onChange, error, id, messageId, push = false, reviewed = null, reviewing = 0, recount = 0 }: {
   options: ComposeOptions;
   choice: AudienceChoice;
   onChange: (c: AudienceChoice) => void;
   error?: string;
   id: string;
+  messageId?: number;
   push?: boolean;
   reviewed?: AudienceSummary | null;
   reviewing?: number;
@@ -44,7 +45,7 @@ export function AudiencePicker({ options, choice, onChange, error, id, push = fa
   const event = kind === "event" ? options.events.find((e) => e.id === Number(raw)) : undefined;
   const audience = toAudience(choice);
   const key = audienceKey(audience);
-  const counted = `${key}#${recount}`;
+  const counted = `${messageId ?? "new"}#${key}#${recount}`;
   const [summary, setSummary] = useState<{ key: string; summary: AudienceSummary } | null>(null);
   const [countError, setCountError] = useState<{ key: string; text: string } | null>(null);
   const latest = useRef("");
@@ -56,7 +57,7 @@ export function AudiencePicker({ options, choice, onChange, error, id, push = fa
     if (!audience) return;
 
     const timer = setTimeout(() => {
-      Messages.audiencePreview(audience)
+      Messages.audiencePreview(audience, messageId)
         .then(({ summary: s }) => { if (latest.current === counted) setSummary({ key: counted, summary: s }); })
         .catch((e) => { if (latest.current === counted) setCountError({ key: counted, text: errorText(e, "We couldn't count who gets this.") }); });
     }, COUNT_DELAY_MS);
@@ -86,9 +87,9 @@ export function AudiencePicker({ options, choice, onChange, error, id, push = fa
   // The chosen label in full, for the select's title, and its shortened form
   // as an option shows it. The full name also goes on a line under the select
   // when the option had to be cut.
-  const earlier = kind === "group" ? "The group you chose earlier" : kind === "event" ? "The event you chose earlier" : "The date you chose earlier";
+  const earlier = kind === "group" ? "Previously selected group" : kind === "event" ? "Previously selected event" : "Previously selected date";
   const named = kind === "group" ? options.groups.find((g) => g.id === Number(raw))?.name : event?.title;
-  const chosenLabel = choice.target === "" ? undefined : !listed(choice.target) ? earlier : choice.target === "all" ? "Everyone at church" : named;
+  const chosenLabel = choice.target === "all" ? "Everyone at church" : listed(choice.target) ? named : earlier;
   const fullNameId = `${id}-full-name`;
   const showFullName = named !== undefined && shortLabel(named, AUDIENCE_LABEL_MAX).shortened;
   // One pass over groups then events, so two names alike at both ends are told apart across the whole select.
@@ -100,6 +101,11 @@ export function AudiencePicker({ options, choice, onChange, error, id, push = fa
   const pushCopy = current && push ? pushLine(current) : "";
   const failed = reviewed ? "" : countError?.key === counted ? countError.text : "";
   const isGroup = kind === "group";
+  const hasOptions = options.canMessageEveryone || options.groups.length > 0 || options.events.length > 0;
+
+  const hint = !hasOptions ? "No audiences are available for this message."
+    : messageId === undefined ? "Your groups and the events you lead or host." : "Choose an audience the author can message.";
+
   const chips = isGroup ? ROLE_CHOICES : STATUS_CHOICES;
   const picked: string[] = isGroup ? choice.roles : choice.statuses;
 
@@ -121,15 +127,15 @@ export function AudiencePicker({ options, choice, onChange, error, id, push = fa
 
   return (
     <div className="space-y-4">
-      <Field id={id} label="Send to" hint="Your groups and the events you lead or host." error={error}>
+      <Field id={id} label="Send to" hint={hint} error={error}>
         <Select
           value={choice.target}
           title={chosenLabel}
           aria-describedby={showFullName ? fullNameId : undefined}
           onChange={(e) => onChange({ ...choice, target: e.target.value, dates: "all" })}
         >
-          <option value="">Choose a group or event</option>
-          {!listed(choice.target) && <option value={choice.target}>{earlier}</option>}
+          {hasOptions && <option value="">Choose a group or event</option>}
+          {!listed(choice.target) && <option value={choice.target}>{chosenLabel}</option>}
           {options.groups.length > 0 && (
             <optgroup label="Groups">
               {options.groups.map((g, i) => <option key={g.id} value={`group:${g.id}`}>{groupLabel(i)}</option>)}
@@ -152,7 +158,7 @@ export function AudiencePicker({ options, choice, onChange, error, id, push = fa
         ].filter(Boolean).join(" ") || undefined}>
           <Select value={choice.dates} onChange={(e) => onChange({ ...choice, dates: e.target.value })}>
             <option value="all">All upcoming dates</option>
-            {!datesListed && <option value={choice.dates}>The date you chose earlier</option>}
+            {!datesListed && <option value={choice.dates}>Previously selected date</option>}
             {event.dates.map((d) => <option key={d.occurrenceId} value={String(d.occurrenceId)}>{formatWhen(d.startsAt)}</option>)}
           </Select>
         </Field>

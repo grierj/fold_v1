@@ -137,6 +137,8 @@ func (a *App) registerAPIRoutes(r *gin.Engine) {
 	// The composer (M3.4): announcements from leaders, hosts and admins.
 	v1.GET("/messages/compose", a.apiAuth(), a.apiComposeOptions)
 	v1.POST("/messages/audience-preview", a.apiAuth(), a.apiAudiencePreview)
+	v1.GET("/messages/:id/compose", a.apiAuth(), a.apiComposeOptions)
+	v1.POST("/messages/:id/audience-preview", a.apiAuth(), a.apiAudiencePreview)
 	v1.GET("/messages", a.apiAuth(), a.apiListMessages)
 	v1.POST("/messages", a.apiAuth(), a.apiCreateMessage)
 	v1.GET("/messages/:id", a.apiAuth(), a.apiGetMessage)
