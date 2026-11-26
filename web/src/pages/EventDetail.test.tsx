@@ -2745,6 +2745,38 @@ describe("EventDetail when a series save meets someone else's change", () => {
     else expect(Events.update).toHaveBeenCalledExactlyOnceWith(7, expect.objectContaining({ title: "Hybrid study night", revision: "r1" }));
   });
 
+  it.each(["room list", "visibility count"])("withdraws the event when only the %s finishes after the session changes", async (reader) => {
+    const rooms = deferred<SeriesRoomsResponse>();
+    const count = deferred<Awaited<ReturnType<typeof Events.visibilityImpact>>>();
+    const site = vi.spyOn(Site, "get").mockResolvedValue({ name: "Fold", timezone: "UTC", selfSignup: "off", roomsEnabled: true, pushEnabled: true });
+    const list = vi.spyOn(SeriesRooms, "list").mockReturnValue(rooms.promise);
+    const date = vi.spyOn(DateRooms, "list").mockResolvedValue({ rooms: [], booking: null, dateRoom: { id: 1, revision: "r1" } });
+    vi.mocked(Events.visibilityImpact).mockReturnValue(count.promise);
+    vi.mocked(Events.get).mockResolvedValue(opened);
+
+    try {
+      renderInMain();
+      await draftBoth();
+      expect(list).toHaveBeenCalledWith(7, credential);
+      expect(Events.visibilityImpact).toHaveBeenCalledWith(7, "public", false, credential);
+      expect(screen.getByLabelText("Title")).toHaveValue("Hybrid study night");
+      setMarkerCookie("replacement-marker");
+
+      await act(async () => {
+        if (reader === "room list") rooms.resolve({ revision: "r2", rooms: [], dates: 1, defaultRoom: null, ownRooms: [], pending: 0, needsRoom: [{ date: "2026-12-01", roomName: "Late room", status: "requested" }] });
+        else count.resolve({ visibility: "public", currentVisibility: "public", futureOverrides: 2, tightened: [], leaderOpened: [] });
+      });
+      showsNothingOfTheEvent();
+      expect(screen.queryByText(/Late room/)).not.toBeInTheDocument();
+      expect(Events.get).toHaveBeenCalledTimes(1);
+      expect(Events.setVisibility).not.toHaveBeenCalled();
+    } finally {
+      site.mockRestore();
+      list.mockRestore();
+      date.mockRestore();
+    }
+  });
+
   it("drops another viewer's draft and ignores pending event, room and visibility reads", async () => {
     const quiet = deferred<EventDetailResponse>();
     const replacement = deferred<EventDetailResponse>();

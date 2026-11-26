@@ -376,7 +376,7 @@ function EventDetailContent() {
   }
 
   return (
-    <EventReadPin.Provider value={[pin]}><ResourceRefusal.Provider value={refreshRefusal}><div className="fold-page fold-page-narrow">
+    <EventReadPin.Provider value={{ pin: [pin], close }}><ResourceRefusal.Provider value={refreshRefusal}><div className="fold-page fold-page-narrow">
       {managerStatus}
       {/* Edit series and More sit beside the title as secondary actions; an event page has no primary one (DEC-63, DEC-65). */}
       <div className="fold-page-header">

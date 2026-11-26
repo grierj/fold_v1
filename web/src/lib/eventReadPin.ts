@@ -1,10 +1,25 @@
-import { createContext, useContext } from "react";
-import type { Credential } from "../api/core";
+import { createContext, useContext, useLayoutEffect } from "react";
+import { credentialCurrent, recheckCredential, type Credential } from "../api/core";
 
-// The event page renders these readers only while its own answer holds for this credential. The same components
-// can also run on other pages, which have their own read protocol.
-export const EventReadPin = createContext<readonly [Credential] | readonly []>([]);
+interface EventReadScope {
+  pin: readonly [Credential];
+  close: () => void;
+}
+
+const unpinned = [] as const;
+export const EventReadPin = createContext<EventReadScope | null>(null);
 
 export function useEventReadPin() {
-  return useContext(EventReadPin);
+  const scope = useContext(EventReadPin);
+
+  // A room or visibility answer can update its control without rendering the event page.
+  // Withdraw the whole page before that update paints if the browser credential changed.
+  useLayoutEffect(() => {
+    if (scope && !credentialCurrent(scope.pin[0])) {
+      scope.close();
+      recheckCredential();
+    }
+  });
+
+  return scope?.pin ?? unpinned;
 }

@@ -219,7 +219,7 @@ export function bootstrapCredential(fresh = false): Promise<BootstrapSession> {
   return promise;
 }
 
-function recheckCredential() {
+export function recheckCredential() {
   if (current && liveMarker() !== current.seen) invalidateCredential();
   void bootstrapCredential().catch(() => {});
 }
