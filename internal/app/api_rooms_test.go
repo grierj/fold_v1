@@ -18,6 +18,111 @@ import (
 	"gorm.io/gorm"
 )
 
+var adminRoomLists = []struct {
+	surface, path string
+	before, after []string
+}{
+	{"admin room requests", "/api/v1/admin/room-requests",
+		[]string{`"eventTitle":"Event A"`, `"requestedBy":"leader"`},
+		[]string{`"eventTitle":"New title"`, `"requestedBy":"New display name"`}},
+	{"admin typed locations", "/api/v1/admin/rooms/locations",
+		[]string{`"location":"Side Hall"`}, []string{`"location":"New location"`}},
+}
+
+func TestAdminRoomListsReadOneSnapshot(t *testing.T) {
+	for _, route := range adminRoomLists {
+		t.Run(route.surface, func(t *testing.T) {
+			f := newBookingFixture(t)
+			approvalOn(t, f)
+			if code, body := f.book(t, f.leader, f.eventA, map[string]any{"roomId": f.hall.ID}); code != http.StatusOK {
+				t.Fatalf("request a room: %d %s", code, body)
+			}
+			gormMust(t, f.app.DB.Model(&models.Event{ID: f.eventB.ID}).Update("location", "Side Hall"))
+			var admin models.User
+			gormMust(t, f.app.DB.Where("role = ?", models.RoleAdmin).First(&admin))
+			pinned := pinnedAs(t, f.admin)
+			before := apiDo(t, pinned, "GET", route.path, nil, http.StatusOK)
+			wantIn(t, "list before the commit", before, route.before...)
+
+			t.Run("one connection", func(t *testing.T) {
+				oneConnection(t, f.app, oneConnectionPool(t, f.app))
+				if got := apiDo(t, pinned, "GET", route.path, nil, http.StatusOK); got != before {
+					t.Fatalf("one connection gave %s, want %s", got, before)
+				}
+			})
+
+			fired := atReaderSeam(f.app, "authorized", route.surface, func() {
+				err := f.app.DB.Transaction(func(tx *gorm.DB) error {
+					gormMust(t, tx.Model(&admin).Update("role", models.RoleMember))
+					gormMust(t, tx.Model(&models.Event{ID: f.eventA.ID}).Update("title", "New title"))
+					gormMust(t, tx.Model(&models.Event{ID: f.eventB.ID}).Update("location", "New location"))
+					gormMust(t, tx.Model(f.leaderUser).Update("display_name", "New display name"))
+					return setSettingIn(tx, settingRoomsEnabled, "false")
+				})
+				if err != nil {
+					t.Fatal(err)
+				}
+			})
+			w := pinned.do("GET", route.path, nil, false)
+			if !fired.Load() || w.Code != http.StatusOK || w.Body.String() != before {
+				t.Fatalf("read across commit (change committed: %t): %d %s, want %s", fired.Load(), w.Code, w.Body.String(), before)
+			}
+			wantAck(t, "snapshot list", w, pinned, &admin)
+			wantCode(t, "rooms off", pinned.do("GET", route.path, nil, false), http.StatusNotFound, "not_found")
+
+			if err := setSettingIn(f.app.DB, settingRoomsEnabled, "true"); err != nil {
+				t.Fatal(err)
+			}
+			wantCode(t, "member's list", pinned.do("GET", route.path, nil, false), http.StatusForbidden, "not_allowed")
+			gormMust(t, f.app.DB.Model(&admin).Update("role", models.RoleAdmin))
+			after := apiDo(t, pinned, "GET", route.path, nil, http.StatusOK)
+			wantIn(t, "list after the commit", after, route.after...)
+		})
+	}
+}
+
+func TestAdminRoomListsJudgeCurrentAuthority(t *testing.T) {
+	for _, route := range adminRoomLists {
+		for _, tc := range []struct {
+			name, code string
+			status     int
+			change     func(*gorm.DB, *models.User) error
+		}{
+			{"rooms turned off", "not_found", http.StatusNotFound, func(db *gorm.DB, _ *models.User) error {
+				return setSettingIn(db, settingRoomsEnabled, "false")
+			}},
+			{"admin demoted", "signed_out", http.StatusUnauthorized, func(db *gorm.DB, admin *models.User) error {
+				return db.Model(admin).Update("role", models.RoleMember).Error
+			}},
+			{"session ended", "signed_out", http.StatusUnauthorized, func(db *gorm.DB, admin *models.User) error {
+				return db.Model(admin).Update("session_version", sessionVersionBump()).Error
+			}},
+		} {
+			t.Run(route.surface+"/"+tc.name, func(t *testing.T) {
+				app := testApp(t)
+				admin := newTestUser(t, app, "admin", "password1234", models.RoleAdmin)
+				client := loginAPI(t, app, "admin", "password1234")
+				apiDo(t, client, "PUT", "/api/v1/admin/settings/rooms", map[string]any{"enabled": true}, http.StatusOK)
+				app.hooks.readerBegin = func(surface string) {
+					if surface == route.surface {
+						if err := tc.change(app.DB, admin); err != nil {
+							t.Fatal(err)
+						}
+					}
+				}
+				w := pinnedAs(t, client).do("GET", route.path, nil, false)
+				wantCode(t, tc.name, w, tc.status, tc.code)
+				wantNoAck(t, tc.name, w)
+				var body map[string]any
+				decodeJSON(t, w, &body)
+				if len(body) != 2 || body["error"] == nil {
+					t.Fatalf("refusal included list data: %s", w.Body.String())
+				}
+			})
+		}
+	}
+}
+
 func TestRoomAdminWritesRequireCurrentAdmin(t *testing.T) {
 	f := newBookingFixture(t)
 	approvalOn(t, f)
@@ -73,6 +178,27 @@ func TestRoomAdminWritesRequireCurrentAdmin(t *testing.T) {
 	}
 	if tok, err := latestRoomFeed(f.app.DB, f.hall.ID); err != nil || tok.ID == 0 || tok.RevokedAt != nil {
 		t.Fatalf("original room feed is no longer active: %v", err)
+	}
+}
+
+func TestAdminRoomListsGateReadFailure(t *testing.T) {
+	app := testApp(t)
+	newTestUser(t, app, "admin", "password1234", models.RoleAdmin)
+	admin := pinnedAs(t, loginAPI(t, app, "admin", "password1234"))
+	if err := setSettingIn(app.DB, settingRoomsEnabled, "true"); err != nil {
+		t.Fatal(err)
+	}
+	failures := failStatement(t, app, func(tx *gorm.DB) bool {
+		return tx.Statement.Table == "settings" && strings.Contains(fmt.Sprint(tx.Statement.Clauses["WHERE"].Expression), settingRoomsEnabled)
+	})
+	paths := []string{"/api/v1/admin/room-requests", "/api/v1/admin/rooms/locations"}
+	for _, path := range paths {
+		w := admin.do("GET", path, nil, false)
+		wantCode(t, path, w, http.StatusInternalServerError, "server_error")
+		wantNoAck(t, path, w)
+	}
+	if n := failures.Load(); int(n) != len(paths) {
+		t.Fatalf("switch query failed %d times for %d routes", n, len(paths))
 	}
 }
 

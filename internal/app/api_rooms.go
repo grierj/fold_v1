@@ -98,6 +98,35 @@ func lockRoomManagerIn(tx *gorm.DB, session *models.User, mode actorLock) (*mode
 	return actor, nil
 }
 
+func (a *App) readAdminRoomList(c *gin.Context, surface string, read func(*gorm.DB) error) bool {
+	var judged sessionJudgment
+	err := decidingSnapshot(a.DB.WithContext(c.Request.Context()), func(tx *gorm.DB) error {
+		if a.hooks.readerBegin != nil {
+			a.hooks.readerBegin(surface)
+		}
+		if err := roomsOnIn(tx, errRoomRouteHidden); err != nil {
+			return err
+		}
+		me, err := lockRoomManagerIn(tx, apiUser(c), actorRead)
+		if err != nil {
+			return err
+		}
+		judged.judge(me)
+		if a.hooks.readerAuthorized != nil {
+			a.hooks.readerAuthorized(surface)
+		}
+		return read(tx)
+	})
+	if err == nil {
+		err = a.acknowledgeDecision(c, judged, true)
+	}
+	if err != nil {
+		fail(c, err)
+		return false
+	}
+	return true
+}
+
 type roomJSON struct {
 	ID                     uint   `json:"id"`
 	Name                   string `json:"name"`

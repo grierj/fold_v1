@@ -1,5 +1,5 @@
 import { useEffect, useEffectEvent } from "react";
-import { credentialCurrent, type Credential } from "../api/core";
+import { credentialCurrent, currentCredential, recheckCredential, type Credential } from "../api/core";
 import { resourceRefused, type ResourceReadOutcome } from "../lib/refusedSave";
 import { errorCode, errorText } from "../lib/errors";
 import { useLoad } from "../lib/useLoad";
@@ -8,13 +8,17 @@ import { Button } from "./ui/Button";
 import { FormError } from "./ui/Field";
 import { Skeleton } from "./ui/Skeleton";
 
-// A room read can stop at the public rooms switch before checking the viewer. Only /site can tell us the switch
-// is off in that case. Keep the pinned refusal as an error until the public setting answers.
-export async function readRooms<T>(answer: Promise<T>, pinned?: Credential): Promise<T> {
+// A room read can stop at the public rooms switch before checking the viewer. Let /site settle before
+// surfacing a pinned refusal, so a screen that closes when booking turns off can close first.
+export async function readRooms<T>(answer: Promise<T>, pinned?: Credential | null): Promise<T> {
   try {
     return await answer;
   } catch (cause) {
-    if (pinned && credentialCurrent(pinned) && errorCode(cause) === "session_expired") recheckSite();
+    if (pinned && errorCode(cause) === "session_expired") {
+      if (credentialCurrent(pinned)) await recheckSite();
+      else if (currentCredential() === pinned) recheckCredential();
+    }
+
     throw cause;
   }
 }
