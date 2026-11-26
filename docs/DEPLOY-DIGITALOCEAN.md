@@ -590,7 +590,9 @@ Run the installed `/opt/fold/restore.sh` as root. On its first use it checks
 that the complete tool set sits beside it (otherwise it stops, names the missing
 file and tells you to run the current `provision.sh`), copies the set into a
 root-owned `/opt/fold/recovery-tools`, and re-runs from there. A rejected
-preflight leaves the installed recovery tools unchanged.
+preflight leaves the installed recovery tools unchanged. Use deploy tools version 7 or later
+for a restore or rollback to expire account links from the dump. See section 6 for how to
+install the release's tools before starting recovery.
 
 **Before you start** (every item is checked before anything stops, unless
 noted):
@@ -639,9 +641,11 @@ In order, `restore.sh`:
    `fold` (it waits up to 120 seconds for a running `backup.sh` dump to finish,
    otherwise it stops with the services still stopped).
 3. Restores the dump into a new database, `fold_restore_<id>`, in one
-   transaction. Clears the restored browser-session signing epoch before the
-   swap, so everyone signs in again when the restored site opens with a release
-   that uses the epoch. If either step fails, `fold` has not been touched. The failed database
+   transaction. Before the swap, the tool clears the browser-session signing epoch and
+   expires every unused setup, password-reset and email-change link still live in the dump.
+   Both the verification link sent to the new address and the cancellation link sent to the
+   old address expire. Everyone signs in again with a release that uses the epoch. If either
+   step fails, the original database stays intact. The failed database
    is dropped and the phase is `collect-failed`; run `--abort` to reopen the
    original, or `--resume` to try again.
 4. Counts the accounts the dump would bring back: the accounts that are deleted
@@ -662,6 +666,11 @@ In order, `restore.sh`:
 7. Starts a private recovery instance: the pinned image, background work off
    (queued mail, push and scheduled jobs do not run), restart policy `no`, reachable only at
    `127.0.0.1:18080` on the droplet. Caddy and the app stay stopped.
+
+After reopening, ask anyone partway through account setup to contact a church admin for
+help setting their password. Members can request another password reset or start their
+email change again. Links issued after recovery work as usual. Other links, including
+invitations and guardian consent, keep the status and expiry they had in the dump.
 
 When `--uploads` is supplied, the tool stages and swaps the archive within the
 recovery fence. Before reopening, `fold restore settle-uploads` empties avatar
@@ -876,8 +885,9 @@ Pin every upgrade to an image tag or a git commit. `:latest` is refused.
 Read the release notes first. `README.md` records operator steps (for
 example the `SESSION_SECRET` length).
 
-For the first upgrade to a release with the browser-session signing epoch,
-prepare a separate trusted checkout of the release at `/root/fold-release`.
+When upgrading to the browser-session signing epoch or to deploy tools version 7
+(account-link expiry on restore), prepare a separate trusted checkout of the release at
+`/root/fold-release`.
 For a build-based install, leave `/root/fold` at the deployed commit and fetch
 the target into it without checking it out. Run the matching image or build
 command below with `/root/fold-release/deploy/digitalocean/upgrade.sh` in
@@ -887,12 +897,17 @@ for rollback before it checks out the target. The earlier installed script
 can upgrade the app while retaining its old restore tools.
 
 After the upgrade, check both installed copies against the release checkout.
-Each comparison succeeds silently. If either differs, finish the upgrade from
+Each comparison succeeds silently. If any file differs, finish the upgrade from
 the release checkout before restoring a dump.
 
 ```bash
-sudo cmp /root/fold-release/deploy/digitalocean/restore.sh /opt/fold/restore.sh
-sudo cmp /root/fold-release/deploy/digitalocean/restore.sh /opt/fold/deploy-tools/restore.sh
+(
+  set -e
+  for tool in restore.sh checks.sh deploy-tools-version; do
+    sudo cmp "/root/fold-release/deploy/digitalocean/$tool" "/opt/fold/$tool"
+    sudo cmp "/root/fold-release/deploy/digitalocean/$tool" "/opt/fold/deploy-tools/$tool"
+  done
+)
 ```
 
 For subsequent upgrades, run the installed `/opt/fold/upgrade.sh`. It uses its enforcing copy in
