@@ -1,4 +1,4 @@
-package main
+package app
 
 import (
 	"fmt"
@@ -30,8 +30,8 @@ type readSealSite struct{ file, fn, anchorFn string }
 // ungated read that calls currentAdminIn is added here with its negative
 // fixtures.
 var readSealSites = []readSealSite{
-	{"account_erasure_reasons.go", "reasonPageAttempt", "func (a *App) apiAdminErasureReasonsPage("},
-	{"api_admin_reasons_legacy.go", "legacyReadAttempt", "func (a *App) runLegacyRead("},
+	{"internal/app/account_erasure_reasons.go", "reasonPageAttempt", "func (a *App) apiAdminErasureReasonsPage("},
+	{"internal/app/api_admin_reasons_legacy.go", "legacyReadAttempt", "func (a *App) runLegacyRead("},
 }
 
 // readSealProblems checks one site's file: currentAdminIn is called once, as
@@ -130,7 +130,7 @@ func TestReasonPageSealIsLast(t *testing.T) {
 // literals guards_seal_test.go checks. A call anywhere else would be a seal no
 // guard covers.
 func unguardedSealCallers(src guardkit.Sources) []string {
-	allowed := map[string]bool{"admin_operation_attempts.go": true}
+	allowed := map[string]bool{"internal/app/admin_operation_attempts.go": true}
 	for _, site := range readSealSites {
 		allowed[site.file] = true
 	}
@@ -157,12 +157,12 @@ func TestCurrentAdminInCallersAreGuarded(t *testing.T) {
 	}
 	// The guard fails for a seal in a file no guard reads, and reads files
 	// anywhere in the tree.
-	for _, name := range []string{"api_other.go", "internal/other/other.go"} {
+	for _, name := range []string{"internal/app/api_other.go", "internal/other/other.go"} {
 		with := guardkit.Sources{}
 		for k, v := range production {
 			with[k] = v
 		}
-		with[name] = "package main\n\nfunc other() { currentAdminIn(nil, nil, nil) }\n"
+		with[name] = "package app\n\nfunc other() { currentAdminIn(nil, nil, nil) }\n"
 		if len(unguardedSealCallers(with)) == 0 {
 			t.Errorf("the guard accepted a currentAdminIn call in %s", name)
 		}
@@ -255,16 +255,16 @@ func TestReasonSQLOrderGuard(t *testing.T) {
 		t.Fatal("no production file names reasonSelect: the guard reads nothing")
 	}
 	wrap := func(clause string) string {
-		return "package main\n\nfunc f() {\n\ttx.Raw(\"SELECT \"+reasonSelect+\" FROM contact_requests WHERE reason <> '' " + clause + "\")\n}\n"
+		return "package app\n\nfunc f() {\n\ttx.Raw(\"SELECT \"+reasonSelect+\" FROM contact_requests WHERE reason <> '' " + clause + "\")\n}\n"
 	}
 	for name, src := range map[string]string{
 		"ORDER BY id":                     wrap("ORDER BY id"),
 		"ORDER BY id FOR UPDATE":          wrap("ORDER BY id FOR UPDATE"),
 		"ORDER BY 1":                      wrap("ORDER BY 1"),
 		"lower case":                      wrap("order by id"),
-		"a projection call, not a select": "package main\n\nfunc f() {\n\ttx.Raw(\"SELECT \" + reasonProjection() + \" FROM contact_requests ORDER BY id\")\n}\n",
+		"a projection call, not a select": "package app\n\nfunc f() {\n\ttx.Raw(\"SELECT \" + reasonProjection() + \" FROM contact_requests ORDER BY id\")\n}\n",
 	} {
-		if len(reasonSQLOrderProblems("fixture.go", src)) == 0 {
+		if len(reasonSQLOrderProblems("internal/app/fixture.go", src)) == 0 {
 			t.Errorf("%s: the guard accepted it", name)
 		}
 	}
@@ -272,9 +272,9 @@ func TestReasonSQLOrderGuard(t *testing.T) {
 		"qualified":           wrap("ORDER BY contact_requests.id"),
 		"qualified, locked":   wrap("ORDER BY contact_requests.id FOR UPDATE"),
 		"no ordering":         wrap(""),
-		"another select list": "package main\n\nfunc f() {\n\ttx.Raw(\"SELECT id FROM contact_requests ORDER BY id\")\n}\n",
+		"another select list": "package app\n\nfunc f() {\n\ttx.Raw(\"SELECT id FROM contact_requests ORDER BY id\")\n}\n",
 	} {
-		if bad := reasonSQLOrderProblems("fixture.go", src); len(bad) != 0 {
+		if bad := reasonSQLOrderProblems("internal/app/fixture.go", src); len(bad) != 0 {
 			t.Errorf("%s: the guard refused it: %v", name, bad)
 		}
 	}
@@ -309,7 +309,7 @@ func TestReasonProbeUsesLimitOne(t *testing.T) {
 	if !strings.Contains(strings.ToUpper(reasonProbeSQL), "LIMIT 1") || strings.Contains(strings.ToUpper(reasonProbeSQL), "FOR UPDATE") {
 		t.Errorf("the probe must be a plain LIMIT 1 statement: %s", reasonProbeSQL)
 	}
-	b, err := os.ReadFile("account_erasure_reasons.go")
+	b, err := os.ReadFile("internal/app/account_erasure_reasons.go")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -438,12 +438,12 @@ func TestReasonCadenceNamesRealTests(t *testing.T) {
 	}
 
 	// A misspelling is caught.
-	fixture := "`go test . -run '^(TestReasonScanNoSkip\\|TestReasonScanNoSkp)$'`"
+	fixture := "`go test ./internal/app -run '^(TestReasonScanNoSkip\\|TestReasonScanNoSkp)$'`"
 	got := cadenceProblems(fixture, map[string]bool{"TestReasonScanNoSkip": true})
 	if len(got) != 1 || !strings.Contains(got[0], "TestReasonScanNoSkp") {
 		t.Errorf("a misspelled name was not the one problem reported: %v", got)
 	}
-	if cadenceProblems("`go test . -run '^TestAttemptLifecycle$'`", map[string]bool{"TestAttemptLifecycle": true}) != nil {
+	if cadenceProblems("`go test ./internal/app -run '^TestAttemptLifecycle$'`", map[string]bool{"TestAttemptLifecycle": true}) != nil {
 		t.Error("a single anchored name was rejected")
 	}
 }

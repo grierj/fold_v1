@@ -154,7 +154,7 @@ func TestWindowLastAllowed(t *testing.T) {
 }
 
 // zoneOf is the test tables' stand-in for the caller's zone resolution: the
-// named zone, else fallback (the root package's userZone does this for real).
+// named zone, else fallback (package app's userZone does this for real).
 func zoneOf(tzid string, fallback *time.Location) *time.Location {
 	if loc, err := time.LoadLocation(tzid); tzid != "" && err == nil {
 		return loc

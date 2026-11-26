@@ -1,4 +1,4 @@
-package main
+package app
 
 import (
 	"bytes"
@@ -29,6 +29,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"path/filepath"
 	"reflect"
 	"regexp"
 	"sort"
@@ -82,11 +83,46 @@ func loginAPIExpectFail(t *testing.T, app *App, name, password string) bool {
 // TestMain gives this package one migrated Postgres database and drops it
 // afterwards (internal/testdb). Password hashes use the cheapest bcrypt cost;
 // tests that measure timing call realPasswordCost.
+//
+// The tests run from the repository root, not from this directory: the source
+// guards and contract tests among them read the whole repository (web/src,
+// docs, deploy, .github) by root-relative path, and the binary's files come
+// from disk where the root package embeds them.
 func TestMain(m *testing.M) {
+	if err := enterRepoRoot(); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	help, err := os.ReadFile("docs/MEMBERS.md")
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	build = Build{Version: "dev", Dist: os.DirFS("."), MemberHelp: help}
 	models.PasswordCost = bcrypt.MinCost
 	code := testdb.Main(m)
 	removeFoldBuilds()
 	os.Exit(code)
+}
+
+// enterRepoRoot walks up to the directory holding go.mod. A process already
+// there (the test binary scripts/go-test.sh runs, a fuzz worker) stays put.
+func enterRepoRoot() error {
+	for {
+		if _, err := os.Stat("go.mod"); err == nil {
+			return nil
+		}
+		wd, err := os.Getwd()
+		if err != nil {
+			return err
+		}
+		if filepath.Dir(wd) == wd {
+			return errors.New("no go.mod above the test's working directory")
+		}
+		if err := os.Chdir(".."); err != nil {
+			return err
+		}
+	}
 }
 
 // realPasswordCost restores production bcrypt cost for one test, so timing

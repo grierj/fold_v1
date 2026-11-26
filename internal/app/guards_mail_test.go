@@ -1,4 +1,4 @@
-package main
+package app
 
 import (
 	"go/ast"
@@ -26,17 +26,17 @@ var legacyNoticeDeliveryNames = map[string]bool{
 // mailerSendFiles may deliver application mail, each with its reason. The
 // synchronous account exceptions below are methods, never whole-file grants.
 var mailerSendFiles = map[string]string{
-	"mail_send.go":            "sendTracked, the one place a sender is called; its callers are the files below",
-	"notify_deliver.go":       "the notify.deliver job sends notice mail",
-	"notify_guardian_copy.go": "the notify.guardian_copy job sends a guardian the copy of a teen's notice",
-	"mail_jobs.go":            "direct account mail is sent by durable jobs after preparation commits",
-	"messages_send.go":        "announcement mail goes through its own send path",
-	"api_message_preview.go":  "the composer's test send is synchronous by design (brief section 4)",
+	"internal/app/mail_send.go":            "sendTracked, the one place a sender is called; its callers are the files below",
+	"internal/app/notify_deliver.go":       "the notify.deliver job sends notice mail",
+	"internal/app/notify_guardian_copy.go": "the notify.guardian_copy job sends a guardian the copy of a teen's notice",
+	"internal/app/mail_jobs.go":            "direct account mail is sent by durable jobs after preparation commits",
+	"internal/app/messages_send.go":        "announcement mail goes through its own send path",
+	"internal/app/api_message_preview.go":  "the composer's test send is synchronous by design (brief section 4)",
 }
 
 var synchronousMailMethods = map[string]struct{ method, reason string }{
-	"api_profile.go": {"sendEmailChangeNotice", "the old address and cancellation capability cannot be rebuilt after verification"},
-	"api_guest.go":   {"sendGuestConfirmationEmail", "the browser receives the same manage capability; delayed rotation would invalidate it"},
+	"internal/app/api_profile.go": {"sendEmailChangeNotice", "the old address and cancellation capability cannot be rebuilt after verification"},
+	"internal/app/api_guest.go":   {"sendGuestConfirmationEmail", "the browser receives the same manage capability; delayed rotation would invalidate it"},
 }
 
 func mailSendAllowed(file string, parents []ast.Node) bool {
@@ -473,7 +473,7 @@ func TestMailGoesThroughJobs(t *testing.T) {
 // same-package resolver together, including the sender-implementation exclusion.
 func TestMailGuardScansProductionPackages(t *testing.T) {
 	for _, checkMailer := range []bool{false, true} {
-		bad, err := productionMailViolations("testdata/mailguard", checkMailer)
+		bad, err := productionMailViolations("internal/app/testdata/mailguard", checkMailer)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -498,7 +498,7 @@ func TestMailGuardSkipsFixturesButNotProductionPackages(t *testing.T) {
 	root := t.TempDir()
 	for _, path := range []string{
 		"models/model.go", "storage/store.go", "migrations/migration.go", "internal/one/two/three/worker.go", "internal/mail/legacy.go", "internal/web/worker.go",
-		"example_test.go", "testdata/example.go", "web/node_modules/example/example.go", "vendor/example/example.go", ".git/example.go",
+		"internal/app/example_test.go", "testdata/example.go", "web/node_modules/example/example.go", "vendor/example/example.go", ".git/example.go",
 	} {
 		file := filepath.Join(root, filepath.FromSlash(path))
 		if err := os.MkdirAll(filepath.Dir(file), 0o755); err != nil {
@@ -521,24 +521,24 @@ func TestMailGuardSkipsFixturesButNotProductionPackages(t *testing.T) {
 // direct mailer call from a file with no reason to hold one.
 func TestNoticeGuardCatchesPostCommitDelivery(t *testing.T) {
 	for name := range legacyNoticeDeliveryNames {
-		post := "package main\nfunc example() { ids, err := notifyThing(tx); a." + name + "(ids) }\n"
-		if bad := noticeDeliveryViolations("api_example.go", post, false); len(bad) != 1 || !strings.Contains(bad[0], "delivery is automatic") {
+		post := "package app\nfunc example() { ids, err := notifyThing(tx); a." + name + "(ids) }\n"
+		if bad := noticeDeliveryViolations("internal/app/api_example.go", post, false); len(bad) != 1 || !strings.Contains(bad[0], "delivery is automatic") {
 			t.Fatalf("guard missed legacy %s: %v", name, bad)
 		}
 	}
-	mailer := "package main\nfunc example() { err := a.Mailer.Send(ctx, msg) }\n"
-	if len(noticeDeliveryViolations("api_example.go", mailer, true)) != 1 {
+	mailer := "package app\nfunc example() { err := a.Mailer.Send(ctx, msg) }\n"
+	if len(noticeDeliveryViolations("internal/app/api_example.go", mailer, true)) != 1 {
 		t.Fatal("guard missed a mailer call from a file outside the allow-list")
 	}
-	if len(noticeDeliveryViolations("notify_deliver.go", mailer, true)) != 0 {
+	if len(noticeDeliveryViolations("internal/app/notify_deliver.go", mailer, true)) != 0 {
 		t.Fatal("guard flagged an allow-listed file")
 	}
 }
 
 // sendTracked sends mail, so the guard treats naming it as it treats a send.
 func TestMailGuardCatchesSendTrackedOutsideDelivery(t *testing.T) {
-	src := "package main\nfunc example() { sendTracked(ctx, sender, msg, nil) }\n"
-	if bad := noticeDeliveryViolations("api_example.go", src, true); len(bad) != 1 {
+	src := "package app\nfunc example() { sendTracked(ctx, sender, msg, nil) }\n"
+	if bad := noticeDeliveryViolations("internal/app/api_example.go", src, true); len(bad) != 1 {
 		t.Fatalf("guard missed sendTracked in a handler file: %v", bad)
 	}
 	for file := range mailerSendFiles {
@@ -572,14 +572,14 @@ func TestMailGuardCatchesBypasses(t *testing.T) {
 		{"background alias", "", "background := a.runInBackground; background(f)"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			src := "package main\n" + tc.imports + "\nfunc (a *App) example() { " + tc.body + " }\n"
-			bad := noticeDeliveryViolations("api_example.go", src, true)
+			src := "package app\n" + tc.imports + "\nfunc (a *App) example() { " + tc.body + " }\n"
+			bad := noticeDeliveryViolations("internal/app/api_example.go", src, true)
 			if len(bad) != 1 || strings.Contains(bad[0], "does not parse") {
 				t.Fatalf("guard must reject the send or background identifier: %v", bad)
 			}
 		})
 	}
-	background := "package main\nfunc (a *App) runInBackground(f func()) { go f() }\n"
+	background := "package app\nfunc (a *App) runInBackground(f func()) { go f() }\n"
 	if bad := noticeDeliveryViolations("internal/example/example.go", background, false); len(bad) != 1 || !strings.Contains(bad[0], "untracked background mail") {
 		t.Fatalf("guard must reject reintroducing the helper in any production package: %v", bad)
 	}
@@ -593,8 +593,8 @@ func TestMailGuardFollowsConcreteSendersAndConstructors(t *testing.T) {
 				"func example() { var sender " + ptr + "delivery." + senderType + "; sender.Send(ctx, msg) }",
 				"type holder struct { sender " + ptr + "delivery." + senderType + " }; func example(h holder) { h.sender.Send(ctx, msg) }",
 			} {
-				src := "package main\nimport delivery \"fold/internal/mail\"\n" + declaration
-				if bad := noticeDeliveryViolations("api_example.go", src, true); len(bad) != 1 || strings.Contains(bad[0], "does not parse") {
+				src := "package app\nimport delivery \"fold/internal/mail\"\n" + declaration
+				if bad := noticeDeliveryViolations("internal/app/api_example.go", src, true); len(bad) != 1 || strings.Contains(bad[0], "does not parse") {
 					t.Fatalf("guard missed typed sender in %s: %v", declaration, bad)
 				}
 			}
@@ -617,8 +617,8 @@ func TestMailGuardFollowsConcreteSendersAndConstructors(t *testing.T) {
 		"var s, err = delivery.NewSMTP(url, from); s.Send(ctx, msg)",
 		"s := unknown.(*delivery.Postmark); s.Send(ctx, msg)",
 	} {
-		src := "package main\nimport delivery \"fold/internal/mail\"\nfunc example() { " + body + " }\n"
-		if bad := noticeDeliveryViolations("api_example.go", src, true); len(bad) != 1 || strings.Contains(bad[0], "does not parse") {
+		src := "package app\nimport delivery \"fold/internal/mail\"\nfunc example() { " + body + " }\n"
+		if bad := noticeDeliveryViolations("internal/app/api_example.go", src, true); len(bad) != 1 || strings.Contains(bad[0], "does not parse") {
 			t.Fatalf("guard missed concrete sender or constructor in %s: %v", body, bad)
 		}
 	}
@@ -628,8 +628,8 @@ func TestMailGuardFollowsConcreteSendersAndConstructors(t *testing.T) {
 		"s, _ := NewSMTP(url, from); s.Send(ctx, msg)",
 		"WithSuppressions(db, inner).Send(ctx, msg)",
 	} {
-		src := "package main\nimport . \"fold/internal/mail\"\nfunc example() { " + body + " }\n"
-		if bad := noticeDeliveryViolations("api_example.go", src, true); len(bad) != 1 || strings.Contains(bad[0], "does not parse") {
+		src := "package app\nimport . \"fold/internal/mail\"\nfunc example() { " + body + " }\n"
+		if bad := noticeDeliveryViolations("internal/app/api_example.go", src, true); len(bad) != 1 || strings.Contains(bad[0], "does not parse") {
 			t.Fatalf("guard missed dot-imported sender in %s: %v", body, bad)
 		}
 	}
@@ -646,13 +646,13 @@ func TestMailGuardFollowsMultipleResultPositions(t *testing.T) {
 		{"func mailer() (error, delivery.Sender) { return nil, nil }", "var s any; var err error; err, s = mailer(); s.Send(ctx, msg)"},
 		{"func mailer() (delivery.Sender, error) { return nil, nil }", "var s, err = (mailer)(); s.Send(ctx, msg)"},
 	} {
-		src := "package main\nimport delivery \"fold/internal/mail\"\n" + tc.declaration + "\nfunc example() { " + tc.body + " }\n"
-		if bad := noticeDeliveryViolations("api_example.go", src, true); len(bad) != 1 || strings.Contains(bad[0], "does not parse") {
+		src := "package app\nimport delivery \"fold/internal/mail\"\n" + tc.declaration + "\nfunc example() { " + tc.body + " }\n"
+		if bad := noticeDeliveryViolations("internal/app/api_example.go", src, true); len(bad) != 1 || strings.Contains(bad[0], "does not parse") {
 			t.Fatalf("guard missed sender result in %s with %s: %v", tc.declaration, tc.body, bad)
 		}
 	}
 	// A multi-result helper's error and other positions are not mail senders.
-	src := `package main
+	src := `package app
 import "fold/internal/mail"
 func mailer() (other, mail.Sender, error) { return other{}, nil, nil }
 func example() {
@@ -664,7 +664,7 @@ func example() {
 	e.Send(ctx, msg)
 }
 `
-	if bad := noticeDeliveryViolations("api_example.go", src, true); len(bad) != 0 {
+	if bad := noticeDeliveryViolations("internal/app/api_example.go", src, true); len(bad) != 0 {
 		t.Fatalf("guard treated a non-sender result as mail: %v", bad)
 	}
 }
@@ -681,10 +681,10 @@ func TestMailGuardSynchronousMethodsStayImmediate(t *testing.T) {
 			"send := a." + exception.method + "; go send(args)",
 			"consume(a." + exception.method + ")",
 		} {
-			src := "package main\nfunc (a *App) handler() { " + body + " }\n"
+			src := "package app\nfunc (a *App) handler() { " + body + " }\n"
 			// Whole-file delivery allowances must not permit these methods to
 			// escape either. Their provider call needs a waiting HTTP handler.
-			for _, callerFile := range []string{file, "api_example.go", "mail_jobs.go", "notify_deliver.go"} {
+			for _, callerFile := range []string{file, "internal/app/api_example.go", "internal/app/mail_jobs.go", "internal/app/notify_deliver.go"} {
 				if bad := noticeDeliveryViolations(callerFile, src, true); len(bad) != 1 || !strings.Contains(bad[0], "call synchronous mail methods immediately after commit") {
 					t.Fatalf("%s allowed %s: %v", callerFile, body, bad)
 				}
@@ -696,7 +696,7 @@ func TestMailGuardSynchronousMethodsStayImmediate(t *testing.T) {
 			"(a." + exception.method + ")(args)",
 			"err := db.Transaction(func(tx *gorm.DB) error { return save(tx) }); if err != nil { return }; " + call,
 		} {
-			src := "package main\nfunc (a *App) handler() { " + body + " }\n"
+			src := "package app\nfunc (a *App) handler() { " + body + " }\n"
 			if bad := noticeDeliveryViolations(file, src, true); len(bad) != 0 {
 				t.Fatalf("%s rejected immediate post-commit call %s: %v", file, body, bad)
 			}
@@ -725,11 +725,11 @@ func TestMailGuardScopesSynchronousExceptions(t *testing.T) {
 					{"func " + exception.method + "()", 1},
 					{"func (a *Other) " + exception.method + "()", 1},
 				} {
-					src := "package main\nimport delivery \"fold/internal/mail\"\n" + fn.decl + " { " + send + " }\n"
+					src := "package app\nimport delivery \"fold/internal/mail\"\n" + fn.decl + " { " + send + " }\n"
 					if bad := noticeDeliveryViolations(file, src, true); len(bad) != fn.want {
 						t.Fatalf("%s with %s: %v, want %d violations", fn.decl, send, bad, fn.want)
 					}
-					if bad := noticeDeliveryViolations("api_example.go", src, true); len(bad) != 1 {
+					if bad := noticeDeliveryViolations("internal/app/api_example.go", src, true); len(bad) != 1 {
 						t.Fatalf("method name granted permission in another file: %v", bad)
 					}
 				}
@@ -744,7 +744,7 @@ func TestMailGuardScopesSynchronousExceptions(t *testing.T) {
 				"send := a.Mailer.Send; defer send(ctx, msg)",
 				"consume(a.Mailer.Send)",
 			} {
-				src := "package main\nimport delivery \"fold/internal/mail\"\nfunc (a *App) " + exception.method + "() { " + body + " }\n"
+				src := "package app\nimport delivery \"fold/internal/mail\"\nfunc (a *App) " + exception.method + "() { " + body + " }\n"
 				if bad := noticeDeliveryViolations(file, src, true); len(bad) != 1 || strings.Contains(bad[0], "does not parse") {
 					t.Fatalf("guard granted the synchronous exception to %s: %v", body, bad)
 				}
@@ -754,7 +754,7 @@ func TestMailGuardScopesSynchronousExceptions(t *testing.T) {
 }
 
 func TestMailGuardAllowsDeliveryAndReadOnlyOutbox(t *testing.T) {
-	send := "package main\nimport delivery \"fold/internal/mail\"\nfunc example() { a.Mailer.Send(ctx, msg); sender := delivery.Unwrap(a.Mailer); sender.Send(ctx, msg); sender.SendEmail(ctx, msg) }\n"
+	send := "package app\nimport delivery \"fold/internal/mail\"\nfunc example() { a.Mailer.Send(ctx, msg); sender := delivery.Unwrap(a.Mailer); sender.Send(ctx, msg); sender.SendEmail(ctx, msg) }\n"
 	for file, reason := range mailerSendFiles {
 		if reason == "" {
 			t.Fatalf("%s needs its delivery reason", file)
@@ -763,7 +763,7 @@ func TestMailGuardAllowsDeliveryAndReadOnlyOutbox(t *testing.T) {
 			t.Errorf("%s delivery rejected: %v", file, bad)
 		}
 	}
-	read := `package main
+	read := `package app
 import delivery "fold/internal/mail"
 func (a *App) devOutbox() {
 	outbox, ok := delivery.Unwrap(a.Mailer).(*delivery.DevOutbox)
@@ -771,15 +771,15 @@ func (a *App) devOutbox() {
 	outbox.HTMLOf(1)
 }
 `
-	if bad := noticeDeliveryViolations("api_dev.go", read, true); len(bad) != 0 {
+	if bad := noticeDeliveryViolations("internal/app/api_dev.go", read, true); len(bad) != 0 {
 		t.Fatalf("read-only unwrap rejected: %v", bad)
 	}
 	readAndSend := strings.Replace(read, "outbox.List(100)", "outbox.List(100); outbox.Send(ctx, msg)", 1)
-	if bad := noticeDeliveryViolations("api_dev.go", readAndSend, true); len(bad) != 1 {
+	if bad := noticeDeliveryViolations("internal/app/api_dev.go", readAndSend, true); len(bad) != 1 {
 		t.Fatalf("dev outbox was granted permission to send: %v", bad)
 	}
 	// Comments, strings, unrelated sends and shadowed bindings are not mail.
-	other := `package main
+	other := `package app
 import "fold/internal/mail"
 func example() {
 	// a.Mailer.Send(ctx, msg); runInBackground
@@ -789,7 +789,7 @@ func example() {
 	{ mail := other; sender := mail.Unwrap(other); sender.Send(ctx, msg) }
 }
 `
-	if bad := noticeDeliveryViolations("api_example.go", other, true); len(bad) != 0 {
+	if bad := noticeDeliveryViolations("internal/app/api_example.go", other, true); len(bad) != 0 {
 		t.Fatalf("guard confused examples or unrelated bindings with mail: %v", bad)
 	}
 	// Provider implementations still own their Send/SendEmail methods.

@@ -1,4 +1,4 @@
-package main
+package app
 
 import (
 	"encoding/json"
@@ -277,10 +277,10 @@ func TestContactPrivacyChurchEventHost(t *testing.T) {
 // that show a person their own account, or an admin an account they manage, may
 // call it; every other surface presents a person through the contact rules.
 func TestContactPresentationDoesNotUseUnrestrictedUserJSON(t *testing.T) {
-	allowed := map[string]bool{"api_auth.go": true, "api_admin.go": true, "api_invitations.go": true,
-		"api_profile.go": true, "api_account_requests.go": true}
+	allowed := map[string]bool{"internal/app/api_auth.go": true, "internal/app/api_admin.go": true, "internal/app/api_invitations.go": true,
+		"internal/app/api_profile.go": true, "internal/app/api_account_requests.go": true}
 	callers := map[string]bool{}
-	for _, f := range guardkit.Production(t).Parse(0).Package("main") {
+	for _, f := range guardkit.Production(t).Parse(0).Package("app") {
 		ast.Inspect(f.AST, func(n ast.Node) bool {
 			if call, ok := n.(*ast.CallExpr); ok {
 				if sel, ok := call.Fun.(*ast.SelectorExpr); ok && sel.Sel.Name == "toUserJSON" {

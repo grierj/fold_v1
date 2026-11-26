@@ -194,7 +194,7 @@ release instead.
 ## Tests
 
 ```bash
-make test   # go test ./... on Postgres (root package sharded); starts the dev database if DATABASE_URL is unset
+make test   # go test ./... on Postgres (`internal/app` sharded); starts the dev database if DATABASE_URL is unset
 make lint   # shell, Go (vet/gofmt/staticcheck), and web lint
 make deadcode # production reachability gate; test database and registry inspection seams are allow-listed
 cd web && npm test   # Vitest component tests
@@ -215,14 +215,17 @@ guide to verify delivery before relying on invitations or password resets.
 
 ## Layout
 
-- `main.go` — wiring, setup wizard; `internal/httpx` — SPA serving, security headers, access log, manifest
-- `api.go`, `api_*.go` — JSON API v1 wiring and handlers
-- `csrf.go` — hand-rolled synchronizer CSRF tokens
-- `config.go` — environment-based configuration
-- `cli.go` — subcommands (`serve`, `healthcheck`, `migrate`, `version`)
-- `db.go` — Postgres connection + migrations on start
+- `main.go` — the binary's entry point: it embeds `web/dist` and the member guide and calls `internal/app`
+- `internal/app/` — the application, one package:
+  - `app.go` — wiring, setup wizard; `internal/httpx` — SPA serving, security headers, access log, manifest
+  - `api.go`, `api_*.go` — JSON API v1 wiring and handlers
+  - `csrf.go` — hand-rolled synchronizer CSRF tokens
+  - `config.go` — environment-based configuration
+  - `cli.go` — subcommands (`serve`, `healthcheck`, `migrate`, `version`)
+  - `db.go` — Postgres connection + migrations on start
+  - `templates/` — setup wizard page only (the app UI is the SPA)
+- `internal/` — the packages the application is built from (policy, jobs, mail, notify, events, rooms and more)
 - `migrations/` — goose SQL migrations (the schema's source of truth), embedded
 - `models/` — GORM models (`User`, `Group`, `Event`, `EventOccurrence`, `Membership`, `Registration`, `Setting`)
 - `web/` — React + Vite + Tailwind SPA (builds to `web/dist`, embedded via `go:embed`)
-- `templates/` — setup wizard page only (the app UI is the SPA)
 - `docs/` — API contract and other docs

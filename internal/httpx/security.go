@@ -2,7 +2,7 @@
 // security headers, the body cap, the redacting access log, the health probe,
 // the web manifest and the embedded single-page-app server. It reports its
 // refusals through the caller's error writer, so the API's error codes stay in
-// the root package.
+// package app.
 package httpx
 
 import "github.com/gin-gonic/gin"

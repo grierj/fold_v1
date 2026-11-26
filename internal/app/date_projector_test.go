@@ -1,4 +1,4 @@
-package main
+package app
 
 import (
 	"bytes"
@@ -27,7 +27,7 @@ import (
 // date page, its one-date .ics and the three calendar feeds) is captured for
 // every kind of viewer over one fixture, and must stay byte for byte the same
 // when the code that builds them changes. Run with UPDATE_GOLDEN=1 to rewrite
-// testdata/date_projector/*.golden after an intended change.
+// internal/app/testdata/date_projector/*.golden after an intended change.
 
 type projectorFixture struct {
 	app                                         *App
@@ -260,7 +260,7 @@ func (f *projectorFixture) dateStrings(t *testing.T, ev models.Event) []string {
 
 func checkProjectorGolden(t *testing.T, name, got string) {
 	t.Helper()
-	path := filepath.Join("testdata", "date_projector", name+".golden")
+	path := filepath.Join("internal", "app", "testdata", "date_projector", name+".golden")
 	if os.Getenv("UPDATE_GOLDEN") == "1" {
 		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 			t.Fatal(err)

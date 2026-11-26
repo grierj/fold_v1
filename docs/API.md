@@ -2775,8 +2775,8 @@ New v2 tokens sign the person and the email's kind (`category:<admin|groups|even
 - Validation failures → `400 {"error":"..."}`; missing → `404`.
 - Pagination is endpoint-specific: notifications and request/history APIs have
   bounded pages/cursors; ordinary group lists remain unpaginated.
-- Every response carries the app's security headers (`securityHeaders` in
-  `main.go`, DEC-37): a `Content-Security-Policy` allowing only same-origin
+- Every response carries the app's security headers (`SecurityHeaders` in
+  `internal/httpx/security.go`, DEC-37): a `Content-Security-Policy` allowing only same-origin
   scripts, styles, and connections (images may also be `data:`, `blob:`, or
   `https:`), `X-Content-Type-Options: nosniff`, `Referrer-Policy:
   same-origin`, `X-Frame-Options: SAMEORIGIN`, and `Permissions-Policy:

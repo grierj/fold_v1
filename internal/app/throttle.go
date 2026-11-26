@@ -1,4 +1,4 @@
-package main
+package app
 
 // The throttle module: every rate limit in Fold is counted here. Three
 // mechanisms, each implemented once:

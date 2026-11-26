@@ -1,4 +1,4 @@
-package main
+package app
 
 import (
 	"fold/models"
@@ -94,7 +94,7 @@ func TestCSRFExemptRoutesAreExact(t *testing.T) {
 }
 
 // csrfExemptRoutes are the only state-changing routes registered outside
-// csrfMiddleware (setupRouter, main.go). TestCSRFExemptRoutesAreExact keeps it honest.
+// csrfMiddleware (setupRouter, app.go). TestCSRFExemptRoutesAreExact keeps it honest.
 var csrfExemptRoutes = []string{"POST /hooks/postmark/email", "POST /u/unsubscribe/:token"}
 
 // pinnedFixture is a participating route for the credential check (M8.1): it

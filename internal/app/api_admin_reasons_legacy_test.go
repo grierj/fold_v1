@@ -1,4 +1,4 @@
-package main
+package app
 
 // Tests for the deleted-accounts review list (T07B-3a, slice S1): the legacy
 // filter and its marker selector, request-atomic scanning against a reference
@@ -3896,7 +3896,7 @@ func TestLegacySaveRestorePopulations(t *testing.T) {
 // Nothing the save or its scanner reads goes through an unsigned request id
 // (R4-C04): neither a model with a uint id nor a uint-typed id variable.
 func TestLegacyCensusHasNoUnsignedRequestID(t *testing.T) {
-	for _, file := range []string{"api_admin_reasons_legacy.go", "account_erasure_reasons_scan.go"} {
+	for _, file := range []string{"internal/app/api_admin_reasons_legacy.go", "internal/app/account_erasure_reasons_scan.go"} {
 		b, err := os.ReadFile(file)
 		if err != nil {
 			t.Fatal(err)

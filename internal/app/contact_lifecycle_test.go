@@ -1,4 +1,4 @@
-package main
+package app
 
 import (
 	"context"
@@ -789,7 +789,7 @@ func TestGroupAskApprovedCapacityPendingStillExpires(t *testing.T) {
 // runs the call; the shared handle is the control and the observer. Nothing
 // here equates the call's return with the server letting go: each test polls
 // pg_locks and pg_stat_activity for the backend the proxy log names. Tests that
-// set the package bounds restore them and stay serial (no root-package test
+// set the package bounds restore them and stay serial (no test in this package
 // uses t.Parallel).
 
 func setContactBounds(t *testing.T, reserve, serverCap time.Duration) {
@@ -2812,9 +2812,9 @@ func TestContactMutationsRunAtReadCommitted(t *testing.T) {
 // passes sql.LevelReadCommitted.
 func TestContactMutationsPinReadCommitted(t *testing.T) {
 	parsed := guardkit.Production(t).Parse(parser.SkipObjectResolution)
-	f := parsed.File("contact_lifecycle.go")
+	f := parsed.File("internal/app/contact_lifecycle.go")
 	if f == nil {
-		t.Fatal("contact_lifecycle.go not found")
+		t.Fatal("internal/app/contact_lifecycle.go not found")
 	}
 	fn := guardkit.FindFunc(f.AST, "contactMutationOn")
 	if fn == nil {
@@ -2863,7 +2863,7 @@ func TestRepeatableReadLockOfAMovedRowFails(t *testing.T) {
 // gate's owners outside contactMutation (C5): a production .Transaction call
 // whose function (a literal, or a local variable holding one) reaches
 // takeContactGate (every form of the gate: exclusive, shared and the sweep's
-// try-lock) through the root package's own functions passes contactGateTx.
+// try-lock) through this package's own functions passes contactGateTx.
 // It follows calls by name and leaves out contactMutationOn, which begins its
 // own transaction (TestContactMutationsPinReadCommitted). It cannot follow a
 // gate reached through a function value passed in, so the owners that take
@@ -2874,7 +2874,7 @@ func TestRepeatableReadLockOfAMovedRowFails(t *testing.T) {
 // TestGatedMutationsHonorWhatCommittedWhileTheyWaited proves the behavior.
 func TestGatedTransactionsBeginReadCommitted(t *testing.T) {
 	parsed := guardkit.Production(t).Parse(parser.SkipObjectResolution)
-	files := parsed.Package("main")
+	files := parsed.Package("app")
 	decls := map[string][]*ast.FuncDecl{}
 	for _, f := range files {
 		for _, d := range f.AST.Decls {
@@ -2916,7 +2916,7 @@ func TestGatedTransactionsBeginReadCommitted(t *testing.T) {
 			if ok && fd.Name.Name == "takeContactGate" {
 				return false
 			}
-			if id, ok := n.(*ast.Ident); ok && id.Name == "contactLockID" && !strings.HasSuffix(f.Path, "advisory_locks.go") {
+			if id, ok := n.(*ast.Ident); ok && id.Name == "contactLockID" && !strings.HasSuffix(f.Path, "internal/app/advisory_locks.go") {
 				t.Errorf("%s:%d names contactLockID outside takeContactGate", f.Path, parsed.Fset.Position(id.Pos()).Line)
 			}
 			return true

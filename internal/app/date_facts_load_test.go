@@ -1,4 +1,4 @@
-package main
+package app
 
 import (
 	"encoding/json"
@@ -307,7 +307,7 @@ func factsAccountProblems(parsed *guardkit.Parsed) []string {
 		id, ok := e.(*ast.Ident)
 		return ok && (id.Name == "dateFactSource" || id.Name == "memDates" || id.Name == "dateFacts" || id.Name == "copyRule")
 	}
-	for _, f := range parsed.Package("main") {
+	for _, f := range parsed.Package("app") {
 		for _, decl := range f.AST.Decls {
 			fn, ok := decl.(*ast.FuncDecl)
 			if !ok || fn.Body == nil {
@@ -358,7 +358,7 @@ func TestFactsStatementRowsNeverBecomeAContactAccount(t *testing.T) {
 
 // The guard catches the mistake it exists for.
 func TestFactsAccountGuardCatchesAContactAccount(t *testing.T) {
-	bad := guardkit.Sources{"bad.go": `package main
+	bad := guardkit.Sources{"internal/app/bad.go": `package app
 func (m memDates) adult(id uint) bool { return contactAccount(m.f.users[id], now, zone).Active }
 func (a *App) other(tx *gorm.DB) { f, _ := a.loadDateFacts(tx, q); _ = policy.ContactAccount{Person: asPerson(f.users[1])} }
 func (a *App) values(src dateFactSource, u *models.User) bool { return policy.CanSearchPeople(contactAccount(u, now, zone), false, false) }

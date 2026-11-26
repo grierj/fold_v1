@@ -1,4 +1,4 @@
-package main
+package app
 
 import (
 	"go/ast"
@@ -23,7 +23,7 @@ var groupDetailRe = regexp.MustCompile(`\b(g|f\.group|group)\.(Location|Name)\b|
 
 // eventOutputFiles build event and notice output for viewers who may not
 // see the event's group.
-var eventOutputFiles = []string{"api_occurrence_access.go", "api_events.go", "api_event_access.go", "api_notifications.go", "notices_groups.go", "notices_events.go", "api_group_visibility.go", "api_guest.go", "api_registrations.go", "api_calendar.go", "api_feeds.go", "date_projector.go"}
+var eventOutputFiles = []string{"internal/app/api_occurrence_access.go", "internal/app/api_events.go", "internal/app/api_event_access.go", "internal/app/api_notifications.go", "internal/app/notices_groups.go", "internal/app/notices_events.go", "internal/app/api_group_visibility.go", "internal/app/api_guest.go", "internal/app/api_registrations.go", "internal/app/api_calendar.go", "internal/app/api_feeds.go", "internal/app/date_projector.go"}
 
 func groupDetailViolations(src string) []string {
 	var bad []string
@@ -42,7 +42,7 @@ var rawGroupRe = regexp.MustCompile(`\bf\.group\b|\.Groups\[`)
 
 // projectorFiles hold the one place a date's group is decided, so a raw group
 // read there is checked line by line, not only by the field names above.
-var projectorFiles = []string{"date_projector.go"}
+var projectorFiles = []string{"internal/app/date_projector.go"}
 
 // rawGroupViolations flags a raw group source on a line that neither passes it
 // to groupShownTo (the filter) or asGroup (a policy input) nor says why it may
@@ -313,14 +313,14 @@ func (a *App) addByManager(tx *gorm.DB) {
 		name, src string
 		want      string
 	}{
-		{"locked first", `package main
+		{"locked first", `package app
 func (a *App) departureConfirm() {
 	a.contactMutation(change, func(tx *gorm.DB) error {
 		locked, _ := lockDepartureOccurrences(tx, facts)
 		return a.applyDeparture(tx, locked)
 	})
 }` + tail, ""},
-		{"applied before the lock", `package main
+		{"applied before the lock", `package app
 func (a *App) departureConfirm() {
 	a.contactMutation(change, func(tx *gorm.DB) error {
 		err := a.applyDeparture(tx, nil)
@@ -328,7 +328,7 @@ func (a *App) departureConfirm() {
 		return err
 	})
 }` + tail, "without lockDepartureOccurrences"},
-		{"a second issuer", `package main
+		{"a second issuer", `package app
 func (a *App) departureConfirm() {
 	a.contactMutation(change, func(tx *gorm.DB) error {
 		lockDepartureOccurrences(tx, facts)
@@ -338,7 +338,7 @@ func (a *App) departureConfirm() {
 func (a *App) rawKeep(tx *gorm.DB) {
 	grantRegistrationAccess(tx, 1, scope, accessGrant{Origin: policy.OccurrenceOriginDepartureSelf}, nil, now, "")
 }` + tail, "rawKeep calls grantRegistrationAccess"},
-		{"another caller of applyDeparture", `package main
+		{"another caller of applyDeparture", `package app
 func (a *App) departureConfirm() {
 	a.contactMutation(change, func(tx *gorm.DB) error {
 		lockDepartureOccurrences(tx, facts)
@@ -348,7 +348,7 @@ func (a *App) departureConfirm() {
 func (a *App) bulkDepart(tx *gorm.DB) { a.applyDeparture(tx, nil) }` + tail, "bulkDepart calls applyDeparture"},
 	} {
 		t.Run(c.name, func(t *testing.T) {
-			got := strings.Join(departureGrantViolations(guardkit.Sources{"fixture.go": c.src}.Parse(0)), "\n")
+			got := strings.Join(departureGrantViolations(guardkit.Sources{"internal/app/fixture.go": c.src}.Parse(0)), "\n")
 			if (c.want == "") != (got == "") || !strings.Contains(got, c.want) {
 				t.Fatalf("violations %q, want one containing %q", got, c.want)
 			}
@@ -807,7 +807,7 @@ func refuseKeptDates(tx *gorm.DB, raised map[uint]string) error { _, err := kept
 		name, src  string
 		shape, bad string
 	}{
-		{"checked under the gate", `package main
+		{"checked under the gate", `package app
 func (a *App) move(id uint) error {
 	return a.contactMutation(change, func(tx *gorm.DB) error {
 		var o models.EventOccurrence
@@ -817,26 +817,26 @@ func (a *App) move(id uint) error {
 		return tx.Save(&o).Error
 	})
 }` + helpers, "Save of a date", ""},
-		{"no kept check", `package main
+		{"no kept check", `package app
 func (a *App) move(id uint) error {
 	return a.contactMutation(change, func(tx *gorm.DB) error {
 		return tx.Model(&models.EventOccurrence{}).Where("id = ?", id).Update("ends_at", later).Error
 	})
 }` + helpers, `Update("ends_at")`, "without refuseKeptDates"},
-		{"checked after the write", `package main
+		{"checked after the write", `package app
 func (a *App) move(id uint) error {
 	return a.singleDateMutation(id, func(tx *gorm.DB, d *singleDate) error {
 		tx.Exec("UPDATE event_occurrences SET ends_at = ? WHERE id = ?", later, id)
 		return refuseKeptDates(tx, nil)
 	})
 }` + helpers, "raw UPDATE of ends_at", "without refuseKeptDates"},
-		{"every row, aliased", `package main
+		{"every row, aliased", `package app
 func (a *App) shift() error {
 	return a.contactMutation(change, func(tx *gorm.DB) error {
 		return tx.Exec(` + "`" + `UPDATE event_occurrences AS o SET starts_at = o.starts_at + interval '1 day', "ends_at" = o.ends_at + interval '1 day'` + "`" + `).Error
 	})
 }` + helpers, "raw UPDATE of ends_at", "without refuseKeptDates"},
-		{"a title write is not an end", `package main
+		{"a title write is not an end", `package app
 func (a *App) move(id uint) error {
 	return a.contactMutation(change, func(tx *gorm.DB) error {
 		if err := refuseKeptDates(tx, nil); err != nil { return err }
@@ -844,20 +844,20 @@ func (a *App) move(id uint) error {
 		return tx.Model(&models.EventOccurrence{}).Where("id = ?", id).UpdateColumn("ends_at", later).Error
 	})
 }` + helpers, `UpdateColumn("ends_at")`, ""},
-		{"outside the gate", `package main
+		{"outside the gate", `package app
 func (a *App) move(id uint) error {
 	return a.DB.Transaction(func(tx *gorm.DB) error {
 		if err := refuseKeptDates(tx, nil); err != nil { return err }
 		return tx.Model(&models.EventOccurrence{}).Where("id = ?", id).Updates(map[string]any{"ends_at": later}).Error
 	})
 }` + helpers, `map key "ends_at"`, "outside a contactMutation"},
-		{"a declared writer called outside the gate", `package main
+		{"a declared writer called outside the gate", `package app
 func (a *App) moveIn(tx *gorm.DB, o *models.EventOccurrence) error {
 	if err := refuseKeptDates(tx, nil); err != nil { return err }
 	return tx.Save(o).Error
 }
 func (a *App) handler(o *models.EventOccurrence) { a.moveIn(a.DB, o) }` + helpers, "Save of a date", "is called outside"},
-		{"a date read back from a helper", `package main
+		{"a date read back from a helper", `package app
 func loadDate(tx *gorm.DB) (*models.EventOccurrence, error) { return nil, nil }
 func (a *App) move() error {
 	return a.contactMutation(change, func(tx *gorm.DB) error {
@@ -865,7 +865,7 @@ func (a *App) move() error {
 		return tx.Save(o).Error
 	})
 }` + helpers, "Save of a date", "without refuseKeptDates"},
-		{"a refusal that no longer counts", `package main
+		{"a refusal that no longer counts", `package app
 func refuseKeptDates(tx *gorm.DB, raised map[uint]string) error { return nil }
 func (a *App) move(id uint) error {
 	return a.contactMutation(change, func(tx *gorm.DB) error {
@@ -875,7 +875,7 @@ func (a *App) move(id uint) error {
 }`, `UpdateColumn("ends_at")`, "no longer counts"},
 	} {
 		t.Run(c.name, func(t *testing.T) {
-			parsed := guardkit.Sources{"fixture.go": c.src}.Parse(0)
+			parsed := guardkit.Sources{"internal/app/fixture.go": c.src}.Parse(0)
 			writes := endsAtWrites(parsed)
 			if len(writes) != 1 || writes[0].shape != c.shape {
 				t.Fatalf("writes %+v, want one %q", writes, c.shape)

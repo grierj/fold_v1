@@ -1,4 +1,4 @@
-package main
+package app
 
 import (
 	"fmt"
@@ -64,7 +64,7 @@ func sealRunLiteral(parents []ast.Node, lit *ast.FuncLit) bool {
 func sealProblems(sources map[string]string) []string {
 	var bad []string
 	named := guardkit.Sources{}
-	for _, name := range []string{"admin_operation_attempts.go", "contact_lifecycle.go", "api_host_handoff.go"} {
+	for _, name := range []string{"internal/app/admin_operation_attempts.go", "internal/app/contact_lifecycle.go", "internal/app/api_host_handoff.go"} {
 		if src, ok := sources[name]; ok {
 			named[name] = src
 		} else {
@@ -83,10 +83,10 @@ func sealProblems(sources map[string]string) []string {
 	}
 
 	// currentAdminIn itself.
-	attempts := trees["admin_operation_attempts.go"]
+	attempts := trees["internal/app/admin_operation_attempts.go"]
 	cur := guardkit.FindFunc(attempts, "currentAdminIn")
 	if cur == nil {
-		return append(bad, "admin_operation_attempts.go: currentAdminIn is gone")
+		return append(bad, "internal/app/admin_operation_attempts.go: currentAdminIn is gone")
 	}
 	var names []string
 	for _, p := range cur.Type.Params.List {
@@ -186,7 +186,7 @@ func sealProblems(sources map[string]string) []string {
 			}
 		}
 		if !inSeal {
-			bad = append(bad, fmt.Sprintf("admin_operation_attempts.go:%d: currentAdminIn is called outside a contactSeal run function", fset.Position(call.Pos()).Line))
+			bad = append(bad, fmt.Sprintf("internal/app/admin_operation_attempts.go:%d: currentAdminIn is called outside a contactSeal run function", fset.Position(call.Pos()).Line))
 		}
 		return true
 	})
@@ -245,7 +245,7 @@ func sealProblems(sources map[string]string) []string {
 	for _, name := range []string{"deletionSeal", "legacySaveSeal"} {
 		ds := guardkit.FindFunc(attempts, name)
 		if ds == nil {
-			bad = append(bad, "admin_operation_attempts.go: "+name+" is gone")
+			bad = append(bad, "internal/app/admin_operation_attempts.go: "+name+" is gone")
 			continue
 		}
 		for _, p := range ds.Type.Params.List {
@@ -271,9 +271,9 @@ func sealProblems(sources map[string]string) []string {
 
 	// contactMutationOn: reconcileContacts, the seal, then the reserve check,
 	// with nothing between.
-	lc := guardkit.FindFunc(trees["contact_lifecycle.go"], "contactMutationOn")
+	lc := guardkit.FindFunc(trees["internal/app/contact_lifecycle.go"], "contactMutationOn")
 	if lc == nil {
-		bad = append(bad, "contact_lifecycle.go: contactMutationOn is gone")
+		bad = append(bad, "internal/app/contact_lifecycle.go: contactMutationOn is gone")
 	} else {
 		at := -1
 		for i, s := range lc.Body.List {
@@ -321,9 +321,9 @@ func sealProblems(sources map[string]string) []string {
 
 	// deletionHostPlan's actor read takes no lock: it is exactly one
 	// lockAdminIn call in the plain mode actorRead.
-	dp := guardkit.FindFunc(trees["api_host_handoff.go"], "deletionHostPlan")
+	dp := guardkit.FindFunc(trees["internal/app/api_host_handoff.go"], "deletionHostPlan")
 	if dp == nil {
-		bad = append(bad, "api_host_handoff.go: deletionHostPlan is gone")
+		bad = append(bad, "internal/app/api_host_handoff.go: deletionHostPlan is gone")
 	} else {
 		reads := 0
 		ast.Inspect(dp.Body, func(m ast.Node) bool {
@@ -353,7 +353,7 @@ func sealProblems(sources map[string]string) []string {
 func sealRealSources(t *testing.T) map[string]string {
 	t.Helper()
 	out := map[string]string{}
-	for _, name := range []string{"admin_operation_attempts.go", "contact_lifecycle.go", "api_host_handoff.go"} {
+	for _, name := range []string{"internal/app/admin_operation_attempts.go", "internal/app/contact_lifecycle.go", "internal/app/api_host_handoff.go"} {
 		b, err := os.ReadFile(name)
 		if err != nil {
 			t.Fatal(err)
@@ -379,7 +379,7 @@ func TestActorSealIsLast(t *testing.T) {
 		out[file] = strings.Replace(real[file], old, replacement, 1)
 		return out
 	}
-	const aops = "admin_operation_attempts.go"
+	const aops = "internal/app/admin_operation_attempts.go"
 	cases := []struct {
 		name    string
 		sources map[string]string
@@ -392,7 +392,7 @@ func TestActorSealIsLast(t *testing.T) {
 		{"a session decision other than sessionCurrent", with(aops, "!sessionCurrent(&actor, me)", "actor.Status != models.UserActive")},
 		{"a hand-written sign-in check", with(aops, "!sessionCurrent(&actor, me)", "!actor.CanSignIn()")},
 		{"a currentAdminIn call outside a seal", with(aops, "func (a *App) apiAdminMintOperationAttempt(", "func (a *App) notASeal(tx *gorm.DB, me *models.User) error { return currentAdminIn(tx, me, nil) }\n\nfunc (a *App) apiAdminMintOperationAttempt(")},
-		{"a statement after the seal in contactMutationOn", with("contact_lifecycle.go", "\tif _, ok := commitReserveLeft(deadline); ctx.Err() != nil || (bounded && !ok) {", "\t_ = tx\n\tif _, ok := commitReserveLeft(deadline); ctx.Err() != nil || (bounded && !ok) {")},
+		{"a statement after the seal in contactMutationOn", with("internal/app/contact_lifecycle.go", "\tif _, ok := commitReserveLeft(deadline); ctx.Err() != nil || (bounded && !ok) {", "\t_ = tx\n\tif _, ok := commitReserveLeft(deadline); ctx.Err() != nil || (bounded && !ok) {")},
 		{"an Update in a seal", with(aops, "\t\t\ta.hooks.deleteBeforeSeal(tx)\n\t\t}\n\t\treturn currentAdminIn(tx, me, pred)", "\t\t\ta.hooks.deleteBeforeSeal(tx)\n\t\t}\n\t\ttx.Exec(\"UPDATE users SET name = name\")\n\t\treturn currentAdminIn(tx, me, pred)")},
 		{"an Update in the legacy save's seal", with(aops, "\t\t\ta.hooks.legacySaveBeforeSeal(tx)\n\t\t}\n\t\treturn currentAdminIn(tx, me, pred)", "\t\t\ta.hooks.legacySaveBeforeSeal(tx)\n\t\t}\n\t\ttx.Exec(\"UPDATE users SET name = name\")\n\t\treturn currentAdminIn(tx, me, pred)")},
 		{"a locking read in the legacy save's seal", with(aops, "\t\t\ta.hooks.legacySaveBeforeSeal(tx)\n\t\t}\n\t\treturn currentAdminIn(tx, me, pred)", "\t\t\ta.hooks.legacySaveBeforeSeal(tx)\n\t\t}\n\t\ttx.Raw(\"SELECT id FROM users WHERE id = 1 FOR UPDATE\")\n\t\treturn currentAdminIn(tx, me, pred)")},
@@ -402,7 +402,7 @@ func TestActorSealIsLast(t *testing.T) {
 		{"the legacy save's seal deciding without currentAdminIn", with(aops, "\t\t\ta.hooks.legacySaveBeforeSeal(tx)\n\t\t}\n\t\treturn currentAdminIn(tx, me, pred)", "\t\t\ta.hooks.legacySaveBeforeSeal(tx)\n\t\t}\n\t\treturn nil")},
 		{"the legacy save's seal deciding twice", with(aops, "\t\t\ta.hooks.legacySaveBeforeSeal(tx)\n\t\t}\n\t\treturn currentAdminIn(tx, me, pred)", "\t\t\ta.hooks.legacySaveBeforeSeal(tx)\n\t\t}\n\t\t_ = currentAdminIn(tx, me, pred)\n\t\treturn currentAdminIn(tx, me, pred)")},
 		{"a locking read after the ledger transition", with(aops, "\t\t\tfacts.state = st\n", "\t\t\tfacts.state = st\n\t\t\ttx.Raw(\"SELECT id FROM users WHERE id = 1 FOR UPDATE\")\n")},
-		{"a locked mode on deletionHostPlan's actor read", with("api_host_handoff.go", "lockAdminIn(tx, me, actorRead)", "lockAdminIn(tx, me, actorShare)")},
+		{"a locked mode on deletionHostPlan's actor read", with("internal/app/api_host_handoff.go", "lockAdminIn(tx, me, actorRead)", "lockAdminIn(tx, me, actorShare)")},
 	}
 	for _, tc := range cases {
 		if bad := sealProblems(tc.sources); len(bad) == 0 {

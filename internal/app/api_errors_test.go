@@ -1,4 +1,4 @@
-package main
+package app
 
 import (
 	"encoding/json"
@@ -106,7 +106,7 @@ func TestDeclaredMessagesAreWrittenOnce(t *testing.T) {
 		t.Error(problem)
 	}
 	declaration := map[*ast.BasicLit]bool{}
-	for _, pf := range parsed.Package("main") {
+	for _, pf := range parsed.Package("app") {
 		ast.Inspect(pf.AST, func(n ast.Node) bool {
 			call, ok := n.(*ast.CallExpr)
 			if !ok {
@@ -124,7 +124,7 @@ func TestDeclaredMessagesAreWrittenOnce(t *testing.T) {
 		})
 	}
 	checked := 0
-	for _, pf := range parsed.Package("main") {
+	for _, pf := range parsed.Package("app") {
 		ast.Inspect(pf.AST, func(n ast.Node) bool {
 			lit, ok := n.(*ast.BasicLit)
 			if !ok || lit.Kind != token.STRING {
@@ -151,8 +151,8 @@ func TestAPIErrorsAreDeclaredAtPackageLevel(t *testing.T) {
 	for _, problem := range parsed.Problems {
 		t.Error(problem)
 	}
-	for _, pf := range parsed.Package("main") {
-		if pf.Path == "api_errors.go" { // the constructors call each other
+	for _, pf := range parsed.Package("app") {
+		if pf.Path == "internal/app/api_errors.go" { // the constructors call each other
 			continue
 		}
 		guardkit.InspectStack(pf.AST, func(n ast.Node, stack []ast.Node) bool {

@@ -1,4 +1,4 @@
-package main
+package app
 
 import (
 	"reflect"
@@ -57,35 +57,35 @@ func loadUser(tx *gorm.DB, id uint) (*models.User, error) { return nil, nil }
 func lockConsentUsers(tx *gorm.DB, actorID, teenID uint) (*models.User, *models.User, error) { return nil, nil, nil }
 `
 	for _, c := range []struct{ name, src, want string }{
-		{"a bare Update, as the teen conversion did", `package main
+		{"a bare Update, as the teen conversion did", `package app
 func (a *App) wait(tx *gorm.DB, user *models.User) error {
 	return tx.Model(user).Update("status", models.UserPendingConsent).Error
 }`, `wait: Update("status")`},
-		{"a local map, as the age rollover did", `package main
+		{"a local map, as the age rollover did", `package app
 func (a *App) roll(tx *gorm.DB, user *models.User, status string) error {
 	updates := map[string]any{"status": status}
 	updates["session_version"] = sessionVersionBump()
 	return tx.Model(user).Updates(updates).Error
 }`, `roll: Updates of a map given "status"`},
-		{"a pointer to a local map", `package main
+		{"a pointer to a local map", `package app
 func (a *App) roll(tx *gorm.DB, u *models.User) error {
 	cols := map[string]any{"Status": models.UserActive}
 	return tx.Model(u).Updates(&cols).Error
 }`, `roll: Updates of a map given "status"`},
-		{"a map given status later", `package main
+		{"a map given status later", `package app
 func (a *App) roll(tx *gorm.DB, id uint) error {
 	var u models.User
 	updates := map[string]any{}
 	updates["status"] = models.UserActive
 	return tx.Model(&u).Where("id = ?", id).Updates(updates).Error
 }`, `roll: Updates of a map given "status"`},
-		{"a locked user from a map", `package main
+		{"a locked user from a map", `package app
 func (a *App) roll(tx *gorm.DB, id uint) error {
 	users, _ := lockUsersByID(tx, []uint{id}, false)
 	user := users[id]
 	return tx.Model(user).UpdateColumn("status", models.UserActive).Error
 }` + decls, `roll: UpdateColumn("status")`},
-		{"a loaded user in a callback", `package main
+		{"a loaded user in a callback", `package app
 func (a *App) roll(id uint) error {
 	return a.DB.Transaction(func(tx *gorm.DB) error {
 		u, err := loadUser(tx, id)
@@ -93,69 +93,69 @@ func (a *App) roll(id uint) error {
 		return tx.Model(u).Updates(map[string]any{"status": models.UserActive}).Error
 	})
 }` + decls, `roll: Updates of a map with "status"`},
-		{"a range over users", `package main
+		{"a range over users", `package app
 func (a *App) roll(tx *gorm.DB, users []models.User) error {
 	for _, u := range users {
 		if err := tx.Model(&u).Update("status", models.UserActive).Error; err != nil { return err }
 	}
 	return nil
 }`, `roll: Update("status")`},
-		{"the table by name", `package main
+		{"the table by name", `package app
 func (a *App) roll(tx *gorm.DB, id uint) error {
 	return tx.Table("users").Where("id = ?", id).Update("status", models.UserActive).Error
 }`, `roll: Update("status")`},
-		{"a model literal", `package main
+		{"a model literal", `package app
 func (a *App) roll(tx *gorm.DB, id uint) error {
 	return tx.Model(&models.User{}).Where("id = ?", id).Updates(map[string]any{"status": models.UserActive}).Error
 }`, `roll: Updates of a map with "status"`},
-		{"a saved row", `package main
+		{"a saved row", `package app
 func (a *App) roll(tx *gorm.DB, u *models.User) error {
 	u.Status = models.UserActive
 	return tx.Save(u).Error
 }`, "roll: Save of a user"},
-		{"raw SQL", `package main
+		{"raw SQL", `package app
 func (a *App) roll(tx *gorm.DB, id uint) error {
 	return tx.Exec("UPDATE users SET name = name, status = 'active' WHERE id = ?", id).Error
 }`, "roll: raw UPDATE of users.status"},
-		{"raw SQL in a constant", `package main
+		{"raw SQL in a constant", `package app
 const activateSQL = ` + "`UPDATE users AS u SET \"status\" = 'active' WHERE u.id = ?`" + `
 `, "activateSQL: raw UPDATE of users.status"},
-		{"a session end that also sets status", `package main
+		{"a session end that also sets status", `package app
 func (a *App) roll(tx *gorm.DB, u *models.User) error {
 	return endAllSessionsIn(tx, u, map[string]any{"status": models.UserActive})
 }`, `roll: endAllSessionsIn with a map with "status"`},
-		{"a column named at run time", `package main
+		{"a column named at run time", `package app
 func (a *App) roll(tx *gorm.DB, u *models.User, col string) error {
 	return tx.Model(u).Update(col, models.UserActive).Error
 }`, "roll: Update of a computed column"},
-		{"a helper that writes its caller's columns", `package main
+		{"a helper that writes its caller's columns", `package app
 func writeUser(tx *gorm.DB, u *models.User, cols map[string]any) error {
 	return tx.Model(u).Updates(cols).Error
 }`, "writeUser: Updates of a parameter's map"},
-		{"a computed key in an inline map", `package main
+		{"a computed key in an inline map", `package app
 func (a *App) roll(tx *gorm.DB, user *models.User, key string, value any) error {
 	return tx.Model(user).Updates(map[string]any{key: value}).Error
 }`, "roll: Updates of a map with computed keys"},
-		{"a constant key in an inline map", `package main
+		{"a constant key in an inline map", `package app
 const statusColumn = "status"
 func (a *App) roll(tx *gorm.DB, id uint) error {
 	return tx.Model(&models.User{}).Where("id = ?", id).UpdateColumns(map[string]any{"name": "x", statusColumn: models.UserActive}).Error
 }`, "roll: UpdateColumns of a map with computed keys"},
-		{"a computed key in a local map literal", `package main
+		{"a computed key in a local map literal", `package app
 func (a *App) roll(tx *gorm.DB, user *models.User, key string) error {
 	cols := map[string]any{key: models.UserActive}
 	return tx.Model(user).Updates(cols).Error
 }`, "roll: Updates of a map with computed keys"},
-		{"a computed key in a var map literal", `package main
+		{"a computed key in a var map literal", `package app
 func (a *App) roll(tx *gorm.DB, user *models.User, key string) error {
 	var cols = map[string]any{key: models.UserActive}
 	return tx.Model(user).Updates(cols).Error
 }`, "roll: Updates of a map with computed keys"},
-		{"a session end with a computed key", `package main
+		{"a session end with a computed key", `package app
 func (a *App) roll(tx *gorm.DB, u *models.User, key string) error {
 	return endAllSessionsIn(tx, u, map[string]any{key: models.UserActive})
 }`, "roll: endAllSessionsIn with a map with computed keys"},
-		{"every way a function names a users value", `package main
+		{"every way a function names a users value", `package app
 func inferred(tx *gorm.DB, id uint, key string, value any) error {
 	var u = models.User{ID: id}
 	return tx.Model(&u).Updates(map[string]any{key: value}).Error
@@ -198,7 +198,7 @@ func asserted(tx *gorm.DB, v any) error {
 			"inferred: Updates of a map with computed keys", `inferredPointer: Update("status")`,
 			`loaded: Update("status")`, `named: Update("status")`, `second: Update("status")`,
 			`typed: Update("status")`, `typed: Update("status")`}, "\n")},
-		{"collections of users", `package main
+		{"collections of users", `package app
 func made(tx *gorm.DB) error {
 	var us = []models.User{}
 	vs := make([]models.User, 0)
@@ -210,13 +210,13 @@ func batch(tx *gorm.DB, users []models.User) error {
 	tx.Save(&users)
 	return tx.Model(&users).Update("status", models.UserActive).Error
 }`, strings.Join([]string{`batch: Save of a user`, `batch: Update("status")`, `made: Update("status")`, `made: Update("status")`}, "\n")},
-		{"a saved row from an inferred var", `package main
+		{"a saved row from an inferred var", `package app
 func roll(tx *gorm.DB, id uint) error {
 	var u = models.User{ID: id}
 	u.Status = models.UserActive
 	return tx.Save(&u).Error
 }`, "roll: Save of a user"},
-		{"the Go field name and every spelling GORM resolves", `package main
+		{"the Go field name and every spelling GORM resolves", `package app
 func roll(tx *gorm.DB, u *models.User) error {
 	tx.Model(u).Updates(map[string]any{"Status": models.UserActive})
 	tx.Model(u).Update("Status", models.UserActive)
@@ -225,24 +225,24 @@ func roll(tx *gorm.DB, u *models.User) error {
 	cols["Status"] = models.UserActive
 	return tx.Model(u).Updates(cols).Error
 }`, strings.Join([]string{`roll: Update("status")`, `roll: UpdateColumn("status")`, `roll: Updates of a map given "status"`, `roll: Updates of a map with "status"`}, "\n")},
-		{"a users struct, whatever Select names", `package main
+		{"a users struct, whatever Select names", `package app
 func roll(tx *gorm.DB, u *models.User) error {
 	tx.Model(u).Select("Status").Updates(u)
 	tx.Model(u).Select("status").Updates(models.User{Status: models.UserActive})
 	return tx.Model(&models.User{}).Where("id = ?", u.ID).Updates(&models.User{Status: models.UserActive}).Error
 }`, strings.Join([]string{"roll: Updates of a user struct", "roll: Updates of a user struct", "roll: Updates of a user struct"}, "\n")},
-		{"a struct of another type", `package main
+		{"a struct of another type", `package app
 func roll(tx *gorm.DB, u *models.User) error {
 	return tx.Model(u).Updates(struct{ Status string }{models.UserActive}).Error
 }`, "roll: Updates of a value it cannot read"},
-		{"a query held in a name", `package main
+		{"a query held in a name", `package app
 func roll(tx *gorm.DB, id uint) error {
 	q := tx.Model(&models.User{}).Where("id = ?", id)
 	var r = q.Where("deleted_at IS NULL")
 	r.Update("status", models.UserActive)
 	return tx.Table("public.users").Where("id = ?", id).Update("status", models.UserActive).Error
 }`, strings.Join([]string{`roll: Update("status")`, `roll: Update("status")`}, "\n")},
-		{"a type switch", `package main
+		{"a type switch", `package app
 func roll(tx *gorm.DB, v any) error {
 	switch u := v.(type) {
 	case *models.User:
@@ -250,7 +250,7 @@ func roll(tx *gorm.DB, v any) error {
 	}
 	return nil
 }`, `roll: Update("status")`},
-		{"names that do not hold a users row or write its status", `package main
+		{"names that do not hold a users row or write its status", `package app
 func photo(tx *gorm.DB, id uint) error {
 	var u = models.User{ID: id}
 	var g = models.Group{ID: id}
@@ -262,25 +262,25 @@ func photo(tx *gorm.DB, id uint) error {
 	tx.Model(&u).Updates(map[string]any{"statuses": "x", "status_note": "y", "sTatus": "z"})
 	return tx.Model(&u).Update("Statuses", "x").Error
 }`, ""},
-		{"literal keys that are not status", `package main
+		{"literal keys that are not status", `package app
 func (a *App) photo(tx *gorm.DB, u *models.User) error {
 	cols := map[string]any{"avatar_key": ""}
 	tx.Model(u).Updates(cols)
 	return tx.Model(u).Updates(map[string]any{"name": "x"}).Error
 }`, ""},
-		{"another table's status", `package main
+		{"another table's status", `package app
 func (a *App) leave(tx *gorm.DB, m *models.Membership) error {
 	tx.Model(m).Update("status", models.MembershipLeft)
 	return tx.Model(&models.Registration{}).Updates(map[string]any{"status": "cancelled"}).Error
 }`, ""},
-		{"another users column", `package main
+		{"another users column", `package app
 func (a *App) photo(tx *gorm.DB, u *models.User) error {
 	tx.Exec("UPDATE users SET avatar_key = '' WHERE status = 'active'")
 	return tx.Model(u).Update("avatar_key", "").Error
 }`, ""},
 	} {
 		t.Run(c.name, func(t *testing.T) {
-			p := guardkit.Sources{"x.go": c.src}.Parse(0)
+			p := guardkit.Sources{"internal/app/x.go": c.src}.Parse(0)
 			if len(p.Problems) > 0 {
 				t.Fatal(p.Problems)
 			}

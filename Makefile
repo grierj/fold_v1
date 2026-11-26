@@ -21,7 +21,7 @@ dev: devdb
 # the self-tests in its checks job.
 test: go-test reason-review-scale-test backup-test
 
-# go test ./... against DATABASE_URL, with the root package split across
+# go test ./... against DATABASE_URL, with the app package (internal/app) split across
 # parallel shards (scripts/go-test.sh); starts the dev database when it is unset.
 go-test:
 	@if [ -z "$$DATABASE_URL" ]; then \

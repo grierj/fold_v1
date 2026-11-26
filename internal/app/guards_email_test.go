@@ -1,4 +1,4 @@
-package main
+package app
 
 import (
 	"go/ast"
@@ -35,7 +35,7 @@ func emailChoiceViolations(sources map[string]string) []string {
 				case *ast.BasicLit:
 					if n.Kind == token.STRING {
 						s, _ := strconv.Unquote(n.Value)
-						flagged = strings.Contains(strings.ToLower(s), "email_address_optouts") && path != "email_optouts.go"
+						flagged = strings.Contains(strings.ToLower(s), "email_address_optouts") && path != "internal/app/email_optouts.go"
 					}
 				case *ast.SelectorExpr:
 					id, ok := n.X.(*ast.Ident)
@@ -44,9 +44,9 @@ func emailChoiceViolations(sources map[string]string) []string {
 					}
 					switch n.Sel.Name {
 					case "EmailAddressOptOut":
-						flagged = path != "email_optouts.go"
+						flagged = path != "internal/app/email_optouts.go"
 					case "ConsentEmail":
-						flagged = path != "email_optouts.go" && !(path == "email_unsubscribe.go" && owner == "setEmailConsent") && !(path == "api_notification_settings.go" && owner == "apiUpdateNotificationSettings")
+						flagged = path != "internal/app/email_optouts.go" && !(path == "internal/app/email_unsubscribe.go" && owner == "setEmailConsent") && !(path == "internal/app/api_notification_settings.go" && owner == "apiUpdateNotificationSettings")
 					}
 				}
 				if flagged {
@@ -67,21 +67,21 @@ func TestEmailChoiceSQLStaysInOneHelper(t *testing.T) {
 
 func TestEmailChoiceGuardCatchesBypasses(t *testing.T) {
 	for name, src := range map[string]string{
-		"table":    `package main; func x() { _ = "SELECT * FROM email_address_optouts" }`,
-		"model":    `package main; import m "fold/models"; func x() { _ = m.EmailAddressOptOut{} }`,
-		"consents": `package main; import "fold/models"; func x() { _ = models.ConsentEmail }`,
+		"table":    `package app; func x() { _ = "SELECT * FROM email_address_optouts" }`,
+		"model":    `package app; import m "fold/models"; func x() { _ = m.EmailAddressOptOut{} }`,
+		"consents": `package app; import "fold/models"; func x() { _ = models.ConsentEmail }`,
 	} {
 		t.Run(name, func(t *testing.T) {
-			path := "messages_send.go"
+			path := "internal/app/messages_send.go"
 			if name == "model" {
-				path = "api_admin_suppressions.go"
+				path = "internal/app/api_admin_suppressions.go"
 			}
 			if bad := emailChoiceViolations(map[string]string{path: src}); len(bad) == 0 {
 				t.Fatal("bypass accepted")
 			}
 		})
 	}
-	if bad := emailChoiceViolations(map[string]string{"email_optouts.go": `package main; import "fold/models"; func readEmailOff() { _ = models.ConsentEmail; _ = "SELECT * FROM email_address_optouts" }`}); len(bad) != 0 {
+	if bad := emailChoiceViolations(map[string]string{"internal/app/email_optouts.go": `package app; import "fold/models"; func readEmailOff() { _ = models.ConsentEmail; _ = "SELECT * FROM email_address_optouts" }`}); len(bad) != 0 {
 		t.Fatal(bad)
 	}
 }
@@ -99,7 +99,7 @@ func optionalMailViolations(sources map[string]string) []string {
 	positions := parsed.Fset
 	bad := append([]string(nil), parsed.Problems...)
 	functions := map[string]*ast.FuncDecl{}
-	allowed := map[string]string{"notice_email.go": "notificationEmailMessage", "messages_send.go": "messageEmail", "api_message_preview.go": "apiTestMessage", "notify_guardian_copy.go": "guardianCopyEmailMessage"}
+	allowed := map[string]string{"internal/app/notice_email.go": "notificationEmailMessage", "internal/app/messages_send.go": "messageEmail", "internal/app/api_message_preview.go": "apiTestMessage", "internal/app/notify_guardian_copy.go": "guardianCopyEmailMessage"}
 	for _, pf := range parsed.Files {
 		path, tree := pf.Path, pf.AST
 		if pf.Dir() != "." && (!strings.HasPrefix(path, "internal/") || strings.HasPrefix(path, "internal/mail/") || strings.HasPrefix(path, "internal/providers/")) {
@@ -188,16 +188,16 @@ func optionalMailViolations(sources map[string]string) []string {
 		return found
 	}
 	for _, edge := range [][3]string{
-		{"notice_email.go:readEmailRecipients", "readEmailOff", "effective recipient choices"},
-		{"notice_email.go:readEmailRecipient", "readEmailRecipients", "effective recipient read"},
-		{"notify_deliver.go:sendHeldNotification", "readEmailRecipient", "notification boundary"},
-		{"notify_guardian_copy.go:prepareGuardianCopy", "readEmailRecipient", "guardian copy boundary"},
+		{"internal/app/notice_email.go:readEmailRecipients", "readEmailOff", "effective recipient choices"},
+		{"internal/app/notice_email.go:readEmailRecipient", "readEmailRecipients", "effective recipient read"},
+		{"internal/app/notify_deliver.go:sendHeldNotification", "readEmailRecipient", "notification boundary"},
+		{"internal/app/notify_guardian_copy.go:prepareGuardianCopy", "readEmailRecipient", "guardian copy boundary"},
 	} {
 		if f := functions[edge[0]]; f == nil || !hasCall(f, edge[1]) {
 			bad = append(bad, edge[0]+": missing "+edge[2])
 		}
 	}
-	for _, key := range []string{"notify_deliver.go:sendHeldNotification", "notify_guardian_copy.go:prepareGuardianCopy"} {
+	for _, key := range []string{"internal/app/notify_deliver.go:sendHeldNotification", "internal/app/notify_guardian_copy.go:prepareGuardianCopy"} {
 		f := functions[key]
 		if f == nil {
 			continue // the edge check above names a missing function
@@ -215,7 +215,7 @@ func optionalMailViolations(sources map[string]string) []string {
 			bad = append(bad, key+": missing effective-choice .Off call")
 		}
 	}
-	for _, key := range []string{"messages_send.go:deliverMessageBatchOnce", "api_message_preview.go:apiTestMessage"} {
+	for _, key := range []string{"internal/app/messages_send.go:deliverMessageBatchOnce", "internal/app/api_message_preview.go:apiTestMessage"} {
 		f := functions[key]
 		if f == nil {
 			bad = append(bad, key+": missing send boundary")
@@ -255,9 +255,9 @@ func optionalMailViolations(sources map[string]string) []string {
 					}
 				}
 			}
-			if claimTransaction != nil && (key != "messages_send.go:deliverMessageBatchOnce" || inRange) {
+			if claimTransaction != nil && (key != "internal/app/messages_send.go:deliverMessageBatchOnce" || inRange) {
 				inside++
-				if key == "messages_send.go:deliverMessageBatchOnce" {
+				if key == "internal/app/messages_send.go:deliverMessageBatchOnce" {
 					claimedBefore, renderedAfter := false, false
 					ast.Inspect(claimTransaction.Body, func(n ast.Node) bool {
 						// A nested closure cannot supply this transaction's claim
@@ -302,15 +302,15 @@ func TestOptionalMailChecksTheEffectiveChoice(t *testing.T) {
 
 func cleanOptionalMailSources() map[string]string {
 	return map[string]string{
-		"notice_email.go": `package main
+		"internal/app/notice_email.go": `package app
 func readEmailRecipients() { readEmailOff() }
 func readEmailRecipient() { readEmailRecipients() }
 func (a *App) notificationEmailMessage() {}`,
-		"notify_deliver.go":       `package main; func (a *App) sendHeldNotification() { readEmailRecipient(); off.Off() }`,
-		"notify_guardian_copy.go": `package main; func (a *App) prepareGuardianCopy() { readEmailRecipient(); off.Off() }; func (a *App) guardianCopyEmailMessage() {}`,
-		"messages_send.go":        `package main; func (a *App) deliverMessageBatchOnce() { for range rows { db.Transaction(func() { tx.Raw("FOR UPDATE SKIP LOCKED"); readEmailOff(); a.messageEmail() }) } }`,
-		"api_message_preview.go":  `package main; func (a *App) apiTestMessage() { db.Transaction(func() { readEmailOff() }) }`,
-		"mail_jobs.go":            `package main; func sendDirect() { msg.Optional = false }`,
+		"internal/app/notify_deliver.go":       `package app; func (a *App) sendHeldNotification() { readEmailRecipient(); off.Off() }`,
+		"internal/app/notify_guardian_copy.go": `package app; func (a *App) prepareGuardianCopy() { readEmailRecipient(); off.Off() }; func (a *App) guardianCopyEmailMessage() {}`,
+		"internal/app/messages_send.go":        `package app; func (a *App) deliverMessageBatchOnce() { for range rows { db.Transaction(func() { tx.Raw("FOR UPDATE SKIP LOCKED"); readEmailOff(); a.messageEmail() }) } }`,
+		"internal/app/api_message_preview.go":  `package app; func (a *App) apiTestMessage() { db.Transaction(func() { readEmailOff() }) }`,
+		"internal/app/mail_jobs.go":            `package app; func sendDirect() { msg.Optional = false }`,
 	}
 }
 
@@ -319,33 +319,33 @@ func TestOptionalMailGuardCatchesBypasses(t *testing.T) {
 		t.Fatal(bad)
 	}
 	for name, src := range map[string]string{
-		"optional constructor":                   `package main; import m "fold/internal/mail"; func other() { _ = m.Message{Optional: true} }`,
-		"broadcast constructor":                  `package main; import m "fold/internal/mail"; import p "fold/internal/providers"; func other() { _ = m.Message{Stream: p.StreamBroadcast} }`,
-		"optional assignment":                    `package main; func other() { msg.Optional = true }`,
-		"broadcast assignment":                   `package main; import p "fold/internal/providers"; func other() { msg.Stream = p.StreamBroadcast }`,
-		"batch cache":                            `package main; func (a *App) deliverMessageBatchOnce() { readEmailOff(); for range rows { db.Transaction(func() {}) } }`,
-		"batch choice before claim":              `package main; func (a *App) deliverMessageBatchOnce() { for range rows { db.Transaction(func() { readEmailOff(); tx.Raw("FOR UPDATE SKIP LOCKED"); a.messageEmail() }) } }`,
-		"batch choice after render":              `package main; func (a *App) deliverMessageBatchOnce() { for range rows { db.Transaction(func() { tx.Raw("FOR UPDATE SKIP LOCKED"); a.messageEmail(); readEmailOff() }) } }`,
-		"batch claim in other closure":           `package main; func (a *App) deliverMessageBatchOnce() { for range rows { db.Transaction(func() { _ = func() { tx.Raw("FOR UPDATE SKIP LOCKED") }; readEmailOff(); a.messageEmail() }) } }`,
-		"notification ignores choice":            `package main; func (a *App) sendHeldNotification() { readEmailRecipient() }`,
-		"missing composer choice":                `package main; func (a *App) apiTestMessage() { db.Transaction(func() {}) }`,
-		"guardian copy ignores choice":           `package main; func (a *App) prepareGuardianCopy() { readEmailRecipient() }`,
-		"guardian copy skips the recipient read": `package main; func (a *App) prepareGuardianCopy() { off.Off() }`,
+		"optional constructor":                   `package app; import m "fold/internal/mail"; func other() { _ = m.Message{Optional: true} }`,
+		"broadcast constructor":                  `package app; import m "fold/internal/mail"; import p "fold/internal/providers"; func other() { _ = m.Message{Stream: p.StreamBroadcast} }`,
+		"optional assignment":                    `package app; func other() { msg.Optional = true }`,
+		"broadcast assignment":                   `package app; import p "fold/internal/providers"; func other() { msg.Stream = p.StreamBroadcast }`,
+		"batch cache":                            `package app; func (a *App) deliverMessageBatchOnce() { readEmailOff(); for range rows { db.Transaction(func() {}) } }`,
+		"batch choice before claim":              `package app; func (a *App) deliverMessageBatchOnce() { for range rows { db.Transaction(func() { readEmailOff(); tx.Raw("FOR UPDATE SKIP LOCKED"); a.messageEmail() }) } }`,
+		"batch choice after render":              `package app; func (a *App) deliverMessageBatchOnce() { for range rows { db.Transaction(func() { tx.Raw("FOR UPDATE SKIP LOCKED"); a.messageEmail(); readEmailOff() }) } }`,
+		"batch claim in other closure":           `package app; func (a *App) deliverMessageBatchOnce() { for range rows { db.Transaction(func() { _ = func() { tx.Raw("FOR UPDATE SKIP LOCKED") }; readEmailOff(); a.messageEmail() }) } }`,
+		"notification ignores choice":            `package app; func (a *App) sendHeldNotification() { readEmailRecipient() }`,
+		"missing composer choice":                `package app; func (a *App) apiTestMessage() { db.Transaction(func() {}) }`,
+		"guardian copy ignores choice":           `package app; func (a *App) prepareGuardianCopy() { readEmailRecipient() }`,
+		"guardian copy skips the recipient read": `package app; func (a *App) prepareGuardianCopy() { off.Off() }`,
 	} {
 		t.Run(name, func(t *testing.T) {
 			sources := cleanOptionalMailSources()
-			path := "other.go"
+			path := "internal/app/other.go"
 			if strings.HasPrefix(name, "batch ") {
-				path = "messages_send.go"
+				path = "internal/app/messages_send.go"
 			}
 			if name == "notification ignores choice" {
-				path = "notify_deliver.go"
+				path = "internal/app/notify_deliver.go"
 			}
 			if strings.HasPrefix(name, "guardian copy") {
-				path = "notify_guardian_copy.go"
+				path = "internal/app/notify_guardian_copy.go"
 			}
 			if name == "missing composer choice" {
-				path = "api_message_preview.go"
+				path = "internal/app/api_message_preview.go"
 			}
 			sources[path] = src
 			if bad := optionalMailViolations(sources); len(bad) == 0 {

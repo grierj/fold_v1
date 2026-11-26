@@ -1,4 +1,4 @@
-package main
+package app
 
 import (
 	"context"
@@ -6,7 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"os"
+	"io/fs"
 	"path"
 	"slices"
 	"strings"
@@ -19,8 +19,21 @@ import (
 	"gorm.io/gorm/logger"
 )
 
-// version is set at build time with -ldflags "-X main.version=x.y.z".
-var version = "dev"
+// Build is what only the root package can supply: the version set at build time
+// and the files outside this directory, which go:embed cannot reach from here.
+type Build struct {
+	Version    string
+	Dist       fs.FS // holds the web client at web/dist
+	MemberHelp []byte
+}
+
+var build Build
+
+// Main runs the fold command and returns its exit code.
+func Main(b Build, args []string, stdout, stderr io.Writer) int {
+	build = b
+	return run(args, stdout, stderr)
+}
 
 const usage = `usage: fold [command] [--json]
 
@@ -73,9 +86,9 @@ func run(args []string, stdout, stderr io.Writer) int {
 			// (R4-RP) and restoreUploads says this binary has
 			// `restore settle-uploads`; an older binary has neither field,
 			// which reads as 0.
-			_ = json.NewEncoder(stdout).Encode(map[string]any{"version": version, "recoveryPolicy": recoveryPolicyLevel, "restoreUploads": restoreUploadsLevel})
+			_ = json.NewEncoder(stdout).Encode(map[string]any{"version": build.Version, "recoveryPolicy": recoveryPolicyLevel, "restoreUploads": restoreUploadsLevel})
 		} else {
-			fmt.Fprintln(stdout, "fold", version)
+			fmt.Fprintln(stdout, "fold", build.Version)
 		}
 		return 0
 	case "help", "-h", "--help":
@@ -327,5 +340,3 @@ func runPushCheck(asJSON bool, stdout, stderr io.Writer) int {
 	}
 	return 0
 }
-
-func main() { os.Exit(run(os.Args[1:], os.Stdout, os.Stderr)) }

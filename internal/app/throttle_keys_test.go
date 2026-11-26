@@ -1,4 +1,4 @@
-package main
+package app
 
 import (
 	"fmt"
@@ -16,7 +16,7 @@ import (
 )
 
 // The throttle guards are parse-only analysis (go/parser and go/ast, through
-// guardkit), not a type checker. The key-position rules read package main, where
+// guardkit), not a type checker. The key-position rules read package app, where
 // throttleKey lives; the login_throttles SQL rule reads the whole production tree. Their limits, stated
 // here and in the T19 note:
 //
@@ -32,17 +32,17 @@ import (
 //     was given the right argument. The exact-output tables below pin the
 //     arguments each builder takes.
 
-const throttleKeysFile = "throttle_keys.go"
+const throttleKeysFile = "internal/app/throttle_keys.go"
 
 // throttleSQLAllowed names the only functions that may hold login_throttles
 // SQL or models.LoginThrottle. eraseOwnedThrottleKeysIn (account_erasure.go)
 // is the erasure's one statement over the table.
 var throttleSQLAllowed = map[string]map[string]bool{
-	"throttle.go": {
+	"internal/app/throttle.go": {
 		"reserveLoginAttempt": true, "countThrottleHit": true, "lockLoginKeysAtLimit": true,
 		"pruneLoginThrottles": true, "refundLoginAttempts": true, "clearLoginKey": true,
 	},
-	"account_erasure.go": {"eraseOwnedThrottleKeysIn": true},
+	"internal/app/account_erasure.go": {"eraseOwnedThrottleKeysIn": true},
 }
 
 // loginThrottlesTable matches the table name as a whole word, so a schema
@@ -106,9 +106,9 @@ func throttleKeyViolations(sources map[string]string) []string {
 	bad := append([]string(nil), parsed.Problems...)
 	files := map[string]*ast.File{}
 	var names []string
-	// throttleKey is unexported, so only package main can build or pass one;
+	// throttleKey is unexported, so only package app can build or pass one;
 	// the key-position rules read that package alone (names come out sorted).
-	for _, pf := range parsed.Package("main") {
+	for _, pf := range parsed.Package("app") {
 		names = append(names, pf.Path)
 		files[pf.Path] = pf.AST
 	}
@@ -522,7 +522,7 @@ func TestOwnedThrottleKeysCoverEveryOwnedBuilder(t *testing.T) {
 
 // throttleStubs declares the helper signatures a fixture calls, the way
 // throttle.go does for the real tree.
-const throttleStubs = `package main
+const throttleStubs = `package app
 
 func (a *App) throttleAllow(ctx context.Context, key throttleKey, limit int, window time.Duration) (bool, error) {
 	return true, nil
@@ -536,11 +536,11 @@ func (a *App) reserveLoginAttempt(ctx context.Context, keys []throttleKey) (bool
 func TestThrottleGuardsCatchMistakes(t *testing.T) {
 	keysSrc := throttleProductionSources(t)[throttleKeysFile]
 	withFixture := func(src string) map[string]string {
-		return map[string]string{throttleKeysFile: keysSrc, "api_stubs.go": throttleStubs, "api_fixture.go": src}
+		return map[string]string{throttleKeysFile: keysSrc, "internal/app/api_stubs.go": throttleStubs, "internal/app/api_fixture.go": src}
 	}
 
 	// The intended code passes every guard.
-	good := `package main
+	good := `package app
 
 import "log"
 
@@ -561,37 +561,37 @@ func (a *App) good(ctx context.Context, ip, addr string, id uint, k throttleKey,
 		t.Fatalf("the intended code must pass: %v", bad)
 	}
 	if bad := throttleKeyViolations(map[string]string{throttleKeysFile: keysSrc}); len(bad) != 0 {
-		t.Fatalf("throttle_keys.go alone must pass: %v", bad)
+		t.Fatalf("internal/app/throttle_keys.go alone must pass: %v", bad)
 	}
 
 	for _, tt := range []struct{ name, src, want string }{
-		{"inline conversion", `package main
+		{"inline conversion", `package app
 func (a *App) f(ctx context.Context) { a.throttleAllow(ctx, throttleKey("other"), 1, 0) }`, "uses the throttleKey type"},
-		{"typed var", `package main
+		{"typed var", `package app
 func (a *App) f() { var k throttleKey = "email:x"; _ = k }`, "uses the throttleKey type"},
-		{"const passed by name", `package main
+		{"const passed by name", `package app
 const k = "email:x"
 func (a *App) f(ctx context.Context) { a.throttleAllow(ctx, k, 1, 0) }`, "argument 1 of throttleAllow"},
-		{"literal in a typed slice", `package main
+		{"literal in a typed slice", `package app
 func (a *App) f(ctx context.Context) { a.reserveLoginAttempt(ctx, []throttleKey{"email:x"}) }`, "element is not a builder call"},
-		{"variable in a typed slice", `package main
+		{"variable in a typed slice", `package app
 func (a *App) f(ctx context.Context, k throttleKey) { a.reserveLoginAttempt(ctx, []throttleKey{k}) }`, "element is not a builder call"},
-		{"unknown prefix literal", `package main
+		{"unknown prefix literal", `package app
 func (a *App) f(ctx context.Context) { a.throttleAllow(ctx, "newfamily:x", 1, 0) }`, "argument 1 of throttleAllow"},
-		{"concatenated literal", `package main
+		{"concatenated literal", `package app
 func (a *App) f(ctx context.Context) { a.throttleAllow(ctx, "ema"+"il:x", 1, 0) }`, "argument 1 of throttleAllow"},
-		{"known prefix literal anywhere", `package main
+		{"known prefix literal anywhere", `package app
 var key = "pwreset:ip:" + "x"
 func f() string { return "guestreg:site" }`, "starts with the throttle key prefix"},
-		{"method value", `package main
+		{"method value", `package app
 func (a *App) f() { g := a.throttleAllow; _ = g }`, "throttleAllow is used as a value"},
-		{"builder value", `package main
+		{"builder value", `package app
 func f() { g := loginIPKey; _ = g }`, "loginIPKey is used as a value"},
-		{"struct field", `package main
+		{"struct field", `package app
 type holder struct{ k throttleKey }`, "uses the throttleKey type"},
-		{"map of keys", `package main
+		{"map of keys", `package app
 func f() { m := map[string]throttleKey{}; _ = m }`, "uses the throttleKey type"},
-		{"type assertion", `package main
+		{"type assertion", `package app
 func f(v any) { _ = v.(throttleKey) }`, "uses the throttleKey type"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
@@ -603,21 +603,21 @@ func f(v any) { _ = v.(throttleKey) }`, "uses the throttleKey type"},
 	}
 
 	t.Run("login_throttles SQL in an unlisted function", func(t *testing.T) {
-		src := map[string]string{"api_fixture.go": "package main\nfunc (a *App) sneaky() { a.DB.Exec(\"DELETE FROM login_throttles WHERE key = ?\", \"x\") }\n"}
+		src := map[string]string{"internal/app/api_fixture.go": "package app\nfunc (a *App) sneaky() { a.DB.Exec(\"DELETE FROM login_throttles WHERE key = ?\", \"x\") }\n"}
 		bad := throttleSQLViolations(src, throttleSQLAllowed)
 		if len(bad) != 1 || !strings.Contains(bad[0], "login_throttles SQL") {
 			t.Fatalf("got %v", bad)
 		}
 	})
 	t.Run("schema-qualified login_throttles SQL in an unlisted function", func(t *testing.T) {
-		src := map[string]string{"api_fixture.go": "package main\nfunc (a *App) sneaky() { a.DB.Exec(\"DELETE FROM public.login_throttles WHERE key = ?\", \"x\") }\n"}
+		src := map[string]string{"internal/app/api_fixture.go": "package app\nfunc (a *App) sneaky() { a.DB.Exec(\"DELETE FROM public.login_throttles WHERE key = ?\", \"x\") }\n"}
 		bad := throttleSQLViolations(src, throttleSQLAllowed)
 		if len(bad) != 1 || !strings.Contains(bad[0], "login_throttles SQL") {
 			t.Fatalf("got %v", bad)
 		}
 	})
 	t.Run("models.LoginThrottle in an unlisted function", func(t *testing.T) {
-		src := map[string]string{"api_fixture.go": "package main\nfunc (a *App) sneaky() { a.DB.Delete(&models.LoginThrottle{}) }\n"}
+		src := map[string]string{"internal/app/api_fixture.go": "package app\nfunc (a *App) sneaky() { a.DB.Delete(&models.LoginThrottle{}) }\n"}
 		bad := throttleSQLViolations(src, throttleSQLAllowed)
 		if len(bad) != 1 || !strings.Contains(bad[0], "models.LoginThrottle") {
 			t.Fatalf("got %v", bad)
@@ -630,7 +630,7 @@ func f(v any) { _ = v.(throttleKey) }`, "uses the throttleKey type"},
 		{"the job kind outside daily()", `cleanup.login_throttles`},
 	} {
 		t.Run("login_throttles SQL, "+tt.name, func(t *testing.T) {
-			src := map[string]string{"api_fixture.go": "package main\nfunc (a *App) sneaky() { a.DB.Exec(\"" + tt.sql + "\") }\n"}
+			src := map[string]string{"internal/app/api_fixture.go": "package app\nfunc (a *App) sneaky() { a.DB.Exec(\"" + tt.sql + "\") }\n"}
 			bad := throttleSQLViolations(src, throttleSQLAllowed)
 			if len(bad) != 1 || !strings.Contains(bad[0], "login_throttles SQL") {
 				t.Fatalf("got %v", bad)
@@ -638,19 +638,19 @@ func f(v any) { _ = v.(throttleKey) }`, "uses the throttleKey type"},
 		})
 	}
 	t.Run("a longer identifier is not the table", func(t *testing.T) {
-		src := map[string]string{"api_fixture.go": "package main\nfunc f() { _ = \"x_login_throttles\" }\n"}
+		src := map[string]string{"internal/app/api_fixture.go": "package app\nfunc f() { _ = \"x_login_throttles\" }\n"}
 		if bad := throttleSQLViolations(src, throttleSQLAllowed); len(bad) != 0 {
 			t.Fatalf("got %v", bad)
 		}
 	})
 	t.Run("the table name in a daily job kind is not SQL", func(t *testing.T) {
-		src := map[string]string{"jobs_daily.go": "package main\nfunc g() { daily(\"cleanup.login_throttles\", \"Clearing\", nil) }\n"}
+		src := map[string]string{"internal/app/jobs_daily.go": "package app\nfunc g() { daily(\"cleanup.login_throttles\", \"Clearing\", nil) }\n"}
 		if bad := throttleSQLViolations(src, throttleSQLAllowed); len(bad) != 0 {
 			t.Fatalf("got %v", bad)
 		}
 	})
 	t.Run("a listed function may hold the SQL", func(t *testing.T) {
-		src := map[string]string{"throttle.go": "package main\nfunc pruneLoginThrottles() { _ = `DELETE FROM login_throttles` }\n"}
+		src := map[string]string{"internal/app/throttle.go": "package app\nfunc pruneLoginThrottles() { _ = `DELETE FROM login_throttles` }\n"}
 		if bad := throttleSQLViolations(src, throttleSQLAllowed); len(bad) != 0 {
 			t.Fatalf("got %v", bad)
 		}
@@ -658,7 +658,7 @@ func f(v any) { _ = v.(throttleKey) }`, "uses the throttleKey type"},
 
 	mutate := func(from, to string) string {
 		if !strings.Contains(keysSrc, from) {
-			t.Fatalf("throttle_keys.go no longer contains %q; update the fixture", from)
+			t.Fatalf("internal/app/throttle_keys.go no longer contains %q; update the fixture", from)
 		}
 		return strings.Replace(keysSrc, from, to, 1)
 	}

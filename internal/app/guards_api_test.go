@@ -1,4 +1,4 @@
-package main
+package app
 
 import (
 	"go/ast"
@@ -17,8 +17,8 @@ import (
 func TestOnlyLoginAndInvitesAnswer429(t *testing.T) {
 	// answers429 maps each declared 429 value to the functions that may use it.
 	answers429 := map[string]map[string]map[string]bool{
-		"errLockedOut":       {"api_auth.go": {"apiLogin": true, "reauthenticate": true}},
-		"errInvitationLimit": {"api_invitations.go": {"apiCreateInvitation": true}},
+		"errLockedOut":       {"internal/app/api_auth.go": {"apiLogin": true, "reauthenticate": true}},
+		"errInvitationLimit": {"internal/app/api_invitations.go": {"apiCreateInvitation": true}},
 	}
 	// The values are the only declared errors with that status.
 	for _, e := range declaredAPIErrors {
@@ -30,12 +30,12 @@ func TestOnlyLoginAndInvitesAnswer429(t *testing.T) {
 	for _, problem := range parsed.Problems {
 		t.Error(problem)
 	}
-	// Package main only: the handlers live there. Other packages use the status
+	// Package app only: the handlers live there. Other packages use the status
 	// constant for other reasons (internal/push reads a push service's 429).
-	for _, pf := range parsed.Package("main") {
+	for _, pf := range parsed.Package("app") {
 		f, file := pf.Path, pf.AST
 		// api_errors.go only names the code for a 429; it sends none itself.
-		if f == "api_errors.go" {
+		if f == "internal/app/api_errors.go" {
 			continue
 		}
 		for _, decl := range file.Decls {

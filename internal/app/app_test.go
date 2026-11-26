@@ -1,4 +1,4 @@
-package main
+package app
 
 import (
 	"bytes"
@@ -441,7 +441,7 @@ func TestManifestCarriesTheChurchName(t *testing.T) {
 // returns a non-zero exit.
 func serveBootProblems(src string) []string {
 	fset := token.NewFileSet()
-	f, err := parser.ParseFile(fset, "main.go", src, 0)
+	f, err := parser.ParseFile(fset, "internal/app/app.go", src, 0)
 	if err != nil {
 		return []string{err.Error()}
 	}
@@ -497,7 +497,7 @@ func serveBootProblems(src string) []string {
 }
 
 func TestServeBootStepComesFirst(t *testing.T) {
-	b, err := os.ReadFile("main.go")
+	b, err := os.ReadFile("internal/app/app.go")
 	if err != nil {
 		t.Fatal(err)
 	}

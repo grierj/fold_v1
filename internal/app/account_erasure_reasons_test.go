@@ -1,4 +1,4 @@
-package main
+package app
 
 import (
 	"bytes"
@@ -1851,15 +1851,15 @@ func TestReasonReviewCensus(t *testing.T) {
 	}
 	// The pin sees a new site of each kind.
 	for name, src := range map[string]struct{ kind, code string }{
-		"a new row locker":     {"rowLockers", "package main\nfunc newLocker(tx *gorm.DB) { tx.Raw(\"SELECT id FROM contact_requests WHERE id = ? FOR UPDATE\", 1) }\n"},
-		"a new request write":  {"requestWriters", "package main\nfunc newWriter(tx *gorm.DB) { tx.Exec(\"UPDATE contact_requests SET status = 'x'\") }\n"},
-		"a model write":        {"requestWriters", "package main\nfunc newModelWriter(tx *gorm.DB) { tx.Create(&models.ContactRequest{}) }\n"},
-		"a new audit reader":   {"auditReaders", "package main\nfunc newReader(tx *gorm.DB) { tx.Raw(\"SELECT target_id FROM audit_logs\").Scan(&ids) }\n"},
-		"a model audit read":   {"auditReaders", "package main\nfunc newModelReader(tx *gorm.DB) { tx.Model(&models.AuditLog{}).Count(&n) }\n"},
-		"a new fenced caller":  {"gatedFenced", "package main\nfunc (a *App) newFenced() { a.contactMutationCtx(ctx, change, fn) }\n"},
-		"a new wrapper caller": {"gatedFenced", "package main\nfunc (a *App) newWrapped() { a.fencedContactMutation(ctx, change, fn) }\n"},
+		"a new row locker":     {"rowLockers", "package app\nfunc newLocker(tx *gorm.DB) { tx.Raw(\"SELECT id FROM contact_requests WHERE id = ? FOR UPDATE\", 1) }\n"},
+		"a new request write":  {"requestWriters", "package app\nfunc newWriter(tx *gorm.DB) { tx.Exec(\"UPDATE contact_requests SET status = 'x'\") }\n"},
+		"a model write":        {"requestWriters", "package app\nfunc newModelWriter(tx *gorm.DB) { tx.Create(&models.ContactRequest{}) }\n"},
+		"a new audit reader":   {"auditReaders", "package app\nfunc newReader(tx *gorm.DB) { tx.Raw(\"SELECT target_id FROM audit_logs\").Scan(&ids) }\n"},
+		"a model audit read":   {"auditReaders", "package app\nfunc newModelReader(tx *gorm.DB) { tx.Model(&models.AuditLog{}).Count(&n) }\n"},
+		"a new fenced caller":  {"gatedFenced", "package app\nfunc (a *App) newFenced() { a.contactMutationCtx(ctx, change, fn) }\n"},
+		"a new wrapper caller": {"gatedFenced", "package app\nfunc (a *App) newWrapped() { a.fencedContactMutation(ctx, change, fn) }\n"},
 	} {
-		with := map[string]string{"new_site.go": src.code}
+		with := map[string]string{"internal/app/new_site.go": src.code}
 		for k, v := range sources {
 			with[k] = v
 		}
@@ -1923,46 +1923,46 @@ func TestReasonReviewCensus(t *testing.T) {
 // reconcile of the tombstone and the actor seal last.
 var reasonCensusPinned = map[string][]string{
 	"rowLockers": {
-		"account_erasure.go:eraseContactRequestTextIn",
-		"account_erasure_reasons.go:planReasonReviewIn",
-		"api_admin_reasons_legacy.go:legacySavePlanIn",
-		"api_contact.go:useContactGrant",
-		"api_registrations.go:apiAddRegistration",
-		"contact_lifecycle.go:reconcileContacts",
-		"request_lifecycle.go:lockRequest",
+		"internal/app/account_erasure.go:eraseContactRequestTextIn",
+		"internal/app/account_erasure_reasons.go:planReasonReviewIn",
+		"internal/app/api_admin_reasons_legacy.go:legacySavePlanIn",
+		"internal/app/api_contact.go:useContactGrant",
+		"internal/app/api_registrations.go:apiAddRegistration",
+		"internal/app/contact_lifecycle.go:reconcileContacts",
+		"internal/app/request_lifecycle.go:lockRequest",
 	},
 	"requestWriters": {
-		"account_erasure.go:eraseContactRequestTextIn",
-		"account_erasure_reasons.go:eraseContactRequestReasonsIn",
+		"internal/app/account_erasure.go:eraseContactRequestTextIn",
+		"internal/app/account_erasure_reasons.go:eraseContactRequestReasonsIn",
 		"internal/dbopen/dbopen.go:isExpectedLegacyBusy",
 	},
 	"auditReaders": {
-		"account_erasure.go:captureErasureSetsIn",
-		"account_erasure_audit.go:auditRetentionReportSQL",
-		"account_erasure_audit.go:discoverAuditConversionsIn",
-		"account_erasure_tombstones.go:tombstoneSweptSQL",
-		"age_rollover.go:flagHouseholdChild13",
-		"age_rollover.go:rolloverAges",
-		"api_contact_history.go:contactHistoryQuery",
-		"api_household_conversion.go:conversionInviterDisabled",
-		"api_message_preview.go:apiTestMessage",
-		"api_occurrence_access.go:cancelEvidenceIn",
-		"api_push.go:apiPushSubscribe",
-		"api_push.go:apiPushTest",
-		"api_registrations.go:previouslyRegisteredPerson",
-		"edit_revision.go:dateRoomRevisionIn",
-		"edit_revision.go:settingRevisionIn",
-		"link_cleanup.go:pruneExpiredLinks",
-		"registration_access.go:loadAccessHistory",
-		"registration_subjects.go:appendRecoverableRegistrations",
-		"throttle.go:inviteSendAllowed",
+		"internal/app/account_erasure.go:captureErasureSetsIn",
+		"internal/app/account_erasure_audit.go:auditRetentionReportSQL",
+		"internal/app/account_erasure_audit.go:discoverAuditConversionsIn",
+		"internal/app/account_erasure_tombstones.go:tombstoneSweptSQL",
+		"internal/app/age_rollover.go:flagHouseholdChild13",
+		"internal/app/age_rollover.go:rolloverAges",
+		"internal/app/api_contact_history.go:contactHistoryQuery",
+		"internal/app/api_household_conversion.go:conversionInviterDisabled",
+		"internal/app/api_message_preview.go:apiTestMessage",
+		"internal/app/api_occurrence_access.go:cancelEvidenceIn",
+		"internal/app/api_push.go:apiPushSubscribe",
+		"internal/app/api_push.go:apiPushTest",
+		"internal/app/api_registrations.go:previouslyRegisteredPerson",
+		"internal/app/edit_revision.go:dateRoomRevisionIn",
+		"internal/app/edit_revision.go:settingRevisionIn",
+		"internal/app/link_cleanup.go:pruneExpiredLinks",
+		"internal/app/registration_access.go:loadAccessHistory",
+		"internal/app/registration_subjects.go:appendRecoverableRegistrations",
+		"internal/app/throttle.go:inviteSendAllowed",
 	},
 	"gatedFenced": {
-		"account_erasure_tombstones.go:eraseTombstoneOnce",
-		"admin_operation_attempts.go:apiAdminSettleOperationAttempt",
-		"api_admin.go:apiAdminDeleteUser",
-		"api_admin_reasons_legacy.go:apiAdminLegacyReasonSave",
-		"restore_fence.go:fencedContactMutation",
+		"internal/app/account_erasure_tombstones.go:eraseTombstoneOnce",
+		"internal/app/admin_operation_attempts.go:apiAdminSettleOperationAttempt",
+		"internal/app/api_admin.go:apiAdminDeleteUser",
+		"internal/app/api_admin_reasons_legacy.go:apiAdminLegacyReasonSave",
+		"internal/app/restore_fence.go:fencedContactMutation",
 	},
 }
 
@@ -2422,7 +2422,7 @@ func TestReasonReviewDecisionMetaReviewerIsParty(t *testing.T) {
 // schedules, the restore schedules and the signed-id and audit cases). The
 // orchestration runs it with
 //
-//	go test -count=8 -run '^(<names joined by |>)$' .
+//	go test -count=8 -run '^(<names joined by |>)$' ./internal/app
 //
 // and TestReasonReviewRepeatSetExists keeps every name real, so a rename cannot
 // silently shrink the repeat run. None of these changes a package variable
@@ -2464,7 +2464,7 @@ var reasonReviewRepeatSet = []string{
 
 func TestReasonReviewRepeatSetExists(t *testing.T) {
 	have := map[string]bool{}
-	files, err := filepath.Glob("*_test.go")
+	files, err := filepath.Glob("internal/app/*_test.go")
 	if err != nil {
 		t.Fatal(err)
 	}

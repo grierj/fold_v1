@@ -1,4 +1,4 @@
-package main
+package app
 
 import (
 	"context"
@@ -171,7 +171,7 @@ func TestErasureHouseholdLockCensus(t *testing.T) {
 		t.Error(p)
 	}
 	with := func(old, replacement string) guardkit.Sources {
-		const file = "account_erasure.go"
+		const file = "internal/app/account_erasure.go"
 		if strings.Count(sources[file], old) != 1 {
 			t.Fatalf("fixture anchor %q must occur once in %s", old, file)
 		}
@@ -201,20 +201,20 @@ func TestErasureHouseholdLockCensus(t *testing.T) {
 // erasureHouseholdLockProblems checks the census over sources.
 func erasureHouseholdLockProblems(sources guardkit.Sources) []string {
 	want := map[string]bool{
-		"age_rollover.go:rolloverAges":                             true, // flagHouseholdChild13 (N-05)
-		"api_admin_guardian_links.go:decideGuardianLink":           true,
-		"api_admin_household.go:apiAdminAddHouseholdPerson":        true,
-		"api_household_conversion.go:issueHouseholdConversion":     true,
-		"api_household_conversion.go:apiCancelHouseholdConversion": true,
-		"api_household_conversion.go:approveHouseholdConversion":   true,
-		"api_households.go:apiUpdateMyHousehold":                   true, // N-11 family
-		"api_households.go:apiAddHouseholdPerson":                  true,
-		"api_households.go:apiUpdateHouseholdPerson":               true,
-		"api_households.go:apiDeleteHouseholdPerson":               true, // reconcileHouseholdPerson
-		"api_registrations.go:apiRegister":                         true,
-		"api_registrations.go:addHouseholdRegistration":            true,
-		"api_teen_conversion.go:lockConversionParticipants":        true,
-		"api_teen_conversion.go:lockTeenLifecycleUsers":            true,
+		"internal/app/age_rollover.go:rolloverAges":                             true, // flagHouseholdChild13 (N-05)
+		"internal/app/api_admin_guardian_links.go:decideGuardianLink":           true,
+		"internal/app/api_admin_household.go:apiAdminAddHouseholdPerson":        true,
+		"internal/app/api_household_conversion.go:issueHouseholdConversion":     true,
+		"internal/app/api_household_conversion.go:apiCancelHouseholdConversion": true,
+		"internal/app/api_household_conversion.go:approveHouseholdConversion":   true,
+		"internal/app/api_households.go:apiUpdateMyHousehold":                   true, // N-11 family
+		"internal/app/api_households.go:apiAddHouseholdPerson":                  true,
+		"internal/app/api_households.go:apiUpdateHouseholdPerson":               true,
+		"internal/app/api_households.go:apiDeleteHouseholdPerson":               true, // reconcileHouseholdPerson
+		"internal/app/api_registrations.go:apiRegister":                         true,
+		"internal/app/api_registrations.go:addHouseholdRegistration":            true,
+		"internal/app/api_teen_conversion.go:lockConversionParticipants":        true,
+		"internal/app/api_teen_conversion.go:lockTeenLifecycleUsers":            true,
 	}
 	var bad []string
 	got := map[string]bool{}
@@ -229,7 +229,7 @@ func erasureHouseholdLockProblems(sources guardkit.Sources) []string {
 			if !ok || fd.Body == nil {
 				continue
 			}
-			if name == "account_erasure.go" && fd.Name.Name == "eraseAccountIn" && fd.Recv != nil {
+			if name == "internal/app/account_erasure.go" && fd.Name.Name == "eraseAccountIn" && fd.Recv != nil {
 				pipeline = fd
 			}
 			ast.Inspect(fd.Body, func(n ast.Node) bool {
@@ -244,7 +244,7 @@ func erasureHouseholdLockProblems(sources guardkit.Sources) []string {
 					case "lockErasureHouseholdsIn":
 						lockSites++
 						if fd != pipeline {
-							bad = append(bad, fmt.Sprintf("%s:%s calls lockErasureHouseholdsIn; only eraseAccountIn (account_erasure.go) takes the erasure's households", name, fd.Name.Name))
+							bad = append(bad, fmt.Sprintf("%s:%s calls lockErasureHouseholdsIn; only eraseAccountIn (internal/app/account_erasure.go) takes the erasure's households", name, fd.Name.Name))
 						}
 					}
 				}
@@ -258,7 +258,7 @@ func erasureHouseholdLockProblems(sources guardkit.Sources) []string {
 				return true
 			}
 			text := strings.ToUpper(lit.Value)
-			if strings.Contains(text, "FROM HOUSEHOLDS") && strings.Contains(text, "FOR UPDATE") && name != "account_erasure_households.go" {
+			if strings.Contains(text, "FROM HOUSEHOLDS") && strings.Contains(text, "FOR UPDATE") && name != "internal/app/account_erasure_households.go" {
 				bad = append(bad, name+" locks a households row in SQL; every household lock goes through lockHousehold or lockErasureHouseholdsIn")
 			}
 			return true
@@ -278,7 +278,7 @@ func erasureHouseholdLockProblems(sources guardkit.Sources) []string {
 		bad = append(bad, fmt.Sprintf("lockErasureHouseholdsIn is called %d times, want once, in eraseAccountIn", lockSites))
 	}
 	if pipeline == nil {
-		return append(bad, "account_erasure.go: eraseAccountIn is gone")
+		return append(bad, "internal/app/account_erasure.go: eraseAccountIn is gone")
 	}
 	// In eraseAccountIn the only calls before the household lock are the two
 	// plain-read steps, and the credentials delete (the first write) follows it.

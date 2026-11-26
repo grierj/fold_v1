@@ -1,4 +1,4 @@
-package main
+package app
 
 // The token module: every capability Fold mails or hands out (account tokens,
 // invitations, guest verifications) is made, found, claimed, rotated and

@@ -30,7 +30,7 @@ const (
 // RecipientMove is one way a message recipient row's status changes, named by
 // what causes it. Email and push share the column, each with its own machine;
 // a move names the channels it moves. The table below is the whole machine
-// (docs/agents/lifecycles.md); the root package's moveRecipient writes every
+// (docs/agents/lifecycles.md); package app's moveRecipient writes every
 // move of an existing row, and a move that makes a row is the status its
 // creator inserts.
 type RecipientMove string

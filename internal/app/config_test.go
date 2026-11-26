@@ -1,4 +1,4 @@
-package main
+package app
 
 import (
 	"bytes"
@@ -744,7 +744,7 @@ func TestFreshVolumeNamesAreUniquePerCall(t *testing.T) {
 // the two are named (scripts/compose-smoke.sh builds them):
 //
 //	FOLD_TEST_APP_IMAGE=ghcr.io/grierj/fold:ci FOLD_TEST_BACKUP_IMAGE=ghcr.io/grierj/fold-backup:ci \
-//	  go test -run TestFreshVolumesAreWritableByTheAppUser .
+//	  go test -run TestFreshVolumesAreWritableByTheAppUser ./internal/app
 func TestFreshVolumesAreWritableByTheAppUser(t *testing.T) {
 	appImage, backupImage := os.Getenv("FOLD_TEST_APP_IMAGE"), os.Getenv("FOLD_TEST_BACKUP_IMAGE")
 	if appImage == "" || backupImage == "" {

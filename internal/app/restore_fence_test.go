@@ -1,4 +1,4 @@
-package main
+package app
 
 import (
 	"bytes"
@@ -152,7 +152,7 @@ func fenceWriterProblems(sources map[string]string) []string {
 	fset := parsed.Fset
 	// The write statements restore_fence.go declares as constants.
 	writeConsts := map[string]bool{}
-	if f := parsed.File("restore_fence.go"); f != nil {
+	if f := parsed.File("internal/app/restore_fence.go"); f != nil {
 		for _, d := range f.AST.Decls {
 			gd, ok := d.(*ast.GenDecl)
 			if !ok || gd.Tok != token.CONST {
@@ -173,7 +173,7 @@ func fenceWriterProblems(sources map[string]string) []string {
 		for _, d := range tree.Decls {
 			fd, isFunc := d.(*ast.FuncDecl)
 			keyDecl := false
-			if gd, ok := d.(*ast.GenDecl); ok && gd.Tok == token.CONST && path == "restore_fence.go" {
+			if gd, ok := d.(*ast.GenDecl); ok && gd.Tok == token.CONST && path == "internal/app/restore_fence.go" {
 				for _, sp := range gd.Specs {
 					for _, n := range sp.(*ast.ValueSpec).Names {
 						if n.Name == "restoreFenceKey" {
@@ -182,7 +182,7 @@ func fenceWriterProblems(sources map[string]string) []string {
 					}
 				}
 			}
-			writer := isFunc && fenceWriterFuncs[fd.Name.Name] && path == "restore_fence.go"
+			writer := isFunc && fenceWriterFuncs[fd.Name.Name] && path == "internal/app/restore_fence.go"
 			ast.Inspect(d, func(n ast.Node) bool {
 				switch x := n.(type) {
 				case *ast.BasicLit:
@@ -193,11 +193,11 @@ func fenceWriterProblems(sources map[string]string) []string {
 						bad = append(bad, fmt.Sprintf("%s:%d: names the restore_fence row in a string; only the restoreFenceKey constant may", path, fset.Position(x.Pos()).Line))
 						return true
 					}
-					if isFunc && path == "restore_fence.go" && sqlWritesWords(x.Value) && !writer {
-						bad = append(bad, fmt.Sprintf("%s:%d: writes in restore_fence.go outside the boot step and takeRestoreTicket", path, fset.Position(x.Pos()).Line))
+					if isFunc && path == "internal/app/restore_fence.go" && sqlWritesWords(x.Value) && !writer {
+						bad = append(bad, fmt.Sprintf("%s:%d: writes in internal/app/restore_fence.go outside the boot step and takeRestoreTicket", path, fset.Position(x.Pos()).Line))
 					}
 				case *ast.Ident:
-					if x.Name == "restoreFenceKey" && !keyDecl && (path != "restore_fence.go" || !isFunc || !fenceKeyUsers[fd.Name.Name]) {
+					if x.Name == "restoreFenceKey" && !keyDecl && (path != "internal/app/restore_fence.go" || !isFunc || !fenceKeyUsers[fd.Name.Name]) {
 						bad = append(bad, fmt.Sprintf("%s:%d: uses restoreFenceKey outside the boot step, takeRestoreTicket and refuseRestoreFenceKey", path, fset.Position(x.Pos()).Line))
 					}
 					if writeConsts[x.Name] && isFunc && !writer {
@@ -217,7 +217,7 @@ func TestRestoreFenceHasTwoWriters(t *testing.T) {
 		t.Error(v)
 	}
 	// Negative fixtures.
-	clean := map[string]string{"restore_fence.go": `package main
+	clean := map[string]string{"internal/app/restore_fence.go": `package app
 const restoreFenceKey = "restore_fence"
 const (
 	restoreFenceCreateSQL  = "INSERT INTO settings (key, value) VALUES (?, '0') ON CONFLICT (key) DO NOTHING"
@@ -226,23 +226,23 @@ const (
 func refuseRestoreFenceKey(key string) error { if key == restoreFenceKey { return errRestoreFenceKey }; return nil }
 func (a *App) bootRestoreFence() error { tx.Exec(restoreFenceCreateSQL, restoreFenceKey); tx.Raw(restoreFenceAdvanceSQL, restoreFenceKey); return nil }
 func (a *App) takeRestoreTicket() { tx.Raw(restoreFenceAdvanceSQL, restoreFenceKey) }
-`, "other.go": "package main\nfunc f() {}\n"}
+`, "internal/app/other.go": "package app\nfunc f() {}\n"}
 	if bad := fenceWriterProblems(clean); len(bad) != 0 {
 		t.Fatalf("the clean fixture failed: %v", bad)
 	}
 	for name, files := range map[string]map[string]string{
-		"a writer in another file": {"restore_fence.go": clean["restore_fence.go"],
-			"other.go": "package main\nfunc f() { tx.Exec(\"UPDATE settings SET value = '0' WHERE key = 'restore_fence'\") }\n"},
-		"a third writer in the file": {"restore_fence.go": clean["restore_fence.go"] +
-			"func (a *App) other() { tx.Exec(\"DELETE FROM settings WHERE key = 'restore_fence'\") }\n", "other.go": clean["other.go"]},
-		"a third writer through the key": {"restore_fence.go": clean["restore_fence.go"] +
-			"func (a *App) other() { tx.Exec(\"DELETE FROM settings WHERE key = ?\", restoreFenceKey) }\n", "other.go": clean["other.go"]},
-		"a third writer through the advance statement": {"restore_fence.go": clean["restore_fence.go"] +
-			"func (a *App) other(k string) { tx.Raw(restoreFenceAdvanceSQL, k) }\n", "other.go": clean["other.go"]},
-		"the key spelled again in the file": {"restore_fence.go": clean["restore_fence.go"] +
-			"func (a *App) bootCopy() string { return \"restore_fence\" }\n", "other.go": clean["other.go"]},
-		"the key constant used elsewhere": {"restore_fence.go": clean["restore_fence.go"],
-			"other.go": "package main\nfunc f() { _ = models.Setting{Key: restoreFenceKey} }\n"},
+		"a writer in another file": {"internal/app/restore_fence.go": clean["internal/app/restore_fence.go"],
+			"internal/app/other.go": "package app\nfunc f() { tx.Exec(\"UPDATE settings SET value = '0' WHERE key = 'restore_fence'\") }\n"},
+		"a third writer in the file": {"internal/app/restore_fence.go": clean["internal/app/restore_fence.go"] +
+			"func (a *App) other() { tx.Exec(\"DELETE FROM settings WHERE key = 'restore_fence'\") }\n", "internal/app/other.go": clean["internal/app/other.go"]},
+		"a third writer through the key": {"internal/app/restore_fence.go": clean["internal/app/restore_fence.go"] +
+			"func (a *App) other() { tx.Exec(\"DELETE FROM settings WHERE key = ?\", restoreFenceKey) }\n", "internal/app/other.go": clean["internal/app/other.go"]},
+		"a third writer through the advance statement": {"internal/app/restore_fence.go": clean["internal/app/restore_fence.go"] +
+			"func (a *App) other(k string) { tx.Raw(restoreFenceAdvanceSQL, k) }\n", "internal/app/other.go": clean["internal/app/other.go"]},
+		"the key spelled again in the file": {"internal/app/restore_fence.go": clean["internal/app/restore_fence.go"] +
+			"func (a *App) bootCopy() string { return \"restore_fence\" }\n", "internal/app/other.go": clean["internal/app/other.go"]},
+		"the key constant used elsewhere": {"internal/app/restore_fence.go": clean["internal/app/restore_fence.go"],
+			"internal/app/other.go": "package app\nfunc f() { _ = models.Setting{Key: restoreFenceKey} }\n"},
 	} {
 		if len(fenceWriterProblems(files)) == 0 {
 			t.Errorf("%s: the guard accepted it", name)
@@ -302,7 +302,7 @@ func settingsWriterProblems(sources map[string]string) []string {
 					return true
 				})
 			}
-			if path == "settings.go" && isFunc && fd.Name.Name == "setSettingIn" {
+			if path == "internal/app/settings.go" && isFunc && fd.Name.Name == "setSettingIn" {
 				sawSetter = true
 				if !refuses {
 					bad = append(bad, fmt.Sprintf("%s:%d: setSettingIn does not refuse restore_fence", path, fset.Position(fd.Pos()).Line))
@@ -311,8 +311,8 @@ func settingsWriterProblems(sources map[string]string) []string {
 			guardkit.InspectStack(d, func(n ast.Node, stack []ast.Node) bool {
 				switch x := n.(type) {
 				case *ast.BasicLit:
-					if path != "restore_fence.go" && x.Kind == token.STRING && settingsWriteRe.MatchString(x.Value) {
-						bad = append(bad, fmt.Sprintf("%s:%d: raw SQL writes settings outside restore_fence.go", path, fset.Position(x.Pos()).Line))
+					if path != "internal/app/restore_fence.go" && x.Kind == token.STRING && settingsWriteRe.MatchString(x.Value) {
+						bad = append(bad, fmt.Sprintf("%s:%d: raw SQL writes settings outside internal/app/restore_fence.go", path, fset.Position(x.Pos()).Line))
 					}
 				case *ast.CompositeLit:
 					typed := x.Type != nil && isSetting(x.Type)
@@ -354,25 +354,25 @@ func settingsWriterProblems(sources map[string]string) []string {
 			})
 		}
 	}
-	if _, ok := sources["settings.go"]; ok && !sawSetter {
-		bad = append(bad, "settings.go does not declare setSettingIn, the one settings writer")
+	if _, ok := sources["internal/app/settings.go"]; ok && !sawSetter {
+		bad = append(bad, "internal/app/settings.go does not declare setSettingIn, the one settings writer")
 	}
 	return bad
 }
 
 func TestSettingsWritersRefuseTheFenceKey(t *testing.T) {
 	sources := guardkit.Production(t)
-	if _, ok := sources["settings.go"]; !ok {
-		t.Fatal("settings.go, home of setSettingIn, is not in the production tree")
+	if _, ok := sources["internal/app/settings.go"]; !ok {
+		t.Fatal("internal/app/settings.go, home of setSettingIn, is not in the production tree")
 	}
 	for _, v := range settingsWriterProblems(sources) {
 		t.Error(v)
 	}
-	const head = "package main\nconst settingFixed = \"fixed\"\n"
+	const head = "package app\nconst settingFixed = \"fixed\"\n"
 	good := head + "func a(tx *gorm.DB) { tx.Where(models.Setting{Key: settingFixed}).FirstOrCreate(nil) }\n" +
 		"func b(tx *gorm.DB, key string) error { if err := refuseRestoreFenceKey(key); err != nil { return err }\n tx.Where(models.Setting{Key: key}).FirstOrCreate(nil); return nil }\n" +
 		"func c(tx *gorm.DB) error { for _, s := range []models.Setting{{Key: \"site_name\"}} { if err := refuseRestoreFenceKey(s.Key); err != nil { return err }\n tx.Where(models.Setting{Key: s.Key}).FirstOrCreate(nil) }; return nil }\n"
-	if bad := settingsWriterProblems(map[string]string{"x.go": good}); len(bad) != 0 {
+	if bad := settingsWriterProblems(map[string]string{"internal/app/x.go": good}); len(bad) != 0 {
 		t.Fatalf("the clean fixture failed: %v", bad)
 	}
 	for name, src := range map[string]string{
@@ -382,16 +382,16 @@ func TestSettingsWritersRefuseTheFenceKey(t *testing.T) {
 		"a slice element without the refusal": head + "func f(tx *gorm.DB, k string) { tx.Create(&[]models.Setting{{Key: k}}) }\n",
 		"raw SQL that writes settings":        head + "func f(tx *gorm.DB) { tx.Exec(\"UPDATE settings SET value = '1' WHERE key = ?\", k) }\n",
 	} {
-		if len(settingsWriterProblems(map[string]string{"x.go": src})) == 0 {
+		if len(settingsWriterProblems(map[string]string{"internal/app/x.go": src})) == 0 {
 			t.Errorf("%s: the census accepted it", name)
 		}
 	}
 	for name, src := range map[string]string{
-		"setSettingIn without the refusal": "package main\nfunc setSettingIn(tx *gorm.DB, key, value string) error { return tx.Create(&models.Setting{Key: key, Value: value}).Error }\n",
-		"no setSettingIn":                  "package main\nfunc other() {}\n",
+		"setSettingIn without the refusal": "package app\nfunc setSettingIn(tx *gorm.DB, key, value string) error { return tx.Create(&models.Setting{Key: key, Value: value}).Error }\n",
+		"no setSettingIn":                  "package app\nfunc other() {}\n",
 	} {
-		if len(settingsWriterProblems(map[string]string{"settings.go": src})) == 0 {
-			t.Errorf("%s: the census accepted settings.go", name)
+		if len(settingsWriterProblems(map[string]string{"internal/app/settings.go": src})) == 0 {
+			t.Errorf("%s: the census accepted internal/app/settings.go", name)
 		}
 	}
 }
@@ -705,7 +705,7 @@ const (
 
 func pgWrapperPath() string {
 	_, thisFile, _, _ := runtime.Caller(0)
-	return filepath.Join(filepath.Dir(thisFile), "scripts", "pg-client.sh")
+	return filepath.Join(filepath.Dir(thisFile), "..", "..", "scripts", "pg-client.sh")
 }
 
 // pgCandidates lists the commands to try for one tool, in order. FOLD_PG_BIN

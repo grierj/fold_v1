@@ -1,4 +1,4 @@
-package main
+package app
 
 import (
 	"context"
@@ -5770,7 +5770,7 @@ func TestAccountErasureAgesNoteSavepointRollback(t *testing.T) {
 // parameters in one statement, through the real DELETE on a fresh database.
 // Skipped unless FOLD_ERASURE_SCALE=1. Run:
 //
-//	FOLD_ERASURE_SCALE=1 DATABASE_URL=<scratch> go test -run TestAccountErasureScrubsSubjectAgesNoteBeyondBindLimit -count=1 -v .
+//	FOLD_ERASURE_SCALE=1 DATABASE_URL=<scratch> go test -run TestAccountErasureScrubsSubjectAgesNoteBeyondBindLimit -count=1 -v ./internal/app
 //
 // Commit: HTTP 200, 15 UPDATEs (14 of 5,000 rows and one of 1), none with more
 // than lookupChunk+1 parameters, 70,001 rows changed in all, every note blank,
@@ -7225,7 +7225,7 @@ func logScaleReport(t *testing.T, plans []scalePlan) float64 {
 // that the erasure answered 200 and left no copy of the address in the
 // tables it names.
 //
-//	FOLD_ERASURE_SCALE=1 DATABASE_URL=<scratch> go test -run TestAccountErasureScale -count=1 -v .
+//	FOLD_ERASURE_SCALE=1 DATABASE_URL=<scratch> go test -run TestAccountErasureScale -count=1 -v ./internal/app
 //
 // R4-2d1b-2: the consent scrub is asserted, not only timed. The explain
 // subtest requires the real UPDATE's RowsAffected = 4 (cross-checked by the

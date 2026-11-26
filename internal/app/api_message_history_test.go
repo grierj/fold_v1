@@ -1,4 +1,4 @@
-package main
+package app
 
 import (
 	"context"
@@ -279,8 +279,8 @@ func TestOwnMessageErrorsListEveryWhy(t *testing.T) {
 	for _, problem := range parsed.Problems {
 		t.Error(problem)
 	}
-	// why* constants are a package main convention (the messaging failure texts).
-	for _, pf := range parsed.Package("main") {
+	// why* constants are a package app convention (the messaging failure texts).
+	for _, pf := range parsed.Package("app") {
 		ast.Inspect(pf.AST, func(n ast.Node) bool {
 			spec, ok := n.(*ast.ValueSpec)
 			if !ok {

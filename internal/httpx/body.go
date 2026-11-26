@@ -12,7 +12,7 @@ type Refuse func(c *gin.Context, status int, msg string)
 
 // LimitBody makes reads past n fail, so oversized bodies are refused
 // instead of buffered. tooLarge writes the answer for a body declared over n
-// (the root package passes its declared 413); LimitBody aborts after it.
+// (package app passes its declared 413); LimitBody aborts after it.
 func LimitBody(n int64, tooLarge gin.HandlerFunc) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		if c.Request.ContentLength > n {

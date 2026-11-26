@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# go test ./..., with the root package split across parallel shards.
+# go test ./..., with the app package (internal/app) split across parallel shards.
 #
-# The root package holds most handler tests. They share one Postgres
+# The app package holds most handler tests. They share one Postgres
 # database per test process and never call t.Parallel, so one process runs
 # them one at a time. Each shard is a separate process with its own
 # database (internal/testdb), which lets them run side by side.
@@ -12,7 +12,7 @@
 # use the CPU, so there are more shards than CPUs. Stale numbers only make
 # the shards less even; every test still runs exactly once.
 #
-#   FOLD_TEST_SHARDS=n       number of root-package shards (default: 2 per CPU, 2..12)
+#   FOLD_TEST_SHARDS=n       number of app-package shards (default: 2 per CPU, 2..12)
 #   FOLD_TEST_RECORD=1       rewrite scripts/go-test-durations.txt from this run
 # For one test, use go test -run directly.
 set -euo pipefail
@@ -38,12 +38,12 @@ if mkdir "$tmp/v0.1.0" && git archive v0.1.0 2>/dev/null | tar -x -C "$tmp/v0.1.
 	export FOLD_TEST_BUILD_V0_1_0="$tmp/fold-v0.1.0"
 fi
 
-# Every package but the root one, as usual (packages already run in parallel).
-mapfile -t others < <(go list ./... | grep -vx fold)
+# Every package but the app one, as usual (packages already run in parallel).
+mapfile -t others < <(go list ./... | grep -vx fold/internal/app)
 go test "${others[@]}" >"$tmp/others.log" 2>&1 &
 others_pid=$!
 
-go test -c -o "$tmp/fold.test" .
+go test -c -o "$tmp/fold.test" ./internal/app
 "$tmp/fold.test" -test.list '.*' | grep '^Test' >"$tmp/tests"
 
 # One line per test: "<shard> <name>".
@@ -76,15 +76,15 @@ for entry in "${pids[@]}"; do
 	s=${entry%%:*}
 	if ! wait "${entry#*:}"; then
 		status=1
-		echo "--- root package shard $s failed:"
+		echo "--- app package shard $s failed:"
 		grep -E -B2 -A20 '^(--- FAIL|panic:|FAIL)' "$tmp/shard$s.log" || tail -50 "$tmp/shard$s.log"
 	fi
 done
 if ((status == 0)); then
-	echo "ok  	fold	($(wc -l <"$tmp/tests") tests in $shards shards)"
+	echo "ok  	fold/internal/app	($(wc -l <"$tmp/tests") tests in $shards shards)"
 	if [ -n "${FOLD_TEST_RECORD:-}" ]; then
 		{
-			echo "# Seconds per root-package test of 0.5s or more, for scripts/go-test.sh's shard plan."
+			echo "# Seconds per app-package test of 0.5s or more, for scripts/go-test.sh's shard plan."
 			echo "# Rewrite with FOLD_TEST_RECORD=1 scripts/go-test.sh (FOLD_TEST_SHARDS=8 is close to CI)."
 			sed -nE 's/^--- (PASS|SKIP): (Test[^ ]+) \(([0-9.]+)s\)$/\3 \2/p' "$tmp"/shard*.log |
 				awk '$1 >= 0.5 { printf "%.1f %s\n", $1, $2 }' | sort -k2,2

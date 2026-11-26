@@ -1,4 +1,4 @@
-package main
+package app
 
 import (
 	"go/ast"
@@ -39,16 +39,16 @@ func TestDependabotCoversEveryEcosystem(t *testing.T) {
 // testLayoutAllowed are the only test files with no same-named source file:
 // shared helpers and migration tests (the repo-wide guards match guardFileRe).
 var testLayoutAllowed = map[string]bool{
-	"testhelpers_test.go":              true,
+	"internal/app/testhelpers_test.go": true,
 	"migrations/drift_test.go":         true,
 	"migrations/reason_review_test.go": true,
 	"migrations/testhelpers_test.go":   true,
 	// The erasure inventory's data and its check against the live schema and
 	// docs/plan/M7.4-ERASURE-INVENTORY.md section 4 (no production code).
-	"erasure_inventory_test.go": true,
+	"internal/app/erasure_inventory_test.go": true,
 }
 
-// guardFileRe matches the repo-wide guard files in the root package: guards_<concern>_test.go.
+// guardFileRe matches the repo-wide guard files in package app: guards_<concern>_test.go.
 var guardFileRe = regexp.MustCompile(`^guards_[a-z_]+_test\.go$`)
 
 // milestoneNameRe matches a test file named after when it was written
@@ -61,10 +61,10 @@ func testLayoutViolations(path string, exists func(string) bool) []string {
 	dir, base := filepath.Split(path)
 	var out []string
 	if milestoneNameRe.MatchString(base) {
-		out = append(out, path+": named after a milestone. Move its tests into the file for the code they test (X_test.go next to X.go, Foo.test.tsx next to Foo.tsx, e2e specs by feature); shared helpers go in testhelpers_test.go")
+		out = append(out, path+": named after a milestone. Move its tests into the file for the code they test (X_test.go next to X.go, Foo.test.tsx next to Foo.tsx, e2e specs by feature); shared helpers go in internal/app/testhelpers_test.go")
 		return out
 	}
-	if testLayoutAllowed[path] || (dir == "" && guardFileRe.MatchString(base)) || strings.HasPrefix(path, "web/e2e/") {
+	if testLayoutAllowed[path] || (dir == "internal/app/" && guardFileRe.MatchString(base)) || strings.HasPrefix(path, "web/e2e/") {
 		return out
 	}
 	var sources []string
@@ -87,7 +87,7 @@ func testLayoutViolations(path string, exists func(string) bool) []string {
 			return out
 		}
 	}
-	out = append(out, path+": no matching source file ("+strings.Join(sources, " or ")+" in the same directory). Move these tests into the _test file of the code they test; put shared helpers in testhelpers_test.go; only add to testLayoutAllowed in guards_repo_test.go for helpers, integration or migration tests (repo-wide guards go in guards_<concern>_test.go)")
+	out = append(out, path+": no matching source file ("+strings.Join(sources, " or ")+" in the same directory). Move these tests into the _test file of the code they test; put shared helpers in internal/app/testhelpers_test.go; only add to testLayoutAllowed in internal/app/guards_repo_test.go for helpers, integration or migration tests (repo-wide guards go in guards_<concern>_test.go)")
 	return out
 }
 
@@ -122,13 +122,13 @@ func TestTestFilesSitNextToTheirSource(t *testing.T) {
 // The layout check catches the files this rule replaced.
 func TestTestLayoutGuardCatchesMilestoneFiles(t *testing.T) {
 	none := func(string) bool { return false }
-	for _, p := range []string{"m11b_test.go", "m03b_limit_test.go", "web/e2e/m12.spec.ts", "milestone_test.go", "tz_guard_test.go", "web/src/Orphan.test.tsx", "web/scripts/orphan.test.mjs"} {
+	for _, p := range []string{"internal/app/m11b_test.go", "internal/app/m03b_limit_test.go", "web/e2e/m12.spec.ts", "internal/app/milestone_test.go", "internal/app/tz_guard_test.go", "web/src/Orphan.test.tsx", "web/scripts/orphan.test.mjs"} {
 		if len(testLayoutViolations(p, none)) == 0 {
 			t.Errorf("%s passed the layout check", p)
 		}
 	}
-	if v := testLayoutViolations("api_events_test.go", func(p string) bool { return p == "api_events.go" }); len(v) != 0 {
-		t.Errorf("api_events_test.go flagged: %v", v)
+	if v := testLayoutViolations("internal/app/api_events_test.go", func(p string) bool { return p == "internal/app/api_events.go" }); len(v) != 0 {
+		t.Errorf("internal/app/api_events_test.go flagged: %v", v)
 	}
 	if v := testLayoutViolations("web/scripts/bundle-size.test.mjs", func(p string) bool { return p == "web/scripts/bundle-size.mjs" }); len(v) != 0 {
 		t.Errorf("bundle-size.test.mjs flagged: %v", v)
@@ -156,7 +156,7 @@ func servingPath(p string) bool {
 	if !strings.Contains(p, "/") {
 		return strings.HasPrefix(p, "Dockerfile") || p == "Caddyfile" || isComposeFile(p)
 	}
-	for _, dir := range []string{"deploy/", "templates/", "migrations/", "web/src/", "web/public/"} {
+	for _, dir := range []string{"deploy/", "internal/app/templates/", "migrations/", "web/src/", "web/public/"} {
 		if strings.HasPrefix(p, dir) {
 			return true
 		}
@@ -173,7 +173,7 @@ func isComposeFile(p string) bool {
 
 // pythonViolations checks one file. A .py file anywhere in the serving stack fails; the
 // interpreter named in the text of a Dockerfile, a compose file or deploy/ fails too.
-// templates/, migrations/ and the frontend are checked for .py files only: their text is
+// The page templates, migrations/ and the frontend are checked for .py files only: their text is
 // prose and SQL.
 func pythonViolations(p, src string) []string {
 	if !servingPath(p) {
@@ -288,7 +288,7 @@ func TestPythonGuardScopesToServingStack(t *testing.T) {
 		{"deploy script runs python", "deploy/digitalocean/a.sh", "python3 -c 'print(1)'\n", 1},
 		{"compose command", "docker-compose.yml", "    command: python3 app.py\n", 1},
 		{"web source python file", "web/src/x.py", "", 1},
-		{"templates python file", "templates/x.py", "", 1},
+		{"templates python file", "internal/app/templates/x.py", "", 1},
 		{"tooling python file", "scripts/tool.py", "print(1)\n", 0},
 		{"web tooling python file", "web/scripts/tool.py", "", 0},
 		{"verify skill old lines", ".cursor/skills/verify-fold/verify-fold", oldVerify, 0},
@@ -307,21 +307,21 @@ func TestPythonGuardScopesToServingStack(t *testing.T) {
 			t.Errorf("%s is not in the serving stack", p)
 		}
 	}
-	for _, p := range []string{"compose.md", "compose.go", "composer.json", "web/compose.yaml"} {
+	for _, p := range []string{"compose.md", "internal/app/compose.go", "composer.json", "web/compose.yaml"} {
 		if servingPath(p) {
 			t.Errorf("%s is in the serving stack", p)
 		}
 	}
 
-	abs := guardkit.Sources{"api.go": "package main\n\nimport \"os/exec\"\n\nfunc f() { _ = exec.Command(\"/usr/bin/python3\", \"x.py\") }\nvar shebang = \"#!/usr/bin/python3\\n\"\n"}
+	abs := guardkit.Sources{"internal/app/api.go": "package app\n\nimport \"os/exec\"\n\nfunc f() { _ = exec.Command(\"/usr/bin/python3\", \"x.py\") }\nvar shebang = \"#!/usr/bin/python3\\n\"\n"}
 	if got := goPythonViolations(abs); len(got) != 2 {
 		t.Errorf("Go absolute interpreter and shebang: want 2 violations, got %v", got)
 	}
-	exec := guardkit.Sources{"api.go": "package main\n\nimport \"os/exec\"\n\nfunc f() { _ = exec.Command(\"python3\", \"x.py\") }\n"}
+	exec := guardkit.Sources{"internal/app/api.go": "package app\n\nimport \"os/exec\"\n\nfunc f() { _ = exec.Command(\"python3\", \"x.py\") }\n"}
 	if got := goPythonViolations(exec); len(got) != 1 {
 		t.Errorf("Go exec of python3: want 1 violation, got %v", got)
 	}
-	prose := guardkit.Sources{"api.go": "package main\n\nvar msg = \"No Python here\"\nvar other = \"pythonic\"\n"}
+	prose := guardkit.Sources{"internal/app/api.go": "package app\n\nvar msg = \"No Python here\"\nvar other = \"pythonic\"\n"}
 	if got := goPythonViolations(prose); len(got) != 0 {
 		t.Errorf("Go prose flagged: %v", got)
 	}

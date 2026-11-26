@@ -1,4 +1,4 @@
-package main
+package app
 
 // Database-backed tests for the batched live-page scanner
 // (account_erasure_reasons_scan.go). The scanner's own rules (signed ids, the

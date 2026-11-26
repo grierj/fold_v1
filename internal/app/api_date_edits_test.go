@@ -1,4 +1,4 @@
-package main
+package app
 
 import (
 	"bytes"
@@ -2209,7 +2209,7 @@ func singleDateScopeProblems(sources map[string]string) []string {
 		guardkit.InspectStack(pf.AST, func(n ast.Node, stack []ast.Node) bool {
 			inHome := false
 			for _, s := range stack {
-				if fd, ok := s.(*ast.FuncDecl); ok && pf.Path == "api_date_edits.go" && fd.Recv != nil && fd.Name.Name == "singleDateMutation" {
+				if fd, ok := s.(*ast.FuncDecl); ok && pf.Path == "internal/app/api_date_edits.go" && fd.Recv != nil && fd.Name.Name == "singleDateMutation" {
 					inHome = true
 				}
 			}
@@ -2241,18 +2241,18 @@ func TestSingleDateScopeIsSetOnlyBySingleDateMutation(t *testing.T) {
 	for _, p := range singleDateScopeProblems(guardkit.Production(t)) {
 		t.Error(p)
 	}
-	home := "package main\nfunc (a *App) singleDateMutation() { _ = contactChange{EventID: 1, SingleDate: nil} }\n"
+	home := "package app\nfunc (a *App) singleDateMutation() { _ = contactChange{EventID: 1, SingleDate: nil} }\n"
 	for name, extra := range map[string]string{
-		"a literal elsewhere":     "package main\nfunc (a *App) cancelDate() { _ = contactChange{EventID: 1, SingleDate: &singleDate{}} }\n",
-		"an assignment elsewhere": "package main\nfunc (a *App) cancelDate() { c := contactChange{EventID: 1}; c.SingleDate = &singleDate{} }\n",
-		"a literal in a slice":    "package main\nvar changes = []contactChange{{SingleDate: &singleDate{}}}\n",
-		"a pointer literal":       "package main\nfunc f() { _ = &contactChange{SingleDate: &singleDate{}} }\n",
+		"a literal elsewhere":     "package app\nfunc (a *App) cancelDate() { _ = contactChange{EventID: 1, SingleDate: &singleDate{}} }\n",
+		"an assignment elsewhere": "package app\nfunc (a *App) cancelDate() { c := contactChange{EventID: 1}; c.SingleDate = &singleDate{} }\n",
+		"a literal in a slice":    "package app\nvar changes = []contactChange{{SingleDate: &singleDate{}}}\n",
+		"a pointer literal":       "package app\nfunc f() { _ = &contactChange{SingleDate: &singleDate{}} }\n",
 	} {
-		if len(singleDateScopeProblems(map[string]string{"api_date_edits.go": home, "other.go": extra})) == 0 {
+		if len(singleDateScopeProblems(map[string]string{"internal/app/api_date_edits.go": home, "internal/app/other.go": extra})) == 0 {
 			t.Errorf("the guard missed %s", name)
 		}
 	}
-	if bad := singleDateScopeProblems(map[string]string{"api_date_edits.go": home}); len(bad) != 0 {
+	if bad := singleDateScopeProblems(map[string]string{"internal/app/api_date_edits.go": home}); len(bad) != 0 {
 		t.Errorf("the guard refused its own home: %v", bad)
 	}
 }

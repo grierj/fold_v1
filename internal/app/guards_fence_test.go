@@ -1,4 +1,4 @@
-package main
+package app
 
 import (
 	"fmt"
@@ -29,7 +29,7 @@ import (
 
 // fenceWrapper is where the ticket protocol lives.
 const (
-	fenceWrapperFile = "restore_fence.go"
+	fenceWrapperFile = "internal/app/restore_fence.go"
 	fenceWrapper     = "fencedContactMutation"
 )
 
@@ -39,9 +39,9 @@ var fenceTicketFuncs = map[string]bool{"takeRestoreTicket": true, "acknowledgeRe
 // fenceNamed lists the fenced routes: each runs its transaction through the
 // wrapper and never calls a contact mutation directly.
 var fenceNamed = []struct{ file, fn string }{
-	{"api_admin.go", "apiAdminDeleteUser"},
-	{"admin_operation_attempts.go", "apiAdminSettleOperationAttempt"},
-	{"api_admin_reasons_legacy.go", "apiAdminLegacyReasonSave"},
+	{"internal/app/api_admin.go", "apiAdminDeleteUser"},
+	{"internal/app/admin_operation_attempts.go", "apiAdminSettleOperationAttempt"},
+	{"internal/app/api_admin_reasons_legacy.go", "apiAdminLegacyReasonSave"},
 }
 
 func fenceIsSel(e ast.Expr, name string) (*ast.SelectorExpr, bool) {
@@ -453,7 +453,7 @@ func fenceCallProblem(stack []ast.Node, fn *ast.Ident) string {
 }
 
 // fenceWrapperBase is the clean wrapper fixture.
-const fenceWrapperBase = `package main
+const fenceWrapperBase = `package app
 
 func (a *App) fencedContactMutation(ctx context.Context, change contactChange, fn func(tx *gorm.DB) (*contactSeal, error)) error {
 	var tk restoreTicket
@@ -480,7 +480,7 @@ func (a *App) abandonRestoreTicket(tk *restoreTicket) {}
 `
 
 // fenceRoutesBase holds the three fenced routes.
-const fenceRoutesBase = `package main
+const fenceRoutesBase = `package app
 
 func (a *App) apiAdminDeleteUser(c *gin.Context) {
 	var err error
@@ -523,10 +523,10 @@ func fenceSources(wrapper, routes string) map[string]string {
 		return out
 	}
 	return map[string]string{
-		fenceWrapperFile:              wrapper,
-		"api_admin.go":                only("apiAdminDeleteUser"),
-		"admin_operation_attempts.go": only("apiAdminSettleOperationAttempt"),
-		"api_admin_reasons_legacy.go": only("apiAdminLegacyReasonSave"),
+		fenceWrapperFile:                           wrapper,
+		"internal/app/api_admin.go":                only("apiAdminDeleteUser"),
+		"internal/app/admin_operation_attempts.go": only("apiAdminSettleOperationAttempt"),
+		"internal/app/api_admin_reasons_legacy.go": only("apiAdminLegacyReasonSave"),
 	}
 }
 
@@ -621,8 +621,8 @@ var (
 
 // floorAllowed is each file allowed to match, and what it must hold.
 var floorAllowed = map[string]*regexp.Regexp{
-	"migrations/testhelpers_test.go": floorDropRe,
-	"restore_fence_test.go":          floorDisableRe,
+	"migrations/testhelpers_test.go":     floorDropRe,
+	"internal/app/restore_fence_test.go": floorDisableRe,
 }
 
 // floorDropProblems is the guard's pure check over (path, text) pairs.
@@ -702,9 +702,9 @@ func TestRecoveryFloorIsDroppedOnlyByTheTestCleanup(t *testing.T) {
 	for name, planted := range map[string][2]string{
 		"a migration dropping the hold":     {"migrations/00016_x.sql", "DROP " + "VIEW recovery_floor_hold;"},
 		"a script dropping a trigger":       {"deploy/digitalocean/x.sh", "psql -c 'drop " + "trigger if exists settings_recovery_floor on settings'"},
-		"Go dropping a function":            {"cleanup.go", `db.Exec("DROP ` + `FUNCTION audit_logs_visibility_consent()")`},
+		"Go dropping a function":            {"internal/app/cleanup.go", `db.Exec("DROP ` + `FUNCTION audit_logs_visibility_consent()")`},
 		"a workflow disabling all triggers": {".github/workflows/x.yml", "ALTER TABLE audit_logs DISABLE " + "TRIGGER ALL"},
-		"a test disabling the audit fence":  {"x_test.go", "DISABLE " + "TRIGGER audit_logs_visibility_consent"},
+		"a test disabling the audit fence":  {"internal/app/x_test.go", "DISABLE " + "TRIGGER audit_logs_visibility_consent"},
 	} {
 		mutated := map[string]string{planted[0]: planted[1]}
 		for p, v := range base {

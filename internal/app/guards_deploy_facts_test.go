@@ -1,4 +1,4 @@
-package main
+package app
 
 // The QC-1 harness (deploy/digitalocean/qc1-measure.sh) measures the real
 // application, and what it needs to know about it is written down once, in
@@ -146,7 +146,7 @@ func TestQC1AppFacts(t *testing.T) {
 	if !reflect.DeepEqual(file.Go, got) {
 		want, _ := json.MarshalIndent(got, "", "  ")
 		have, _ := json.MarshalIndent(file.Go, "", "  ")
-		t.Fatalf("%s \"go\" no longer matches the code. The QC-1 harness measures against these values: if the change is intended, run\n\n\tUPDATE_QC1_FACTS=1 go test -run TestQC1AppFacts .\n\nand review the diff.\ncode:\n%s\nfile:\n%s", qc1FactsFile, want, have)
+		t.Fatalf("%s \"go\" no longer matches the code. The QC-1 harness measures against these values: if the change is intended, run\n\n\tUPDATE_QC1_FACTS=1 go test -run TestQC1AppFacts ./internal/app\n\nand review the diff.\ncode:\n%s\nfile:\n%s", qc1FactsFile, want, have)
 	}
 }
 

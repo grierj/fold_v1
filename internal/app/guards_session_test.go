@@ -1,10 +1,9 @@
-package main
+package app
 
 import (
 	"fmt"
 	"go/ast"
 	"go/token"
-	"strings"
 	"testing"
 
 	"fold/internal/guardkit"
@@ -16,24 +15,24 @@ import (
 // session_version or logout_version by hand.
 //
 // Parse-only: it flags ==/!= with a .SessionVersion or .LogoutVersion operand in
-// the root package outside sessionEpochExempt, matching by field name; it does
+// package app outside sessionEpochExempt, matching by field name; it does
 // not see comparisons in other packages, through helpers, or in SQL.
 // ---------------------------------------------------------------------------
 
 // sessionEpochExempt are the files that may compare an epoch themselves, each
 // for a reason that is not a session recheck.
 var sessionEpochExempt = map[string]string{
-	"session_state.go":      "the one predicate",
-	"api_guardian_email.go": "a signed emailed link binds the guardian's credential epoch at issue; there is no session",
+	"internal/app/session_state.go":      "the one predicate",
+	"internal/app/api_guardian_email.go": "a signed emailed link binds the guardian's credential epoch at issue; there is no session",
 }
 
 // sessionEpochProblems reports every ==/!= with a .SessionVersion or
-// .LogoutVersion operand in the root package outside the exempt files.
+// .LogoutVersion operand in package app outside the exempt files.
 func sessionEpochProblems(sources guardkit.Sources) []string {
 	parsed := sources.Parse(0)
 	bad := append([]string{}, parsed.Problems...)
-	for _, f := range parsed.Package("main") {
-		if strings.Contains(f.Path, "/") || sessionEpochExempt[f.Path] != "" {
+	for _, f := range parsed.Package("app") {
+		if f.Dir() != "internal/app" || sessionEpochExempt[f.Path] != "" {
 			continue
 		}
 		ast.Inspect(f.AST, func(n ast.Node) bool {
@@ -58,14 +57,14 @@ func TestSessionEpochsAreComparedOnlyBySessionCurrent(t *testing.T) {
 		t.Error(p)
 	}
 	for name, src := range map[string]string{
-		"session version": "package main\nfunc f(a, b *U) bool { return a.SessionVersion != b.SessionVersion }\ntype U struct{ SessionVersion int }",
-		"logout version":  "package main\nfunc f(a, b *U) bool { return (a.LogoutVersion) == b.LogoutVersion }\ntype U struct{ LogoutVersion int }",
+		"session version": "package app\nfunc f(a, b *U) bool { return a.SessionVersion != b.SessionVersion }\ntype U struct{ SessionVersion int }",
+		"logout version":  "package app\nfunc f(a, b *U) bool { return (a.LogoutVersion) == b.LogoutVersion }\ntype U struct{ LogoutVersion int }",
 	} {
-		if len(sessionEpochProblems(guardkit.Sources{"x.go": src})) == 0 {
+		if len(sessionEpochProblems(guardkit.Sources{"internal/app/x.go": src})) == 0 {
 			t.Errorf("%s: the guard accepted a hand-written epoch comparison", name)
 		}
 	}
-	if p := sessionEpochProblems(guardkit.Sources{"x.go": "package main\nfunc f(a, b *U) bool { return a.ID == b.ID }\ntype U struct{ ID int }"}); len(p) != 0 {
+	if p := sessionEpochProblems(guardkit.Sources{"internal/app/x.go": "package app\nfunc f(a, b *U) bool { return a.ID == b.ID }\ntype U struct{ ID int }"}); len(p) != 0 {
 		t.Errorf("the guard flagged an unrelated comparison: %v", p)
 	}
 }
@@ -76,7 +75,7 @@ func TestSessionEpochsAreComparedOnlyBySessionCurrent(t *testing.T) {
 // token, and the login setters run only inside a replaceCredential change, so
 // every credential replacement mints a fresh T and its marker.
 //
-// Parse-only, root package: it flags a .Save call with two or more arguments
+// Parse-only, package app: it flags a .Save call with two or more arguments
 // (gorm's Save takes one), any SetCookie or NewCookie call, an assignment to
 // or delete of a session's credential key or its whole Values, and a call of
 // setSessionLogin, clearSessionLogin or setSessionVersion outside a function
@@ -91,12 +90,12 @@ var loginSetters = map[string]bool{"setSessionLogin": true, "clearSessionLogin":
 func credentialWriterProblems(sources guardkit.Sources) []string {
 	parsed := sources.Parse(0)
 	bad := append([]string{}, parsed.Problems...)
-	for _, f := range parsed.Package("main") {
-		if strings.Contains(f.Path, "/") || f.Path == "session_state.go" {
+	for _, f := range parsed.Package("app") {
+		if f.Dir() != "internal/app" || f.Path == "internal/app/session_state.go" {
 			continue
 		}
 		at := func(n ast.Node, what string) {
-			bad = append(bad, fmt.Sprintf("%s:%d: %s; go through replaceCredential or writeSession (session_state.go)", f.Path, parsed.Fset.Position(n.Pos()).Line, what))
+			bad = append(bad, fmt.Sprintf("%s:%d: %s; go through replaceCredential or writeSession (internal/app/session_state.go)", f.Path, parsed.Fset.Position(n.Pos()).Line, what))
 		}
 		credentialKey := func(e ast.Expr) bool {
 			idx, ok := guardkit.Unparen(e).(*ast.IndexExpr)
@@ -169,8 +168,8 @@ func TestBrowserCredentialHasOneWriter(t *testing.T) {
 		"bare login":     "setSessionLogin(s, u)",
 		"other callback": "a.other(c, func(s *S) bool { setSessionVersion(s, 2); return true })",
 	} {
-		src := "package main\nfunc f() { " + body + " }"
-		if len(credentialWriterProblems(guardkit.Sources{"x.go": src})) == 0 {
+		src := "package app\nfunc f() { " + body + " }"
+		if len(credentialWriterProblems(guardkit.Sources{"internal/app/x.go": src})) == 0 {
 			t.Errorf("%s: the guard accepted %q", name, body)
 		}
 	}
@@ -179,7 +178,7 @@ func TestBrowserCredentialHasOneWriter(t *testing.T) {
 		"tx.Save(&row)",
 		"s.Values[setupSessionKey] = h",
 	} {
-		if p := credentialWriterProblems(guardkit.Sources{"x.go": "package main\nfunc f() { " + body + " }"}); len(p) != 0 {
+		if p := credentialWriterProblems(guardkit.Sources{"internal/app/x.go": "package app\nfunc f() { " + body + " }"}); len(p) != 0 {
 			t.Errorf("the guard flagged %q: %v", body, p)
 		}
 	}

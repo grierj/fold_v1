@@ -1,4 +1,4 @@
-package main
+package app
 
 import (
 	"fmt"
@@ -247,7 +247,7 @@ func ctgEnclosing(parents []ast.Node) (*ast.FuncDecl, bool) {
 // api_contact.go that build a new request. Reason may be set only in the
 // composite literal there; the ages note only in apiCreateAddRequest.
 func ctgCreationSite(path string, decl *ast.FuncDecl, field string, literal bool) bool {
-	if path != "api_contact.go" || decl == nil {
+	if path != "internal/app/api_contact.go" || decl == nil {
 		return false
 	}
 	switch field {
@@ -1200,17 +1200,17 @@ func (run *ctgRun) text(f *ctgFile, n ast.Node, raw string, parents []ast.Node) 
 	only := len(writes) == 1 && writes[0].kind == "UPDATE" && ctgSetPart(writes[0].list) == "add_childcare_ages_note = ''"
 	onlyReason := len(writes) == 1 && writes[0].kind == "UPDATE" && ctgSetPart(writes[0].list) == "reason = ''"
 	decl, inLit := ctgEnclosing(parents)
-	site := f.path == "account_erasure.go" && decl != nil && decl.Recv == nil && decl.Name.Name == "eraseContactRequestTextIn" && !inLit && !run.agesLiteral
+	site := f.path == "internal/app/account_erasure.go" && decl != nil && decl.Recv == nil && decl.Name.Name == "eraseContactRequestTextIn" && !inLit && !run.agesLiteral
 	if only && site {
 		run.agesLiteral = true
 		return
 	}
-	reasonSite := f.path == "account_erasure_reasons.go" && decl != nil && decl.Recv == nil && decl.Name.Name == "eraseContactRequestReasonsIn" && !inLit && !run.reasonLiteral
+	reasonSite := f.path == "internal/app/account_erasure_reasons.go" && decl != nil && decl.Recv == nil && decl.Name.Name == "eraseContactRequestReasonsIn" && !inLit && !run.reasonLiteral
 	if onlyReason && reasonSite {
 		run.reasonLiteral = true
 		return
 	}
-	run.add(f, "R-5", n, parents, "raw SQL writes reason or add_childcare_ages_note on contact_requests (%s); the only allowances are the single UPDATE literal in eraseContactRequestTextIn (account_erasure.go) whose SET list is add_childcare_ages_note = '' and the single one in eraseContactRequestReasonsIn (account_erasure_reasons.go) whose SET list is reason = ''", writes[0].kind)
+	run.add(f, "R-5", n, parents, "raw SQL writes reason or add_childcare_ages_note on contact_requests (%s); the only allowances are the single UPDATE literal in eraseContactRequestTextIn (internal/app/account_erasure.go) whose SET list is add_childcare_ages_note = '' and the single one in eraseContactRequestReasonsIn (internal/app/account_erasure_reasons.go) whose SET list is reason = ''", writes[0].kind)
 }
 
 // ident is R-6. The ages-note scrub, eraseContactRequestTextIn, is called
@@ -1280,7 +1280,7 @@ func (run *ctgRun) ident(f *ctgFile, id *ast.Ident, parents []ast.Node) {
 // ctgPipelineName and ctgPipelineFile name the one erasure pipeline.
 const (
 	ctgPipelineName = "eraseAccountIn"
-	ctgPipelineFile = "account_erasure.go"
+	ctgPipelineFile = "internal/app/account_erasure.go"
 )
 
 // ctgStatementOf finds the statement that holds the call at parents[ci]: an
@@ -1317,7 +1317,7 @@ func ctgStatementOf(parents []ast.Node, ci, stop int) (int, string) {
 // ctgLegacyReasonFile and ctgLegacyReasonFunc name the reason helper's second
 // call site: the deleted-accounts save.
 const (
-	ctgLegacyReasonFile = "api_admin_reasons_legacy.go"
+	ctgLegacyReasonFile = "internal/app/api_admin_reasons_legacy.go"
 	ctgLegacyReasonFunc = "apiAdminLegacyReasonSave"
 )
 
@@ -1574,10 +1574,10 @@ func ctgPipelineCallProblem(f *ctgFile, parents []ast.Node, call *ast.CallExpr, 
 			decl = n
 		}
 	}
-	admin := decl != nil && decl.Name.Name == "apiAdminDeleteUser" && path == "api_admin.go"
-	tombstone := decl != nil && decl.Name.Name == "eraseTombstoneOnce" && path == "account_erasure_tombstones.go"
+	admin := decl != nil && decl.Name.Name == "apiAdminDeleteUser" && path == "internal/app/api_admin.go"
+	tombstone := decl != nil && decl.Name.Name == "eraseTombstoneOnce" && path == "internal/app/account_erasure_tombstones.go"
 	if !admin && !tombstone {
-		return "called from a function other than apiAdminDeleteUser in api_admin.go or eraseTombstoneOnce in account_erasure_tombstones.go"
+		return "called from a function other than apiAdminDeleteUser in internal/app/api_admin.go or eraseTombstoneOnce in internal/app/account_erasure_tombstones.go"
 	}
 	if admin && osel.Sel.Name != "fencedContactMutation" {
 		return "the admin deletion's callback must be the last argument of a.fencedContactMutation"
@@ -1737,13 +1737,13 @@ func ctgViolations(sources map[string]string) []string {
 		run.file(f)
 	}
 	if run.eraseCalls != 1 || run.eraseSites[ctgPipelineFile] != 1 {
-		run.bad = append(run.bad, fmt.Sprintf("production tree: package level: R-6: eraseContactRequestTextIn is called %d times, want exactly one call, in eraseAccountIn (account_erasure.go), after the soft delete", run.eraseCalls))
+		run.bad = append(run.bad, fmt.Sprintf("production tree: package level: R-6: eraseContactRequestTextIn is called %d times, want exactly one call, in eraseAccountIn (internal/app/account_erasure.go), after the soft delete", run.eraseCalls))
 	}
 	if run.reasonCalls != 2 || run.reasonSites[ctgPipelineFile] != 1 || run.reasonSites[ctgLegacyReasonFile] != 1 {
-		run.bad = append(run.bad, fmt.Sprintf("production tree: package level: R-6: eraseContactRequestReasonsIn is called %d times, want exactly two calls: one in eraseAccountIn (account_erasure.go), directly after eraseContactRequestTextIn, and one in the fenced callback of apiAdminLegacyReasonSave (api_admin_reasons_legacy.go)", run.reasonCalls))
+		run.bad = append(run.bad, fmt.Sprintf("production tree: package level: R-6: eraseContactRequestReasonsIn is called %d times, want exactly two calls: one in eraseAccountIn (internal/app/account_erasure.go), directly after eraseContactRequestTextIn, and one in the fenced callback of apiAdminLegacyReasonSave (internal/app/api_admin_reasons_legacy.go)", run.reasonCalls))
 	}
-	if run.pipelineCalls != 2 || run.pipelineSites["api_admin.go"] != 1 || run.pipelineSites["account_erasure_tombstones.go"] != 1 {
-		run.bad = append(run.bad, fmt.Sprintf("production tree: package level: R-6: eraseAccountIn is called %d times, want exactly two calls, one in apiAdminDeleteUser (api_admin.go) in its a.fencedContactMutation callback and one in eraseTombstoneOnce (account_erasure_tombstones.go) in its a.contactMutationCtx callback", run.pipelineCalls))
+	if run.pipelineCalls != 2 || run.pipelineSites["internal/app/api_admin.go"] != 1 || run.pipelineSites["internal/app/account_erasure_tombstones.go"] != 1 {
+		run.bad = append(run.bad, fmt.Sprintf("production tree: package level: R-6: eraseAccountIn is called %d times, want exactly two calls, one in apiAdminDeleteUser (internal/app/api_admin.go) in its a.fencedContactMutation callback and one in eraseTombstoneOnce (internal/app/account_erasure_tombstones.go) in its a.contactMutationCtx callback", run.pipelineCalls))
 	}
 	sort.Strings(run.bad)
 	return run.bad
@@ -1782,7 +1782,7 @@ const ctgReasonLoop = "res := tx.Exec(" + ctgReasonUpdate + ", batch, s.ID, s.ID
 const ctgReasonCall = "if err := eraseContactRequestReasonsIn(tx, s, plan); err != nil {\n\t\t\treturn err\n\t\t}"
 
 func ctgReasonsFile(loop string) string {
-	return `package main
+	return `package app
 
 import "gorm.io/gorm"
 
@@ -1804,7 +1804,7 @@ func ctgErasureFile(loop string) string {
 // ctgErasureFileWith is the erasure file with the ages-note helper (its batch
 // loop) and the given eraseAccountIn source.
 func ctgErasureFileWith(loop, pipeline string) string {
-	return `package main
+	return `package app
 
 import (
 	"fold/internal/guardkit"
@@ -1873,7 +1873,7 @@ func ctgAdminFileShape(head, tail, before, after string) string {
 
 // ctgAdminFileCall builds the admin fixture around the callback body.
 func ctgAdminFileCall(head, tail, body string) string {
-	return `package main
+	return `package app
 
 import (
 	"fold/internal/guardkit"
@@ -1910,7 +1910,7 @@ const ctgTombstoneLock = `found, err := lockTombstoneIn(tx, id)
 const ctgTombstonePipelineCall = "counts, err := a.eraseAccountIn(tx, erasureSubject{ID: id}, erasureOptions{})\n\t\tif err != nil {\n\t\t\treturn err\n\t\t}\n\t\t_ = counts"
 
 func ctgTombstoneFile(before, after string) string {
-	return `package main
+	return `package app
 
 import "gorm.io/gorm"
 
@@ -1947,7 +1947,7 @@ func resetStatements(db *gorm.DB) (string, string, error) {
 ` + extra
 }
 
-const ctgContactFile = `package main
+const ctgContactFile = `package app
 
 import (
 	"fold/internal/guardkit"
@@ -2012,7 +2012,7 @@ func finishRequests(tx *gorm.DB, r *models.ContactRequest, rs []models.ContactRe
 // receipt and the reason helper's call, and with the last statement returning
 // the seal.
 func ctgLegacyFileWith(call, last string) string {
-	return `package main
+	return `package app
 
 import "gorm.io/gorm"
 
@@ -2034,7 +2034,7 @@ const (
 	ctgLegacyLast = "return a.legacySaveSeal(me, rule.allows), nil"
 )
 
-const ctgTimeoutFile = `package main
+const ctgTimeoutFile = `package app
 
 import "gorm.io/gorm"
 
@@ -2050,7 +2050,7 @@ func withStatementTimeout(tx *gorm.DB) error {
 }
 `
 
-const ctgLifecycleFile = `package main
+const ctgLifecycleFile = `package app
 
 import "gorm.io/gorm"
 
@@ -2071,24 +2071,24 @@ func All() []any { return []any{&ContactRequest{}} }
 
 func ctgClean() map[string]string {
 	return map[string]string{
-		"account_erasure.go":            ctgErasureFile(ctgErasureLoop),
-		"account_erasure_reasons.go":    ctgReasonsFile(ctgReasonLoop),
-		"account_erasure_tombstones.go": ctgTombstoneFile("", ctgTombstonePipelineCall),
-		"api_admin.go":                  ctgAdminFile("", ""),
-		ctgLegacyReasonFile:             ctgLegacyFileWith(ctgLegacyCall, ctgLegacyLast),
-		"api_contact.go":                ctgContactFile,
-		"contact_lifecycle.go":          ctgLifecycleFile,
-		"internal/testdb/testdb.go":     ctgTestdbFile(""),
-		"statement_timeout.go":          ctgTimeoutFile,
-		"models/models.go":              ctgModelsFile,
-		"other.go":                      "package main\n\nfunc other() {}\n",
+		"internal/app/account_erasure.go":            ctgErasureFile(ctgErasureLoop),
+		"internal/app/account_erasure_reasons.go":    ctgReasonsFile(ctgReasonLoop),
+		"internal/app/account_erasure_tombstones.go": ctgTombstoneFile("", ctgTombstonePipelineCall),
+		"internal/app/api_admin.go":                  ctgAdminFile("", ""),
+		ctgLegacyReasonFile:                          ctgLegacyFileWith(ctgLegacyCall, ctgLegacyLast),
+		"internal/app/api_contact.go":                ctgContactFile,
+		"internal/app/contact_lifecycle.go":          ctgLifecycleFile,
+		"internal/testdb/testdb.go":                  ctgTestdbFile(""),
+		"internal/app/statement_timeout.go":          ctgTimeoutFile,
+		"models/models.go":                           ctgModelsFile,
+		"internal/app/other.go":                      "package app\n\nfunc other() {}\n",
 	}
 }
 
 // ctgBodyFile wraps statements in a function that has a loaded request r, a
 // pointer p, a slice rs, a map m and a conflict clause oc in scope.
 func ctgBodyFile(body string) string {
-	return "package main\n\nimport (\n\t\"fold/models\"\n\n\t\"gorm.io/gorm\"\n\t\"gorm.io/gorm/clause\"\n)\n\n" +
+	return "package app\n\nimport (\n\t\"fold/models\"\n\n\t\"gorm.io/gorm\"\n\t\"gorm.io/gorm/clause\"\n)\n\n" +
 		"func other(tx *gorm.DB, p *models.ContactRequest, rs []models.ContactRequest, m map[string]any, oc clause.OnConflict) {\n" +
 		"\tvar r models.ContactRequest\n\t" + body + "\n}\n"
 }
@@ -2103,7 +2103,7 @@ type ctgCase struct {
 func ctgBodies(rule string, bodies ...string) []ctgCase {
 	cases := make([]ctgCase, 0, len(bodies))
 	for _, b := range bodies {
-		cases = append(cases, ctgCase{name: b, rule: rule, files: map[string]string{"other.go": ctgBodyFile(b)}})
+		cases = append(cases, ctgCase{name: b, rule: rule, files: map[string]string{"internal/app/other.go": ctgBodyFile(b)}})
 	}
 	return cases
 }
@@ -2137,7 +2137,7 @@ func ctgRunCase(t *testing.T, tc ctgCase, covered map[string]bool) {
 	}
 	want := tc.want
 	if want == "" {
-		want = "other.go"
+		want = "internal/app/other.go"
 	}
 	for _, v := range bad {
 		if strings.HasPrefix(v, want) && strings.Contains(v, ": "+tc.rule+": ") {
@@ -2157,7 +2157,7 @@ func TestContactRequestTextGuardCatchesBypasses(t *testing.T) {
 	}
 	contactWith := func(old, replacement string) string {
 		if !strings.Contains(ctgContactFile, old) {
-			t.Fatalf("fixture anchor %q is missing from the clean api_contact.go", old)
+			t.Fatalf("fixture anchor %q is missing from the clean internal/app/api_contact.go", old)
 		}
 		return strings.Replace(ctgContactFile, old, replacement, 1)
 	}
@@ -2204,21 +2204,21 @@ func TestContactRequestTextGuardCatchesBypasses(t *testing.T) {
 		`func(r models.ContactRequest) { r.Reason = "" }(r)`,
 	)...)
 	cases = append(cases,
-		ctgSource("Reason assigned inside a creation function", "R-1", "api_contact.go", map[string]string{
-			"api_contact.go": contactWith("r.AddChildcareCount, r.AddChildcareAgesNote = old.ChildcareCount, old.ChildcareAgesNote",
+		ctgSource("Reason assigned inside a creation function", "R-1", "internal/app/api_contact.go", map[string]string{
+			"internal/app/api_contact.go": contactWith("r.AddChildcareCount, r.AddChildcareAgesNote = old.ChildcareCount, old.ChildcareAgesNote",
 				"r.AddChildcareCount, r.AddChildcareAgesNote = old.ChildcareCount, old.ChildcareAgesNote\n\t\tr.Reason = \"x\""),
 		}),
-		ctgSource("ages note assigned in the other creation function", "R-1", "api_contact.go", map[string]string{
-			"api_contact.go": contactWith("var count int64", "r.AddChildcareAgesNote = \"x\"\n\t\tvar count int64"),
+		ctgSource("ages note assigned in the other creation function", "R-1", "internal/app/api_contact.go", map[string]string{
+			"internal/app/api_contact.go": contactWith("var count int64", "r.AddChildcareAgesNote = \"x\"\n\t\tvar count int64"),
 		}),
 		ctgSource("a package models method body", "R-1", "models/other.go", map[string]string{
 			"models/other.go": "package models\n\nfunc f() {\n\tvar r ContactRequest\n\tr.Reason = \"\"\n}\n",
 		}),
 		ctgSource("aliased models import", "R-1", "", map[string]string{
-			"other.go": "package main\n\nimport (\n\tmm \"fold/models\"\n)\n\nfunc other() {\n\tvar r mm.ContactRequest\n\tr.Reason = \"\"\n}\n",
+			"internal/app/other.go": "package app\n\nimport (\n\tmm \"fold/models\"\n)\n\nfunc other() {\n\tvar r mm.ContactRequest\n\tr.Reason = \"\"\n}\n",
 		}),
 		ctgSource("dot-imported models", "R-1", "", map[string]string{
-			"other.go": "package main\n\nimport . \"fold/models\"\n\nfunc other() {\n\tvar r ContactRequest\n\tr.Reason = \"\"\n}\n",
+			"internal/app/other.go": "package app\n\nimport . \"fold/models\"\n\nfunc other() {\n\tvar r ContactRequest\n\tr.Reason = \"\"\n}\n",
 		}),
 	)
 
@@ -2236,14 +2236,14 @@ func TestContactRequestTextGuardCatchesBypasses(t *testing.T) {
 		`tx.Save(&models.ContactRequest{ID: 1})`,
 	)...)
 	cases = append(cases,
-		ctgSource("a creation function name in another file", "R-2", "api_other.go", map[string]string{
-			"api_other.go": "package main\n\nimport \"fold/models\"\n\nfunc apiCreateAddRequest() { _ = models.ContactRequest{Reason: \"x\"} }\n",
+		ctgSource("a creation function name in another file", "R-2", "internal/app/api_other.go", map[string]string{
+			"internal/app/api_other.go": "package app\n\nimport \"fold/models\"\n\nfunc apiCreateAddRequest() { _ = models.ContactRequest{Reason: \"x\"} }\n",
 		}),
-		ctgSource("a third function in api_contact.go", "R-2", "api_contact.go", map[string]string{
-			"api_contact.go": ctgContactFile + "\nfunc (a *App) apiCreateGroupAsk() { _ = models.ContactRequest{Reason: \"x\"} }\n",
+		ctgSource("a third function in internal/app/api_contact.go", "R-2", "internal/app/api_contact.go", map[string]string{
+			"internal/app/api_contact.go": ctgContactFile + "\nfunc (a *App) apiCreateGroupAsk() { _ = models.ContactRequest{Reason: \"x\"} }\n",
 		}),
-		ctgSource("ages note literal in the contact creator", "R-2", "api_contact.go", map[string]string{
-			"api_contact.go": contactWith(`Purpose: "contact",`, `Purpose: "contact", AddChildcareAgesNote: "x",`),
+		ctgSource("ages note literal in the contact creator", "R-2", "internal/app/api_contact.go", map[string]string{
+			"internal/app/api_contact.go": contactWith(`Purpose: "contact",`, `Purpose: "contact", AddChildcareAgesNote: "x",`),
 		}),
 	)
 
@@ -2279,10 +2279,10 @@ func TestContactRequestTextGuardCatchesBypasses(t *testing.T) {
 	)...)
 	cases = append(cases,
 		ctgSource("aliased models import", "R-3", "", map[string]string{
-			"other.go": "package main\n\nimport (\n\tmm \"fold/models\"\n)\n\nfunc other() {\n\tvar r mm.ContactRequest\n\ttx.Model(&r).Updates(map[string]any{\"reason\": \"\"})\n}\n",
+			"internal/app/other.go": "package app\n\nimport (\n\tmm \"fold/models\"\n)\n\nfunc other() {\n\tvar r mm.ContactRequest\n\ttx.Model(&r).Updates(map[string]any{\"reason\": \"\"})\n}\n",
 		}),
 		ctgSource("dot-imported models", "R-3", "", map[string]string{
-			"other.go": "package main\n\nimport . \"fold/models\"\n\nfunc other() {\n\tvar r ContactRequest\n\ttx.Model(&r).Update(\"reason\", \"\")\n}\n",
+			"internal/app/other.go": "package app\n\nimport . \"fold/models\"\n\nfunc other() {\n\tvar r ContactRequest\n\ttx.Model(&r).Update(\"reason\", \"\")\n}\n",
 		}),
 	)
 
@@ -2301,11 +2301,11 @@ func TestContactRequestTextGuardCatchesBypasses(t *testing.T) {
 		`q := tx.Clauses(clause.OnConflict{UpdateAll: true}); func() { q := tx.Model(&models.Setting{}); _ = q }(); q.Create(&r)`,
 	)...)
 	cases = append(cases,
-		ctgSource("UpdateAll inside both creation functions", "R-4a", "api_contact.go", map[string]string{
-			"api_contact.go": strings.ReplaceAll(ctgContactFile, "return tx.Create(&r).Error", "return tx.Clauses(clause.OnConflict{UpdateAll: true}).Create(&r).Error"),
+		ctgSource("UpdateAll inside both creation functions", "R-4a", "internal/app/api_contact.go", map[string]string{
+			"internal/app/api_contact.go": strings.ReplaceAll(ctgContactFile, "return tx.Create(&r).Error", "return tx.Clauses(clause.OnConflict{UpdateAll: true}).Create(&r).Error"),
 		}),
 		ctgSource("conflict clause through a cl alias", "R-4a", "", map[string]string{
-			"other.go": "package main\n\nimport (\n\t\"fold/models\"\n\tcl \"gorm.io/gorm/clause\"\n)\n\nfunc other(tx *gorm.DB) {\n\tvar r models.ContactRequest\n\ttx.Clauses(cl.OnConflict{UpdateAll: true}).Create(&r)\n}\n",
+			"internal/app/other.go": "package app\n\nimport (\n\t\"fold/models\"\n\tcl \"gorm.io/gorm/clause\"\n)\n\nfunc other(tx *gorm.DB) {\n\tvar r models.ContactRequest\n\ttx.Clauses(cl.OnConflict{UpdateAll: true}).Create(&r)\n}\n",
 		}),
 	)
 
@@ -2377,30 +2377,30 @@ func TestContactRequestTextGuardCatchesBypasses(t *testing.T) {
 		`const a = "UPDATE contact_requests "; const q = a + "SET "; func() { const a = "UPDATE settings "; _ = a }(); tx.Exec(q + "reason = ''")`,
 	)...)
 	cases = append(cases,
-		ctgSource("a package constant used by a function", "R-5", "other.go", map[string]string{
-			"other.go": "package main\n\nconst q = \"UPDATE contact_requests SET \"\n\nfunc other(tx *gorm.DB) {\n\ttx.Exec(q + \"reason = ''\")\n}\n",
+		ctgSource("a package constant used by a function", "R-5", "internal/app/other.go", map[string]string{
+			"internal/app/other.go": "package app\n\nconst q = \"UPDATE contact_requests SET \"\n\nfunc other(tx *gorm.DB) {\n\ttx.Exec(q + \"reason = ''\")\n}\n",
 		}),
-		ctgSource("a package constant declared after its use", "R-5", "other.go", map[string]string{
-			"other.go": "package main\n\nfunc other(tx *gorm.DB) {\n\ttx.Exec(q + \"reason = ''\")\n}\n\nconst q = \"UPDATE contact_requests SET \"\n",
+		ctgSource("a package constant declared after its use", "R-5", "internal/app/other.go", map[string]string{
+			"internal/app/other.go": "package app\n\nfunc other(tx *gorm.DB) {\n\ttx.Exec(q + \"reason = ''\")\n}\n\nconst q = \"UPDATE contact_requests SET \"\n",
 		}),
-		ctgSource("a second literal in eraseContactRequestTextIn that sets reason", "R-5", "account_erasure.go", map[string]string{
-			"account_erasure.go": ctgErasureFile(ctgErasureLoop + "\n\t\ttx.Exec(\"UPDATE contact_requests SET reason = '' WHERE id = 1\")"),
+		ctgSource("a second literal in eraseContactRequestTextIn that sets reason", "R-5", "internal/app/account_erasure.go", map[string]string{
+			"internal/app/account_erasure.go": ctgErasureFile(ctgErasureLoop + "\n\t\ttx.Exec(\"UPDATE contact_requests SET reason = '' WHERE id = 1\")"),
 		}),
-		ctgSource("the ages literal in a func literal", "R-5", "account_erasure.go", map[string]string{
-			"account_erasure.go": ctgErasureFile("func() { tx.Exec(" + ctgAgesUpdate + ", chunk, s.ID) }()"),
+		ctgSource("the ages literal in a func literal", "R-5", "internal/app/account_erasure.go", map[string]string{
+			"internal/app/account_erasure.go": ctgErasureFile("func() { tx.Exec(" + ctgAgesUpdate + ", chunk, s.ID) }()"),
 		}),
-		ctgSource("the ages literal twice", "R-5", "account_erasure.go", map[string]string{
-			"account_erasure.go": ctgErasureFile(ctgErasureLoop + "\n\t\ttx.Exec(" + ctgAgesUpdate + ", chunk, s.ID)"),
+		ctgSource("the ages literal twice", "R-5", "internal/app/account_erasure.go", map[string]string{
+			"internal/app/account_erasure.go": ctgErasureFile(ctgErasureLoop + "\n\t\ttx.Exec(" + ctgAgesUpdate + ", chunk, s.ID)"),
 		}),
-		ctgSource("the ages literal with reason in its SET list", "R-5", "account_erasure.go", map[string]string{
-			"account_erasure.go": ctgErasureFile("res := tx.Exec(\"UPDATE contact_requests SET add_childcare_ages_note = '', reason = '' WHERE id IN ?\", chunk)\n\t\ttotal += res.RowsAffected"),
+		ctgSource("the ages literal with reason in its SET list", "R-5", "internal/app/account_erasure.go", map[string]string{
+			"internal/app/account_erasure.go": ctgErasureFile("res := tx.Exec(\"UPDATE contact_requests SET add_childcare_ages_note = '', reason = '' WHERE id IN ?\", chunk)\n\t\ttotal += res.RowsAffected"),
 		}),
-		ctgSource("the ages literal in another function of account_erasure.go", "R-5", "account_erasure.go", map[string]string{
-			"account_erasure.go": ctgErasureFile(ctgErasureLoop) + "\nfunc eraseElsewhere(tx *gorm.DB) { tx.Exec(" + ctgAgesUpdate + ", 1, 2) }\n",
+		ctgSource("the ages literal in another function of internal/app/account_erasure.go", "R-5", "internal/app/account_erasure.go", map[string]string{
+			"internal/app/account_erasure.go": ctgErasureFile(ctgErasureLoop) + "\nfunc eraseElsewhere(tx *gorm.DB) { tx.Exec(" + ctgAgesUpdate + ", 1, 2) }\n",
 		}),
-		ctgSource("the ages literal in a copy of the helper in another file", "R-5", "api_other.go", map[string]string{
-			"account_erasure.go": ctgErasureFile("total++"),
-			"api_other.go":       "package main\n\nfunc eraseContactRequestTextInCopy(tx *gorm.DB) { tx.Exec(" + ctgAgesUpdate + ", 1, 2) }\n",
+		ctgSource("the ages literal in a copy of the helper in another file", "R-5", "internal/app/api_other.go", map[string]string{
+			"internal/app/account_erasure.go": ctgErasureFile("total++"),
+			"internal/app/api_other.go":       "package app\n\nfunc eraseContactRequestTextInCopy(tx *gorm.DB) { tx.Exec(" + ctgAgesUpdate + ", 1, 2) }\n",
 		}),
 	)
 
@@ -2408,73 +2408,73 @@ func TestContactRequestTextGuardCatchesBypasses(t *testing.T) {
 	// eraseContactRequestReasonsIn and nowhere else.
 	scrubs := func(after string) string { return ctgErasureFileWith(ctgErasureLoop, ctgPipeline("", after)) }
 	cases = append(cases,
-		ctgSource("a second reason literal in the helper", "R-5", "account_erasure_reasons.go", map[string]string{
-			"account_erasure_reasons.go": ctgReasonsFile(ctgReasonLoop + "\n\t\ttx.Exec(" + ctgReasonUpdate + ", batch, s.ID, s.ID)"),
+		ctgSource("a second reason literal in the helper", "R-5", "internal/app/account_erasure_reasons.go", map[string]string{
+			"internal/app/account_erasure_reasons.go": ctgReasonsFile(ctgReasonLoop + "\n\t\ttx.Exec(" + ctgReasonUpdate + ", batch, s.ID, s.ID)"),
 		}),
-		ctgSource("the reason literal in a func literal", "R-5", "account_erasure_reasons.go", map[string]string{
-			"account_erasure_reasons.go": ctgReasonsFile("func() { tx.Exec(" + ctgReasonUpdate + ", batch, s.ID, s.ID) }()"),
+		ctgSource("the reason literal in a func literal", "R-5", "internal/app/account_erasure_reasons.go", map[string]string{
+			"internal/app/account_erasure_reasons.go": ctgReasonsFile("func() { tx.Exec(" + ctgReasonUpdate + ", batch, s.ID, s.ID) }()"),
 		}),
-		ctgSource("the reason literal in another function of the file", "R-5", "account_erasure_reasons.go", map[string]string{
-			"account_erasure_reasons.go": ctgReasonsFile(ctgReasonLoop) + "\nfunc blankElsewhere(tx *gorm.DB) { tx.Exec(" + ctgReasonUpdate + ", 1, 2, 3) }\n",
+		ctgSource("the reason literal in another function of the file", "R-5", "internal/app/account_erasure_reasons.go", map[string]string{
+			"internal/app/account_erasure_reasons.go": ctgReasonsFile(ctgReasonLoop) + "\nfunc blankElsewhere(tx *gorm.DB) { tx.Exec(" + ctgReasonUpdate + ", 1, 2, 3) }\n",
 		}),
-		ctgSource("the reason literal in another file", "R-5", "api_other.go", map[string]string{
-			"api_other.go": "package main\n\nfunc blank(tx *gorm.DB) { tx.Exec(" + ctgReasonUpdate + ", 1, 2, 3) }\n",
+		ctgSource("the reason literal in another file", "R-5", "internal/app/api_other.go", map[string]string{
+			"internal/app/api_other.go": "package app\n\nfunc blank(tx *gorm.DB) { tx.Exec(" + ctgReasonUpdate + ", 1, 2, 3) }\n",
 		}),
-		ctgSource("the reason literal with the ages note in its SET list", "R-5", "account_erasure_reasons.go", map[string]string{
-			"account_erasure_reasons.go": ctgReasonsFile("res := tx.Exec(\"UPDATE contact_requests SET reason = '', add_childcare_ages_note = '' WHERE id = ANY(?::bigint[])\", batch)\n\t\ttotal += res.RowsAffected"),
+		ctgSource("the reason literal with the ages note in its SET list", "R-5", "internal/app/account_erasure_reasons.go", map[string]string{
+			"internal/app/account_erasure_reasons.go": ctgReasonsFile("res := tx.Exec(\"UPDATE contact_requests SET reason = '', add_childcare_ages_note = '' WHERE id = ANY(?::bigint[])\", batch)\n\t\ttotal += res.RowsAffected"),
 		}),
-		ctgSource("the reason literal setting another column too", "R-5", "account_erasure_reasons.go", map[string]string{
-			"account_erasure_reasons.go": ctgReasonsFile("res := tx.Exec(\"UPDATE contact_requests SET reason = '', status = 'x' WHERE id = ANY(?::bigint[])\", batch)\n\t\ttotal += res.RowsAffected"),
+		ctgSource("the reason literal setting another column too", "R-5", "internal/app/account_erasure_reasons.go", map[string]string{
+			"internal/app/account_erasure_reasons.go": ctgReasonsFile("res := tx.Exec(\"UPDATE contact_requests SET reason = '', status = 'x' WHERE id = ANY(?::bigint[])\", batch)\n\t\ttotal += res.RowsAffected"),
 		}),
 		// The reason helper's one call: in eraseAccountIn, directly after the
 		// ages-note scrub.
 		ctgSource("the reason helper's call twice", "R-6", "production tree", map[string]string{
-			"account_erasure.go": scrubs(ctgEraseCall + "\n\t" + ctgReasonCall + "\n\t" + ctgReasonCall),
+			"internal/app/account_erasure.go": scrubs(ctgEraseCall + "\n\t" + ctgReasonCall + "\n\t" + ctgReasonCall),
 		}),
 		ctgSource("no call of the reason helper", "R-6", "production tree", map[string]string{
-			"account_erasure.go": scrubs(ctgEraseCall + "\n\t// no reasons call"),
+			"internal/app/account_erasure.go": scrubs(ctgEraseCall + "\n\t// no reasons call"),
 		}),
-		ctgSource("the reason call before the ages-note call", "R-6", "account_erasure.go", map[string]string{
-			"account_erasure.go": scrubs(ctgReasonCall + "\n\t" + ctgEraseCall),
+		ctgSource("the reason call before the ages-note call", "R-6", "internal/app/account_erasure.go", map[string]string{
+			"internal/app/account_erasure.go": scrubs(ctgReasonCall + "\n\t" + ctgEraseCall),
 		}),
-		ctgSource("a statement between the two calls", "R-6", "account_erasure.go", map[string]string{
-			"account_erasure.go": scrubs(ctgEraseCall + "\n\t_ = plan\n\t" + ctgReasonCall),
+		ctgSource("a statement between the two calls", "R-6", "internal/app/account_erasure.go", map[string]string{
+			"internal/app/account_erasure.go": scrubs(ctgEraseCall + "\n\t_ = plan\n\t" + ctgReasonCall),
 		}),
-		ctgSource("the reason call before the soft delete", "R-6", "account_erasure.go", map[string]string{
-			"account_erasure.go": ctgErasureFileWith(ctgErasureLoop, ctgPipeline(ctgReasonCall, ctgEraseCall+"\n\t// no reasons call")),
+		ctgSource("the reason call before the soft delete", "R-6", "internal/app/account_erasure.go", map[string]string{
+			"internal/app/account_erasure.go": ctgErasureFileWith(ctgErasureLoop, ctgPipeline(ctgReasonCall, ctgEraseCall+"\n\t// no reasons call")),
 		}),
-		ctgSource("the reason call passing a.DB", "R-6", "account_erasure.go", map[string]string{
-			"account_erasure.go": scrubs(ctgEraseCall + "\n\tif err := eraseContactRequestReasonsIn(a.DB, s, plan); err != nil {\n\t\treturn out, err\n\t}"),
+		ctgSource("the reason call passing a.DB", "R-6", "internal/app/account_erasure.go", map[string]string{
+			"internal/app/account_erasure.go": scrubs(ctgEraseCall + "\n\tif err := eraseContactRequestReasonsIn(a.DB, s, plan); err != nil {\n\t\treturn out, err\n\t}"),
 		}),
-		ctgSource("the reason call nested in a block", "R-6", "account_erasure.go", map[string]string{
-			"account_erasure.go": scrubs(ctgEraseCall + "\n\tif true {\n\t\t_ = eraseContactRequestReasonsIn(tx, s, plan)\n\t}"),
+		ctgSource("the reason call nested in a block", "R-6", "internal/app/account_erasure.go", map[string]string{
+			"internal/app/account_erasure.go": scrubs(ctgEraseCall + "\n\tif true {\n\t\t_ = eraseContactRequestReasonsIn(tx, s, plan)\n\t}"),
 		}),
-		ctgSource("the reason call in a go statement", "R-6", "account_erasure.go", map[string]string{
-			"account_erasure.go": scrubs(ctgEraseCall + "\n\tgo eraseContactRequestReasonsIn(tx, s, plan)"),
+		ctgSource("the reason call in a go statement", "R-6", "internal/app/account_erasure.go", map[string]string{
+			"internal/app/account_erasure.go": scrubs(ctgEraseCall + "\n\tgo eraseContactRequestReasonsIn(tx, s, plan)"),
 		}),
-		ctgSource("the reason call from another function", "R-6", "account_erasure.go", map[string]string{
-			"account_erasure.go": scrubs(ctgEraseCall) + "\nfunc (a *App) otherErasure(tx *gorm.DB, s erasureSubject, plan reasonPlan) error {\n\treturn eraseContactRequestReasonsIn(tx, s, plan)\n}\n",
+		ctgSource("the reason call from another function", "R-6", "internal/app/account_erasure.go", map[string]string{
+			"internal/app/account_erasure.go": scrubs(ctgEraseCall) + "\nfunc (a *App) otherErasure(tx *gorm.DB, s erasureSubject, plan reasonPlan) error {\n\treturn eraseContactRequestReasonsIn(tx, s, plan)\n}\n",
 		}),
-		ctgSource("the reason call from the tombstone callback", "R-6", "account_erasure_tombstones.go", map[string]string{
-			"account_erasure_tombstones.go": ctgTombstoneFile("", ctgTombstonePipelineCall+"\n\t\t"+ctgReasonCall),
+		ctgSource("the reason call from the tombstone callback", "R-6", "internal/app/account_erasure_tombstones.go", map[string]string{
+			"internal/app/account_erasure_tombstones.go": ctgTombstoneFile("", ctgTombstonePipelineCall+"\n\t\t"+ctgReasonCall),
 		}),
-		ctgSource("the reason call from the admin callback", "R-6", "api_admin.go", map[string]string{
-			"api_admin.go": ctgAdminFile("", ctgReasonCall),
+		ctgSource("the reason call from the admin callback", "R-6", "internal/app/api_admin.go", map[string]string{
+			"internal/app/api_admin.go": ctgAdminFile("", ctgReasonCall),
 		}),
-		ctgSource("the reason helper declared as a method", "R-5", "account_erasure_reasons.go", map[string]string{
-			"account_erasure_reasons.go": strings.Replace(ctgReasonsFile(ctgReasonLoop), "func eraseContactRequestReasonsIn(", "func (a *App) eraseContactRequestReasonsIn(", 1),
+		ctgSource("the reason helper declared as a method", "R-5", "internal/app/account_erasure_reasons.go", map[string]string{
+			"internal/app/account_erasure_reasons.go": strings.Replace(ctgReasonsFile(ctgReasonLoop), "func eraseContactRequestReasonsIn(", "func (a *App) eraseContactRequestReasonsIn(", 1),
 		}),
-		ctgSource("the reason call on a copy of the pipeline's tx", "R-6", "account_erasure.go", map[string]string{
-			"account_erasure.go": scrubs(ctgEraseCall + "\n\ttx2 := tx\n\tif err := eraseContactRequestReasonsIn(tx2, s, plan); err != nil {\n\t\treturn out, err\n\t}"),
+		ctgSource("the reason call on a copy of the pipeline's tx", "R-6", "internal/app/account_erasure.go", map[string]string{
+			"internal/app/account_erasure.go": scrubs(ctgEraseCall + "\n\ttx2 := tx\n\tif err := eraseContactRequestReasonsIn(tx2, s, plan); err != nil {\n\t\treturn out, err\n\t}"),
 		}),
-		ctgSource("the reason call inside a closure of the pipeline", "R-6", "account_erasure.go", map[string]string{
-			"account_erasure.go": scrubs(ctgEraseCall + "\n\tfunc() { _ = eraseContactRequestReasonsIn(tx, s, plan) }()"),
+		ctgSource("the reason call inside a closure of the pipeline", "R-6", "internal/app/account_erasure.go", map[string]string{
+			"internal/app/account_erasure.go": scrubs(ctgEraseCall + "\n\tfunc() { _ = eraseContactRequestReasonsIn(tx, s, plan) }()"),
 		}),
-		ctgSource("the reason call in a defer statement", "R-6", "account_erasure.go", map[string]string{
-			"account_erasure.go": scrubs(ctgEraseCall + "\n\tdefer eraseContactRequestReasonsIn(tx, s, plan)"),
+		ctgSource("the reason call in a defer statement", "R-6", "internal/app/account_erasure.go", map[string]string{
+			"internal/app/account_erasure.go": scrubs(ctgEraseCall + "\n\tdefer eraseContactRequestReasonsIn(tx, s, plan)"),
 		}),
-		ctgSource("the reason helper used as a value", "R-6", "other.go", map[string]string{
-			"other.go": "package main\n\nfunc other() {\n\tf := eraseContactRequestReasonsIn\n\t_ = f\n}\n",
+		ctgSource("the reason helper used as a value", "R-6", "internal/app/other.go", map[string]string{
+			"internal/app/other.go": "package app\n\nfunc other() {\n\tf := eraseContactRequestReasonsIn\n\t_ = f\n}\n",
 		}),
 		// The second call: the legacy save's fenced callback, and nowhere else.
 		ctgSource("no legacy call", "R-6", "production tree", map[string]string{
@@ -2484,8 +2484,8 @@ func TestContactRequestTextGuardCatchesBypasses(t *testing.T) {
 		ctgSource("a third reason call in the legacy callback", "R-6", "production tree", map[string]string{
 			ctgLegacyReasonFile: ctgLegacyFileWith(ctgLegacyCall+"\n\t\t\t"+ctgLegacyCall, ctgLegacyLast),
 		}),
-		ctgSource("a third reason call in another file", "R-6", "other.go", map[string]string{
-			"other.go": "package main\n\nfunc (a *App) other(tx *gorm.DB, s erasureSubject, plan reasonPlan) error {\n\treturn eraseContactRequestReasonsIn(tx, s, plan)\n}\n",
+		ctgSource("a third reason call in another file", "R-6", "internal/app/other.go", map[string]string{
+			"internal/app/other.go": "package app\n\nfunc (a *App) other(tx *gorm.DB, s erasureSubject, plan reasonPlan) error {\n\treturn eraseContactRequestReasonsIn(tx, s, plan)\n}\n",
 		}),
 		ctgSource("the legacy call passing a.DB", "R-6", ctgLegacyReasonFile, map[string]string{
 			ctgLegacyReasonFile: ctgLegacyFileWith(strings.Replace(ctgLegacyCall, "(tx,", "(a.DB,", 1), ctgLegacyLast),
@@ -2526,75 +2526,75 @@ func TestContactRequestTextGuardCatchesBypasses(t *testing.T) {
 		ctgSource("a statement after the legacy callback's seal return", "R-6", ctgLegacyReasonFile, map[string]string{
 			ctgLegacyReasonFile: ctgLegacyFileWith(ctgLegacyCall+"\n\t\t\t_ = plan", ctgLegacyLast+"\n\t\t\t_ = rule"),
 		}),
-		ctgSource("the legacy callback in another file", "R-6", "api_admin.go", map[string]string{
-			"api_admin.go": ctgLegacyFileWith(ctgLegacyCall, ctgLegacyLast),
+		ctgSource("the legacy callback in another file", "R-6", "internal/app/api_admin.go", map[string]string{
+			"internal/app/api_admin.go": ctgLegacyFileWith(ctgLegacyCall, ctgLegacyLast),
 		}),
 	)
 
 	// R-6: the ages-note scrub's one call, in eraseAccountIn after the soft
 	// delete, on its own transaction.
 	cases = append(cases,
-		ctgSource("a second call", "R-6", "production tree", map[string]string{"account_erasure.go": scrubs(ctgEraseCall + "\n\t" + ctgEraseCall)}),
-		ctgSource("no call at all", "R-6", "production tree", map[string]string{"account_erasure.go": scrubs("// no reasons call")}),
-		ctgSource("a call before the soft delete", "R-6", "account_erasure.go", map[string]string{
-			"account_erasure.go": ctgErasureFileWith(ctgErasureLoop, ctgPipeline(ctgEraseCall, "")),
+		ctgSource("a second call", "R-6", "production tree", map[string]string{"internal/app/account_erasure.go": scrubs(ctgEraseCall + "\n\t" + ctgEraseCall)}),
+		ctgSource("no call at all", "R-6", "production tree", map[string]string{"internal/app/account_erasure.go": scrubs("// no reasons call")}),
+		ctgSource("a call before the soft delete", "R-6", "internal/app/account_erasure.go", map[string]string{
+			"internal/app/account_erasure.go": ctgErasureFileWith(ctgErasureLoop, ctgPipeline(ctgEraseCall, "")),
 		}),
-		ctgSource("a call before a soft delete of another value", "R-6", "account_erasure.go", map[string]string{
-			"account_erasure.go": strings.Replace(scrubs(ctgEraseCall), "tx.Delete(opts.Live.User)", "tx.Delete(opts.Live.Other)", 1),
+		ctgSource("a call before a soft delete of another value", "R-6", "internal/app/account_erasure.go", map[string]string{
+			"internal/app/account_erasure.go": strings.Replace(scrubs(ctgEraseCall), "tx.Delete(opts.Live.User)", "tx.Delete(opts.Live.Other)", 1),
 		}),
-		ctgSource("a soft delete of a local, not the options", "R-6", "account_erasure.go", map[string]string{
-			"account_erasure.go": strings.Replace(scrubs(ctgEraseCall), "if opts.Live != nil {\n\t\tif err := tx.Delete(opts.Live.User)", "if opts := other; opts.Live != nil {\n\t\tif err := tx.Delete(opts.Live.User)", 1),
+		ctgSource("a soft delete of a local, not the options", "R-6", "internal/app/account_erasure.go", map[string]string{
+			"internal/app/account_erasure.go": strings.Replace(scrubs(ctgEraseCall), "if opts.Live != nil {\n\t\tif err := tx.Delete(opts.Live.User)", "if opts := other; opts.Live != nil {\n\t\tif err := tx.Delete(opts.Live.User)", 1),
 		}),
-		ctgSource("a call passing a.DB", "R-6", "account_erasure.go", map[string]string{"account_erasure.go": scrubs("if err := eraseContactRequestTextIn(a.DB, s); err != nil {\n\t\treturn out, err\n\t}")}),
-		ctgSource("a call in a tx.Transaction body", "R-6", "account_erasure.go", map[string]string{
-			"account_erasure.go": scrubs("if err := tx.Transaction(func(tx2 *gorm.DB) error {\n\t\treturn eraseContactRequestTextIn(tx2, s)\n\t}); err != nil {\n\t\treturn out, err\n\t}"),
+		ctgSource("a call passing a.DB", "R-6", "internal/app/account_erasure.go", map[string]string{"internal/app/account_erasure.go": scrubs("if err := eraseContactRequestTextIn(a.DB, s); err != nil {\n\t\treturn out, err\n\t}")}),
+		ctgSource("a call in a tx.Transaction body", "R-6", "internal/app/account_erasure.go", map[string]string{
+			"internal/app/account_erasure.go": scrubs("if err := tx.Transaction(func(tx2 *gorm.DB) error {\n\t\treturn eraseContactRequestTextIn(tx2, s)\n\t}); err != nil {\n\t\treturn out, err\n\t}"),
 		}),
-		ctgSource("a go statement", "R-6", "account_erasure.go", map[string]string{"account_erasure.go": scrubs("go eraseContactRequestTextIn(tx, s)")}),
-		ctgSource("a defer statement", "R-6", "account_erasure.go", map[string]string{"account_erasure.go": scrubs("defer eraseContactRequestTextIn(tx, s)")}),
-		ctgSource("a call nested in a block", "R-6", "account_erasure.go", map[string]string{"account_erasure.go": scrubs("if true {\n\t\t_ = eraseContactRequestTextIn(tx, s)\n\t}")}),
-		ctgSource("a returned call", "R-6", "account_erasure.go", map[string]string{"account_erasure.go": scrubs("return out, eraseContactRequestTextIn(tx, s)")}),
-		ctgSource("a call from another function of account_erasure.go", "R-6", "account_erasure.go", map[string]string{
-			"account_erasure.go": strings.Replace(scrubs(ctgEraseCall), "func (a *App) eraseAccountIn(", "func (a *App) eraseOther(", 1),
+		ctgSource("a go statement", "R-6", "internal/app/account_erasure.go", map[string]string{"internal/app/account_erasure.go": scrubs("go eraseContactRequestTextIn(tx, s)")}),
+		ctgSource("a defer statement", "R-6", "internal/app/account_erasure.go", map[string]string{"internal/app/account_erasure.go": scrubs("defer eraseContactRequestTextIn(tx, s)")}),
+		ctgSource("a call nested in a block", "R-6", "internal/app/account_erasure.go", map[string]string{"internal/app/account_erasure.go": scrubs("if true {\n\t\t_ = eraseContactRequestTextIn(tx, s)\n\t}")}),
+		ctgSource("a returned call", "R-6", "internal/app/account_erasure.go", map[string]string{"internal/app/account_erasure.go": scrubs("return out, eraseContactRequestTextIn(tx, s)")}),
+		ctgSource("a call from another function of internal/app/account_erasure.go", "R-6", "internal/app/account_erasure.go", map[string]string{
+			"internal/app/account_erasure.go": strings.Replace(scrubs(ctgEraseCall), "func (a *App) eraseAccountIn(", "func (a *App) eraseOther(", 1),
 		}),
-		ctgSource("the pipeline in another file", "R-6", "account_erasure_extra.go", map[string]string{
-			"account_erasure.go":       ctgErasureFileWith(ctgErasureLoop, ""),
-			"account_erasure_extra.go": "package main\n\nimport \"gorm.io/gorm\"\n" + ctgPipeline("", ctgEraseCall),
+		ctgSource("the pipeline in another file", "R-6", "internal/app/account_erasure_extra.go", map[string]string{
+			"internal/app/account_erasure.go":       ctgErasureFileWith(ctgErasureLoop, ""),
+			"internal/app/account_erasure_extra.go": "package app\n\nimport \"gorm.io/gorm\"\n" + ctgPipeline("", ctgEraseCall),
 		}),
-		ctgSource("eraseAccountIn as a function, not an App method", "R-6", "account_erasure.go", map[string]string{
-			"account_erasure.go": strings.Replace(scrubs(ctgEraseCall), "func (a *App) eraseAccountIn(", "func eraseAccountIn(", 1),
+		ctgSource("eraseAccountIn as a function, not an App method", "R-6", "internal/app/account_erasure.go", map[string]string{
+			"internal/app/account_erasure.go": strings.Replace(scrubs(ctgEraseCall), "func (a *App) eraseAccountIn(", "func eraseAccountIn(", 1),
 		}),
-		ctgSource("eraseAccountIn on another type", "R-6", "account_erasure.go", map[string]string{
-			"account_erasure.go": strings.Replace(scrubs(ctgEraseCall), "func (a *App) eraseAccountIn(", "func (a *Other) eraseAccountIn(", 1),
+		ctgSource("eraseAccountIn on another type", "R-6", "internal/app/account_erasure.go", map[string]string{
+			"internal/app/account_erasure.go": strings.Replace(scrubs(ctgEraseCall), "func (a *App) eraseAccountIn(", "func (a *Other) eraseAccountIn(", 1),
 		}),
-		ctgSource("eraseAccountIn's transaction not its first parameter", "R-6", "account_erasure.go", map[string]string{
-			"account_erasure.go": strings.Replace(scrubs(ctgEraseCall), "eraseAccountIn(tx *gorm.DB, s erasureSubject,", "eraseAccountIn(s erasureSubject, tx *gorm.DB,", 1),
+		ctgSource("eraseAccountIn's transaction not its first parameter", "R-6", "internal/app/account_erasure.go", map[string]string{
+			"internal/app/account_erasure.go": strings.Replace(scrubs(ctgEraseCall), "eraseAccountIn(tx *gorm.DB, s erasureSubject,", "eraseAccountIn(s erasureSubject, tx *gorm.DB,", 1),
 		}),
-		ctgSource("a call from any other function", "R-6", "other.go", map[string]string{
-			"other.go": "package main\n\nfunc other(tx *gorm.DB, s erasureSubject) error {\n\treturn eraseContactRequestTextIn(tx, s)\n}\n",
+		ctgSource("a call from any other function", "R-6", "internal/app/other.go", map[string]string{
+			"internal/app/other.go": "package app\n\nfunc other(tx *gorm.DB, s erasureSubject) error {\n\treturn eraseContactRequestTextIn(tx, s)\n}\n",
 		}),
-		ctgSource("a function value", "R-6", "other.go", map[string]string{
-			"other.go": "package main\n\nfunc other() {\n\tf := eraseContactRequestTextIn\n\t_ = f\n}\n",
+		ctgSource("a function value", "R-6", "internal/app/other.go", map[string]string{
+			"internal/app/other.go": "package app\n\nfunc other() {\n\tf := eraseContactRequestTextIn\n\t_ = f\n}\n",
 		}),
-		ctgSource("a method value", "R-6", "other.go", map[string]string{
-			"other.go": "package main\n\nfunc (a *App) other() {\n\tf := a.eraseContactRequestTextIn\n\t_ = f\n}\n",
+		ctgSource("a method value", "R-6", "internal/app/other.go", map[string]string{
+			"internal/app/other.go": "package app\n\nfunc (a *App) other() {\n\tf := a.eraseContactRequestTextIn\n\t_ = f\n}\n",
 		}),
-		ctgSource("an argument", "R-6", "other.go", map[string]string{
-			"other.go": "package main\n\nfunc other() {\n\trun(eraseContactRequestTextIn)\n}\n",
+		ctgSource("an argument", "R-6", "internal/app/other.go", map[string]string{
+			"internal/app/other.go": "package app\n\nfunc other() {\n\trun(eraseContactRequestTextIn)\n}\n",
 		}),
-		ctgSource("a returned function", "R-6", "other.go", map[string]string{
-			"other.go": "package main\n\nfunc other() any {\n\treturn eraseContactRequestTextIn\n}\n",
+		ctgSource("a returned function", "R-6", "internal/app/other.go", map[string]string{
+			"internal/app/other.go": "package app\n\nfunc other() any {\n\treturn eraseContactRequestTextIn\n}\n",
 		}),
 		// T07A-GFR-03: the first argument is the pipeline's own parameter, not a
 		// local that reuses its name, and the same holds for the soft delete the
 		// call must follow.
-		ctgSource("an if-init local that shadows the pipeline tx", "R-6", "account_erasure.go", map[string]string{
-			"account_erasure.go": scrubs("if tx := a.DB; eraseContactRequestTextIn(tx, s) != nil {\n\t\treturn out, gorm.ErrInvalidDB\n\t}"),
+		ctgSource("an if-init local that shadows the pipeline tx", "R-6", "internal/app/account_erasure.go", map[string]string{
+			"internal/app/account_erasure.go": scrubs("if tx := a.DB; eraseContactRequestTextIn(tx, s) != nil {\n\t\treturn out, gorm.ErrInvalidDB\n\t}"),
 		}),
-		ctgSource("a pipeline parameter named _", "R-6", "account_erasure.go", map[string]string{
-			"account_erasure.go": strings.Replace(scrubs(ctgEraseCall), "eraseAccountIn(tx *gorm.DB,", "eraseAccountIn(_ *gorm.DB,", 1),
+		ctgSource("a pipeline parameter named _", "R-6", "internal/app/account_erasure.go", map[string]string{
+			"internal/app/account_erasure.go": strings.Replace(scrubs(ctgEraseCall), "eraseAccountIn(tx *gorm.DB,", "eraseAccountIn(_ *gorm.DB,", 1),
 		}),
-		ctgSource("a soft delete on a local that shadows the pipeline tx", "R-6", "account_erasure.go", map[string]string{
-			"account_erasure.go": strings.Replace(scrubs(ctgEraseCall), "if err := tx.Delete(opts.Live.User).Error; err != nil {", "if tx := a.DB; tx.Delete(opts.Live.User).Error != nil {", 1),
+		ctgSource("a soft delete on a local that shadows the pipeline tx", "R-6", "internal/app/account_erasure.go", map[string]string{
+			"internal/app/account_erasure.go": strings.Replace(scrubs(ctgEraseCall), "if err := tx.Delete(opts.Live.User).Error; err != nil {", "if tx := a.DB; tx.Delete(opts.Live.User).Error != nil {", 1),
 		}),
 	)
 
@@ -2603,80 +2603,80 @@ func TestContactRequestTextGuardCatchesBypasses(t *testing.T) {
 	admin := ctgAdminFile("", "")
 	pipelineCall := "counts, err := a.eraseAccountIn(tx, s, opts)"
 	cases = append(cases,
-		ctgSource("a second admin call", "R-6", "production tree", map[string]string{"api_admin.go": ctgAdminFile("", ctgPipelineCall)}),
-		ctgSource("no admin call", "R-6", "production tree", map[string]string{"api_admin.go": ctgAdminFileCall("err = a.fencedContactMutation(ctx, contactChange{UserID: targetID}, ", ")", "counts := 0")}),
-		ctgSource("the admin call under a.contactMutationCtx", "R-6", "api_admin.go", map[string]string{
-			"api_admin.go": ctgAdminFileShape("err = a.contactMutationCtx(ctx, contactChange{UserID: targetID}, ", ")", "", ""),
+		ctgSource("a second admin call", "R-6", "production tree", map[string]string{"internal/app/api_admin.go": ctgAdminFile("", ctgPipelineCall)}),
+		ctgSource("no admin call", "R-6", "production tree", map[string]string{"internal/app/api_admin.go": ctgAdminFileCall("err = a.fencedContactMutation(ctx, contactChange{UserID: targetID}, ", ")", "counts := 0")}),
+		ctgSource("the admin call under a.contactMutationCtx", "R-6", "internal/app/api_admin.go", map[string]string{
+			"internal/app/api_admin.go": ctgAdminFileShape("err = a.contactMutationCtx(ctx, contactChange{UserID: targetID}, ", ")", "", ""),
 		}),
-		ctgSource("the old a.contactMutation at the admin site", "R-6", "api_admin.go", map[string]string{
-			"api_admin.go": ctgAdminFileShape("err = a.contactMutation(contactChange{UserID: targetID}, ", ")", "", ""),
+		ctgSource("the old a.contactMutation at the admin site", "R-6", "internal/app/api_admin.go", map[string]string{
+			"internal/app/api_admin.go": ctgAdminFileShape("err = a.contactMutation(contactChange{UserID: targetID}, ", ")", "", ""),
 		}),
-		ctgSource("a callback that is not the last argument", "R-6", "api_admin.go", map[string]string{
-			"api_admin.go": ctgAdminFileShape("err = a.fencedContactMutation(ctx, contactChange{UserID: targetID}, ", ", nil)", "", ""),
+		ctgSource("a callback that is not the last argument", "R-6", "internal/app/api_admin.go", map[string]string{
+			"internal/app/api_admin.go": ctgAdminFileShape("err = a.fencedContactMutation(ctx, contactChange{UserID: targetID}, ", ", nil)", "", ""),
 		}),
-		ctgSource("the admin call passing a.DB", "R-6", "api_admin.go", map[string]string{"api_admin.go": strings.Replace(admin, pipelineCall, "counts, err := a.eraseAccountIn(a.DB, s, opts)", 1)}),
-		ctgSource("the admin call on a copy of the callback's tx", "R-6", "api_admin.go", map[string]string{
-			"api_admin.go": strings.Replace(admin, pipelineCall, "tx2 := tx\n\t\t\tcounts, err := a.eraseAccountIn(tx2, s, opts)", 1),
+		ctgSource("the admin call passing a.DB", "R-6", "internal/app/api_admin.go", map[string]string{"internal/app/api_admin.go": strings.Replace(admin, pipelineCall, "counts, err := a.eraseAccountIn(a.DB, s, opts)", 1)}),
+		ctgSource("the admin call on a copy of the callback's tx", "R-6", "internal/app/api_admin.go", map[string]string{
+			"internal/app/api_admin.go": strings.Replace(admin, pipelineCall, "tx2 := tx\n\t\t\tcounts, err := a.eraseAccountIn(tx2, s, opts)", 1),
 		}),
-		ctgSource("the admin call nested in a block", "R-6", "api_admin.go", map[string]string{
-			"api_admin.go": ctgAdminFileCall("err = a.fencedContactMutation(ctx, contactChange{UserID: targetID}, ", ")", "counts := 0\n\t\t\tif true {\n\t\t\t\t_, _ = a.eraseAccountIn(tx, s, opts)\n\t\t\t}"),
+		ctgSource("the admin call nested in a block", "R-6", "internal/app/api_admin.go", map[string]string{
+			"internal/app/api_admin.go": ctgAdminFileCall("err = a.fencedContactMutation(ctx, contactChange{UserID: targetID}, ", ")", "counts := 0\n\t\t\tif true {\n\t\t\t\t_, _ = a.eraseAccountIn(tx, s, opts)\n\t\t\t}"),
 		}),
-		ctgSource("the admin call in a closure", "R-6", "api_admin.go", map[string]string{
-			"api_admin.go": ctgAdminFileCall("err = a.fencedContactMutation(ctx, contactChange{UserID: targetID}, ", ")", "counts := 0\n\t\t\tfunc() { _, _ = a.eraseAccountIn(tx, s, opts) }()"),
+		ctgSource("the admin call in a closure", "R-6", "internal/app/api_admin.go", map[string]string{
+			"internal/app/api_admin.go": ctgAdminFileCall("err = a.fencedContactMutation(ctx, contactChange{UserID: targetID}, ", ")", "counts := 0\n\t\t\tfunc() { _, _ = a.eraseAccountIn(tx, s, opts) }()"),
 		}),
-		ctgSource("the admin call in a go statement", "R-6", "api_admin.go", map[string]string{
-			"api_admin.go": ctgAdminFileCall("err = a.fencedContactMutation(ctx, contactChange{UserID: targetID}, ", ")", "counts := 0\n\t\t\tgo a.eraseAccountIn(tx, s, opts)"),
+		ctgSource("the admin call in a go statement", "R-6", "internal/app/api_admin.go", map[string]string{
+			"internal/app/api_admin.go": ctgAdminFileCall("err = a.fencedContactMutation(ctx, contactChange{UserID: targetID}, ", ")", "counts := 0\n\t\t\tgo a.eraseAccountIn(tx, s, opts)"),
 		}),
-		ctgSource("the admin call in a defer statement", "R-6", "api_admin.go", map[string]string{
-			"api_admin.go": ctgAdminFileCall("err = a.fencedContactMutation(ctx, contactChange{UserID: targetID}, ", ")", "counts := 0\n\t\t\tdefer a.eraseAccountIn(tx, s, opts)"),
+		ctgSource("the admin call in a defer statement", "R-6", "internal/app/api_admin.go", map[string]string{
+			"internal/app/api_admin.go": ctgAdminFileCall("err = a.fencedContactMutation(ctx, contactChange{UserID: targetID}, ", ")", "counts := 0\n\t\t\tdefer a.eraseAccountIn(tx, s, opts)"),
 		}),
-		ctgSource("the wrapper call inside a func literal", "R-6", "api_admin.go", map[string]string{
-			"api_admin.go": strings.Replace(strings.Replace(admin, "\t\terr = a.fencedContactMutation(", "\t\tfunc() {\n\t\terr = a.fencedContactMutation(", 1), "\t\t})\n\t}\n\t_ = err", "\t\t})\n\t\t}()\n\t}\n\t_ = err", 1),
+		ctgSource("the wrapper call inside a func literal", "R-6", "internal/app/api_admin.go", map[string]string{
+			"internal/app/api_admin.go": strings.Replace(strings.Replace(admin, "\t\terr = a.fencedContactMutation(", "\t\tfunc() {\n\t\terr = a.fencedContactMutation(", 1), "\t\t})\n\t}\n\t_ = err", "\t\t})\n\t\t}()\n\t}\n\t_ = err", 1),
 		}),
-		ctgSource("a call from another function of api_admin.go", "R-6", "api_admin.go", map[string]string{
-			"api_admin.go": strings.Replace(admin, "apiAdminDeleteUser", "apiAdminOtherThing", 1),
+		ctgSource("a call from another function of internal/app/api_admin.go", "R-6", "internal/app/api_admin.go", map[string]string{
+			"internal/app/api_admin.go": strings.Replace(admin, "apiAdminDeleteUser", "apiAdminOtherThing", 1),
 		}),
-		ctgSource("the admin call in another file", "R-6", "api_admin_extra.go", map[string]string{"api_admin.go": "-", "api_admin_extra.go": admin}),
-		ctgSource("a call from any other method", "R-6", "other.go", map[string]string{
-			"other.go": "package main\n\nfunc (a *App) other(tx *gorm.DB) {\n\t_, _ = a.eraseAccountIn(tx, erasureSubject{}, erasureOptions{})\n}\n",
+		ctgSource("the admin call in another file", "R-6", "internal/app/api_admin_extra.go", map[string]string{"internal/app/api_admin.go": "-", "internal/app/api_admin_extra.go": admin}),
+		ctgSource("a call from any other method", "R-6", "internal/app/other.go", map[string]string{
+			"internal/app/other.go": "package app\n\nfunc (a *App) other(tx *gorm.DB) {\n\t_, _ = a.eraseAccountIn(tx, erasureSubject{}, erasureOptions{})\n}\n",
 		}),
-		ctgSource("eraseAccountIn as a method value", "R-6", "other.go", map[string]string{
-			"other.go": "package main\n\nfunc (a *App) other() {\n\tf := a.eraseAccountIn\n\t_ = f\n}\n",
+		ctgSource("eraseAccountIn as a method value", "R-6", "internal/app/other.go", map[string]string{
+			"internal/app/other.go": "package app\n\nfunc (a *App) other() {\n\tf := a.eraseAccountIn\n\t_ = f\n}\n",
 		}),
-		ctgSource("eraseAccountIn passed as an argument", "R-6", "other.go", map[string]string{
-			"other.go": "package main\n\nfunc (a *App) other() {\n\trun(a.eraseAccountIn)\n}\n",
+		ctgSource("eraseAccountIn passed as an argument", "R-6", "internal/app/other.go", map[string]string{
+			"internal/app/other.go": "package app\n\nfunc (a *App) other() {\n\trun(a.eraseAccountIn)\n}\n",
 		}),
-		ctgSource("eraseAccountIn on another receiver", "R-6", "api_admin.go", map[string]string{
-			"api_admin.go": strings.Replace(admin, pipelineCall, "counts, err := b.eraseAccountIn(tx, s, opts)", 1),
+		ctgSource("eraseAccountIn on another receiver", "R-6", "internal/app/api_admin.go", map[string]string{
+			"internal/app/api_admin.go": strings.Replace(admin, pipelineCall, "counts, err := b.eraseAccountIn(tx, s, opts)", 1),
 		}),
 		// T07A-GR-04: a method named like the wrapper on another receiver is not
 		// the transaction-and-gate wrapper, whether it is a different variable or
 		// a local that reuses the receiver's name.
-		ctgSource("the wrapper on another receiver", "R-6", "api_admin.go", map[string]string{
-			"api_admin.go": strings.Replace(admin, "\t\terr = a.fencedContactMutation(", "\t\trunner := directRunner{db: a.DB}\n\t\terr = runner.fencedContactMutation(", 1),
-			"api_runner.go": "package main\n\nimport \"gorm.io/gorm\"\n\ntype directRunner struct{ db *gorm.DB }\n\n" +
+		ctgSource("the wrapper on another receiver", "R-6", "internal/app/api_admin.go", map[string]string{
+			"internal/app/api_admin.go": strings.Replace(admin, "\t\terr = a.fencedContactMutation(", "\t\trunner := directRunner{db: a.DB}\n\t\terr = runner.fencedContactMutation(", 1),
+			"internal/app/api_runner.go": "package app\n\nimport \"gorm.io/gorm\"\n\ntype directRunner struct{ db *gorm.DB }\n\n" +
 				"func (d directRunner) fencedContactMutation(_ context.Context, _ contactChange, fn func(*gorm.DB) (*contactSeal, error)) error { _, err := fn(d.db); return err }\n",
 		}),
-		ctgSource("the wrapper on a local that shadows the receiver", "R-6", "api_admin.go", map[string]string{
-			"api_admin.go": strings.Replace(admin, "\t\terr = a.fencedContactMutation(", "\t\ta := directRunner{db: a.DB}\n\t\terr = a.fencedContactMutation(", 1),
-			"api_runner.go": "package main\n\nimport \"gorm.io/gorm\"\n\ntype directRunner struct{ db *gorm.DB }\n\n" +
+		ctgSource("the wrapper on a local that shadows the receiver", "R-6", "internal/app/api_admin.go", map[string]string{
+			"internal/app/api_admin.go": strings.Replace(admin, "\t\terr = a.fencedContactMutation(", "\t\ta := directRunner{db: a.DB}\n\t\terr = a.fencedContactMutation(", 1),
+			"internal/app/api_runner.go": "package app\n\nimport \"gorm.io/gorm\"\n\ntype directRunner struct{ db *gorm.DB }\n\n" +
 				"func (d directRunner) fencedContactMutation(_ context.Context, _ contactChange, fn func(*gorm.DB) (*contactSeal, error)) error { _, err := fn(d.db); return err }\n",
 		}),
-		ctgSource("the wrapper on a parameter, not the receiver", "R-6", "api_admin.go", map[string]string{
-			"api_admin.go": strings.Replace(strings.Replace(admin, "(a *App) apiAdminDeleteUser(c *gin.Context)", "(a *App) apiAdminDeleteUser(c *gin.Context, runner directRunner)", 1),
+		ctgSource("the wrapper on a parameter, not the receiver", "R-6", "internal/app/api_admin.go", map[string]string{
+			"internal/app/api_admin.go": strings.Replace(strings.Replace(admin, "(a *App) apiAdminDeleteUser(c *gin.Context)", "(a *App) apiAdminDeleteUser(c *gin.Context, runner directRunner)", 1),
 				"err = a.fencedContactMutation(", "err = runner.fencedContactMutation(", 1),
 		}),
-		ctgSource("apiAdminDeleteUser as a function, not an App method", "R-6", "api_admin.go", map[string]string{
-			"api_admin.go": strings.Replace(admin, "func (a *App) apiAdminDeleteUser(", "func apiAdminDeleteUser(a *App, ", 1),
+		ctgSource("apiAdminDeleteUser as a function, not an App method", "R-6", "internal/app/api_admin.go", map[string]string{
+			"internal/app/api_admin.go": strings.Replace(admin, "func (a *App) apiAdminDeleteUser(", "func apiAdminDeleteUser(a *App, ", 1),
 		}),
-		ctgSource("apiAdminDeleteUser on another type", "R-6", "api_admin.go", map[string]string{
-			"api_admin.go": strings.Replace(admin, "(a *App) apiAdminDeleteUser", "(a *Other) apiAdminDeleteUser", 1),
+		ctgSource("apiAdminDeleteUser on another type", "R-6", "internal/app/api_admin.go", map[string]string{
+			"internal/app/api_admin.go": strings.Replace(admin, "(a *App) apiAdminDeleteUser", "(a *Other) apiAdminDeleteUser", 1),
 		}),
-		ctgSource("an if-init local that shadows the callback tx", "R-6", "api_admin.go", map[string]string{
-			"api_admin.go": ctgAdminFileCall("err = a.fencedContactMutation(ctx, contactChange{UserID: targetID}, ", ")", "counts := 0\n\t\t\tif tx := a.DB; true {\n\t\t\t\t_, _ = a.eraseAccountIn(tx, s, opts)\n\t\t\t}"),
+		ctgSource("an if-init local that shadows the callback tx", "R-6", "internal/app/api_admin.go", map[string]string{
+			"internal/app/api_admin.go": ctgAdminFileCall("err = a.fencedContactMutation(ctx, contactChange{UserID: targetID}, ", ")", "counts := 0\n\t\t\tif tx := a.DB; true {\n\t\t\t\t_, _ = a.eraseAccountIn(tx, s, opts)\n\t\t\t}"),
 		}),
-		ctgSource("a callback parameter named _ and an unresolved tx argument", "R-6", "api_admin.go", map[string]string{
-			"api_admin.go": strings.Replace(admin, "func(tx *gorm.DB)", "func(_ *gorm.DB)", 1),
+		ctgSource("a callback parameter named _ and an unresolved tx argument", "R-6", "internal/app/api_admin.go", map[string]string{
+			"internal/app/api_admin.go": strings.Replace(admin, "func(tx *gorm.DB)", "func(_ *gorm.DB)", 1),
 		}),
 	)
 	tombstone := ctgTombstoneFile("", ctgTombstonePipelineCall)
@@ -2706,29 +2706,29 @@ func TestContactRequestTextGuardCatchesBypasses(t *testing.T) {
 		{"a shadowed tombstone no-op sentinel", ctgTombstoneFile("errTombstoneNoop := otherError", ctgTombstonePipelineCall)},
 	}
 	for _, tc := range tombstoneBad {
-		cases = append(cases, ctgSource(tc.name, "R-6", "account_erasure_tombstones.go", map[string]string{
-			"account_erasure_tombstones.go": tc.source,
+		cases = append(cases, ctgSource(tc.name, "R-6", "internal/app/account_erasure_tombstones.go", map[string]string{
+			"internal/app/account_erasure_tombstones.go": tc.source,
 		}))
 	}
 	cases = append(cases,
 		ctgSource("a second tombstone callback call", "R-6", "production tree", map[string]string{
-			"account_erasure_tombstones.go": ctgTombstoneFile("", ctgTombstonePipelineCall+"\n"+strings.Replace(ctgTombstonePipelineCall, ":=", "=", 1)),
+			"internal/app/account_erasure_tombstones.go": ctgTombstoneFile("", ctgTombstonePipelineCall+"\n"+strings.Replace(ctgTombstonePipelineCall, ":=", "=", 1)),
 		}),
 		ctgSource("no tombstone call", "R-6", "production tree", map[string]string{
-			"account_erasure_tombstones.go": ctgTombstoneFile("", ""),
+			"internal/app/account_erasure_tombstones.go": ctgTombstoneFile("", ""),
 		}),
 		ctgSource("two admin calls cannot replace the tombstone call", "R-6", "production tree", map[string]string{
-			"account_erasure_tombstones.go": ctgTombstoneFile("", ""),
-			"api_admin.go":                  ctgAdminFile("", ctgPipelineCall),
+			"internal/app/account_erasure_tombstones.go": ctgTombstoneFile("", ""),
+			"internal/app/api_admin.go":                  ctgAdminFile("", ctgPipelineCall),
 		}),
-		ctgSource("a third site in the tombstone file", "R-6", "account_erasure_tombstones.go", map[string]string{
-			"account_erasure_tombstones.go": tombstone + "\nfunc (a *App) other(tx *gorm.DB) error { _, err := " + tombstoneCall + "; return err }\n",
+		ctgSource("a third site in the tombstone file", "R-6", "internal/app/account_erasure_tombstones.go", map[string]string{
+			"internal/app/account_erasure_tombstones.go": tombstone + "\nfunc (a *App) other(tx *gorm.DB) error { _, err := " + tombstoneCall + "; return err }\n",
 		}),
-		ctgSource("an ages-note call left in the tombstone callback", "R-6", "account_erasure_tombstones.go", map[string]string{
-			"account_erasure_tombstones.go": ctgTombstoneFile("", ctgTombstonePipelineCall+"\n\t\t"+ctgEraseCall),
+		ctgSource("an ages-note call left in the tombstone callback", "R-6", "internal/app/account_erasure_tombstones.go", map[string]string{
+			"internal/app/account_erasure_tombstones.go": ctgTombstoneFile("", ctgTombstonePipelineCall+"\n\t\t"+ctgEraseCall),
 		}),
-		ctgSource("an ages-note call left in the admin callback", "R-6", "api_admin.go", map[string]string{
-			"api_admin.go": ctgAdminFile("", ctgEraseCall),
+		ctgSource("an ages-note call left in the admin callback", "R-6", "internal/app/api_admin.go", map[string]string{
+			"internal/app/api_admin.go": ctgAdminFile("", ctgEraseCall),
 		}),
 	)
 
@@ -2749,7 +2749,7 @@ func TestContactRequestTextGuardCatchesBypasses(t *testing.T) {
 	)...)
 	cases = append(cases,
 		ctgSource("aliased models import", "R-7", "", map[string]string{
-			"other.go": "package main\n\nimport mm \"fold/models\"\n\nfunc other() {\n\ttx.Delete(&mm.ContactRequest{})\n}\n",
+			"internal/app/other.go": "package app\n\nimport mm \"fold/models\"\n\nfunc other() {\n\ttx.Delete(&mm.ContactRequest{})\n}\n",
 		}),
 	)
 
@@ -2793,7 +2793,7 @@ func TestContactRequestTextGuardCatchesBypasses(t *testing.T) {
 		"blank": `import _ "fold/internal/testdb"`, "dot": `import . "fold/internal/testdb"`,
 	} {
 		cases = append(cases,
-			ctgSource("a "+name+" import of internal/testdb", "RC-1(d)", "api_x.go", map[string]string{"api_x.go": "package main\n\n" + imp + "\n"}),
+			ctgSource("a "+name+" import of internal/testdb", "RC-1(d)", "internal/app/api_x.go", map[string]string{"internal/app/api_x.go": "package app\n\n" + imp + "\n"}),
 			ctgSource("a "+name+" import of internal/testdb from a deep package", "RC-1(d)", "internal/other/x.go", map[string]string{"internal/other/x.go": "package other\n\n" + imp + "\n"}),
 		)
 	}
@@ -2863,45 +2863,45 @@ func TestContactRequestTextGuardCatchesBypasses(t *testing.T) {
 		`q := tx.Model(&models.Setting{}); func() { q := tx.Model(&r); _ = q }(); q.Delete(nil)`,
 	}
 	for _, b := range allowed {
-		cases = append(cases, ctgCase{name: b, files: map[string]string{"other.go": ctgBodyFile(b)}})
+		cases = append(cases, ctgCase{name: b, files: map[string]string{"internal/app/other.go": ctgBodyFile(b)}})
 	}
 	cases = append(cases,
 		ctgCase{name: "tombstone package declarations resolve in their own file", files: map[string]string{
-			"account_erasure_tombstones.go": tombstone + "\nfunc lockTombstoneIn(tx *gorm.DB, id uint) (bool, error) { return true, nil }\nvar errTombstoneNoop = errors.New(\"no work\")\n",
+			"internal/app/account_erasure_tombstones.go": tombstone + "\nfunc lockTombstoneIn(tx *gorm.DB, id uint) (bool, error) { return true, nil }\nvar errTombstoneNoop = errors.New(\"no work\")\n",
 		}},
 		ctgCase{name: "tombstone renamed callback parameter", files: map[string]string{
-			"account_erasure_tombstones.go": strings.NewReplacer("func(tx *gorm.DB)", "func(tombTx *gorm.DB)", "lockTombstoneIn(tx,", "lockTombstoneIn(tombTx,", "a.eraseAccountIn(tx,", "a.eraseAccountIn(tombTx,").Replace(tombstone),
+			"internal/app/account_erasure_tombstones.go": strings.NewReplacer("func(tx *gorm.DB)", "func(tombTx *gorm.DB)", "lockTombstoneIn(tx,", "lockTombstoneIn(tombTx,", "a.eraseAccountIn(tx,", "a.eraseAccountIn(tombTx,").Replace(tombstone),
 		}},
 		ctgCase{name: "tombstone renamed lock results", files: map[string]string{
-			"account_erasure_tombstones.go": strings.NewReplacer("found", "locked", "err :=", "lockErr :=", "err !=", "lockErr !=", "return err\n", "return lockErr\n", "{}, err", "{}, lockErr").Replace(tombstone),
+			"internal/app/account_erasure_tombstones.go": strings.NewReplacer("found", "locked", "err :=", "lockErr :=", "err !=", "lockErr !=", "return err\n", "return lockErr\n", "{}, err", "{}, lockErr").Replace(tombstone),
 		}},
 		ctgCase{name: "an assignment call in the pipeline body", files: map[string]string{
-			"account_erasure.go": scrubs("err := eraseContactRequestTextIn(tx, s)\n\tif err != nil {\n\t\treturn out, err\n\t}"),
+			"internal/app/account_erasure.go": scrubs("err := eraseContactRequestTextIn(tx, s)\n\tif err != nil {\n\t\treturn out, err\n\t}"),
 		}},
 		ctgCase{name: "an expression statement call in the pipeline body", files: map[string]string{
-			"account_erasure.go": scrubs("eraseContactRequestTextIn(tx, s)"),
+			"internal/app/account_erasure.go": scrubs("eraseContactRequestTextIn(tx, s)"),
 		}},
 		// T07A-GFR-03: a call in an if condition that uses the pipeline's own tx.
 		ctgCase{name: "a condition call using the pipeline parameter", files: map[string]string{
-			"account_erasure.go": scrubs("if eraseContactRequestTextIn(tx, s) != nil {\n\t\treturn out, gorm.ErrInvalidDB\n\t}"),
+			"internal/app/account_erasure.go": scrubs("if eraseContactRequestTextIn(tx, s) != nil {\n\t\treturn out, gorm.ErrInvalidDB\n\t}"),
 		}},
 		ctgCase{name: "a condition call with an init that does not shadow tx", files: map[string]string{
-			"account_erasure.go": scrubs("if n := 1; eraseContactRequestTextIn(tx, s) != nil && n > 0 {\n\t\treturn out, gorm.ErrInvalidDB\n\t}"),
+			"internal/app/account_erasure.go": scrubs("if n := 1; eraseContactRequestTextIn(tx, s) != nil && n > 0 {\n\t\treturn out, gorm.ErrInvalidDB\n\t}"),
 		}},
 		ctgCase{name: "the pipeline's transaction renamed", files: map[string]string{
-			"account_erasure.go": strings.NewReplacer("eraseAccountIn(tx *gorm.DB", "eraseAccountIn(etx *gorm.DB", "tx.Where(", "etx.Where(", "tx.Delete(opts", "etx.Delete(opts", "eraseContactRequestTextIn(tx,", "eraseContactRequestTextIn(etx,", "eraseContactRequestReasonsIn(tx,", "eraseContactRequestReasonsIn(etx,").Replace(scrubs(ctgEraseCall)),
+			"internal/app/account_erasure.go": strings.NewReplacer("eraseAccountIn(tx *gorm.DB", "eraseAccountIn(etx *gorm.DB", "tx.Where(", "etx.Where(", "tx.Delete(opts", "etx.Delete(opts", "eraseContactRequestTextIn(tx,", "eraseContactRequestTextIn(etx,", "eraseContactRequestReasonsIn(tx,", "eraseContactRequestReasonsIn(etx,").Replace(scrubs(ctgEraseCall)),
 		}},
 		ctgCase{name: "an if-init admin call", files: map[string]string{
-			"api_admin.go": ctgAdminFileCall("err = a.fencedContactMutation(ctx, contactChange{UserID: targetID}, ", ")", "counts := 0\n\t\t\tif _, err := a.eraseAccountIn(tx, s, opts); err != nil {\n\t\t\t\treturn nil, err\n\t\t\t}"),
+			"internal/app/api_admin.go": ctgAdminFileCall("err = a.fencedContactMutation(ctx, contactChange{UserID: targetID}, ", ")", "counts := 0\n\t\t\tif _, err := a.eraseAccountIn(tx, s, opts); err != nil {\n\t\t\t\treturn nil, err\n\t\t\t}"),
 		}},
 		ctgCase{name: "a ContactRequest type of another package", files: map[string]string{
-			"other.go": "package main\n\nimport \"fold/internal/policy\"\n\nfunc other() {\n\tvar r policy.ContactRequest\n\tr.Reason = \"\"\n}\n",
+			"internal/app/other.go": "package app\n\nimport \"fold/internal/policy\"\n\nfunc other() {\n\tvar r policy.ContactRequest\n\tr.Reason = \"\"\n}\n",
 		}},
 		ctgCase{name: "a bare ContactRequest in package policy", files: map[string]string{
 			"internal/policy/contact.go": "package policy\n\ntype ContactRequest struct{ Reason string }\n\nfunc f() {\n\tvar r ContactRequest\n\tr.Reason = \"\"\n}\n",
 		}},
 		ctgCase{name: "a test file that sets the role and imports internal/testdb", files: map[string]string{
-			"api_x_test.go": "package main\n\nimport \"fold/internal/testdb\"\n\nvar q = \"SET LOCAL session_replication_role = replica; ALTER TABLE x DISABLE TRIGGER y\"\n",
+			"internal/app/api_x_test.go": "package app\n\nimport \"fold/internal/testdb\"\n\nvar q = \"SET LOCAL session_replication_role = replica; ALTER TABLE x DISABLE TRIGGER y\"\n",
 		}},
 		ctgCase{name: "a package inside internal/testdb", files: map[string]string{
 			"internal/testdb/helper.go": "package testdb\n\nfunc helper() {}\n",
@@ -2925,7 +2925,7 @@ func TestContactRequestTextGuardCatchesBypasses(t *testing.T) {
 // about. A tree that stops holding them would let the guard pass on nothing.
 func TestContactRequestTextGuardReadsTheRealTree(t *testing.T) {
 	sources := guardkit.Production(t)
-	for _, path := range []string{"account_erasure.go", "account_erasure_tombstones.go", "api_admin.go", "api_contact.go", "internal/testdb/testdb.go"} {
+	for _, path := range []string{"internal/app/account_erasure.go", "internal/app/account_erasure_tombstones.go", "internal/app/api_admin.go", "internal/app/api_contact.go", "internal/testdb/testdb.go"} {
 		if _, ok := sources[path]; !ok {
 			t.Errorf("guardkit.ReadProduction no longer reads %s, which the contact-request text guard binds its allowances to", path)
 		}

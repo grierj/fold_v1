@@ -1,4 +1,4 @@
-package main
+package app
 
 // The deleted-accounts review list (M7.4 T07B-3a, owner decision 7): the
 // contact-request reasons that were left behind by accounts deleted before

@@ -1,4 +1,4 @@
-package main
+package app
 
 import (
 	"bytes"
@@ -114,7 +114,7 @@ func TestProductionLoggerKeepsRealCallerLocations(t *testing.T) {
 		if !strings.Contains(out, want) {
 			t.Fatalf("diagnostic missing %q (captured output withheld)", want)
 		}
-		if strings.Contains(out, "dbopen.go") {
+		if strings.Contains(out, "internal/app/dbopen.go") {
 			t.Fatal("diagnostic reports the forwarding logger instead of the query caller")
 		}
 		line := callerLine.FindString(out)

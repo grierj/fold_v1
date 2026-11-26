@@ -91,7 +91,7 @@ func (s RoomBookingState) HoldsRoom() bool {
 }
 
 // RoomBookingMove is one way a booking's state changes, named by what causes
-// it. The root package's changeBookings writes every move of an existing
+// it. Package app's changeBookings writes every move of an existing
 // row; a move that makes the row is the status its insert writes; a release
 // is a delete; and a move the request makes changes no booking row.
 type RoomBookingMove string
@@ -206,7 +206,7 @@ func (m RoomBookingMove) FromStatuses() []string {
 }
 
 // RoomRequestMove is one way a room request's status changes, named by what
-// causes it. The root package's moveRoomRequest and moveRoomRequestsWhere
+// causes it. Package app's moveRoomRequest and moveRoomRequestsWhere
 // write every move of an existing row; opening one inserts it pending.
 type RoomRequestMove string
 

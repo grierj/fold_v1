@@ -1,4 +1,4 @@
-package main
+package app
 
 import (
 	"context"
@@ -377,9 +377,6 @@ func (a *App) setupRouter() *gin.Engine {
 	return r
 }
 
-//go:embed web/dist
-var distFS embed.FS
-
 //go:embed templates/*.html
 var templatesFS embed.FS
 
@@ -398,18 +395,15 @@ func parsePageTemplates(css string) (*template.Template, error) {
 	}).ParseFS(templatesFS, "templates/*.html")
 }
 
-//go:embed docs/MEMBERS.md
-var memberHelp []byte
-
 func serveMemberHelp(c *gin.Context) {
 	c.Header("X-Content-Type-Options", "nosniff")
-	c.Data(http.StatusOK, "text/plain; charset=utf-8", memberHelp)
+	c.Data(http.StatusOK, "text/plain; charset=utf-8", build.MemberHelp)
 }
 
 // distSub is the built SPA bundle, rooted at index.html; nil when the embedded
 // directory has no bundle.
 func distSub() fs.FS {
-	sub, err := fs.Sub(distFS, "web/dist")
+	sub, err := fs.Sub(build.Dist, "web/dist")
 	if err != nil {
 		return nil
 	}

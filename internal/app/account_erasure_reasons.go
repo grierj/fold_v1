@@ -1,4 +1,4 @@
-package main
+package app
 
 // Reason review during an account deletion (M7.4 T07B-2b, owner decision 6).
 //

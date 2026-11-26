@@ -1,4 +1,4 @@
-package main
+package app
 
 import (
 	"encoding/json"
@@ -356,7 +356,7 @@ var (
 	hexColorRe     = regexp.MustCompile(`#(?:[0-9a-fA-F]{8}|[0-9a-fA-F]{6}|[0-9a-fA-F]{3,4})\b`)
 	paletteClassRe = regexp.MustCompile(`\b(?:bg|text|border|ring|ring-offset|divide|outline|from|via|to|fill|stroke|accent|caret|decoration|placeholder|shadow)-(?:slate|gray|zinc|stone|red|orange|amber|yellow|lime|green|emerald|teal|cyan|sky|blue|indigo|violet|purple|fuchsia|pink|rose|brand|neutral|pending|accent)(?:-\d{2,3})?\b|\b(?:bg|text|border|ring|divide|outline|from|via|to|fill|stroke|accent|decoration)-(?:primary|danger|success|warning|info)-\d{2,3}\b`)
 	// colorScanDirs hold everything that styles a page.
-	colorScanDirs = []string{"web/src", "templates"}
+	colorScanDirs = []string{"web/src", "internal/app/templates"}
 	// themeFile is the one place hex values live, inside its @theme block.
 	themeFile = "web/src/index.css"
 )
@@ -429,10 +429,10 @@ func TestColorsComeFromThemeTokens(t *testing.T) {
 // red, a Tailwind palette class, and a hex outside @theme in index.css.
 func TestColorGuardCatchesHardCodedColors(t *testing.T) {
 	cases := map[string]string{
-		"templates/setup.html":        `<style>header { background-color: #e51937; }</style>`,
-		"web/src/pages/Admin.tsx":     `<button className="btn-secondary text-red-600!">`,
-		"web/src/components/Card.tsx": `<div className="bg-brand-dark">`,
-		"web/src/index.css":           "@theme {\n  --color-primary: #f64060;\n}\n.btn { color: #fff; }",
+		"internal/app/templates/setup.html": `<style>header { background-color: #e51937; }</style>`,
+		"web/src/pages/Admin.tsx":           `<button className="btn-secondary text-red-600!">`,
+		"web/src/components/Card.tsx":       `<div className="bg-brand-dark">`,
+		"web/src/index.css":                 "@theme {\n  --color-primary: #f64060;\n}\n.btn { color: #fff; }",
 	}
 	for path, src := range cases {
 		if len(colorViolations(path, src)) == 0 {
@@ -598,7 +598,7 @@ func TestRouteDialogGuardCatchesNativePrompts(t *testing.T) {
 // components/ui excluded). ui-ratchet.json holds today's counts: a file may
 // not go above its count, and when a file gets better its count must come
 // down in the same change, so the ratchet only turns one way.
-// UPDATE_UI_RATCHET=1 go test -run TestUIRatchets rewrites the file.
+// UPDATE_UI_RATCHET=1 go test ./internal/app -run TestUIRatchets rewrites the file.
 
 type uiRule struct {
 	name, fix string
@@ -707,7 +707,7 @@ func uiRatchetViolations(ratchet map[string]map[string]int, files map[string]str
 			case got[r.name] > want:
 				out = append(out, fmt.Sprintf("%s: %s went from %d to %d; %s", p, r.name, want, got[r.name], r.fix))
 			case got[r.name] < want:
-				out = append(out, fmt.Sprintf("%s: %s fell from %d to %d. Good: lower it in ui-ratchet.json (UPDATE_UI_RATCHET=1 go test -run TestUIRatchets)", p, r.name, want, got[r.name]))
+				out = append(out, fmt.Sprintf("%s: %s fell from %d to %d. Good: lower it in ui-ratchet.json (UPDATE_UI_RATCHET=1 go test ./internal/app -run TestUIRatchets)", p, r.name, want, got[r.name]))
 			}
 		}
 	}

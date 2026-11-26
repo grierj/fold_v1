@@ -1,4 +1,4 @@
-package main
+package app
 
 // erasureReportJSON is what DELETE /api/v1/admin/users/:id answers under
 // "erasure" (M7.4 R4-3b-2 and R4-4a-V): integer counts of what the household

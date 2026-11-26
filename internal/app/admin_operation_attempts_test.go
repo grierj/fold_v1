@@ -1,4 +1,4 @@
-package main
+package app
 
 import (
 	"context"
@@ -366,7 +366,7 @@ func TestAttemptLedgerCap(t *testing.T) {
 // defers the unlock at once and holds no database call, channel operation,
 // select, sleep or context wait.
 func ledgerMutexProblems(src string) []string {
-	tree, err := parser.ParseFile(token.NewFileSet(), "ledger.go", src, 0)
+	tree, err := parser.ParseFile(token.NewFileSet(), "internal/app/ledger.go", src, 0)
 	if err != nil {
 		return []string{"cannot parse: " + err.Error()}
 	}
@@ -440,7 +440,7 @@ func ledgerMutexProblems(src string) []string {
 }
 
 func TestLedgerMutexHoldsNoWait(t *testing.T) {
-	b, err := os.ReadFile("admin_operation_attempts.go")
+	b, err := os.ReadFile("internal/app/admin_operation_attempts.go")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -450,7 +450,7 @@ func TestLedgerMutexHoldsNoWait(t *testing.T) {
 	if !strings.Contains(string(b), "func (l *attemptLedger) claim") {
 		t.Fatal("the ledger's claim method moved; this guard must keep reading it")
 	}
-	const good = "package main\nfunc (l *L) f() int {\n\tl.mu.Lock()\n\tdefer l.mu.Unlock()\n\treturn l.m[1]\n}\n"
+	const good = "package app\nfunc (l *L) f() int {\n\tl.mu.Lock()\n\tdefer l.mu.Unlock()\n\treturn l.m[1]\n}\n"
 	if bad := ledgerMutexProblems(good); len(bad) != 0 {
 		t.Fatalf("the positive fixture failed: %v", bad)
 	}
@@ -465,12 +465,12 @@ func TestLedgerMutexHoldsNoWait(t *testing.T) {
 		"a goroutine":        "\tgo f()\n",
 		"a transaction call": "\tdb.Transaction(nil)\n",
 	} {
-		src := "package main\nfunc (l *L) f() int {\n\tl.mu.Lock()\n\tdefer l.mu.Unlock()\n" + body + "\treturn l.m[1]\n}\n"
+		src := "package app\nfunc (l *L) f() int {\n\tl.mu.Lock()\n\tdefer l.mu.Unlock()\n" + body + "\treturn l.m[1]\n}\n"
 		if len(ledgerMutexProblems(src)) == 0 {
 			t.Errorf("%s under the mutex: the guard accepted it", name)
 		}
 	}
-	notDeferred := "package main\nfunc (l *L) f() int {\n\tl.mu.Lock()\n\tx := l.m[1]\n\tl.mu.Unlock()\n\treturn x\n}\n"
+	notDeferred := "package app\nfunc (l *L) f() int {\n\tl.mu.Lock()\n\tx := l.m[1]\n\tl.mu.Unlock()\n\treturn x\n}\n"
 	if len(ledgerMutexProblems(notDeferred)) == 0 {
 		t.Error("an unlock that is not deferred right away: the guard accepted it")
 	}
@@ -2941,7 +2941,7 @@ func attemptKindProblems(files []*guardkit.File) []string {
 
 // attemptKindFixture is a package that passes attemptKindProblems; each negative
 // fixture below is it with one change.
-const attemptKindFixture = `package main
+const attemptKindFixture = `package app
 const (
 	attemptKindAccountDelete = "account_delete"
 	attemptKindLegacyReasonSave = "legacy_reason_save"
@@ -2964,15 +2964,15 @@ func TestAttemptKindsAreOneList(t *testing.T) {
 	for _, p := range parsed.Problems {
 		t.Error(p)
 	}
-	if f := parsed.File("admin_operation_attempts.go"); f == nil || guardkit.FindFunc(f.AST, "apiAdminSettleOperationAttempt") == nil || guardkit.FindFunc(f.AST, "settleAnswer") == nil {
+	if f := parsed.File("internal/app/admin_operation_attempts.go"); f == nil || guardkit.FindFunc(f.AST, "apiAdminSettleOperationAttempt") == nil || guardkit.FindFunc(f.AST, "settleAnswer") == nil {
 		t.Fatal("the attempt handlers moved; this guard must keep reading them")
 	}
-	for _, v := range attemptKindProblems(parsed.Package("main")) {
+	for _, v := range attemptKindProblems(parsed.Package("app")) {
 		t.Error(v)
 	}
 
 	files := func(src string) []*guardkit.File {
-		return guardkit.Sources{"fixture.go": src}.Parse(0).Files
+		return guardkit.Sources{"internal/app/fixture.go": src}.Parse(0).Files
 	}
 	if bad := attemptKindProblems(files(attemptKindFixture)); len(bad) != 0 {
 		t.Fatalf("the positive fixture failed: %v", bad)

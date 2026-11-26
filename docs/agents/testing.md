@@ -18,10 +18,14 @@ experiment only when the requested change specifically calls for it.
 - `make test` runs `go test ./...` against `DATABASE_URL` (`make go-test`), plus the shell
   self-tests; it starts the dev database if `DATABASE_URL` is unset. CI runs `make go-test` in the
   test job and the self-tests in the checks job.
-  `scripts/go-test.sh` shards the root package (`FOLD_TEST_SHARDS`, default two per CPU: the slow
-  tests mostly wait on real deadlines) and balances the shards by the seconds in
+  `scripts/go-test.sh` shards the app package, `internal/app` (`FOLD_TEST_SHARDS`, default two per
+  CPU: the slow tests mostly wait on real deadlines), and balances the shards by the seconds in
   `scripts/go-test-durations.txt`. A test that newly takes several seconds belongs in that file:
   refresh it with `FOLD_TEST_RECORD=1 FOLD_TEST_SHARDS=8 scripts/go-test.sh`.
+- `internal/app`'s tests run from the repository root, not from their own directory (`TestMain`
+  walks up to `go.mod`): the guards and contract tests read `web/src`, `docs`, `deploy` and
+  `.github` by root-relative path. So a path in one of its tests is relative to the root
+  (`internal/app/testdata/...`), and a failing fuzz input lands in the root's `testdata/fuzz/`.
 - Tests hash passwords at bcrypt's cheapest cost; a test that measures timing calls
   `realPasswordCost(t)` first.
 - Handler tests use `httptest` and `internal/testdb` (reuse the cookie-jar + CSRF dance in
@@ -176,7 +180,7 @@ Device checks are in `docs/FIRST-CHURCH-CHECKS.md`. Field data collection is a s
 `TestMeasureNormalize` (`internal/images`) and `TestMeasureUploadRequests` (root, needs
 `DATABASE_URL`) are opt-in (`FOLD_UPLOAD_MEASURE=1`, not run in CI), e.g.
 `FOLD_UPLOAD_MEASURE=1 go test ./internal/images -run '^TestMeasureNormalize$' -count=1 -v` and
-`FOLD_UPLOAD_MEASURE=1 go test . -run '^TestMeasureUploadRequests$' -count=1 -v`. Each runs every
+`FOLD_UPLOAD_MEASURE=1 go test ./internal/app -run '^TestMeasureUploadRequests$' -count=1 -v`. Each runs every
 `imagetest.WorstCases` picture (sized so its estimate is 80% to 100% of the budget, one for each way
 the estimate adds up, a 200-frame interlaced GIF for the per-frame decoder and encoder state among them) in a process of its own (`FOLD_UPLOAD_MEASURE_CASE=<name>` runs one) and logs a
 `MEASURE {...}` JSON line. Run them alone: they are about memory, so other work on the machine skews
@@ -364,8 +368,8 @@ build`, `make e2e`) and CI. Every name below is a test that exists today; the lo
 
 | You changed | Run while iterating | Why this one |
 |---|---|---|
-| The scanner: the scan SQL, batches, cursor, the tombstone discovery markers, the legacy (deleted-accounts) scan | `go test . -count=1 -run '^(TestReasonScanNoSkip\|TestLegacyScanNoSkip\|TestReasonScanIsBounded\|TestReasonOrderingMatrix\|TestBatchedScanMatchesTheSingleStatementOnPostgres\|TestTombstoneDiscoveryNumericMarkersAndShape\|TestTombstoneStructuralMatchAndNumericMarker)$'` | The traversal (live and legacy, T07B-3a) must not skip or repeat a request or an account, every unit stays bounded, the batched scan equals the single statement, and the markers decide what a sweep revisits. Needs `DATABASE_URL`. |
-| A transaction, the attempt ledger, the restore fence or a legacy save (T07B-3b) | `go test . -count=1 -run '^(TestLegacySaveDecidesEachReason\|TestLegacySaveRefusesAStaleSet\|TestLegacySaveStatementOrder)$'`; `go test . -count=8 -run '^TestAttemptLifecycle$'`; `go test . -count=1 -run '^TestFencedTransactionsTakeTheTicketFirst$'`; then the restore-fence tests below | `-count=8` because the lifecycle tests are about ordering; the guard reads the whole production tree; the fence tests dump and restore a real database, so they need the `pg_dump` setup in "Restore tests" above (`TestRestoreFence*`, `TestReasonReviewRestoreWithOpenPanel`). |
+| The scanner: the scan SQL, batches, cursor, the tombstone discovery markers, the legacy (deleted-accounts) scan | `go test ./internal/app -count=1 -run '^(TestReasonScanNoSkip\|TestLegacyScanNoSkip\|TestReasonScanIsBounded\|TestReasonOrderingMatrix\|TestBatchedScanMatchesTheSingleStatementOnPostgres\|TestTombstoneDiscoveryNumericMarkersAndShape\|TestTombstoneStructuralMatchAndNumericMarker)$'` | The traversal (live and legacy, T07B-3a) must not skip or repeat a request or an account, every unit stays bounded, the batched scan equals the single statement, and the markers decide what a sweep revisits. Needs `DATABASE_URL`. |
+| A transaction, the attempt ledger, the restore fence or a legacy save (T07B-3b) | `go test ./internal/app -count=1 -run '^(TestLegacySaveDecidesEachReason\|TestLegacySaveRefusesAStaleSet\|TestLegacySaveStatementOrder)$'`; `go test ./internal/app -count=8 -run '^TestAttemptLifecycle$'`; `go test ./internal/app -count=1 -run '^TestFencedTransactionsTakeTheTicketFirst$'`; then the restore-fence tests below | `-count=8` because the lifecycle tests are about ordering; the guard reads the whole production tree; the fence tests dump and restore a real database, so they need the `pg_dump` setup in "Restore tests" above (`TestRestoreFence*`, `TestReasonReviewRestoreWithOpenPanel`). |
 | The review UI or its store, live or legacy | `cd web && npx vitest run src/pages/ReasonReviewLegacy.test.tsx src/components/ReasonReviewList.test.tsx src/components/ReasonReviewSection.test.tsx src/lib/reasonReviewStore.test.ts`; then `make e2e` (the shards decide which specs run together, so a spec filter after the spec list does not narrow it; with `DATABASE_URL` set, `E2E_SHARDS=1 web/e2e/run.sh --grep "reviewing contact-request reasons"` runs the deletion flow alone, and `--grep "the deleted-accounts review"` the legacy review in `admin-reason-review.spec.ts`, and `--grep "long reason reviews"` the long-history session spec, after `cd web && npm run build`), which includes `admin-delete-user.spec.ts`, `admin-reason-review.spec.ts`, `reason-review-session.spec.ts` and the `a11y` and `layout` specs | Vitest is the fast loop; the e2e spec drives the real deletion; axe and layout catch what a unit test cannot see. Look at the 390px screenshots (`.cursor/skills/verify-ui`). |
 | Host archives, adopted copies, expiry, cutover: `checks.sh` archive section, `backup.sh`, `provision.sh`, `upgrade.sh`, the backup image | `make backup-test` (the image, no Docker); the host side is a real-droplet check (DEC-154) | `backup-test.sh` stubs commands through `PATH` only. Offsite uses one fake bucket (`deploy/digitalocean/bucket-model.sh`, sourced by the `rclone` stub): PUTs are kept under their whole key, any list, head, get or delete writes a `forbidden` file every case requires absent, and `bucket_check` holds the committed keys to one pair per run folder. The fake `age` only marks its input, so it proves routing, not encryption. The host cases (archive copies, expiry, cutover, crash convergence) and real `age` and S3 clients are checked on a real droplet and listed in `docs/FIRST-CHURCH-CHECKS.md`. |
 | Recovery: `restore.sh`, the drill, the deploy tools | The drill cases the change can reach, through `restore-drill.sh` on a disposable droplet (the case list is its `drill_progress_init` call); there is no CI harness (DEC-154) | The full drill is long; `docs/agents/deploy.md` ("Full restore drill frequency") is the one place that says when it is owed. |
@@ -622,7 +626,7 @@ argument above 128 KiB.
   `FULL`. The record at `8ef97ff7` is such a `PILOT`.
 - **Checks that run without Docker**: `make reason-review-scale-test` (the matrix report's own checks against stub evidence, none of
   which can be FULL). The `go` section of `qc1/app-facts.json` changes only by
-  `UPDATE_QC1_FACTS=1 go test -run TestQC1AppFacts .`; its `web` section is held by
+  `UPDATE_QC1_FACTS=1 go test -run TestQC1AppFacts ./internal/app`; its `web` section is held by
   `ReasonReviewSection.test.tsx`.
 
 ### Legacy QC4/5: the deleted-accounts review (#292)
@@ -684,7 +688,7 @@ reasons. A matrix run still records the two legacy placeholders as pending, with
   proxied by `timeToFirstItemsMs`; the marker lookup is measured at 0 markers, at 100 and at 100%, not at intermediate mixes; parse time is not separated
   from request time. Close #292's measurement part only with the invocation `complete: true` and every budget finding either absent or carrying its
   reviewed R4-C06 disposition; otherwise the PR says `Refs`.
-- **Checks that run without Docker**: `go test -run 'TestQC1LegacyMarkersSQL|TestQC1LegacyPlanMarkersAreWhatTheApplicationSends|TestQC1AppFacts' .`
+- **Checks that run without Docker**: `go test -run 'TestQC1LegacyMarkersSQL|TestQC1LegacyPlanMarkersAreWhatTheApplicationSends|TestQC1AppFacts' ./internal/app`
   (needs `DATABASE_URL`).
 
 ### Sampling Next changed reason (#298)
@@ -851,7 +855,7 @@ without it; none is written before then.
   `<name>-390.png` and `<name>-390x420.png` for each dialog it checks; open them to see the dialog at
   phone width, as the axe and layout checks cannot judge how it looks.
 - Traces: `web/test-results/shard-<n>/`.
-- Golden files: `TestDateProjectorGoldens` rewrites `testdata/date_projector` with
+- Golden files: `TestDateProjectorGoldens` rewrites `internal/app/testdata/date_projector` with
   `UPDATE_GOLDEN=1`.
 
 ### Test-only attempt clock

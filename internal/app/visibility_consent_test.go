@@ -1,4 +1,4 @@
-package main
+package app
 
 import (
 	"bytes"
@@ -1623,10 +1623,10 @@ func atTopLevel(stack []ast.Node) bool {
 }
 
 var visibilityActionWriters = map[string]string{
-	"apiCreateEvent":               "api_events.go",
-	"apiSetEventVisibility":        "api_event_access.go",
-	"applyGroupTightening":         "api_group_visibility.go",
-	"changeDateVisibilitySelected": "api_occurrence_visibility.go",
+	"apiCreateEvent":               "internal/app/api_events.go",
+	"apiSetEventVisibility":        "internal/app/api_event_access.go",
+	"applyGroupTightening":         "internal/app/api_group_visibility.go",
+	"changeDateVisibilitySelected": "internal/app/api_occurrence_visibility.go",
 }
 
 // auditWriterProblems: every reference to an event visibility audit action in
@@ -1640,7 +1640,7 @@ func auditWriterProblems(sources map[string]string, other map[string]string) []s
 	bad := append([]string(nil), parsed.Problems...)
 	seen := map[string]bool{}
 	for _, f := range parsed.Files {
-		if strings.HasSuffix(f.Path, "_test.go") || f.Path == "internal/audit/audit.go" || strings.HasPrefix(f.Path, "internal/notify/") || f.Path == "account_erasure_audit.go" {
+		if strings.HasSuffix(f.Path, "_test.go") || f.Path == "internal/audit/audit.go" || strings.HasPrefix(f.Path, "internal/notify/") || f.Path == "internal/app/account_erasure_audit.go" {
 			continue
 		}
 		auditNames := guardkit.ImportNames(f.AST, "fold/internal/audit")
@@ -1735,15 +1735,15 @@ func TestEventVisibilityAuditWritersDeclareConsent(t *testing.T) {
 		out[path] = src
 		return out
 	}
-	const head = "package main\nimport \"fold/internal/audit\"\n"
+	const head = "package app\nimport \"fold/internal/audit\"\n"
 	for name, mutated := range map[string]map[string]string{
-		"a writer in an unlisted function": plant("x.go", head+"func f() { _ = audit.Visibility"+"Changed }\n"),
-		"a listed writer with no call":     plant("api_events.go", strings.Replace(sources["api_events.go"], "plan, _, err := a.checkConsentIn(", "plan, _, err := a.checkConsentInX(", 1)),
-		"a call after the reference":       plant("y.go", head+"func (a *App) apiCreateEvent() { _ = audit.Visibility"+"Override; a.checkConsentIn() }\n"),
-		"a call inside a Transaction":      plant("y.go", head+"func (a *App) apiCreateEvent() { a.DB.Transaction(func(tx *gorm.DB) error { a.checkConsentIn(); return nil }); _ = audit.Visibility"+"Override }\n"),
+		"a writer in an unlisted function": plant("internal/app/x.go", head+"func f() { _ = audit.Visibility"+"Changed }\n"),
+		"a listed writer with no call":     plant("internal/app/api_events.go", strings.Replace(sources["internal/app/api_events.go"], "plan, _, err := a.checkConsentIn(", "plan, _, err := a.checkConsentInX(", 1)),
+		"a call after the reference":       plant("internal/app/y.go", head+"func (a *App) apiCreateEvent() { _ = audit.Visibility"+"Override; a.checkConsentIn() }\n"),
+		"a call inside a Transaction":      plant("internal/app/y.go", head+"func (a *App) apiCreateEvent() { a.DB.Transaction(func(tx *gorm.DB) error { a.checkConsentIn(); return nil }); _ = audit.Visibility"+"Override }\n"),
 	} {
 		if name == "a call after the reference" || name == "a call inside a Transaction" {
-			delete(mutated, "api_events.go")
+			delete(mutated, "internal/app/api_events.go")
 		}
 		if len(auditWriterProblems(mutated, scripts)) == 0 {
 			t.Errorf("%s: the guard missed it", name)
@@ -1770,7 +1770,7 @@ func consentPlanProblems(sources map[string]string) []string {
 		ast.Inspect(f.AST, func(n ast.Node) bool {
 			if lit, ok := n.(*ast.BasicLit); ok && lit.Kind == token.STRING && strings.Contains(lit.Value, "set_config('fold.visibility_consent'") {
 				markers++
-				if fd := enclosingFunc(f.AST, lit.Pos()); fd == nil || fd.Name.Name != "checkConsentIn" || f.Path != "visibility_consent.go" {
+				if fd := enclosingFunc(f.AST, lit.Pos()); fd == nil || fd.Name.Name != "checkConsentIn" || f.Path != "internal/app/visibility_consent.go" {
 					bad = append(bad, f.Path+": sets the visibility consent marker outside checkConsentIn")
 				}
 			}
@@ -1816,7 +1816,7 @@ func consentPlanProblems(sources map[string]string) []string {
 						}
 					}
 					if !inReset {
-						bad = append(bad, "api_event_access.go: the event route resets a date that is not from plan.ResetDates()")
+						bad = append(bad, "internal/app/api_event_access.go: the event route resets a date that is not from plan.ResetDates()")
 					}
 				}
 			}
@@ -1825,10 +1825,10 @@ func consentPlanProblems(sources map[string]string) []string {
 	if markers != 1 {
 		bad = append(bad, fmt.Sprintf("the visibility consent marker is set %d times, want once", markers))
 	}
-	if f := parsed.File("api_group_visibility.go"); f != nil {
+	if f := parsed.File("internal/app/api_group_visibility.go"); f != nil {
 		fd := guardkit.FindFunc(f.AST, "cancelSelectedLosers")
 		if fd == nil || len(fd.Body.List) < 3 {
-			bad = append(bad, "api_group_visibility.go: cancelSelectedLosers is missing")
+			bad = append(bad, "internal/app/api_group_visibility.go: cancelSelectedLosers is missing")
 		} else {
 			src := func(n ast.Node) string {
 				return guardkit.Squash(f.Src[parsed.Fset.Position(n.Pos()).Offset:parsed.Fset.Position(n.End()).Offset])
@@ -1864,13 +1864,13 @@ func TestVisibilityCancellationsConsumeACheckedPlan(t *testing.T) {
 		return out
 	}
 	for name, mutated := range map[string]map[string]string{
-		"a second marker":                    mutate("api_events.go", "func (a *App) apiCreateEvent(", "func marker(tx *gorm.DB) { tx.Exec(\"SELECT set_config('fold.visibility_"+"consent', 'v1', true)\") }\nfunc (a *App) apiCreateEvent("),
-		"a date writer with no check":        mutate("api_date_edits.go", "plan, token, err := a.checkConsentIn(tx, &edit.consent, h, b.entries)", "plan, token, err := a.checkConsentInX(tx, &edit.consent, h, b.entries)"),
-		"a check in a loop":                  mutate("api_group_visibility.go", "plan, token, err := a.checkConsentIn(tx, given, h, b.entries)", "var plan *consent.Plan[dateLosers]; var token string; for range 1 { plan, token, err = a.checkConsentIn(tx, given, h, b.entries) }"),
-		"no Done":                            mutate("api_event_access.go", "return plan.Done()", "return nil"),
-		"a read of the plan's copy again":    mutate("api_group_visibility.go", "dates, rows, now := sel.dates, sel.rows, sel.now", "dates, rows, now := c.Selection().dates, sel.rows, sel.now"),
-		"a statement before Verify":          mutate("api_group_visibility.go", "if h := a.hooks.consentSelection; h != nil {\n\t\th(&sel)\n\t}", "sel.rows = nil"),
-		"a reset of a date outside the plan": mutate("api_event_access.go", "for _, id := range plan.ResetDates() {", "for _, id := range []uint64{} {"),
+		"a second marker":                    mutate("internal/app/api_events.go", "func (a *App) apiCreateEvent(", "func marker(tx *gorm.DB) { tx.Exec(\"SELECT set_config('fold.visibility_"+"consent', 'v1', true)\") }\nfunc (a *App) apiCreateEvent("),
+		"a date writer with no check":        mutate("internal/app/api_date_edits.go", "plan, token, err := a.checkConsentIn(tx, &edit.consent, h, b.entries)", "plan, token, err := a.checkConsentInX(tx, &edit.consent, h, b.entries)"),
+		"a check in a loop":                  mutate("internal/app/api_group_visibility.go", "plan, token, err := a.checkConsentIn(tx, given, h, b.entries)", "var plan *consent.Plan[dateLosers]; var token string; for range 1 { plan, token, err = a.checkConsentIn(tx, given, h, b.entries) }"),
+		"no Done":                            mutate("internal/app/api_event_access.go", "return plan.Done()", "return nil"),
+		"a read of the plan's copy again":    mutate("internal/app/api_group_visibility.go", "dates, rows, now := sel.dates, sel.rows, sel.now", "dates, rows, now := c.Selection().dates, sel.rows, sel.now"),
+		"a statement before Verify":          mutate("internal/app/api_group_visibility.go", "if h := a.hooks.consentSelection; h != nil {\n\t\th(&sel)\n\t}", "sel.rows = nil"),
+		"a reset of a date outside the plan": mutate("internal/app/api_event_access.go", "for _, id := range plan.ResetDates() {", "for _, id := range []uint64{} {"),
 	} {
 		if len(consentPlanProblems(mutated)) == 0 {
 			t.Errorf("%s: the guard missed it", name)
@@ -1885,9 +1885,9 @@ func TestVisibilityCancellationsConsumeACheckedPlan(t *testing.T) {
 func consentEpochProblems(sources map[string]string) []string {
 	parsed := guardkit.Sources(sources).Parse(0)
 	bad := append([]string(nil), parsed.Problems...)
-	f := parsed.File("visibility_consent.go")
+	f := parsed.File("internal/app/visibility_consent.go")
 	if f == nil {
-		return append(bad, "visibility_consent.go is missing")
+		return append(bad, "internal/app/visibility_consent.go is missing")
 	}
 	foundConst := false
 	ast.Inspect(f.AST, func(n ast.Node) bool {
@@ -1943,9 +1943,9 @@ func consentEpochProblems(sources map[string]string) []string {
 			bad = append(bad, "lockConsentEpochIn does not read consentEpochLockSQL exactly once")
 		}
 	}
-	rf := parsed.File("restore_fence.go")
+	rf := parsed.File("internal/app/restore_fence.go")
 	if rf == nil {
-		return append(bad, "restore_fence.go is missing")
+		return append(bad, "internal/app/restore_fence.go is missing")
 	}
 	boot := guardkit.FindFunc(rf.AST, "bootRestoreFence")
 	if boot == nil {
@@ -1992,14 +1992,14 @@ func TestConsentEpochIsLockedOnlyWhereATokenIsChecked(t *testing.T) {
 	}
 	const lockSQL = `"SELECT value FROM settings WHERE key = ? FOR SHARE"`
 	for name, mutated := range map[string]map[string]string{
-		"the plain read":                 mutate("visibility_consent.go", lockSQL, `"SELECT value FROM settings WHERE key = ?"`),
-		"FOR KEY SHARE":                  mutate("visibility_consent.go", lockSQL, `"SELECT value FROM settings WHERE key = ? FOR KEY SHARE"`),
-		"NOWAIT":                         mutate("visibility_consent.go", lockSQL, `"SELECT value FROM settings WHERE key = ? FOR SHARE NOWAIT"`),
-		"SKIP LOCKED":                    mutate("visibility_consent.go", lockSQL, `"SELECT value FROM settings WHERE key = ? FOR SHARE SKIP LOCKED"`),
-		"a second call":                  mutate("visibility_consent.go", "func (a *App) consentTokenIn(", "func second(a *App, tx *gorm.DB) { a.lockConsentEpochIn(tx) }\nfunc (a *App) consentTokenIn("),
-		"a plain read in the check":      mutate("visibility_consent.go", "if h.Epoch, err = a.lockConsentEpochIn(tx); err != nil {", "if h.Epoch, err = consentEpochIn(tx); err != nil {"),
-		"a fenced caller":                mutate("visibility_consent.go", "func (a *App) consentTokenIn(", "func fenced(a *App) { a.fencedContactMutation(nil, contactChange{}, func(tx *gorm.DB) (*contactSeal, error) { a.checkConsentIn(tx, nil, consent.Header{}, nil); return nil, nil }) }\nfunc (a *App) consentTokenIn("),
-		"a statement after the rotation": mutate("restore_fence.go", "if h := a.hooks.bootRotated; h != nil {", "tx.Exec(\"SELECT 1\")\n\t\tif h := a.hooks.bootRotated; h != nil {"),
+		"the plain read":                 mutate("internal/app/visibility_consent.go", lockSQL, `"SELECT value FROM settings WHERE key = ?"`),
+		"FOR KEY SHARE":                  mutate("internal/app/visibility_consent.go", lockSQL, `"SELECT value FROM settings WHERE key = ? FOR KEY SHARE"`),
+		"NOWAIT":                         mutate("internal/app/visibility_consent.go", lockSQL, `"SELECT value FROM settings WHERE key = ? FOR SHARE NOWAIT"`),
+		"SKIP LOCKED":                    mutate("internal/app/visibility_consent.go", lockSQL, `"SELECT value FROM settings WHERE key = ? FOR SHARE SKIP LOCKED"`),
+		"a second call":                  mutate("internal/app/visibility_consent.go", "func (a *App) consentTokenIn(", "func second(a *App, tx *gorm.DB) { a.lockConsentEpochIn(tx) }\nfunc (a *App) consentTokenIn("),
+		"a plain read in the check":      mutate("internal/app/visibility_consent.go", "if h.Epoch, err = a.lockConsentEpochIn(tx); err != nil {", "if h.Epoch, err = consentEpochIn(tx); err != nil {"),
+		"a fenced caller":                mutate("internal/app/visibility_consent.go", "func (a *App) consentTokenIn(", "func fenced(a *App) { a.fencedContactMutation(nil, contactChange{}, func(tx *gorm.DB) (*contactSeal, error) { a.checkConsentIn(tx, nil, consent.Header{}, nil); return nil, nil }) }\nfunc (a *App) consentTokenIn("),
+		"a statement after the rotation": mutate("internal/app/restore_fence.go", "if h := a.hooks.bootRotated; h != nil {", "tx.Exec(\"SELECT 1\")\n\t\tif h := a.hooks.bootRotated; h != nil {"),
 	} {
 		if len(consentEpochProblems(mutated)) == 0 {
 			t.Errorf("%s: the guard missed it", name)
@@ -2010,8 +2010,8 @@ func TestConsentEpochIsLockedOnlyWhereATokenIsChecked(t *testing.T) {
 // TestConsentEpochHasOneWriter: the epoch row's key is named only where it is
 // declared, refused, rotated and read, and no SQL file but 00015 names it.
 func TestConsentEpochHasOneWriter(t *testing.T) {
-	allowed := map[string]bool{"settings.go:": true, "restore_fence.go:refuseRestoreFenceKey": true, "restore_fence.go:bootRestoreFence": true,
-		"visibility_consent.go:consentEpochIn": true, "visibility_consent.go:lockConsentEpochIn": true}
+	allowed := map[string]bool{"internal/app/settings.go:": true, "internal/app/restore_fence.go:refuseRestoreFenceKey": true, "internal/app/restore_fence.go:bootRestoreFence": true,
+		"internal/app/visibility_consent.go:consentEpochIn": true, "internal/app/visibility_consent.go:lockConsentEpochIn": true}
 	parsed := guardkit.Production(t).Parse(0)
 	for _, f := range parsed.Files {
 		ast.Inspect(f.AST, func(n ast.Node) bool {
@@ -2052,7 +2052,7 @@ func TestVisibilityConsentReadsTheInjectedClock(t *testing.T) {
 	sources := guardkit.Production(t)
 	parsed := sources.Parse(0)
 	for _, f := range parsed.Files {
-		whole := f.Path == "visibility_consent.go" || strings.HasPrefix(f.Path, "internal/consent/")
+		whole := f.Path == "internal/app/visibility_consent.go" || strings.HasPrefix(f.Path, "internal/consent/")
 		for _, d := range f.AST.Decls {
 			fd, ok := d.(*ast.FuncDecl)
 			if !ok || (!whole && !listed[fd.Name.Name]) {

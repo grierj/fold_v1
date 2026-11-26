@@ -44,7 +44,8 @@
 # start, seconds, exit status and log), one log per step, web-seeds.log (a line
 # per seed that ran, with its trace on failure) and failure-corpus/ (any input
 # the fuzzer saved). A failing fuzz input is also left in
-# testdata/fuzz/FuzzReasonEnvelope/, where `go test` replays it; deleting it is
+# testdata/fuzz/FuzzReasonEnvelope/ at the repository root (internal/app's
+# tests run from there), where `go test` replays it; deleting it is
 # the decision to call it fixed or not a bug. The record starts as incomplete
 # before the first step, and a signal finalizes it, so an interrupted rerun
 # cannot keep a previous pass; the completed record is parsed as JSON before
@@ -529,7 +530,7 @@ normal_pattern="^($(
 	IFS='|'
 	echo "${normal_tests[*]}"
 ))\$"
-run_step normal normal.log go test -count=1 -v -run "$normal_pattern" .
+run_step normal normal.log go test -count=1 -v -run "$normal_pattern" ./internal/app
 check_step "a deterministic test did not report PASS exactly once" all_passed "$evidence/normal.log" 1 "${normal_tests[@]}"
 record_step
 
@@ -537,7 +538,7 @@ record_step
 corpus=testdata/fuzz/FuzzReasonEnvelope
 corpus_files() { find "$corpus" -maxdepth 1 -type f -printf '%f\n' 2>/dev/null | sort || true; }
 before_corpus=$(corpus_files)
-run_step fuzz fuzz.log go test -run '^$' -fuzz '^FuzzReasonEnvelope$' -fuzztime "$fuzz_time" .
+run_step fuzz fuzz.log go test -run '^$' -fuzz '^FuzzReasonEnvelope$' -fuzztime "$fuzz_time" ./internal/app
 after_corpus=$(corpus_files)
 failure_files=()
 while IFS= read -r f; do
@@ -562,7 +563,7 @@ race_pattern="^($(
 	IFS='|'
 	echo "${race_tests[*]}"
 ))\$"
-run_step race race.log env CGO_ENABLED=1 FOLD_REASON_SEED="$seed_base" go test -race -count="$race_count" -timeout 30m -v -run "$race_pattern" .
+run_step race race.log env CGO_ENABLED=1 FOLD_REASON_SEED="$seed_base" go test -race -count="$race_count" -timeout 30m -v -run "$race_pattern" ./internal/app
 check_step "a race test did not report PASS $race_count times, or a race or skip was reported" all_passed "$evidence/race.log" "$race_count" "${race_tests[@]}"
 record_step
 

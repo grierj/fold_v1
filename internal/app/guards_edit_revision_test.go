@@ -1,4 +1,4 @@
-package main
+package app
 
 import (
 	"fmt"
@@ -16,7 +16,7 @@ import (
 // (edit_revision.go) inside its write transaction, under the row lock, so a
 // refusal writes nothing.
 //
-// Parse-only, root package. A check is a call named in editRevisionChecks
+// Parse-only, package app. A check is a call named in editRevisionChecks
 // outside edit_revision.go. It is inside the transaction when
 // the nearest function literal around it is an argument of a call named
 // contactMutation or Transaction. The guard does not see a check reached
@@ -41,8 +41,8 @@ var editRevisionTransactions = map[string]bool{"contactMutation": true, "Transac
 // transaction, and a problem for each check that does not.
 func editRevisionCensus(p *guardkit.Parsed) (checkers, bad []string) {
 	bad = append(bad, p.Problems...)
-	for _, f := range p.Package("main") {
-		if f.Path == "edit_revision.go" {
+	for _, f := range p.Package("app") {
+		if f.Path == "internal/app/edit_revision.go" {
 			continue
 		}
 		for _, d := range f.AST.Decls {
@@ -120,14 +120,14 @@ func TestSavesCheckTheirRevisionInTheirTransaction(t *testing.T) {
 }
 
 func TestEditRevisionGuardCatchesABypass(t *testing.T) {
-	const visibility = `package main
+	const visibility = `package app
 func (a *App) apiSetEventVisibility(c *gin.Context) {
 	a.contactMutation(contactChange{}, func(tx *gorm.DB) error {
 		return a.checkEventRevision(locked, body.Revision)
 	})
 }
 `
-	const series = `package main
+	const series = `package app
 func (a *App) apiUpdateEvent(c *gin.Context) {
 	err := a.contactMutation(contactChange{}, func(tx *gorm.DB) error {
 		if err := a.checkEventRevision(lockedEv, body.Revision); err != nil {
@@ -137,7 +137,7 @@ func (a *App) apiUpdateEvent(c *gin.Context) {
 	})
 }
 `
-	const group = `package main
+	const group = `package app
 func (a *App) apiUpdateGroup(c *gin.Context) {
 	err := a.contactMutation(contactChange{}, func(tx *gorm.DB) error {
 		if err := a.checkGroupRevision(tx, locked.ID, body.Revision); err != nil {
@@ -147,7 +147,7 @@ func (a *App) apiUpdateGroup(c *gin.Context) {
 	})
 }
 `
-	const rooms = `package main
+	const rooms = `package app
 func (a *App) apiSetDateRoom(c *gin.Context) {
 	err := a.DB.Transaction(func(tx *gorm.DB) error {
 		if err := a.checkDateRoomRevision(tx, occ.ID, body.Revision); err != nil {
@@ -162,7 +162,7 @@ func (a *App) apiSetSeriesRoom(c *gin.Context) {
 	})
 }
 `
-	const messages = `package main
+	const messages = `package app
 func (a *App) apiUpdateMessage(c *gin.Context) {
 	err := a.DB.Transaction(func(tx *gorm.DB) error {
 		return a.checkMessageRevision(tx, m.ID, body.Revision)
@@ -177,7 +177,7 @@ func (a *App) apiScheduleMessage(c *gin.Context) {
 	}, readCommitted)
 }
 `
-	const roomEditor = `package main
+	const roomEditor = `package app
 func (a *App) apiAdminUpdateRoom(c *gin.Context) {
 	err = a.DB.Transaction(func(tx *gorm.DB) error {
 		if err := a.checkRoomRevision(tx, room.ID, body.Revision); err != nil {
@@ -187,7 +187,7 @@ func (a *App) apiAdminUpdateRoom(c *gin.Context) {
 	}, readCommitted)
 }
 `
-	const admin = `package main
+	const admin = `package app
 func (a *App) apiAdminUpdateUser(c *gin.Context) {
 	a.contactMutation(contactChange{}, func(tx *gorm.DB) error {
 		return a.checkAdminUserRevision(tx, user.ID, body.Revision)
@@ -199,7 +199,7 @@ func (a *App) saveRevisedSetting() {
 	}, readCommitted)
 }
 `
-	const consents = `package main
+	const consents = `package app
 func (a *App) apiChangeTeenConsent(c *gin.Context) {
 	a.contactMutation(contactChange{}, func(tx *gorm.DB) error {
 		if change.namesARead() {
@@ -221,7 +221,7 @@ func (a *App) apiGuardianChangeConsent(c *gin.Context) {
 	})
 }
 `
-	const households = `package main
+	const households = `package app
 func (a *App) apiUpdateMyHousehold(c *gin.Context) {
 	a.DB.Transaction(func(tx *gorm.DB) error {
 		if err := a.checkHouseholdRevision(tx, householdID, given); err != nil {
@@ -236,21 +236,21 @@ func (a *App) apiUpdateHouseholdPerson(c *gin.Context) {
 	})
 }
 `
-	sound := guardkit.Sources{"a.go": visibility, "b.go": series, "c.go": group, "d.go": rooms, "e.go": messages, "f.go": roomEditor, "g.go": admin, "h.go": households, "i.go": consents}
+	sound := guardkit.Sources{"internal/app/a.go": visibility, "internal/app/b.go": series, "internal/app/c.go": group, "internal/app/d.go": rooms, "internal/app/e.go": messages, "internal/app/f.go": roomEditor, "internal/app/g.go": admin, "internal/app/h.go": households, "internal/app/i.go": consents}
 	if bad := editRevisionProblems(sound.Parse(0)); len(bad) > 0 {
 		t.Fatalf("the sound shape was flagged: %v", bad)
 	}
-	sound["g.go"] = strings.Replace(admin, "checkSettingRevision(tx,", "checkSettingRevision(a.DB,", 1)
+	sound["internal/app/g.go"] = strings.Replace(admin, "checkSettingRevision(tx,", "checkSettingRevision(a.DB,", 1)
 	if bad := editRevisionProblems(sound.Parse(0)); len(bad) == 0 {
 		t.Error("a setting checked on the connection outside its transaction passed the guard")
 	}
-	sound["g.go"] = admin
+	sound["internal/app/g.go"] = admin
 	for name, src := range map[string]string{
 		"a household save that skips the check":                                strings.Replace(households, "a.checkHouseholdRevision(tx, householdID, given)", "error(nil)", 1),
 		"a person save that skips the check":                                   strings.Replace(households, "return a.checkHouseholdPersonRevision(tx, person.ID, input.Revision)", "return nil", 1),
 		"a household save that reads its row outside its transaction's handle": strings.Replace(households, "checkHouseholdRevision(tx,", "checkHouseholdRevision(a.DB,", 1),
 		"a person save that reads its row outside its transaction's handle":    strings.Replace(households, "checkHouseholdPersonRevision(tx,", "checkHouseholdPersonRevision(a.DB,", 1),
-		"a person save checked before its transaction": `package main
+		"a person save checked before its transaction": `package app
 func (a *App) apiUpdateMyHousehold(c *gin.Context) {
 	a.DB.Transaction(func(tx *gorm.DB) error { return a.checkHouseholdRevision(tx, householdID, body.Revision) })
 }
@@ -265,18 +265,18 @@ func (a *App) apiUpdateHouseholdPerson(c *gin.Context) {
 		if src == households {
 			t.Fatalf("%s: the mutation did not apply", name)
 		}
-		sound["h.go"] = src
+		sound["internal/app/h.go"] = src
 		if bad := editRevisionProblems(sound.Parse(0)); len(bad) == 0 {
 			t.Errorf("%s passed the guard", name)
 		}
 	}
-	sound["h.go"] = households
+	sound["internal/app/h.go"] = households
 	for name, src := range map[string]string{
 		"an admin grant that skips the check":                                  strings.Replace(consents, "a.checkConsentRevision(tx, teen.ID, body.Revision)", "error(nil)", 1),
 		"a guardian grant that skips the check":                                strings.Replace(consents, "a.checkConsentRevision(tx, guardianTeen.ID, body.Revision)", "error(nil)", 1),
 		"a guardian grant that reads its log outside its transaction's handle": strings.Replace(consents, "checkConsentRevision(tx, guardianTeen", "checkConsentRevision(a.DB, guardianTeen", 1),
 		"a grant that reads its log outside its transaction's handle":          strings.Replace(consents, "checkConsentRevision(tx,", "checkConsentRevision(a.DB,", 1),
-		"a grant checked in the consent writer": `package main
+		"a grant checked in the consent writer": `package app
 func (a *App) apiChangeTeenConsent(c *gin.Context) {
 	a.contactMutation(contactChange{}, func(tx *gorm.DB) error { return a.changeTeenConsent(tx, c, teen, actor, change) })
 }
@@ -291,18 +291,18 @@ func (a *App) changeTeenConsent(tx *gorm.DB, c *gin.Context, teen, actor *models
 		if src == consents {
 			t.Fatalf("%s: the mutation did not apply", name)
 		}
-		sound["i.go"] = src
+		sound["internal/app/i.go"] = src
 		if bad := editRevisionProblems(sound.Parse(0)); len(bad) == 0 {
 			t.Errorf("%s passed the guard", name)
 		}
 	}
 	for name, src := range map[string]string{
-		"a room edit that skips the check": `package main
+		"a room edit that skips the check": `package app
 func (a *App) apiAdminUpdateRoom(c *gin.Context) {
 	a.DB.Transaction(func(tx *gorm.DB) error { return nil }, readCommitted)
 }
 `,
-		"a room edit checked before its transaction": `package main
+		"a room edit checked before its transaction": `package app
 func (a *App) apiAdminUpdateRoom(c *gin.Context) {
 	if err := a.checkRoomRevision(a.DB, room.ID, body.Revision); err != nil {
 		return
@@ -310,19 +310,19 @@ func (a *App) apiAdminUpdateRoom(c *gin.Context) {
 	a.DB.Transaction(func(tx *gorm.DB) error { return nil }, readCommitted)
 }
 `,
-		"a room edit that reads its room outside its transaction's handle": `package main
+		"a room edit that reads its room outside its transaction's handle": `package app
 func (a *App) apiAdminUpdateRoom(c *gin.Context) {
 	a.DB.Transaction(func(tx *gorm.DB) error { return a.checkRoomRevision(a.DB, room.ID, body.Revision) }, readCommitted)
 }
 `,
 	} {
-		sources := guardkit.Sources{"a.go": visibility, "b.go": series, "c.go": group, "d.go": rooms, "e.go": messages, "f.go": src, "g.go": admin, "h.go": households, "i.go": consents}
+		sources := guardkit.Sources{"internal/app/a.go": visibility, "internal/app/b.go": series, "internal/app/c.go": group, "internal/app/d.go": rooms, "internal/app/e.go": messages, "internal/app/f.go": src, "internal/app/g.go": admin, "internal/app/h.go": households, "internal/app/i.go": consents}
 		if bad := editRevisionProblems(sources.Parse(0)); len(bad) == 0 {
 			t.Errorf("%s passed the guard", name)
 		}
 	}
 	for name, src := range map[string]string{
-		"a date pick that skips the check": `package main
+		"a date pick that skips the check": `package app
 func (a *App) apiSetDateRoom(c *gin.Context) {
 	a.DB.Transaction(func(tx *gorm.DB) error { return nil })
 }
@@ -330,7 +330,7 @@ func (a *App) apiSetSeriesRoom(c *gin.Context) {
 	a.DB.Transaction(func(tx *gorm.DB) error { return a.checkEventRevision(locked, f.group, body.Revision) })
 }
 `,
-		"a date pick that reads its booking outside its transaction's handle": `package main
+		"a date pick that reads its booking outside its transaction's handle": `package app
 func (a *App) apiSetDateRoom(c *gin.Context) {
 	a.DB.Transaction(func(tx *gorm.DB) error { return a.checkDateRoomRevision(a.DB, occ.ID, body.Revision) })
 }
@@ -338,7 +338,7 @@ func (a *App) apiSetSeriesRoom(c *gin.Context) {
 	a.DB.Transaction(func(tx *gorm.DB) error { return a.checkEventRevision(locked, f.group, body.Revision) })
 }
 `,
-		"a date pick checked before its transaction": `package main
+		"a date pick checked before its transaction": `package app
 func (a *App) apiSetDateRoom(c *gin.Context) {
 	if err := a.checkDateRoomRevision(a.DB, occ.ID, body.Revision); err != nil {
 		return
@@ -349,7 +349,7 @@ func (a *App) apiSetSeriesRoom(c *gin.Context) {
 	a.DB.Transaction(func(tx *gorm.DB) error { return a.checkEventRevision(locked, f.group, body.Revision) })
 }
 `,
-		"a series pick checked in the helper it calls": `package main
+		"a series pick checked in the helper it calls": `package app
 func (a *App) apiSetDateRoom(c *gin.Context) {
 	a.DB.Transaction(func(tx *gorm.DB) error { return a.checkDateRoomRevision(tx, occ.ID, body.Revision) })
 }
@@ -361,13 +361,13 @@ func bookWholeSeries(tx *gorm.DB, ev *models.Event, body seriesBody) error {
 }
 `,
 	} {
-		sources := guardkit.Sources{"a.go": visibility, "b.go": series, "c.go": group, "d.go": src, "e.go": messages, "f.go": roomEditor, "g.go": admin, "h.go": households, "i.go": consents}
+		sources := guardkit.Sources{"internal/app/a.go": visibility, "internal/app/b.go": series, "internal/app/c.go": group, "internal/app/d.go": src, "internal/app/e.go": messages, "internal/app/f.go": roomEditor, "internal/app/g.go": admin, "internal/app/h.go": households, "internal/app/i.go": consents}
 		if bad := editRevisionProblems(sources.Parse(0)); len(bad) == 0 {
 			t.Errorf("%s passed the guard", name)
 		}
 	}
 	for name, src := range map[string]string{
-		"a message edit that skips the check": `package main
+		"a message edit that skips the check": `package app
 func (a *App) apiUpdateMessage(c *gin.Context) {
 	a.DB.Transaction(func(tx *gorm.DB) error { return nil }, readCommitted)
 }
@@ -375,7 +375,7 @@ func (a *App) apiScheduleMessage(c *gin.Context) {
 	a.DB.Transaction(func(tx *gorm.DB) error { return a.checkMessageRevision(tx, m.ID, body.Revision) }, readCommitted)
 }
 `,
-		"a send checked before its transaction": `package main
+		"a send checked before its transaction": `package app
 func (a *App) apiUpdateMessage(c *gin.Context) {
 	a.DB.Transaction(func(tx *gorm.DB) error { return a.checkMessageRevision(tx, m.ID, body.Revision) }, readCommitted)
 }
@@ -386,7 +386,7 @@ func (a *App) apiScheduleMessage(c *gin.Context) {
 	a.DB.Transaction(func(tx *gorm.DB) error { return nil }, readCommitted)
 }
 `,
-		"a send that reads its message outside its transaction's handle": `package main
+		"a send that reads its message outside its transaction's handle": `package app
 func (a *App) apiUpdateMessage(c *gin.Context) {
 	a.DB.Transaction(func(tx *gorm.DB) error { return a.checkMessageRevision(tx, m.ID, body.Revision) }, readCommitted)
 }
@@ -395,18 +395,18 @@ func (a *App) apiScheduleMessage(c *gin.Context) {
 }
 `,
 	} {
-		sources := guardkit.Sources{"a.go": visibility, "b.go": series, "c.go": group, "d.go": rooms, "e.go": src, "f.go": roomEditor, "g.go": admin, "h.go": households, "i.go": consents}
+		sources := guardkit.Sources{"internal/app/a.go": visibility, "internal/app/b.go": series, "internal/app/c.go": group, "internal/app/d.go": rooms, "internal/app/e.go": src, "internal/app/f.go": roomEditor, "internal/app/g.go": admin, "internal/app/h.go": households, "internal/app/i.go": consents}
 		if bad := editRevisionProblems(sources.Parse(0)); len(bad) == 0 {
 			t.Errorf("%s passed the guard", name)
 		}
 	}
 	for name, src := range map[string]string{
-		"a handler that skips the check": `package main
+		"a handler that skips the check": `package app
 func (a *App) apiSetEventVisibility(c *gin.Context) {
 	a.contactMutation(contactChange{}, func(tx *gorm.DB) error { return nil })
 }
 `,
-		"a check before the transaction": `package main
+		"a check before the transaction": `package app
 func (a *App) apiSetEventVisibility(c *gin.Context) {
 	if err := a.checkEventRevision(ev, body.Revision); err != nil {
 		return
@@ -414,13 +414,13 @@ func (a *App) apiSetEventVisibility(c *gin.Context) {
 	a.contactMutation(contactChange{}, func(tx *gorm.DB) error { return nil })
 }
 `,
-		"a check in another closure": `package main
+		"a check in another closure": `package app
 func (a *App) apiSetEventVisibility(c *gin.Context) {
 	check := func() error { return a.checkEventRevision(ev, body.Revision) }
 	a.contactMutation(contactChange{}, func(tx *gorm.DB) error { return check() })
 }
 `,
-		"a group save that skips the check": `package main
+		"a group save that skips the check": `package app
 func (a *App) apiSetEventVisibility(c *gin.Context) {
 	a.contactMutation(contactChange{}, func(tx *gorm.DB) error { return a.checkEventRevision(locked, body.Revision) })
 }
@@ -428,7 +428,7 @@ func (a *App) apiUpdateGroup(c *gin.Context) {
 	a.contactMutation(contactChange{}, func(tx *gorm.DB) error { return nil })
 }
 `,
-		"a group check before the transaction": `package main
+		"a group check before the transaction": `package app
 func (a *App) apiSetEventVisibility(c *gin.Context) {
 	a.contactMutation(contactChange{}, func(tx *gorm.DB) error { return a.checkEventRevision(locked, body.Revision) })
 }
@@ -439,7 +439,7 @@ func (a *App) apiUpdateGroup(c *gin.Context) {
 	a.contactMutation(contactChange{}, func(tx *gorm.DB) error { return nil })
 }
 `,
-		"a group check that reads outside its transaction's handle": `package main
+		"a group check that reads outside its transaction's handle": `package app
 func (a *App) apiSetEventVisibility(c *gin.Context) {
 	a.contactMutation(contactChange{}, func(tx *gorm.DB) error { return a.checkEventRevision(locked, body.Revision) })
 }
@@ -447,7 +447,7 @@ func (a *App) apiUpdateGroup(c *gin.Context) {
 	a.contactMutation(contactChange{}, func(tx *gorm.DB) error { return a.checkGroupRevision(a.DB, locked.ID, body.Revision) })
 }
 `,
-		"an unlisted handler that checks": `package main
+		"an unlisted handler that checks": `package app
 func (a *App) apiSetEventVisibility(c *gin.Context) {
 	a.contactMutation(contactChange{}, func(tx *gorm.DB) error { return a.checkEventRevision(locked, body.Revision) })
 }
@@ -456,9 +456,9 @@ func (a *App) apiSetGroup(c *gin.Context) {
 }
 `,
 	} {
-		sources := guardkit.Sources{"a.go": src, "b.go": series, "d.go": rooms, "e.go": messages, "f.go": roomEditor, "g.go": admin, "h.go": households, "i.go": consents}
+		sources := guardkit.Sources{"internal/app/a.go": src, "internal/app/b.go": series, "internal/app/d.go": rooms, "internal/app/e.go": messages, "internal/app/f.go": roomEditor, "internal/app/g.go": admin, "internal/app/h.go": households, "internal/app/i.go": consents}
 		if !strings.Contains(src, "apiUpdateGroup") {
-			sources["c.go"] = group
+			sources["internal/app/c.go"] = group
 		}
 		if bad := editRevisionProblems(sources.Parse(0)); len(bad) == 0 {
 			t.Errorf("%s passed the guard", name)

@@ -1,4 +1,4 @@
-package main
+package app
 
 import (
 	"reflect"
@@ -53,43 +53,43 @@ func TestRoomStatusGuardCatchesBypasses(t *testing.T) {
 func loadRequest(tx *gorm.DB, id uint) (*models.RoomRequest, error) { return nil, nil }
 `
 	for _, c := range []struct{ name, src, want string }{
-		{"a computed key in an inline map", `package main
+		{"a computed key in an inline map", `package app
 func decide(tx *gorm.DB, col string) error {
 	return tx.Model(&models.RoomRequest{}).Updates(map[string]any{col: "confirmed"}).Error
 }`, "decide: Updates of a map with computed keys"},
-		{"a confirmation as it was written", `package main
+		{"a confirmation as it was written", `package app
 func confirm(tx *gorm.DB, b models.RoomBooking) error {
 	return tx.Exec(` + "`UPDATE room_bookings SET status = ?, updated_at = now() WHERE id = ?`" + `, models.BookingConfirmed, b.ID).Error
 }`, "confirm: raw UPDATE of room_bookings.status"},
-		{"a move with status last, as it was written", `package main
+		{"a move with status last, as it was written", `package app
 func move(tx *gorm.DB, id uint) error {
 	return tx.Exec(` + "`UPDATE room_bookings SET starts_at = ?, padded_range = tstzrange(?, ?), status = ?, updated_at = now() WHERE id = ?`" + `).Error
 }`, "move: raw UPDATE of room_bookings.status"},
-		{"a withdrawal as it was written", `package main
+		{"a withdrawal as it was written", `package app
 func withdraw(tx *gorm.DB, eventID uint) error {
 	return tx.Exec(` + "`UPDATE room_requests SET status = ?, updated_at = now()\n\t\tWHERE event_id = ? AND series AND status = ? RETURNING id`" + `).Error
 }`, "withdraw: raw UPDATE of room_requests.status"},
-		{"a decision as it was written", `package main
+		{"a decision as it was written", `package app
 func decide(tx *gorm.DB, req *models.RoomRequest) error {
 	return tx.Model(req).Updates(map[string]any{"status": models.RoomRequestConfirmed, "decided_at": time.Now()}).Error
 }`, `decide: Updates of a map with "status"`},
-		{"a query held in a variable", `package main
+		{"a query held in a variable", `package app
 func decide(tx *gorm.DB, id uint) error {
 	q := tx.Model(&models.RoomRequest{}).Where("id = ?", id)
 	return q.Updates(map[string]any{"status": "rejected"}).Error
 }`, `decide: Updates of a map with "status"`},
-		{"a map given status later", `package main
+		{"a map given status later", `package app
 func decide(tx *gorm.DB, id uint) error {
 	fields := map[string]any{"decided_at": time.Now()}
 	fields["status"] = models.RoomRequestRejected
 	return tx.Model(&models.RoomRequest{}).Where("id = ?", id).Updates(fields).Error
 }`, `decide: Updates of a map given "status"`},
-		{"a bare Update on a loaded request", `package main
+		{"a bare Update on a loaded request", `package app
 func decide(tx *gorm.DB, id uint) error {
 	r, _ := loadRequest(tx, id)
 	return tx.Model(r).Update("status", models.RoomRequestWithdrawn).Error
 }` + decls, `decide: Update("status")`},
-		{"a range over bookings", `package main
+		{"a range over bookings", `package app
 func reject(tx *gorm.DB) error {
 	var bookings []models.RoomBooking
 	for _, b := range bookings {
@@ -97,49 +97,49 @@ func reject(tx *gorm.DB) error {
 	}
 	return nil
 }`, `reject: UpdateColumn("status")`},
-		{"the table by name", `package main
+		{"the table by name", `package app
 func reject(tx *gorm.DB, id uint) error {
 	return tx.Table("room_bookings").Where("request_id = ?", id).Update("status", "rejected").Error
 }`, `reject: Update("status")`},
-		{"a column named at run time", `package main
+		{"a column named at run time", `package app
 func set(tx *gorm.DB, b *models.RoomBooking, col string) error {
 	return tx.Model(b).Update(col, "confirmed").Error
 }`, "set: Update of a computed column"},
-		{"a helper that writes its caller's columns", `package main
+		{"a helper that writes its caller's columns", `package app
 func writeRequest(tx *gorm.DB, id uint, cols map[string]any) error {
 	return tx.Model(&models.RoomRequest{}).Where("id = ?", id).Updates(cols).Error
 }`, "writeRequest: Updates of a parameter's map"},
-		{"a saved booking", `package main
+		{"a saved booking", `package app
 func confirm(tx *gorm.DB, b *models.RoomBooking) error {
 	b.Status = models.BookingConfirmed
 	return tx.Save(b).Error
 }`, "confirm: Save of a room booking"},
-		{"a booking struct as the update", `package main
+		{"a booking struct as the update", `package app
 func confirm(tx *gorm.DB, id uint) error {
 	return tx.Model(&models.RoomBooking{}).Where("id = ?", id).Updates(models.RoomBooking{Status: "confirmed"}).Error
 }`, "confirm: Updates of a room booking struct"},
-		{"a new booking through gorm", `package main
+		{"a new booking through gorm", `package app
 func book(tx *gorm.DB) error {
 	b := models.RoomBooking{RoomID: 1}
 	return tx.Create(&b).Error
 }`, "book: Create of a room booking"},
-		{"a raw request insert", `package main
+		{"a raw request insert", `package app
 func ask(tx *gorm.DB) error {
 	return tx.Exec("INSERT INTO room_requests (event_id, room_id) VALUES (1, 1)").Error
 }`, "ask: raw INSERT INTO room_requests"},
-		{"raw SQL in a constant, with an alias", `package main
+		{"raw SQL in a constant, with an alias", `package app
 const rejectSQL = ` + "`UPDATE room_bookings AS b SET \"status\" = 'rejected' WHERE b.request_id = ?`" + `
 `, "rejectSQL: raw UPDATE of room_bookings.status"},
-		{"a moved date's update, as it was before the writer", `package main
+		{"a moved date's update, as it was before the writer", `package app
 func moveRoomBookings(tx *gorm.DB, b models.RoomBooking, status string) error {
 	return tx.Exec(` + "`UPDATE room_bookings SET starts_at = ?, ends_at = ?, padded_range = `+paddedRangeSQL+`, status = ?, updated_at = now() WHERE id = ?`" + `,
 		b.StartsAt, b.EndsAt, b.StartsAt, b.SetupMinutes, b.EndsAt, b.TeardownMinutes, status, b.ID).Error
 }`, "moveRoomBookings: raw UPDATE room_bookings with a column list built at run time"},
-		{"raw SQL with its columns built at run time", `package main
+		{"raw SQL with its columns built at run time", `package app
 func set(tx *gorm.DB, cols string) error {
 	return tx.Exec("UPDATE room_requests SET " + cols + " WHERE id = 1").Error
 }`, "set: raw UPDATE room_requests with a column list built at run time"},
-		{"another table's status, and other room columns", `package main
+		{"another table's status, and other room columns", `package app
 func other(tx *gorm.DB, req *models.RoomRequest, ev *models.Event, id uint) error {
 	tx.Model(ev).Updates(map[string]any{"status": "active", "default_room_id": nil})
 	tx.Model(&models.Membership{}).Where("id = ?", id).Update("status", "left")
@@ -152,7 +152,7 @@ func other(tx *gorm.DB, req *models.RoomRequest, ev *models.Event, id uint) erro
 }`, ""},
 	} {
 		t.Run(c.name, func(t *testing.T) {
-			p := guardkit.Sources{"x.go": c.src}.Parse(0)
+			p := guardkit.Sources{"internal/app/x.go": c.src}.Parse(0)
 			if len(p.Problems) > 0 {
 				t.Fatal(p.Problems)
 			}

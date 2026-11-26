@@ -1,6 +1,6 @@
 //go:build e2eclock
 
-package main
+package app
 
 import (
 	"net/http"

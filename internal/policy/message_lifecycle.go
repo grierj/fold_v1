@@ -14,7 +14,7 @@ const (
 
 // MessageMove is one way a message's status changes, named by what causes
 // it. The table below is the whole machine (docs/agents/lifecycles.md); the
-// root package's moveMessage writes every move of an existing row, and a
+// package app's moveMessage writes every move of an existing row, and a
 // move that makes a row is the status its creator inserts.
 type MessageMove string
 

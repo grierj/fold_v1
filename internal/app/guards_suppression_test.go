@@ -1,4 +1,4 @@
-package main
+package app
 
 import (
 	"fmt"
@@ -26,10 +26,10 @@ import (
 // of fold/models and cross-package helpers are not seen. The unwanted shapes
 // the guard does see are covered by TestSuppressionSQLGuardCatchesBypasses.
 var suppressionSQLAllowed = map[string][]string{
-	"internal/mail/suppress.go": {"OpenSuppressionReasons", "openSuppressionsSQL"},
-	"api_admin_suppressions.go": {"openSuppressions", "apiAdminClearSuppression"},
-	"api_email_webhooks.go":     {"applyEmailEvent"},
-	"models/models.go":          {"Suppression", "All"},
+	"internal/mail/suppress.go":              {"OpenSuppressionReasons", "openSuppressionsSQL"},
+	"internal/app/api_admin_suppressions.go": {"openSuppressions", "apiAdminClearSuppression"},
+	"internal/app/api_email_webhooks.go":     {"applyEmailEvent"},
+	"models/models.go":                       {"Suppression", "All"},
 }
 
 // plaintextAddressRe finds the word address in suppression SQL. The column
@@ -155,19 +155,19 @@ func cleanSuppressionSources() map[string]string {
 const openSuppressionsSQL = "SELECT address_hash, reason FROM suppressions WHERE address_hash IN ?"
 func OpenSuppressionReasons() { _ = StoredAddressHash }
 `,
-		"api_admin_suppressions.go": `package main
+		"internal/app/api_admin_suppressions.go": `package app
 import "fold/models"
 func openSuppressions() { var rows []models.Suppression; _ = rows[0].AddressHash }
 func (a *App) apiAdminClearSuppression() { q := "UPDATE suppressions SET cleared_at = ? WHERE address_hash = ?"; _ = q }
 `,
-		"api_email_webhooks.go": `package main
+		"internal/app/api_email_webhooks.go": `package app
 func applyEmailEvent() { q := "INSERT INTO suppressions (channel, address_hash) VALUES (?, ?)"; _ = q }
 `,
 		"models/models.go": `package models
 type Suppression struct{ AddressHash string }
 func All() []any { return []any{&Suppression{}} }
 `,
-		"api_other.go": `package main
+		"internal/app/api_other.go": `package app
 func other() {}
 `,
 	}
@@ -181,50 +181,50 @@ func TestSuppressionSQLGuardCatchesBypasses(t *testing.T) {
 		file, source string // replaces or adds this file
 		want         string // a substring of the violation
 	}{
-		"a second subquery that normalizes in SQL": {"api_other.go", `package main
+		"a second subquery that normalizes in SQL": {"internal/app/api_other.go", `package app
 func other() { q := "SELECT 1 WHERE EXISTS (SELECT 1 FROM suppressions s WHERE s.address_hash = lower(btrim(users.email)))"; _ = q }
 `, "api_other.go:2"},
-		"a Table call": {"api_other.go", `package main
+		"a Table call": {"internal/app/api_other.go", `package app
 func other() { db.Table("suppressions").Find(&x) }
 `, "api_other.go:2"},
-		"concatenated SQL": {"api_other.go", `package main
+		"concatenated SQL": {"internal/app/api_other.go", `package app
 func other() { q := "SELECT reason FROM " + "suppressions"; _ = q }
 `, "api_other.go:2"},
-		"a model with a TableName": {"api_other.go", `package main
+		"a model with a TableName": {"internal/app/api_other.go", `package app
 type thing struct{}
 func (thing) TableName() string { return "suppressions" }
 `, "api_other.go:3"},
-		"a local Suppression type": {"api_other.go", `package main
+		"a local Suppression type": {"internal/app/api_other.go", `package app
 type Suppression struct{}
 `, "api_other.go:2"},
-		"models.Suppression elsewhere": {"api_other.go", `package main
+		"models.Suppression elsewhere": {"internal/app/api_other.go", `package app
 import "fold/models"
 func other() { var rows []models.Suppression; _ = rows }
 `, "api_other.go:3"},
-		"models.Suppression through an import alias": {"api_other.go", `package main
+		"models.Suppression through an import alias": {"internal/app/api_other.go", `package app
 import m "fold/models"
 func other() { _ = &m.Suppression{} }
 `, "api_other.go:3"},
-		"a second reader in an allowed file": {"api_admin_suppressions.go", `package main
+		"a second reader in an allowed file": {"internal/app/api_admin_suppressions.go", `package app
 import "fold/models"
 func openSuppressions() { var rows []models.Suppression; _ = rows[0].AddressHash }
 func (a *App) apiAdminClearSuppression() { q := "UPDATE suppressions SET cleared_at = ? WHERE address_hash = ?"; _ = q }
 func anotherReader() { q := "SELECT reason FROM suppressions WHERE address_hash = ?"; _ = q }
-`, "api_admin_suppressions.go:5"},
-		"an allowed function that names the plaintext address column": {"api_email_webhooks.go", `package main
+`, "internal/app/api_admin_suppressions.go:5"},
+		"an allowed function that names the plaintext address column": {"internal/app/api_email_webhooks.go", `package app
 func applyEmailEvent() { q := "INSERT INTO suppressions (channel, address, address_hash) VALUES (?, ?, ?)"; _ = q }
 `, "names the plaintext address column"},
 		"an allowed reader that matches the address": {"internal/mail/suppress.go", `package mail
 const openSuppressionsSQL = "SELECT address_hash, reason FROM suppressions WHERE address_hash IN ? OR address IN ?"
 func OpenSuppressionReasons() { _ = StoredAddressHash }
 `, "names the plaintext address column"},
-		"an allowed function that normalizes in SQL": {"api_email_webhooks.go", `package main
+		"an allowed function that normalizes in SQL": {"internal/app/api_email_webhooks.go", `package app
 func applyEmailEvent() { q := "INSERT INTO suppressions (address_hash) SELECT lower(btrim(email))"; _ = q }
 `, "normalizes an address in SQL"},
-		"an allowed function that never uses the hash": {"api_email_webhooks.go", `package main
+		"an allowed function that never uses the hash": {"internal/app/api_email_webhooks.go", `package app
 func applyEmailEvent() { q := "INSERT INTO suppressions (channel, provider) VALUES (?, ?)"; _ = q }
 `, "never mentions address_hash"},
-		"an allowed helper that was renamed": {"api_email_webhooks.go", `package main
+		"an allowed helper that was renamed": {"internal/app/api_email_webhooks.go", `package app
 func applyEvent() {}
 `, "names applyEmailEvent, which no longer exists"},
 	} {
@@ -243,7 +243,7 @@ func applyEvent() {}
 	}
 	// A violation names the helper to use.
 	sources := cleanSuppressionSources()
-	sources["api_other.go"] = "package main\nfunc other() { db.Table(\"suppressions\") }\n"
+	sources["internal/app/api_other.go"] = "package app\nfunc other() { db.Table(\"suppressions\") }\n"
 	if bad := suppressionSQLViolations(sources, suppressionSQLAllowed); len(bad) != 1 || !strings.Contains(bad[0], "mail.OpenSuppressionReasons") {
 		t.Errorf("violation = %v, want one that names mail.OpenSuppressionReasons", bad)
 	}

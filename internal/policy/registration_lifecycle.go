@@ -25,7 +25,7 @@ var CurrentRegStatuses = []string{RegGoing, RegMaybe, RegWaitlisted}
 
 // RegistrationMove is one way a registration's status changes, named by what
 // causes it. The table below is the whole machine (docs/agents/lifecycles.md):
-// the root package's saveRegistration writes every move but promotion, which
+// package app's saveRegistration writes every move but promotion, which
 // promoteRegistration writes. Where a move may end going or waitlisted, the
 // seat ledger (registration_seats.go) picks between them.
 type RegistrationMove string

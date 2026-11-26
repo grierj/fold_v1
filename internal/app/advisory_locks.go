@@ -1,4 +1,4 @@
-package main
+package app
 
 // Every Postgres advisory lock id this process takes, in one place so two
 // features cannot pick the same number. TestAdvisoryLockIDsAreUnique checks

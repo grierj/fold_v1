@@ -1,4 +1,4 @@
-package main
+package app
 
 // Batch sizes. Each names one constraint; use the constant, not a number.
 //

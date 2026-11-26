@@ -1,4 +1,4 @@
-package main
+package app
 
 // The live review pages read their scanner unit in bounded batches (T07B-2,
 // design t07b-scanner-read-amplification-design-v2.md, option 1).
