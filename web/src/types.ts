@@ -399,7 +399,14 @@ export interface RegistrationResponse {
   attendanceMode: AttendanceMode;
 }
 
+export interface RestorableDate {
+  date: string;
+  startsAt: string;
+  revision: string;
+}
+
 export interface EventDetailResponse {
+  restorableDates?: RestorableDate[];
   event: EventSeries;
   occurrences: EventOccurrence[];
   canManage: boolean;
