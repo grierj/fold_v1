@@ -24,6 +24,11 @@ promises.
   exact. Sign-in drops the old CSRF token, so the next request gets a new one.
 - Account tokens (password reset, invitation, email verification and cancellation): single use,
   stored hashed, valid 24 hours (`tokenTTL`).
+- On each managed database restore, expire outstanding account setup, password reset and
+  email-change links from the dump, including both verification and cancellation (#511).
+  A link that was used or revoked after the backup therefore stays unusable. Other capabilities,
+  including guardian consent and invitations, keep their restored state. Links issued after
+  restore have their usual lifetime.
 - Link retention (#433, Grier, Nov 25, 2026). Each church day, `cleanup.expired_links` deletes
   guest signup and invitation rows 30 days after expiry and account token rows 30 days after
   use, or after expiry if unused. An open household conversion invitation stays available for

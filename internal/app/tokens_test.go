@@ -11,6 +11,53 @@ import (
 	"gorm.io/gorm"
 )
 
+func TestManagedRestoreExpiresAccountLinks(t *testing.T) {
+	app, _, _, _, _, consent := guardianEmailSetup(t)
+	user := newTestUser(t, app, "member", "password1234", models.RoleMember)
+	anon := anonClient(t, app, "10.7.0.1")
+	kinds := []string{models.TokenAccountSetup, models.TokenPasswordReset, models.TokenEmailVerify, models.TokenEmailChangeCancel}
+	links := make(map[string]string)
+	for _, kind := range kinds {
+		raw, _, err := issueAccountToken(app.DB, kind, user.ID, nil, tokenTTL)
+		if err != nil {
+			t.Fatal(err)
+		}
+		links[kind] = raw
+	}
+	var archived []models.AccountToken
+	if err := app.DB.Where("user_id = ?", user.ID).Find(&archived).Error; err != nil {
+		t.Fatal(err)
+	}
+	bootFence(t, app)
+	for kind, raw := range links {
+		if _, err := findAccountToken(app.DB, kind, raw); err != nil {
+			t.Fatalf("ordinary restart lost %s: %v", kind, err)
+		}
+	}
+	for restore := 1; restore <= 2; restore++ {
+		// The dump predates revocation. Each import brings back the same live rows.
+		if err := revokeAccountTokens(app.DB, user.ID); err != nil {
+			t.Fatal(err)
+		}
+		if err := app.DB.Create(&archived).Error; err != nil {
+			t.Fatal(err)
+		}
+		resetRestoredCredentials(t, app)
+		bootFence(t, app)
+		for kind, raw := range links {
+			if _, err := consumeAccountToken(app.DB, kind, raw); !errors.Is(err, errTokenInvalid) {
+				t.Fatalf("restore %d, redeem %s: got %v, want invalid token", restore, kind, err)
+			}
+		}
+		apiDo(t, anon, "GET", "/api/v1/guardian-consent?token="+consent, nil, http.StatusOK)
+	}
+
+	queueResetMail(t, app, user)
+	runResetMail(t, app)
+	raw := tokenInEmail(t, latestEmail(t, app, user.Email))
+	apiDo(t, anon, "POST", "/api/v1/auth/password-reset/confirm", map[string]string{"token": raw, "password": "replacement1234"}, http.StatusOK)
+}
+
 // Issuing a token revokes the previous unused one of the same kind, so
 // only one live link exists per person per kind: a fresh password-reset
 // request kills the earlier link, and a second email-change request kills
