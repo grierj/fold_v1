@@ -36,6 +36,7 @@ const (
 	ContactUpdated          = "contact.updated"
 	GroupPending            = "group.pending"
 	GroupDeletion           = "group.deletion"
+	GroupDeletionKept       = "group.deletion_kept"
 	GroupApproved           = "group.approved"
 	GroupRejected           = "group.rejected"
 	GroupDeleted            = "group.deleted"
@@ -470,6 +471,15 @@ func init() {
 				"They are its only member. Delete the group or keep it."
 		},
 		AllowPush: true, PushRender: func(Vars) (string, string) { return "A request to delete a group is waiting", "" },
+	})
+	register(Kind{
+		Key: GroupDeletionKept, Category: CatGroups,
+		Render: func(v Vars) (string, string) {
+			if v.Group == "" {
+				return "Group deletion request closed", "An admin decided to keep the group you asked to delete."
+			}
+			return v.Group + " was kept", "An admin closed your request to delete this group."
+		},
 	})
 	register(Kind{
 		Key: LeadershipChanged, Category: CatAdmin, AllowEmail: true,

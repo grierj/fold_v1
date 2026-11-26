@@ -266,10 +266,11 @@ type Group struct {
 	MemberLimit *int
 	// DeletionRequested is set by the leader when they are the only member.
 	// An admin approves it by deleting the group.
-	DeletionRequested bool `gorm:"not null;default:false"`
-	CreatedAt         time.Time
-	UpdatedAt         time.Time
-	DeletedAt         gorm.DeletedAt `gorm:"index"`
+	DeletionRequested   bool `gorm:"not null;default:false"`
+	DeletionRequesterID *uint
+	CreatedAt           time.Time
+	UpdatedAt           time.Time
+	DeletedAt           gorm.DeletedAt `gorm:"index"`
 }
 
 // Event is a series (or a one-time event). GroupID is nil for a church-wide
