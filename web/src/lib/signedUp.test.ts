@@ -26,5 +26,5 @@ it("reads the event's count, or the date's", async () => {
 
 it("still asks, without a number, when the count can't be read", async () => {
   vi.mocked(Events.signedUp).mockRejectedValue(new Error("offline"));
-  expect(await signedUpNotice(7)).toBe("Anyone else who signed up will be notified.");
+  expect(await signedUpNotice(7)).toBe("Anyone else signed up for an upcoming date will be notified.");
 });

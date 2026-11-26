@@ -1820,7 +1820,7 @@ describe("GroupDetail: the date question in the app's dialog", () => {
     vi.mocked(window.confirm).mockReturnValue(false);
     await userEvent.click(await screen.findByRole("button", { name: /^More for .* on 2026-12-01$/ }));
     await userEvent.click(screen.getByRole("menuitem", { name: "Cancel this date" }));
-    await waitFor(() => expect(window.confirm).toHaveBeenCalledExactlyOnceWith("Cancel this date on 2026-12-01? Anyone else who signed up will be notified."));
+    await waitFor(() => expect(window.confirm).toHaveBeenCalledExactlyOnceWith("Cancel this date on 2026-12-01? Anyone else signed up for an upcoming date will be notified."));
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
   });
 });

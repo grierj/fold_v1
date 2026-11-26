@@ -5,7 +5,7 @@ import type { Id } from "../api/core";
 // who is going: it leaves out the person pressing, who is never told of their own change (their own sign-up and one
 // they made for someone in their household included), so every line says "other". null is a count that could not be read.
 function signedUpLine(n: number | null): string {
-  if (n === null) return "Anyone else who signed up will be notified.";
+  if (n === null) return "Anyone else signed up for an upcoming date will be notified.";
 
   if (n === 0) return "No one else will be notified.";
 
