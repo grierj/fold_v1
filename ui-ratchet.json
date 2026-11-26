@@ -31,7 +31,7 @@
     "web/src/lib/notifications.ts": 1,
     "web/src/lib/useRsvpMutationGate.ts": 1,
     "web/src/pages/AddRequests.tsx": 1,
-    "web/src/pages/Admin.tsx": 8,
+    "web/src/pages/Admin.tsx": 7,
     "web/src/pages/CancelEmailChange.tsx": 1,
     "web/src/pages/ContactHistory.tsx": 1,
     "web/src/pages/ContactRequests.tsx": 1,
