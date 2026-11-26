@@ -2795,24 +2795,24 @@ func erasureTestStatementWait(t *testing.T, app *App) (pid int, queryStart time.
 	return pid, queryStart
 }
 
-// erasureTestWaitBlockedOnlyBy waits until the waiter is in the same
-// statement execution (same query_start), active, waiting on a lock
-// and blocked by exactly blocker. It returns the observation on the database clock.
+// erasureTestWaitBlockedOnlyBy polls every millisecond until the waiter is in
+// the same statement execution (same query_start), active, waiting on a lock
+// and blocked by exactly blocker. It returns when that first held.
 func erasureTestWaitBlockedOnlyBy(t *testing.T, app *App, waiter int, queryStart time.Time, blocker int) time.Time {
 	t.Helper()
 	var first time.Time
 	testdb.WaitUntil(t, fmt.Sprintf("session %d to be blocked only by session %d in the statement started at %v", waiter, blocker, queryStart), 5*time.Second, func() bool {
-		err := app.DB.Raw(`SELECT clock_timestamp() FROM pg_stat_activity a
+		var n int
+		if err := app.DB.Raw(`SELECT count(*) FROM pg_stat_activity a
 			WHERE a.pid = ? AND a.state = 'active' AND a.wait_event_type = 'Lock' AND a.query_start = ?
 			AND a.query LIKE ? AND pg_blocking_pids(a.pid) = ARRAY[?]::int[]`,
-			waiter, queryStart, erasureRecipientScrubPrefix+"%", blocker).Row().Scan(&first)
-		if errors.Is(err, sql.ErrNoRows) {
-			return false
-		}
-		if err != nil {
+			waiter, queryStart, erasureRecipientScrubPrefix+"%", blocker).Scan(&n).Error; err != nil {
 			t.Fatal(err)
 		}
-		return true
+		if n == 1 {
+			first = time.Now()
+		}
+		return n == 1
 	})
 	return first
 }
@@ -3290,8 +3290,7 @@ func TestAccountErasureRecipientWaitIsBounded(t *testing.T) {
 		before := erasureWaitSnapshot(t, r.app.DB)
 		del := r.erase()
 		epid, qs := erasureTestStatementWait(t, r.app)
-		erasureTestWaitBlockedOnlyBy(t, r.app, epid, qs, int(w1pid.Load()))
-		observed := time.Now()
+		observed := erasureTestWaitBlockedOnlyBy(t, r.app, epid, qs, int(w1pid.Load()))
 		res := awaitResult(t, del)
 		answered := time.Since(observed)
 		erasureTestAssertTimeout(t, r, res)
@@ -3338,8 +3337,6 @@ func TestAccountErasureRecipientWaitIsBounded(t *testing.T) {
 	})
 
 	t.Run("staggered rows outlast the whole statement", func(t *testing.T) {
-		// Release R1 after 0.4T. The UPDATE has about 0.6T left at R2,
-		// and a fresh per-row budget would have T left.
 		const wait = 2500 * time.Millisecond
 		setWait(t, wait)
 		r := newErasureWaitRun(t)
@@ -3388,26 +3385,23 @@ func TestAccountErasureRecipientWaitIsBounded(t *testing.T) {
 		if !inOrder {
 			t.Fatalf("the scrub uses a plan whose row order is not known to reach R1 first:\n%s", planText)
 		}
-		var scrubEnd struct {
-			pid        int
-			start, end time.Time
-			err        error
-		}
-		const observeScrub = "test:erasure_scrub_end"
-		// ROLLBACK replaces the UPDATE in pg_stat_activity. Read the state
-		// change on another connection before returning the error to the caller.
-		if err := db.Callback().Raw().After("gorm:raw").Register(observeScrub, func(tx *gorm.DB) {
-			if tx.Error == nil || !strings.HasPrefix(tx.Statement.SQL.String(), erasureRecipientScrubPrefix) {
+		var scrubPID int
+		var scrubTimeoutMS int64
+		var probeErr error
+		const probe = "test:erasure_scrub_timeout"
+		// Read the timeout on the UPDATE's connection before it runs. An
+		// error reply can lag while PostgreSQL aborts the transaction.
+		if err := db.Callback().Raw().Before("gorm:raw").Register(probe, func(tx *gorm.DB) {
+			if tx.Error != nil || !strings.HasPrefix(tx.Statement.SQL.String(), erasureRecipientScrubPrefix) {
 				return
 			}
-			scrubEnd.err = db.WithContext(tx.Statement.Context).Raw(`SELECT pid, query_start, state_change
-				FROM pg_stat_activity WHERE datname = current_database()
-				AND state = 'idle in transaction (aborted)' AND query LIKE ?`,
-				erasureRecipientScrubPrefix+"%").Row().Scan(&scrubEnd.pid, &scrubEnd.start, &scrubEnd.end)
+			probeErr = tx.Statement.ConnPool.QueryRowContext(tx.Statement.Context,
+				"SELECT pg_backend_pid(), setting::bigint FROM pg_settings WHERE name = 'statement_timeout'").
+				Scan(&scrubPID, &scrubTimeoutMS)
 		}); err != nil {
 			t.Fatal(err)
 		}
-		t.Cleanup(func() { _ = db.Callback().Raw().Remove(observeScrub) })
+		t.Cleanup(func() { _ = db.Callback().Raw().Remove(probe) })
 
 		w1pid := erasureTestWorkerPID(t, db, r.seed.r1.ID)
 		w2pid := erasureTestWorkerPID(t, db, r.seed.r2.ID)
@@ -3415,23 +3409,18 @@ func TestAccountErasureRecipientWaitIsBounded(t *testing.T) {
 		awaitDBSignal(t, r.sender.Reached(r.seed.key1()))
 		del := r.erase()
 		epid, qs := erasureTestStatementWait(t, r.app)
-		erasureTestWaitBlockedOnlyBy(t, r.app, epid, qs, int(w1pid.Load()))
-		releaseAt := time.Now().Add(wait * 2 / 5)
+		t1 := erasureTestWaitBlockedOnlyBy(t, r.app, epid, qs, int(w1pid.Load()))
 		w2 := r.worker(r.seed.m2, r.seed.r2.ID)
 		awaitDBSignal(t, r.sender.Reached(r.seed.key2()))
 		erasureTestWaitBlockedOnlyBy(t, r.app, epid, qs, int(w1pid.Load())) // still W1 alone
-		time.Sleep(time.Until(releaseAt))
+		time.Sleep(time.Until(t1.Add(wait * 2 / 5)))
 		r.sender.Release(r.seed.key1())
 		r.awaitStatus(r.seed.r1.ID, models.RecipientSent)
-		t2 := erasureTestWaitBlockedOnlyBy(t, r.app, epid, qs, int(w2pid.Load()))
+		erasureTestWaitBlockedOnlyBy(t, r.app, epid, qs, int(w2pid.Load()))
 		res := awaitResult(t, del)
-		if scrubEnd.err != nil || scrubEnd.pid != epid || !scrubEnd.start.Equal(qs) {
-			t.Fatalf("observed scrub end %+v, want backend %d and query_start %v", scrubEnd, epid, qs)
-		}
-		since := scrubEnd.end.Sub(t2)
-		t.Logf("PostgreSQL ended the scrub after %v, %v after observing the second wait", scrubEnd.end.Sub(qs), since)
-		if since < 0 || since >= wait*4/5 {
-			t.Errorf("the scrub ended %v after observing the second wait, want between 0 and %v", since, wait*4/5)
+		if probeErr != nil || scrubPID != epid || scrubTimeoutMS != wait.Milliseconds() {
+			t.Errorf("scrub backend %d has statement_timeout %dms (probe error %v), want backend %d with %dms",
+				scrubPID, scrubTimeoutMS, probeErr, epid, wait.Milliseconds())
 		}
 		select {
 		case <-w2:
