@@ -1855,7 +1855,7 @@ func TestSeriesEditRestoresSeriesCancelledDates(t *testing.T) {
 	if err := json.Unmarshal([]byte(restoredAudit.MetaJSON), &restoredMeta); err != nil {
 		t.Fatal(err)
 	}
-	// restoreSeriesDates records every occurrence the edit brought back, not
+	// recordDatesRestored records every occurrence the edit brought back, not
 	// only the ones someone registered for. The series has no end date again,
 	// so that is each generated date after d1 except the manually cancelled d4,
 	// in date order. The people told (noticeDates above) are only d2 and d3.
@@ -3061,7 +3061,7 @@ func TestDateEditEventDeletedAfterHeldBody(t *testing.T) {
 }
 
 func TestEventSiblingWritersRecheckAfterHeldBody(t *testing.T) {
-	for _, writer := range []string{"series", "cancel"} {
+	for _, writer := range []string{"series", "cancel", "restore"} {
 		for _, change := range []string{"demoted admin", "disabled account", "removed leader"} {
 			t.Run(writer+"/"+change, func(t *testing.T) {
 				f := newEventWriterRace(t, change == "demoted admin")
@@ -3069,6 +3069,10 @@ func TestEventSiblingWritersRecheckAfterHeldBody(t *testing.T) {
 				body := map[string]any{"title": "Changed series", "location": "New hall"}
 				if writer == "cancel" {
 					method, path, body = "POST", path+"/cancel", map[string]any{"date": f.date}
+				}
+				if writer == "restore" {
+					apiDo(t, f.admin, "POST", path+"/cancel", map[string]string{"date": f.date}, 200)
+					method, path, body = "POST", path+"/restore", map[string]any{"date": f.date, "revision": editBaseOf(t, f.actor, f.event.ID, f.date).Revision}
 				}
 				held := f.actor.doHeld(method, path, body)
 				f.revoke(t, change)
@@ -4098,5 +4102,119 @@ func TestSignedUpCountIncludesAKeptMaybe(t *testing.T) {
 	}
 	if got := noticesSince(t, f.app, w.ID, notify.EventDeleted, mark.notice); len(got) != 1 || got[0].Title != "Cancelled: Church event" {
 		t.Fatalf("the kept Maybe's deletion notices: %+v", got)
+	}
+}
+
+func TestBringBackManuallyCancelledDate(t *testing.T) {
+	f := newDateEditFixture(t)
+	date, occ := f.date(0), f.dates[0]
+	path := "/api/v1/events/" + itoa(f.event.ID)
+	// A verified guest has a party of two and a link for this public date.
+	gormMust(t, f.app.DB.Model(&models.Event{}).Where("id = ?", f.event.ID).Updates(map[string]any{"waitlist_enabled": true, "guests_allowed": 1, "capacity": 2}))
+	gormMust(t, f.app.DB.Model(&occ).Update("visibility_override", models.VisibilityPublic))
+	guest := newTestUser(t, f.app, "restore guest", "pw", models.RoleMember)
+	gormMust(t, f.app.DB.Model(guest).Updates(map[string]any{"status": models.UserGuest, "password_hash": nil}))
+	at := time.Now().UTC().Truncate(time.Microsecond)
+	const token = "restore-guest-test"
+	regs := []models.Registration{
+		{UserID: &guest.ID, Status: models.RegGoing, GuestCount: 1, ManageTokenHash: hashToken(token)},
+		{UserID: &f.memberUser.ID, Status: models.RegWaitlisted, WaitlistedAt: &at},
+		{UserID: &f.leaderUser.ID, Status: models.RegMaybe},
+		{UserID: &f.outsiders[0].ID, Status: models.RegRemoved},
+		{UserID: &f.outsiders[1].ID, Status: models.RegCancelled},
+	}
+	for i := range regs {
+		regs[i].OccurrenceID, regs[i].Source = occ.ID, "web"
+		gormMust(t, f.app.DB.Create(&regs[i]))
+	}
+	cancel := func() { apiDo(t, f.leader, "POST", path+"/cancel", map[string]string{"date": date}, 200) }
+	cancel()
+	link := "/api/v1/guest-registrations/manage/" + token
+	apiDo(t, f.member, "GET", link, nil, http.StatusNotFound)
+	if _, raw := getEvent(t, f.member, f.event.ID, 200); strings.Contains(raw, "restorableDates") {
+		t.Fatal("member saw restore list")
+	}
+	list := func() restorableDateJSON {
+		page, _ := getEvent(t, f.leader, f.event.ID, 200)
+		if len(page.RestorableDates) != 1 || page.RestorableDates[0].Date != date {
+			t.Fatalf("restore list = %+v", page.RestorableDates)
+		}
+		return page.RestorableDates[0]
+	}
+	post := func(c *apiClient, rev string, status int) {
+		apiDo(t, c, "POST", path+"/restore", map[string]string{"date": date, "revision": rev}, status)
+	}
+	old := list()
+	post(f.member, old.Revision, 403)
+	// Move the series past this day and reduce the pool below its existing party.
+	apiDo(t, f.admin, "PUT", path, seriesBody(t, f.admin, path, map[string]any{"startsLocal": f.dates[1].StartsAt.Format("2006-01-02T15:04"), "capacity": 1}), 200)
+	post(f.leader, old.Revision, 409)
+	current := list()
+	mark := markNotices(t, f.app)
+	post(f.leader, current.Revision, 200)
+	post(f.leader, current.Revision, 409)
+	restored := occurrenceRow(t, f.app, occ.ID)
+	if restored.Status != models.OccurrenceScheduled || restored.CancelSource != "" || !restored.StartsAt.Equal(occ.StartsAt) || !restored.EndsAt.Equal(occ.EndsAt) {
+		t.Fatalf("restored date = %+v", restored)
+	}
+	for _, before := range regs {
+		var r models.Registration
+		gormMust(t, f.app.DB.First(&r, before.ID))
+		if r.Status != before.Status || r.GuestCount != before.GuestCount || r.ManageTokenHash != before.ManageTokenHash {
+			t.Fatalf("changed answer %d: %+v", before.ID, r)
+		}
+		if before.WaitlistedAt != nil && (r.WaitlistedAt == nil || !r.WaitlistedAt.Equal(at)) {
+			t.Fatal("waitlist position changed")
+		}
+		n := len(noticesSince(t, f.app, *r.UserID, notify.OccurrenceRestored, mark.notice))
+		want := 0
+		if r.Status == models.RegGoing || r.Status == models.RegWaitlisted {
+			want = 1
+		}
+		if n != want {
+			t.Fatalf("%s recipient got %d restore notices", r.Status, n)
+		}
+	}
+	apiDo(t, f.member, "GET", link, nil, http.StatusOK)
+	if n := auditCount(t, f.app, audit.EventDatesRestored); n != 1 {
+		t.Fatalf("restore audit rows = %d", n)
+	}
+	cancel()
+	post(f.leader, current.Revision, 409)
+	if status := occurrenceRow(t, f.app, occ.ID).Status; status != models.OccurrenceCancelled {
+		t.Fatal("stale restore undid a later cancel")
+	}
+	for _, source := range []string{models.CancelSourceSeries, ""} {
+		gormMust(t, f.app.DB.Model(&occ).Update("cancel_source", source))
+		if page, _ := getEvent(t, f.leader, f.event.ID, 200); len(page.RestorableDates) != 0 {
+			t.Fatalf("offered restore for source %q", source)
+		}
+		post(f.leader, editBaseOf(t, f.leader, f.event.ID, date).Revision, 409)
+	}
+	gormMust(t, f.app.DB.Model(&occ).Update("cancel_source", models.CancelSourceManual))
+	rev := list().Revision
+	f.app.clock = func() time.Time { return occ.StartsAt }
+	post(f.leader, rev, 409)
+	if page, _ := getEvent(t, f.leader, f.event.ID, 200); len(page.RestorableDates) != 0 {
+		t.Fatal("started date offered for restore")
+	}
+}
+
+func TestManualRestoreLeavesEndedInvitationTerminal(t *testing.T) {
+	f := newDepartureReadFixture(t, models.VisibilityInviteOnly, models.RegGoing, policy.OccurrenceOriginDepartureSelf)
+	o := f.dates[1]
+	date := models.FormatCalendarDate(o.OriginalDate)
+	path := "/api/v1/events/" + itoa(f.event.ID)
+	apiDo(t, f.admin, "POST", path+"/cancel", map[string]string{"date": date}, 200)
+	mark := markNotices(t, f.app)
+	apiDo(t, f.admin, "POST", path+"/restore", map[string]string{"date": date, "revision": editBaseOf(t, f.admin, f.event.ID, date).Revision}, 200)
+	if grant := savedOccurrenceAccess(t, f); grant.Status != policy.OccurrenceAccessEnded || grant.EndReason != policy.OccurrenceCancelled {
+		t.Fatalf("grant = %+v", grant)
+	}
+	if got := regStatus(t, f.app, f.recipient.ID, o.ID); got != models.RegCancelled {
+		t.Fatalf("ineligible answer = %s", got)
+	}
+	if n := len(noticesSince(t, f.app, f.recipient.ID, notify.OccurrenceRestored, mark.notice)); n != 0 {
+		t.Fatal("ended invitation got a back-on notice")
 	}
 }
