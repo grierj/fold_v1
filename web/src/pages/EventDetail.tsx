@@ -24,12 +24,13 @@ import { RefusedSaveLine, ResourceRefusal, resourceRefused, useRefusedSave, useR
 import { RsvpButtons } from "../components/RsvpButtons";
 import { GuestRegistrationForm } from "../components/GuestRegistrationForm";
 import { DateActions } from "../components/DateActions";
-import { formatDayFull, formatTime, heldIn } from "../lib/when";
+import { dayOf, formatDayFull, formatEventDay, formatTime, heldIn } from "../lib/when";
 import { placeLine } from "../lib/place";
 import { dateLine, whenLine } from "../lib/repeat";
-import type { EventHostRow, EventOccurrence, HouseholdPerson } from "../types";
+import type { EventHostRow, EventOccurrence, HouseholdPerson, RestorableDate } from "../types";
 import { errorText } from "../lib/errors";
 import { useLoad } from "../lib/useLoad";
+import { useBeforeDeadline } from "../lib/useBeforeDeadline";
 import { useAction } from "../lib/useAction";
 import { ErrorNotice } from "../components/ErrorNotice";
 import { Missing } from "../components/Missing";
@@ -112,6 +113,7 @@ function EventDetailContent() {
   const visibilityAction = useAction();
   const panelBusy = seriesAction.running || visibilityAction.running;
   const [panelUpdated, setPanelUpdated] = useState(false);
+  const [restoredDate, setRestoredDate] = useState<RestorableDate | null>(null);
   const [updatedDateId, setUpdatedDateId] = useState<number | null>(null);
   const managerStatus = <ManagerSaveStatus saving={panelBusy} updated={panelUpdated} />;
   useEffect(() => {
@@ -492,6 +494,14 @@ function EventDetailContent() {
         />
       )}
 
+      {canManage && page.restorableDates?.map((date) => <RestoreDate key={date.revision} date={date} eventId={event.id}
+        onChanged={() => { setRestoredDate(date); refreshDates(); }} onRefused={(why) => refusedSave.refused(why, "action")} />)}
+      {canManage && <div role="status" aria-atomic="true">
+        {restoredDate && <p className="mt-2">
+          You brought back {formatEventDay(restoredDate.startsAt)} at {formatTime(restoredDate.startsAt)}.{" "}
+          <ButtonLink variant="link" to={`/events/${event.id}/dates/${restoredDate.date}`}>View date</ButtonLink>
+        </p>}
+      </div>}
       {!single && <h2 className="text-xl font-semibold mt-6 mb-4">Upcoming dates</h2>}
       {householdError && <ErrorNotice message={householdError} onRetry={retryHousehold} />}
       <ManagerSaveStatus saving={false} updated={updatedDateId !== null} updateKey={updatedDateId} />
@@ -499,7 +509,7 @@ function EventDetailContent() {
       {refusedDate && <RefusedSaveLine save={dateRefused} noun="date" about={formatDayFull(refusedDate.date)}
         canManage={occurrences.some((o) => o.eventId === refusedDate.eventId && o.date === refusedDate.date) ? canManage : undefined} />}
       {occurrences.length === 0 && (
-        <EmptyState title="No upcoming dates." body="This event has no more dates on the calendar." />
+        <EmptyState title="No upcoming dates." body="There are no dates to show in the next 90 days." />
       )}
       <div className={single ? "mt-6 fold-list" : "fold-list"}>
         <CompactDates dates={occurrences} requested={pickRequest?.date ?? (canManage ? manageDate ?? undefined : undefined)} requestVersion={pickRequest?.seq}>
@@ -536,6 +546,49 @@ function EventDetailContent() {
       </div>
     </div></ResourceRefusal.Provider></EventReadPin.Provider>
   );
+}
+
+function RestoreDate({ date, eventId, onChanged, onRefused }: {
+  date: RestorableDate;
+  eventId: number;
+  onChanged: () => void;
+  onRefused: (why: RevisionConflict) => void;
+}) {
+  const deadline = Date.parse(date.startsAt);
+  const future = useBeforeDeadline(deadline);
+  const begin = useConfirm(future ? date.revision : null);
+  const restore = useAction();
+
+  if (!future) return null;
+
+  const day = formatEventDay(date.startsAt);
+  const title = `Bring back ${day} at ${formatTime(date.startsAt)}?`;
+  const body = "People who can still attend keep their sign-ups. We'll tell those going or on the waitlist that the date is back on.";
+
+  function bringBack() {
+    const action = begin();
+    void restore.run(async () => {
+      if (!(await action.ask({ title, body, tone: "normal", confirmLabel: "Bring this date back", cancelLabel: "Keep cancelled", native: `${title} ${body}` })) || Date.now() >= deadline) return false;
+
+      try {
+        await Events.restoreOccurrence(eventId, date.date, date.revision);
+      } catch (cause) {
+        if (!(cause instanceof ApiError) || (cause.status !== 409 && !resourceRefused(cause))) throw cause;
+
+        if (action.here()) onRefused(cause.status === 409 ? "changed" : "gone");
+
+        return false;
+      }
+
+      if (action.here()) onChanged();
+    }, { fallback: "We couldn't bring this date back." });
+  }
+
+  return <div className="fold-list-row">
+    <p className="font-medium">{day} · {formatTime(date.startsAt)} · Cancelled</p>
+    <Button variant="secondary" layout="mt-2" disabled={restore.running || restore.state.status === "done"} onClick={bringBack}>Bring this date back</Button>
+    {restore.state.status === "failed" && <FormError>{restore.state.text}</FormError>}
+  </div>;
 }
 
 function DateRow({
@@ -624,6 +677,7 @@ function DateRow({
   const cancelNow = useRef(false);
   const [cancelError, setCancelError] = useState<string | null>(null);
   const beginCancel = useConfirm();
+  const day = dayOf(instance.startsAt);
   const time = formatTime(instance.startsAt);
   const held = heldIn(instance.startsAt, instance.tzid);
   const place = placeLine(instance.room, instance.location);
@@ -633,7 +687,7 @@ function DateRow({
     const action = beginCancel();
     cancelNow.current = true;
     setCancelStep("asking");
-    const question = `Cancel this date on ${instance.date}?`;
+    const question = `Cancel this date on ${formatDayFull(day)}?`;
     const told = await signedUpNotice(instance.eventId, instance.date);
 
     if (!(await action.ask({ title: question, body: told, confirmLabel: "Cancel this date", cancelLabel: "Keep this date", tone: "danger", native: `${question} ${told}` }))) {
@@ -672,7 +726,7 @@ function DateRow({
       </>}
       menu={canManage && <Menu
         tone="quiet"
-        label={`More for ${instance.date}`}
+        label={`More for ${day}`}
         items={[
           { label: "Edit this date", onSelect: () => { setFocusRoom(false); dateEditor.toggle(); }, disabled: settlingDate || dateEditor.saving },
           { label: "Manage sign-ups", onSelect: () => setManaging((v) => !v) },
