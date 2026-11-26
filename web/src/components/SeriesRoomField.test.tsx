@@ -412,8 +412,8 @@ it("says what each date has when a pick whose answer was lost is found stored, a
   await pickAndBook("2");
   expect(await screen.findByRole("alert")).toBeInTheDocument();
   await userEvent.click(screen.getByRole("button", { name: "Book for every date" }));
-  await waitForStatus("Sent to an admin for approval: 8 dates. 2 dates still need a room; pick one for them under “Dates that need a room” on the event page.");
-  expect(screen.queryByText(/The series room is saved/)).not.toBeInTheDocument();
+  await waitForStatus("Still waiting for an admin's approval: 8 dates. 2 dates still need a room; pick one for them under “Dates that need a room” on the event page.");
+  expect(screen.queryByText(/The series room is saved|Sent to an admin/)).not.toBeInTheDocument();
 });
 
 it("books every date again, and says what its answer did, when someone else already set the same series room", async () => {

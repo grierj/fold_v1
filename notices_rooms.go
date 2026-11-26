@@ -52,22 +52,6 @@ func notifyRoomRequested(tx *gorm.DB, req *models.RoomRequest, ev *models.Event,
 	return err
 }
 
-// restateRoomRequested brings req's open admin task up to date with the dates
-// that wait on it now, after more joined it, without telling anyone again.
-func restateRoomRequested(tx *gorm.DB, req *models.RoomRequest, ev *models.Event, room *models.Room) error {
-	var dates int64
-	if err := tx.Model(&models.RoomBooking{}).Where("request_id = ? AND status = ?", req.ID, policy.RoomBookingWaiting.Status()).
-		Count(&dates).Error; err != nil {
-		return err
-	}
-	vars, err := roomRequestedVars(tx, ev, room, int(dates), req.RequestedBy)
-	if err != nil {
-		return err
-	}
-	_, err = notify.Restate(tx, notify.RoomRequested, req.ID, vars)
-	return err
-}
-
 func roomRequestedVars(tx *gorm.DB, ev *models.Event, room *models.Room, dates int, asker *uint) (notify.Vars, error) {
 	name, err := askerName(tx, asker)
 	return notify.Vars{Actor: name, Event: ev.Title, Change: room.Name + " for " + dateCount(dates)}, err // group-ok: admin tasks go to admins

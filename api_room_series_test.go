@@ -942,16 +942,6 @@ func roomTasks(t *testing.T, app *App, id uint) []models.Notification {
 	return rows
 }
 
-// withoutText is a task row less the text a restatement renders again.
-func withoutText(rows []models.Notification) []models.Notification {
-	out := make([]models.Notification, len(rows))
-	for i, n := range rows {
-		n.Title, n.Body, n.EmailTitle, n.EmailBody, n.PushTitle, n.PushBody = "", "", "", "", "", ""
-		out[i] = n
-	}
-	return out
-}
-
 // bookingIDsOf is each of ev's dates' booking row.
 func bookingIDsOf(t *testing.T, app *App, ev eventJSON) map[string]uint {
 	t.Helper()
@@ -970,8 +960,8 @@ func bookingIDsOf(t *testing.T, app *App, ev eventJSON) map[string]uint {
 
 // A leader's or host's pick of the room the event's series request is for
 // keeps that request: the dates waiting on it stay as they are, the dates
-// the pick sends join it, and its one admin task says how many dates it is
-// for now and is never sent again. A pick that changes nothing tells no one.
+// the pick sends join it, and its one admin task stays as it was written and
+// is never sent again. A pick that changes nothing tells no one.
 func TestSeriesRepickOfTheWaitingRoomKeepsItsRequest(t *testing.T) {
 	f := newBookingFixture(t)
 	_, co := f.coLeader(t)
@@ -996,19 +986,19 @@ func TestSeriesRepickOfTheWaitingRoomKeepsItsRequest(t *testing.T) {
 	changedNotices := func() int64 {
 		return contactCount(t, f.app, &models.Notification{}, "user_id = ? AND kind = ?", co.ID, notify.RoomChanged)
 	}
-	// sameRequest: req is still the event's one pending series request, its
-	// task the same row, open, telling of dates, and nothing went out to admins.
+	// sameRequest: req is still the event's one pending series request with
+	// dates waiting on it, its task the same open row, and nothing went out to admins.
 	sameRequest := func(step string, dates int, jobsBefore int64) {
 		t.Helper()
 		if got := seriesRequestOf(t, f.app, series); got.ID != req.ID {
 			t.Fatalf("%s: the series request is %d, want %d kept", step, got.ID, req.ID)
 		}
 		now := roomTasks(t, f.app, req.ID)
-		if !reflect.DeepEqual(withoutText(now), withoutText(tasks)) || now[0].ResolvedAt != nil {
-			t.Fatalf("%s: the admin's task is\n%+v\nwant the same open row as\n%+v", step, now, tasks)
+		if !reflect.DeepEqual(now, tasks) || now[0].ResolvedAt != nil {
+			t.Fatalf("%s: the admin's task is\n%+v\nwant the same open row, as it was written, as\n%+v", step, now, tasks)
 		}
-		if want := "Fellowship Hall for " + dateCount(dates) + ". Needs an admin's approval."; now[0].Body != want || !strings.Contains(now[0].EmailBody, dateCount(dates)) {
-			t.Fatalf("%s: the task says %q (email %q), want %q", step, now[0].Body, now[0].EmailBody, want)
+		if n := contactCount(t, f.app, &models.RoomBooking{}, "request_id = ? AND status = ?", req.ID, models.BookingRequested); int(n) != dates {
+			t.Fatalf("%s: %d dates wait on the request, want %d", step, n, dates)
 		}
 		if n := contactCount(t, f.app, &models.Notification{}, "kind = ?", notify.RoomRequested); n != 1 {
 			t.Fatalf("%s: %d room request notices, want the one task", step, n)

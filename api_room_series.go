@@ -604,11 +604,6 @@ func bookWholeSeries(tx *gorm.DB, ev *models.Event, pick seriesPick, user *model
 	if err := resolveWithdrawn(tx, withdrawn); err != nil {
 		return out, err
 	}
-	if keptRequest != nil && out.Pending > 0 {
-		if err := restateRoomRequested(tx, keptRequest, ev, room); err != nil {
-			return out, err
-		}
-	}
 	if err := closeEmptyRoomRequests(tx); err != nil {
 		return out, err
 	}

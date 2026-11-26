@@ -182,7 +182,9 @@ export function seriesBookingMessage(res: SeriesBooking): string {
 export function seriesStoredMessage(read: SeriesRoomsResponse): string {
   if (read.defaultRoom === null) return "Series room released.";
 
-  const parts = waitingAndNeeding(read.pending, read.needsRoom.length);
+  // "Still waiting", not "sent": the read shows every date that waits, and this pick may have sent only some of them.
+  const parts = read.pending > 0 ? [`Still waiting for an admin's approval: ${dates(read.pending)}.`] : [];
+  parts.push(...waitingAndNeeding(0, read.needsRoom.length));
 
   return parts.length > 0 ? parts.join(" ") : "The series room is saved.";
 }
