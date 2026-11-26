@@ -78,7 +78,7 @@ Playwright locators in the feature files are the handles to use: role and access
 Proof for a run lives in `/tmp/fold-verify-proof/<RUN_ID>/`. `drive sign-in` writes `sign-in/`:
 
 - `bad-password.png` shows the login form still open with `That email and password don't match. Check them and try again.`
-- `after-login.png` shows the directory heading and the header name `Verify Admin` after a successful login.
+- `after-login.png` shows the signed-in greeting and the header name `Verify Admin` after a successful login.
 - `after-reload.png` shows the same session after a reload.
 - `me.json` is the body of `GET /api/v1/auth/me` from that browser session. It is 200 and the user email is `verify-admin@example.com`.
 - `result.txt` records the final URL, heading, header name, and that `auth/me` returned the same email.
@@ -87,7 +87,7 @@ Proof for a run lives in `/tmp/fold-verify-proof/<RUN_ID>/`. `drive sign-in` wri
 Standards:
 
 - Use the pages and controls a person uses. Do not call an unlisted test endpoint, and do not insert rows except through the app.
-- Capture the action and the state it produced. A status message or a single screenshot is not enough. Sign-in proof is the failed attempt, the directory after success, the same directory after reload, the session JSON, and the user row.
+- Capture the action and the state it produced. A status message or a single screenshot is not enough. Sign-in proof is the failed attempt, the signed-in home page after success and after reload, the session JSON, and the user row.
 - `GET /api/v1/auth/me` is the same call the SPA uses to read the session. It is a second view of the cookie, not a substitute for the form.
 - The dev database named `fold` must not gain `verify-admin@example.com`. The drive checks that and fails if it did.
 - There is no dry-run mode. The verify database is the real database for that process.

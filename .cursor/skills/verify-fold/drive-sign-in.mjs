@@ -20,6 +20,7 @@ await mkdir(dir, { recursive: true });
 
 const browser = await chromium.launch();
 const page = await browser.newPage({ viewport: { width: 1280, height: 800 } });
+const greeting = page.getByRole("heading", { level: 1, name: /^Good (morning|afternoon|evening), Verify$/ });
 page.setDefaultTimeout(15_000);
 try {
   await page.goto(url + "/setup");
@@ -48,7 +49,7 @@ try {
   await page.getByLabel("Password").fill(password);
   await page.getByRole("button", { name: "Log in" }).click();
   await page.waitForURL((u) => !u.pathname.startsWith("/login"));
-  await page.getByRole("heading", { name: "Find your people. Grow in faith together." }).waitFor();
+  await greeting.waitFor();
   await page.getByRole("button", { name: "Log out" }).waitFor();
   await page.locator("header").getByText(name, { exact: true }).waitFor();
   await page.screenshot({ path: path.join(dir, "after-login.png"), fullPage: true });
@@ -65,7 +66,7 @@ try {
   }
 
   await page.reload();
-  await page.getByRole("heading", { name: "Find your people. Grow in faith together." }).waitFor();
+  await greeting.waitFor();
   await page.getByRole("button", { name: "Log out" }).waitFor();
   await page.locator("header").getByText(name, { exact: true }).waitFor();
   await page.screenshot({ path: path.join(dir, "after-reload.png"), fullPage: true });
@@ -74,7 +75,7 @@ try {
     path.join(dir, "result.txt"),
     [
       "url " + page.url(),
-      "heading Find your people. Grow in faith together.",
+      "heading " + (await greeting.innerText()),
       "header " + name,
       "me 200 " + email,
     ].join("\n") + "\n"

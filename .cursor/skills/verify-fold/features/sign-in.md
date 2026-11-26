@@ -27,7 +27,7 @@ Preconditions:
 - **Reject a bad password.** The heading reads `Log in to Fold`. Fill `Email` with `verify-admin@example.com` and `Password` with `not-the-password`. Choose `Log in`. The text `That email and password don't match. Check them and try again.` is visible and the URL still contains `/login`. `bad-password.png` shows that form.
 - **Sign in.** Replace `Password` with `password1234` and choose `Log in`. The URL is no longer `/login`. The level-1 heading reads `Good evening, Verify` (`Good morning` or `Good afternoon` earlier in the day; the first name only). The header (`getByRole("banner")`) shows `Verify Admin` and a `Log out` button, and the `Groups` section is below the greeting. `after-login.png` shows that page.
 - **Confirm the session.** `GET /api/v1/auth/me` from the same browser returns 200. `me.json` has `user.email` `verify-admin@example.com` and `user.name` `Verify Admin`.
-- **Reload.** Reload the home page. The same greeting, header name, and `Log out` button are still there. `after-reload.png` shows that page.
+- **Reload.** Reload the home page. The greeting for `Verify`, the header name, and `Log out` are visible again. `after-reload.png` shows that page.
 - **Confirm the stored user.** `users.csv` from the verify database contains `verify-admin@example.com,Verify Admin,admin`. The dev database named `fold` does not contain that email.
 
 ## Gotchas
@@ -36,5 +36,4 @@ Preconditions:
 - Password must be at least 10 characters. `password1234` is long enough.
 - `Log in` is a link in the header and a button on the form. Choose the button to submit.
 - The header's home link shows the church name (`Fold verify`) over `powered by Fold`. It is not proof of which account is signed in. The header name and `Log out` are.
-- Only the signed-out home page has the heading `Find your people. Grow in faith together.` A signed-in person sees the greeting instead. `drive-sign-in.mjs` still waits for the old heading after login, so the packaged drive stops with a timeout after `bad-password.png` until that wait is changed to the greeting. The steps above are what it should check.
 - `GET /api/v1/auth/me` without the browser's `fold-session` cookie does not prove the form worked.
