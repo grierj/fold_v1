@@ -215,6 +215,14 @@
   .input:focus-visible { outline-offset: 2px; }
   .input:disabled { @apply bg-sunken text-text-muted cursor-not-allowed; }
   .input[aria-invalid="true"] { @apply border-danger; }
+  /* The native room control still opens the picker and takes focus. Its closed
+     value needs a real text box so the browser can wrap the full option. */
+  .room-select { position: relative; }
+  .room-select > select { @apply absolute inset-0 h-full opacity-0; }
+  .room-select-value { @apply flex items-center justify-between gap-2; }
+  .room-select > select:focus-visible + .room-select-value { outline: 2px solid var(--color-focus); outline-offset: 2px; }
+  .room-select > select:disabled + .room-select-value { @apply bg-sunken text-text-muted cursor-not-allowed; }
+  .room-select > select[aria-invalid="true"] + .room-select-value { @apply border-danger; }
   .input[type="range"] { accent-color: var(--color-primary); }
   .btn-secondary:active, .btn-ghost:active, .btn-link:active { @apply bg-primary-subtle text-primary-on-subtle; }
   .btn-danger-outline:active { @apply bg-danger-subtle; }
