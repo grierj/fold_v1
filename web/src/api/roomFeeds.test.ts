@@ -48,7 +48,7 @@ it.each([
 });
 
 it.each([
-  { label: "still on", enabled: true, rotates: false, code: "session_expired" },
+  { label: "still on", enabled: true, rotates: false, code: "server_error" },
   { label: "off", enabled: false, rotates: false, code: "rooms_off" },
   { label: "off under a replacement credential", enabled: false, rotates: true, code: "session_expired" },
 ])("checks the public switch after an unacknowledged feed read ($label)", async ({ enabled, rotates, code }) => {
@@ -83,7 +83,7 @@ it.each([
   }
 
   site.resolve(Response.json({ roomsEnabled: enabled }));
-  await expect(pending).rejects.toMatchObject({ code, unreadable: code === "session_expired" });
+  await expect(pending).rejects.toMatchObject({ code, unreadable: code !== "rooms_off" });
   expect(sentChecks(fetcher.mock.calls)).toEqual([[endpoint, "v2", "before"], ["/api/v1/site", null, null]]);
   await bootstrapCredential();
 });

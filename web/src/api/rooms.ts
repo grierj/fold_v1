@@ -15,7 +15,7 @@ import type {
   SeriesBooking,
   SeriesRoomsResponse,
 } from "../types";
-import { api, ApiError, credentialCurrent, path, type Credential, type Id } from "./core";
+import { api, ApiError, credentialCurrent, currentCredential, path, recheckCredential, type Credential, type Id } from "./core";
 import { Site } from "./site";
 
 // Rooms (M2.1a). Everything answers 404 while rooms are off. On update, absent
@@ -43,7 +43,13 @@ const feedAnswers = {
 };
 
 async function roomFeed(id: Id, request: { method: "GET" } | { method: "POST" | "DELETE"; body: { revision: string } }, pinned: Credential | null): Promise<RoomFeedResponse> {
-  const answer = await api<unknown>(path`/admin/rooms/${id}/feed`, { ...request, pinned });
+  const answer = await api<unknown>(path`/admin/rooms/${id}/feed`, { ...request, pinned }).catch((cause: unknown) => {
+    // A pre-dispatch refusal can be the first sign that another tab changed the cookie.
+    if (pinned && currentCredential() === pinned && !credentialCurrent(pinned)) recheckCredential();
+
+    throw cause;
+  });
+
   const parsed = safeParse(feedAnswers[request.method], answer);
 
   if (!parsed.success) throw new ApiError(502, "unreadable room calendar link", {}, true);
@@ -61,9 +67,11 @@ async function getRoomFeed(id: Id, pinned: Credential | null): Promise<RoomFeedR
     // settings read can confirm that the feed settings are unavailable on this credential.
     const site = await Site.get().catch(() => null);
 
-    if (site?.roomsEnabled !== false || !credentialCurrent(pinned)) throw cause;
+    if (!credentialCurrent(pinned)) throw cause;
 
-    throw new ApiError(404, "room booking is turned off", { code: "rooms_off" });
+    if (site?.roomsEnabled === false) throw new ApiError(404, "room booking is turned off", { code: "rooms_off" });
+
+    throw new ApiError(502, "unconfirmed room calendar link status", {}, true);
   }
 }
 

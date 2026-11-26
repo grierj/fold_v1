@@ -2253,7 +2253,7 @@ erases no identity data, which is later M7.4 work, and M7.4 is not complete.
   R19.2). Nothing here erases a name, an address or any other identity data.
 ### Rooms (M2.1a)
 
-Rooms are optional (PLAN 9.1). While the `rooms_enabled` setting is off, every room route answers 404, for anyone, and `GET /api/v1/site` reports `roomsEnabled: false`.
+Rooms are optional (PLAN 9.1). While the `rooms_enabled` setting is off, every room route answers 404, for anyone, and `GET /api/v1/site` reports `roomsEnabled: false`. If the site endpoint cannot read the rooms setting, it returns 500 so clients can distinguish the failed read from a confirmed switch state.
 
 Room admin writes recheck the actor's session and role in their transaction.
 They return `401` if the admin can no longer act.

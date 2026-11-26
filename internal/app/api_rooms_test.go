@@ -76,6 +76,24 @@ func TestRoomAdminWritesRequireCurrentAdmin(t *testing.T) {
 	}
 }
 
+func TestSiteReportsRoomSwitchReadFailure(t *testing.T) {
+	app := testApp(t)
+	newTestUser(t, app, "admin", "password1234", models.RoleAdmin)
+	if err := setSettingIn(app.DB, settingRoomsEnabled, "true"); err != nil {
+		t.Fatal(err)
+	}
+	failures := failStatement(t, app, func(tx *gorm.DB) bool {
+		return tx.Statement.Table == "settings" && strings.Contains(fmt.Sprint(tx.Statement.Clauses["WHERE"].Expression), settingRoomsEnabled)
+	})
+
+	guest := newAPIClient(t, app)
+	w := guest.do("GET", "/api/v1/site", nil, false)
+	wantCode(t, "site could not read the rooms switch", w, http.StatusInternalServerError, "server_error")
+	if failures.Load() != 1 || strings.Contains(w.Body.String(), "roomsEnabled") {
+		t.Fatalf("site reported a switch value after a failed read: %s", w.Body.String())
+	}
+}
+
 // Rooms are invisible until an admin turns them on (9.1, M2.1a); then only
 // admins manage them, names are unique per building, and nothing is deleted.
 func TestRoomCatalog(t *testing.T) {

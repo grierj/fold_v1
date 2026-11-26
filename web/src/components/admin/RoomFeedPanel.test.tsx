@@ -1,7 +1,8 @@
-import { bootstrapAnswer, clearMarkerCookie } from "../../test/credential";
+import { bootstrapAnswer, clearMarkerCookie, setMarkerCookie } from "../../test/credential";
 import { renderWithAuth } from "../../test/auth";
 import { stubService } from "../../test/service";
 import { AdminRooms } from "../../api/rooms";
+import { AuthProvider, useAuth } from "../../auth";
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -147,6 +148,7 @@ describe("RoomFeedPanel (M2.2b)", () => {
 });
 
 afterEach(() => {
+  vi.restoreAllMocks();
   vi.unstubAllGlobals();
   clearMarkerCookie();
 });
@@ -197,4 +199,80 @@ it.each([200, 404])("recovers an unreadable %i write and status read through the
   expect(onGone).not.toHaveBeenCalled();
   expect(screen.queryByRole("button", { name: "Copy link" })).toBeNull();
   expect(requests).toEqual(["GET", "POST", "GET", "GET"]);
+});
+
+it("closes and hides a shown URL when the cookie changes before dispatch", async () => {
+  const viewer = { token: "previous", user: { id: 7, role: "admin" as const, timezone: "UTC" } };
+  const replacement = { token: "replacement", user: { id: 9, role: "admin" as const, timezone: "UTC" } };
+  let session = viewer;
+  const writes: string[] = [];
+
+  const fetcher = vi.fn<typeof fetch>(async (url, init) => {
+    if (String(url).endsWith("/auth/bootstrap")) return bootstrapAnswer(session);
+
+    expect(url).toBe("/api/v1/admin/rooms/7/feed");
+    const method = init?.method ?? "GET";
+    writes.push(method);
+    const headers = { "Fold-Session-Checked": "v2 m-previous 7" };
+
+    const feed = method === "GET"
+      ? { hasToken: false, createdAt: null, revision: "off" }
+      : { hasToken: true, createdAt: "2026-10-30T15:00:00Z", revision: "on", url: URL_ };
+
+    return Response.json({ feed }, { headers });
+  });
+
+  vi.stubGlobal("fetch", fetcher);
+  vi.spyOn(window, "confirm").mockReturnValue(true);
+  const onClose = vi.fn();
+
+  function ReadyPanel() {
+    const { loading } = useAuth();
+
+    return loading ? null : <RoomFeedPanel room={hall} onClose={onClose} onGone={() => {}} />;
+  }
+
+  render(<ReadyPanel />, { wrapper: AuthProvider });
+  await userEvent.click(await screen.findByRole("button", { name: "Create calendar link" }));
+  expect(await screen.findByLabelText("Calendar link")).toHaveValue(URL_);
+
+  session = replacement;
+  setMarkerCookie("m-replacement");
+  await userEvent.click(screen.getByRole("button", { name: "Turn off calendar link" }));
+
+  await waitFor(() => expect(onClose).toHaveBeenCalled());
+  expect(screen.queryByDisplayValue(URL_)).not.toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "Copy link" })).not.toBeInTheDocument();
+  expect(writes).toEqual(["GET", "POST"]);
+  expect(fetcher.mock.calls.filter(([url]) => url === "/api/v1/auth/bootstrap")).toHaveLength(2);
+});
+
+it("offers retry when a fresh settings read cannot confirm that rooms are off", async () => {
+  const viewer = { token: "feed-test", user: { id: 7 } };
+  const off = { feed: { hasToken: false, createdAt: null, revision: "off" } };
+  let reads = 0;
+
+  vi.stubGlobal("fetch", vi.fn<typeof fetch>(async (url) => {
+    if (url === "/api/v1/auth/bootstrap") return bootstrapAnswer(viewer);
+
+    if (url === "/api/v1/site") {
+      return Response.json({ error: "failed", code: "server_error" }, { status: 500 });
+    }
+
+    expect(url).toBe("/api/v1/admin/rooms/7/feed");
+    reads++;
+
+    return reads === 1
+      ? Response.json({ error: "not found", code: "not_found" }, { status: 404 })
+      : Response.json(off, { headers: { "Fold-Session-Checked": "v2 m-feed-test 7" } });
+  }));
+
+  const { credential } = await bootstrapCredential(true);
+  const onGone = vi.fn();
+  renderWithAuth(() => ({ credential }))(<RoomFeedPanel room={hall} onClose={() => {}} onGone={onGone} />);
+  expect(await screen.findByRole("alert")).toHaveTextContent("We couldn't load this room's calendar link.");
+  await userEvent.click(screen.getByRole("button", { name: "Try again" }));
+  expect(await screen.findByRole("button", { name: "Create calendar link" })).toBeVisible();
+  expect(onGone).not.toHaveBeenCalled();
+  expect(reads).toBe(2);
 });

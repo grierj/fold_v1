@@ -31,7 +31,12 @@ const (
 )
 
 func (a *App) apiSite(c *gin.Context) {
-	c.JSON(http.StatusOK, siteJSON{Name: a.siteName(), Timezone: churchZoneOrUTC(a.DB).String(), SelfSignup: a.selfSignupMode(), RoomsEnabled: a.roomsEnabled(), PushEnabled: a.pushEnabled()})
+	roomsEnabled, err := boolSettingErrIn(a.DB.WithContext(c.Request.Context()), settingRoomsEnabled, false)
+	if err != nil {
+		fail(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, siteJSON{Name: a.siteName(), Timezone: churchZoneOrUTC(a.DB).String(), SelfSignup: a.selfSignupMode(), RoomsEnabled: roomsEnabled, PushEnabled: a.pushEnabled()})
 }
 
 // occurrencesForEventsErr lists scheduled dates of these events and attaches
