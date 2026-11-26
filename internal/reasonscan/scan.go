@@ -79,6 +79,8 @@ type BatchEvent struct {
 type Hooks struct {
 	// Before runs before batch index is sent.
 	Before func(index int)
+	// BeforeDrain runs when Scan fills the page, before it closes the rows.
+	BeforeDrain func()
 	// After runs when a batch has finished (success or failure).
 	After func(BatchEvent)
 }
@@ -134,6 +136,9 @@ func Scan(q Query, qualifies func(Row) bool, after *int64, p Params, h Hooks) (U
 		}
 		// Close drains what the server still sends. Its error is a failed
 		// stream and fails the page; it is never dropped.
+		if ev.Stopped && h.BeforeDrain != nil {
+			h.BeforeDrain()
+		}
 		closeErr := rows.Close()
 		ev.Err = errors.Join(iterErr, closeErr, rows.Err())
 		ev.Short = !ev.Stopped && ev.Err == nil && ev.Consumed < n
