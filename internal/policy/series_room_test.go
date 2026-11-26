@@ -35,6 +35,10 @@ func TestSeriesRoomChange(t *testing.T) {
 		b.BooksOver = true
 		return b
 	}
+	onKept := func(b SeriesDateBooking) SeriesDateBooking {
+		b.OnKeptRequest = true
+		return b
+	}
 	for _, tc := range []struct {
 		name         string
 		p            *Person
@@ -73,6 +77,11 @@ func TestSeriesRoomChange(t *testing.T) {
 		{"Book anyway leaves a date that waits for the room to its request", admin, over(at(RoomBookingWaiting, hall)), &hall, &hall, false, SeriesLeftAlone},
 		{"Book anyway books a date that lost the room", admin, over(at(RoomBookingLost, hall)), &hall, &hall, false, SeriesFollows},
 		{"Book anyway moves a waiting date of the old series room", admin, over(at(RoomBookingWaiting, hall)), &hall, &chapel, false, SeriesFollows},
+		{"a re-pick of the series request's room leaves its waiting date to it", leader, onKept(at(RoomBookingWaiting, hall)), &hall, &hall, false, SeriesLeftAlone},
+		{"a waiting date on the kept request with its room as its own is kept", leader, onKept(at(RoomBookingWaiting, hall)), &chapel, &hall, false, SeriesKept},
+		{"named, it still waits on the request the pick keeps", leader, onKept(at(RoomBookingWaiting, hall)), &chapel, &hall, true, SeriesKept},
+		{"named into another room, it is included as any own room is", leader, onKept(at(RoomBookingWaiting, hall)), &chapel, &annex, true, SeriesIncluded},
+		{"a lost date of the series room is booked again into the kept request", leader, onKept(at(RoomBookingLost, hall)), &hall, &hall, false, SeriesFollows},
 	} {
 		if got := SeriesRoomChange(tc.p, tc.b, tc.series, tc.pick, tc.named); got != tc.want {
 			t.Errorf("%s: got %q, want %q", tc.name, got, tc.want)
@@ -91,9 +100,9 @@ func TestSeriesRoomListIsWhatAChangeKeeps(t *testing.T) {
 			for _, room := range rooms {
 				for _, restricted := range []bool{false, true} {
 					for _, overlap := range []bool{false, true} {
-						for _, how := range [][2]bool{{false, false}, {true, false}, {false, true}} {
+						for _, how := range [][3]bool{{false, false, false}, {true, false, false}, {false, true, false}, {false, false, true}, {true, false, true}} {
 							inUse := how[0]
-							b := SeriesDateBooking{State: s, RoomID: room, Restricted: restricted, AllowOverlap: overlap, PickInUse: inUse, BooksOver: how[1]}
+							b := SeriesDateBooking{State: s, RoomID: room, Restricted: restricted, AllowOverlap: overlap, PickInUse: inUse, BooksOver: how[1], OnKeptRequest: how[2]}
 							for _, series := range pointers {
 								for _, pick := range pointers {
 									shown := b.Listed(p, series) && !(pick != nil && room == *pick && s.HoldsRoom())

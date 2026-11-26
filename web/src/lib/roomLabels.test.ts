@@ -68,6 +68,12 @@ describe("seriesBookingMessage", () => {
     expect(seriesBookingMessage(res({ booked: 1, lost: ["2026-12-08"] }))).toBe("Booked for 1 date. 1 date still needs a room; pick one for it under “Dates that need a room” on the event page.");
     expect(seriesBookingMessage(res({ booked: 3, pending: 2, kept: 1 }))).toBe("Booked for 3 dates. Sent to an admin for approval: 2 dates. 1 date keeps its own room.");
   });
+
+  it("says a re-pick of the room an admin is asked for left its dates waiting, and counts only what it sent", () => {
+    const after = (pending: number) => ({ ownRooms: [], needsRoom: [], pending });
+    expect(seriesBookingMessage(res({ after: after(3) }))).toBe("Still waiting for an admin's approval: 3 dates.");
+    expect(seriesBookingMessage(res({ pending: 1, changed: 1, after: after(4) }))).toBe("Sent to an admin for approval: 1 date. Also changed 1 date that had a room of its own.");
+  });
 });
 
 // DEC-168: what the series room control says about dates with a room of their own.

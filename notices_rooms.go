@@ -38,18 +38,23 @@ func notifyRoomRequested(tx *gorm.DB, req *models.RoomRequest, ev *models.Event,
 	if err != nil {
 		return err
 	}
-	asker, err := askerName(tx, actor)
+	vars, err := roomRequestedVars(tx, ev, room, dates, actor)
 	if err != nil {
 		return err
 	}
 	_, err = notify.Send(tx, notify.Msg{
 		Kind: notify.RoomRequested, To: admins, Actor: actor,
 		SubjectType: "room_request", SubjectID: req.ID, Link: roomRequestsLink,
-		Vars:      notify.Vars{Actor: asker, Event: ev.Title, Change: room.Name + " for " + dateCount(dates)}, // group-ok: admin tasks go to admins
+		Vars:      vars,
 		Data:      map[string]any{"requestId": req.ID, "eventId": ev.ID},
 		DedupeKey: fmt.Sprintf("room.requested:%d", req.ID),
 	})
 	return err
+}
+
+func roomRequestedVars(tx *gorm.DB, ev *models.Event, room *models.Room, dates int, asker *uint) (notify.Vars, error) {
+	name, err := askerName(tx, asker)
+	return notify.Vars{Actor: name, Event: ev.Title, Change: room.Name + " for " + dateCount(dates)}, err // group-ok: admin tasks go to admins
 }
 
 func askerName(tx *gorm.DB, id *uint) (string, error) {

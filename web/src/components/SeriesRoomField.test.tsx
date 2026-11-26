@@ -412,8 +412,8 @@ it("says what each date has when a pick whose answer was lost is found stored, a
   await pickAndBook("2");
   expect(await screen.findByRole("alert")).toBeInTheDocument();
   await userEvent.click(screen.getByRole("button", { name: "Book for every date" }));
-  await waitForStatus("Sent to an admin for approval: 8 dates. 2 dates still need a room; pick one for them under “Dates that need a room” on the event page.");
-  expect(screen.queryByText(/The series room is saved/)).not.toBeInTheDocument();
+  await waitForStatus("Still waiting for an admin's approval: 8 dates. 2 dates still need a room; pick one for them under “Dates that need a room” on the event page.");
+  expect(screen.queryByText(/The series room is saved|Sent to an admin/)).not.toBeInTheDocument();
 });
 
 it("books every date again, and says what its answer did, when someone else already set the same series room", async () => {
@@ -428,6 +428,32 @@ it("books every date again, and says what its answer did, when someone else alre
   await waitForStatus("Booked for 1 date.");
   expect(vi.mocked(SeriesRooms.set).mock.calls.map((c) => c[2])).toEqual(["r1", "r3"]);
   expect(screen.queryByText(/is saved|changed while you were choosing/)).not.toBeInTheDocument();
+});
+
+// The counts are the server's for a re-pick of the room the series request is for: it keeps the request, so the dates
+// that wait on it are not sent again, and a named date that joins it is the one sent.
+it("says the dates still wait when someone else already asked for the same series room", async () => {
+  const hallRoom = { id: 1, name: "Fellowship Hall", building: "Main" };
+  vi.mocked(SeriesRooms.list).mockResolvedValueOnce(read()).mockResolvedValue(read({ revision: "r3", defaultRoom: hallRoom, pending: 3 }));
+  vi.mocked(SeriesRooms.set)
+    .mockRejectedValueOnce(changed())
+    .mockResolvedValueOnce(booking({ event: { id: 7, revision: "r4" }, booked: 0, after: { ownRooms: [], needsRoom: [], pending: 3 } }));
+  show();
+  await pickAndBook("1");
+  await waitForStatus("Still waiting for an admin's approval: 3 dates.");
+  expect(screen.queryByText(/Sent to an admin|is saved/)).not.toBeInTheDocument();
+  expect(vi.mocked(SeriesRooms.set).mock.calls.map((c) => c[2])).toEqual(["r1", "r3"]);
+});
+
+it("says only the named date was sent when it joins the series request the room waits on", async () => {
+  vi.mocked(SeriesRooms.list).mockResolvedValue(read({ defaultRoom: { id: 1, name: "Fellowship Hall", building: "Main" }, pending: 3, ownRooms: [ownRoom("2026-12-08")] }));
+  vi.mocked(SeriesRooms.set).mockResolvedValue(booking({ booked: 0, pending: 1, changed: 1, after: { ownRooms: [], needsRoom: [], pending: 4 } }));
+  show();
+  await select();
+  await userEvent.click(screen.getByRole("checkbox", { name: "Also change this date to Fellowship Hall · Main" }));
+  await userEvent.click(screen.getByRole("button", { name: "Book for every date" }));
+  expect(SeriesRooms.set).toHaveBeenCalledWith(7, { roomId: 1, includeDates: ["2026-12-08"] }, "r1");
+  await waitForStatus("Sent to an admin for approval: 1 date. Also changed 1 date that had a room of its own.");
 });
 
 it("offers a plain pick without claiming what was booked when an all-busy confirmation's reply was lost", async () => {
