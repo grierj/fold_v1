@@ -278,10 +278,10 @@ decision). The CSRF token goes in the
 
 ```
 GET    /api/v1/me/household                 → 200 {household|null}  (read-only; null until created)
-PUT    /api/v1/me/household                 → 200 {household}  {name?, address?}  (creates on first use)
+PUT    /api/v1/me/household                 → 200 {household} | 409 household_changed  {name?, address?, revision}  (creates on first use; revision when a field is named)
 POST   /api/v1/me/household/people          → 201 {person}  {firstName, lastName, kind, birthDate?, careNotes?, photoConsent?}  (creates the household on first use)
-PUT    /api/v1/me/household/people/:id      → 200 {person}
-DELETE /api/v1/me/household/people/:id      → 200 {}
+PUT    /api/v1/me/household/people/:id      → 200 {person} | 409 household_person_changed  {firstName?, lastName?, kind?, birthDate?, careNotes?, photoConsent?, revision}
+DELETE /api/v1/me/household/people/:id      → 200 {}  (cancels the person's sign-ups for upcoming dates)
 POST   /api/v1/me/household/people/:id/convert → 201 {conversion}  {email}
 POST   /api/v1/me/household/people/:id/convert/resend → 200 {conversion}
 DELETE /api/v1/me/household/people/:id/convert → 200 {}
@@ -305,6 +305,26 @@ the account's last name. Any adult account in the household manages it; teen
 accounts get `null` from GET and 403 from the writes. Adding a `child` or
 `teen` person opens a pending guardian link that only an admin can confirm,
 with a note on how it was checked (DEC-32); an `adult` needs no approval.
+
+The household's details and each person's edit name the read they were made from (DEC-173). The household and each
+person in every household answer (`GET /me/household`, the answers of these writes, the admin household routes) carry
+a `revision`, read in the same snapshot as the fields beside it: a digest of the row (`households` kind `h`,
+`household_people` kind `p`, `updated_at` and a removal's `deleted_at` as instants, `created_at` left out), so there is
+no column and no migration. `PUT /me/household/people/:id` requires the person's revision, and `PUT /me/household`
+requires the household's whenever the body names a field; an empty body names nothing and needs none, and the request
+that creates the household on first use had no read to name, so its fields save without one. Under the locks each
+write already takes (the acting account's row, then the household's), after the account is read again and its seat
+and the person are checked, any revision but the row's current one is 409 `household_changed` or
+`household_person_changed`, and nothing happens: no field is written, no account invitation is revoked, no sign-up is
+cancelled or changed, no guardian link, notice or audit row is written. An adult whose session ended or who left the
+household while the save waited gets the 401, 403 or 404 they would have got anyway. Every writer of an existing
+household or person row holds the household's lock, so the comparison cannot race one: another adult's edit, the
+conversion of the person to their own account, the age rollover's change of a staged teen's kind, a removal and an
+erasure each move that row's revision; a sign-up for the person, a guardian link's decision, an account invitation
+being sent and an admin adding someone else do not. The answer's `revision` is what the next save sends; `POST`'s
+answer carries the new person's, so they can be edited at once. A page loaded before this release sends no revision,
+so each of its household saves is refused with 409, writing nothing, until the page is loaded again. Removing a person
+takes no revision: it is a named action on the person as they are, and it cancels their sign-ups for upcoming dates.
 
 Admin household delegation uses an existing active adult account with a password
 as the holder (`:id`), never the acting admin. GET does not create anything;
