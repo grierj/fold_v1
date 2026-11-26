@@ -350,6 +350,41 @@ func (a *App) checkAdminUserRevision(tx *gorm.DB, id uint, given string) error {
 	return checkEditRevision(given, current, errAdminUserChanged)
 }
 
+var (
+	errHouseholdChanged       = apiErr(http.StatusConflict, "household_changed", "the household changed since this edit was based on it")
+	errHouseholdPersonChanged = apiErr(http.StatusConflict, "household_person_changed", "this household member changed since this edit was based on them")
+)
+
+// The household's name and address form and a household person's edit form
+// name these rows. Every writer of an existing row holds the household's row
+// lock (lockHousehold), which both saves take before they compare. created_at
+// never changes. A person's removal is a soft delete, so deleted_at moves the
+// token too. An adult of the household who is not the person's confirmed
+// guardian holds the person's token but may not read their care notes, so the
+// notes stay out of the digest, as a password hash stays out of an account's:
+// every write of them stamps updated_at (the edit) or deleted_at (the
+// erasure's scrub).
+var (
+	householdRevisionRows       = revisionRows{table: "households", kind: "h", key: "id", instants: []string{"updated_at"}, omit: []string{"created_at"}}
+	householdPersonRevisionRows = revisionRows{table: "household_people", kind: "p", key: "id", instants: []string{"updated_at", "deleted_at"}, omit: []string{"created_at", "care_notes"}}
+)
+
+func (a *App) checkHouseholdRevision(tx *gorm.DB, id uint, given string) error {
+	current, err := a.rowRevisionIn(tx, householdRevisionRows, id)
+	if err != nil {
+		return err
+	}
+	return checkEditRevision(given, current, errHouseholdChanged)
+}
+
+func (a *App) checkHouseholdPersonRevision(tx *gorm.DB, id uint, given string) error {
+	current, err := a.rowRevisionIn(tx, householdPersonRevisionRows, id)
+	if err != nil {
+		return err
+	}
+	return checkEditRevision(given, current, errHouseholdPersonChanged)
+}
+
 // errConsentChanged refuses a grant of teen consent made from an older read of
 // the teen's consent log than the one it would add to (DEC-176). Nothing is
 // written.

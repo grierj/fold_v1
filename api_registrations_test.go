@@ -1864,12 +1864,13 @@ func TestRegistrationReadBudget(t *testing.T) {
 	// GET /me/household: reads don't grow per person or
 	// per account (18 before batching, 9 before slice 3; the pending-approval
 	// lookup adds one, DEC-82; judging the viewer again in the read's snapshot
-	// adds one). A six-person household reads the same.
+	// adds one; the household's revision and its people's add two, DEC-174).
+	// A six-person household reads the same.
 	n = 0
 	apiDo(t, c, "GET", "/api/v1/me/household", nil, http.StatusOK)
 	small := n
-	if n > 12 {
-		t.Fatalf("household GET read %d times, budget 12", n)
+	if n > 14 {
+		t.Fatalf("household GET read %d times, budget 14", n)
 	}
 	for i := 0; i < 6; i++ {
 		apiDo(t, c, "POST", "/api/v1/me/household/people", map[string]any{"firstName": "Extra" + itoa(uint(i)), "kind": "adult", "birthDate": "1990-01-01"}, http.StatusCreated)

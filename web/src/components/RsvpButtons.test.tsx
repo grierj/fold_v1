@@ -273,7 +273,7 @@ describe("series dates and the standing answer line (DEC-92)", () => {
 
   it("household series dates have no whole-series block either and reach all_future through the dialog", async () => {
     vi.mocked(Events.registerSeries).mockResolvedValue({ eventId: 7, scope: "all_future", date: "2026-12-01", status: "going", results: [{ occurrenceId: 1, date: "2026-12-01", before: {}, after: { registrationId: 4, status: "going" } }], refusals: [] });
-    const mary: import("../types").HouseholdPerson = { id: 18, householdId: 1, canConvert: false, firstName: "Mary", lastName: "", name: "Mary", kind: "adult", age: 35, photoConsent: false, linkStatus: "confirmed", registrationEligibility: "eligible", createdBy: 3 };
+    const mary: import("../types").HouseholdPerson = { id: 18, householdId: 1, canConvert: false, firstName: "Mary", lastName: "", name: "Mary", kind: "adult", age: 35, photoConsent: false, linkStatus: "confirmed", registrationEligibility: "eligible", createdBy: 3, revision: "p3" };
     render(<MemoryRouter><Rsvp instance={occurrence({ recurrenceRule: "FREQ=WEEKLY" })} people={[mary]} onChange={() => {}} /></MemoryRouter>);
     expect(screen.queryByText("Answer the whole series")).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Going to all dates" })).not.toBeInTheDocument();
@@ -802,7 +802,7 @@ describe("childcare RSVP", () => {
 
 describe("named household answers", () => {
   beforeEach(() => vi.resetAllMocks());
-  const kit: import("../types").HouseholdPerson = { id: 17, householdId: 1, canConvert: false, firstName: "Kit", lastName: "", name: "Kit", kind: "child", age: 6, photoConsent: false, linkStatus: "confirmed", registrationEligibility: "eligible", createdBy: 3 };
+  const kit: import("../types").HouseholdPerson = { id: 17, householdId: 1, canConvert: false, firstName: "Kit", lastName: "", name: "Kit", kind: "child", age: 6, photoConsent: false, linkStatus: "confirmed", registrationEligibility: "eligible", createdBy: 3, revision: "p3" };
   const mary: import("../types").HouseholdPerson = { ...kit, id: 18, firstName: "Mary", name: "Mary", kind: "adult", age: 35 };
 
   function family(instance = occurrence({ remoteAvailable: true, childcareAvailable: true })) {

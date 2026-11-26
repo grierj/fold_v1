@@ -2276,7 +2276,7 @@ func TestVisibilityConsentLifecycleMatrix(t *testing.T) {
 			apiDo(t, f.client(t, p.o1), "DELETE", "/api/v1/me/household/people/"+itoa(p.kit), nil, http.StatusOK)
 		}},
 		{"12 a household person's kind changes", all, func(t *testing.T, f *vcFixture, p *lifecyclePeople) {
-			apiDo(t, f.client(t, p.o1), "PUT", "/api/v1/me/household/people/"+itoa(p.kit), map[string]any{"firstName": "Kit", "kind": "child", "birthDate": "2018-05-01"}, http.StatusOK)
+			editMyPerson(t, f.client(t, p.o1), p.kit, map[string]any{"firstName": "Kit", "kind": "child", "birthDate": "2018-05-01"}, http.StatusOK)
 		}},
 		{"16 another manager retitles a date with its own visibility", only("reset"), func(t *testing.T, f *vcFixture, p *lifecyclePeople) {
 			saveDate(t, f.admin, f.ev.ID, f.day(2), map[string]any{"title": "Harvest evening"}, http.StatusOK, "")

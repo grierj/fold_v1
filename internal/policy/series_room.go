@@ -19,12 +19,21 @@ type SeriesDateBooking struct {
 	// BooksOver: the pick is an admin's "Book anyway", which asked only
 	// about the dates with no room.
 	BooksOver bool
+	// OnKeptRequest: it waits on the event's series request and the pick, a
+	// leader's or host's of that request's room, keeps the request.
+	OnKeptRequest bool
 }
 
 // holdsOrWaits: the booking holds its room, or waits for an admin's
 // approval of it. A lost or rejected one holds nothing.
 func (b SeriesDateBooking) holdsOrWaits() bool {
 	return b.State.HoldsRoom() || b.State == RoomBookingWaiting
+}
+
+// waitsOnKeptRequest: it waits for the room picked on the request the pick
+// keeps, which decides it (DEC-173).
+func (b SeriesDateBooking) waitsOnKeptRequest(pick *uint) bool {
+	return pick != nil && b.OnKeptRequest && b.RoomID == *pick && b.State == RoomBookingWaiting
 }
 
 // OwnRoom is DEC-168's rule: the date has a room of its own when its
@@ -59,14 +68,15 @@ const (
 	// SeriesAlreadyThere: it already holds the room picked, with any padding
 	// an admin set.
 	SeriesAlreadyThere SeriesRoomOutcome = "already holds the room picked"
-	// SeriesKept: a listed date that keeps its room: not named, or only an
-	// admin may change it.
+	// SeriesKept: a listed date that keeps its room: not named, only an
+	// admin may change it, or it waits for the room picked on the request
+	// the pick keeps.
 	SeriesKept SeriesRoomOutcome = "keeps its room"
 	// SeriesLeftAlone: it holds nothing and is not the change's to replace:
 	// a lost or rejected booking only an admin may change; when the series
-	// room stops, one in another room than the series room; or, for a pick
-	// that books over others, one that waits for the room picked (its request
-	// decides it).
+	// room stops, one in another room than the series room; or one that waits
+	// for the room picked, for a pick that books over others or one that keeps
+	// the request it waits on (its request decides it).
 	SeriesLeftAlone SeriesRoomOutcome = "left as it is"
 )
 
@@ -84,7 +94,7 @@ func SeriesRoomChange(p *Person, b SeriesDateBooking, seriesRoom, pick *uint, na
 		return SeriesLeftAlone
 	case b.OwnRoom(seriesRoom):
 		switch {
-		case !named:
+		case !named, b.waitsOnKeptRequest(pick):
 			return SeriesKept
 		case pick != nil && b.PickInUse:
 			return SeriesKeptInUse
@@ -92,7 +102,7 @@ func SeriesRoomChange(p *Person, b SeriesDateBooking, seriesRoom, pick *uint, na
 		return SeriesIncluded
 	case pick == nil && (seriesRoom == nil || b.RoomID != *seriesRoom):
 		return SeriesLeftAlone
-	case pick != nil && b.BooksOver && b.RoomID == *pick && b.State == RoomBookingWaiting:
+	case pick != nil && b.BooksOver && b.RoomID == *pick && b.State == RoomBookingWaiting, b.waitsOnKeptRequest(pick):
 		return SeriesLeftAlone
 	}
 	return SeriesFollows
