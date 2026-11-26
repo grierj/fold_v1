@@ -53,6 +53,18 @@ dc() { compose_in "$DIR" "$@"; }
 pg() { dc exec -T db psql -X -U church -d "$1" -At -v ON_ERROR_STOP=1 "${@:2}"; }
 recovery_ids() { docker ps -aq --filter "label=com.docker.compose.project=$PROJECT" --filter label=com.docker.compose.service=recovery; }
 
+# Run only against the quiescent staging database, after importing the dump.
+invalidate_restored_credentials_sql() {
+  cat <<'SQL'
+DELETE FROM settings WHERE key = 'session_signing_epoch';
+
+UPDATE account_tokens
+   SET expires_at = CURRENT_TIMESTAMP
+ WHERE used_at IS NULL AND expires_at > CURRENT_TIMESTAMP
+   AND kind IN ('account_setup', 'password_reset', 'email_verify', 'email_change_cancel');
+SQL
+}
+
 # Caller holds the operations lock; these are private interrupted pin snapshots.
 remove_stale_pin_saves() {
   local entry
