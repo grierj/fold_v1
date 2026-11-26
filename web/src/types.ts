@@ -257,9 +257,6 @@ export interface EventOccurrence {
   recurrenceRule: string;
   rruleUntil?: string;
   seriesStartsLocal: string;
-  seriesTitle: string;
-  seriesLocation: string;
-  seriesDurationMinutes: number;
   overridden: boolean;
   registrations: Record<string, number>;
   myRegistration: RegistrationStatus | null;
@@ -289,11 +286,6 @@ export interface EventOccurrence {
   spotsLeft: number | null;
   waitlistEnabled: boolean;
   guestsAllowed: number;
-  // The series' reminder time (M3.6), for its Edit series form; 0 is off.
-  // Optional in fixtures; the API always sends it. reminderPush is its
-  // 2-hour push reminder switch (M3.13d3).
-  reminderEmailMinutes?: number;
-  reminderPush?: boolean;
   // Remote attendance (M1.8 slice 2): the second seat pool, mirroring
   // the in-person fields. remoteCapacity is this date's effective cap.
   childcareAvailable: boolean;
@@ -314,9 +306,7 @@ export interface EventOccurrence {
   myAttendanceMode?: AttendanceMode;
   // Video link for this date (M1.8). videoUrl is set only when you may
   // see it; videoHidden means a link exists but you can't yet.
-  videoProvider: VideoProvider;
   videoUrl?: string;
-  videoReveal: VideoReveal;
   videoHidden?: boolean;
 }
 
@@ -1504,8 +1494,7 @@ export interface AudienceRecipient {
   name: string;
   teen: boolean;
   skipped?: string;
-  // They get the email and have notifications on, so "Push notification
-  // too" reaches them.
+  // They have notifications on, so "Push notification too" reaches them.
   push?: boolean;
 }
 
@@ -1516,9 +1505,10 @@ export interface AudienceSummary {
   eligible: number;
   teens: number;
   skipped: Record<string, number>;
-  // Of those who get it, how many also get a push notification (0 when
-  // the church turned notifications off). Having none isn't a skip.
+  // How many can get a push notification, including people skipped for email.
   push: number;
+  // Of those who can get a push notification, how many are skipped for email.
+  pushOnly: number;
   // The first 100 by name; more says there are others.
   recipients: AudienceRecipient[];
   more: boolean;

@@ -1,4 +1,5 @@
-import type { ApiError } from "../api/core";
+import { useEffect, useEffectEvent } from "react";
+import { resourceRefused } from "../lib/refusedSave";
 import { errorCode, errorText } from "../lib/errors";
 import { useLoad } from "../lib/useLoad";
 import { useRoomsEnabled } from "../lib/useSite";
@@ -9,11 +10,15 @@ import { Skeleton } from "./ui/Skeleton";
 // What the room pickers share: a church with rooms off, or a site we can't
 // read, shows no rooms control at all; and the rooms load only while it is on.
 // `off`: room booking was turned off after the page read the site settings (the route's rooms_off).
-export function useRoomPicker<T>(fetch: () => Promise<T>, deps: readonly unknown[]) {
+export function useRoomPicker<T>(fetch: () => Promise<T>, deps: readonly unknown[], onGone: () => void) {
   const roomsOn = useRoomsEnabled();
   const enabled = roomsOn === true;
   const list = useLoad(fetch, deps, { enabled });
   const off = roomsTurnedOff(list.error);
+  const reportGone = useEffectEvent(onGone);
+  useEffect(() => {
+    if (resourceRefused(list.error)) reportGone();
+  }, [list.error]);
 
   return {
     enabled,
@@ -50,4 +55,4 @@ export function RoomLoadStatus({ loading, error, onRetry }: { loading: boolean; 
 // A pick's refusal that says this person may no longer manage the date or event (the event's 403, a missing event or
 // date's 404), as opposed to one about the room they chose (room_restricted, room_gone, booking_admin_only) or room
 // booking being turned off (rooms_off).
-export const pickGone = (err: ApiError) => (err.status === 403 && err.code === "not_allowed") || (err.status === 404 && err.code === "not_found");
+export const pickGone = resourceRefused;

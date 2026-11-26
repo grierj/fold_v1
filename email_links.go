@@ -16,3 +16,9 @@ func (a *App) emailBaseURL() string {
 func (a *App) emailLink(path string) string {
 	return a.emailBaseURL() + path
 }
+
+const guestManagePath = "/guest/manage/"
+
+func (a *App) guestManageURL(raw string) string {
+	return a.emailLink(guestManagePath + raw)
+}

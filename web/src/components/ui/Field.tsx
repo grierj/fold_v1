@@ -1,4 +1,4 @@
-import { createContext, useContext, useId, type InputHTMLAttributes, type ReactNode, type Ref, type SelectHTMLAttributes, type TextareaHTMLAttributes } from "react";
+import { createContext, useContext, useEffect, useId, useRef, type InputHTMLAttributes, type ReactNode, type Ref, type SelectHTMLAttributes, type TextareaHTMLAttributes } from "react";
 import { flushSync } from "react-dom";
 import { FormErrorsContext } from "./FormContext";
 import { AlertCircleIcon } from "../icons";
@@ -191,8 +191,18 @@ export function showFieldErrors(form: HTMLElement | null, update: () => void) {
 // above the fields. Field-level errors go on their Field instead.
 // `layout` takes spacing classes only ("mt-2").
 export function FormError({ layout, children }: { layout?: string; children: ReactNode }) {
+  const ref = useRef<HTMLParagraphElement>(null);
+  useEffect(() => {
+    const line = ref.current;
+    const active = document.activeElement;
+
+    if (line?.closest("form")?.contains(active) && !active?.matches('[aria-invalid="true"]')) {
+      line.scrollIntoView?.({ block: "nearest" });
+    }
+  }, [children]);
+
   return (
-    <p role="alert" className={`flex items-start gap-1 text-sm text-danger${layout ? ` ${layout}` : ""}`}>
+    <p ref={ref} role="alert" className={`flex items-start gap-1 text-sm text-danger${layout ? ` ${layout}` : ""}`}>
       <AlertCircleIcon className="mt-0.5 size-4 shrink-0" />
       <span>{children}</span>
     </p>

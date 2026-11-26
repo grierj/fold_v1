@@ -4,6 +4,7 @@ import { Link } from "react-router-dom";
 import { ChildcareRequestField, childcareCountProblem } from "./ChildcareRequestField";
 import { Button } from "./ui/Button";
 import { useEffect, useId, useRef, useState, type ReactNode } from "react";
+import { useResourceRefusal } from "../lib/refusedSave";
 import { Events } from "../api/events";
 import type { AttendanceMode, EventOccurrence, RegistrationBatch, RegistrationCommand, HouseholdAnswer, RegistrationResponse, HouseholdRegistration, MyHouseholdRegistration, HouseholdPerson } from "../types";
 import { errorCode, errorText } from "../lib/errors";
@@ -101,6 +102,8 @@ function useActorSeriesRsvp({
     onSeriesFeedback?.(instance.eventId, instance.date, [actorResultFromRegistration(registration)]);
   }
 
+  const refreshRefusal = useResourceRefusal();
+
   async function applySeries(answer: SeriesAnswer, scope: Exclude<SeriesRsvpScope, "just_this_date">): Promise<boolean> {
     // Only a bulk Can't go asks first; every other answer acquires the gate in this same turn.
     if (answer.status === "declined" && !(await beginSeries().ask({
@@ -130,7 +133,7 @@ function useActorSeriesRsvp({
 
       return true;
     } catch (e) {
-      setError(errorText(e, "We couldn't save your series answer."));
+      if (!refreshRefusal(e)) setError(errorText(e, "We couldn't save your series answer."));
 
       return false;
     } finally {
@@ -153,6 +156,7 @@ function useActorSeriesRsvp({
       onChange({ registration: null, people: [] });
       queueMicrotask(() => statusRef.current?.focus());
     } catch (e) {
+      if (refreshRefusal(e)) return;
       const code = errorCode(e);
 
       if (TERMINAL_UNDO_CODES.has(code)) {
@@ -299,6 +303,7 @@ function SingleRsvpButtons({
     setAges(saved.ages);
     setSavedCare({ count: saved.children, ages: saved.ages });
   });
+  const refreshRefusal = useResourceRefusal();
   const series = useActorSeriesRsvp({ instance, seriesDates, onChange, seriesFeedback, onSeriesFeedback, onTerminalRefresh, mutationGate });
 
   const mine = instance.myRegistration;
@@ -363,6 +368,8 @@ function SingleRsvpButtons({
           : "");
       }
     } catch (e) {
+      if (refreshRefusal(e)) return;
+
       if (switching) setMode(myMode);
 
       if (errorCode(e) === "childcare_full") {
@@ -565,6 +572,8 @@ function HouseholdRsvp({ instance, seriesDates, people, onChange, seriesFeedback
     series.askScope(answerFor());
   }
 
+  const refreshRefusal = useResourceRefusal();
+
   async function saveActorDate(answer: SeriesAnswer) {
     const release = mutationGate.acquire();
 
@@ -582,7 +591,7 @@ function HouseholdRsvp({ instance, seriesDates, people, onChange, seriesFeedback
         : `You: ${registration.status === "going" ? `going ${registration.attendanceMode === "remote" ? "remotely" : "in person"}` : registration.status === "declined" ? "can't go" : "maybe"}`);
       onChange(result);
     } catch (e) {
-      setError(errorText(e, "We couldn't save your answer."));
+      if (!refreshRefusal(e)) setError(errorText(e, "We couldn't save your answer."));
     } finally {
       setBusy(false);
       release();
@@ -642,6 +651,7 @@ function HouseholdRsvp({ instance, seriesDates, people, onChange, seriesFeedback
       if (command.status && result.registration) series.reportDateMutation(result.registration);
       setMessage(outcomes.join("; ")); onChange(result);
     } catch (e) {
+      if (refreshRefusal(e)) return;
       setError(errorText(e, "We couldn't save your answers."));
       const personId = e && isObject(e) && "data" in e && e.data && isObject(e.data) && "personId" in e.data ? e.data.personId : undefined;
 

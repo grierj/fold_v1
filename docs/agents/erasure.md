@@ -56,9 +56,9 @@ file in the blob store.
   Keep requires). A U sentinel is accepted only by the rule its seed names, only at that rule's table, column
   and JSON key (and `Where` row), and only while the rule is **enabled**: every PLAN anchor in `Plan` must
   still match its document. A rule whose disposition is missing accepts nothing, so residue with no
-  authorized disposition fails the test (S1, DEC-148). Today `O-16` (names in other people's notices) and
-  `RETAIN_ESSENTIAL` (no action uses it) are disabled, and a U sentinel in a message's text has no rule at
-  all (RS-11, O-8 is Proposed), so the world seeds none there.
+  authorized disposition fails the test (S1, DEC-148). O-16 covers the stored bell and email title
+  and body of another person's notice. O-8 covers messages the person wrote. `RETAIN_ESSENTIAL`
+  stays disabled because no action uses it.
 - **Add or enable a rule by changing the PLAN first.** Settle the disposition in the inventory or
   `decisions.md`, put its anchor in the rule, seed a sentinel that names the rule, and add its row to the
   mutation map. Never widen a rule's place or edit an anchor to make a failure pass.

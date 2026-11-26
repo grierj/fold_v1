@@ -159,7 +159,7 @@ func (a *App) prepareGuardianCopy(tx *gorm.DB, p guardianCopyJob) (msg mail.Mess
 			return msg, nil, false, err
 		}
 	}
-	title, body := k.CopyText(n.Title, n.Body)
+	var title, body string
 	if k.CopyWithoutSubjectAccess {
 		// The teen has lost the subject, so the stored text, which can carry more
 		// than the event's title, is not what a guardian sees. A row with no
@@ -180,6 +180,13 @@ func (a *App) prepareGuardianCopy(tx *gorm.DB, p guardianCopyJob) (msg mail.Mess
 	}
 	if guardian == nil || guardian.Status != models.UserActive || off.Off(guardian.ID, guardian.Email, categoryScope(k.Category)) {
 		return msg, nil, false, nil
+	}
+	if !k.CopyWithoutSubjectAccess {
+		title, body, _, err = noticeEmailText(tx, &n, k, n.Title, n.Body)
+		if err != nil {
+			return msg, nil, false, err
+		}
+		title, body = k.CopyText(title, body)
 	}
 	return a.guardianCopyEmailMessage(title, body, k, teen, guardian, footer), suppressions, true, nil
 }

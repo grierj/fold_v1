@@ -1,22 +1,13 @@
 package main
 
 import (
-	"go/ast"
-	"go/token"
 	"reflect"
-	"regexp"
-	"sort"
 	"strings"
-	"sync"
 	"testing"
 
 	"fold/internal/guardkit"
-	"fold/models"
-
-	"gorm.io/gorm/schema"
 )
 
-// ---------------------------------------------------------------------------
 // users.status has one writer, setAccountStatusIn, which owns the move's
 // session bump, seat work and token revoke (DEC-159, docs/agents/lifecycles.md).
 // upgradeGuestIn turns a guest row into an account, and two statements keep the
@@ -24,44 +15,9 @@ import (
 // endAllSessionsIn) and the erasure (tombstoneUserIn, and scrubTombstoneRowSQL
 // for the sweep).
 //
-// Parse-only, root package. A users value is a name a function binds to
-// models.User (modelNames: by declared type, initializer, new, a declared
-// function's result, a range or a type switch), a models.User literal, or an
-// element of a slice or map of them; a users query is a chain with Model(<users
-// value or collection>) or Table("users"), or a local name assigned one. A key
-// names the status column when GORM's schema lookup resolves it there
-// ("status", "Status", "STATUS"; userStatusKey). On a users query it reports
-// Update or UpdateColumn of the status column or of a column that is not a
-// string literal; Updates or UpdateColumns of a users struct (whatever Select
-// names), of a literal of another type (a struct with a status field writes
-// it), of a parameter, or of a map[...]{...} literal, inline or a local name
-// assigned one (:= or var), that has a status key or any key that is not a
-// string literal, or of a local map given such a key by an indexed assignment
-// (m["status"], m[k]). It reports the same maps passed to endAllSessionsIn,
-// whatever the chain; Save of a users value or collection; and raw SQL "UPDATE
-// users SET" that sets status or whose column list follows at run time. GORM
-// refuses a named map type (gin.H) or a map[string]string as Updates' argument,
-// so those write nothing. Two shapes it reports never write the status:
-// "Status" or "STATUS" on a Table("users") chain (no schema there, so Postgres
-// refuses the quoted column) and a named map literal (gin.H{...}) on a users
-// query, which GORM refuses.
-//
-// It looks inside function declarations only, so it does not see a users value,
-// map or query declared at package level, or a GORM call in a function literal
-// held by a package-level var. It does not see a users value or query reached
-// through a struct field, an interface, a parameter (a *gorm.DB already scoped
-// to users) or a helper's result the root package does not declare; a map built
-// by a call (maps.Clone, a helper), copied from another name, or held in a
-// struct field; a struct of another type held in a name; a SET clause passed
-// through Clauses; a write made in another package; an upsert
-// (clause.OnConflict) or an Assign(...).FirstOrCreate of a users row; or SQL
-// assembled without the "UPDATE users SET" literal.
-// ---------------------------------------------------------------------------
+// The guard checks changes to existing accounts and calls to endAllSessionsIn.
+// newAccountStatus owns initial status.
 
-// accountStatusWriterCensus is every write of users.status the guard sees.
-// apiAdminUpdateUser's map gets "status" only on the edit that changes it, and
-// that edit goes to setAccountStatusIn; its own Updates runs when the map has
-// no status, which parse-only analysis cannot tell apart.
 var accountStatusWriterCensus = []string{
 	"apiAdminUpdateUser: Updates of a map given \"status\"",
 	"endAllSessionsIn: Updates of a map with computed keys",
@@ -69,351 +25,23 @@ var accountStatusWriterCensus = []string{
 	"scrubTombstoneRowSQL: raw UPDATE users with a column list built at run time",
 	"setAccountStatusIn: Updates of a parameter's map",
 	"tombstoneUserIn: Updates of a map with computed keys",
-	"upgradeGuestIn: Updates of a users struct",
+	"upgradeGuestIn: Updates of a user struct",
 }
 
-var (
-	updateUsersRe = regexp.MustCompile(`(?is)\bUPDATE\s+(?:public\.)?"?users"?\s+(?:AS\s+\w+\s+)?SET\b(.*?)(?:\bWHERE\b|\bFROM\b|\bRETURNING\b|$)`)
-	setsStatusRe  = regexp.MustCompile(`(?i)(?:^|[\s,."])status"?\s*=`)
-)
-
-type statusWrite struct{ at, fn, shape string }
-
-var userSchema = sync.OnceValues(func() (*schema.Schema, error) {
-	return schema.Parse(&models.User{}, &sync.Map{}, schema.NamingStrategy{})
-})
-
-// userStatusKey reports whether GORM resolves the map key or Update column k
-// to users.status, the way ConvertToAssignments does (LookUpField: the column
-// name, the field name, then the naming strategy's column for k).
-func userStatusKey(k string) bool {
-	s, err := userSchema()
-	if err != nil {
-		panic(err)
-	}
-	f := s.LookUpField(k)
-	return f != nil && f.DBName == "status"
-}
-
-// localMaps is what fd does to each local map name: given a literal "status"
-// key, or given a key that is not a string literal, in its map literal or by
-// an indexed assignment.
-func localMaps(fd ast.Node) (status, computed map[string]bool) {
-	status, computed = map[string]bool{}, map[string]bool{}
-	mark := func(name string, e ast.Expr) {
-		hasStatus, hasComputed := mapLitKeys(e)
-		status[name] = status[name] || hasStatus
-		computed[name] = computed[name] || hasComputed
-	}
-	ast.Inspect(fd, func(n ast.Node) bool {
-		as, ok := n.(*ast.AssignStmt)
-		if !ok {
-			return true
-		}
-		for i, l := range as.Lhs {
-			switch v := l.(type) {
-			case *ast.Ident:
-				if i < len(as.Rhs) {
-					mark(v.Name, as.Rhs[i])
-				}
-			case *ast.IndexExpr:
-				x, ok := guardkit.Unparen(v.X).(*ast.Ident)
-				if !ok {
-					continue
-				}
-				if s, ok := stringLit(v.Index); !ok {
-					computed[x.Name] = true
-				} else if userStatusKey(s) {
-					status[x.Name] = true
-				}
-			}
-		}
-		return true
-	})
-	ast.Inspect(fd, func(n ast.Node) bool {
-		if vs, ok := n.(*ast.ValueSpec); ok {
-			for i, name := range vs.Names {
-				if i < len(vs.Values) {
-					mark(name.Name, vs.Values[i])
-				}
-			}
-		}
-		return true
-	})
-	return status, computed
-}
-
-// mapLitKeys reports whether e is a map[...]{...} literal with a status key,
-// and whether it has a key that is not a string literal (a constant, a
-// variable, a call), which may name status.
-func mapLitKeys(e ast.Expr) (status, computed bool) {
-	lit, ok := guardkit.Unparen(e).(*ast.CompositeLit)
-	if !ok {
-		return false, false
-	}
-	if _, ok := lit.Type.(*ast.MapType); !ok {
-		return false, false
-	}
-	for _, el := range lit.Elts {
-		if kv, ok := el.(*ast.KeyValueExpr); ok {
-			s, lit := stringLit(kv.Key)
-			status = status || (lit && userStatusKey(s))
-			computed = computed || !lit
-		}
-	}
-	return status, computed
-}
-
-// paramNames is every parameter name of fd and its function literals.
-func paramNames(fd *ast.FuncDecl) map[string]bool {
-	out := map[string]bool{}
-	add := func(fl *ast.FieldList) {
-		if fl == nil {
-			return
-		}
-		for _, f := range fl.List {
-			for _, n := range f.Names {
-				out[n.Name] = true
-			}
-		}
-	}
-	add(fd.Type.Params)
-	ast.Inspect(fd, func(n ast.Node) bool {
-		if fl, ok := n.(*ast.FuncLit); ok {
-			add(fl.Type.Params)
-		}
-		return true
-	})
-	return out
-}
-
-// usersRef reports whether e is a users value or, behind & or not, a name
-// holding a collection of them.
-func usersRef(e ast.Expr, users modelBindings) bool {
-	if modelValue(e, "User", users) {
-		return true
-	}
-	e = guardkit.Unparen(e)
-	if u, ok := e.(*ast.UnaryExpr); ok {
-		e = guardkit.Unparen(u.X)
-	}
-	id, ok := e.(*ast.Ident)
-	return ok && users.collections[id.Name]
-}
-
-// usersChain reports whether the receiver chain of a gorm call names the users
-// table: a Model of a users value or collection, or Table("users"), somewhere
-// before it, or a name in queries (a local assigned such a chain).
-func usersChain(x ast.Expr, users modelBindings, queries map[string]bool) bool {
-	for {
-		if id, ok := guardkit.Unparen(x).(*ast.Ident); ok {
-			return queries[id.Name]
-		}
-		call, ok := guardkit.Unparen(x).(*ast.CallExpr)
-		if !ok {
-			return false
-		}
-		sel, ok := guardkit.Unparen(call.Fun).(*ast.SelectorExpr)
-		if !ok {
-			return false
-		}
-		switch sel.Sel.Name {
-		case "Model":
-			if len(call.Args) == 1 && usersRef(call.Args[0], users) {
-				return true
-			}
-		case "Table":
-			if len(call.Args) > 0 {
-				if s, ok := stringLit(call.Args[0]); ok && len(strings.Fields(s)) > 0 && strings.Trim(strings.TrimPrefix(strings.Fields(s)[0], "public."), `"`) == "users" {
-					return true
-				}
-			}
-		}
-		x = sel.X
-	}
-}
-
-// usersQueries is every local name fd assigns a users query (:= or var),
-// directly or from another such name.
-func usersQueries(fd *ast.FuncDecl, users modelBindings) map[string]bool {
-	queries := map[string]bool{}
-	for changed := true; changed; {
-		changed = false
-		mark := func(name string, e ast.Expr) {
-			if name != "_" && !queries[name] && usersChain(e, users, queries) {
-				queries[name] = true
-				changed = true
-			}
-		}
-		ast.Inspect(fd, func(n ast.Node) bool {
-			switch s := n.(type) {
-			case *ast.AssignStmt:
-				for i, l := range s.Lhs {
-					if id, ok := l.(*ast.Ident); ok && len(s.Lhs) == len(s.Rhs) {
-						mark(id.Name, s.Rhs[i])
-					}
-				}
-			case *ast.ValueSpec:
-				for i, name := range s.Names {
-					if len(s.Names) == len(s.Values) {
-						mark(name.Name, s.Values[i])
-					}
-				}
-			}
-			return true
-		})
-	}
-	return queries
-}
-
-// otherLiteral reports whether e is a composite literal, behind & or not, of a
-// type that is neither models.User nor a map[...] literal type.
-func otherLiteral(e ast.Expr) bool {
-	e = guardkit.Unparen(e)
-	if u, ok := e.(*ast.UnaryExpr); ok {
-		e = guardkit.Unparen(u.X)
-	}
-	lit, ok := e.(*ast.CompositeLit)
-	if !ok || modelType(lit.Type, "User") {
-		return false
-	}
-	_, isMap := lit.Type.(*ast.MapType)
-	return !isMap
-}
-
-// mapShape is how a map argument carries the status column, or "" when it
-// does not.
-func mapShape(e ast.Expr, status, computed, params map[string]bool) string {
-	// gorm reads through a pointer to a map as it does the map.
-	if u, ok := guardkit.Unparen(e).(*ast.UnaryExpr); ok && u.Op == token.AND {
-		e = u.X
-	}
-	switch hasStatus, hasComputed := mapLitKeys(e); {
-	case hasStatus:
-		return `a map with "status"`
-	case hasComputed:
-		return "a map with computed keys"
-	}
-	id, ok := guardkit.Unparen(e).(*ast.Ident)
-	if !ok {
-		return ""
-	}
-	switch {
-	case params[id.Name]:
-		return "a parameter's map"
-	case status[id.Name]:
-		return `a map given "status"`
-	case computed[id.Name]:
-		return "a map with computed keys"
-	}
-	return ""
-}
-
-// accountStatusWrites finds every write of users.status in the root package.
-func accountStatusWrites(p *guardkit.Parsed) []statusWrite {
-	var out []statusWrite
-	files := p.Package("main")
-	funcs := modelFuncs(p, "User")
-	add := func(n ast.Node, fn, shape string) {
-		out = append(out, statusWrite{p.Fset.Position(n.Pos()).String(), fn, shape})
-	}
-	rawSQL := func(root ast.Node, fn string) {
-		ast.Inspect(root, func(n ast.Node) bool {
-			if lit, ok := n.(*ast.BasicLit); ok {
-				s, _ := stringLit(lit)
-				for _, m := range updateUsersRe.FindAllStringSubmatch(s, -1) {
-					if setsStatusRe.MatchString(m[1]) {
-						add(n, fn, "raw UPDATE of users.status")
-					} else if strings.TrimSpace(m[1]) == "" {
-						add(n, fn, "raw UPDATE users with a column list built at run time")
-					}
-				}
-			}
-			return true
-		})
-	}
-	for _, f := range files {
-		if strings.Contains(f.Path, "/") {
-			continue
-		}
-		for _, d := range f.AST.Decls {
-			if gd, ok := d.(*ast.GenDecl); ok && (gd.Tok == token.VAR || gd.Tok == token.CONST) {
-				for _, spec := range gd.Specs {
-					vs := spec.(*ast.ValueSpec)
-					rawSQL(vs, vs.Names[0].Name)
-				}
-				continue
-			}
-			fd, ok := d.(*ast.FuncDecl)
-			if !ok || fd.Body == nil {
-				continue
-			}
-			name := fd.Name.Name
-			rawSQL(fd.Body, name)
-			users := modelNames(fd, "User", funcs)
-			queries := usersQueries(fd, users)
-			status, computed := localMaps(fd)
-			params := paramNames(fd)
-			ast.Inspect(fd.Body, func(n ast.Node) bool {
-				call, ok := n.(*ast.CallExpr)
-				if !ok {
-					return true
-				}
-				if guardkit.Callee(call) == "endAllSessionsIn" && len(call.Args) == 3 {
-					if shape := mapShape(call.Args[2], status, computed, params); shape != "" {
-						add(call, name, "endAllSessionsIn with "+shape)
-					}
-					return true
-				}
-				sel, ok := guardkit.Unparen(call.Fun).(*ast.SelectorExpr)
-				if !ok || len(call.Args) == 0 {
-					return true
-				}
-				method, arg := sel.Sel.Name, call.Args[0]
-				onUsers := usersChain(sel.X, users, queries)
-				switch method {
-				case "Update", "UpdateColumn":
-					if s, lit := stringLit(arg); onUsers && lit && userStatusKey(s) {
-						add(call, name, method+`("status")`)
-					} else if onUsers && !lit {
-						add(call, name, method+" of a computed column")
-					}
-				case "Updates", "UpdateColumns":
-					if modelValue(arg, "User", users) {
-						add(call, name, method+" of a users struct")
-					} else if onUsers && otherLiteral(arg) {
-						add(call, name, method+" of a literal of another type")
-					} else if shape := mapShape(arg, status, computed, params); shape != "" && onUsers {
-						add(call, name, method+" of "+shape)
-					}
-				case "Save":
-					if usersRef(arg, users) {
-						add(call, name, "Save of a users row")
-					}
-				}
-				return true
-			})
-		}
-	}
-	return out
-}
-
-func statusWriteCensus(writes []statusWrite) []string {
-	got := []string{}
-	for _, w := range writes {
-		got = append(got, w.fn+": "+w.shape)
-	}
-	sort.Strings(got)
-	return got
-}
+var accountStatusGuard = func() tableStatusGuard {
+	g := newTableStatusGuard("User", "users", "a user")
+	g.skipInserts = true
+	g.updateHelper = "endAllSessionsIn"
+	return g
+}()
 
 func TestAccountStatusHasOneWriter(t *testing.T) {
 	parsed := guardkit.Production(t).Parse(0)
 	for _, p := range parsed.Problems {
 		t.Error(p)
 	}
-	writes := accountStatusWrites(parsed)
-	if got := statusWriteCensus(writes); !reflect.DeepEqual(got, accountStatusWriterCensus) {
+	writes := accountStatusGuard.writes(parsed)
+	if got := tableStatusCensus(writes); !reflect.DeepEqual(got, accountStatusWriterCensus) {
 		var where []string
 		for _, w := range writes {
 			where = append(where, w.at+" "+w.fn+": "+w.shape)
@@ -484,7 +112,7 @@ func (a *App) roll(tx *gorm.DB, id uint) error {
 func (a *App) roll(tx *gorm.DB, u *models.User) error {
 	u.Status = models.UserActive
 	return tx.Save(u).Error
-}`, "roll: Save of a users row"},
+}`, "roll: Save of a user"},
 		{"raw SQL", `package main
 func (a *App) roll(tx *gorm.DB, id uint) error {
 	return tx.Exec("UPDATE users SET name = name, status = 'active' WHERE id = ?", id).Error
@@ -581,13 +209,13 @@ func made(tx *gorm.DB) error {
 func batch(tx *gorm.DB, users []models.User) error {
 	tx.Save(&users)
 	return tx.Model(&users).Update("status", models.UserActive).Error
-}`, strings.Join([]string{`batch: Save of a users row`, `batch: Update("status")`, `made: Update("status")`, `made: Update("status")`}, "\n")},
+}`, strings.Join([]string{`batch: Save of a user`, `batch: Update("status")`, `made: Update("status")`, `made: Update("status")`}, "\n")},
 		{"a saved row from an inferred var", `package main
 func roll(tx *gorm.DB, id uint) error {
 	var u = models.User{ID: id}
 	u.Status = models.UserActive
 	return tx.Save(&u).Error
-}`, "roll: Save of a users row"},
+}`, "roll: Save of a user"},
 		{"the Go field name and every spelling GORM resolves", `package main
 func roll(tx *gorm.DB, u *models.User) error {
 	tx.Model(u).Updates(map[string]any{"Status": models.UserActive})
@@ -602,11 +230,11 @@ func roll(tx *gorm.DB, u *models.User) error {
 	tx.Model(u).Select("Status").Updates(u)
 	tx.Model(u).Select("status").Updates(models.User{Status: models.UserActive})
 	return tx.Model(&models.User{}).Where("id = ?", u.ID).Updates(&models.User{Status: models.UserActive}).Error
-}`, strings.Join([]string{"roll: Updates of a users struct", "roll: Updates of a users struct", "roll: Updates of a users struct"}, "\n")},
+}`, strings.Join([]string{"roll: Updates of a user struct", "roll: Updates of a user struct", "roll: Updates of a user struct"}, "\n")},
 		{"a struct of another type", `package main
 func roll(tx *gorm.DB, u *models.User) error {
 	return tx.Model(u).Updates(struct{ Status string }{models.UserActive}).Error
-}`, "roll: Updates of a literal of another type"},
+}`, "roll: Updates of a value it cannot read"},
 		{"a query held in a name", `package main
 func roll(tx *gorm.DB, id uint) error {
 	q := tx.Model(&models.User{}).Where("id = ?", id)
@@ -656,7 +284,7 @@ func (a *App) photo(tx *gorm.DB, u *models.User) error {
 			if len(p.Problems) > 0 {
 				t.Fatal(p.Problems)
 			}
-			got := strings.Join(statusWriteCensus(accountStatusWrites(p)), "\n")
+			got := strings.Join(tableStatusCensus(accountStatusGuard.writes(p)), "\n")
 			if got != c.want {
 				t.Errorf("got %q, want %q", got, c.want)
 			}

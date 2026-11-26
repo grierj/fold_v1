@@ -25,6 +25,13 @@ event, group or date pages. Background: DEC-48, DEC-156, DEC-157, DEC-158, PLAN 
   row lock, after the authority and status checks and before any field, `applyGroupTightening` or the
   consent check, so a stale widening or tightening writes nothing (`group_changed`).
 
+On an event, group or date page, a control that receives a missing resource or management refusal
+asks the page to read again from nothing (`ResourceRefusal`). The previous answer leaves the screen
+while the read runs. A refused write leaves a focused notice after the read. A feature-specific
+refusal, such as rooms being turned off, stays with the control. A date add with an unknown email
+leaves the roster and email field in place. An unavailable group email add checks the group again
+before restoring the invitation option and address.
+
 ## Consent (DEC-158)
 
 - A tightening's or reset's consent is the token `internal/consent` computes over the displayed

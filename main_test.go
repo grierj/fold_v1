@@ -12,6 +12,7 @@ import (
 	"fold/internal/httpx"
 	"fold/models"
 	"github.com/gin-gonic/gin"
+	"github.com/gorilla/sessions"
 	"go/ast"
 	"go/parser"
 	"go/token"
@@ -54,6 +55,59 @@ func TestSessionCookieExpiresOnServerAfterSevenDays(t *testing.T) {
 			t.Fatalf("eight-day cookie should expire, got %v", err)
 		}
 	}
+}
+
+func TestDatabaseSessionStoreKeepsItsKeyUntilTheRestoreResetsIt(t *testing.T) {
+	app := testApp(t)
+	openStore := func() *sessions.CookieStore {
+		t.Helper()
+		store, err := newDatabaseSessionStore(app.DB, app.Config)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return store
+	}
+	writeCookie := func(store *sessions.CookieStore) *http.Cookie {
+		t.Helper()
+		s := sessions.NewSession(store, sessionName)
+		s.Options = store.Options
+		s.Values[csrfSessionKey] = "test-credential"
+		w := httptest.NewRecorder()
+		if err := s.Save(httptest.NewRequest("GET", "/", nil), w); err != nil {
+			t.Fatal(err)
+		}
+		return w.Result().Cookies()[0]
+	}
+	readCookie := func(store *sessions.CookieStore, cookie *http.Cookie, wantValid bool) {
+		t.Helper()
+		req := httptest.NewRequest("GET", "/", nil)
+		req.AddCookie(cookie)
+		s, err := store.Get(req, sessionName)
+		valid := err == nil && !s.IsNew && s.Values[csrfSessionKey] == "test-credential"
+		if valid != wantValid {
+			t.Fatalf("cookie valid = %t, want %t", valid, wantValid)
+		}
+	}
+
+	before := openStore()
+	cookie := writeCookie(before)
+	bootFence(t, app)
+	readCookie(openStore(), cookie, true)
+
+	if err := setSettingIn(app.DB, sessionSigningEpochKey, ""); err == nil {
+		t.Fatal("general settings writer changed the session signing epoch")
+	}
+	// Managed restore clears this key before the restored database can boot.
+	if err := app.DB.Exec("DELETE FROM settings WHERE key = ?", sessionSigningEpochKey).Error; err != nil {
+		t.Fatal(err)
+	}
+	if _, err := newDatabaseSessionStore(app.DB, app.Config); err == nil {
+		t.Fatal("missing epoch was accepted")
+	}
+	bootFence(t, app)
+	restored := openStore()
+	readCookie(restored, cookie, false)
+	readCookie(restored, writeCookie(restored), true)
 }
 
 func TestSetupWizardCreatesAdmin(t *testing.T) {
@@ -451,9 +505,10 @@ func TestServeBootStepComesFirst(t *testing.T) {
 	for _, v := range serveBootProblems(src) {
 		t.Error(v)
 	}
+	bootFailure := "if err := app.bootRestoreFence(); err != nil {\n\t\tfmt.Fprintln(stderr, \"fold:\", err)\n\t\treturn "
 	for name, mutated := range map[string]string{
 		"the router before the boot": strings.Replace(src, "if err := app.bootRestoreFence(); err != nil {", "_ = app.setupRouter()\n\tif err := app.bootRestoreFence(); err != nil {", 1),
-		"a zero exit on failure":     strings.Replace(src, "fmt.Fprintln(stderr, \"fold:\", err)\n\t\treturn 1\n\t}\n\tready, err := app.setupComplete()", "fmt.Fprintln(stderr, \"fold:\", err)\n\t\treturn 0\n\t}\n\tready, err := app.setupComplete()", 1),
+		"a zero exit on failure":     strings.Replace(src, bootFailure+"1", bootFailure+"0", 1),
 		"no boot":                    strings.Replace(src, "app.bootRestoreFence()", "app.initAttempts()", 1),
 	} {
 		if mutated == src {

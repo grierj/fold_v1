@@ -278,7 +278,7 @@ The schema is `migrations/00001_baseline.sql` (the squashed baseline, M7.7, DEC-
   - `occurrences.extend` also runs at every start. Besides adding dates, it settles the series clock evidence (DEC-155): it drops what a previous binary left stale and fills upcoming dates that have none, for live series and for ended ones with a future date. Startup only queues it; the evidence is settled when a worker runs it.
   - Other jobs carry their own `unique_key`, such as `message.send:<id>:<unix time>` or `push:n:<notification>:d:<device>`, so queueing twice is harmless. Timed sends store `run_at`; nothing depends on cron.
 - Job kinds. `App.allJobKinds()` (`jobs_daily.go`) is the one list; the worker, the schedulers and the System page all read it.
-  - Daily: `occurrences.extend` (dates 18 months ahead), `contact.sweep` (expires contact requests and ends grants; role changes also end grants at once, 5.11), `cleanup.login_throttles`, `messages.reap` (settles an announcement that stopped with no job left, M3.5), `notifications.cleanup` (retention, DEC-45, and push devices that keep failing or have expired), `accounts.expire_requests`, `accounts.age_rollover` (teens become adults at 18; guardians of household children who turn 13 get a review notice), `erasure.tombstone_sweep`, `avatar.sweep` (leftover photo folders), `admin_attempts.sweep`, and `jobs.cleanup` (finished jobs are kept 30 days).
+  - Daily: `occurrences.extend` (dates 18 months ahead), `contact.sweep` (expires contact requests and ends grants; role changes also end grants at once, 5.11), `cleanup.login_throttles`, `cleanup.expired_links` (link retention, 10.1), `messages.reap` (settles an announcement that stopped with no job left, M3.5), `notifications.cleanup` (retention, DEC-45, and push devices that keep failing or have expired), `accounts.expire_requests`, `accounts.age_rollover` (teens become adults at 18; guardians of household children who turn 13 get a review notice), `erasure.tombstone_sweep`, `avatar.sweep` (leftover photo folders), `admin_attempts.sweep`, and `jobs.cleanup` (finished jobs are kept 30 days).
   - Hourly: `reminders.sweep` (queues reminders due soon, 7.7) and `notify.reconcile` (notices that still need sending).
   - Queued by the app: `message.send` and `message.deliver_batch` (announcements and reminders, 7.5), `reminder.send`, `notify.deliver` (a notice's email and push, 5.12), `push.deliver` (one per device; the payload holds device ids, never endpoints; a 404 or 410 deletes the device, DEC-125), `push.devices_off` (queued by a `users` trigger), `webhook.process` (one email delivery report), `avatar.cleanup`, `erasure.tombstone_page`, `erasure.tombstone`, and the direct account mail: `account.password_reset_mail`, `account.request_mail`, `account.exists_mail`, `invitation.mail`, `account.email_verify_mail`, `guardian.consent_mail` and `guest.verify_mail`.
   - **Planned:** `provider.poll_status` (email domain verification, M4.4, and SMS registration, M4.6) and `notification.digest` (M6.16).
@@ -396,6 +396,12 @@ How a person gets in:
 | Household conversion | An adult in the household, for a household person (Conversion, below) | `AccountRequest` (source `household_conversion`) | Yes |
 
 An invited person who answers "13 to 17" starts `pending_consent` like any teen account.
+
+For a leader, the invitation acknowledgement is the same for every valid
+destination, including an existing account or an address held by a pending
+invitation or household conversion (DEC-172). Fold queues mail when the
+address is eligible and rechecks before preparing it. Admins receive the
+invitation record or an address conflict.
 
 The age gate is on every account door and on the guest form for public events. A guest must tick "I am 18 or older"; the form explains that a parent or guardian can register a younger person from their own account, as a household person. On account doors, the person picks "18 or older", "13 to 17", or "Under 13":
 
@@ -519,6 +525,7 @@ notify.reconcile (hourly): requeues lost delivery jobs and backfills notices of 
 
 - **Email timing.** Email goes when the job runs, with no delay. It doesn't skip a notice the person already read. Email is "Right away" only in v1 (DEC-44); daily digests are M6.16. **Planned (M3.12):** the 15-minute "skip if seen or read" escalation for non-urgent kinds; required kinds still send at once.
 - **Sensitive email (6.13 #9).** Kinds that touch minors, consent, or contact access render through `RenderEmailSafe`. It names nobody and only links in: "Review an update in Fold. Sign in to Fold to review an update."
+- **Names after erasure (O-16, #493).** A notice can keep names in its stored bell and email text for its retention period. Each delivery or guardian copy uses name-free text if a person named by the template has since been erased or the row lacks a reliable identity for that person. See [T26 in the erasure inventory](../M7.4-ERASURE-INVENTORY.md#t26-notifications-baseline-1438-modelsgo1049).
 - **Push.** Optional kinds wait for the recipient's 8 AM–8 PM window. Required kinds and changes to events starting within 24 hours go at once. Past 20 optional pushes per person per hour, the extras are `suppressed` and the bell still has them (DEC-126). Safety, consent and contact kinds push only the safe text ("Open Fold to review an update."), titled with the church's name.
 - **Quiet hours (DEC-44, DEC-126).** In-app notices are silent and arrive at any time. Email ignores quiet hours, as in 7.5. Optional push follows the window above (an interim copy of the send-window function until M3.8). **Planned (M3.12):** notification SMS, through Consent, Suppression, the teen rules and the shared send window (M3.8).
 

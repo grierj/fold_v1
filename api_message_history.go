@@ -314,21 +314,13 @@ func goingOut(m *models.Message) bool { return policy.MessageGoingOut(m.Status) 
 // (decideRetryIn), where each failed person is checked against today's
 // audience too.
 func (a *App) authorMayResend(db *gorm.DB, m *models.Message) (bool, error) {
-	if m.AuthorID == nil {
-		return false, nil
-	}
-	var author models.User
-	if err := db.First(&author, *m.AuthorID).Error; errors.Is(err, gorm.ErrRecordNotFound) {
-		return false, nil
-	} else if err != nil {
+	author, err := activeMessageAuthorIn(db, m, nil)
+	if err != nil || author == nil {
 		return false, err
-	}
-	if author.Status != models.UserActive {
-		return false, nil
 	}
 	var au audienceJSON
 	_ = json.Unmarshal([]byte(m.Audience), &au)
-	_, err := a.resolveAudienceIn(db, &author, &au, time.Now())
+	_, err = a.resolveAudienceIn(db, author, &au, time.Now())
 	switch {
 	case err == nil:
 		return true, nil

@@ -198,7 +198,7 @@ func notifySeriesRoomChanged(tx *gorm.DB, ev *models.Event, actor uint, oldRoom,
 		note = append(note, "Booked "+dateCount(out.Booked)+".")
 	}
 	if out.Pending > 0 {
-		note = append(note, isAre(out.Pending)+" waiting for an admin's approval.")
+		note = append(note, "Requested approval for "+dateCount(out.Pending)+".")
 	}
 	// "Left as it is", not "keeps its room": a kept date may hold a room or only wait for one.
 	if kept := out.Kept + out.KeptInUse; kept > 0 {
