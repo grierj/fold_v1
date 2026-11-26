@@ -36,6 +36,21 @@ func listRequests(t *testing.T, c *apiClient) []roomRequestJSON {
 	return out.Requests
 }
 
+func TestRoomRequestListKeepsFallbackWhenNameReadFails(t *testing.T) {
+	f := newBookingFixture(t)
+	approvalOn(t, f)
+	if code, body := f.book(t, f.leader, f.eventA, map[string]any{"roomId": f.hall.ID}); code != http.StatusOK {
+		t.Fatalf("request a room: %d %s", code, body)
+	}
+	failed := failStatement(t, f.app, func(tx *gorm.DB) bool {
+		return tx.Statement.Table == "users" && selects(tx, "display_name")
+	})
+	reqs := listRequests(t, f.admin)
+	if failed.Load() != 1 || len(reqs) != 1 || reqs[0].EventTitle != "Event A" || reqs[0].RequestedBy != "Someone" {
+		t.Fatalf("requests after %d failed name reads: %+v", failed.Load(), reqs)
+	}
+}
+
 func TestRoomApprovalOneDate(t *testing.T) {
 	f := newBookingFixture(t)
 	approvalOn(t, f)

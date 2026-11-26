@@ -1,8 +1,10 @@
 import { afterEach, expect, it, vi } from "vitest";
 import { bootstrapAnswer, clearMarkerCookie, sentChecks, setMarkerCookie } from "../test/credential";
+import { readRooms } from "../components/useRoomPicker";
 import { deferred } from "../test/keptPanel";
-import { bootstrapCredential, type Credential } from "./core";
-import { AdminRooms } from "./rooms";
+import type { RoomLocationsResponse, RoomRequestsResponse } from "../types";
+import { bootstrapCredential, currentCredential, type Credential } from "./core";
+import { AdminRooms, RoomRequests } from "./rooms";
 
 const endpoint = "/api/v1/admin/rooms/7/feed";
 const oldViewer = { token: "before", user: { id: 5 } };
@@ -86,4 +88,54 @@ it.each([
   await expect(pending).rejects.toMatchObject({ code, unreadable: code !== "rooms_off" });
   expect(sentChecks(fetcher.mock.calls)).toEqual([[endpoint, "v2", "before"], ["/api/v1/site", null, null]]);
   await bootstrapCredential();
+});
+
+const adminLists: Array<{ path: string; read: () => Promise<RoomLocationsResponse | RoomRequestsResponse> }> = [
+  { path: "/admin/rooms/locations", read: AdminRooms.locations },
+  { path: "/admin/room-requests", read: RoomRequests.list },
+];
+
+it.each(adminLists)("accepts $path only with the captured admin acknowledgment", async ({ path, read }) => {
+  let acknowledged: string | undefined;
+  const answer = { marker: "room-read" };
+
+  const fetcher = vi.fn<typeof fetch>(async (url) => {
+    if (String(url).endsWith("/auth/bootstrap")) return bootstrapAnswer({ token: "room", user: { id: 5 } });
+
+    return Response.json(answer, { headers: acknowledged ? { "Fold-Session-Checked": acknowledged } : {} });
+  });
+
+  vi.stubGlobal("fetch", fetcher);
+  await bootstrapCredential(true);
+
+  await expect(read()).rejects.toMatchObject({ code: "session_expired" });
+  acknowledged = "v2 m-room 8";
+  await expect(read()).rejects.toMatchObject({ code: "session_expired" });
+  acknowledged = "v2 m-room 5";
+  await expect(read()).resolves.toEqual(answer);
+  expect(sentChecks(fetcher.mock.calls)).toEqual(Array.from({ length: 3 }, () => ["/api/v1" + path, "v2", "room"]));
+});
+
+it.each(adminLists)("reconciles a changed cookie before retrying $path", async ({ path, read }) => {
+  let viewer = { token: "room", user: { id: 5 } };
+  const answer = { marker: "fresh-room-read" };
+
+  const fetcher = vi.fn<typeof fetch>(async (url) => {
+    if (url === "/api/v1/auth/bootstrap") return bootstrapAnswer(viewer);
+
+    expect(url).toBe("/api/v1" + path);
+
+    return Response.json(answer, { headers: { "Fold-Session-Checked": "v2 m-replacement 8" } });
+  });
+
+  vi.stubGlobal("fetch", fetcher);
+  const { credential } = await bootstrapCredential(true);
+  viewer = { token: "replacement", user: { id: 8 } };
+  setMarkerCookie("m-replacement");
+
+  await expect(readRooms(read(), credential)).rejects.toMatchObject({ code: "session_expired", unreadable: false });
+  expect(sentChecks(fetcher.mock.calls)).toEqual([]);
+  await vi.waitFor(() => expect(currentCredential()).toMatchObject({ token: "replacement", viewer: 8 }));
+  await expect(readRooms(read(), currentCredential())).resolves.toEqual(answer);
+  expect(sentChecks(fetcher.mock.calls)).toEqual([["/api/v1" + path, "v2", "replacement"]]);
 });

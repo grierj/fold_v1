@@ -40,3 +40,16 @@ it.each(["chips", "underline"] as const)("links %s tabs and panels with one tab 
   await user.keyboard("{Home}");
   expect(events).toHaveFocus();
 });
+
+it.each(["tab", "panel", "blurred"] as const)("handles focus when a %s is removed", (where) => {
+  const options = [{ id: "about", label: "About" }, { id: "events", label: "Events" }];
+  const page = (value: string, items: typeof options) => <Tabs label="Sections" value={value} onChange={() => {}} options={items}>Content</Tabs>;
+  const { rerender } = render(page("events", options));
+  const focused = where === "panel" ? screen.getByRole("tabpanel", { name: "Events" }) : screen.getByRole("tab", { name: "Events" });
+  focused.focus();
+
+  if (where === "blurred") focused.blur();
+
+  rerender(page("about", [options[0]]));
+  expect(where === "blurred" ? document.body : screen.getByRole("tab", { name: "About" })).toHaveFocus();
+});
