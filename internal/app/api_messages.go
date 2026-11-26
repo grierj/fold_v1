@@ -352,52 +352,46 @@ func canComposeIn(db *gorm.DB, me *models.User) (bool, error) {
 	return policy.CanComposeMessages(asPerson(me), leads, hosts > 0), nil
 }
 
-// answerAudience answers a resolveAudienceIn error for me (audienceError);
-// true means there was none.
-func answerAudience(c *gin.Context, me *models.User, err error) bool {
-	switch err = audienceError(me, err); {
-	case err == nil:
-		return true
-	case isAPIError(err):
-		fail(c, err)
-	default:
-		jsonError(c, http.StatusInternalServerError, "could not check who gets this message")
-	}
-	return false
-}
-
-// summarizeAudienceFor checks that the session's user may message au and
-// counts who it reaches, with their names, in one read-only Repeatable Read
-// snapshot: the author's rights, the audience's targets, the dates that put
-// each registrant in it, the grants behind those dates and the names are one
-// committed state, so a preview never names someone no state admits. false
-// means the error response was sent.
-func (a *App) summarizeAudienceFor(c *gin.Context, au *audienceJSON) (audienceSummaryJSON, bool) {
-	var s audienceSummaryJSON
-	var me *models.User
-	err := a.DB.Transaction(func(tx *gorm.DB) error {
-		var err error
-		if me, err = snapshotViewerIn(tx, apiUser(c)); err != nil || me == nil {
-			return err
+// A new draft uses the viewer's audiences. For a saved message, the viewer
+// must still be its editor and only its active author may supply the audience.
+func (a *App) readComposerAudience(c *gin.Context, fallback string, read func(tx *gorm.DB, viewer, author *models.User) error) bool {
+	var id uint
+	_, scoped := c.Params.Get("id")
+	if scoped {
+		var ok bool
+		if id, ok = messageIDParam(c); !ok {
+			return false
 		}
-		ids, err := a.resolveAudienceIn(tx, me, au, a.now())
+	}
+	err := a.DB.Transaction(func(tx *gorm.DB) error {
+		viewer, err := snapshotViewerIn(tx, apiUser(c))
 		if err != nil {
 			return err
 		}
-		s, err = a.summarizeAudience(tx, ids, policy.IsAdmin(asPerson(me)))
-		return err
+		if viewer == nil {
+			return errSecuritySession
+		}
+		author := viewer
+		if scoped {
+			m, err := readOwnMessageIn(tx, viewer, id, policy.MessageEdit)
+			if err != nil {
+				return err
+			}
+			if a.hooks.readerAuthorized != nil {
+				a.hooks.readerAuthorized("message audience")
+			}
+			author, err = activeMessageAuthorIn(tx, m, viewer)
+			if err != nil {
+				return err
+			}
+		}
+		return audienceError(viewer, read(tx, viewer, author))
 	}, readSnapshot)
-	switch {
-	case me == nil && err == nil:
-		fail(c, errSecuritySession)
-		return s, false
-	case errors.Is(err, errAudienceInvalid), errors.Is(err, errAudienceGone), errors.Is(err, errAudienceRefused):
-		return s, answerAudience(c, me, err)
-	case err != nil:
-		jsonError(c, http.StatusInternalServerError, "could not count who gets this message")
-		return s, false
+	if err != nil {
+		answerMessageError(c, err, fallback)
+		return false
 	}
-	return s, true
+	return true
 }
 
 // errAudienceRefused: me may not message that audience (policy).
@@ -504,43 +498,31 @@ func (a *App) apiComposeOptions(c *gin.Context) {
 		onlyEvent = n
 	}
 	var out composeOptionsJSON
-	var me *models.User
-	// The session's user, what they lead and host, and the events and dates
-	// offered come from one read-only snapshot, so a leader who loses a group
-	// is never offered its events as they stood after.
-	err := a.DB.Transaction(func(tx *gorm.DB) error {
+	if a.readComposerAudience(c, "could not load the composer", func(tx *gorm.DB, _, author *models.User) error {
 		var err error
-		if me, err = snapshotViewerIn(tx, apiUser(c)); err != nil || me == nil {
-			return err
-		}
-		out, err = a.composeOptionsIn(tx, me, onlyEvent)
+		out, err = a.composeOptionsIn(tx, author, onlyEvent)
 		return err
-	}, readSnapshot)
-	switch {
-	case me == nil && err == nil:
-		fail(c, errSecuritySession)
-	case err != nil:
-		jsonError(c, http.StatusInternalServerError, "could not load the composer")
-	default:
+	}) {
 		c.JSON(http.StatusOK, out)
 	}
 }
 
 // composeOptionsIn is the picker for me, read on tx.
 func (a *App) composeOptionsIn(tx *gorm.DB, me *models.User, onlyEvent uint64) (composeOptionsJSON, error) {
-	p := asPerson(me)
-	ok, err := canComposeIn(tx, me)
-	if err != nil {
-		return composeOptionsJSON{}, err
-	}
 	pushOn, err := boolSettingErrIn(tx, settingPushEnabled, true)
 	if err != nil {
 		return composeOptionsJSON{}, err
 	}
-	out := composeOptionsJSON{CanCompose: ok, CanMessageEveryone: policy.IsAdmin(p), PushEnabled: pushOn, Groups: []composeGroupJSON{}, Events: []composeEventJSON{}}
-	if !ok {
+	out := composeOptionsJSON{PushEnabled: pushOn, Groups: []composeGroupJSON{}, Events: []composeEventJSON{}}
+	if me == nil {
 		return out, nil
 	}
+	out.CanCompose, err = canComposeIn(tx, me)
+	if err != nil || !out.CanCompose {
+		return out, err
+	}
+	p := asPerson(me)
+	out.CanMessageEveryone = policy.IsAdmin(p)
 	groups := []models.Group{}
 	gq := tx.Where("status = ?", models.GroupActive).Order("lower(name)")
 	if !p.Admin {
@@ -623,11 +605,20 @@ func (a *App) apiAudiencePreview(c *gin.Context) {
 		fail(c, errAudienceInvalid)
 		return
 	}
-	s, ok := a.summarizeAudienceFor(c, &body.Audience)
-	if !ok {
-		return
+	var s audienceSummaryJSON
+	if a.readComposerAudience(c, "could not count who gets this message", func(tx *gorm.DB, viewer, author *models.User) error {
+		if author == nil {
+			return errAudienceRefused
+		}
+		ids, err := a.resolveAudienceIn(tx, author, &body.Audience, a.now())
+		if err != nil {
+			return err
+		}
+		s, err = a.summarizeAudience(tx, ids, policy.IsAdmin(asPerson(viewer)))
+		return err
+	}) {
+		c.JSON(http.StatusOK, audienceSummaryResponseJSON{Summary: s})
 	}
-	c.JSON(http.StatusOK, audienceSummaryResponseJSON{Summary: s})
 }
 
 type messageBody struct {
