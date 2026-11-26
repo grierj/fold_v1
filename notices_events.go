@@ -9,6 +9,7 @@ import (
 	"fold/models"
 
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 // notifyOccurrences tells everyone going or waitlisted on these dates that
@@ -113,21 +114,28 @@ type signedUp struct {
 	OccID  uint
 }
 
-// signedUpOn is who a change to these dates tells: everyone going or
-// waitlisted, as the account that answers for the row (listedRegistrations: a
-// household person's holder), one row per person per date, ordered by date
-// then person. actor, who is never told of their own change, is left out.
-// What a date cancel or an event delete tells and what its confirmation
-// counts both come from here.
+// signedUpOn is who a change to these dates tells, one row per person per
+// date, ordered by date then person: everyone going or waitlisted, as the
+// account that answers for the row (listedRegistrations: a household person's
+// holder), and every account that can sign in holding a live exact-date grant
+// on the date whatever its answer (a date kept as Maybe after leaving), whom
+// the grant's end tells when the date is cancelled (endRegistrationAccess
+// notifies exactly those accounts). actor, who is never told of their own
+// change, is left out. What a date cancel or an event delete tells and what
+// its confirmation counts both come from here.
 func signedUpOn(tx *gorm.DB, occIDs []uint, actor uint) ([]signedUp, error) {
 	if len(occIDs) == 0 {
 		return nil, nil
 	}
 	var rows []signedUp
-	err := tx.Table("registrations").Joins(listedRegistrations()).Distinct("users.id AS user_id, registrations.occurrence_id AS occ_id").
-		Where("registrations.occurrence_id IN ? AND registrations.status IN ? AND users.id <> ?", occIDs,
-			[]string{models.RegGoing, models.RegWaitlisted}, actor).
-		Order("occ_id, user_id").Scan(&rows).Error
+	err := tx.Raw(`SELECT users.id AS user_id, registrations.occurrence_id AS occ_id FROM registrations `+listedRegistrations()+`
+		WHERE registrations.occurrence_id IN @occs AND registrations.status IN @answers AND users.id <> @actor
+		UNION
+		SELECT registrations.user_id, registrations.occurrence_id FROM registrations
+		JOIN users ON users.id = registrations.user_id AND users.deleted_at IS NULL AND users.status = @active AND users.password_hash IS NOT NULL
+		WHERE registrations.occurrence_id IN @occs AND `+registrationAccessLiveSQL+` AND users.id <> @actor
+		ORDER BY occ_id, user_id`,
+		map[string]any{"occs": occIDs, "answers": []string{models.RegGoing, models.RegWaitlisted}, "actor": actor, "active": models.UserActive}).Scan(&rows).Error
 	return rows, err
 }
 
@@ -157,10 +165,19 @@ func cancelTells(tx *gorm.DB, o *models.EventOccurrence, actor uint, now time.Ti
 
 // eventDeleteTells is who deleting eventID tells: everyone signed up for one
 // of its dates a cancel would tell about (dateTellsOnCancel), with those dates
-// by id. It is the delete's notices and its confirmation's count.
-func eventDeleteTells(tx *gorm.DB, eventID, actor uint, now time.Time) ([]signedUp, map[uint]*models.EventOccurrence, error) {
+// by id. It is the delete's notices and its confirmation's count. The delete
+// passes lock, taking the dates' rows in id order after the event's (the
+// order event-wide writers use, registration_locks.go) before it reads who is
+// signed up: a sign-up or a withdrawal holds its date's row until it commits,
+// so every answer that returned before the delete is read, and one still in
+// flight finds the date gone.
+func eventDeleteTells(tx *gorm.DB, eventID, actor uint, now time.Time, lock bool) ([]signedUp, map[uint]*models.EventOccurrence, error) {
+	q := tx.Where("event_id = ?", eventID)
+	if lock {
+		q = q.Clauses(clause.Locking{Strength: "UPDATE"}).Order("id")
+	}
 	var occs []models.EventOccurrence
-	if err := tx.Where("event_id = ?", eventID).Find(&occs).Error; err != nil {
+	if err := q.Find(&occs).Error; err != nil {
 		return nil, nil, err
 	}
 	byID := map[uint]*models.EventOccurrence{}
@@ -184,9 +201,10 @@ func eventDeleteTells(tx *gorm.DB, eventID, actor uint, now time.Time) ([]signed
 // may see one of their dates is told the title and time of the first of them
 // (eventNoticeVars, so a hidden group's name never stands in for the title);
 // anyone else gets the nameless text through withheldDate. The notice links
-// home and has the plain title in Data, which is all a guardian's copy shows.
+// home and has the event's plain title in Data, which is all a guardian's
+// copy shows.
 func notifyEventDeleted(tx *gorm.DB, actor uint, ev *models.Event, now time.Time) error {
-	rows, occs, err := eventDeleteTells(tx, ev.ID, actor, now)
+	rows, occs, err := eventDeleteTells(tx, ev.ID, actor, now, true)
 	if err != nil || len(rows) == 0 {
 		return err
 	}
@@ -219,7 +237,12 @@ func notifyEventDeleted(tx *gorm.DB, actor uint, ev *models.Event, now time.Time
 				end := noticeEnd(mine[len(mine)-1])
 				m.Vars = notify.Vars{Event: v.Event, When: v.When}
 				m.SubjectType, m.SubjectID, m.ExpiresAt = "event", ev.ID, &end
-				m.Data = map[string]any{notify.DataEventTitle: v.Event}
+				// The copy's title is the event's own, never the group's name
+				// standing in for an untitled event: the guardian is not judged
+				// against the group. An untitled event makes no copy.
+				if title := effectiveOccurrenceTitle(ev, o); title != "" {
+					m.Data = map[string]any{notify.DataEventTitle: title}
+				}
 				break
 			}
 			if m.SubjectID == 0 {

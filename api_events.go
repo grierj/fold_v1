@@ -1518,6 +1518,9 @@ func (a *App) apiDeleteEvent(c *gin.Context) {
 		if err := notifyEventDeleted(tx, actor.ID, ev, a.now()); err != nil {
 			return err
 		}
+		if a.hooks.eventDeleteNoticed != nil {
+			a.hooks.eventDeleteNoticed(tx)
+		}
 		return deleteEventRows(tx, []uint{ev.ID})
 	})
 	if err != nil {
@@ -1550,7 +1553,7 @@ func (a *App) apiSignedUpCount(c *gin.Context) {
 		now := a.now()
 		var rows []signedUp
 		if date == "" {
-			rows, _, err = eventDeleteTells(tx, t.ev.ID, t.me.ID, now)
+			rows, _, err = eventDeleteTells(tx, t.ev.ID, t.me.ID, now, false)
 		} else {
 			var occ models.EventOccurrence
 			if err := tx.Where("event_id = ? AND original_date = ?", t.ev.ID, date).Limit(1).Find(&occ).Error; err != nil {

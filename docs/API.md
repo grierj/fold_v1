@@ -1099,7 +1099,8 @@ PUT  /api/v1/events/:id                     → 200 {event} | 409 event_changed 
 PUT  /api/v1/events/:id/visibility          → 200 {event} | 409 event_changed   (leader, host, or admin)
      body: {visibility, reason?, consent?, resetOverrides?, revision}
 DELETE /api/v1/events/:id                   → 200 {}        (leader, host, or admin)
-     — tells everyone going or waitlisted on its upcoming dates, one event.deleted notice each (DEC-175)
+     — tells everyone going or waitlisted on its upcoming dates, and every account holding a live exact-date
+       grant on them, one event.deleted notice each (DEC-175)
 GET  /api/v1/events/:id/signed-up?date=      → 200 {people}  (leader, host, or admin; one snapshot)
      — how many people the delete (no date) or that date's cancel would tell, for the
        confirmation to show; never sent back and never checked by the delete or cancel

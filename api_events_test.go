@@ -3163,6 +3163,8 @@ func TestSignedUpCountIsWhoTheActionTells(t *testing.T) {
 	for _, n := range []int{0, 1, 3} {
 		t.Run(itoa(uint(n)), func(t *testing.T) {
 			f := newDateEditFixture(t)
+			// The manager who presses is going too: with n = 0 they are the
+			// only one, and the count is the zero line's 0.
 			signUp(t, f.app, f.adminUser, f.dates[1].ID, models.RegGoing)
 			signUp(t, f.app, f.adminUser, f.dates[2].ID, models.RegGoing)
 			people := []*models.User{f.memberUser, f.leaderUser, f.outsiders[0]}[:n]
@@ -3917,6 +3919,12 @@ func TestSeriesNullCapacityClearsTheLimit(t *testing.T) {
 // through the grants.
 func departedWithGrants(t *testing.T, f dateEditFixture, name string, dates ...uint) *models.User {
 	t.Helper()
+	return departedKeeping(t, f, name, models.RegGoing, dates...)
+}
+
+// departedKeeping is departedWithGrants with each kept date answered status.
+func departedKeeping(t *testing.T, f dateEditFixture, name, status string, dates ...uint) *models.User {
+	t.Helper()
 	w := newTestUser(t, f.app, name, "password1234", models.RoleMember)
 	membership := models.Membership{UserID: w.ID, GroupID: f.group, Role: models.MembershipMember, Status: models.MembershipActive}
 	gormMust(t, &gorm.DB{Error: f.app.DB.Transaction(func(tx *gorm.DB) error {
@@ -3924,7 +3932,7 @@ func departedWithGrants(t *testing.T, f dateEditFixture, name string, dates ...u
 			return err
 		}
 		for _, occ := range dates {
-			r := models.Registration{UserID: &w.ID, OccurrenceID: occ, Status: models.RegGoing, Source: models.RegSourceAdmin, AttendanceMode: models.AttendanceInPerson}
+			r := models.Registration{UserID: &w.ID, OccurrenceID: occ, Status: status, Source: models.RegSourceAdmin, AttendanceMode: models.AttendanceInPerson}
 			if err := tx.Create(&r).Error; err != nil {
 				return err
 			}
@@ -3971,5 +3979,38 @@ func TestSignedUpCountIncludesGrantHolders(t *testing.T) {
 	}
 	if n := noticesSince(t, f.app, w.ID, notify.OccurrenceUpdated, mark.notice); len(n) != 0 {
 		t.Fatalf("the grant holder was told twice: %+v", n)
+	}
+}
+
+// A date kept as Maybe after leaving the group holds a live grant: a date
+// cancel tells its holder through the grant's end and a delete with one
+// event.deleted, so both counts include them, once. An ordinary Maybe with no
+// grant is told by neither and counted by neither.
+func TestSignedUpCountIncludesAKeptMaybe(t *testing.T) {
+	f := newDateEditFixture(t)
+	w := departedKeeping(t, f, "kept maybe", models.RegMaybe, f.dates[1].ID, f.dates[2].ID, f.dates[3].ID)
+	signUp(t, f.app, f.memberUser, f.dates[1].ID, models.RegMaybe)
+	signUp(t, f.app, f.memberUser, f.dates[2].ID, models.RegMaybe)
+
+	if got := signedUpCount(t, f.admin, f.event.ID, f.date(1)); got != 1 {
+		t.Fatalf("the date's count is %d, want 1", got)
+	}
+	mark := markNotices(t, f.app)
+	apiDo(t, f.admin, "POST", "/api/v1/events/"+itoa(f.event.ID)+"/cancel", map[string]any{"date": f.date(1)}, http.StatusOK)
+	ended := noticesSince(t, f.app, w.ID, notify.OccurrenceUpdated, mark.notice)
+	if cancelled := toldSince(t, f.app, notify.OccurrenceCancelled, mark.notice); cancelled != 0 || len(ended) != 1 {
+		t.Fatalf("the cancel told %d people and the kept Maybe %d times, want 0 and 1", cancelled, len(ended))
+	}
+
+	if got := signedUpCount(t, f.admin, f.event.ID, ""); got != 1 {
+		t.Fatalf("the delete's count is %d, want 1", got)
+	}
+	mark = markNotices(t, f.app)
+	apiDo(t, f.admin, "DELETE", "/api/v1/events/"+itoa(f.event.ID), nil, http.StatusOK)
+	if told := toldSince(t, f.app, notify.EventDeleted, mark.notice); told != 1 {
+		t.Fatalf("the delete told %d people, want 1", told)
+	}
+	if got := noticesSince(t, f.app, w.ID, notify.EventDeleted, mark.notice); len(got) != 1 || got[0].Title != "Cancelled: Church event" {
+		t.Fatalf("the kept Maybe's deletion notices: %+v", got)
 	}
 }

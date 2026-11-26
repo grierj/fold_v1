@@ -110,9 +110,9 @@ it("drops the group while rechecking after a date's cancellation is refused", as
 });
 
 it.each([
-  [0, "Nobody is signed up."],
-  [1, "1 person is signed up and will be notified."],
-  [5, "5 people are signed up and will be notified."],
+  [0, "No one else is signed up."],
+  [1, "1 other person is signed up and will be notified."],
+  [5, "5 other people are signed up and will be notified."],
 ])("asks to cancel a date saying who is told when %s people are signed up", async (people, line) => {
   vi.mocked(Groups.get).mockResolvedValue({ ...page, canManage: true });
   vi.mocked(Events.signedUp).mockResolvedValue({ people });
@@ -126,6 +126,29 @@ it.each([
     await waitFor(() => expect(Events.cancelOccurrence).toHaveBeenCalledExactlyOnceWith(7, "2026-12-01"));
     expect(prompt).toHaveBeenCalledExactlyOnceWith(`Cancel this date on 2026-12-01? ${line}`);
     expect(Events.signedUp).toHaveBeenCalledExactlyOnceWith(7, "2026-12-01");
+  } finally {
+    prompt.mockRestore();
+  }
+});
+
+it("asks nothing when the count arrives after the manager moved to another group", async () => {
+  const second = { ...page, group: { ...page.group, id: 2, name: "Second group" }, canManage: true, upcomingEvents: [occurrence({ id: 9, eventId: 70 })] };
+  vi.mocked(Groups.get).mockImplementation((id) => Promise.resolve(String(id) === "2" ? second : { ...page, canManage: true }));
+  const count = deferred<{ people: number }>();
+  vi.mocked(Events.signedUp).mockReturnValue(count.promise);
+  vi.mocked(Events.cancelOccurrence).mockResolvedValue({});
+  const prompt = vi.spyOn(window, "confirm").mockReturnValue(true);
+
+  try {
+    const router = createMemoryRouter([{ path: "/groups/:id", element: <GroupDetail /> }], { initialEntries: ["/groups/1"] });
+    render(<RouterProvider router={router} />);
+    await userEvent.click(await screen.findByRole("button", { name: /^More for .* on 2026-12-01$/ }));
+    await userEvent.click(screen.getByRole("menuitem", { name: "Cancel this date" }));
+    await act(async () => { await router.navigate("/groups/2"); });
+    expect(await screen.findByRole("heading", { name: "Second group" })).toBeInTheDocument();
+    await act(async () => count.resolve({ people: 2 }));
+    expect(prompt).not.toHaveBeenCalled();
+    expect(Events.cancelOccurrence).not.toHaveBeenCalled();
   } finally {
     prompt.mockRestore();
   }
@@ -1797,7 +1820,7 @@ describe("GroupDetail: the date question in the app's dialog", () => {
     vi.mocked(window.confirm).mockReturnValue(false);
     await userEvent.click(await screen.findByRole("button", { name: /^More for .* on 2026-12-01$/ }));
     await userEvent.click(screen.getByRole("menuitem", { name: "Cancel this date" }));
-    await waitFor(() => expect(window.confirm).toHaveBeenCalledExactlyOnceWith("Cancel this date on 2026-12-01? Everyone signed up will be notified."));
+    await waitFor(() => expect(window.confirm).toHaveBeenCalledExactlyOnceWith("Cancel this date on 2026-12-01? Everyone else signed up will be notified."));
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
   });
 });

@@ -1,6 +1,6 @@
 import { Tabs } from "../components/ui/Tabs";
 import { ManagedDateEditor, useDateEditorToggle } from "../components/ManagedDateEditor";
-import { ConfirmProvider } from "../components/ui/ConfirmDialog";
+import { ConfirmProvider, useShownInList } from "../components/ui/ConfirmDialog";
 import { ManagerSaveStatus } from "../components/ui/ManagerSaveStatus";
 import { useLeaveQuestion } from "../lib/leaveQuestion";
 import { AddPeople } from "../components/AddPeople";
@@ -116,6 +116,15 @@ function EventRow({
   const time = formatTime(instance.startsAt);
   const loc = placeLine(instance.room, instance.location);
   const name = instance.title || groupName;
+  // The browser's prompt opens only after the count arrives: by then this row may be gone (another group's page),
+  // hidden or no longer the manager's to cancel, and then the press asks nothing.
+  const shown = useShownInList();
+  const asking = useRef({ live: false, canManage, shown });
+  useLayoutEffect(() => {
+    asking.current = { live: true, canManage, shown };
+
+    return () => { asking.current = { ...asking.current, live: false }; };
+  }, [canManage, shown]);
 
   async function cancel() {
     if (cancelling) return;
@@ -123,7 +132,10 @@ function EventRow({
     setCancelError(null);
 
     try {
-      if (!confirm(`Cancel this date on ${instance.date}? ${await signedUpNotice(instance.eventId, instance.date)}`)) return;
+      const told = await signedUpNotice(instance.eventId, instance.date);
+      const still = asking.current;
+
+      if (!still.live || !still.canManage || !still.shown || !confirm(`Cancel this date on ${instance.date}? ${told}`)) return;
       await Events.cancelOccurrence(instance.eventId, instance.date);
       onCancelled(instance.eventId, instance.date);
     } catch (e) {

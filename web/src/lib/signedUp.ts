@@ -1,14 +1,14 @@
 import { Events } from "../api/events";
 import type { Id } from "../api/core";
-import { people } from "./plural";
 
-// The line a delete or cancel confirmation shows about who is told. null is a count that could not be read.
+// The line a delete or cancel confirmation shows about who is told. The count leaves out the person pressing, who is
+// never told of their own change, so every line says "other". null is a count that could not be read.
 function signedUpLine(n: number | null): string {
-  if (n === null) return "Everyone signed up will be notified.";
+  if (n === null) return "Everyone else signed up will be notified.";
 
-  if (n === 0) return "Nobody is signed up.";
+  if (n === 0) return "No one else is signed up.";
 
-  return `${people(n)} ${n === 1 ? "is" : "are"} signed up and will be notified.`;
+  return `${n} other ${n === 1 ? "person is" : "people are"} signed up and will be notified.`;
 }
 
 // The line for deleting the event (no date) or cancelling one date. The count is shown, never sent back or checked:

@@ -14,6 +14,7 @@ import (
 	"fold/internal/mail"
 	"fold/internal/notify"
 	"fold/internal/policy"
+	"fold/internal/testdb"
 	"fold/models"
 
 	"gorm.io/gorm"
@@ -776,5 +777,71 @@ func TestEventDeleteTellsASignUpCommittedWhileItWaited(t *testing.T) {
 	}
 	if got := noticesSince(t, f.app, f.memberUser.ID, notify.EventDeleted, mark.notice); len(got) != 1 {
 		t.Fatalf("the late sign-up got %d notices, want 1", len(got))
+	}
+}
+
+// For an untitled event the teen, who may see the group, is told its name, but
+// the guardian's copy carries the event's own title, and an untitled event
+// has none: the guardian, who is not in the private group, gets no copy and
+// nothing that names the group.
+func TestEventDeleteCopiesNoGroupNameToAGuardian(t *testing.T) {
+	f := newDateEditFixture(t)
+	gormMust(t, f.app.DB.Model(&models.Event{}).Where("id = ?", f.event.ID).Update("title", ""))
+	teen := activeTeen(t, f.app, "untitled teen", f.adminUser.ID)
+	gormMust(t, f.app.DB.Create(&models.Membership{UserID: teen.ID, GroupID: f.group, Role: models.MembershipMember, Status: models.MembershipActive}))
+	signUp(t, f.app, teen, f.dates[1].ID, models.RegGoing)
+	guardian := newTestUser(t, f.app, "untitled guardian", "password1234", models.RoleMember)
+	gormMust(t, f.app.DB.Create(&models.GuardianLink{GuardianUserID: guardian.ID, TeenUserID: &teen.ID, Status: models.GuardianConfirmed}))
+	gormMust(t, f.app.DB.Create(&models.Setting{Key: settingGuardianCopies, Value: "true"}))
+	mark := markNotices(t, f.app)
+
+	apiDo(t, f.admin, "DELETE", "/api/v1/events/"+itoa(f.event.ID), nil, http.StatusOK)
+	drainNotices(t, f.app)
+	drainNotices(t, f.app)
+	zone := churchZoneOrUTC(f.app.DB)
+	wantEventDeleted(t, f.app, "the teen", teen.ID, loginAPI(t, f.app, teen.Name, "password1234"), teen.Email, mark,
+		"Cancelled: Supper club", "This event was deleted, so its upcoming dates are off, starting "+formatWhen(f.dates[1].StartsAt, zone)+".")
+	if got := copiesTo(t, f.app, guardian.Email); len(got) != 0 {
+		t.Fatalf("the guardian got copies %v", got)
+	}
+	noSecrets(t, f.app, "the guardian", guardian.ID, guardian.Email, mark, []string{"Supper club", "Group hall"})
+}
+
+// The delete locks the event's dates before it reads who is signed up, so a
+// sign-up or a withdrawal still in flight when the delete reads waits for it
+// and then finds the date gone: none returns 200 after the read. The hook
+// starts a real answer at the point the notices are written, which is where
+// one that committed between the read and the rows going would be lost
+// (a sign-up removed untold) or misreported (a withdrawal told).
+func TestEventDeleteSettlesAnswersInFlight(t *testing.T) {
+	for _, answer := range []string{models.RegGoing, models.RegDeclined} {
+		t.Run(answer, func(t *testing.T) {
+			f := newDateEditFixture(t)
+			if answer == models.RegDeclined {
+				signUp(t, f.app, f.memberUser, f.dates[1].ID, models.RegGoing)
+			}
+			mark := markNotices(t, f.app)
+			var rsvp <-chan *httptest.ResponseRecorder
+			f.app.hooks.eventDeleteNoticed = func(*gorm.DB) {
+				rsvp = queueContact(func() *httptest.ResponseRecorder {
+					return f.member.do("PUT", "/api/v1/events/"+itoa(f.event.ID)+"/registrations", map[string]any{"date": f.date(1), "status": answer}, true)
+				})
+				testdb.WaitUntil(t, "the answer to wait on a lock or return", 5*time.Second, func() bool {
+					var n int64
+					gormMust(t, f.app.DB.Raw(`SELECT count(*) FROM pg_stat_activity WHERE datname = current_database() AND wait_event_type = 'Lock'`).Scan(&n))
+					return n > 0 || len(rsvp) > 0
+				})
+			}
+			apiDo(t, f.admin, "DELETE", "/api/v1/events/"+itoa(f.event.ID), nil, http.StatusOK)
+			f.app.hooks.eventDeleteNoticed = nil
+			w := awaitContactResponse(t, rsvp)
+			told := len(noticesSince(t, f.app, f.memberUser.ID, notify.EventDeleted, mark.notice)) == 1
+			if w.Code == http.StatusOK {
+				t.Fatalf("the %s answer returned 200 after the delete read who to tell (told %v): %s", answer, told, w.Body.String())
+			}
+			if told != (answer == models.RegDeclined) {
+				t.Fatalf("the member was told %v; they were going at the read: %v", told, answer == models.RegDeclined)
+			}
+		})
 	}
 }
