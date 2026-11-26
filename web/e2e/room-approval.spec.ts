@@ -1,6 +1,6 @@
 import * as schema from "valibot";
-import { expect, test } from "@playwright/test";
-import { apiAs, pickRoom, signIn } from "./helpers";
+import { expect, test, type Locator } from "@playwright/test";
+import { apiAs, checkState, pickRoom, signIn, signInTo } from "./helpers";
 
 // M2.1d: with approval on, a leader's room booking waits for an admin, the
 // admin confirms it from the Rooms tab, and the leader's date shows the room.
@@ -46,6 +46,74 @@ test("a leader's room waits for an admin, who confirms it", async ({ page, reque
     await expect(page.getByText("Fellowship Hall · Main · south door", { exact: true })).toBeVisible();
   } finally {
     const admin = await apiAs(request, "grier");
+    await admin("PUT", "/admin/settings/room-approval", { enabled: false });
+  }
+});
+
+test("a phone shows the full selected room and building in all four pickers", async ({ page, request }) => {
+  test.setTimeout(60_000);
+  await page.setViewportSize({ width: 390, height: 844 });
+  const admin = await apiAs(request, "grier");
+  const name = "South Fellowship Room in the West Wing beside the Community Kitchen and Welcome Desk";
+  const building = "Saint Brigid's Community and Ministry Center";
+  const otherBuilding = "Saint Brigid's Community and Ministry Annex";
+  const label = `${name} · ${building}`;
+  await admin("POST", "/admin/rooms", { name, building });
+  await admin("POST", "/admin/rooms", { name, building: otherBuilding });
+  const { groups } = schema.parse(schema.looseObject({ groups: schema.array(schema.looseObject({ id: schema.number(), name: schema.string() })) }), await admin("GET", "/groups"));
+  const group = groups.find((g) => g.name === "Room 201 class")!;
+  const date = new Date(Date.now() + 48 * 864e5).toISOString().slice(0, 10);
+
+  const { event } = schema.parse(schema.looseObject({ event: schema.looseObject({ id: schema.number() }) }), await admin("POST", `/groups/${group.id}/events`, {
+    title: "Fellowship night", startsLocal: `${date}T18:00`, durationMinutes: 60, tzid: "America/Boise",
+    recurrenceRule: "FREQ=WEEKLY;COUNT=2",
+  }));
+
+  const visibleValue = (room: Locator) => room.locator("..").locator("[data-selected-option]");
+
+  const checkChoice = async (room: Locator, entry: string) => {
+    await expect(room.locator("option:checked")).toHaveText(label);
+    await expect(room.getByRole("option", { name: `${name} · ${otherBuilding}`, exact: true })).toHaveCount(1);
+    await checkState(page, "long-room", entry);
+    await expect(visibleValue(room)).toBeVisible();
+    await expect(visibleValue(room)).toHaveText(label);
+  };
+
+  // Pending bookings don't add a suggestion based on a confirmed use.
+  await admin("PUT", "/admin/settings/room-approval", { enabled: true });
+
+  try {
+    await signInTo(page, "lee", `/events/${event.id}/dates/${date}`);
+    await page.getByRole("button", { name: "Edit this date" }).click();
+    const dateRoom = page.getByRole("combobox", { name: "Room (optional)", exact: true });
+    await expect(visibleValue(dateRoom)).toHaveCount(0);
+    await pickRoom(dateRoom, label);
+    await expect(page.getByRole("status").filter({ hasText: `Waiting for an admin to approve ${name}.` })).toBeVisible();
+    await expect(dateRoom).toHaveAccessibleDescription("Saved as soon as you choose it, so you don't need to press Save. If bookings need an admin's approval, it waits for one.");
+    await checkChoice(dateRoom, "edit-date");
+
+    await dateRoom.press("Home");
+    await expect(page.getByRole("status").filter({ hasText: "Room released." })).toBeVisible();
+    await expect(dateRoom.locator("option:checked")).toHaveText("No room");
+    await expect(visibleValue(dateRoom)).toHaveCount(0);
+
+    await page.goto(`/events/${event.id}`);
+    await page.getByRole("button", { name: "Edit series" }).click();
+    const seriesRoom = page.getByRole("combobox", { name: "Room for every date (optional)", exact: true });
+    await pickRoom(seriesRoom, label);
+    await checkChoice(seriesRoom, "edit-series");
+
+    for (const entry of [
+      { who: "lee", path: `/groups/${group.id}/events/new`, name: "schedule-group" },
+      { who: "grier", path: "/events/new", name: "schedule-church" },
+    ]) {
+      await signInTo(page, entry.who, entry.path);
+      await page.getByLabel("Date", { exact: true }).fill(date);
+      const room = page.getByRole("combobox", { name: "Room (optional)", exact: true });
+      await pickRoom(room, label);
+      await checkChoice(room, entry.name);
+    }
+  } finally {
     await admin("PUT", "/admin/settings/room-approval", { enabled: false });
   }
 });
