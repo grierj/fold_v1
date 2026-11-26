@@ -2064,6 +2064,8 @@ func legacySavePath(id uint) string { return "/api/v1/admin/erasure-reasons/lega
 
 type saveRig struct{ *attemptScene }
 
+const legacySaveFaultMatch = "idle_in_transaction_session_timeout"
+
 func newSaveRig(t *testing.T) *saveRig {
 	t.Helper()
 	s := newAttemptScene(t)
@@ -2077,6 +2079,17 @@ func newProxiedSaveRig(t *testing.T) *saveRig {
 	s := newProxiedAttemptScene(t)
 	s.kind = attemptKindLegacyReasonSave
 	return &saveRig{s}
+}
+
+func (r *saveRig) wantCompletedCommit(firstReply int) {
+	r.t.Helper()
+	pid := uint32(r.rig.pidOf(legacySaveFaultMatch))
+	for _, result := range r.rig.proxy.Tags()[firstReply:] {
+		if result.PID == pid && strings.EqualFold(result.SQL, "COMMIT") && result.Tag == "COMMIT" {
+			return
+		}
+	}
+	r.t.Fatalf("proxy did not receive a COMMIT completion from save backend %d", pid)
 }
 
 func (r *saveRig) bury(users ...*models.User) {
@@ -3290,7 +3303,8 @@ func TestLegacySaveOutcomes(t *testing.T) {
 			decisions := choose(r.items(gone.ID), "remove")
 			id := r.mint(gone.ID)
 			floor := r.app.restoreFenceFloor()
-			r.rig.proxy.Arm(testdb.Faults{Match: "idle_in_transaction_session_timeout", Commit: fault})
+			firstReply := len(r.rig.proxy.Tags())
+			r.rig.proxy.Arm(testdb.Faults{Match: legacySaveFaultMatch, Commit: fault})
 			w := r.send(gone.ID, id, decisions)
 			wantSaveCode(t, w, http.StatusInternalServerError, "legacy_save_outcome_unknown")
 			if strings.Contains(strings.ToLower(w.Body.String()), "nothing was saved") {
@@ -3302,18 +3316,17 @@ func TestLegacySaveOutcomes(t *testing.T) {
 			if r.app.restoreFenceFloor() != floor {
 				t.Error("an unknown commit raised the restore floor")
 			}
-			// A forwarded COMMIT may still be finishing on the server when the
-			// cut reply reaches the handler; judge the outcome once it has.
-			r.rig.awaitReleased(r.rig.pidOf("idle_in_transaction_session_timeout"), 10*time.Second)
 			if fault == testdb.CommitCloseUnforwarded {
-				if r.reasonOf(int64(req.ID)) == "" || len(r.decisionRows()) != 0 {
+				r.rig.awaitReleased(r.rig.pidOf(legacySaveFaultMatch), 10*time.Second)
+				if r.reasonOf(int64(req.ID)) == "" || len(r.decisionRows()) != 0 || r.receipts() != 0 {
 					t.Error("a commit that never arrived saved something")
 				}
 				wantSettle(t, r.settled(id, gone.ID), settleHistoryUnavailable, nil)
 				return
 			}
+			r.wantCompletedCommit(firstReply)
 			if r.reasonOf(int64(req.ID)) != "" || len(r.decisionRows()) != 1 || r.receipts() != 1 {
-				t.Error("a commit the server received was not saved")
+				t.Fatal("a completed commit must blank the reason and leave one decision and one receipt")
 			}
 			wantSettle(t, r.settled(id, gone.ID), settleApplied, nil)
 			// Unknown or not, the id is spent.
@@ -3575,12 +3588,13 @@ func legacyAttemptLifecycle(t *testing.T) {
 		r.bury(gone)
 		decisions := choose(r.items(gone.ID), "remove")
 		id := r.mint(gone.ID)
-		r.rig.proxy.Arm(testdb.Faults{Match: "idle_in_transaction_session_timeout", Commit: testdb.CommitForwardThenClose})
+		firstReply := len(r.rig.proxy.Tags())
+		r.rig.proxy.Arm(testdb.Faults{Match: legacySaveFaultMatch, Commit: testdb.CommitForwardThenClose})
 		wantSaveCode(t, r.send(gone.ID, id, decisions), http.StatusInternalServerError, "legacy_save_outcome_unknown")
 		if got := r.state(id, gone.ID); got != attemptUnknown {
 			t.Fatalf("state %v, want unknown", got)
 		}
-		r.rig.awaitReleased(r.rig.pidOf("idle_in_transaction_session_timeout"), 10*time.Second)
+		r.wantCompletedCommit(firstReply)
 		if r.reasonOf(int64(req.ID)) != "" || len(r.decisionRows()) != 1 || r.receipts() != 1 {
 			t.Fatal("the commit the server received was not saved exactly once")
 		}
@@ -3588,8 +3602,8 @@ func legacyAttemptLifecycle(t *testing.T) {
 			t.Fatalf("settle = %s, want applied", got)
 		}
 		wantSaveCode(t, r.send(gone.ID, id, decisions), http.StatusConflict, "attempt_closed")
-		if len(r.decisionRows()) != 1 {
-			t.Error("a resend after an unknown outcome decided again")
+		if len(r.decisionRows()) != 1 || r.receipts() != 1 {
+			t.Error("a resend after an unknown outcome changed the decision or receipt count")
 		}
 	})
 
