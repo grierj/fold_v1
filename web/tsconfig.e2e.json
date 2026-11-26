@@ -1,0 +1,10 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "allowJs": true,
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "target": "ES2022",
+    "types": ["node"]
+  },
+  "include": ["e2e", "playwright.config.ts", "playwright.journeys.config.ts"]
+}
