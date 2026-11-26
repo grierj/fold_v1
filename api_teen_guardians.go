@@ -264,20 +264,15 @@ func (a *App) guardianTeensIn(tx *gorm.DB, guardianID, linkID uint) ([]guardianT
 		Changes    int
 		Yours      bool
 	}
-	if err := tx.Raw(`SELECT n.teen_user_id, n.changes, (c.granted_by = ? AND c.granter_role = ?) AS yours
-		FROM (SELECT teen_user_id, count(*) AS changes, max(id) AS last FROM teen_consents WHERE teen_user_id IN ? GROUP BY teen_user_id) n
-		JOIN teen_consents c ON c.id = n.last`, guardianID, models.ConsentGuardian, ids).Scan(&counts).Error; err != nil {
+	if err := tx.Raw(`SELECT teen_user_id, count(*) AS changes, (array_agg(granted_by = ? AND granter_role = ? ORDER BY id DESC))[1] AS yours
+		FROM teen_consents WHERE teen_user_id IN ? GROUP BY teen_user_id`, guardianID, models.ConsentGuardian, ids).Scan(&counts).Error; err != nil {
 		return nil, err
 	}
 	for _, n := range counts {
 		byTeen[n.TeenUserID].Changes, byTeen[n.TeenUserID].LastChangeYours = n.Changes, n.Yours
 	}
-	revisions, err := a.consentRevisionsIn(tx, ids)
-	if err != nil {
-		return nil, err
-	}
 	for id, row := range byTeen {
-		row.Revision = revisions[id]
+		row.Revision = a.consentRevision(id, row.Changes)
 	}
 	return out, nil
 }

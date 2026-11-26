@@ -122,6 +122,22 @@ it("a grant refused only because the token moved (a restart) goes again under th
   expect(refused).not.toHaveBeenCalled();
 });
 
+it("a grant this admin already made in another tab is told as the state it left, sent once, with the stored history", async () => {
+  const refused = vi.fn();
+  vi.mocked(AdminTeenConsents.change).mockRejectedValue(changed());
+  render(panel({ onRefused: refused }));
+  await userEvent.type(await screen.findByLabelText("Consent evidence"), "Signed parent form");
+  // The other tab's grant: one new row, this admin's, this scope, this evidence.
+  vi.mocked(AdminTeenConsents.list).mockResolvedValue(log([{ ...consent, id: 50 }], "r2"));
+  await userEvent.click(screen.getByRole("button", { name: "Grant consent" }));
+  expect(await screen.findByRole("status")).toHaveTextContent("Account access consent granted.");
+  expect(refused).not.toHaveBeenCalled();
+  expect(AdminTeenConsents.change).toHaveBeenCalledOnce();
+  expect(screen.getByText("Granted", { selector: "strong", exact: true })).toBeInTheDocument();
+  await userEvent.click(screen.getByText("Consent history (1)"));
+  expect(screen.getByText("Signed parent form")).toBeVisible();
+});
+
 it("a grant whose answer was lost and is pressed again is saved, not refused", async () => {
   const refused = vi.fn();
   vi.mocked(AdminTeenConsents.change).mockRejectedValueOnce(new ApiError(502, "bad gateway", {})).mockRejectedValueOnce(changed());

@@ -94,3 +94,27 @@ credentials, personal data, or exploit instructions.
   intentionally not fixed.
 - Evidence: `householdPersonRevisionRows` in `edit_revision.go`; `checkHouseholdPersonRevision` in
   `apiUpdateHouseholdPerson` (`api_households.go`).
+
+## A guardian's consent change count includes changes from before their link
+
+- Date: 2026-11-25. Reviewed revision: `33479be42da46a6427b5e8c2512c3a413ef22594` (PR #557, DEC-176).
+- `GET /me/guardian-teens` gives each teen `changes`, the number of consent changes the teen has in every scope, and
+  `lastChangeYours`. The card needs the count to tell a grant and a revoke since its read from no change. A guardian
+  whose link was confirmed later, or whose account was not active during a change, got no notice of the earlier
+  changes, so the count tells them how many there were. It shows no scope, status, time, evidence or who made them.
+- Likelihood: **2/10**. Only a guardian confirmed after earlier changes, or inactive during them, sees a number
+  they did not hear about, and it is the teen's own consent history.
+- Severity: **2/10**. A bare count of changes to a teen the guardian is confirmed for, with nothing about them.
+  Product: **4**. The issue is intentionally not fixed.
+- Evidence: `guardianTeensIn` in `api_teen_guardians.go`.
+
+## The admin's consent change answers the teen's whole history under the contact gate
+
+- Date: 2026-11-25. Reviewed revision: `33479be42da46a6427b5e8c2512c3a413ef22594` (PR #557, DEC-176).
+- After a change, `POST /admin/users/:id/teen-consents` reads every consent row of the teen inside the write
+  transaction, which holds the contact gate, so the panel needs no second read. A teen with a very long history
+  would hold the gate a little longer.
+- Likelihood: **1/10**. Each row is a real, audited change by an admin or guardian; a teen has a handful.
+- Severity: **3/10**. Other contact changes wait slightly longer; nothing is disclosed or lost.
+  Product: **3**. The issue is intentionally not fixed.
+- Evidence: `apiChangeTeenConsent` and `teenConsentLogIn` in `api_teen_consent.go`.

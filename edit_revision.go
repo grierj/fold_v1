@@ -390,46 +390,25 @@ func (a *App) checkHouseholdPersonRevision(tx *gorm.DB, id uint, given string) e
 // written.
 var errConsentChanged = apiErr(http.StatusConflict, "consent_changed", "the teen's consent changed since this change was based on it")
 
-// consentRevisionsIn is the token an admin's consent panel or a guardian's
-// card holds for each of teenIDs, keyed by id: bound to the teen's highest
-// consent row in every scope (0 before the first), since teen_consents is
-// append only, so any change of any scope moves it. Every append holds the
-// teen's user row lock, which a grant takes before it compares. The id goes in
-// as a keyed digest under this process's key: the ids count consent rows
-// across the church, which a guardian must not read.
-func (a *App) consentRevisionsIn(tx *gorm.DB, teenIDs []uint) (map[uint]string, error) {
-	last := make(map[uint]uint, len(teenIDs))
-	err := eachIDChunk(teenIDs, func(chunk []uint) error {
-		var rows []struct {
-			TeenUserID uint
-			Last       uint
-		}
-		if err := tx.Raw(`SELECT teen_user_id, max(id) AS last FROM teen_consents WHERE teen_user_id IN ? GROUP BY teen_user_id`, chunk).Scan(&rows).Error; err != nil {
-			return err
-		}
-		for _, r := range rows {
-			last[r.TeenUserID] = r.Last
-		}
-		return nil
-	})
-	if err != nil {
-		return nil, err
-	}
-	out := make(map[uint]string, len(teenIDs))
-	for _, id := range teenIDs {
-		m := hmac.New(sha256.New, a.processKey("teen-consent-revision:v1"))
-		fmt.Fprintf(m, "%d.%d", id, last[id])
-		out[id] = a.editRevision(fmt.Sprintf("t%d", id), hex.EncodeToString(m.Sum(nil)[:16]))
-	}
-	return out, nil
+// consentRevision is the token an admin's consent panel or a guardian's card
+// holds for a teen whose consent log has changes rows (0 before the first).
+// teen_consents is append only (trigger teen_consents_append_only) and its rows
+// are never deleted, erasure included, so the count moves with every change of
+// every scope and never comes back; a restore restarts the process, whose new
+// generation ends every earlier token. Every append holds the teen's user row
+// lock, which a grant takes before it compares.
+func (a *App) consentRevision(teenID uint, changes int) string {
+	return a.editRevision(fmt.Sprintf("t%d", teenID), changes)
 }
 
-// consentRevisionIn is consentRevisionsIn for one teen: a reader calls it in
-// the snapshot that read the consent it shows, a writer under the teen's user
-// row lock.
+// consentRevisionIn is consentRevision as tx counts the teen's log: a writer
+// calls it under the teen's user row lock.
 func (a *App) consentRevisionIn(tx *gorm.DB, teenID uint) (string, error) {
-	revisions, err := a.consentRevisionsIn(tx, []uint{teenID})
-	return revisions[teenID], err
+	var changes int
+	if err := tx.Raw(`SELECT count(*) FROM teen_consents WHERE teen_user_id = ?`, teenID).Row().Scan(&changes); err != nil {
+		return "", err
+	}
+	return a.consentRevision(teenID, changes), nil
 }
 
 // checkConsentRevision refuses given unless it is the token of the teen's

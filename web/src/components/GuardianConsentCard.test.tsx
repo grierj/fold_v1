@@ -143,6 +143,40 @@ test("a grant refused because someone else changed the consent shows the consent
   expect(screen.queryByRole("alert")).not.toBeInTheDocument();
 });
 
+test("a refused grant whose read shows an account revoke closes the ended contact access; opening it again reads it", async () => {
+  // Account consent is granted, so contact access is listed; SMS is not.
+  vi.mocked(Guardians.teens).mockResolvedValueOnce({ teens: [teen] })
+    .mockResolvedValueOnce({ teens: [{ ...teen, accountConsent: false, changes: 2, revision: "r2" }] });
+  vi.mocked(Guardians.change).mockRejectedValue(changed());
+  vi.mocked(Contacts.grants).mockResolvedValueOnce({ grants: [grant] }).mockResolvedValueOnce({ grants: [] });
+  render(<MemoryRouter><GuardianConsentCard /></MemoryRouter>);
+  await userEvent.click(await screen.findByRole("button", { name: "View active contact access" }));
+  expect(await screen.findByText("Email · Active grant")).toBeInTheDocument();
+  await userEvent.selectOptions(screen.getByRole("combobox", { name: /^Consent/ }), "sms");
+  await userEvent.click(screen.getByRole("button", { name: "Grant consent" }));
+  expect(await screen.findByText(/could not be saved/)).toHaveFocus();
+  expect(screen.queryByText("Email · Active grant")).not.toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "Revoke access" })).not.toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "View active contact access" })).toHaveAttribute("aria-expanded", "false");
+  await userEvent.click(screen.getByRole("button", { name: "View active contact access" }));
+  expect(await screen.findByText("No active contact grants")).toBeInTheDocument();
+  expect(Contacts.grants).toHaveBeenCalledTimes(2);
+});
+
+test("a grant this guardian already made in another tab is told as the state it left, and sent once", async () => {
+  const opened = { ...teen, accountConsent: false };
+  // The other tab's grant: one new change, this guardian's, account granted.
+  vi.mocked(Guardians.teens).mockResolvedValueOnce({ teens: [opened] })
+    .mockResolvedValueOnce({ teens: [{ ...opened, accountConsent: true, changes: 2, lastChangeYours: true, revision: "r2" }] });
+  vi.mocked(Guardians.change).mockRejectedValue(changed());
+  render(<MemoryRouter><GuardianConsentCard /></MemoryRouter>);
+  await userEvent.click(await screen.findByRole("button", { name: "Grant consent" }));
+  expect(await screen.findByRole("status")).toHaveTextContent("Account consent granted.");
+  expect(screen.queryByText(/could not be saved/)).not.toBeInTheDocument();
+  expect(screen.getByText("Consent granted")).toBeInTheDocument();
+  expect(Guardians.change).toHaveBeenCalledOnce();
+});
+
 test("a grant and a revoke by someone else since the read are a conflict, never a quiet resend of the grant", async () => {
   const opened = { ...teen, accountConsent: false };
   // The account looks as it did (not granted), but two changes landed since the card read it.

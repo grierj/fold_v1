@@ -252,7 +252,7 @@ func consentError(c *gin.Context, err error) {
 
 // teenConsentLogIn is the teen's consent history, newest first, and the token
 // a grant made from it names, as tx sees them: a reader's snapshot, or the
-// writer's transaction after its write.
+// writer's transaction after its write. The token counts the rows returned.
 func (a *App) teenConsentLogIn(tx *gorm.DB, teenID uint) ([]teenConsentJSON, string, error) {
 	var rows []models.TeenConsent
 	if err := tx.Where("teen_user_id = ?", teenID).Order("at DESC, id DESC").Find(&rows).Error; err != nil {
@@ -262,8 +262,7 @@ func (a *App) teenConsentLogIn(tx *gorm.DB, teenID uint) ([]teenConsentJSON, str
 	for _, row := range rows {
 		consents = append(consents, consentJSON(row))
 	}
-	revision, err := a.consentRevisionIn(tx, teenID)
-	return consents, revision, err
+	return consents, a.consentRevision(teenID, len(rows)), nil
 }
 
 func (a *App) apiListTeenConsents(c *gin.Context) {
@@ -271,11 +270,13 @@ func (a *App) apiListTeenConsents(c *gin.Context) {
 	if !ok {
 		return
 	}
-	out := teenConsentsJSON{AdministrativelyDisabled: u.AdministrativelyDisabled}
+	var out teenConsentsJSON
 	err := a.DB.Transaction(func(tx *gorm.DB) error {
 		var err error
-		out.Consents, out.Revision, err = a.teenConsentLogIn(tx, u.ID)
-		return err
+		if out.Consents, out.Revision, err = a.teenConsentLogIn(tx, u.ID); err != nil {
+			return err
+		}
+		return tx.Raw(`SELECT administratively_disabled FROM users WHERE id = ?`, u.ID).Row().Scan(&out.AdministrativelyDisabled)
 	}, readSnapshot)
 	if err != nil {
 		consentError(c, err)

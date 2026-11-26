@@ -744,40 +744,49 @@ func TestConsentReadRevisionIsTheWritesBase(t *testing.T) {
 	}
 }
 
-// Both consent reads take their rows and their token from one snapshot: a
-// change that commits between the two statements is in neither, so a grant
-// made from the read is refused rather than passing with a token newer than
-// the picture it was made from.
+// Both consent reads take what they show and their token from one snapshot.
+// The guardian card's token counts the log in its own statement: a change that
+// commits after the statuses were read is in neither, so a grant made from the
+// read is refused rather than passing with a token newer than the picture it
+// was made from. The admin panel's suspension note is read with its history: a
+// change committed before the snapshot shows in both.
 func TestConsentReadsTakeTheirTokenInTheirRowsSnapshot(t *testing.T) {
 	f := newConsentFamily(t)
 	var adminID uint
 	if err := f.app.DB.Raw("SELECT id FROM users WHERE email = ?", testEmail("admin")).Row().Scan(&adminID); err != nil {
 		t.Fatal(err)
 	}
-	for _, read := range []struct {
-		name  string
-		token func() string
-		grant func(revision string) *httptest.ResponseRecorder
-	}{
-		{"the admin panel", func() string { return consentRevision(t, f.admin, f.teen) }, func(revision string) *httptest.ResponseRecorder {
-			return f.admin.do("POST", consentPath(f.teen), map[string]string{"scope": "photos", "status": "granted", "evidenceText": "Paper", "revision": revision}, true)
-		}},
-		{"the guardian card", func() string { return guardianRevision(t, f.guardian, f.link.ID) }, func(revision string) *httptest.ResponseRecorder {
-			return f.guardian.do("POST", guardianConsentPath(f.link.ID), map[string]string{"scope": "photos", "status": "granted", "revision": revision}, true)
-		}},
-	} {
-		var fired atomic.Bool
-		name := fmt.Sprintf("test:consent_between_statements:%d", queryCounterSeq.Add(1))
-		gormMust(t, &gorm.DB{Error: f.app.DB.Callback().Query().After("gorm:query").Register(name, func(tx *gorm.DB) {
-			if tx.Statement.Table == "teen_consents" && fired.CompareAndSwap(false, true) {
-				gormMust(t, f.app.DB.Exec(`INSERT INTO teen_consents (teen_user_id, scope, status, granted_by, granter_role) VALUES (?, 'sms', 'revoked', ?, 'admin')`, f.teen.ID, adminID))
-			}
-		})})
-		revision := read.token()
-		_ = f.app.DB.Callback().Query().Remove(name)
-		if !fired.Load() {
-			t.Fatalf("%s: no change committed between its statements", read.name)
+	change := func(tx *gorm.DB, fired *atomic.Bool, disable bool) {
+		if tx.Statement.Table != "teen_consents" || !fired.CompareAndSwap(false, true) {
+			return
 		}
-		refusedAsChanged(t, read.grant(revision))
+		gormMust(t, f.app.DB.Exec(`INSERT INTO teen_consents (teen_user_id, scope, status, granted_by, granter_role) VALUES (?, 'sms', 'revoked', ?, 'admin')`, f.teen.ID, adminID))
+		if disable {
+			gormMust(t, f.app.DB.Exec(`UPDATE users SET administratively_disabled = true WHERE id = ?`, f.teen.ID))
+		}
 	}
+
+	var fired atomic.Bool
+	name := fmt.Sprintf("test:consent_between_statements:%d", queryCounterSeq.Add(1))
+	gormMust(t, &gorm.DB{Error: f.app.DB.Callback().Query().After("gorm:query").Register(name, func(tx *gorm.DB) { change(tx, &fired, false) })})
+	revision := guardianRevision(t, f.guardian, f.link.ID)
+	_ = f.app.DB.Callback().Query().Remove(name)
+	if !fired.Load() {
+		t.Fatal("no change committed between the card's statements")
+	}
+	refusedAsChanged(t, f.guardian.do("POST", guardianConsentPath(f.link.ID), map[string]string{"scope": "photos", "status": "granted", "revision": revision}, true))
+
+	fired.Store(false)
+	name = fmt.Sprintf("test:consent_before_snapshot:%d", queryCounterSeq.Add(1))
+	gormMust(t, &gorm.DB{Error: f.app.DB.Callback().Query().Before("gorm:query").Register(name, func(tx *gorm.DB) { change(tx, &fired, true) })})
+	w := f.admin.do("GET", consentPath(f.teen), nil, false)
+	_ = f.app.DB.Callback().Query().Remove(name)
+	var read teenConsentsJSON
+	if err := json.Unmarshal(w.Body.Bytes(), &read); err != nil || !fired.Load() {
+		t.Fatalf("the panel's read (changed %t): %d %s", fired.Load(), w.Code, w.Body.String())
+	}
+	if len(read.Consents) != 2 || !read.AdministrativelyDisabled {
+		t.Fatalf("the panel shows %d changes and suspended %t, want both from one snapshot", len(read.Consents), read.AdministrativelyDisabled)
+	}
+	apiDo(t, f.admin, "POST", consentPath(f.teen), map[string]string{"scope": "photos", "status": "granted", "evidenceText": "Paper", "revision": read.Revision}, 200)
 }

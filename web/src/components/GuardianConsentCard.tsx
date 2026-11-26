@@ -69,7 +69,10 @@ function TeenConsentControls({ teen, onStored, onGone }: { teen: GuardianTeen; o
         return;
       }
 
+      // What the read found may have ended contact access (an account revoke), so the list closes as after a change
+      // of this card's own, and opening it again reads the grants as they are now.
       if (row) onStored(row);
+      setShowGrants(false);
       refusal.refused(why);
     },
   });

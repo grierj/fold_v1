@@ -123,6 +123,19 @@ func TestTeenConversionApprovalConsentAndFreshLink(t *testing.T) {
 			if first == "consent" {
 				confirm()
 			} else {
+				// A grant from a read older than another change is refused and
+				// leaves the conversion where it was (DEC-176).
+				stale := consentRevision(t, admin, &f.user)
+				apiDo(t, admin, "POST", consentPath(&f.user), map[string]string{"scope": "photos", "status": "revoked"}, 200)
+				apiDo(t, admin, "POST", consentPath(&f.user), map[string]string{"scope": "account", "status": "granted", "evidenceText": "Signed paper consent", "revision": stale}, 409)
+				f.unchanged(t, app)
+				var refused models.HouseholdPerson
+				app.DB.First(&refused, f.person.ID)
+				var still models.User
+				app.DB.First(&still, f.user.ID)
+				if refused.ConvertedUserID != nil || still.Status != models.UserPendingConsent || auditCount(t, app, audit.HouseholdPersonConverted) != 0 {
+					t.Fatalf("a refused grant moved the conversion: %+v, status %s", refused, still.Status)
+				}
 				grant()
 			}
 			var person models.HouseholdPerson
