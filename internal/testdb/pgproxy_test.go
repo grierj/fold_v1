@@ -3,10 +3,10 @@ package testdb
 import (
 	"context"
 	"errors"
+	"io"
 	"net"
 	"net/url"
 	"strings"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -75,6 +75,14 @@ func (r *proxyRig) backendExists(pid uint32) bool {
 func (r *proxyRig) waitFor(what string, within time.Duration, cond func() bool) {
 	r.t.Helper()
 	WaitUntil(r.t, what, within, cond)
+}
+
+func (r *proxyRig) wantLastTag(want string) {
+	r.t.Helper()
+	tags := r.proxy.Tags()
+	if len(tags) == 0 || tags[len(tags)-1].Tag != want {
+		r.t.Fatalf("server replies when the client was cut = %+v, want final %s", tags, want)
+	}
 }
 
 // pidOf is the backend of the first logged statement containing sql.
@@ -229,14 +237,58 @@ func TestProxyCommitModes(t *testing.T) {
 			t.Fatal("COMMIT never returned after the release")
 		}
 	})
-	t.Run("b: forwarded, client closed before the reply", func(t *testing.T) {
+	t.Run("b: committed, reply lost", func(t *testing.T) {
 		r := newProxyRig(t)
-		r.proxy.Arm(Faults{Match: "insert into proxy_rows", Commit: CommitForwardThenClose})
-		err := <-r.commitInTx()
-		if err == nil {
-			t.Fatal("COMMIT answered although the client was cut before the reply")
+		if err := r.direct.Exec(`
+			CREATE FUNCTION wait_at_commit() RETURNS trigger LANGUAGE plpgsql AS $$
+			BEGIN PERFORM pg_advisory_xact_lock(603); RETURN NULL; END $$;
+			CREATE CONSTRAINT TRIGGER wait_at_commit AFTER INSERT ON proxy_rows
+			DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION wait_at_commit();
+		`).Error; err != nil {
+			t.Fatal(err)
 		}
-		r.waitFor("the row to commit on the server", 5*time.Second, func() bool { return r.rows() == 1 })
+		hold := r.direct.Begin()
+		defer hold.Rollback()
+		if hold.Error != nil {
+			t.Fatal(hold.Error)
+		}
+		if err := hold.Exec("SELECT pg_advisory_xact_lock(603)").Error; err != nil {
+			t.Fatal(err)
+		}
+		r.proxy.Arm(Faults{Match: "insert into proxy_rows", Commit: CommitForwardThenClose})
+		done := r.commitInTx()
+		pid := r.pidOf("insert into proxy_rows")
+		r.waitFor("COMMIT to wait on the lock or the proxy to forward a cancellation", 5*time.Second, func() bool {
+			var blocked bool
+			if err := r.direct.Raw("SELECT cardinality(pg_blocking_pids(?)) > 0", pid).Scan(&blocked).Error; err != nil {
+				t.Fatal(err)
+			}
+			return blocked || len(r.proxy.Find(KindCancel, ActionForwarded)) > 0
+		})
+		select {
+		case err := <-done:
+			r.waitFor("pgx to forward its cancellation", 5*time.Second, func() bool {
+				return len(r.proxy.Find(KindCancel, ActionForwarded)) > 0
+			})
+			r.waitFor("the cancelled backend to close", 5*time.Second, func() bool { return !r.backendExists(pid) })
+			t.Fatalf("COMMIT returned while the lock was held (%v); the backend received a cancellation and stored %d rows", err, r.rows())
+		case <-time.After(300 * time.Millisecond):
+		}
+		if err := hold.Rollback().Error; err != nil {
+			t.Fatal(err)
+		}
+		select {
+		case err := <-done:
+			if err == nil {
+				t.Fatal("COMMIT answered although the proxy drops the reply")
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatal("COMMIT never returned after the lock was released")
+		}
+		r.wantLastTag("COMMIT")
+		if n := r.rows(); n != 1 {
+			t.Errorf("rows when the client is cut = %d, want 1", n)
+		}
 	})
 	t.Run("c: closed without forwarding", func(t *testing.T) {
 		r := newProxyRig(t)
@@ -273,7 +325,7 @@ func (c observeProxyWrite) Write(p []byte) (int, error) {
 	return n, err
 }
 
-func TestProxyForwardedReadyDoesNotCloseUpstream(t *testing.T) {
+func TestProxyDropsTransactionReplyThroughReady(t *testing.T) {
 	client, downstream := net.Pipe()
 	server, upstream := net.Pipe()
 	for _, conn := range []net.Conn{client, downstream, server, upstream} {
@@ -301,13 +353,23 @@ func TestProxyForwardedReadyDoesNotCloseUpstream(t *testing.T) {
 	if typ, body, err := readMsg(server); err != nil || typ != 'Q' || string(body) != "COMMIT\x00" {
 		t.Fatalf("forwarded COMMIT: type %q, body %q, err %v", typ, body, err)
 	}
+	if err := writeMsg(server, 'C', []byte("COMMIT\x00")); err != nil {
+		t.Fatalf("upstream closed before CommandComplete: %v", err)
+	}
+	// Reading the following frame proves the proxy finished handling CommandComplete.
+	if err := writeMsg(server, 'N', []byte{0}); err != nil {
+		t.Fatalf("upstream closed after CommandComplete: %v", err)
+	}
+	if c.clientClosed.Load() {
+		t.Fatal("client closed before ReadyForQuery")
+	}
 	if err := writeMsg(server, 'Z', []byte{'I'}); err != nil {
 		t.Fatalf("upstream closed before the COMMIT reply: %v", err)
 	}
-	<-done
-	if got := c.suppressedReady.Load(); got != 1 {
-		t.Errorf("suppressed %d ReadyForQuery frames, want one for COMMIT", got)
+	if typ, _, err := readMsg(client); err != io.EOF {
+		t.Fatalf("client received type %q, err %v, want EOF with the COMMIT reply dropped", typ, err)
 	}
+	<-done
 }
 
 func TestProxyRollbackModes(t *testing.T) {
@@ -340,6 +402,7 @@ func TestProxyRollbackModes(t *testing.T) {
 		if err := rollback(r); err == nil {
 			t.Fatal("ROLLBACK answered although the client was cut before the reply")
 		}
+		r.wantLastTag("ROLLBACK")
 		if fwd := r.proxy.Find(KindRollback, ActionForwarded); len(fwd) != 1 {
 			t.Errorf("forwarded rollbacks = %d, want 1", len(fwd))
 		}
@@ -520,57 +583,6 @@ func TestProxyArmClaimsOneConnection(t *testing.T) {
 	}
 }
 
-// replyBeforeCut makes the proxy wait, after it sent a transaction-ending
-// message and before it cuts the client, until the server's ReadyForQuery has
-// come back and been dropped. That is the schedule in which a forward-then-
-// close fault used to hand the client the reply it promises to withhold. The
-// returned flag says the reply did reach the proxy first.
-func (r *proxyRig) replyBeforeCut() *atomic.Bool {
-	saw := &atomic.Bool{}
-	r.proxy.setAfterForward(func(c *proxyConn) {
-		for stop := time.Now().Add(5 * time.Second); time.Now().Before(stop); time.Sleep(time.Millisecond) {
-			if c.suppressedReady.Load() > 0 {
-				saw.Store(true)
-				return
-			}
-		}
-	})
-	return saw
-}
-
-func TestProxyForwardThenCloseNeverAnswers(t *testing.T) {
-	t.Run("COMMIT", func(t *testing.T) {
-		r := newProxyRig(t)
-		saw := r.replyBeforeCut()
-		r.proxy.Arm(Faults{Match: "insert into proxy_rows", Commit: CommitForwardThenClose})
-		if err := <-r.commitInTx(); err == nil {
-			t.Fatal("COMMIT was answered although the reply arrived before the client was cut")
-		}
-		if !saw.Load() {
-			t.Error("the server's reply never reached the proxy before the cut")
-		}
-		r.waitFor("the row to commit on the server", 5*time.Second, func() bool { return r.rows() == 1 })
-	})
-	t.Run("ROLLBACK", func(t *testing.T) {
-		r := newProxyRig(t)
-		saw := r.replyBeforeCut()
-		r.proxy.Arm(Faults{Match: "insert into proxy_rows", Rollback: RollbackForwardThenClose})
-		tx := r.via.Begin()
-		if err := tx.Exec("INSERT INTO proxy_rows VALUES (1)").Error; err != nil {
-			t.Fatal(err)
-		}
-		if err := tx.Rollback().Error; err == nil {
-			t.Fatal("ROLLBACK was answered although the reply arrived before the client was cut")
-		}
-		if !saw.Load() {
-			t.Error("the server's reply never reached the proxy before the cut")
-		}
-		if n := r.rows(); n != 0 {
-			t.Errorf("rows = %d, want 0", n)
-		}
-	})
-}
-
 // rawConn is a pgconn connection through the proxy, whose Prepare and
 // ExecPrepared speak the extended protocol, so a COMMIT or ROLLBACK can be
 // prepared on its own and executed later, or executed again with no Parse.
@@ -626,9 +638,8 @@ func rawExecPrepared(ctx context.Context, pc *pgconn.PgConn, name string) error 
 func TestProxyExtendedTransactionEnds(t *testing.T) {
 	// A COMMIT or ROLLBACK that is prepared on its own (Parse, Describe, Sync)
 	// and executed later (Bind, Execute, Sync) meets its fault at the Execute.
-	prepared := func(t *testing.T, fault Faults, end string) (*proxyRig, *pgconn.PgConn, *atomic.Bool) {
+	prepared := func(t *testing.T, fault Faults, end string) (*proxyRig, *pgconn.PgConn) {
 		r := newProxyRig(t)
-		saw := r.replyBeforeCut()
 		fault.Match = "insert into proxy_rows"
 		r.proxy.Arm(fault)
 		pc := r.rawConn()
@@ -640,10 +651,10 @@ func TestProxyExtendedTransactionEnds(t *testing.T) {
 		// Preparing the transaction end is not running it: it is answered
 		// whatever is armed, and nothing is held or cut.
 		rawPrepare(t, pc, "end", end)
-		return r, pc, saw
+		return r, pc
 	}
 	t.Run("COMMIT reply held", func(t *testing.T) {
-		r, pc, _ := prepared(t, Faults{Commit: CommitHoldReply}, "COMMIT")
+		r, pc := prepared(t, Faults{Commit: CommitHoldReply}, "COMMIT")
 		done := make(chan error, 1)
 		go func() { done <- rawExecPrepared(rawCtx(t), pc, "end") }()
 		r.waitFor("the row to commit on the server", 5*time.Second, func() bool { return r.rows() == 1 })
@@ -660,21 +671,21 @@ func TestProxyExtendedTransactionEnds(t *testing.T) {
 			t.Errorf("COMMIT after the release: %v", err)
 		}
 	})
-	t.Run("COMMIT forwarded, client cut before the reply", func(t *testing.T) {
-		r, pc, saw := prepared(t, Faults{Commit: CommitForwardThenClose}, "COMMIT")
+	t.Run("COMMIT completed, reply lost", func(t *testing.T) {
+		r, pc := prepared(t, Faults{Commit: CommitForwardThenClose}, "COMMIT")
 		if err := rawExecPrepared(rawCtx(t), pc, "end"); err == nil {
-			t.Fatal("COMMIT was answered although the client was cut before the reply")
+			t.Fatal("client received the COMMIT reply")
 		}
-		if !saw.Load() {
-			t.Error("the server's reply never reached the proxy before the cut")
+		r.wantLastTag("COMMIT")
+		if n := r.rows(); n != 1 {
+			t.Errorf("rows when the client is cut = %d, want 1", n)
 		}
-		r.waitFor("the row to commit on the server", 5*time.Second, func() bool { return r.rows() == 1 })
 		if fwd := r.proxy.Find(KindCommit, ActionForwarded); len(fwd) != 1 {
 			t.Errorf("forwarded commits = %d, want 1", len(fwd))
 		}
 	})
 	t.Run("COMMIT closed without forwarding", func(t *testing.T) {
-		r, pc, _ := prepared(t, Faults{Commit: CommitCloseUnforwarded}, "COMMIT")
+		r, pc := prepared(t, Faults{Commit: CommitCloseUnforwarded}, "COMMIT")
 		if err := rawExecPrepared(rawCtx(t), pc, "end"); err == nil {
 			t.Fatal("COMMIT was answered although it was never forwarded")
 		}
@@ -687,7 +698,7 @@ func TestProxyExtendedTransactionEnds(t *testing.T) {
 		r.waitFor("the transaction to roll back", 5*time.Second, func() bool { return r.rows() == 0 && !r.hasOpenWriter() })
 	})
 	t.Run("ROLLBACK closed without forwarding", func(t *testing.T) {
-		r, pc, _ := prepared(t, Faults{Rollback: RollbackCloseUnforwarded}, "ROLLBACK")
+		r, pc := prepared(t, Faults{Rollback: RollbackCloseUnforwarded}, "ROLLBACK")
 		if err := rawExecPrepared(rawCtx(t), pc, "end"); err == nil {
 			t.Fatal("ROLLBACK was answered although it was never forwarded")
 		}
@@ -701,14 +712,12 @@ func TestProxyExtendedTransactionEnds(t *testing.T) {
 			t.Errorf("rows = %d, want 0", n)
 		}
 	})
-	t.Run("ROLLBACK forwarded, client cut before the reply", func(t *testing.T) {
-		r, pc, saw := prepared(t, Faults{Rollback: RollbackForwardThenClose}, "ROLLBACK")
+	t.Run("ROLLBACK completed, reply lost", func(t *testing.T) {
+		r, pc := prepared(t, Faults{Rollback: RollbackForwardThenClose}, "ROLLBACK")
 		if err := rawExecPrepared(rawCtx(t), pc, "end"); err == nil {
-			t.Fatal("ROLLBACK was answered although the client was cut before the reply")
+			t.Fatal("client received the ROLLBACK reply")
 		}
-		if !saw.Load() {
-			t.Error("the server's reply never reached the proxy before the cut")
-		}
+		r.wantLastTag("ROLLBACK")
 		if fwd := r.proxy.Find(KindRollback, ActionForwarded); len(fwd) != 1 {
 			t.Errorf("forwarded rollbacks = %d, want 1", len(fwd))
 		}
@@ -735,7 +744,6 @@ func TestProxyExtendedTransactionEnds(t *testing.T) {
 		}
 		// Armed now, on this connection (the claiming statement is a simple
 		// Query). The second COMMIT is not parsed again.
-		r.replyBeforeCut()
 		r.proxy.Arm(Faults{Match: "select 'claim'", Commit: CommitForwardThenClose})
 		rawSimple(t, pc, "SELECT 'claim'")
 		rawSimple(t, pc, "BEGIN")
@@ -745,7 +753,10 @@ func TestProxyExtendedTransactionEnds(t *testing.T) {
 		if err := rawExecPrepared(rawCtx(t), pc, "end"); err == nil {
 			t.Fatal("the cached COMMIT was answered although the client was cut before the reply")
 		}
-		r.waitFor("the second row to commit on the server", 5*time.Second, func() bool { return r.rows() == 2 })
+		r.wantLastTag("COMMIT")
+		if n := r.rows(); n != 2 {
+			t.Errorf("rows when the client is cut = %d, want 2", n)
+		}
 		if fwd := r.proxy.Find(KindCommit, ActionForwarded); len(fwd) != 2 {
 			t.Errorf("forwarded commits = %d, want 2 (every execution is logged)", len(fwd))
 		}
