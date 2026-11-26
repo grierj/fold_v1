@@ -454,3 +454,31 @@ func TestBatchedMergeKeepsTheBadgeOnlyWhenEveryRowAgrees(t *testing.T) {
 		}
 	}
 }
+
+// A group's deletion names the group for a member who may see it and reads
+// right without it; it never names a place, an event or a person, and is
+// never copied without the teen's access to the group (which is gone).
+func TestGroupDeletedWords(t *testing.T) {
+	k, ok := Lookup(GroupDeleted)
+	if !ok || k.Category != CatGroups || !k.AllowEmail || k.Required || !k.AllowPush || k.PushSoon || k.CopyWithoutSubjectAccess {
+		t.Fatalf("group.deleted: %+v", k)
+	}
+	for _, c := range []struct {
+		v                                Vars
+		title, body, pushTitle, pushBody string
+	}{
+		{Vars{Group: "Supper club", Place: "Home", Event: "Supper", Person: "Pat"}, "Supper club was deleted", "Its events are off, and you're no longer a member.", "Supper club was deleted", "Its events are off."},
+		{Vars{}, "One of your groups was deleted", "Its events are off, and you're no longer a member.", "One of your groups was deleted", "Its events are off."},
+	} {
+		title, body := k.Render(c.v)
+		pushTitle, pushBody, _ := k.RenderForPush(c.v)
+		if title != c.title || body != c.body || pushTitle != c.pushTitle || pushBody != c.pushBody {
+			t.Errorf("%+v: %q / %q, push %q / %q", c.v, title, body, pushTitle, pushBody)
+		}
+		for _, bad := range []string{"Home", "Supper.", "Pat"} {
+			if strings.Contains(title+body+pushTitle+pushBody, bad) {
+				t.Errorf("group.deleted names %q", bad)
+			}
+		}
+	}
+}
