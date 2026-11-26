@@ -208,7 +208,7 @@ func (a *App) apiListOpenEvents(c *gin.Context) {
 // its 404 once that rollback was confirmed.
 func (a *App) apiGetEvent(c *gin.Context) {
 	id, _ := strconv.Atoi(c.Param("id"))
-	var out gin.H
+	var out eventDetailResponseJSON
 	var judged sessionJudgment
 	err := decidingSnapshot(a.DB.WithContext(c.Request.Context()), func(tx *gorm.DB) error {
 		if a.hooks.readerBegin != nil {
@@ -247,14 +247,18 @@ func (a *App) apiGetEvent(c *gin.Context) {
 		if err != nil {
 			return err
 		}
-		if f.canManage(me) {
-			event.Revision = a.eventRevision(&ev, f.group)
-		}
-		out = gin.H{
-			"event":            event,
-			"occurrences":      listed,
-			"canManage":        manage,
-			"canSetVisibility": setVis,
+		out = eventDetailResponseJSON{Event: event, Occurrences: listed, CanManage: manage, CanSetVisibility: setVis}
+		if manage {
+			out.Event.Revision = a.eventRevision(&ev, f.group)
+			var cancelled []models.EventOccurrence
+			if err := tx.Where("event_id = ? AND status = ? AND cancel_source = ? AND starts_at > ?", ev.ID, models.OccurrenceCancelled, models.CancelSourceManual, now).
+				Order("starts_at, id").Find(&cancelled).Error; err != nil {
+				return err
+			}
+			shown := a.groupShownTo(me, f.group, f.rel)
+			for _, o := range cancelled {
+				out.RestorableDates = append(out.RestorableDates, restorableDateJSON{Date: models.FormatCalendarDate(o.OriginalDate), StartsAt: o.StartsAt, Revision: a.dateToken(&ev, &o, shown)})
+			}
 		}
 		if a.hooks.readerEnd != nil {
 			a.hooks.readerEnd("event detail", tx)

@@ -1601,6 +1601,29 @@ func TestHouseholdBatchAnswersAndStableHolder(t *testing.T) {
 	}
 }
 
+func TestManualRestoreRechecksHouseholdSignups(t *testing.T) {
+	app := testApp(t)
+	admin, group := openGroup(t, app, "Household date")
+	id, date := seedChildcareEvent(t, app, admin, group, nil, nil, true)
+	holder, c, spouse, child := householdFamily(t, app, admin, "household restore")
+	batchAnswer(t, c, id, date, map[string]any{"people": []map[string]any{{"personId": spouse.ID, "status": "going"}, {"personId": child.ID, "status": "going", "childcareRequested": true}}}, 200)
+	path := "/api/v1/events/" + itoa(id)
+	apiDo(t, admin, "POST", path+"/cancel", map[string]string{"date": date}, 200)
+	apiDo(t, c, "DELETE", "/api/v1/me/household/people/"+itoa(child.ID), nil, 200)
+	mark := markNotices(t, app)
+	apiDo(t, admin, "POST", path+"/restore", map[string]string{"date": date, "revision": editBaseOf(t, admin, id, date).Revision}, 200)
+	for person, want := range map[uint]string{spouse.ID: models.RegGoing, child.ID: models.RegCancelled} {
+		var r models.Registration
+		gormMust(t, app.DB.Where("household_person_id = ?", person).First(&r))
+		if r.Status != want {
+			t.Fatalf("person %d: %s, want %s", person, r.Status, want)
+		}
+	}
+	if notices := noticesSince(t, app, holder.ID, notify.OccurrenceRestored, mark.notice); len(notices) != 1 {
+		t.Fatalf("holder notices: %+v", notices)
+	}
+}
+
 func TestHouseholdBatchValidationRollsBack(t *testing.T) {
 	app := testApp(t)
 	admin, gid := openGroup(t, app, "BatchValidation")
@@ -2890,5 +2913,41 @@ func TestOrdinaryRSVPRefusesASessionRevokedWhileItWaited(t *testing.T) {
 	gormMust(t, app.DB.First(&fresh, mem.ID))
 	if fresh.Status != models.UserActive {
 		t.Fatalf("the account is %q; the test needs it active", fresh.Status)
+	}
+}
+
+// The household read can start while the restore still holds the date.
+// Its first selection sees a cancelled date; its locked judgment must see
+// that it came back before the person was removed.
+func TestHouseholdRemovalMeetsManualRestore(t *testing.T) {
+	f := newBookingFixture(t)
+	ev := createFeedEvent(t, f.leader, f.group, "Shared date", f.startOn, "FREQ=WEEKLY;COUNT=2")
+	if code, _ := f.seriesRoom(t, f.leader, ev, map[string]any{"roomId": f.hall.ID}); code != 200 {
+		t.Fatalf("series room: %d", code)
+	}
+	_, c, spouse, _ := householdFamily(t, f.app, f.admin, "household removal")
+	day := feedDate(f.startOn)
+	answer := batchAnswer(t, c, ev.ID, day, map[string]any{"people": []map[string]any{{"personId": spouse.ID, "status": "going"}}}, 200)
+	path := "/api/v1/events/" + itoa(ev.ID)
+	apiDo(t, f.leader, "POST", path+"/cancel", map[string]string{"date": day}, 200)
+	body := map[string]string{"date": day, "revision": editBaseOf(t, f.leader, ev.ID, day).Revision}
+	wait := f.app.DB.Begin()
+	defer wait.Rollback()
+	if _, err := lockRoom(wait, f.hall.ID); err != nil {
+		t.Fatal(err)
+	}
+	restore := queueContact(func() *httptest.ResponseRecorder { return f.leader.do("POST", path+"/restore", body, true) })
+	waitForLockedUsersQuery(t, f.app, "%rooms%FOR UPDATE%")
+	remove := queueContact(func() *httptest.ResponseRecorder {
+		return c.do("DELETE", "/api/v1/me/household/people/"+itoa(spouse.ID), nil, true)
+	})
+	waitForLockedUsersQuery(t, f.app, "%event_occurrences%FOR UPDATE%")
+	gormMust(t, wait.Commit())
+	wantCode(t, "restore", awaitContactResponse(t, restore), 200, "")
+	wantCode(t, "household person removal", awaitContactResponse(t, remove), 200, "")
+	var row models.Registration
+	gormMust(t, f.app.DB.First(&row, answer.People[0].RegistrationID))
+	if row.Status != models.RegCancelled {
+		t.Fatalf("removed household person still %s", row.Status)
 	}
 }

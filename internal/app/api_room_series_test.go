@@ -266,6 +266,49 @@ func TestRoomSeriesEditsBookAddedAndRestoredDates(t *testing.T) {
 	}
 }
 
+func TestManualRestoreUsesCurrentSeriesRoom(t *testing.T) {
+	for _, scenario := range []string{"free", "busy", "approval", "rooms off"} {
+		t.Run(scenario, func(t *testing.T) {
+			f := newBookingFixture(t)
+			if scenario == "approval" {
+				apiDo(t, f.admin, "PUT", "/api/v1/admin/settings/room-approval", map[string]bool{"enabled": true}, 200)
+			}
+			ev := createFeedEvent(t, f.leader, f.group, "Weekly", f.startOn, "FREQ=WEEKLY;COUNT=2")
+			if code, _ := f.seriesRoom(t, f.leader, ev, map[string]any{"roomId": f.hall.ID}); code != 200 {
+				t.Fatalf("series room: %d", code)
+			}
+			path, day := "/api/v1/events/"+itoa(ev.ID), feedDate(f.startOn)
+			apiDo(t, f.leader, "POST", path+"/cancel", map[string]string{"date": day}, 200)
+			if scenario == "busy" {
+				if code, body := f.book(t, f.leader, f.eventA, map[string]any{"roomId": f.hall.ID}); code != 200 {
+					t.Fatal(code, body)
+				}
+			}
+			if scenario == "rooms off" {
+				apiDo(t, f.admin, "PUT", "/api/v1/admin/settings/rooms", map[string]bool{"enabled": false}, 200)
+			}
+			apiDo(t, f.leader, "POST", path+"/restore", map[string]string{"date": day, "revision": editBaseOf(t, f.leader, ev.ID, day).Revision}, 200)
+			room, status, waiting, _ := dateBookingOf(t, f.app, ev, day)
+			if scenario == "rooms off" {
+				if room != 0 {
+					t.Fatal("restore booked a room while rooms were off")
+				}
+				return
+			}
+			want := models.BookingConfirmed
+			if scenario != "free" {
+				want = models.BookingRequested
+			}
+			if room != f.hall.ID || status != want || waiting != (scenario == "approval") {
+				t.Fatalf("restore room %d, status %q, waiting %v", room, status, waiting)
+			}
+			if scenario == "busy" && contactCount(t, f.app, &models.Notification{}, "kind = ? AND user_id = ?", notify.RoomLost, f.leaderUser.ID) != 1 {
+				t.Fatal("manager not told the room was taken")
+			}
+		})
+	}
+}
+
 func TestRoomSeriesSwitchRooms(t *testing.T) {
 	f := newBookingFixture(t)
 	var chapel struct {

@@ -690,7 +690,7 @@ func TestEventVisibilityUsesGroupAfterHeldBody(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("visibility after group tightening: %d %s", w.Code, w.Body.String())
 	}
-	var answer eventPage
+	var answer eventDetailResponseJSON
 	decodeJSON(t, w, &answer)
 	ev := eventRow(t, f.app, f.event.ID)
 	if ev.Visibility != models.VisibilityPrivate || !ev.LeaderOpened || answer.Event.Visibility != ev.Visibility || !answer.Event.LeaderOpened {
@@ -1045,7 +1045,7 @@ func TestVisibilitySaveNamesTheReadItWasMadeFrom(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("the current token: %d %s", w.Code, w.Body.String())
 	}
-	var answer eventPage
+	var answer eventDetailResponseJSON
 	decodeJSON(t, w, &answer)
 	if next := seriesRevisionOf(t, f.admin, f.ev.ID); answer.Event.Revision != next || next == current {
 		t.Fatalf("the answer's revision %q, the page's %q, the sent one %q", answer.Event.Revision, next, current)
@@ -1203,7 +1203,7 @@ func TestVisibilityRevisionNoChangeAndDecision(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("a current no-change save: %d %s", w.Code, w.Body.String())
 	}
-	var answer eventPage
+	var answer eventDetailResponseJSON
 	decodeJSON(t, w, &answer)
 	if after := f.everything(t); after != before || answer.Event.Revision != current {
 		t.Fatalf("a no-change save wrote or moved the revision (%q, was %q)", answer.Event.Revision, current)
