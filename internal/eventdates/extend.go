@@ -118,6 +118,22 @@ func Ensure(db *gorm.DB, ev *models.Event, now time.Time) error {
 	return err
 }
 
+// FollowsSeries reports whether a plain date at its stored time would survive
+// an unchanged series edit. ApplySeries takes the last time on a multi-time day.
+func FollowsSeries(ev *models.Event, occ *models.EventOccurrence, now time.Time) (bool, error) {
+	x, err := expansion(ev, now)
+	if err != nil || !x.Replayable() {
+		return false, err
+	}
+	day := models.FormatCalendarDate(occ.OriginalDate)
+	for _, w := range slices.Backward(x.Whens) {
+		if w.OriginalDate == day {
+			return occ.StartsAt.Equal(w.StartsAt) && occ.EndsAt.Equal(w.EndsAt), nil
+		}
+	}
+	return false, nil
+}
+
 // expansion is the writer's walk of ev through its horizon at now.
 func expansion(ev *models.Event, now time.Time) (events.Expansion, error) {
 	until := ""

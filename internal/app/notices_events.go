@@ -14,9 +14,7 @@ import (
 
 // notifyOccurrences tells everyone going or waitlisted on these dates that
 // the date was cancelled (OccurrenceCancelled; M1.5: maybe no longer gets one)
-// or, after a series edit had cancelled it, is back on (OccurrenceRestored,
-// DEC-91; their registrations were never touched, so that notice says the
-// sign-up is still there). A registrant who can't see the group gets no group
+// or is back on (OccurrenceRestored, DEC-91). A registrant who can't see the group gets no group
 // name or group place; one who can't see the date gets the kind's nameless
 // text through withheldDate. One stored item per person per date.
 func notifyOccurrences(tx *gorm.DB, actor uint, occIDs []uint, kind string) error {

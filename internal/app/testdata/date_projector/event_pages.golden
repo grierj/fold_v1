@@ -911,6 +911,13 @@
       "remoteSpotsLeft": null,
       "videoUrl": "https://example.com/study-call"
     }
+  ],
+  "restorableDates": [
+    {
+      "date": "D+14",
+      "startsAt": "D+14T19:00:00Z",
+      "revision": "R"
+    }
   ]
 }
 ### Ada Admin GET /api/v1/events/2 -> 200
@@ -2276,6 +2283,13 @@
       "childcareUsed": 0,
       "remoteSpotsLeft": null,
       "videoUrl": "https://example.com/study-call"
+    }
+  ],
+  "restorableDates": [
+    {
+      "date": "D+14",
+      "startsAt": "D+14T19:00:00Z",
+      "revision": "R"
     }
   ]
 }

@@ -993,7 +993,7 @@ func (a *App) cancelEvidenceIn(tx *gorm.DB, row models.Registration, eventID uin
 }
 
 // restoredOccurrenceIDs reads a restore record's occurrenceIds as its writer
-// (restoreSeriesDates) leaves it: a nonempty array of positive ids. Anything
+// (recordDatesRestored) leaves it: a nonempty array of positive ids. Anything
 // else (absent, not an array, empty, or an element that is null, zero,
 // negative, fractional or not a number) is unreadable, and the caller denies:
 // a list Go would read with a zero in place of a null could otherwise hide the
