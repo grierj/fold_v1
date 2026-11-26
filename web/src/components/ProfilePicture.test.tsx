@@ -17,7 +17,10 @@ function renderPicture(read: () => User) {
   function Editor() {
     const [shown, setShown] = useState(user);
 
-    return <ProfilePicture user={shown} refresh={async () => { setShown(read()); }} />;
+    return <>
+      <ProfilePicture user={shown} refresh={async () => { setShown(read()); }} />
+      <button>Other setting</button>
+    </>;
   }
 
   return render(<Editor />);
@@ -54,15 +57,38 @@ it("shows the latest adjustment at once and persists it after the first request 
   expect(view.container.querySelector("img")).toHaveStyle({ objectPosition: "50% 72%" });
 });
 
-it("shows the current picture when a save names a picture that was replaced", async () => {
-  const replacement = { ...user, avatarUrl: "/uploads/avatars/1/two.png", avatarFocalX: 22 };
-  const update = vi.mocked(Profile.update).mockReset().mockRejectedValue(new ApiError(409, "the profile picture changed", { code: "avatar_changed" }));
+it.each([
+  { change: "replaced", focus: "left", expected: "left" },
+  { change: "replaced", focus: "top", expected: "top" },
+  { change: "removed", focus: "top", expected: "chooser" },
+  { change: "replaced", focus: "other", expected: "other" },
+])("keeps focus on $expected when a save names a picture that was $change", async ({ change, focus, expected }) => {
+  const replacement = { ...user, avatarUrl: change === "removed" ? "" : "/uploads/avatars/1/two.png", avatarFocalX: 22 };
+  const first = deferred<{ user: User }>();
+  const update = vi.mocked(Profile.update).mockReset().mockReturnValue(first.promise);
   const view = renderPicture(() => replacement);
+  const left = () => screen.getByRole("slider", { name: "Focal point from left" });
+  const top = () => screen.getByRole("slider", { name: "Focal point from top" });
+  const other = screen.getByRole("button", { name: "Other setting" });
 
-  fireEvent.change(screen.getByRole("slider", { name: "Focal point from left" }), { target: { value: "90" } });
+  left().focus();
+  fireEvent.change(left(), { target: { value: "90" } });
+  const focused = focus === "other" ? other : focus === "top" ? top() : left();
+  focused.focus();
+  expect(focused).toHaveFocus();
+  await act(async () => { first.reject(new ApiError(409, "the profile picture changed", { code: "avatar_changed" })); });
+
   expect(await screen.findByText("Your profile picture changed before its position could be saved.")).toBeInTheDocument();
   expect(update).toHaveBeenCalledExactlyOnceWith({ avatarFocal: { x: 90, y: 60, avatarUrl: user.avatarUrl } });
-  expect(screen.getByRole("slider", { name: "Focal point from left" })).toHaveValue("22");
-  expect(view.container.querySelector("img")).toHaveAttribute("src", replacement.avatarUrl);
-  expect(view.container.querySelector("img")).toHaveStyle({ objectPosition: "22% 60%" });
+
+  if (change === "removed") {
+    expect(screen.queryByRole("slider")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Choose photo" })).toHaveFocus();
+  } else {
+    expect(left()).toHaveValue("22");
+    expect(top()).toHaveValue("60");
+    expect(view.container.querySelector("img")).toHaveAttribute("src", replacement.avatarUrl);
+    expect(view.container.querySelector("img")).toHaveStyle({ objectPosition: "22% 60%" });
+    expect(expected === "other" ? other : expected === "top" ? top() : left()).toHaveFocus();
+  }
 });

@@ -24,8 +24,9 @@ Preconditions: a baseline instance (the seed runs automatically).
 
 1. Open Me, then Profile details. Choose a non-square test picture and capture the preview.
 2. Tab to each focal point slider and press an arrow key. Check that the preview and marker move and the slider still has focus.
-3. Hold the first `PUT /api/v1/me` while changing both sliders again. Capture the pending preview. Release the request and wait for “Picture saved.” Reload and capture the preview at the final adjustment. Check both saved coordinates in `GET /api/v1/auth/me`.
-4. Hold another focal save while replacing the picture in another tab. Release the save and check that the old request is refused and the editor shows the replacement at its stored position.
+3. Hold the first `PUT /api/v1/me` after changing the horizontal slider. Return to Me and reopen Profile details. Check that the horizontal slider still shows the pending value. Change the vertical slider and capture the pending preview. Release the request, wait for “Picture saved,” and reload. Capture the preview and check both saved coordinates in `GET /api/v1/auth/me`.
+4. Keep focus on a slider and hold its save while replacing the picture in another tab. Release the save and check that the old request is refused. Capture the replacement at its stored position with the equivalent slider focused.
+5. Repeat while removing the picture in the other tab. Capture focus on Choose photo. Repeat a replacement after moving focus to Full name and check that it stays there.
 
 ## Gotchas
 - A page that waits forever usually means a missing seed precondition. Report it; don't remove the page.

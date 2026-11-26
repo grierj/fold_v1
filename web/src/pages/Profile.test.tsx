@@ -4,7 +4,8 @@ import { Households } from "../api/households";
 import { Guardians } from "../api/guardians";
 import { NotificationSettings } from "../api/notifications";
 import { renderWithAuth } from "../test/auth";
-import { act, screen, within } from "@testing-library/react";
+import { deferred } from "../test/keptPanel";
+import { act, fireEvent, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { beforeEach, expect, it, vi } from "vitest";
@@ -60,6 +61,42 @@ it("opens a short hub without mounting forms or fetching the calendar feed", () 
   expect(Households.mine).not.toHaveBeenCalled();
   expect(Guardians.teens).not.toHaveBeenCalled();
   expect(get).not.toHaveBeenCalled();
+});
+
+it("keeps a pending picture adjustment when you leave Profile details and reopen it", async () => {
+  const photo = { ...adult, avatarUrl: "/uploads/avatars/1/one.png" };
+  actor.user = photo;
+  const first = deferred<void>();
+
+  const update = vi.mocked(Profile.update).mockImplementation(async ({ avatarFocal }) => {
+    if (avatarFocal?.y === 50) await first.promise;
+
+    return { user: photo };
+  });
+
+  renderProfile("/profile/details");
+  const left = () => screen.getByRole("slider", { name: "Focal point from left" });
+  const top = () => screen.getByRole("slider", { name: "Focal point from top" });
+
+  fireEvent.change(left(), { target: { value: "70" } });
+  await waitFor(() => expect(update).toHaveBeenCalledTimes(1));
+  await userEvent.click(screen.getByRole("link", { name: "Back to your profile" }));
+  await userEvent.click(screen.getByRole("link", { name: /^Profile details/ }));
+
+  expect(left()).toHaveValue("70");
+  expect(top()).toHaveValue("50");
+  expect(screen.getByRole("button", { name: "Remove picture" })).toBeDisabled();
+  fireEvent.change(top(), { target: { value: "65" } });
+  expect(left()).toHaveValue("70");
+  expect(top()).toHaveValue("65");
+  expect(update).toHaveBeenCalledTimes(1);
+
+  await act(async () => { first.resolve(); });
+  expect(update.mock.calls).toEqual([
+    [{ avatarFocal: { x: 70, y: 50, avatarUrl: photo.avatarUrl } }],
+    [{ avatarFocal: { x: 70, y: 65, avatarUrl: photo.avatarUrl } }],
+  ]);
+  expect(await screen.findByText("Picture saved.")).toBeInTheDocument();
 });
 
 it("groups the rows under You, Family and Sharing, each with a one-line description", () => {

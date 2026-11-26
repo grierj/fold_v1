@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, type RefObject } from "react";
 import { focalPosition, prepareUpload } from "../lib/image";
 import { Avatar } from "./Avatar";
 import { Button } from "./ui/Button";
@@ -9,6 +9,7 @@ export function ImageUpload({
   label,
   initialUrl,
   focal,
+  focalFocus,
   maxDim,
   aspectClass,
   onFile,
@@ -22,6 +23,7 @@ export function ImageUpload({
   label: string;
   initialUrl?: string;
   focal: { x: number; y: number };
+  focalFocus?: RefObject<"x" | "y" | null>;
   maxDim: number;
   aspectClass: string;
   onFile: (file: File | null) => void;
@@ -39,14 +41,32 @@ export function ImageUpload({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
+  const leftRef = useRef<HTMLInputElement>(null);
+  const topRef = useRef<HTMLInputElement>(null);
+  const chooserRef = useRef<HTMLButtonElement>(null);
   const active = useRef(false);
   const canAdjust = !busy && !focalLocked;
 
   useLayoutEffect(() => {
     active.current = true;
 
-    return () => { active.current = false; };
-  }, []);
+    if (focalFocus?.current) {
+      const slider = focalFocus.current === "x" ? leftRef.current : topRef.current;
+      focalFocus.current = null;
+
+      if (document.activeElement === document.body) (slider ?? chooserRef.current)?.focus();
+    }
+
+    return () => {
+      active.current = false;
+
+      // Layout cleanup can still see which control held focus before removal.
+      if (focalFocus) {
+        const focused = document.activeElement;
+        focalFocus.current = focused === leftRef.current ? "x" : focused === topRef.current ? "y" : null;
+      }
+    };
+  }, [focalFocus]);
 
   useEffect(() => {
     return () => {
@@ -92,7 +112,7 @@ export function ImageUpload({
 
   const chooser = (
     <>
-      <Button variant="secondary" onClick={() => inputRef.current?.click()} disabled={busy || fileLocked}>
+      <Button ref={chooserRef} variant="secondary" onClick={() => inputRef.current?.click()} disabled={busy || fileLocked}>
         {busy ? "Processing…" : preview ? "Choose different image" : "Choose photo"}
       </Button>
       <HiddenFileInput ref={inputRef} accept="image/jpeg,image/png,image/gif" onChange={pick} />
@@ -142,10 +162,10 @@ export function ImageUpload({
       </p>
       <div className="mt-3 grid gap-3 sm:grid-cols-2">
         <Field label="Focal point from left">
-          <Input type="range" min={0} max={100} disabled={!canAdjust} value={focal.x} aria-valuetext={`${focal.x}% from the left`} onChange={(e) => onFocal({ ...focal, x: e.target.valueAsNumber })} />
+          <Input ref={leftRef} type="range" min={0} max={100} disabled={!canAdjust} value={focal.x} aria-valuetext={`${focal.x}% from the left`} onChange={(e) => onFocal({ ...focal, x: e.target.valueAsNumber })} />
         </Field>
         <Field label="Focal point from top">
-          <Input type="range" min={0} max={100} disabled={!canAdjust} value={focal.y} aria-valuetext={`${focal.y}% from the top`} onChange={(e) => onFocal({ ...focal, y: e.target.valueAsNumber })} />
+          <Input ref={topRef} type="range" min={0} max={100} disabled={!canAdjust} value={focal.y} aria-valuetext={`${focal.y}% from the top`} onChange={(e) => onFocal({ ...focal, y: e.target.valueAsNumber })} />
         </Field>
       </div>
       <div className="flex gap-2 mt-2">
