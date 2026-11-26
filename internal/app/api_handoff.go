@@ -315,6 +315,9 @@ func restoreMemberships(tx *gorm.DB, userID, actor uint, ip string) error {
 		if err := tx.Model(&m).Updates(map[string]any{"role": models.MembershipMember, "status": models.MembershipActive}).Error; err != nil {
 			return err
 		}
+		if err := withdrawDeletionAfterMemberAdded(tx, &g, members); err != nil {
+			return err
+		}
 		if err := audit.Write(tx, audit.Entry{
 			Actor: actorID, Action: audit.MemberRestored, TargetType: "group", TargetID: m.GroupID,
 			Meta: map[string]any{"userId": userID, "status": models.MembershipActive}, IP: ip,

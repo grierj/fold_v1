@@ -892,14 +892,13 @@ PUT  /api/v1/groups/:id/members/:userId/role → 200 {members: [...]}  (auth; le
      once the change commits, the reply is GET /members as the caller may see it then (its own
      snapshot): a caller who lost access since gets that read's 401, 403 or 404, and the change stays made
 POST /api/v1/groups/:id/deletion-request → 200 {group}  (auth; a leader)
-DELETE /api/v1/groups/:id/deletion-request → 200 {}    (auth; leader or admin)
+DELETE /api/v1/groups/:id/deletion-request → 200 {} | 409 already_handled | 404 (auth; leader or admin)
      — a leader asks only while they are the group's one listed member, counted under the group's row lock in the
        transaction that opens the request; an add that brings someone else in (a join, a leader's or an admin's add,
-       an accepted invitation, an approved ask to add) withdraws it in the add's own transaction, and a sole leader's
-       handoff to a successor (their account disabled or deleted) withdraws it too. The request card's Delete checks
-       again, under the lock, that the group's one listed member is still the person who asked, and withdraws a
-       request that no longer holds (a member re-enabled since, a successor, a request older than these rules)
-       (DEC-177)
+       an accepted invitation, an approved ask to add) or a successful membership restore withdraws it in the
+       same transaction. A sole leader's handoff withdraws it too. A withdrawal after the request closed
+       answers 409 already_handled. The request card's Delete still confirms under the lock that the group's
+       one listed member is the person who asked and withdraws a request that no longer holds (DEC-177)
 GET  /api/v1/groups/:id/members → {members: [...]}  (auth; members and admins; 404 if you cannot see the group, 403 if you are not in it)
 ```
 
@@ -910,7 +909,8 @@ group is left out and told to ask a leader; there is no pending-return state. A 
 accepted only from a leader who is the group's only active member. Adding
 a member clears a pending request. A join, a role change or an add that waited behind an admin's
 delete of the group finds it gone and answers 404 (an add by email answers its usual 400
-`group_member_email_unavailable`), and a sign-up or withdrawal that waited on one of its dates answers the
+`group_member_email_unavailable`). If the group is deleted after a join commits but before the membership
+reply is read, the join also answers 404. A sign-up or withdrawal that waited on one of its dates answers the
 404 of a date not on the event. A join, a leave, a sign-up or a withdrawal that committed before the delete read
 who to tell is reflected in who is told: the new member or the sign-up is told, the one who left is not told as a
 member, and someone who withdrew their only sign-up first is not told for that sign-up (they are still told if they
@@ -1806,6 +1806,8 @@ POST /api/v1/admin/groups/:id/reject       → 200 {}                    (admin;
      body: {message?} — optional, at most 500 characters, carried on the leaders' group.rejected notice and the
      audit row (DEC-96); 400 too_long, or message_has_contact when it holds an email address or phone number
 POST /api/v1/admin/groups/:id/reject-deletion → 200 {} | 409 already_handled | 404 (admin; keeps the group, clears the request)
+     — sends group.deletion_kept in-app to the requester recorded on the open admin task, except when the
+       requester pressed Keep themselves. The notice and the request's resolution commit together (DEC-177)
      — only ever an answer to the request: once it is no longer open (the leader withdrew it, someone else joined,
        which withdraws it, or another admin kept the group) it writes nothing and answers 409 already_handled with
        {resolvedBy, resolution}, as the other approval queues do (DEC-177). They are read from the group's most
@@ -2631,7 +2633,10 @@ actions use domain endpoints, checked against notification ownership, kind and
 subject. Only group approval and eligible clean-adult account requests are
 inline; sensitive requests use navigation and explicit destination decisions.
 Resolved races return structured already-handled details. No contact data or
-hidden-group metadata may enter feed text; sensitive email is names-free. A
+hidden-group metadata may enter feed text. `group.deletion_kept` is in-app only.
+It names and links to the group when the requester may see it. Otherwise it
+says the request was closed and links to My groups, with no group subject ID.
+Sensitive email is names-free. A
 notice about a date its recipient may not see (`event.cancelled`,
 `event.restored`, `event.deleted`, `registration.cancelled`, `registration.removed`,
 `registration.not_restored`, `registration.promoted`) is the kind's nameless
