@@ -2339,6 +2339,7 @@ The room request and typed-location lists read the rooms switch, the current adm
 and their results in one read-only snapshot. The request list uses that snapshot for requester
 display names too. If rooms turn off before the snapshot, the list answers the usual 404.
 If the session ends or admin access is lost before the snapshot, the list answers 401.
+A failed rooms-switch read returns 500 without acknowledging the request.
 
 ### Matching old locations (M2.1e)
 

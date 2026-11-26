@@ -181,6 +181,27 @@ func TestRoomAdminWritesRequireCurrentAdmin(t *testing.T) {
 	}
 }
 
+func TestAdminRoomListsGateReadFailure(t *testing.T) {
+	app := testApp(t)
+	newTestUser(t, app, "admin", "password1234", models.RoleAdmin)
+	admin := pinnedAs(t, loginAPI(t, app, "admin", "password1234"))
+	if err := setSettingIn(app.DB, settingRoomsEnabled, "true"); err != nil {
+		t.Fatal(err)
+	}
+	failures := failStatement(t, app, func(tx *gorm.DB) bool {
+		return tx.Statement.Table == "settings" && strings.Contains(fmt.Sprint(tx.Statement.Clauses["WHERE"].Expression), settingRoomsEnabled)
+	})
+	paths := []string{"/api/v1/admin/room-requests", "/api/v1/admin/rooms/locations"}
+	for _, path := range paths {
+		w := admin.do("GET", path, nil, false)
+		wantCode(t, path, w, http.StatusInternalServerError, "server_error")
+		wantNoAck(t, path, w)
+	}
+	if n := failures.Load(); int(n) != len(paths) {
+		t.Fatalf("switch query failed %d times for %d routes", n, len(paths))
+	}
+}
+
 func TestSiteReportsRoomSwitchReadFailure(t *testing.T) {
 	app := testApp(t)
 	newTestUser(t, app, "admin", "password1234", models.RoleAdmin)

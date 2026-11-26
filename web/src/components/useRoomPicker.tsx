@@ -1,5 +1,5 @@
 import { useEffect, useEffectEvent } from "react";
-import { credentialCurrent, type Credential } from "../api/core";
+import { credentialCurrent, currentCredential, recheckCredential, type Credential } from "../api/core";
 import { resourceRefused, type ResourceReadOutcome } from "../lib/refusedSave";
 import { errorCode, errorText } from "../lib/errors";
 import { useLoad } from "../lib/useLoad";
@@ -14,7 +14,11 @@ export async function readRooms<T>(answer: Promise<T>, pinned?: Credential | nul
   try {
     return await answer;
   } catch (cause) {
-    if (pinned && credentialCurrent(pinned) && errorCode(cause) === "session_expired") await recheckSite();
+    if (pinned && errorCode(cause) === "session_expired") {
+      if (credentialCurrent(pinned)) await recheckSite();
+      else if (currentCredential() === pinned) recheckCredential();
+    }
+
     throw cause;
   }
 }
