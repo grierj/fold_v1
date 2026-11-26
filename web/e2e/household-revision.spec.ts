@@ -2,7 +2,7 @@ import * as schema from "valibot";
 import { expect, test, type Page } from "@playwright/test";
 import { apiAs, checkState, email, PASSWORD, signInTo } from "./helpers";
 
-// DEC-173: an edit of a household member names the read it was made from. Two adults of one household have the same
+// DEC-174: an edit of a household member names the read it was made from. Two adults of one household have the same
 // child's edit form open; the first saves new care notes, the second then renames the child. The second's form closes
 // on its own, one focused line says the household changed and the changes could not be saved, and the card shows the
 // first adult's care notes. The second adult's seat comes from a household conversion, so this reads the invitation

@@ -107,7 +107,7 @@ function answeredRevision(answer: SavedAnswer): string {
   return answer.dateRoom.revision;
 }
 
-// useRevisionSave is the one conflict protocol for a manager's save (DEC-162 to DEC-164, DEC-166, DEC-169, DEC-171, DEC-173). The save
+// useRevisionSave is the one conflict protocol for a manager's save (DEC-162 to DEC-164, DEC-166, DEC-169, DEC-171, DEC-174). The save
 // names the read the form opened with (`revision`, kept from the first render, like `opened`). On a refusal
 // (`changedCode`: an event's `event_changed`, a single date's `date_changed`, a group's `group_changed`, a message's
 // `message_changed`, a room's `room_changed`, a household's `household_changed`, a household person's

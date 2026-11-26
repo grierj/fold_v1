@@ -2311,7 +2311,7 @@ func TestHouseholdFirstUseNamesTheLockedRow(t *testing.T) {
 // user wait on the same user lock, then leave one household and one seat. Each
 // names a field and no revision: the one that made the household had no read
 // to name and saves, and the other, which would change a household it never
-// read, is refused (DEC-173).
+// read, is refused (DEC-174).
 func TestHouseholdConcurrentFirstUseMakesOneHousehold(t *testing.T) {
 	s := newHWScene(t, false)
 	second := *s.c

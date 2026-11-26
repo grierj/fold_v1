@@ -251,7 +251,7 @@ func householdPersonAnswer(t *testing.T, w *httptest.ResponseRecorder) household
 	return out.Person
 }
 
-// A person's edit names the read it was made from (DEC-173). Another adult's
+// A person's edit names the read it was made from (DEC-174). Another adult's
 // edit moves Mary's revision; a save from the older read, even one that would
 // make her a child (revoking her invitation and cancelling her sign-up), is
 // 409 with nothing written: no field, invitation, registration, link, notice,
@@ -310,7 +310,7 @@ func TestHouseholdPersonEditNamesItsRead(t *testing.T) {
 	}
 }
 
-// The household's name and address save names its read too (DEC-173). An
+// The household's name and address save names its read too (DEC-174). An
 // empty body names no field and needs none; the request that makes the
 // household on first use had no read to name, so its fields save without one.
 func TestHouseholdDetailsSaveNamesItsRead(t *testing.T) {

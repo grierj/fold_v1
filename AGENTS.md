@@ -230,7 +230,7 @@ section or decision; check it still exists.
   holds its event's row lock first; a pick of a date's room or of the series room names its read (DEC-167).
 - An event's series and visibility saves, the group form's save, the two room picks, a message's edit and send, the
   admin room editor and the household's details and person forms name their read (DEC-162, DEC-163, DEC-166, DEC-167,
-  DEC-169, DEC-171, DEC-173): the token is built and
+  DEC-169, DEC-171, DEC-174): the token is built and
   compared only in `edit_revision.go` (`eventRevision`/`checkEventRevision`, `groupRevisionIn`/`checkGroupRevision`,
   `dateRoomRevisionIn`/`checkDateRoomRevision`, `messageRevisionIn`/`checkMessageRevision`,
   `roomRevisionIn`/`checkRoomRevision`, `checkHouseholdRevision`/`checkHouseholdPersonRevision`, inside the write
@@ -465,7 +465,7 @@ table), and a new area gets a new file there and a row in that table, not a row 
 | Token contrast: text 4.5:1, control edges 3:1 | `npm run contrast` (in CI) |
 | The entry JS chunk stays under its gzip budget; rarely needed libraries load with `import()` | `npm run bundle-size` (in CI) |
 | Seat counts never overrun under concurrent registration | `TestConcurrentGoingRespectsCapacity` |
-| A save that takes a revision (a series, an event's visibility, the group form, a date's room, the series room, a message's edit and send, an admin's room edit, a household's details, a household person) checks it with the one shared check inside its write transaction, and a check that reads its row reads it through that transaction (DEC-163, DEC-166, DEC-167, DEC-169, DEC-171, DEC-173) | `TestSavesCheckTheirRevisionInTheirTransaction`, `TestEditRevisionGuardCatchesABypass` |
+| A save that takes a revision (a series, an event's visibility, the group form, a date's room, the series room, a message's edit and send, an admin's room edit, a household's details, a household person) checks it with the one shared check inside its write transaction, and a check that reads its row reads it through that transaction (DEC-163, DEC-166, DEC-167, DEC-169, DEC-171, DEC-174) | `TestSavesCheckTheirRevisionInTheirTransaction`, `TestEditRevisionGuardCatchesABypass` |
 | Secrets in URLs never reach the access log | `TestAccessLogKeepsSecretsOut` |
 | Tests sit next to their code | `TestTestFilesSitNextToTheirSource` |
 | Source guards read the whole production tree, not a directory glob | `internal/guardkit` tests, `TestContactRequestTextGuardReadsTheRealTree` |

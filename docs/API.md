@@ -306,7 +306,7 @@ accounts get `null` from GET and 403 from the writes. Adding a `child` or
 `teen` person opens a pending guardian link that only an admin can confirm,
 with a note on how it was checked (DEC-32); an `adult` needs no approval.
 
-The household's details and each person's edit name the read they were made from (DEC-173). The household and each
+The household's details and each person's edit name the read they were made from (DEC-174). The household and each
 person in every household answer (`GET /me/household`, the answers of these writes, the admin household routes) carry
 a `revision`, read in the same snapshot as the fields beside it: a digest of the row (`households` kind `h`,
 `household_people` kind `p`, `updated_at` and a removal's `deleted_at` as instants, `created_at` left out), so there is

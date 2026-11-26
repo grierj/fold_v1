@@ -179,7 +179,7 @@ function useMounted() {
 }
 
 // PersonEditor is one opening of a person's edit form. It mounts once per opening, so its save names the read the form
-// opened with (DEC-173), and a refusal is the shared protocol's (useRevisionSave). On a conflict the form closes and
+// opened with (DEC-174), and a refusal is the shared protocol's (useRevisionSave). On a conflict the form closes and
 // the card reads the household from nothing (`onConflict`).
 function PersonEditor({ person, level, onSaved, onConflict, onCancel }: {
   person: HouseholdPerson;

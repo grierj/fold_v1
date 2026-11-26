@@ -26,7 +26,7 @@ export const Households = {
   cancelConversion: (id: Id) => api<Record<string, never>>(path`/me/household/people/${id}/convert`, { method: "DELETE" }),
   // pinned (M8.1): a participating read, answered only for this credential (api/core.ts).
   mine: (pinned?: Credential) => api<MyHouseholdResponse>("/me/household", { pinned }),
-  // A save of the details or of a person names the read it was made from (DEC-173): an older one is 409
+  // A save of the details or of a person names the read it was made from (DEC-174): an older one is 409
   // household_changed or household_person_changed.
   update: (data: { name?: string; address?: string }, revision: string | undefined) =>
     api<HouseholdResponse>("/me/household", { method: "PUT", body: { ...data, revision: revision ?? "" } }),

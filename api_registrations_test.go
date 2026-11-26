@@ -1864,7 +1864,7 @@ func TestRegistrationReadBudget(t *testing.T) {
 	// GET /me/household: reads don't grow per person or
 	// per account (18 before batching, 9 before slice 3; the pending-approval
 	// lookup adds one, DEC-82; judging the viewer again in the read's snapshot
-	// adds one; the household's revision and its people's add two, DEC-173).
+	// adds one; the household's revision and its people's add two, DEC-174).
 	// A six-person household reads the same.
 	n = 0
 	apiDo(t, c, "GET", "/api/v1/me/household", nil, http.StatusOK)

@@ -236,7 +236,7 @@ describe("HouseholdCard under a page heading", () => {
   });
 });
 
-// DEC-173: a household's details and each person's edit name the read they were made from. A conflict closes the form,
+// DEC-174: a household's details and each person's edit name the read they were made from. A conflict closes the form,
 // the card reads the household from nothing and one focused line says so.
 describe("a household save someone else's change refused", () => {
   const kid: HouseholdPerson = { ...household.people[0], kind: "child", linkStatus: "pending", canConvert: false, registrationEligibility: "eligible", careNotes: "Peanuts" };
