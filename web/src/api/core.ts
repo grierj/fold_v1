@@ -462,9 +462,9 @@ export interface RequestOptions {
   // email).
   rotatesCsrf?: boolean;
   // pinned: a participating request (M8.1), checked against this credential
-  // (true: the current one) before it is sent, by the server against the
+  // (true: the current one, null: unavailable) before it is sent, by the server against the
   // cookie it carries, and on its acknowledgment and after its body is read.
-  pinned?: Credential | true;
+  pinned?: Credential | true | null;
 }
 
 // A JSON request. A plain success body that is not JSON reads as {}; a

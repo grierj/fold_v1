@@ -2255,7 +2255,7 @@ erases no identity data, which is later M7.4 work, and M7.4 is not complete.
   R19.2). Nothing here erases a name, an address or any other identity data.
 ### Rooms (M2.1a)
 
-Rooms are optional (PLAN 9.1). While the `rooms_enabled` setting is off, every room route answers 404, for anyone, and `GET /api/v1/site` reports `roomsEnabled: false`.
+Rooms are optional (PLAN 9.1). While the `rooms_enabled` setting is off, every room route answers 404, for anyone, and `GET /api/v1/site` reports `roomsEnabled: false`. If the site endpoint cannot read the rooms setting, it returns 500 so clients can distinguish the failed read from a confirmed switch state.
 
 Room admin writes recheck the actor's session and role in their transaction.
 They return `401` if the admin can no longer act.
@@ -2352,12 +2352,18 @@ Admins only, and 404 while rooms are off (9.1). The list counts the scheduled up
 ### Room feeds (M2.2b)
 
 ```
-GET    /api/v1/admin/rooms/:id/feed → 200 {feed: {hasToken, createdAt}}
-POST   /api/v1/admin/rooms/:id/feed → 200 {feed: {hasToken: true, createdAt, url}}   (audited room_feed.created)
-DELETE /api/v1/admin/rooms/:id/feed → 200 {feed: {hasToken: false, createdAt: null}}  (audited room_feed.revoked)
+GET    /api/v1/admin/rooms/:id/feed            → 200 {feed: {hasToken, createdAt, revision}}
+POST   /api/v1/admin/rooms/:id/feed {revision} → 200 {feed: {hasToken: true, createdAt, revision, url}} | 409
+DELETE /api/v1/admin/rooms/:id/feed {revision} → 200 {feed: {hasToken: false, createdAt: null, revision}} | 409
 ```
 
-Admins only, and 404 while rooms are off or for a room that doesn't exist; POST is also 404 for a deactivated room. A room has at most one working link. `POST` makes it, or a new one, which turns the old one off at once; the raw link is in that response only (32 random bytes, base64url; only the SHA-256 is stored, as for personal feeds). Turned-off links stay in `room_feed_tokens` as history. The feed itself is `GET /cal/rooms/<roomId>/<token>.ics` (ICS feeds below).
+Admins only. These routes return 404 `not_found` while rooms are off, including to signed-out callers. A missing room also returns 404. POST also returns 404 for a deactivated room. GET reads the link status and revision in the same snapshot as the admin and rooms switch. `createdAt` is null when the link is off.
+
+The browser pins all three operations to the credential that opened the panel. Only the deciding answer for that credential is used. A 404 from the pre-authentication rooms switch carries no acknowledgment. If the credential is still current, the browser can use a fresh public `/site` read to confirm that rooms are off.
+
+POST creates or replaces the one working link and records `room_feed.created`. DELETE turns off the reviewed link and records `room_feed.revoked` if a live link was revoked. Both require the `revision` from the last read or write, even when the link is off. A missing or stale revision returns 409 `room_feed_changed` with no change or audit row. Read the endpoint again to review the current status before making another choice.
+
+The raw URL appears only in the successful POST response. Fold stores the SHA-256 hash of the 32-byte random token and retains revoked rows as history. The feed itself is `GET /cal/rooms/<roomId>/<token>.ics` (ICS feeds below).
 
 ### By-room view (M2.2a)
 

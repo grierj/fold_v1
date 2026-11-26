@@ -99,6 +99,45 @@ describe("room list", () => {
   });
 });
 
+describe("when calendar feed settings become unavailable", () => {
+  it.each([
+    { write: "none", message: "The calendar link settings are no longer available." },
+    { write: "refused", message: "Your request to change the calendar link was refused." },
+    { write: "unconfirmed", message: "We couldn’t confirm whether your calendar link changed." },
+  ])("focuses the outcome for write state $write", async ({ write, message }) => {
+    const getFeed = vi.mocked(AdminRooms.getFeed).mockReset();
+    const makeFeed = vi.mocked(AdminRooms.makeFeed).mockReset();
+    const gone = new ApiError(404, "not found", { code: "not_found" });
+
+    if (write !== "none") {
+      getFeed.mockResolvedValueOnce({ feed: { hasToken: false, createdAt: null, revision: "initial" } });
+      makeFeed.mockRejectedValueOnce(write === "refused"
+        ? new ApiError(409, "changed", { code: "room_feed_changed" })
+        : new ApiError(502, "unreadable answer", {}, true));
+    }
+
+    getFeed.mockRejectedValueOnce(gone);
+    // Even the refreshed room list can be unavailable after the panel closes.
+    vi.mocked(AdminRooms.list).mockRejectedValueOnce(gone);
+    render(<Harness initial={[hall]} />);
+
+    await userEvent.click(screen.getByRole("button", { name: "More for Fellowship Hall" }));
+    await userEvent.click(screen.getByRole("menuitem", { name: "Calendar feed for Fellowship Hall" }));
+
+    if (write !== "none") {
+      await userEvent.click(await screen.findByRole("button", { name: "Create calendar link" }));
+      expect(makeFeed).toHaveBeenCalledExactlyOnceWith(hall.id, "initial", null);
+    } else {
+      expect(makeFeed).not.toHaveBeenCalled();
+    }
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("We couldn't load the rooms.");
+    expect(screen.getByText(message)).toHaveFocus();
+    expect(screen.queryByRole("region", { name: "Calendar feed for Fellowship Hall" })).not.toBeInTheDocument();
+    expect(AdminRooms.list).toHaveBeenCalledOnce();
+  });
+});
+
 describe("adding a room", () => {
   async function open() {
     render(<Harness initial={[hall]} />);
@@ -537,7 +576,7 @@ describe("a deactivation someone else's change refused", () => {
 
 describe("room calendar feed (M2.2b)", () => {
   it("active rooms get a Calendar feed panel; Done gives focus back", async () => {
-    vi.mocked(AdminRooms.getFeed).mockResolvedValue({ feed: { hasToken: false, createdAt: null } });
+    vi.mocked(AdminRooms.getFeed).mockResolvedValue({ feed: { hasToken: false, createdAt: null, revision: "feed-off" } });
     render(<Harness initial={[hall, room(3, "Old Annex", { active: false })]} />);
     await userEvent.click(screen.getByRole("button", { name: "More for Old Annex" }));
     expect(screen.queryByRole("menuitem", { name: "Calendar feed for Old Annex" })).toBeNull();
@@ -547,7 +586,7 @@ describe("room calendar feed (M2.2b)", () => {
     await userEvent.click(screen.getByRole("menuitem", { name: "Calendar feed for Fellowship Hall" }));
     const panel = screen.getByRole("region", { name: "Calendar feed for Fellowship Hall" });
     expect(await within(panel).findByRole("button", { name: "Create calendar link" })).toBeInTheDocument();
-    expect(AdminRooms.getFeed).toHaveBeenCalledWith(1);
+    expect(AdminRooms.getFeed).toHaveBeenCalledWith(1, null);
     await userEvent.click(within(panel).getByRole("button", { name: "Done" }));
     expect(screen.queryByRole("region", { name: "Calendar feed for Fellowship Hall" })).toBeNull();
     expect(screen.getByRole("button", { name: "More for Fellowship Hall" })).toHaveFocus();

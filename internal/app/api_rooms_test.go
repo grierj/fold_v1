@@ -131,8 +131,7 @@ func TestRoomAdminWritesRequireCurrentAdmin(t *testing.T) {
 	}
 	reqID := itoa(listRequests(t, f.admin)[0].ID)
 	roomID := itoa(f.hall.ID)
-	feedPath := "/api/v1/admin/rooms/" + roomID + "/feed"
-	apiDo(t, f.admin, "POST", feedPath, nil, http.StatusOK)
+	f.roomFeed(t, f.hall.ID)
 	var admin models.User
 	if err := f.app.DB.Where("role = ?", models.RoleAdmin).First(&admin).Error; err != nil {
 		t.Fatal(err)
@@ -177,8 +176,26 @@ func TestRoomAdminWritesRequireCurrentAdmin(t *testing.T) {
 	if n := contactCount(t, f.app, &models.RoomFeedToken{}, "room_id = ?", f.hall.ID); n != 1 {
 		t.Fatalf("room feed tokens = %d, want one", n)
 	}
-	if tok, err := activeRoomFeed(f.app.DB, f.hall.ID); err != nil || tok == nil {
+	if tok, err := latestRoomFeed(f.app.DB, f.hall.ID); err != nil || tok.ID == 0 || tok.RevokedAt != nil {
 		t.Fatalf("original room feed is no longer active: %v", err)
+	}
+}
+
+func TestSiteReportsRoomSwitchReadFailure(t *testing.T) {
+	app := testApp(t)
+	newTestUser(t, app, "admin", "password1234", models.RoleAdmin)
+	if err := setSettingIn(app.DB, settingRoomsEnabled, "true"); err != nil {
+		t.Fatal(err)
+	}
+	failures := failStatement(t, app, func(tx *gorm.DB) bool {
+		return tx.Statement.Table == "settings" && strings.Contains(fmt.Sprint(tx.Statement.Clauses["WHERE"].Expression), settingRoomsEnabled)
+	})
+
+	guest := newAPIClient(t, app)
+	w := guest.do("GET", "/api/v1/site", nil, false)
+	wantCode(t, "site could not read the rooms switch", w, http.StatusInternalServerError, "server_error")
+	if failures.Load() != 1 || strings.Contains(w.Body.String(), "roomsEnabled") {
+		t.Fatalf("site reported a switch value after a failed read: %s", w.Body.String())
 	}
 }
 
