@@ -836,8 +836,8 @@ func TestEventDeleteSettlesAnswersInFlight(t *testing.T) {
 			f.app.hooks.eventDeleteNoticed = nil
 			w := awaitContactResponse(t, rsvp)
 			told := len(noticesSince(t, f.app, f.memberUser.ID, notify.EventDeleted, mark.notice)) == 1
-			if w.Code == http.StatusOK {
-				t.Fatalf("the %s answer returned 200 after the delete read who to tell (told %v): %s", answer, told, w.Body.String())
+			if w.Code != http.StatusNotFound {
+				t.Fatalf("the %s answer returned %d after the delete read who to tell, want 404 for a date that is gone (told %v): %s", answer, w.Code, told, w.Body.String())
 			}
 			if told != (answer == models.RegDeclined) {
 				t.Fatalf("the member was told %v; they were going at the read: %v", told, answer == models.RegDeclined)

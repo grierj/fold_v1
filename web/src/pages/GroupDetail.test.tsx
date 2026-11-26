@@ -110,9 +110,9 @@ it("drops the group while rechecking after a date's cancellation is refused", as
 });
 
 it.each([
-  [0, "No one else is signed up."],
-  [1, "1 other person is signed up and will be notified."],
-  [5, "5 other people are signed up and will be notified."],
+  [0, "No one else will be notified."],
+  [1, "1 other person will be notified."],
+  [5, "5 other people will be notified."],
 ])("asks to cancel a date saying who is told when %s people are signed up", async (people, line) => {
   vi.mocked(Groups.get).mockResolvedValue({ ...page, canManage: true });
   vi.mocked(Events.signedUp).mockResolvedValue({ people });
@@ -1820,7 +1820,7 @@ describe("GroupDetail: the date question in the app's dialog", () => {
     vi.mocked(window.confirm).mockReturnValue(false);
     await userEvent.click(await screen.findByRole("button", { name: /^More for .* on 2026-12-01$/ }));
     await userEvent.click(screen.getByRole("menuitem", { name: "Cancel this date" }));
-    await waitFor(() => expect(window.confirm).toHaveBeenCalledExactlyOnceWith("Cancel this date on 2026-12-01? Everyone else signed up will be notified."));
+    await waitFor(() => expect(window.confirm).toHaveBeenCalledExactlyOnceWith("Cancel this date on 2026-12-01? Anyone else who signed up will be notified."));
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
   });
 });

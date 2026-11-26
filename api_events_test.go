@@ -3214,6 +3214,28 @@ func TestSignedUpCountIsWhoTheActionTells(t *testing.T) {
 	}
 }
 
+// The count is who will be told, not who is going: a manager who signed up
+// only someone in their own household is that sign-up's holder, so nobody else
+// is counted or told.
+func TestSignedUpCountLeavesOutThePressersHousehold(t *testing.T) {
+	f := newDateEditFixture(t)
+	spouse := addMyPerson(t, f.admin, map[string]any{"firstName": "Mary", "kind": "adult", "birthDate": "1990-01-01"})
+	batchAnswer(t, f.admin, f.event.ID, f.date(1), map[string]any{"people": []map[string]any{{"personId": spouse.ID, "status": models.RegGoing}}}, http.StatusOK)
+	if n := contactCount(t, f.app, &models.Registration{}, "occurrence_id = ? AND household_person_id = ? AND status = ?", f.dates[1].ID, spouse.ID, models.RegGoing); n != 1 {
+		t.Fatalf("%d sign-ups for the manager's spouse, want 1", n)
+	}
+	for _, date := range []string{f.date(1), ""} {
+		if got := signedUpCount(t, f.admin, f.event.ID, date); got != 0 {
+			t.Fatalf("the count for date %q is %d, want 0: the only sign-up is the manager's own household", date, got)
+		}
+	}
+	mark := markNotices(t, f.app)
+	apiDo(t, f.admin, "DELETE", "/api/v1/events/"+itoa(f.event.ID), nil, http.StatusOK)
+	if told := toldSince(t, f.app, notify.EventDeleted, mark.notice); told != 0 {
+		t.Fatalf("the delete told %d people, its count said 0", told)
+	}
+}
+
 // Only a manager may read the count, in one snapshot that acknowledges the
 // viewer it judged; a member, an outsider and a signed-out visitor are refused
 // as every manager read refuses them, and a date not on the event is missing.

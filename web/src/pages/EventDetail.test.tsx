@@ -1244,7 +1244,7 @@ describe("EventDetail asks every question in the app's dialog", () => {
     await userEvent.click(more);
     await userEvent.click(screen.getByRole("menuitem", { name: "Delete event" }));
     const asked = await screen.findByRole("dialog", { name: "Delete “Hybrid study”?" });
-    expect(asked).toHaveAccessibleDescription("This removes every date and its registrations. No one else is signed up.");
+    expect(asked).toHaveAccessibleDescription("This removes every date and its registrations. No one else will be notified.");
     expect(within(asked).getByRole("button", { name: "Cancel" })).toHaveFocus();
     await userEvent.keyboard("{Escape}");
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
@@ -1261,9 +1261,9 @@ describe("EventDetail asks every question in the app's dialog", () => {
 
   // The count is shown, not bound: the delete and the cancel send what they sent before.
   const told = [
-    [0, "No one else is signed up."],
-    [1, "1 other person is signed up and will be notified."],
-    [4, "4 other people are signed up and will be notified."],
+    [0, "No one else will be notified."],
+    [1, "1 other person will be notified."],
+    [4, "4 other people will be notified."],
   ] as const;
 
   it.each(told)("asks to delete saying who is told when %s people are signed up", async (people, line) => {

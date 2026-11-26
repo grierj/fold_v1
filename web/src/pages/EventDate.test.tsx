@@ -74,9 +74,9 @@ it.each([true, false])("offers cancellation when opening a manager's date that i
 });
 
 it.each([
-  [0, "No one else is signed up."],
-  [1, "1 other person is signed up and will be notified."],
-  [2, "2 other people are signed up and will be notified."],
+  [0, "No one else will be notified."],
+  [1, "1 other person will be notified."],
+  [2, "2 other people will be notified."],
 ])("asks to cancel the date saying who is told when %s people are signed up", async (people, line) => {
   const end = Date.now() + 45 * 60_000;
   vi.mocked(Dates.get).mockResolvedValue({ occurrence: occurrence({ visibility: "public", canManage: true, startsAt: new Date(end - 60 * 60_000).toISOString(), endsAt: new Date(end).toISOString() }) });
