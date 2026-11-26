@@ -227,21 +227,76 @@ func TestConcurrentRoomFeedWritesHaveOneWinner(t *testing.T) {
 	}
 }
 
-func TestRoomFeedChecksAuthorityAfterWaitingForRoom(t *testing.T) {
+func TestRoomFeedRevokeKeepsAdminUntilCommit(t *testing.T) {
+	f := newBookingFixture(t)
+	path := roomFeedPath(f.hall.ID)
+	f.roomFeed(t, f.hall.ID)
+	before := readRoomFeed(t, f.admin, f.hall.ID)
+
+	holder := f.app.DB.Begin()
+	defer holder.Rollback()
+	gormMust(t, holder.Exec("SELECT id FROM room_feed_tokens WHERE room_id = ? FOR UPDATE", f.hall.ID))
+	done := make(chan *httptest.ResponseRecorder, 1)
+	go func() { done <- f.admin.do("DELETE", path, withRevision(nil, before.Revision), true) }()
+	waitForLockedUsersQuery(t, f.app, "%UPDATE%room_feed_tokens%")
+	demote := func(tx *gorm.DB) error {
+		return tx.Exec("UPDATE users SET role = ?, session_version = session_version + 1 WHERE email = ?", models.RoleMember, testEmail("admin")).Error
+	}
+	for _, change := range []func(*gorm.DB) error{demote, func(tx *gorm.DB) error {
+		return setSettingIn(tx, settingRoomsEnabled, "false")
+	}} {
+		err := f.app.DB.Transaction(func(tx *gorm.DB) error {
+			if err := tx.Exec("SET LOCAL lock_timeout = '250ms'").Error; err != nil {
+				return err
+			}
+			return change(tx)
+		})
+		if pgCode(err) != pgLockNotAvailable {
+			t.Errorf("authority change during an authorized revoke = %v, want lock timeout", err)
+		}
+	}
+	gormMust(t, holder.Commit())
+	if got := feedAnswer(t, <-done); got.HasToken || got.Revision == before.Revision {
+		t.Fatal("revoke did not turn off the reviewed link")
+	}
+	if err := demote(f.app.DB); err != nil {
+		t.Fatal(err)
+	}
+	if w := f.admin.do("GET", path, nil, false); w.Code != http.StatusUnauthorized {
+		t.Fatalf("session after demotion: %d", w.Code)
+	}
+}
+
+func TestRoomFeedHidesDisabledRoutes(t *testing.T) {
+	f := newBookingFixture(t)
+	if err := setSettingIn(f.app.DB, settingRoomsEnabled, "false"); err != nil {
+		t.Fatal(err)
+	}
+	anon := newAPIClient(t, f.app)
+	anon.fetchCSRF()
+	for _, c := range []*apiClient{anon, f.leader, f.admin} {
+		for _, method := range []string{"GET", "POST", "DELETE"} {
+			wantCode(t, method, c.do(method, roomFeedPath(f.hall.ID), nil, method != "GET"), http.StatusNotFound, "not_found")
+		}
+	}
+}
+
+func TestRoomFeedChecksAuthorityAfterLockWait(t *testing.T) {
 	for _, tc := range []struct {
 		name, method string
-		code         int
+		status       int
+		code         string
 		change       func(*testing.T, bookingFixture, *gorm.DB)
 	}{
-		{"admin demoted", "POST", http.StatusUnauthorized, func(t *testing.T, f bookingFixture, tx *gorm.DB) {
+		{"admin demoted", "POST", http.StatusUnauthorized, "signed_out", func(t *testing.T, f bookingFixture, tx *gorm.DB) {
 			gormMust(t, tx.Exec("UPDATE users SET role = ?, session_version = session_version + 1 WHERE email = ?", models.RoleMember, testEmail("admin")))
 		}},
-		{"rooms off", "DELETE", http.StatusNotFound, func(t *testing.T, f bookingFixture, tx *gorm.DB) {
+		{"rooms off", "DELETE", http.StatusNotFound, "not_found", func(t *testing.T, f bookingFixture, tx *gorm.DB) {
 			if err := setSettingIn(tx, settingRoomsEnabled, "false"); err != nil {
 				t.Fatal(err)
 			}
 		}},
-		{"room deactivated", "POST", http.StatusNotFound, func(t *testing.T, f bookingFixture, tx *gorm.DB) {
+		{"room deactivated", "POST", http.StatusNotFound, "not_found", func(t *testing.T, f bookingFixture, tx *gorm.DB) {
 			gormMust(t, tx.Model(&models.Room{}).Where("id = ?", f.hall.ID).Update("active", false))
 		}},
 	} {
@@ -250,7 +305,11 @@ func TestRoomFeedChecksAuthorityAfterWaitingForRoom(t *testing.T) {
 			f.roomFeed(t, f.hall.ID)
 			holder := f.app.DB.Begin()
 			defer holder.Rollback()
-			if _, err := lockRoom(holder, f.hall.ID); err != nil {
+			waiting := "%rooms%FOR UPDATE%"
+			if tc.name == "admin demoted" {
+				gormMust(t, holder.Exec("SELECT id FROM users WHERE email = ? FOR NO KEY UPDATE", testEmail("admin")))
+				waiting = "%users%FOR SHARE%"
+			} else if _, err := lockRoom(holder, f.hall.ID); err != nil {
 				t.Fatal(err)
 			}
 			original := f.app.DB
@@ -258,11 +317,12 @@ func TestRoomFeedChecksAuthorityAfterWaitingForRoom(t *testing.T) {
 			t.Cleanup(func() { f.app.DB = original })
 			answer := make(chan *httptest.ResponseRecorder, 1)
 			go func() { answer <- f.admin.do(tc.method, roomFeedPath(f.hall.ID), withRevision(nil, "stale"), true) }()
-			waitForLockedUsersQuery(t, f.app, "%rooms%FOR UPDATE%")
+			waitForLockedUsersQuery(t, f.app, waiting)
 			tc.change(t, f, holder)
 			gormMust(t, holder.Commit())
 			w := <-answer
-			if w.Code != tc.code || strings.Contains(w.Body.String(), "revision") {
+			wantCode(t, "write after authority changed", w, tc.status, tc.code)
+			if strings.Contains(w.Body.String(), "revision") {
 				t.Fatalf("write after authority changed: %d %s", w.Code, w.Body.String())
 			}
 			if auditCount(t, f.app, audit.RoomFeedCreated) != 1 || auditCount(t, f.app, audit.RoomFeedRevoked) != 0 {

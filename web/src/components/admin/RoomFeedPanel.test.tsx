@@ -1,18 +1,17 @@
+import { bootstrapAnswer } from "../../test/credential";
 import { stubService } from "../../test/service";
 import { AdminRooms } from "../../api/rooms";
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-const getFeed = vi.fn();
-const makeFeed = vi.fn();
-const revokeFeed = vi.fn();
-
-stubService(AdminRooms, () => ({ getFeed: (id) => getFeed(id), makeFeed: (id, revision) => makeFeed(id, revision), revokeFeed: (id, revision) => revokeFeed(id, revision) }));
-
 import { ApiError } from "../../api/core";
 import type { Room } from "../../types";
 import { RoomFeedPanel } from "./RoomFeedPanel";
+
+const getFeed = vi.fn();
+const makeFeed = vi.fn();
+const revokeFeed = vi.fn();
 
 const hall: Room = {
   id: 7, name: "Fellowship Hall", building: "Main", capacity: 80, features: "", notes: "",
@@ -22,6 +21,8 @@ const hall: Room = {
 const URL_ = "https://church.example/cal/rooms/7/s3cret.ics";
 
 describe("RoomFeedPanel (M2.2b)", () => {
+  stubService(AdminRooms, () => ({ getFeed: (id) => getFeed(id), makeFeed: (id, revision) => makeFeed(id, revision), revokeFeed: (id, revision) => revokeFeed(id, revision) }));
+
   beforeEach(() => {
     getFeed.mockReset();
     makeFeed.mockReset();
@@ -126,4 +127,40 @@ describe("RoomFeedPanel (M2.2b)", () => {
     await userEvent.click(await screen.findByRole("button", { name: "Done" }));
     expect(onClose).toHaveBeenCalled();
   });
+});
+
+afterEach(() => vi.unstubAllGlobals());
+
+it("recovers an unreadable 200 write and status read through the room API", async () => {
+  const replies = [
+    Response.json({ feed: { hasToken: false, createdAt: null, revision: "off" } }),
+    new Response("<html>Unavailable</html>"),
+    Response.json({ feed: { hasToken: true, createdAt: "2026-10-30T15:00:00Z" } }),
+    Response.json({ feed: { hasToken: true, createdAt: "2026-10-30T15:00:00Z", revision: "on" } }),
+  ];
+
+  const requests: string[] = [];
+  vi.stubGlobal("fetch", vi.fn<typeof fetch>(async (url, init) => {
+    if (String(url).endsWith("/auth/bootstrap")) return bootstrapAnswer();
+
+    expect(String(url)).toBe("/api/v1/admin/rooms/7/feed");
+    requests.push(init?.method ?? "GET");
+    const next = replies.shift();
+
+    if (!next) throw new Error("Unexpected request");
+
+    return next;
+  }));
+  render(<RoomFeedPanel room={hall} onClose={() => {}} onGone={() => {}} />);
+  await userEvent.click(await screen.findByRole("button", { name: "Create calendar link" }));
+  const retry = await screen.findByRole("button", { name: "Try again" });
+  expect(screen.getByText(/couldn.t confirm whether your calendar link changed/)).toBeVisible();
+  expect(screen.queryByRole("button", { name: "Create calendar link" })).toBeNull();
+  expect(screen.queryByRole("button", { name: "Make a new link" })).toBeNull();
+  expect(screen.queryByRole("button", { name: "Copy link" })).toBeNull();
+
+  await userEvent.click(retry);
+  expect(await screen.findByText(/A calendar link is on, made/)).toBeVisible();
+  expect(screen.queryByRole("button", { name: "Copy link" })).toBeNull();
+  expect(requests).toEqual(["GET", "POST", "GET", "GET"]);
 });

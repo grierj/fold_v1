@@ -1,3 +1,4 @@
+import { isoTimestamp, literal, minLength, null_, object, optional, pipe, safeParse, string, undefined_, union, url } from "valibot";
 import type {
   AdminRoomsResponse,
   DateRoomsResponse,
@@ -14,7 +15,7 @@ import type {
   SeriesBooking,
   SeriesRoomsResponse,
 } from "../types";
-import { api, path, type Credential, type Id } from "./core";
+import { api, ApiError, path, type Credential, type Id } from "./core";
 
 // Rooms (M2.1a). Everything answers 404 while rooms are off. On update, absent
 // fields keep their value and a null capacity clears the limit.
@@ -28,6 +29,25 @@ export interface RoomInput {
   restricted?: boolean;
   defaultSetupMinutes?: number;
   defaultTeardownMinutes?: number;
+}
+
+const revision = pipe(string(), minLength(1));
+const liveFeed = { hasToken: literal(true), createdAt: pipe(string(), isoTimestamp()), revision };
+const feedOff = object({ hasToken: literal(false), createdAt: null_(), revision, url: optional(undefined_()) });
+
+const feedAnswers = {
+  GET: object({ feed: union([feedOff, object({ ...liveFeed, url: optional(undefined_()) })]) }),
+  POST: object({ feed: object({ ...liveFeed, url: pipe(string(), url()) }) }),
+  DELETE: object({ feed: feedOff }),
+};
+
+async function roomFeed(id: Id, request: { method: "GET" } | { method: "POST" | "DELETE"; body: { revision: string } }): Promise<RoomFeedResponse> {
+  const answer = await api<unknown>(path`/admin/rooms/${id}/feed`, request);
+  const parsed = safeParse(feedAnswers[request.method], answer);
+
+  if (!parsed.success) throw new ApiError(502, "unreadable room calendar link", {}, true);
+
+  return parsed.output;
 }
 
 export const AdminRooms = {
@@ -45,11 +65,11 @@ export const AdminRooms = {
     api<MatchLocationResponse>("/admin/rooms/locations/match", { method: "POST", body: { location, roomId } }),
   // A room's calendar-feed link (M2.2b): makeFeed returns the link once and
   // turns any old one off.
-  getFeed: (id: Id) => api<RoomFeedResponse>(path`/admin/rooms/${id}/feed`),
+  getFeed: (id: Id) => roomFeed(id, { method: "GET" }),
   makeFeed: (id: Id, revision: string) =>
-    api<RoomFeedResponse>(path`/admin/rooms/${id}/feed`, { method: "POST", body: { revision } }),
+    roomFeed(id, { method: "POST", body: { revision } }),
   revokeFeed: (id: Id, revision: string) =>
-    api<RoomFeedResponse>(path`/admin/rooms/${id}/feed`, { method: "DELETE", body: { revision } }),
+    roomFeed(id, { method: "DELETE", body: { revision } }),
 };
 
 // Open room requests (M2.1d, DEC-106): one per booking action, a date or a whole

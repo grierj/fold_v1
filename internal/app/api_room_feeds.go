@@ -15,6 +15,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 // Room feeds (M2.2b, 8.2): an admin-issued secret link per room that
@@ -72,7 +73,7 @@ func (a *App) apiAdminGetRoomFeed(c *gin.Context) {
 	var out roomFeedJSON
 	var judged sessionJudgment
 	err = decidingSnapshot(a.DB.WithContext(c.Request.Context()), func(tx *gorm.DB) error {
-		if err := roomsOnIn(tx); err != nil {
+		if err := roomsOnIn(tx, errRoomRouteHidden); err != nil {
 			return err
 		}
 		me, err := lockRoomManagerIn(tx, apiUser(c), actorRead)
@@ -132,6 +133,13 @@ func (a *App) changeRoomFeed(c *gin.Context, issue bool) {
 	var raw string
 	var judged sessionJudgment
 	err = decidingTransaction(a.DB.WithContext(c.Request.Context()), readCommitted, func(tx *gorm.DB) error {
+		// Booking writers can hold a user before the room. The switch writer
+		// takes the admin before the setting. Hold all three through commit.
+		me, err := lockRoomManagerIn(tx, apiUser(c), actorShare)
+		if err != nil {
+			return err
+		}
+		judged.judge(me)
 		room, err := lockRoom(tx, id)
 		if err != nil {
 			if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -139,12 +147,7 @@ func (a *App) changeRoomFeed(c *gin.Context, issue bool) {
 			}
 			return err
 		}
-		me, err := lockRoomManagerIn(tx, apiUser(c), actorRead)
-		if err != nil {
-			return err
-		}
-		judged.judge(me)
-		if err := roomsOnIn(tx); err != nil {
+		if err := roomsOnIn(tx.Clauses(clause.Locking{Strength: "SHARE"}), errRoomRouteHidden); err != nil {
 			return err
 		}
 		if issue && !room.Active {

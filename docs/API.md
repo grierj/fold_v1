@@ -2334,7 +2334,7 @@ POST   /api/v1/admin/rooms/:id/feed {revision} → 200 {feed: {hasToken: true, c
 DELETE /api/v1/admin/rooms/:id/feed {revision} → 200 {feed: {hasToken: false, createdAt: null, revision}} | 409
 ```
 
-Admins only. These routes return 404 while rooms are off or the room is missing. POST also returns 404 for a deactivated room. GET reads the link status and revision in the same snapshot as the admin and rooms switch. `createdAt` is null when the link is off.
+Admins only. These routes return 404 `not_found` while rooms are off, including to signed-out callers. A missing room also returns 404. POST also returns 404 for a deactivated room. GET reads the link status and revision in the same snapshot as the admin and rooms switch. `createdAt` is null when the link is off.
 
 POST creates or replaces the one working link and records `room_feed.created`. DELETE turns off the reviewed link and records `room_feed.revoked` if a live link was revoked. Both require the `revision` from the last read or write, even when the link is off. A missing or stale revision returns 409 `room_feed_changed` with no change or audit row. Read the endpoint again to review the current status before making another choice.
 

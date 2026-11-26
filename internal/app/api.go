@@ -253,10 +253,10 @@ func (a *App) registerAPIRoutes(r *gin.Engine) {
 	v1.POST("/admin/rooms", a.roomsOn(), a.apiAuth(), a.roomManager(), a.apiAdminCreateRoom)
 	v1.PUT("/admin/rooms/:id", a.roomsOn(), a.apiAuth(), a.roomManager(), a.apiAdminUpdateRoom)
 	// Room bookings (M2.1b): whoever runs the event books its dates.
-	v1.GET("/events/:id/dates/:date/rooms", a.roomPickerOn(), a.apiAuth(), a.apiDateRooms)
-	v1.PUT("/events/:id/dates/:date/room", a.roomPickerOn(), a.apiAuth(), a.apiSetDateRoom)
-	v1.GET("/events/:id/rooms", a.roomPickerOn(), a.apiAuth(), a.apiSeriesRooms)
-	v1.PUT("/events/:id/room", a.roomPickerOn(), a.apiAuth(), a.apiSetSeriesRoom)
+	v1.GET("/events/:id/dates/:date/rooms", a.requireRooms(errRoomsOff), a.apiAuth(), a.apiDateRooms)
+	v1.PUT("/events/:id/dates/:date/room", a.requireRooms(errRoomsOff), a.apiAuth(), a.apiSetDateRoom)
+	v1.GET("/events/:id/rooms", a.requireRooms(errRoomsOff), a.apiAuth(), a.apiSeriesRooms)
+	v1.PUT("/events/:id/room", a.requireRooms(errRoomsOff), a.apiAuth(), a.apiSetSeriesRoom)
 	v1.POST("/rooms/check", a.roomsOn(), a.apiAuth(), a.apiCheckRooms)
 	// Approval (M2.1d, DEC-102).
 	v1.PUT("/admin/settings/room-approval", a.roomsOn(), a.apiAuth(), a.roomManager(), a.apiSetRoomApproval)
@@ -272,9 +272,9 @@ func (a *App) registerAPIRoutes(r *gin.Engine) {
 	v1.POST("/admin/jobs/:id/retry", a.apiAuth(), a.jobManager(), a.apiAdminRetryJob)
 	v1.POST("/admin/jobs/:id/dismiss", a.apiAuth(), a.jobManager(), a.apiAdminDismissJob)
 	// Room feeds (M2.2b): an admin makes, replaces or turns off a room's link.
-	v1.GET("/admin/rooms/:id/feed", a.roomPickerOn(), a.apiAuth(), a.roomManager(), a.apiAdminGetRoomFeed)
-	v1.POST("/admin/rooms/:id/feed", a.roomPickerOn(), a.apiAuth(), a.roomManager(), a.apiAdminCreateRoomFeed)
-	v1.DELETE("/admin/rooms/:id/feed", a.roomPickerOn(), a.apiAuth(), a.roomManager(), a.apiAdminRevokeRoomFeed)
+	v1.GET("/admin/rooms/:id/feed", a.requireRooms(errRoomRouteHidden), a.apiAuth(), a.roomManager(), a.apiAdminGetRoomFeed)
+	v1.POST("/admin/rooms/:id/feed", a.requireRooms(errRoomRouteHidden), a.apiAuth(), a.roomManager(), a.apiAdminCreateRoomFeed)
+	v1.DELETE("/admin/rooms/:id/feed", a.requireRooms(errRoomRouteHidden), a.apiAuth(), a.roomManager(), a.apiAdminRevokeRoomFeed)
 	// The home list: events the viewer can see without seeing their group.
 	v1.GET("/events", a.optionalUser(), a.apiListOpenEvents)
 	// The calendar (M1.6): every occurrence the viewer may see over a
