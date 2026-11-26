@@ -86,7 +86,7 @@ func Ext(mime string) (string, bool) {
 }
 
 // The reasons an upload is refused. The package knows nothing of the API:
-// the root package maps each to its declared answer (imageRefusal), and any
+// package app maps each to its declared answer (imageRefusal), and any
 // other error from ReadUpload is a server fault.
 var (
 	ErrEmpty      = errors.New("empty upload")

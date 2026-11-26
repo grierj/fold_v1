@@ -1,5 +1,5 @@
 {
-  "about": "What the QC-1 measurement harness takes from the application. The harness reads these values; it never reads application source. Every value is held equal to the code by a test next to the code: TestQC1AppFacts (guards_deploy_facts_test.go) for \"go\", web/src/components/ReasonReviewSection.test.tsx for \"web\". After a change to the code, run UPDATE_QC1_FACTS=1 go test -run TestQC1AppFacts . and read the diff of this file before committing it.",
+  "about": "What the QC-1 measurement harness takes from the application. The harness reads these values; it never reads application source. Every value is held equal to the code by a test next to the code: TestQC1AppFacts (guards_deploy_facts_test.go) for \"go\", web/src/components/ReasonReviewSection.test.tsx for \"web\". After a change to the code, run UPDATE_QC1_FACTS=1 go test -run TestQC1AppFacts ./internal/app and read the diff of this file before committing it.",
   "go": {
     "contactLockID": "0x464f4c44434f4e",
     "maxUploadBytes": 5242880,

@@ -1,0 +1,523 @@
+package app
+
+import (
+	"crypto/sha256"
+	"encoding/hex"
+	"errors"
+	"io"
+	"log"
+	"net/http"
+	"net/url"
+	"strconv"
+	"strings"
+	"time"
+
+	"fold/internal/audit"
+	"fold/internal/events"
+	"fold/internal/policy"
+	"fold/models"
+
+	"github.com/gin-gonic/gin"
+	"gorm.io/gorm"
+)
+
+// ICS calendar feeds (M1.7, 8.2): the public church feed, one feed per
+// public group, and one secret-link feed per person. Feeds live outside
+// /api/v1 because that group's no-store middleware would fight the feed
+// caching calendar apps rely on. No feed ever carries attendee data.
+
+func (a *App) registerCalendarFeeds(r *gin.Engine) {
+	r.GET("/cal/public.ics", a.feedPublic)
+	r.GET("/cal/groups/:id", a.feedGroup)
+	r.GET("/cal/u/:token", a.feedPersonal)
+	r.GET("/cal/rooms/:roomId/:token", a.feedRoom)
+}
+
+func feedWindow(now time.Time) (time.Time, time.Time) {
+	return now.AddDate(0, 0, -30), now.AddDate(1, 0, 0)
+}
+
+func (a *App) feedHost() string {
+	if a.Config.SiteURL != "" {
+		if u, err := url.Parse(a.Config.SiteURL); err == nil && u.Host != "" {
+			return u.Host
+		}
+	}
+	return "fold"
+}
+
+func feedNotFound(c *gin.Context) {
+	c.String(http.StatusNotFound, "not found")
+}
+
+func serveFeed(c *gin.Context, body []byte) {
+	sum := sha256.Sum256(body)
+	etag := `"` + hex.EncodeToString(sum[:]) + `"`
+	c.Header("ETag", etag)
+	c.Header("Cache-Control", "private, max-age=900")
+	if m := c.GetHeader("If-None-Match"); m == etag || m == "*" {
+		c.Status(http.StatusNotModified)
+		return
+	}
+	c.Data(http.StatusOK, "text/calendar; charset=utf-8", body)
+}
+
+func feedUnavailable(c *gin.Context, err error) {
+	log.Printf("calendar feed unavailable: %v", err)
+	c.Header("Cache-Control", "no-store")
+	c.String(http.StatusInternalServerError, "calendar unavailable")
+}
+
+// errFeedNotFound answers a feed that is not there for this link: the same
+// plain 404 as a token or group that never existed.
+var errFeedNotFound = errors.New("calendar feed not found")
+
+// serveFeedSnapshot builds a feed in one read-only Repeatable Read snapshot
+// and serves it: whatever authorizes the feed (a group's visibility, a link's
+// owner and scope) is read in the same snapshot as the dates it then shows.
+func (a *App) serveFeedSnapshot(c *gin.Context, build func(tx *gorm.DB, now time.Time) (events.Feed, error)) {
+	var feed events.Feed
+	now := a.now().UTC()
+	err := a.DB.Transaction(func(tx *gorm.DB) error {
+		var err error
+		feed, err = build(tx, now)
+		return err
+	}, readSnapshot)
+	switch {
+	case errors.Is(err, errFeedNotFound):
+		feedNotFound(c)
+	case err != nil:
+		feedUnavailable(c, err)
+	default:
+		serveFeed(c, events.RenderFeed(feed))
+	}
+}
+
+func (a *App) feedPublic(c *gin.Context) {
+	a.serveFeedSnapshot(c, func(tx *gorm.DB, now time.Time) (events.Feed, error) {
+		name, err := siteNameIn(tx)
+		if err != nil {
+			return events.Feed{}, err
+		}
+		return a.buildFeedIn(tx, nil, feedOptions{name: name}, now)
+	})
+}
+
+func (a *App) feedGroup(c *gin.Context) {
+	id, err := strconv.Atoi(strings.TrimSuffix(c.Param("id"), ".ics"))
+	if err != nil || !strings.HasSuffix(c.Param("id"), ".ics") {
+		feedNotFound(c)
+		return
+	}
+	a.serveFeedSnapshot(c, func(tx *gorm.DB, now time.Time) (events.Feed, error) {
+		var g models.Group
+		if err := tx.Where("id = ?", id).Limit(1).Find(&g).Error; err != nil {
+			return events.Feed{}, err
+		}
+		// The feed is served to anyone with the link: only what a signed-out
+		// visitor may see.
+		if g.ID == 0 || !policy.CanSeeGroup(nil, asGroup(&g), policy.Rel{}) {
+			return events.Feed{}, errFeedNotFound
+		}
+		return a.buildFeedIn(tx, nil, feedOptions{
+			name:        g.Name, // group-ok: this feed only serves active public groups
+			onlyGroupID: &g.ID,
+		}, now)
+	})
+}
+
+// feedPersonal serves a secret link's feed. The link, its scope and its owner
+// are read in the feed's own snapshot, so a scope change or a revoked link
+// never pairs the old scope with dates read after it changed.
+func (a *App) feedPersonal(c *gin.Context) {
+	param := c.Param("token")
+	if !strings.HasSuffix(param, ".ics") {
+		feedNotFound(c)
+		return
+	}
+	raw := strings.TrimSuffix(param, ".ics")
+	a.serveFeedSnapshot(c, func(tx *gorm.DB, now time.Time) (events.Feed, error) {
+		var tok models.CalendarToken
+		if err := tx.Where("token_hash = ?", hashToken(raw)).Limit(1).Find(&tok).Error; err != nil {
+			return events.Feed{}, err
+		}
+		if tok.ID == 0 {
+			return events.Feed{}, errFeedNotFound
+		}
+		// A disabled or deleted owner's link stops working, with the same
+		// plain 404 as a token that never existed.
+		var owner models.User
+		if err := tx.Where("id = ?", tok.UserID).Limit(1).Find(&owner).Error; err != nil {
+			return events.Feed{}, err
+		}
+		if owner.ID == 0 || owner.Status != models.UserActive {
+			return events.Feed{}, errFeedNotFound
+		}
+		if a.hooks.readerAuthorized != nil {
+			a.hooks.readerAuthorized("personal feed")
+		}
+		name, err := siteNameIn(tx)
+		if err != nil {
+			return events.Feed{}, err
+		}
+		return a.buildFeedIn(tx, &owner, feedOptions{name: name, personal: true, scope: tok.Scope}, now)
+	})
+}
+
+type feedOptions struct {
+	name        string
+	onlyGroupID *uint
+	personal    bool
+	scope       string
+}
+
+// buildFeedIn projects authorized scheduled dates inside the export window,
+// every read on tx, the feed's snapshot. Parent candidates never grant series
+// access; group fallback locations and parent details are separately checked
+// before reaching the renderer.
+func (a *App) buildFeedIn(tx *gorm.DB, viewer *models.User, opts feedOptions, now time.Time) (events.Feed, error) {
+	windowStart, windowEnd := feedWindow(now)
+	feed := events.Feed{
+		Name: opts.name, Host: a.feedHost(),
+		WindowStart: windowStart, WindowEnd: windowEnd,
+		Singles: []events.FeedSingle{},
+	}
+
+	// Candidate parents load facts only. Every exported occurrence still
+	// needs its own effective-date authorization below.
+	q := tx.Model(&models.Event{}).Where("id IN (SELECT event_id FROM event_occurrences WHERE starts_at >= ? AND starts_at < ?)", windowStart, windowEnd)
+	if opts.onlyGroupID != nil {
+		q = q.Where("group_id = ?", *opts.onlyGroupID)
+	}
+	vs, err := dateCandidatesIn(tx, viewer, q)
+	if err != nil {
+		return events.Feed{}, err
+	}
+	scoped := map[uint]*occurrenceRead{}
+	if opts.personal && viewer != nil && opts.onlyGroupID == nil {
+		scoped, err = a.scopedOccurrenceReadsIn(tx, viewer, tx.Where("starts_at >= ? AND starts_at < ?", windowStart, windowEnd), now)
+		if err != nil {
+			return events.Feed{}, err
+		}
+	}
+	if len(vs.IDs) == 0 {
+		return feed, nil
+	}
+
+	var occs []models.EventOccurrence
+	// Keep the candidate restriction in SQL rather than expanding an
+	// unbounded event-ID list into PostgreSQL bind parameters.
+	if err := tx.Where("event_id IN (?) AND starts_at >= ? AND starts_at < ?", q.Select("id"), windowStart, windowEnd).
+		Order("starts_at").Find(&occs).Error; err != nil {
+		return events.Feed{}, err
+	}
+	// A booked room is the date's place in calendars too (8.2, M2.1c). A
+	// failed read fails the feed rather than publishing it without rooms.
+	occIDs := make([]uint, 0, len(occs))
+	for _, o := range occs {
+		if o.Status == models.OccurrenceScheduled {
+			occIDs = append(occIDs, o.ID)
+		}
+	}
+	rooms, err := roomsFor(tx, occIDs)
+	if err != nil {
+		return events.Feed{}, err
+	}
+	if opts.personal && viewer != nil {
+		return a.buildPersonalFeedSinglesIn(tx, feed, viewer, opts.scope, now, occs, scoped, vs, rooms)
+	}
+	env := feedEnv{baseURL: a.emailBaseURL(), rooms: rooms}
+	for i := range occs {
+		occ := &occs[i]
+		if occ.Status != models.OccurrenceScheduled {
+			continue
+		}
+		date, ok := a.projectDate(viewer, vs, occ, nil)
+		if !ok {
+			continue
+		}
+		feed.Singles = append(feed.Singles, date.feedSingle(env, feedAudience{}, statusConfirmed))
+	}
+	return feed, nil
+}
+
+// buildPersonalFeedSinglesIn expands personal feeds date by date, on tx. That
+// makes every hidden, declined, out-of-window, or differently answered
+// recurrence explicit, so an RRULE can never reintroduce it in a calendar
+// client.
+func (a *App) buildPersonalFeedSinglesIn(tx *gorm.DB, feed events.Feed, viewer *models.User, rawScope string, now time.Time, occs []models.EventOccurrence, scoped map[uint]*occurrenceRead, vs visibleSet, rooms map[uint]*occurrenceRoomJSON) (events.Feed, error) {
+	ids := visibleOccurrenceIDs(vs, viewer, occs, scoped)
+	facts, err := loadCalendarScopeBatchIn(tx, viewer, ids)
+	if err != nil {
+		return events.Feed{}, err
+	}
+	scope := policy.CalendarScopeMine
+	if rawScope == models.CalendarFeedAll {
+		scope = policy.CalendarScopeAll
+	}
+	householdGoing, err := householdGoingChunked(tx, ids, viewer, false)
+	if err != nil {
+		return events.Feed{}, err
+	}
+	env := feedEnv{baseURL: a.emailBaseURL(), rooms: rooms}
+	siteName := &siteNameOnce{a: a, db: tx}
+	for i := range occs {
+		occ := &occs[i]
+		if occ.Status != models.OccurrenceScheduled {
+			continue
+		}
+		date, ok := a.projectDate(viewer, vs, occ, scoped[occ.ID])
+		if !ok {
+			continue
+		}
+		ownStatus := facts.ownStatus[occ.ID]
+		// Feeds never keep a managed kept date (DEC-157 changes Everything only).
+		decision := calendarScopeDecision(scope, true, date.Event, occ, date.Rel, vs.Hosted[date.Event.ID], facts.household[occ.ID], scoped[occ.ID] != nil, false, ownStatus, now)
+		// Personal ICS never carries Can't go, even in scope=all.
+		if !decision.Include || ownStatus == models.RegDeclined {
+			continue
+		}
+		status := calendarStatus(ownStatus, true)
+		if !date.Ordinary {
+			page := date.dateJSON(siteName, date.Invited.Registration, now)
+			page.Room = rooms[occ.ID]
+			feed.Singles = append(feed.Singles, dateFeedSingle(page, env.baseURL, occ.UpdatedAt, status))
+			continue
+		}
+		videoStatus := ownStatus
+		if videoStatus == "" && householdGoing[occ.ID] {
+			videoStatus = models.RegGoing
+		}
+		feed.Singles = append(feed.Singles, date.feedSingle(env, feedAudience{Personal: true, Status: videoStatus}, status))
+	}
+	return feed, nil
+}
+
+func laterTime(a, b time.Time) time.Time {
+	if a.After(b) {
+		return a
+	}
+	return b
+}
+
+// Token management under /api/v1. The raw token reaches the client only
+// in the POST response; everything else sees that a link exists and
+// which scope it carries.
+
+type calendarFeedJSON struct {
+	HasToken bool   `json:"hasToken"`
+	Scope    string `json:"scope"`
+	URL      string `json:"url,omitempty"`
+}
+
+// errCalendarFeedGone means the person's link was not there under the lock.
+var errCalendarFeedGone = errors.New("calendar feed not found")
+
+// calendarTokenFor is the person's feed link, nil when they have none. A
+// failed read is an error, never "no link".
+func (a *App) calendarTokenFor(userID uint) (*models.CalendarToken, error) {
+	var tok models.CalendarToken
+	if err := a.DB.Where("user_id = ?", userID).First(&tok).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return &tok, nil
+}
+
+func calendarFeedOf(tok *models.CalendarToken) calendarFeedJSON {
+	if tok == nil {
+		return calendarFeedJSON{HasToken: false, Scope: models.CalendarFeedMine}
+	}
+	return calendarFeedJSON{HasToken: true, Scope: tok.Scope}
+}
+
+func feedScopeOK(c *gin.Context, scope string) bool {
+	if scope == models.CalendarFeedMine || scope == models.CalendarFeedAll {
+		return true
+	}
+	fail(c, errInvalidFeedScope)
+	return false
+}
+
+func (a *App) apiGetMyCalendarFeed(c *gin.Context) {
+	tok, err := a.calendarTokenFor(apiUser(c).ID)
+	if err != nil {
+		jsonError(c, http.StatusInternalServerError, "could not load the calendar link")
+		return
+	}
+	c.JSON(http.StatusOK, calendarFeedResponseJSON{CalendarFeed: calendarFeedOf(tok)})
+}
+
+func (a *App) apiCreateMyCalendarFeed(c *gin.Context) {
+	me := apiUser(c)
+	var body struct {
+		Scope *string `json:"scope"`
+	}
+	if err := c.ShouldBindJSON(&body); err != nil && !errors.Is(err, io.EOF) {
+		jsonError(c, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	scope := models.CalendarFeedMine
+	existing, err := a.calendarTokenFor(me.ID)
+	if err != nil {
+		jsonError(c, http.StatusInternalServerError, "could not create the calendar link")
+		return
+	}
+	if existing != nil {
+		scope = existing.Scope
+	}
+	if body.Scope != nil {
+		scope = strings.TrimSpace(*body.Scope)
+	}
+	if !feedScopeOK(c, scope) {
+		return
+	}
+	raw, err := newRawToken()
+	if err != nil {
+		jsonError(c, http.StatusInternalServerError, "could not create the calendar link")
+		return
+	}
+	err = a.DB.Transaction(func(tx *gorm.DB) error {
+		// The contact gate and the person's lock come first, so a session
+		// loaded before an erasure, a disable, a credential change or a
+		// logout creates nothing.
+		if _, err := lockSessionCredentials(tx, me); err != nil {
+			return err
+		}
+		if err := tx.Where("user_id = ?", me.ID).Delete(&models.CalendarToken{}).Error; err != nil {
+			return err
+		}
+		if err := tx.Create(&models.CalendarToken{
+			UserID: me.ID, TokenHash: hashToken(raw), Scope: scope,
+		}).Error; err != nil {
+			return err
+		}
+		return audit.Write(tx, audit.Entry{
+			Actor: &me.ID, Action: audit.CalendarTokenRegenerated,
+			TargetType: "user", TargetID: me.ID,
+			Meta: map[string]any{"scope": scope}, IP: c.ClientIP(),
+		})
+	}, contactGateTx)
+	if answerStaleSession(c, err) {
+		return
+	}
+	if err != nil {
+		jsonError(c, http.StatusInternalServerError, "could not create the calendar link")
+		return
+	}
+	c.JSON(http.StatusOK, calendarFeedResponseJSON{CalendarFeed: calendarFeedJSON{
+		HasToken: true, Scope: scope,
+		URL: a.emailBaseURL() + "/cal/u/" + raw + ".ics",
+	}})
+}
+
+func (a *App) apiUpdateMyCalendarFeed(c *gin.Context) {
+	me := apiUser(c)
+	var body struct {
+		Scope string `json:"scope"`
+	}
+	if err := c.ShouldBindJSON(&body); err != nil {
+		jsonError(c, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	scope := strings.TrimSpace(body.Scope)
+	if !feedScopeOK(c, scope) {
+		return
+	}
+	tok, err := a.calendarTokenFor(me.ID)
+	if err != nil {
+		jsonError(c, http.StatusInternalServerError, "could not change the calendar link")
+		return
+	}
+	if tok == nil {
+		jsonError(c, http.StatusNotFound, "calendar feed not found")
+		return
+	}
+	var current models.CalendarToken
+	err = a.DB.Transaction(func(tx *gorm.DB) error {
+		// Gate and person's lock first, as in create. The link is then read
+		// again under the lock for its old scope: it may be gone, since
+		// revoking a link takes no gate.
+		if _, err := lockSessionCredentials(tx, me); err != nil {
+			return err
+		}
+		if err := tx.Where("user_id = ?", me.ID).First(&current).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return errCalendarFeedGone
+			}
+			return err
+		}
+		res := tx.Model(&models.CalendarToken{}).Where("user_id = ?", me.ID).Update("scope", scope)
+		if res.Error != nil {
+			return res.Error
+		}
+		if res.RowsAffected == 0 {
+			return errCalendarFeedGone
+		}
+		return audit.Write(tx, audit.Entry{
+			Actor: &me.ID, Action: audit.CalendarTokenScopeChanged,
+			TargetType: "user", TargetID: me.ID,
+			Meta: map[string]any{"oldScope": current.Scope, "newScope": scope}, IP: c.ClientIP(),
+		})
+	}, contactGateTx)
+	if answerStaleSession(c, err) {
+		return
+	}
+	if errors.Is(err, errCalendarFeedGone) {
+		jsonError(c, http.StatusNotFound, "calendar feed not found")
+		return
+	}
+	if err != nil {
+		jsonError(c, http.StatusInternalServerError, "could not save the feed choice")
+		return
+	}
+	current.Scope = scope
+	c.JSON(http.StatusOK, calendarFeedResponseJSON{CalendarFeed: calendarFeedOf(&current)})
+}
+
+func (a *App) apiDeleteMyCalendarFeed(c *gin.Context) {
+	me := apiUser(c)
+	if _, err := a.revokeCalendarToken(c, me.ID, me.ID); err != nil {
+		jsonError(c, http.StatusInternalServerError, "could not turn off the calendar link")
+		return
+	}
+	c.JSON(http.StatusOK, calendarFeedResponseJSON{CalendarFeed: calendarFeedOf(nil)})
+}
+
+func (a *App) apiAdminRevokeCalendarFeed(c *gin.Context) {
+	id, err := strconv.ParseUint(c.Param("id"), 10, 32)
+	if err != nil {
+		jsonError(c, http.StatusNotFound, "user not found")
+		return
+	}
+	had, err := a.revokeCalendarToken(c, apiUser(c).ID, uint(id))
+	if err != nil {
+		jsonError(c, http.StatusInternalServerError, "could not revoke the calendar link")
+		return
+	}
+	c.JSON(http.StatusOK, calendarFeedRevokedResponseJSON{CalendarFeed: calendarFeedOf(nil), HadLink: had})
+}
+
+// revokeCalendarToken deletes userID's link when one exists. Revoking a
+// link that is already off succeeds the same way, so the admin action
+// can be unconditional.
+func (a *App) revokeCalendarToken(c *gin.Context, actorID, userID uint) (bool, error) {
+	had := false
+	err := a.DB.Transaction(func(tx *gorm.DB) error {
+		res := tx.Where("user_id = ?", userID).Delete(&models.CalendarToken{})
+		if res.Error != nil {
+			return res.Error
+		}
+		if res.RowsAffected == 0 {
+			return nil
+		}
+		had = true
+		return audit.Write(tx, audit.Entry{
+			Actor: &actorID, Action: audit.CalendarTokenRevoked,
+			TargetType: "user", TargetID: userID, IP: c.ClientIP(),
+		})
+	})
+	return had, err
+}

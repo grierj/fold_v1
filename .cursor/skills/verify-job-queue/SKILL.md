@@ -153,7 +153,7 @@ config that ran.
 
 When a change to covered code is intended:
 
-1. `git diff a9a7c8f57b40f80eb235b23c2623f9b4866595ab -- <file>` for each
+1. `git diff c9bf629b5a3d0ecc596592ec484c0c2a32f9caef -- <file>` for each
    drifted item. Find its action in the table and change the action to match
    the code: the same guard, the same atomic step.
 2. If the change adds a guard or a promise, add a rule for it, and a `Break`
@@ -188,10 +188,12 @@ unchanged and gave the same path.
 
 ## Coverage record
 
-- Sync commit: `a9a7c8f57b40f80eb235b23c2623f9b4866595ab`. The model was
+- Sync commit: `c9bf629b5a3d0ecc596592ec484c0c2a32f9caef`. The model was
   confirmed against the code at this commit. `pushWaitIn` writes its row
   through `moveRecipient`; its users lock, row update and `LaterIn` in one
-  commit are unchanged, so `HandlerWaitsIn` is too.
+  commit are unchanged, so `HandlerWaitsIn` is too. The move of the application
+  package to `internal/app` brought the sync commit here from `a9a7c8f5` with no
+  change to a covered function, only to the path `coverage.txt` records.
 - Covered items, with hashes: `coverage.txt`, written by `check accept`.
 - Result at the sync commit: every rule holds on both configs, and all six
   breaks fail.

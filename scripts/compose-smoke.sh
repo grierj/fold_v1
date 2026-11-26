@@ -461,7 +461,7 @@ fi
 echo "compose-smoke: ok GET / redirects to /setup"
 
 # Fresh boot has a setup code, so GET /setup is the unlock page
-# (templates/setup-unlock.html). templates/setup.html is the form after
+# (internal/app/templates/setup-unlock.html). internal/app/templates/setup.html is the form after
 # the code is entered.
 setup_body=$tmp/setup
 if ! setup_code=$(curl -sS -o "$setup_body" -w '%{http_code}' --max-time 20 "${base_url}/setup"); then
@@ -471,7 +471,7 @@ if [[ "$setup_code" != "200" ]]; then
   fail "GET /setup: status ${setup_code}, want 200"
 fi
 if ! grep -q -F 'Enter your setup code' "$setup_body"; then
-  fail "GET /setup: unlock page missing \"Enter your setup code\" (templates/setup-unlock.html)"
+  fail "GET /setup: unlock page missing \"Enter your setup code\" (internal/app/templates/setup-unlock.html)"
 fi
 echo "compose-smoke: ok GET /setup 200 unlock page"
 

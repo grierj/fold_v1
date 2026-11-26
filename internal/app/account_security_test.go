@@ -1,0 +1,309 @@
+package app
+
+import (
+	"errors"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+	"time"
+
+	"fold/models"
+
+	"github.com/gin-gonic/gin"
+	"gorm.io/gorm"
+)
+
+func pendingSecurityCapabilities(t *testing.T, app *App, user *models.User) map[string]string {
+	t.Helper()
+	out := map[string]string{}
+	for _, kind := range []string{models.TokenPasswordReset, models.TokenEmailVerify, models.TokenEmailChangeCancel, models.TokenAccountSetup, models.TokenTeenConsent} {
+		payload := map[string]any(nil)
+		if kind == models.TokenEmailVerify {
+			payload = map[string]any{"new_email": "pending-takeover@example.com"}
+		}
+		raw, _, err := issueAccountToken(app.DB, kind, user.ID, payload, tokenTTL)
+		if err != nil {
+			t.Fatal(err)
+		}
+		out[kind] = raw
+	}
+	return out
+}
+
+func TestLockedAccountTokenClaimRejectsRotatedHash(t *testing.T) {
+	app := testApp(t)
+	user := newTestUser(t, app, "alice", "password1234", models.RoleMember)
+	raw, _, err := issueAccountToken(app.DB, models.TokenPasswordReset, user.ID, nil, tokenTTL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reached, release := pauseDBRead(t, app.DB, "locked-claim", "account_tokens")
+	_, done := startDBSession(t, app.DB, "locked-claim", func(db *gorm.DB) error {
+		return db.Transaction(func(tx *gorm.DB) error {
+			_, _, err := lockAndConsumeAccountToken(tx, models.TokenPasswordReset, raw)
+			return err
+		}, contactGateTx)
+	})
+	awaitDBSignal(t, reached)
+	// Model a token writer that rotated the row after this lookup. The guarded
+	// UPDATE must reject the stale hash even though the row's ID is unchanged.
+	if err := app.DB.Model(&models.AccountToken{}).Where("token_hash = ?", hashToken(raw)).Update("token_hash", hashToken("rotated-capability")).Error; err != nil {
+		t.Fatal(err)
+	}
+	release()
+	if err := awaitDBResult(t, done); !errors.Is(err, errTokenInvalid) {
+		t.Fatalf("locked claim accepted a rotated hash: %v", err)
+	}
+	if _, err := consumeAccountToken(app.DB, models.TokenPasswordReset, "rotated-capability"); err != nil {
+		t.Fatalf("stale claim consumed the replacement: %v", err)
+	}
+}
+
+func TestPasswordResetDeliveryAndRedemptionLockOrders(t *testing.T) {
+	for _, first := range []string{"delivery", "redemption"} {
+		t.Run(first+" first", func(t *testing.T) {
+			app := testApp(t)
+			user := newTestUser(t, app, "alice", "password1234", models.RoleMember)
+			old, _, err := issueAccountToken(app.DB, models.TokenPasswordReset, user.ID, nil, tokenTTL)
+			if err != nil {
+				t.Fatal(err)
+			}
+			expected := http.StatusBadRequest
+			if first == "redemption" {
+				expected = http.StatusOK
+			}
+			work := func(operation string) func(*gorm.DB) error {
+				return func(db *gorm.DB) error {
+					// Build an App on the reserved connection without copying App's
+					// mutexes. Delivery still uses the normal configured sender.
+					a := &App{DB: db, Store: app.Store, Mailer: app.Mailer, Config: app.Config}
+					if operation == "delivery" {
+						return deliverResetMail(db.Statement.Context, a, user.ID)
+					}
+					w := httptest.NewRecorder()
+					c, _ := gin.CreateTestContext(w)
+					c.Request = httptest.NewRequest("POST", "/api/v1/auth/password-reset/confirm",
+						strings.NewReader(jsonString(map[string]string{"token": old, "password": "replacement1234"}))).WithContext(db.Statement.Context)
+					c.Request.Header.Set("Content-Type", "application/json")
+					a.apiConfirmPasswordReset(c)
+					if w.Code != expected {
+						return fmt.Errorf("redemption: got %d %s, want %d", w.Code, w.Body.String(), expected)
+					}
+					return nil
+				}
+			}
+			second := "redemption"
+			if first == "redemption" {
+				second = "delivery"
+			}
+			reached, release := pauseDBRead(t, app.DB, first, "users")
+			winner, winnerDone := startDBSession(t, app.DB, first, work(first))
+			awaitDBSignal(t, reached) // winner holds contact gate and user lock
+			loser, loserDone := startDBSession(t, app.DB, second, work(second))
+			waitDBBlocked(t, app.DB, loser, winner)
+			release()
+			if err := awaitDBResult(t, winnerDone); err != nil {
+				t.Fatal(err)
+			}
+			if err := awaitDBResult(t, loserDone); err != nil {
+				t.Fatal(err)
+			}
+			var fresh models.User
+			if err := app.DB.First(&fresh, user.ID).Error; err != nil {
+				t.Fatal(err)
+			}
+			password := "password1234"
+			if first == "redemption" {
+				password = "replacement1234"
+			}
+			if !fresh.CheckPassword(password) {
+				t.Fatalf("%s first left the wrong password", first)
+			}
+			var oldRow models.AccountToken
+			err = app.DB.Where("token_hash = ?", hashToken(old)).First(&oldRow).Error
+			if first == "redemption" {
+				if err != nil || oldRow.UsedAt == nil {
+					t.Fatal("delivery resurrected or removed the consumed token")
+				}
+			} else if !errors.Is(err, gorm.ErrRecordNotFound) {
+				t.Fatalf("rotation did not revoke the old capability: %v", err)
+			}
+			newRaw := tokenInEmail(t, latestEmail(t, app, user.Email))
+			if newRaw == old {
+				t.Fatal("delivery reused the consumed or revoked capability")
+			}
+			anon := newAPIClient(t, app)
+			anon.fetchCSRF()
+			apiDo(t, anon, "POST", "/api/v1/auth/password-reset/confirm", map[string]string{"token": old, "password": "anotherpassword1234"}, http.StatusBadRequest)
+			apiDo(t, anon, "POST", "/api/v1/auth/password-reset/confirm", map[string]string{"token": newRaw, "password": "anotherpassword1234"}, http.StatusOK)
+		})
+	}
+}
+
+func TestCredentialChangesRevokeEveryPendingAccountToken(t *testing.T) {
+	for _, change := range []string{"password_change", "password_reset", "password_setup", "admin_reset", "admin_email", "email_verify", "disable", "delete"} {
+		t.Run(change, func(t *testing.T) {
+			app := testApp(t)
+			user := newTestUser(t, app, "security-subject", "password1234", models.RoleMember)
+			client := loginAPI(t, app, user.Email, "password1234")
+			newTestUser(t, app, "security-admin", "password1234", models.RoleAdmin)
+			admin := loginAPI(t, app, "security-admin", "password1234")
+			anon := newAPIClient(t, app)
+			anon.fetchCSRF()
+			tokens := pendingSecurityCapabilities(t, app, user)
+			target := "/api/v1/admin/users/" + itoa(user.ID)
+			switch change {
+			case "password_change":
+				apiDo(t, client, "POST", "/api/v1/me/password", map[string]string{"current": "password1234", "password": "replacement1234"}, http.StatusOK)
+			case "password_reset":
+				apiDo(t, anon, "POST", "/api/v1/auth/password-reset/confirm", map[string]string{"token": tokens[models.TokenPasswordReset], "password": "replacement1234"}, http.StatusOK)
+			case "password_setup":
+				apiDo(t, anon, "POST", "/api/v1/account-requests/confirm", map[string]string{"token": tokens[models.TokenAccountSetup], "password": "replacement1234"}, http.StatusOK)
+			case "admin_reset":
+				apiDo(t, admin, "POST", target+"/password", map[string]string{"password": "replacement1234"}, http.StatusOK)
+			case "admin_email":
+				apiDo(t, admin, "PUT", target, adminEditBody(admin, user.ID, map[string]string{"email": "admin-corrected@example.com"}), http.StatusOK)
+			case "email_verify":
+				apiDo(t, client, "POST", "/api/v1/me/email/verify", map[string]string{"token": tokens[models.TokenEmailVerify]}, http.StatusOK)
+			case "disable":
+				apiDo(t, admin, "PUT", target, map[string]string{"status": models.UserDisabled}, http.StatusOK)
+			case "delete":
+				apiDo(t, admin, "DELETE", target, nil, http.StatusOK)
+			}
+			assertNoPendingSecurityTokens(t, app, user.ID)
+			var fresh models.User
+			if err := app.DB.Unscoped().First(&fresh, user.ID).Error; err != nil {
+				t.Fatal(err)
+			}
+			if fresh.SessionVersion != user.SessionVersion+1 {
+				t.Fatalf("%s did not advance credential epoch: %d", change, fresh.SessionVersion)
+			}
+			if change == "password_change" || change == "password_reset" || change == "password_setup" || change == "admin_reset" {
+				if !fresh.CheckPassword("replacement1234") {
+					t.Fatal("replacement password was not saved")
+				}
+			}
+			// This is the original takeover: an old verification capability must
+			// never survive recovery or an admin's direct email correction.
+			apiDo(t, anon, "POST", "/api/v1/me/email/verify", map[string]string{"token": tokens[models.TokenEmailVerify]}, http.StatusBadRequest)
+			apiDo(t, anon, "POST", "/api/v1/me/email/cancel", map[string]string{"token": tokens[models.TokenEmailChangeCancel]}, http.StatusBadRequest)
+			var after models.User
+			if err := app.DB.Unscoped().First(&after, user.ID).Error; err != nil {
+				t.Fatal(err)
+			}
+			if after.Email != fresh.Email || after.SessionVersion != fresh.SessionVersion {
+				t.Fatal("a stale capability overwrote recovered identity or sessions")
+			}
+		})
+	}
+}
+
+func TestCredentialRevocationFailureRollsBackChange(t *testing.T) {
+	for _, change := range []string{"password_change", "password_reset", "admin_email"} {
+		t.Run(change, func(t *testing.T) {
+			app := testApp(t)
+			user := newTestUser(t, app, "revoke-failure", "password1234", models.RoleMember)
+			client := loginAPI(t, app, user.Email, "password1234")
+			newTestUser(t, app, "revoke-admin", "password1234", models.RoleAdmin)
+			admin := loginAPI(t, app, "revoke-admin", "password1234")
+			var anon *apiClient
+			if change == "password_reset" {
+				anon = newAPIClient(t, app)
+				anon.fetchCSRF()
+			}
+			tokens := pendingSecurityCapabilities(t, app, user)
+			const callback = "security:revoke-failure"
+			if err := app.DB.Callback().Delete().Before("gorm:delete").Register(callback, func(db *gorm.DB) {
+				if db.Statement.Table == "account_tokens" {
+					db.AddError(errors.New("injected token revocation failure"))
+				}
+			}); err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { app.DB.Callback().Delete().Remove(callback) })
+			switch change {
+			case "password_change":
+				apiDo(t, client, "POST", "/api/v1/me/password", map[string]string{"current": "password1234", "password": "replacement1234"}, http.StatusInternalServerError)
+			case "password_reset":
+				apiDo(t, anon, "POST", "/api/v1/auth/password-reset/confirm", map[string]string{"token": tokens[models.TokenPasswordReset], "password": "replacement1234"}, http.StatusInternalServerError)
+			case "admin_email":
+				apiDo(t, admin, "PUT", "/api/v1/admin/users/"+itoa(user.ID), adminEditBody(admin, user.ID, map[string]string{"email": "should-not-save@example.com"}), http.StatusInternalServerError)
+			}
+			var fresh models.User
+			if err := app.DB.First(&fresh, user.ID).Error; err != nil {
+				t.Fatal(err)
+			}
+			if fresh.Email != user.Email || fresh.SessionVersion != user.SessionVersion || !fresh.CheckPassword("password1234") {
+				t.Fatal("failed revocation left a partial credential change")
+			}
+			var pending int64
+			if err := app.DB.Model(&models.AccountToken{}).Where("user_id = ? AND used_at IS NULL", user.ID).Count(&pending).Error; err != nil {
+				t.Fatal(err)
+			}
+			if pending != int64(len(tokens)) {
+				t.Fatalf("rollback lost pending capabilities: %d", pending)
+			}
+		})
+	}
+}
+
+func TestCurrentCredentialProofRejectsStaleEpochOrHash(t *testing.T) {
+	for _, changed := range []string{"epoch", "hash", "disabled"} {
+		t.Run(changed, func(t *testing.T) {
+			app := testApp(t)
+			expected := newTestUser(t, app, "stale-proof", "password1234", models.RoleMember)
+			if !expected.CheckPassword("password1234") {
+				t.Fatal("fixture password proof failed")
+			}
+			updates := map[string]any{}
+			switch changed {
+			case "epoch":
+				updates["session_version"] = expected.SessionVersion + 1
+			case "hash":
+				var prepared models.User
+				if err := prepared.SetPassword("replacement1234"); err != nil {
+					t.Fatal(err)
+				}
+				updates["password_hash"] = *prepared.PasswordHash
+			case "disabled":
+				updates["status"] = models.UserDisabled
+			}
+			// Do not mutate the expected snapshot: it represents the request's
+			// authenticated user and already-completed password comparison.
+			if err := app.DB.Model(&models.User{}).Where("id = ?", expected.ID).Updates(updates).Error; err != nil {
+				t.Fatal(err)
+			}
+			err := app.DB.Transaction(func(tx *gorm.DB) error {
+				_, err := lockCurrentCredentials(tx, expected)
+				return err
+			}, contactGateTx)
+			if !errors.Is(err, errSecuritySession) {
+				t.Fatalf("stale %s proof accepted: %v", changed, err)
+			}
+		})
+	}
+}
+
+// account_tokens.kind accepts exactly the five capability kinds, including the
+// separately authenticated email-change cancellation link, and nothing else.
+// (The old test walked migration 40, which revoked legacy pending links and
+// restored token history on Down; both were version history. The pending-link
+// revocation behavior itself is TestCredentialChangesRevokeEveryPendingAccountToken.)
+func TestAccountTokenKindConstraint(t *testing.T) {
+	app := testApp(t)
+	user := newTestUser(t, app, "token-kinds", "password1234", models.RoleMember)
+	expires := time.Now().UTC().Add(time.Hour)
+	for _, kind := range []string{models.TokenPasswordReset, models.TokenEmailVerify, models.TokenAccountSetup, models.TokenTeenConsent, models.TokenEmailChangeCancel} {
+		token := models.AccountToken{Kind: kind, UserID: user.ID, TokenHash: hashToken("kind-" + kind), Payload: `{}`, ExpiresAt: expires}
+		if err := app.DB.Create(&token).Error; err != nil {
+			t.Fatalf("token kind %q refused: %v", kind, err)
+		}
+	}
+	err := app.DB.Exec(`INSERT INTO account_tokens (kind, user_id, token_hash, payload, expires_at) VALUES ('sms_login', ?, ?, '{}', ?)`,
+		user.ID, hashToken("kind-sms_login"), expires).Error
+	if err == nil {
+		t.Fatal("an unknown token kind was accepted")
+	}
+}

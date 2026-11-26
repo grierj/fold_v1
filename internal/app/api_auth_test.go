@@ -1,0 +1,1088 @@
+package app
+
+import (
+	"context"
+	"encoding/json"
+	"fold/internal/audit"
+	foldmail "fold/internal/mail"
+	"fold/models"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	"gorm.io/gorm"
+)
+
+func TestAPILoginFlow(t *testing.T) {
+	app := testApp(t)
+	newTestUser(t, app, "alice", "secret123", models.RoleMember)
+
+	c := newAPIClient(t, app)
+	c.fetchCSRF()
+
+	w := c.do("POST", "/api/v1/auth/login",
+		map[string]string{"email": "alice@example.com", "password": "nope"}, true)
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("wrong password: got %d", w.Code)
+	}
+
+	w = c.do("POST", "/api/v1/auth/login",
+		map[string]string{"email": "Alice@Example.COM", "password": "secret123"}, true)
+	if w.Code != http.StatusOK {
+		t.Fatalf("login: got %d %s", w.Code, w.Body.String())
+	}
+	var loginBody struct {
+		User userJSON `json:"user"`
+	}
+	decodeJSON(t, w, &loginBody)
+	if loginBody.User.Email != "alice@example.com" {
+		t.Fatalf("unexpected user: %+v", loginBody.User)
+	}
+
+	w = c.do("GET", "/api/v1/auth/me", nil, false)
+	if w.Code != http.StatusOK {
+		t.Fatalf("me: got %d", w.Code)
+	}
+
+	// anonymous me → 401 JSON (not a redirect)
+	anon := newAPIClient(t, app)
+	w = anon.do("GET", "/api/v1/auth/me", nil, false)
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("anon me: got %d", w.Code)
+	}
+}
+
+func TestPasswordChangeEndsOtherSessions(t *testing.T) {
+	app := testApp(t)
+	newTestUser(t, app, "admin", "password1234", models.RoleAdmin)
+	newTestUser(t, app, "alice", "password1234", models.RoleMember)
+	alice := loginAPI(t, app, "alice", "password1234")
+	stale := &apiClient{t: t, router: alice.router, jar: map[string]*http.Cookie{}, token: alice.token}
+	for k, v := range alice.jar {
+		stale.jar[k] = v
+	}
+
+	admin := loginAPI(t, app, "admin", "password1234")
+	var users struct {
+		Users []userJSON `json:"users"`
+	}
+	w := admin.do("GET", "/api/v1/admin/users", nil, false)
+	decodeJSON(t, w, &users)
+	var aliceID uint
+	for _, u := range users.Users {
+		if u.Name == "alice" {
+			aliceID = u.ID
+		}
+	}
+	w = admin.do("POST", "/api/v1/admin/users/"+itoa(aliceID)+"/password",
+		map[string]any{"password": "newpassword1"}, true)
+	if w.Code != http.StatusOK {
+		t.Fatalf("reset: %d %s", w.Code, w.Body.String())
+	}
+	if w := alice.do("GET", "/api/v1/auth/me", nil, false); w.Code != http.StatusUnauthorized {
+		t.Fatalf("old session after reset: got %d", w.Code)
+	}
+
+	alice = loginAPI(t, app, "alice", "newpassword1")
+	for k, v := range alice.jar {
+		stale.jar[k] = v
+	}
+	stale.token = alice.token
+	w = alice.do("POST", "/api/v1/me/password", map[string]any{
+		"current": "newpassword1", "password": "newerpassword1",
+	}, true)
+	if w.Code != http.StatusOK {
+		t.Fatalf("change: %d %s", w.Code, w.Body.String())
+	}
+	if w := alice.do("GET", "/api/v1/auth/me", nil, false); w.Code != http.StatusOK {
+		t.Fatalf("current session after change: got %d %s", w.Code, w.Body.String())
+	}
+	if w := stale.do("GET", "/api/v1/auth/me", nil, false); w.Code != http.StatusUnauthorized {
+		t.Fatalf("copied session after change: got %d", w.Code)
+	}
+}
+
+func TestEmailLoginAnyCaseAndOnlyWithPassword(t *testing.T) {
+	app := testApp(t)
+	newTestUser(t, app, "admin", "password1234", models.RoleAdmin)
+	newTestUser(t, app, "alice", "password1234", models.RoleMember)
+	admin := loginAPI(t, app, "admin", "password1234")
+
+	for _, e := range []string{"alice@example.com", "ALICE@Example.Com", "  Alice@example.com "} {
+		if code, body := tryLogin(t, app, "", e, "password1234"); code != http.StatusOK {
+			t.Fatalf("login as %q: %d %s", e, code, body)
+		}
+	}
+
+	// An account created without a password is invited and can't sign in.
+	w := admin.do("POST", "/api/v1/admin/users", map[string]string{"ageBand": "adult", "email": "bob@example.com", "name": "Bob"}, true)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("create invited user: %d %s", w.Code, w.Body.String())
+	}
+	var created struct {
+		User userJSON `json:"user"`
+	}
+	decodeJSON(t, w, &created)
+	if created.User.Status != models.UserInvited || created.User.HasPassword {
+		t.Fatalf("want invited with no password, got %+v", created.User)
+	}
+	for _, pw := range []string{"", "password1234", "not a real password"} {
+		if code, _ := tryLogin(t, app, "", "bob@example.com", pw); code == http.StatusOK {
+			t.Fatalf("invited user signed in with %q", pw)
+		}
+	}
+	// Setting a password activates the account.
+	if w := admin.do("POST", "/api/v1/admin/users/"+itoa(created.User.ID)+"/password",
+		map[string]string{"password": "bobs-password"}, true); w.Code != http.StatusOK {
+		t.Fatalf("set password: %d %s", w.Code, w.Body.String())
+	}
+	if code, body := tryLogin(t, app, "", "BOB@example.com", "bobs-password"); code != http.StatusOK {
+		t.Fatalf("login after password set: %d %s", code, body)
+	}
+
+	// A second account with the same email in another case is refused,
+	// by the API and by the database.
+	w = admin.do("POST", "/api/v1/admin/users", map[string]string{"ageBand": "adult", "email": "Alice@EXAMPLE.com", "name": "Alice 2"}, true)
+	if w.Code != http.StatusConflict {
+		t.Fatalf("duplicate email: got %d, want 409", w.Code)
+	}
+	if err := app.DB.Create(&models.User{Email: "ALICE@example.com", Name: "x"}).Error; err == nil {
+		t.Fatal("database accepted a duplicate email")
+	}
+	w = admin.do("PUT", "/api/v1/admin/users/"+itoa(created.User.ID), adminEditBody(admin, created.User.ID, map[string]string{"email": "alice@EXAMPLE.com"}), true)
+	if w.Code != http.StatusConflict {
+		t.Fatalf("change to taken email: got %d, want 409", w.Code)
+	}
+
+	// A deleted account frees its email.
+	if w := admin.do("DELETE", "/api/v1/admin/users/"+itoa(created.User.ID), nil, true); w.Code != http.StatusOK {
+		t.Fatalf("delete: %d", w.Code)
+	}
+	if w := admin.do("POST", "/api/v1/admin/users", map[string]string{"ageBand": "adult", "email": "bob@example.com", "name": "Bob"}, true); w.Code != http.StatusCreated {
+		t.Fatalf("reuse deleted email: %d %s", w.Code, w.Body.String())
+	}
+}
+
+// The login is a case-insensitive email, and a new account hides nothing.
+func TestUsersEmailIsCitextAndContactIsVisibleByDefault(t *testing.T) {
+	app := testApp(t)
+	var typ string
+	app.DB.Raw(`SELECT data_type || ':' || udt_name FROM information_schema.columns
+		WHERE table_name = 'users' AND column_name = 'email' AND is_nullable = 'NO'`).Scan(&typ)
+	if typ != "USER-DEFINED:citext" {
+		t.Fatalf("users.email: got %q, want NOT NULL citext", typ)
+	}
+	var privacy string
+	if err := app.DB.Raw(`SELECT data_type || ':' || is_nullable || ':' || column_default
+		FROM information_schema.columns WHERE table_name = 'users' AND column_name = 'hide_contact_from_leaders'`).Scan(&privacy).Error; err != nil {
+		t.Fatal(err)
+	}
+	if privacy != "boolean:NO:false" {
+		t.Fatalf("users.hide_contact_from_leaders: got %q, want NOT NULL boolean DEFAULT false", privacy)
+	}
+}
+
+func TestLoginThrottlePerEmailAndIP(t *testing.T) {
+	app := testApp(t)
+	newTestUser(t, app, "alice", "password1234", models.RoleMember)
+
+	// Ten failures for one email, from different IPs, lock that email
+	// everywhere, even with the right password.
+	for i := 0; i < emailFailureLimit; i++ {
+		ip := "198.51.100." + itoa(uint(i+1))
+		if code, _ := tryLogin(t, app, ip, "Alice@example.com", "wrong"); code != http.StatusUnauthorized {
+			t.Fatalf("failure %d: got %d, want 401", i+1, code)
+		}
+	}
+	if code, _ := tryLogin(t, app, "203.0.113.9", "alice@example.com", "password1234"); code != http.StatusTooManyRequests {
+		t.Fatalf("locked email: got %d, want 429", code)
+	}
+	// Other emails from those IPs are unaffected.
+	newTestUser(t, app, "bob", "password1234", models.RoleMember)
+	if code, _ := tryLogin(t, app, "198.51.100.1", "bob@example.com", "password1234"); code != http.StatusOK {
+		t.Fatalf("other email: got %d", code)
+	}
+	// The lock lasts 15 minutes.
+	var row models.LoginThrottle
+	app.DB.Where("key = ?", "email:alice@example.com").First(&row)
+	if row.LockedUntil == nil || time.Until(*row.LockedUntil) < 14*time.Minute || time.Until(*row.LockedUntil) > 16*time.Minute {
+		t.Fatalf("lock: %+v", row)
+	}
+	// It is stored in Postgres, so a new App (a restart) still sees it.
+	restarted := &App{DB: app.DB, Store: app.Store, Config: app.Config, Uploads: app.Uploads, Mailer: app.Mailer}
+	if code, _ := tryLogin(t, restarted, "203.0.113.9", "alice@example.com", "password1234"); code != http.StatusTooManyRequests {
+		t.Fatalf("after restart: got %d, want 429", code)
+	}
+	// Once it expires the right password works again.
+	app.DB.Model(&models.LoginThrottle{}).Where("key = ?", row.Key).Update("locked_until", time.Now().Add(-time.Second))
+	if code, _ := tryLogin(t, app, "203.0.113.9", "alice@example.com", "password1234"); code != http.StatusOK {
+		t.Fatalf("after expiry: got %d", code)
+	}
+
+	// Fifty failures from one IP, spread over many emails, lock that IP.
+	ip := "192.0.2.77"
+	for i := 0; i < ipFailureLimit; i++ {
+		email := "nobody" + itoa(uint(i%10)) + "@example.com"
+		if code, _ := tryLogin(t, app, ip, email, "wrong"); code != http.StatusUnauthorized {
+			t.Fatalf("ip failure %d: got %d, want 401", i+1, code)
+		}
+		// Keep the per-email counters below their limit.
+		app.DB.Where("key LIKE 'email:nobody%'").Delete(&models.LoginThrottle{})
+	}
+	if code, _ := tryLogin(t, app, ip, "bob@example.com", "password1234"); code != http.StatusTooManyRequests {
+		t.Fatalf("locked ip: got %d, want 429", code)
+	}
+	if code, _ := tryLogin(t, app, "192.0.2.78", "bob@example.com", "password1234"); code != http.StatusOK {
+		t.Fatalf("other ip: got %d", code)
+	}
+}
+
+func TestLoginDoesNotRevealAccounts(t *testing.T) {
+	realPasswordCost(t)
+	app := testApp(t)
+	newTestUser(t, app, "alice", "password1234", models.RoleMember)
+
+	timeIt := func(email string) (int, string, time.Duration) {
+		start := time.Now()
+		code, body := tryLogin(t, app, "", email, "wrong-password")
+		return code, body, time.Since(start)
+	}
+	var known, unknown time.Duration
+	for i := 0; i < 3; i++ {
+		c1, b1, d1 := timeIt("alice@example.com")
+		c2, b2, d2 := timeIt("nobody@example.com")
+		if c1 != c2 || b1 != b2 {
+			t.Fatalf("responses differ: %d %s vs %d %s", c1, b1, c2, b2)
+		}
+		known += d1
+		unknown += d2
+	}
+	// Both paths run one bcrypt comparison. Allow generous slack for CI.
+	if unknown < known/3 || known < unknown/3 {
+		t.Fatalf("timing differs too much: known %v, unknown %v", known, unknown)
+	}
+}
+
+func TestChangesEndOtherSessions(t *testing.T) {
+	cases := []struct {
+		name string
+		do   func(admin *apiClient, id uint) int
+	}{
+		{"password", func(a *apiClient, id uint) int {
+			return a.do("POST", "/api/v1/admin/users/"+itoa(id)+"/password", map[string]string{"password": "another-password"}, true).Code
+		}},
+		{"role", func(a *apiClient, id uint) int {
+			return a.do("PUT", "/api/v1/admin/users/"+itoa(id), adminEditBody(a, id, map[string]string{"role": "admin"}), true).Code
+		}},
+		{"disable", func(a *apiClient, id uint) int {
+			return a.do("PUT", "/api/v1/admin/users/"+itoa(id), map[string]string{"status": "disabled"}, true).Code
+		}},
+		{"email", func(a *apiClient, id uint) int {
+			return a.do("PUT", "/api/v1/admin/users/"+itoa(id), adminEditBody(a, id, map[string]string{"email": "new-alice@example.com"}), true).Code
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			app := testApp(t)
+			newTestUser(t, app, "admin", "password1234", models.RoleAdmin)
+			alice := newTestUser(t, app, "alice", "password1234", models.RoleMember)
+			admin := loginAPI(t, app, "admin", "password1234")
+			session := loginAPI(t, app, "alice", "password1234")
+			if w := session.do("GET", "/api/v1/auth/me", nil, false); w.Code != http.StatusOK {
+				t.Fatalf("before: %d", w.Code)
+			}
+			if code := tc.do(admin, alice.ID); code != http.StatusOK {
+				t.Fatalf("change: %d", code)
+			}
+			if w := session.do("GET", "/api/v1/auth/me", nil, false); w.Code != http.StatusUnauthorized {
+				t.Fatalf("after %s change: got %d, want 401", tc.name, w.Code)
+			}
+		})
+	}
+
+	// A disabled account can't sign in, and an admin can't disable themselves
+	// or the last admin.
+	app := testApp(t)
+	me := newTestUser(t, app, "admin", "password1234", models.RoleAdmin)
+	alice := newTestUser(t, app, "alice", "password1234", models.RoleMember)
+	admin := loginAPI(t, app, "admin", "password1234")
+	admin.do("PUT", "/api/v1/admin/users/"+itoa(alice.ID), map[string]string{"status": "disabled"}, true)
+	if code, _ := tryLogin(t, app, "", "alice@example.com", "password1234"); code != http.StatusUnauthorized {
+		t.Fatalf("disabled login: got %d, want 401", code)
+	}
+	w := admin.do("PUT", "/api/v1/admin/users/"+itoa(me.ID), map[string]string{"status": "disabled"}, true)
+	if w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), "yourself") && !strings.Contains(w.Body.String(), "own account") {
+		t.Fatalf("disable self: %d %s", w.Code, w.Body.String())
+	}
+	// Re-enabling works.
+	if w := admin.do("PUT", "/api/v1/admin/users/"+itoa(alice.ID), map[string]string{"status": "active"}, true); w.Code != http.StatusOK {
+		t.Fatalf("re-enable: %d", w.Code)
+	}
+	if code, _ := tryLogin(t, app, "", "alice@example.com", "password1234"); code != http.StatusOK {
+		t.Fatalf("re-enabled login: got %d", code)
+	}
+}
+
+// M1.2 acceptance: password reset answers uniformly for known and unknown
+// addresses, the token is single use and expires, the raw token is never
+// stored, and confirming signs the user in with the new password.
+func TestPasswordResetTargetHourlyAndDailyCaps(t *testing.T) {
+	app := testApp(t)
+	user := newTestUser(t, app, "alice", "password1234", models.RoleMember)
+	anon := newAPIClient(t, app)
+	anon.fetchCSRF()
+	request := func() {
+		t.Helper()
+		w := anon.do("POST", "/api/v1/auth/password-reset", map[string]string{"email": user.Email}, true)
+		if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), resetRequestMessage) {
+			t.Fatalf("non-uniform answer: %d %s", w.Code, w.Body.String())
+		}
+	}
+	for range targetHourLimit {
+		request()
+	}
+	lastToken := tokenInEmail(t, latestEmail(t, app, user.Email))
+	request()
+	if n := mailsTo(app, user.Email); n != targetHourLimit {
+		t.Fatalf("hourly cap: sent %d", n)
+	}
+	var token models.AccountToken
+	app.DB.Where("kind = ? AND user_id = ?", models.TokenPasswordReset, user.ID).First(&token)
+	if token.TokenHash != hashToken(lastToken) {
+		t.Fatal("throttled request invalidated the last emailed link")
+	}
+	// Move only the hourly/IP windows back; the target's daily count persists.
+	for range targetDayLimit {
+		if err := app.DB.Exec("UPDATE login_throttles SET window_start = now() - interval '2 hours' WHERE key LIKE 'pwreset:ip:%' OR key = ?", "pwreset:addr:"+user.Email+":h").Error; err != nil {
+			t.Fatal(err)
+		}
+		request()
+	}
+	if n := mailsTo(app, user.Email); n != targetDayLimit-1 {
+		// The rejected fourth hourly attempt also counts toward the daily
+		// budget, just as it does for every other targetAllow caller.
+		t.Fatalf("daily cap: sent %d, want %d", n, targetDayLimit-1)
+	}
+}
+
+func TestPendingTeenPasswordResetDoesNotCreateALogin(t *testing.T) {
+	app := testApp(t)
+	teen := newTestUser(t, app, "waiting-teen", "password1234", models.RoleMember)
+	newTestUser(t, app, "adult", "password1234", models.RoleMember)
+	client := loginAPI(t, app, "adult", "password1234")
+	apiDo(t, client, "POST", "/api/v1/auth/password-reset", map[string]string{"email": teen.Email}, 200)
+	token := tokenInEmail(t, latestEmail(t, app, teen.Email))
+	app.DB.Model(teen).Updates(map[string]any{"account_type": models.AccountTeen, "status": models.UserPendingConsent})
+	apiDo(t, client, "POST", "/api/v1/auth/password-reset/confirm", map[string]string{"token": token, "password": "newpassword1234"}, 200)
+	apiDo(t, client, "GET", "/api/v1/auth/me", nil, 401)
+	apiDo(t, client, "GET", "/api/v1/groups", nil, 200)
+	app.DB.First(teen, teen.ID)
+	if teen.Status != models.UserPendingConsent || !teen.CheckPassword("newpassword1234") {
+		t.Fatal("password reset bypassed consent or did not set the password")
+	}
+}
+
+func TestPasswordResetUniformAndSingleUse(t *testing.T) {
+	app := testApp(t)
+	newTestUser(t, app, "alice", "password1234", models.RoleMember)
+	anon := newAPIClient(t, app)
+	anon.fetchCSRF()
+
+	reqBody := map[string]string{"email": "nobody@example.com"}
+	w := anon.do("POST", "/api/v1/auth/password-reset", reqBody, true)
+	if w.Code != http.StatusOK {
+		t.Fatalf("unknown address: %d %s", w.Code, w.Body.String())
+	}
+	var body struct {
+		Message string `json:"message"`
+	}
+	decodeJSON(t, w, &body)
+	if body.Message != resetRequestMessage {
+		t.Fatalf("unknown address message: %q", body.Message)
+	}
+	var n int64
+	app.DB.Model(&models.AccountToken{}).Count(&n)
+	if n != 0 {
+		t.Fatalf("token created for unknown address")
+	}
+
+	// Known address: the on-screen answer is identical...
+	w = anon.do("POST", "/api/v1/auth/password-reset", map[string]string{"email": "alice@example.com"}, true)
+	if w.Code != http.StatusOK {
+		t.Fatalf("known address: %d %s", w.Code, w.Body.String())
+	}
+	var body2 struct {
+		Message string `json:"message"`
+	}
+	decodeJSON(t, w, &body2)
+	if body2.Message != body.Message {
+		t.Fatalf("answers differ: %q vs %q", body.Message, body2.Message)
+	}
+
+	// ...but a hashed token and an email exist behind it.
+	app.DB.Model(&models.AccountToken{}).Where("kind = ?", models.TokenPasswordReset).Count(&n)
+	if n != 1 {
+		t.Fatalf("expected one reset token, got %d", n)
+	}
+	m := latestEmail(t, app, "alice@example.com")
+	if !strings.Contains(m.Subject, "Reset") {
+		t.Fatalf("subject: %q", m.Subject)
+	}
+	token := tokenInEmail(t, m)
+	var tok models.AccountToken
+	if err := app.DB.Where("kind = ?", models.TokenPasswordReset).First(&tok).Error; err != nil {
+		t.Fatalf("token row: %v", err)
+	}
+	if tok.TokenHash == token || strings.Contains(tok.TokenHash, token) {
+		t.Fatalf("raw token appears to be stored")
+	}
+
+	// Confirm: sets the password and signs in.
+	w = anon.do("POST", "/api/v1/auth/password-reset/confirm",
+		map[string]string{"token": token, "password": "newpassword1234"}, true)
+	if w.Code != http.StatusOK {
+		t.Fatalf("confirm: %d %s", w.Code, w.Body.String())
+	}
+	// Single use: the same token fails now.
+	w = anon.do("POST", "/api/v1/auth/password-reset/confirm",
+		map[string]string{"token": token, "password": "anotherpassword123"}, true)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("reuse: %d %s", w.Code, w.Body.String())
+	}
+	// The new password works, the old one doesn't.
+	loginAPI(t, app, "alice", "newpassword1234")
+	bad := newAPIClient(t, app)
+	bad.fetchCSRF()
+	w = bad.do("POST", "/api/v1/auth/login",
+		map[string]string{"email": "alice@example.com", "password": "password1234"}, true)
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("old password still works: %d", w.Code)
+	}
+	if auditCount(t, app, audit.PasswordResetCompleted) != 1 {
+		t.Fatalf("password.reset_completed not audited")
+	}
+
+	// An expired token fails.
+	apiDo(t, anon, "POST", "/api/v1/auth/password-reset", map[string]string{"email": "alice@example.com"}, http.StatusOK)
+	m2 := latestEmail(t, app, "alice@example.com")
+	token2 := tokenInEmail(t, m2)
+	app.DB.Model(&models.AccountToken{}).Where("kind = ?", models.TokenPasswordReset).
+		Update("expires_at", time.Now().UTC().Add(-time.Hour))
+	w = anon.do("POST", "/api/v1/auth/password-reset/confirm",
+		map[string]string{"token": token2, "password": "thirdpassword1234"}, true)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expired token: %d %s", w.Code, w.Body.String())
+	}
+}
+
+// Logout expires the session cookie, and the cookie it hands back carries
+// no user, so even a client that keeps it is signed out.
+func TestLogoutEndsSession(t *testing.T) {
+	app := testApp(t)
+	newTestUser(t, app, "sam", "password1234", models.RoleMember)
+	sam := loginAPI(t, app, "sam", "password1234")
+	w := sam.do("POST", "/api/v1/auth/logout", nil, true)
+	if w.Code != http.StatusOK {
+		t.Fatalf("logout: %d", w.Code)
+	}
+	expired := false
+	for _, ck := range w.Result().Cookies() {
+		if ck.Name == sessionName && ck.MaxAge < 0 {
+			expired = true
+		}
+	}
+	if !expired {
+		t.Fatalf("session cookie not expired: %v", w.Header().Values("Set-Cookie"))
+	}
+	if c := sam.do("GET", "/api/v1/auth/me", nil, false).Code; c != http.StatusUnauthorized {
+		t.Fatalf("me after logout: %d", c)
+	}
+
+	// The logout request carries this browser's push endpoint and deletes
+	// that device in the same request (M3.13b); the person's other devices
+	// keep theirs, and a logout with no body still works (above).
+	t.Run("push device", func(t *testing.T) {
+		app := testApp(t)
+		u := newTestUser(t, app, "pat", "password1234", models.RoleMember)
+		here, other := newPushDevice(t, app, u, "this-browser"), newPushDevice(t, app, u, "phone")
+		pat := loginAPI(t, app, "pat", "password1234")
+		w := pat.do("POST", "/api/v1/auth/logout", map[string]string{"pushEndpoint": here.Endpoint}, true)
+		if w.Code != http.StatusOK || deviceExists(app, here.ID) || !deviceExists(app, other.ID) {
+			t.Fatalf("logout %d: this browser's device kept %v, the phone's %v", w.Code, deviceExists(app, here.ID), deviceExists(app, other.ID))
+		}
+		if c := pat.do("GET", "/api/v1/auth/me", nil, false).Code; c != http.StatusUnauthorized {
+			t.Fatalf("me after logout: %d", c)
+		}
+	})
+}
+
+// DEC-53: guests have no password reset. A guest's address gets the
+// same answer as an unknown one, and no token or email.
+func TestPasswordResetSkipsGuests(t *testing.T) {
+	app := testApp(t)
+	guest := models.User{Email: "guest@example.com", Name: "Gail",
+		Role: models.RoleMember, Status: models.UserGuest, AccountType: models.AccountAdult}
+	if err := app.DB.Create(&guest).Error; err != nil {
+		t.Fatal(err)
+	}
+	anon := newAPIClient(t, app)
+	anon.fetchCSRF()
+	for _, email := range []string{"nobody@example.com", "guest@example.com"} {
+		w := anon.do("POST", "/api/v1/auth/password-reset", map[string]string{"email": email}, true)
+		if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), resetRequestMessage) {
+			t.Fatalf("%s: %d %s", email, w.Code, w.Body.String())
+		}
+	}
+	var tokens, mails int64
+	app.DB.Model(&models.AccountToken{}).Count(&tokens)
+	app.DB.Model(&models.MailOutbox{}).Where("to_address = ?", "guest@example.com").Count(&mails)
+	if tokens != 0 || mails != 0 {
+		t.Fatalf("guest got a reset: tokens %d, emails %d", tokens, mails)
+	}
+}
+
+// #90: a burst of parallel wrong passwords can't get past the lockout. The
+// attempt is counted before bcrypt, so at most the limit are checked.
+func TestLoginLockoutHoldsUnderParallelRequests(t *testing.T) {
+	app := testApp(t)
+	newTestUser(t, app, "alice", "password1234", models.RoleMember)
+
+	const burst = 3 * emailFailureLimit
+	codes := make(chan int, burst)
+	var wg sync.WaitGroup
+	for i := 0; i < burst; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			code, _ := tryLogin(t, app, "198.51.100."+itoa(uint(i+1)), "alice@example.com", "wrong")
+			codes <- code
+		}(i)
+	}
+	wg.Wait()
+	close(codes)
+	checked := 0
+	for code := range codes {
+		switch code {
+		case http.StatusUnauthorized:
+			checked++
+		case http.StatusTooManyRequests:
+		default:
+			t.Fatalf("unexpected status %d", code)
+		}
+	}
+	if checked > emailFailureLimit {
+		t.Fatalf("%d passwords checked in a burst of %d, limit %d", checked, burst, emailFailureLimit)
+	}
+	if code, _ := tryLogin(t, app, "203.0.113.9", "alice@example.com", "password1234"); code != http.StatusTooManyRequests {
+		t.Fatalf("after burst: got %d, want 429", code)
+	}
+}
+
+// A successful sign-in doesn't use up the IP's failure budget.
+func TestLoginSuccessDoesNotCountAgainstIP(t *testing.T) {
+	app := testApp(t)
+	newTestUser(t, app, "alice", "password1234", models.RoleMember)
+	for i := 0; i < ipFailureLimit+5; i++ {
+		if code, _ := tryLogin(t, app, "192.0.2.10", "alice@example.com", "password1234"); code != http.StatusOK {
+			t.Fatalf("sign-in %d: got %d", i+1, code)
+		}
+	}
+}
+
+// #93: a known address doesn't wait on the email send, so response time
+// doesn't reveal which addresses have accounts.
+func TestPasswordResetDoesNotWaitOnEmail(t *testing.T) {
+	app := testApp(t)
+	user := newTestUser(t, app, "alice", "password1234", models.RoleMember)
+	calls := 0
+	app.Mailer = directMailSenderFunc(func(_ context.Context, msg foldmail.Message) error {
+		calls++
+		if msg.To != user.Email {
+			t.Errorf("sent to %q", msg.To)
+		}
+		return nil
+	})
+
+	anon := newAPIClient(t, app)
+	anon.holdNotices = true
+	anon.fetchCSRF()
+	w := anon.do("POST", "/api/v1/auth/password-reset", map[string]string{"email": "alice@example.com"}, true)
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), resetRequestMessage) {
+		t.Fatalf("reset: %d %s", w.Code, w.Body.String())
+	}
+	if calls != 0 {
+		t.Fatal("response called the mailer instead of deferring delivery")
+	}
+	var rows []models.Job
+	if err := app.DB.Where("kind = ?", kindPasswordResetMail).Find(&rows).Error; err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 || rows[0].Status != models.JobQueued || rows[0].UniqueKey != nil || rows[0].MaxAttempts != directMailAttempts {
+		t.Fatalf("reset delivery duty: %+v", rows)
+	}
+	var payload map[string]uint
+	if err := json.Unmarshal([]byte(rows[0].Payload), &payload); err != nil || len(payload) != 1 || payload["userId"] != user.ID {
+		t.Fatalf("reset job must contain only its user ID: %q, %v", rows[0].Payload, err)
+	}
+	var tokens int64
+	if err := app.DB.Model(&models.AccountToken{}).Count(&tokens).Error; err != nil {
+		t.Fatal(err)
+	}
+	if tokens != 0 || auditCount(t, app, audit.PasswordResetRequested) != 1 {
+		t.Fatalf("request must commit the audit and job only, tokens=%d", tokens)
+	}
+	drainNotices(t, app)
+	if calls != 1 {
+		t.Fatalf("drained sends=%d, want 1", calls)
+	}
+}
+
+func reauthBody(emailChange bool, password string) (string, string, map[string]any) {
+	if emailChange {
+		return "PUT", "/api/v1/me", map[string]any{"email": "replacement@example.com", "currentPassword": password}
+	}
+	return "POST", "/api/v1/me/password", map[string]any{"current": password, "password": "replacement1234"}
+}
+
+func TestReauthenticationSharesUserBudgetAcrossEndpointsAndIPs(t *testing.T) {
+	app := testApp(t)
+	user := newTestUser(t, app, "alice", "password1234", models.RoleMember)
+	c := loginAPI(t, app, "alice", "password1234")
+	for i := range emailFailureLimit {
+		c.ip = "198.51.100." + itoa(uint(i+1))
+		method, path, body := reauthBody(i%2 == 0, "wrong")
+		apiDo(t, c, method, path, body, http.StatusBadRequest)
+	}
+	for _, emailChange := range []bool{false, true} {
+		method, path, body := reauthBody(emailChange, "password1234")
+		c.ip = "203.0.113.1"
+		apiDo(t, c, method, path, body, http.StatusTooManyRequests)
+	}
+	var fresh models.User
+	app.DB.First(&fresh, user.ID)
+	if fresh.Email != user.Email || !fresh.CheckPassword("password1234") || fresh.SessionVersion != user.SessionVersion {
+		t.Fatal("locked-out proof changed credentials")
+	}
+	var tokens int64
+	app.DB.Model(&models.AccountToken{}).Count(&tokens)
+	if tokens != 0 || mailsTo(app, "replacement@example.com") != 0 {
+		t.Fatal("locked-out proof issued an email-change capability")
+	}
+	// Lockout lasts 15 minutes, then both window and lock expire.
+	app.DB.Exec(`UPDATE login_throttles SET locked_until = now() - interval '1 second', window_start = now() - interval '16 minutes' WHERE key = ?`, "user:"+itoa(user.ID))
+	method, path, body := reauthBody(false, "password1234")
+	apiDo(t, c, method, path, body, http.StatusOK)
+}
+
+func TestReauthenticationSharesLoginIPBudget(t *testing.T) {
+	for _, emailChange := range []bool{false, true} {
+		t.Run(map[bool]string{false: "password", true: "email"}[emailChange], func(t *testing.T) {
+			app := testApp(t)
+			newTestUser(t, app, "alice", "password1234", models.RoleMember)
+			c := loginAPI(t, app, "alice", "password1234")
+			c.ip = "192.0.2.10"
+			if err := app.DB.Create(&models.LoginThrottle{Key: "ip:" + c.ip, Failures: ipFailureLimit - 1, WindowStart: time.Now()}).Error; err != nil {
+				t.Fatal(err)
+			}
+			method, path, body := reauthBody(emailChange, "wrong")
+			apiDo(t, c, method, path, body, http.StatusBadRequest)
+			method, path, body = reauthBody(emailChange, "password1234")
+			apiDo(t, c, method, path, body, http.StatusTooManyRequests)
+			if code, _ := tryLogin(t, app, c.ip, "alice@example.com", "password1234"); code != http.StatusTooManyRequests {
+				t.Fatalf("sign-in did not share reauthentication IP lock: %d", code)
+			}
+		})
+	}
+}
+
+func TestReauthenticationSuccessRefundsOnlyItsReservation(t *testing.T) {
+	for _, emailChange := range []bool{false, true} {
+		t.Run(map[bool]string{false: "password", true: "email"}[emailChange], func(t *testing.T) {
+			app := testApp(t)
+			user := newTestUser(t, app, "alice", "password1234", models.RoleMember)
+			c := loginAPI(t, app, "alice", "password1234")
+			c.ip = "192.0.2.10"
+			keys := []string{"user:" + itoa(user.ID), "ip:" + c.ip}
+			for _, key := range keys {
+				if err := app.DB.Create(&models.LoginThrottle{Key: key, Failures: 3, WindowStart: time.Now()}).Error; err != nil {
+					t.Fatal(err)
+				}
+			}
+			method, path, body := reauthBody(emailChange, "password1234")
+			apiDo(t, c, method, path, body, http.StatusOK)
+			for _, key := range keys {
+				var row models.LoginThrottle
+				if err := app.DB.Where("key = ?", key).First(&row).Error; err != nil {
+					t.Fatal(err)
+				}
+				if row.Failures != 3 || row.LockedUntil != nil {
+					t.Fatalf("success changed prior failure budget: %+v", row)
+				}
+			}
+		})
+	}
+}
+
+func TestReauthenticationReservationHoldsUnderParallelRequests(t *testing.T) {
+	app := testApp(t)
+	newTestUser(t, app, "alice", "password1234", models.RoleMember)
+	c := loginAPI(t, app, "alice", "password1234")
+	const burst = 3 * emailFailureLimit
+	// Each request needs one connection at a time. Without a cap the burst opens
+	// a connection per request, and when the shared server is out of them the
+	// session lookup fails and the request answers 401, which says nothing
+	// about the reservation.
+	capConnections(t, app.DB, 8)
+	codes := make(chan int, burst)
+	var wg sync.WaitGroup
+	for i := range burst {
+		clone := &apiClient{t: t, router: c.router, token: c.token, jar: map[string]*http.Cookie{}, ip: "198.51.100." + itoa(uint(i+1))}
+		for k, v := range c.jar {
+			clone.jar[k] = v
+		}
+		wg.Go(func() {
+			method, path, body := reauthBody(i%2 == 0, "wrong")
+			codes <- clone.do(method, path, body, true).Code
+		})
+	}
+	wg.Wait()
+	close(codes)
+	checked := 0
+	for code := range codes {
+		switch code {
+		case http.StatusBadRequest:
+			checked++
+		case http.StatusTooManyRequests:
+		default:
+			t.Fatalf("unexpected status %d", code)
+		}
+	}
+	if checked == 0 || checked > emailFailureLimit {
+		t.Fatalf("%d proofs checked in burst of %d, limit %d", checked, burst, emailFailureLimit)
+	}
+}
+
+func TestPasswordResetBudgetGatesAccountWork(t *testing.T) {
+	realPasswordCost(t)
+	start := time.Now()
+	(&models.User{}).CheckPassword("not a real password")
+	minimumWork := time.Since(start) / 3
+	for _, status := range []string{models.UserActive, models.UserGuest, models.UserDisabled, "unknown"} {
+		for _, budget := range []string{"available", "ip", "address hour", "address day"} {
+			t.Run(status+"/"+budget, func(t *testing.T) {
+				app := testApp(t)
+				// Complete the setup gate even for an unknown target address.
+				if err := app.DB.Create(&models.User{Name: "Other member", Email: "other@example.com", Status: models.UserActive}).Error; err != nil {
+					t.Fatal(err)
+				}
+				const email = "target@example.com"
+				const ip = "10.5.0.1"
+				if status != "unknown" {
+					if err := app.DB.Create(&models.User{Name: "Target", Email: email, Status: status}).Error; err != nil {
+						t.Fatal(err)
+					}
+				}
+				var key string
+				var failures int
+				switch budget {
+				case "ip":
+					key, failures = "pwreset:ip:"+rateLimitIP(ip), resetIPLimit
+				case "address hour":
+					key, failures = "pwreset:addr:"+email+":h", targetHourLimit
+				case "address day":
+					key, failures = "pwreset:addr:"+email+":d", targetDayLimit
+				}
+				if key != "" {
+					if err := app.DB.Create(&models.LoginThrottle{Key: key, Failures: failures, WindowStart: time.Now()}).Error; err != nil {
+						t.Fatal(err)
+					}
+				}
+				lookups := 0
+				const callback = "reset:observe-account-lookup"
+				if err := app.DB.Callback().Query().Before("gorm:query").Register(callback, func(db *gorm.DB) {
+					if db.Statement.Table == "users" {
+						lookups++
+					}
+				}); err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() { app.DB.Callback().Query().Remove(callback) })
+				anon := anonClient(t, app, ip)
+				anon.holdNotices = true
+				lookups = 0 // Ignore the first-request setup gate during CSRF.
+				started := time.Now()
+				answer := apiDo(t, anon, "POST", "/api/v1/auth/password-reset", map[string]string{"email": email}, http.StatusOK)
+				elapsed := time.Since(started)
+				if answer != "{\"message\":\""+resetRequestMessage+"\"}" {
+					t.Fatalf("nonuniform answer: %s", answer)
+				}
+				var tokens, audits, jobs int64
+				app.DB.Model(&models.AccountToken{}).Count(&tokens)
+				app.DB.Model(&models.AuditLog{}).Where("action = ?", audit.PasswordResetRequested).Count(&audits)
+				app.DB.Model(&models.Job{}).Where("kind = ?", kindPasswordResetMail).Count(&jobs)
+				if budget != "available" {
+					if lookups != 0 || tokens != 0 || audits != 0 || jobs != 0 {
+						t.Fatalf("throttled account work: lookups=%d tokens=%d audits=%d mail=%d", lookups, tokens, audits, jobs)
+					}
+					return
+				}
+				if lookups == 0 || elapsed < minimumWork {
+					t.Fatalf("in-budget lookup/bcrypt missing: lookups=%d elapsed=%v minimum=%v", lookups, elapsed, minimumWork)
+				}
+				want := int64(0)
+				if status == models.UserActive {
+					want = 1
+				}
+				if tokens != 0 || audits != want || jobs != want {
+					t.Fatalf("in-budget reset: tokens=%d audits=%d mail=%d, want %d", tokens, audits, jobs, want)
+				}
+			})
+		}
+	}
+}
+
+// Logout bumps the account's session_version (M7.2 slice b), so it signs the
+// account out on every device: a copied cookie replayed after logout is
+// refused, and so is another device's own session. Signing in again works.
+func TestLogoutSignsOutEveryDeviceAndCopiedCookies(t *testing.T) {
+	app := testApp(t)
+	sam := newTestUser(t, app, "sam", "password1234", models.RoleMember)
+	laptop := loginAPI(t, app, "sam", "password1234")
+	phone := loginAPI(t, app, "sam", "password1234")
+	copied := newAPIClient(t, app)
+	for name, ck := range laptop.jar {
+		cp := *ck
+		copied.jar[name] = &cp
+	}
+	if w := laptop.do("POST", "/api/v1/auth/logout", nil, true); w.Code != http.StatusOK {
+		t.Fatalf("logout: %d %s", w.Code, w.Body.String())
+	}
+	// Only the logout epoch moves: session_version is the credential epoch
+	// that emailed links (guardian consent) and push devices are bound to.
+	var after models.User
+	app.DB.First(&after, sam.ID)
+	if after.SessionVersion != sam.SessionVersion || after.LogoutVersion != sam.LogoutVersion+1 {
+		t.Fatalf("logout moved session_version %d->%d, logout_version %d->%d", sam.SessionVersion, after.SessionVersion, sam.LogoutVersion, after.LogoutVersion)
+	}
+	for name, c := range map[string]*apiClient{"copied cookie": copied, "other device": phone} {
+		if code := c.do("GET", "/api/v1/auth/me", nil, false).Code; code != http.StatusUnauthorized {
+			t.Fatalf("%s after logout: %d", name, code)
+		}
+	}
+	again := loginAPI(t, app, "sam", "password1234")
+	if code := again.do("GET", "/api/v1/auth/me", nil, false).Code; code != http.StatusOK {
+		t.Fatalf("sign in after logout: %d", code)
+	}
+	// A stale cookie's logout changes nothing: the new session survives it.
+	if w := phone.do("POST", "/api/v1/auth/logout", nil, true); w.Code != http.StatusOK {
+		t.Fatalf("stale logout: %d", w.Code)
+	}
+	if code := again.do("GET", "/api/v1/auth/me", nil, false).Code; code != http.StatusOK {
+		t.Fatalf("a stale cookie's logout ended the new session: %d", code)
+	}
+}
+
+// Sign-in drops the CSRF token minted before it (M7.2 slice b): a token
+// fixed or leaked while signed out stops working once someone signs in.
+func TestLoginRotatesCSRFToken(t *testing.T) {
+	app := testApp(t)
+	newTestUser(t, app, "sam", "password1234", models.RoleMember)
+	c := newAPIClient(t, app)
+	c.fetchCSRF()
+	before := c.token
+	if w := c.do("POST", "/api/v1/auth/login", map[string]string{"email": testEmail("sam"), "password": "password1234"}, true); w.Code != http.StatusOK {
+		t.Fatalf("login: %d %s", w.Code, w.Body.String())
+	}
+	fresh := c.token // the helper refetched it after sign-in, as the SPA does
+	c.token = before
+	if w := c.do("POST", "/api/v1/auth/logout", nil, true); w.Code != http.StatusForbidden {
+		t.Fatalf("pre-login token after login: %d", w.Code)
+	}
+	c.token = fresh
+	if fresh == before {
+		t.Fatal("login kept the pre-login CSRF token")
+	}
+	if code := c.do("GET", "/api/v1/auth/me", nil, false).Code; code != http.StatusOK {
+		t.Fatalf("still signed in: %d", code)
+	}
+	if w := c.do("POST", "/api/v1/auth/logout", nil, true); w.Code != http.StatusOK {
+		t.Fatalf("fresh token: %d %s", w.Code, w.Body.String())
+	}
+}
+
+// capConnections limits db's pool to n open connections for the test, for a
+// burst of parallel requests that would otherwise open one each.
+func capConnections(t *testing.T, db *gorm.DB, n int) {
+	t.Helper()
+	sqlDB, err := db.DB()
+	if err != nil {
+		t.Fatal(err)
+	}
+	was := sqlDB.Stats().MaxOpenConnections
+	sqlDB.SetMaxOpenConns(n)
+	t.Cleanup(func() { sqlDB.SetMaxOpenConns(was) })
+}
+
+// bootstrapAs reads GET /auth/bootstrap with the client's cookies (no token).
+func bootstrapAs(t *testing.T, c *apiClient) (*httptest.ResponseRecorder, sessionBootstrapJSON) {
+	t.Helper()
+	w := c.do("GET", "/api/v1/auth/bootstrap", nil, false)
+	var body sessionBootstrapJSON
+	if w.Code == http.StatusOK {
+		decodeJSON(t, w, &body)
+	}
+	return w, body
+}
+
+// GET /auth/bootstrap names the viewer the cookie authenticates (null when
+// none), the CSRF token and its marker, and acknowledges both; it is no-store.
+// A first visit gets a fresh pair; an older cookie keeps its T and gets only
+// the marker it lacks; a wrong marker, a doubled one or one beside the other
+// name gets its marker set again (the other name expired; a doubled copy stays,
+// as the server cannot tell it apart: TestMarkerCopiesAtOtherPathsStayAndFailClosed); a
+// session ended elsewhere keeps its T and answers no one.
+func TestSessionBootstrap(t *testing.T) {
+	app := testApp(t)
+	alice := newTestUser(t, app, "alice", "password1234", models.RoleMember)
+	want := func(what string, c *apiClient, w *httptest.ResponseRecorder, body sessionBootstrapJSON, viewer string) {
+		t.Helper()
+		token, marker := credentialOf(t, c)
+		if w.Code != http.StatusOK || w.Header().Get("Cache-Control") != "no-store" || body.CSRFToken != token || body.CredentialMarker != marker || marker == "" {
+			t.Fatalf("%s: %d %s (cookie T %q M %q)", what, w.Code, w.Body.String(), token, marker)
+		}
+		if got := w.Header().Get(sessionCheckedHeader); got != "v2 "+marker+" "+viewer {
+			t.Fatalf("%s: acknowledgment %q", what, got)
+		}
+		if (body.User != nil) != (viewer != "anon") || (body.User != nil && body.User.ID != alice.ID) {
+			t.Fatalf("%s: user %+v", what, body.User)
+		}
+	}
+
+	first := newAPIClient(t, app)
+	w, body := bootstrapAs(t, first)
+	want("first visit", first, w, body, "anon")
+	if !setsCookie(w, sessionName) {
+		t.Fatal("a first visit got no session cookie")
+	}
+
+	signedIn := loginAPI(t, app, "alice", "password1234")
+	token, _ := credentialOf(t, signedIn)
+	w, body = bootstrapAs(t, signedIn)
+	want("signed in", signedIn, w, body, itoa(alice.ID))
+	if len(w.Header().Values("Set-Cookie")) != 0 || body.CSRFToken != token {
+		t.Fatalf("a current pair was rewritten: %v", w.Header().Values("Set-Cookie"))
+	}
+
+	for _, jar := range []string{"missing", "wrong", "doubled", "other name too"} {
+		c := newAPIClient(t, app)
+		c.jar[sessionName] = signedIn.jar[sessionName]
+		switch jar {
+		case "wrong":
+			c.jar[app.credentialCookieName()] = &http.Cookie{Name: app.credentialCookieName(), Value: "forged"}
+		case "doubled":
+			c.jar[app.credentialCookieName()] = signedIn.jar[app.credentialCookieName()]
+			c.jar["copy"] = &http.Cookie{Name: app.credentialCookieName(), Value: "forged"}
+		case "other name too":
+			// Left from a switch between HTTP and HTTPS, even with the right value.
+			c.jar[app.credentialCookieName()] = signedIn.jar[app.credentialCookieName()]
+			c.jar[app.otherCredentialCookieName()] = &http.Cookie{Name: app.otherCredentialCookieName(), Value: signedIn.jar[app.credentialCookieName()].Value}
+		}
+		w, body = bootstrapAs(t, c)
+		if !setsCookie(w, app.credentialCookieName()) || (jar == "doubled" && c.jar["copy"].Value != "forged") {
+			t.Fatalf("%s marker: not set again, or the copy changed: %v", jar, w.Header().Values("Set-Cookie"))
+		}
+		if setsCookie(w, sessionName) || body.CSRFToken != token {
+			t.Fatalf("%s marker: the session was rewritten or its T changed", jar)
+		}
+		want(jar+" marker", c, w, body, itoa(alice.ID))
+		if ck := c.jar[app.otherCredentialCookieName()]; jar == "other name too" && (ck == nil || ck.MaxAge >= 0) {
+			t.Fatalf("the other marker name was not expired: %v", w.Header().Values("Set-Cookie"))
+		}
+	}
+
+	legacy := newAPIClient(t, app)
+	legacy.jar[sessionName] = legacySessionCookie(t, app, alice)
+	w, body = bootstrapAs(t, legacy)
+	want("cookie with no T", legacy, w, body, itoa(alice.ID))
+
+	// The plain endpoints are unchanged.
+	if w := signedIn.do("GET", "/api/v1/auth/me", nil, false); w.Code != http.StatusOK || w.Header().Get(sessionCheckedHeader) != "" {
+		t.Fatalf("/auth/me: %d", w.Code)
+	}
+	var csrf struct {
+		CSRFToken string `json:"csrfToken"`
+	}
+	decodeJSON(t, signedIn.do("GET", "/api/v1/auth/csrf", nil, false), &csrf)
+	if csrf.CSRFToken != token {
+		t.Fatal("/auth/csrf no longer answers the session's token")
+	}
+
+	// Ended elsewhere: the cookie's T stays, and it answers no one.
+	other := loginAPI(t, app, "alice", "password1234")
+	stale := newAPIClient(t, app)
+	stale.jar[sessionName] = other.jar[sessionName]
+	staleToken, _ := credentialOf(t, stale)
+	apiDo(t, other, "POST", "/api/v1/auth/logout", nil, http.StatusOK)
+	w, body = bootstrapAs(t, stale)
+	want("ended elsewhere", stale, w, body, "anon")
+	if body.CSRFToken != staleToken {
+		t.Fatal("a stale cookie's T changed")
+	}
+}
+
+func TestSessionBootstrapAndLoginAfterSigningKeyChanges(t *testing.T) {
+	for _, change := range []string{"upgrade", "restore"} {
+		t.Run(change, func(t *testing.T) {
+			app := testApp(t)
+			alice := newTestUser(t, app, "alice", "password1234", models.RoleMember)
+			if change == "upgrade" {
+				app.Store = newSessionStore(app.Config.SessionSecret, app.Config.CookieSecure)
+			} else {
+				store, err := newDatabaseSessionStore(app.DB, app.Config)
+				if err != nil {
+					t.Fatal(err)
+				}
+				app.Store = store
+			}
+			browser := loginAPI(t, app, "alice", "password1234")
+			oldToken := browser.token
+			if change == "restore" {
+				gormMust(t, app.DB.Exec("DELETE FROM settings WHERE key = ?", sessionSigningEpochKey))
+				bootFence(t, app)
+			}
+			store, err := newDatabaseSessionStore(app.DB, app.Config)
+			if err != nil {
+				t.Fatal(err)
+			}
+			app.Store = store
+			browser.router = app.setupRouter()
+
+			body := map[string]string{"email": alice.Email, "password": "password1234"}
+			browser.pinned = true
+			pinned := browser.do("GET", "/api/v1/auth/me", nil, false)
+			browser.pinned = false
+			login := browser.do("POST", "/api/v1/auth/login", body, true)
+			for _, w := range []*httptest.ResponseRecorder{pinned, login} {
+				if w.Code != http.StatusForbidden || !strings.Contains(w.Body.String(), `"code":"session_expired"`) ||
+					len(w.Header().Values("Set-Cookie")) != 0 || w.Header().Get(sessionCheckedHeader) != "" {
+					t.Fatalf("expired credential returned %d %s with headers %v", w.Code, w.Body.String(), w.Header())
+				}
+			}
+
+			w, anon := bootstrapAs(t, browser)
+			if w.Code != http.StatusOK || anon.User != nil || anon.CSRFToken == "" || anon.CSRFToken == oldToken ||
+				!setsCookie(w, sessionName) || w.Header().Get(sessionCheckedHeader) != "v2 "+anon.CredentialMarker+" anon" {
+				t.Fatalf("anonymous bootstrap: %d %s", w.Code, w.Body.String())
+			}
+			browser.token = anon.CSRFToken
+			apiDo(t, browser, "POST", "/api/v1/auth/login", body, http.StatusOK)
+			w, signedIn := bootstrapAs(t, browser)
+			if w.Code != http.StatusOK || signedIn.User == nil || signedIn.User.ID != alice.ID {
+				t.Fatalf("bootstrap after fresh login: %d %s", w.Code, w.Body.String())
+			}
+		})
+	}
+}

@@ -66,6 +66,10 @@ SaaS operator) must be able to run it with `docker compose up`. The shipped arti
 Browser → one Go binary (`/api/v1/*` JSON with cookie auth, embedded SPA with `index.html`
 fallback) → Postgres.
 
+- The application is one package, `internal/app`. A Go file this document or `docs/agents/`
+  names without a directory (`tokens.go`) is there. The root `main.go` only embeds `web/dist`
+  and `docs/MEMBERS.md`, which `go:embed` cannot reach from a subdirectory, and calls `app.Main`.
+
 - Single-tenant. "SaaS" means many single-tenant deployments behind a proxy: **no multi-tenant
   data model**.
 - Auth: cookie sessions + bcrypt. OIDC (Entra ID, Google) comes later; keep an `AuthProvider` seam
@@ -349,7 +353,7 @@ success message and are logged server-side. Only sign-in's lockout and a signed-
 invitation limit answer 429.
 
 One-off pages outside the standard presentation layer, such as the server-rendered setup page
-(`templates/setup.html`), don't have to match the React components.
+(`internal/app/templates/setup.html`), don't have to match the React components.
 
 Docs say "recommended", never "supported" (a line that must quote the word ends with
 `wording-ok:`). No Python in the serving stack (DEC-151): the Dockerfile, compose files, `deploy/`,

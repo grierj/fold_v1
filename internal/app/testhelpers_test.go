@@ -1,0 +1,1724 @@
+package app
+
+import (
+	"bytes"
+	"context"
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/binary"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"fold/internal/audit"
+	"fold/internal/dbopen"
+	"fold/internal/jobs"
+	"fold/internal/mail"
+	"fold/internal/notify"
+	"fold/internal/policy"
+	"fold/internal/testdb"
+	"fold/models"
+	"fold/storage"
+	"image"
+	"image/png"
+	"io"
+	"maps"
+	"mime/multipart"
+	"net"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
+	"os"
+	"path/filepath"
+	"reflect"
+	"regexp"
+	"sort"
+	"strconv"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"github.com/gin-gonic/gin"
+	"golang.org/x/crypto/bcrypt"
+	"gorm.io/gorm"
+	"gorm.io/gorm/logger"
+)
+
+// calDate reads a YYYY-MM-DD for a date column such as OriginalDate. It panics
+// on a bad date, since a test fixture that cannot be parsed is a typo.
+func calDate(s string) time.Time {
+	d, err := models.ParseCalendarDate(s)
+	if err != nil {
+		panic(err)
+	}
+	return d
+}
+
+// noticeDataDate is the "date" in a stored notification's Data. Data is built
+// from a map, so nothing in the compiler checks that the date in it is the
+// plain YYYY-MM-DD the notice readers expect.
+func noticeDataDate(t *testing.T, n models.Notification) string {
+	t.Helper()
+	var data struct {
+		Date string `json:"date"`
+	}
+	if err := json.Unmarshal([]byte(n.Data), &data); err != nil {
+		t.Fatalf("notification %d data %q: %v", n.ID, n.Data, err)
+	}
+	return data.Date
+}
+
+// loginAPIExpectFail reports whether login succeeded (it shouldn't).
+func loginAPIExpectFail(t *testing.T, app *App, name, password string) bool {
+	t.Helper()
+	c := newAPIClient(t, app)
+	c.fetchCSRF()
+	w := c.do("POST", "/api/v1/auth/login",
+		map[string]string{"email": testEmail(name), "password": password}, true)
+	return w.Code == http.StatusOK
+}
+
+// TestMain gives this package one migrated Postgres database and drops it
+// afterwards (internal/testdb). Password hashes use the cheapest bcrypt cost;
+// tests that measure timing call realPasswordCost.
+//
+// The tests run from the repository root, not from this directory: the source
+// guards and contract tests among them read the whole repository (web/src,
+// docs, deploy, .github) by root-relative path, and the binary's files come
+// from disk where the root package embeds them.
+func TestMain(m *testing.M) {
+	if err := enterRepoRoot(); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	help, err := os.ReadFile("docs/MEMBERS.md")
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	build = Build{Version: "dev", Dist: os.DirFS("."), MemberHelp: help}
+	models.PasswordCost = bcrypt.MinCost
+	code := testdb.Main(m)
+	removeFoldBuilds()
+	os.Exit(code)
+}
+
+// enterRepoRoot walks up to the directory holding go.mod. A process already
+// there (the test binary scripts/go-test.sh runs, a fuzz worker) stays put.
+func enterRepoRoot() error {
+	for {
+		if _, err := os.Stat("go.mod"); err == nil {
+			return nil
+		}
+		wd, err := os.Getwd()
+		if err != nil {
+			return err
+		}
+		if filepath.Dir(wd) == wd {
+			return errors.New("no go.mod above the test's working directory")
+		}
+		if err := os.Chdir(".."); err != nil {
+			return err
+		}
+	}
+}
+
+// realPasswordCost restores production bcrypt cost for one test, so timing
+// checks see real work. Call it before creating users.
+func realPasswordCost(t *testing.T) {
+	t.Helper()
+	models.PasswordCost = bcrypt.DefaultCost
+	t.Cleanup(func() { models.PasswordCost = bcrypt.MinCost })
+}
+
+// testApp builds an App for handler tests on the package's Postgres
+// database, emptied before each test. Tests in this package do not call
+// t.Parallel, so they share that database safely.
+func testApp(t *testing.T) *App {
+	t.Helper()
+	db := testdb.Shared(t)
+	gin.SetMode(gin.TestMode)
+	store := newSessionStore([]byte("test-secret"), false)
+	uploads, err := storage.NewLocalStore(t.TempDir(), uploadsURLPrefix)
+	if err != nil {
+		t.Fatalf("upload store: %v", err)
+	}
+	app := &App{
+		DB:      db,
+		Store:   store,
+		Config:  Config{Env: "dev", Port: "8080", SessionSecret: []byte("test-session-secret-at-least-32-bytes"), SetupToken: strings.Repeat("a", 64)},
+		Uploads: uploads,
+		Mailer:  mail.WithSuppressions(db, mail.NewDevOutbox(db, "Fold <noreply@example.com>")),
+	}
+	// The same start-up steps serve runs: the per-process attempt key and the
+	// restore barrier's boot (the database was just emptied, so the counter row
+	// is made here). A test that restarts passes through bootFence itself.
+	bootFence(t, app)
+	return app
+}
+
+// bootFence runs serve's start-up steps for the barrier and the attempt key on
+// app, the way a new process would, and records any restart request.
+func bootFence(t *testing.T, app *App) {
+	t.Helper()
+	if err := app.initAttempts(); err != nil {
+		t.Fatalf("attempt key: %v", err)
+	}
+	if err := app.bootRestoreFence(); err != nil {
+		t.Fatalf("restore barrier boot: %v", err)
+	}
+}
+
+// queryCounter counts GORM reads (Query and Row callbacks: Find, First,
+// Pluck, Scan, ...) on one database handle. Writes are not counted.
+type queryCounter struct {
+	db      *gorm.DB
+	name    string
+	reads   atomic.Int64
+	stopped atomic.Bool
+}
+
+var queryCounterSeq atomic.Uint64
+
+// countDBReads registers a query counter on db and removes it when the
+// test ends. Call Stop before asserting on rows the counted code wrote,
+// so the assertion queries are not counted.
+func countDBReads(t *testing.T, db *gorm.DB) *queryCounter {
+	t.Helper()
+	qc := &queryCounter{db: db, name: fmt.Sprintf("test:count_db_reads:%d", queryCounterSeq.Add(1))}
+	count := func(*gorm.DB) { qc.reads.Add(1) }
+	if err := db.Callback().Query().Before("gorm:query").Register(qc.name, count); err != nil {
+		t.Fatalf("register query counter: %v", err)
+	}
+	if err := db.Callback().Row().Before("gorm:row").Register(qc.name, count); err != nil {
+		qc.Stop()
+		t.Fatalf("register row counter: %v", err)
+	}
+	t.Cleanup(qc.Stop)
+	return qc
+}
+
+func (qc *queryCounter) Reads() int64 { return qc.reads.Load() }
+
+// Stop is safe to call twice.
+func (qc *queryCounter) Stop() {
+	if qc.stopped.Swap(true) {
+		return
+	}
+	_ = qc.db.Callback().Query().Remove(qc.name)
+	_ = qc.db.Callback().Row().Remove(qc.name)
+}
+
+func testEmail(name string) string {
+	if strings.Contains(name, "@") {
+		return name
+	}
+	return name + "@example.com"
+}
+
+// newTestUser creates an active account named name, signing in as
+// testEmail(name).
+func newTestUser(t *testing.T, app *App, name, password, role string) *models.User {
+	t.Helper()
+	u := models.User{Email: testEmail(name), Role: role, Name: name, Status: models.UserActive}
+	if err := u.SetPassword(password); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.DB.Create(&u).Error; err != nil {
+		t.Fatalf("create user: %v", err)
+	}
+	return &u
+}
+
+// apiClient wraps a router with cookie-jar + CSRF handling for API tests.
+type apiClient struct {
+	app         *App
+	holdNotices bool // leave durable notice and direct-mail jobs queued for explicit assertions
+	t           *testing.T
+	router      http.Handler
+	jar         map[string]*http.Cookie
+	token       string
+	ip          string          // client address for requests; empty uses httptest's default
+	ua          string          // User-Agent for requests; empty sends none
+	ctx         context.Context // request context; nil uses httptest's background context
+	// pinned sends every request as a participating one (M8.1): the session
+	// check header and the client's T as X-CSRF-Token, on reads too.
+	pinned bool
+	// autoReview makes a DELETE of an account (DELETE /api/v1/admin/users/:id)
+	// carry a "keep" choice for every contact-request reason that account has,
+	// read through the real review pages, unless the body already has a
+	// reasonReview. It lets the erasure tests that predate the reason review
+	// (T07B-2b) keep deleting accounts whose requests hold reasons. Tests of the
+	// review itself leave it off.
+	autoReview bool
+}
+
+var deleteUserPath = regexp.MustCompile(`^/api/v1/admin/users/\d+$`)
+
+// withKeptReasons returns body with a keep-all reasonReview added when the
+// account in path has reasons to review and the body names no review. Any
+// failure to read the pages leaves the body alone, so the DELETE answers as it
+// would have.
+func (c *apiClient) withKeptReasons(path string, body any) any {
+	return c.withChosenReasons(path, body, "keep")
+}
+
+// withChosenReasons is withKeptReasons with one choice ("keep" or "remove")
+// for every reason.
+func (c *apiClient) withChosenReasons(path string, body any, choice string) any {
+	m := map[string]any{}
+	if body != nil {
+		raw, err := json.Marshal(body)
+		if err != nil || json.Unmarshal(raw, &m) != nil || m == nil {
+			return body
+		}
+	}
+	if _, has := m["reasonReview"]; has {
+		return body
+	}
+	var items []reviewEntry
+	var after any
+	for i := 0; i < 1000; i++ {
+		w := c.do("POST", path+"/erasure-reasons/page", map[string]any{"after": after}, true)
+		if w.Code != http.StatusOK {
+			return body
+		}
+		var page reasonPageJSON
+		if json.Unmarshal(w.Body.Bytes(), &page) != nil {
+			return body
+		}
+		for _, it := range page.Items {
+			id, _ := parseRequestID(it.RequestID)
+			items = append(items, reviewEntry{ID: id, Hash: it.ReviewHash, Choice: choice})
+		}
+		if page.Next == nil {
+			break
+		}
+		after = *page.Next
+	}
+	if len(items) == 0 {
+		return body
+	}
+	m["reasonReview"] = envelopeOf(items)
+	return m
+}
+
+// reviewEntry is one item of a review a test builds: the id and hash a page
+// served, and the choice ("keep", "remove", or anything else for a code the
+// server refuses).
+type reviewEntry struct {
+	ID     int64
+	Hash   string
+	Choice string
+}
+
+// envelopeOf builds the set-v1 envelope of entries the way the browser does,
+// from the wire spec and not from production code: entries sorted by ascending
+// signed id, the digest over prefix, 0x00, the count, then each id and raw hash,
+// and a two-bit code per item (1 keep, 2 remove, 0 otherwise).
+func envelopeOf(entries []reviewEntry) map[string]any {
+	sorted := append([]reviewEntry(nil), entries...)
+	sort.Slice(sorted, func(i, j int) bool { return sorted[i].ID < sorted[j].ID })
+	return envelopeInOrder(sorted)
+}
+
+// envelopeInOrder is envelopeOf without the sort, so a test can make the
+// ordering mistake on purpose.
+func envelopeInOrder(sorted []reviewEntry) map[string]any {
+	var pre bytes.Buffer
+	pre.WriteString("fold:erasure-reason-set:v1")
+	pre.WriteByte(0)
+	var u8 [8]byte
+	binary.BigEndian.PutUint64(u8[:], uint64(len(sorted)))
+	pre.Write(u8[:])
+	choices := make([]byte, (len(sorted)+3)/4)
+	for i, e := range sorted {
+		binary.BigEndian.PutUint64(u8[:], uint64(e.ID))
+		pre.Write(u8[:])
+		raw, err := hex.DecodeString(e.Hash)
+		if err != nil || len(raw) != 32 {
+			panic("envelopeOf: not a review hash: " + e.Hash)
+		}
+		pre.Write(raw)
+		code := byte(0)
+		switch e.Choice {
+		case "keep":
+			code = 1
+		case "remove":
+			code = 2
+		}
+		choices[i/4] |= code << (2 * uint(i%4))
+	}
+	sum := sha256.Sum256(pre.Bytes())
+	return map[string]any{
+		"format":  "set-v1",
+		"count":   strconv.Itoa(len(sorted)),
+		"digest":  hex.EncodeToString(sum[:]),
+		"choices": base64.StdEncoding.EncodeToString(choices),
+	}
+}
+
+func newAPIClient(t *testing.T, app *App) *apiClient {
+	t.Helper()
+	return &apiClient{t: t, app: app, router: app.setupRouter(), jar: map[string]*http.Cookie{}}
+}
+
+func (c *apiClient) fetchCSRF() {
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest("GET", "/api/v1/auth/csrf", nil)
+	for _, ck := range c.jar {
+		req.AddCookie(ck)
+	}
+	c.router.ServeHTTP(w, req)
+	for _, ck := range w.Result().Cookies() {
+		c.jar[ck.Name] = ck
+	}
+	var body struct {
+		CSRFToken string `json:"csrfToken"`
+	}
+	if err := json.NewDecoder(w.Result().Body).Decode(&body); err != nil {
+		c.t.Fatalf("decode csrf: %v", err)
+	}
+	if body.CSRFToken == "" {
+		c.t.Fatal("empty csrf token")
+	}
+	c.token = body.CSRFToken
+}
+
+// rawJSON is a request body sent byte for byte: json.Marshal would refuse (or
+// rewrite) a body that is not valid JSON, and a test of the server's refusal of
+// one needs it exactly as written.
+type rawJSON []byte
+
+func (c *apiClient) do(method, path string, jsonBody any, csrf bool) *httptest.ResponseRecorder {
+	if c.autoReview && method == "DELETE" && deleteUserPath.MatchString(path) {
+		jsonBody = c.withKeptReasons(path, jsonBody)
+	}
+	var rdr *bytes.Reader
+	if raw, ok := jsonBody.(rawJSON); ok {
+		rdr = bytes.NewReader(raw)
+	} else if jsonBody != nil {
+		b, err := json.Marshal(jsonBody)
+		if err != nil {
+			c.t.Fatalf("marshal: %v", err)
+		}
+		rdr = bytes.NewReader(b)
+	} else {
+		rdr = bytes.NewReader(nil)
+	}
+	req := httptest.NewRequest(method, path, rdr)
+	if c.ctx != nil {
+		req = req.WithContext(c.ctx)
+	}
+	if c.ua != "" {
+		req.Header.Set("User-Agent", c.ua)
+	}
+	if c.ip != "" {
+		req.RemoteAddr = net.JoinHostPort(c.ip, "1234")
+	}
+	if jsonBody != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	for _, ck := range c.jar {
+		req.AddCookie(ck)
+	}
+	if csrf || c.pinned {
+		req.Header.Set("X-CSRF-Token", c.token)
+	}
+	if c.pinned {
+		req.Header.Set(sessionCheckHeader, sessionCheckVersion)
+	}
+	w := httptest.NewRecorder()
+	c.router.ServeHTTP(w, req)
+	for _, ck := range w.Result().Cookies() {
+		c.jar[ck.Name] = ck
+	}
+	// Like the SPA (api/core.ts rotatesCsrf), refetch the token after a sign-in path:
+	// the server rotates it there (M7.2 slice b).
+	if csrf && signInPaths[path] && setsCookie(w, sessionName) {
+		c.fetchCSRF()
+	}
+	if !c.holdNotices && c.app != nil {
+		drainNotices(c.t, c.app)
+	}
+	return w
+}
+
+type heldBodyReader struct {
+	*io.PipeReader
+	reading chan struct{}
+	once    sync.Once
+}
+
+func (r *heldBodyReader) Read(p []byte) (int, error) {
+	r.once.Do(func() { close(r.reading) })
+	return r.PipeReader.Read(p)
+}
+
+type heldRequest struct {
+	client  *apiClient
+	path    string
+	reading <-chan struct{}
+	done    <-chan *httptest.ResponseRecorder
+	writer  *io.PipeWriter
+	last    []byte
+	once    sync.Once
+	written chan error
+}
+
+// doHeld stops in JSON binding after auth, CSRF and the handler's preflight.
+// An incomplete JSON value prevents the handler from entering its transaction
+// while a test commits a real concurrent mutation.
+func (c *apiClient) doHeld(method, path string, jsonBody any) *heldRequest {
+	c.t.Helper()
+	b, err := json.Marshal(jsonBody)
+	if err != nil || len(b) < 2 {
+		c.t.Fatalf("held body: %q, %v", b, err)
+	}
+	reader, writer := io.Pipe()
+	reading := make(chan struct{})
+	body := &heldBodyReader{PipeReader: reader, reading: reading}
+	req := httptest.NewRequest(method, path, body)
+	if c.ctx != nil {
+		req = req.WithContext(c.ctx)
+	}
+	if c.ua != "" {
+		req.Header.Set("User-Agent", c.ua)
+	}
+	if c.ip != "" {
+		req.RemoteAddr = net.JoinHostPort(c.ip, "1234")
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-CSRF-Token", c.token)
+	for _, ck := range c.jar {
+		req.AddCookie(ck)
+	}
+	done := make(chan *httptest.ResponseRecorder, 1)
+	h := &heldRequest{client: c, path: path, reading: reading, done: done,
+		writer: writer, last: b[len(b)-1:], written: make(chan error, 1)}
+	c.t.Cleanup(func() { _ = reader.Close(); _ = writer.Close() })
+	go func() {
+		w := httptest.NewRecorder()
+		c.router.ServeHTTP(w, req)
+		done <- w
+	}()
+	prefix := make(chan error, 1)
+	go func() { _, err := writer.Write(b[:len(b)-1]); prefix <- err }()
+	select {
+	case <-h.reading:
+	case w := <-done:
+		c.t.Fatalf("held request returned before reading its body: %d %s", w.Code, w.Body.String())
+	case <-time.After(8 * time.Second):
+		c.t.Fatal("held request never read its body")
+	}
+	select {
+	case err := <-prefix:
+		if err != nil {
+			c.t.Fatalf("held body prefix: %v", err)
+		}
+	case <-time.After(8 * time.Second):
+		c.t.Fatal("held request did not consume its body prefix")
+	}
+	return h
+}
+
+func (h *heldRequest) release() {
+	h.once.Do(func() {
+		go func() {
+			_, err := h.writer.Write(h.last)
+			closeErr := h.writer.Close()
+			if err == nil {
+				err = closeErr
+			}
+			h.written <- err
+		}()
+	})
+}
+
+func (h *heldRequest) wait(t *testing.T) *httptest.ResponseRecorder {
+	t.Helper()
+	var w *httptest.ResponseRecorder
+	select {
+	case w = <-h.done:
+	case <-time.After(8 * time.Second):
+		t.Fatal("held request timed out (possible deadlock)")
+	}
+	select {
+	case err := <-h.written:
+		if err != nil {
+			t.Fatalf("release held body: %v", err)
+		}
+	case <-time.After(8 * time.Second):
+		t.Fatal("held body was not released")
+	}
+	for _, ck := range w.Result().Cookies() {
+		h.client.jar[ck.Name] = ck
+	}
+	if signInPaths[h.path] && setsCookie(w, sessionName) {
+		h.client.fetchCSRF()
+	}
+	if !h.client.holdNotices && h.client.app != nil {
+		drainNotices(t, h.client.app)
+	}
+	return w
+}
+
+func decodeJSON(t *testing.T, w *httptest.ResponseRecorder, v any) {
+	t.Helper()
+	if err := json.NewDecoder(w.Result().Body).Decode(v); err != nil {
+		t.Fatalf("decode json: %v", err)
+	}
+}
+
+func loginAPI(t *testing.T, app *App, name, password string) *apiClient {
+	t.Helper()
+	c := newAPIClient(t, app)
+	c.fetchCSRF()
+	w := c.do("POST", "/api/v1/auth/login",
+		map[string]string{"email": testEmail(name), "password": password}, true)
+	if w.Code != http.StatusOK {
+		t.Fatalf("login failed: %d %s", w.Code, w.Body.String())
+	}
+	return c
+}
+
+func itoa(u uint) string { return strconv.FormatUint(uint64(u), 10) }
+
+// groupDatePaging is the marker the current client sends on every GET
+// /api/v1/groups/:id.
+const groupDatePaging = "datePaging=2"
+
+// groupDetailPath is GET /api/v1/groups/:id as the current client asks for
+// it, with any page parameters ("limit=1", "cursor=..."). A 404 probe, or a
+// request that stays an older client's, writes its path out by hand.
+func groupDetailPath(group uint, params ...string) string {
+	return "/api/v1/groups/" + itoa(group) + "?" + strings.Join(append([]string{groupDatePaging}, params...), "&")
+}
+
+// newTestGroup creates a group led (through its membership, C12) by leader.
+func newTestGroup(t *testing.T, app *App, leader *models.User, name, status string) *models.Group {
+	t.Helper()
+	g := models.Group{Name: name, LeaderID: leader.ID, Status: status, Visibility: models.VisibilityPublic}
+	if err := app.DB.Create(&g).Error; err != nil {
+		t.Fatalf("create group: %v", err)
+	}
+	if err := app.DB.Create(&models.Membership{UserID: leader.ID, GroupID: g.ID,
+		Role: models.MembershipLeader, Status: "active", JoinedAt: time.Now().UTC()}).Error; err != nil {
+		t.Fatalf("create leader membership: %v", err)
+	}
+	return &g
+}
+
+func activeGroup(t *testing.T, app *App, leader *models.User, name, visibility, tags string) models.Group {
+	t.Helper()
+	g := models.Group{
+		Name: name, LeaderID: leader.ID, Status: models.GroupActive,
+		Visibility: visibility, Tags: tags,
+	}
+	if err := app.DB.Create(&g).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := app.DB.Create(&models.Membership{
+		UserID: leader.ID, GroupID: g.ID,
+		Role: models.MembershipLeader, Status: "active", JoinedAt: time.Now().UTC(),
+	}).Error; err != nil {
+		t.Fatal(err)
+	}
+	return g
+}
+
+func groupNames(t *testing.T, w *httptest.ResponseRecorder) []string {
+	t.Helper()
+	var body struct {
+		Groups []groupSummaryJSON `json:"groups"`
+	}
+	decodeJSON(t, w, &body)
+	names := make([]string, 0, len(body.Groups))
+	for _, g := range body.Groups {
+		names = append(names, g.Name)
+	}
+	return names
+}
+
+func containsName(names []string, name string) bool {
+	for _, n := range names {
+		if n == name {
+			return true
+		}
+	}
+	return false
+}
+
+func addMember(t *testing.T, app *App, u *models.User, g *models.Group, role string) {
+	t.Helper()
+	if err := app.DB.Create(&models.Membership{UserID: u.ID, GroupID: g.ID, Role: role, Status: "active"}).Error; err != nil {
+		t.Fatal(err)
+	}
+}
+
+func roleChangeRows(t *testing.T, app *App) []models.AuditLog {
+	t.Helper()
+	var rows []models.AuditLog
+	if err := app.DB.Where("action = ?", audit.RoleChanged).Order("id").Find(&rows).Error; err != nil {
+		t.Fatal(err)
+	}
+	return rows
+}
+
+func notificationTitles(t *testing.T, c *apiClient) []string {
+	t.Helper()
+	var out []string
+	for _, n := range feed(t, c, "") {
+		kind := n.Kind
+		if kind == "group.leadership_changed" {
+			kind = "leadership"
+		}
+		out = append(out, kind+": "+n.Title)
+	}
+	return out
+}
+
+func tryLogin(t *testing.T, app *App, ip, email, password string) (int, string) {
+	t.Helper()
+	c := newAPIClient(t, app)
+	c.ip = ip
+	c.fetchCSRF()
+	w := c.do("POST", "/api/v1/auth/login", map[string]string{"email": email, "password": password}, true)
+	return w.Code, w.Body.String()
+}
+
+func setLimit(t *testing.T, c *apiClient, g *models.Group, limit any) {
+	t.Helper()
+	if w := c.do("PUT", "/api/v1/groups/"+itoa(g.ID), groupBody(t, c, "/api/v1/groups/"+itoa(g.ID), map[string]any{"memberLimit": limit}), true); w.Code != http.StatusOK {
+		t.Fatalf("set limit %v: %d %s", limit, w.Code, w.Body.String())
+	}
+}
+
+func activeCount(app *App, g *models.Group) int64 { return int64(membersIn(app.DB, g.ID)) }
+
+func boolInt(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
+}
+
+func departureConfirmBody(t *testing.T, c *apiClient, previewPath string) map[string]any {
+	t.Helper()
+	w := c.do("GET", previewPath, nil, false)
+	if w.Code != http.StatusOK {
+		t.Fatalf("departure preview %s: %d %s", previewPath, w.Code, w.Body.String())
+	}
+	var response struct {
+		Departure departurePreviewJSON `json:"departure"`
+	}
+	decodeJSON(t, w, &response)
+	keep := make([]uint, 0, response.Departure.DefaultKeepCount)
+	for _, date := range response.Departure.Dates {
+		if date.DefaultKeep {
+			keep = append(keep, date.OccurrenceID)
+		}
+	}
+	return map[string]any{"snapshot": response.Departure.Snapshot, "keepOccurrenceIds": keep}
+}
+
+func confirmDeparture(t *testing.T, c *apiClient, method, mutationPath, previewPath string, note string) *httptest.ResponseRecorder {
+	t.Helper()
+	body := departureConfirmBody(t, c, previewPath)
+	if note != "" {
+		body["note"] = note
+	}
+	return c.do(method, mutationPath, body, true)
+}
+
+type auditMeta struct {
+	UserID          uint   `json:"userId"`
+	OldRole         string `json:"oldRole"`
+	NewRole         string `json:"newRole"`
+	Note            string `json:"note"`
+	Reason          string `json:"reason"`
+	DepartingUserID uint   `json:"departingUserId"`
+	Status          string `json:"status"`
+	Limit           int    `json:"limit"`
+	SelfConfirm     bool   `json:"selfConfirm"`
+}
+
+func auditRows(t *testing.T, app *App, action string) ([]models.AuditLog, []auditMeta) {
+	t.Helper()
+	var rows []models.AuditLog
+	if err := app.DB.Where("action = ?", action).Order("id").Find(&rows).Error; err != nil {
+		t.Fatal(err)
+	}
+	metas := make([]auditMeta, len(rows))
+	for i, r := range rows {
+		if err := json.Unmarshal([]byte(r.MetaJSON), &metas[i]); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return rows, metas
+}
+
+func membershipStatus(app *App, u *models.User, g *models.Group) string {
+	var m models.Membership
+	if app.DB.Where("user_id = ? AND group_id = ?", u.ID, g.ID).Limit(1).Find(&m).RowsAffected == 0 {
+		return "none"
+	}
+	return m.Status
+}
+
+// seedEvent inserts a one-time UTC event and its occurrence. Direct inserts
+// have to set CreatedBy (the foreign key) and a scheduled occurrence, or
+// registrations and the notification feed see nothing.
+func seedEvent(t *testing.T, app *App, g *models.Group, createdBy uint, start time.Time) (models.Event, models.EventOccurrence) {
+	t.Helper()
+	start = start.UTC()
+	gid := g.ID
+	vis := g.Visibility
+	if vis == "" {
+		vis = models.VisibilityPublic
+	}
+	ev := models.Event{
+		GroupID: &gid, Visibility: vis,
+		StartsLocal:     start.Format("2006-01-02T15:04"),
+		DurationMinutes: 60, TZID: "UTC", Location: "", CreatedBy: createdBy,
+	}
+	if err := app.DB.Create(&ev).Error; err != nil {
+		t.Fatalf("seed event: %v", err)
+	}
+	occ := models.EventOccurrence{
+		EventID: ev.ID, OriginalDate: calDate(start.Format("2006-01-02")),
+		StartsAt: start, EndsAt: start.Add(time.Hour),
+		Status: models.OccurrenceScheduled,
+	}
+	if err := app.DB.Create(&occ).Error; err != nil {
+		t.Fatalf("seed occurrence: %v", err)
+	}
+	return ev, occ
+}
+
+func openGroup(t *testing.T, app *App, name string) (*apiClient, string) {
+	t.Helper()
+	newTestUser(t, app, "admin", "password1234", models.RoleAdmin)
+	admin := loginAPI(t, app, "admin", "password1234")
+	w := admin.do("POST", "/api/v1/groups", map[string]any{"name": name, "location": "Hall"}, true)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("create group: %d %s", w.Code, w.Body.String())
+	}
+	var created struct {
+		Group groupSummaryJSON `json:"group"`
+	}
+	decodeJSON(t, w, &created)
+	return admin, itoa(created.Group.ID)
+}
+
+func listOccurrences(t *testing.T, c *apiClient, gid, from, to string) []occurrenceJSON {
+	t.Helper()
+	path := "/api/v1/groups/" + gid + "/events?from=" + from + "&to=" + to
+	out := []occurrenceJSON{}
+	cursor := ""
+	for {
+		url := path
+		if cursor != "" {
+			url += "&cursor=" + cursor
+		}
+		w := c.do("GET", url, nil, false)
+		if w.Code != http.StatusOK {
+			t.Fatalf("list events: %d %s", w.Code, w.Body.String())
+		}
+		var body groupEventsJSON
+		decodeJSON(t, w, &body)
+		out = append(out, body.Events...)
+		if !body.HasMore {
+			return out
+		}
+		if body.NextCursor == "" || body.NextCursor == cursor {
+			t.Fatal("list events did not advance its cursor")
+		}
+		cursor = body.NextCursor
+	}
+}
+
+func occurrenceOn(t *testing.T, list []occurrenceJSON, date string) occurrenceJSON {
+	t.Helper()
+	for _, o := range list {
+		if o.Date == date {
+			return o
+		}
+	}
+	t.Fatalf("no occurrence on %s (%d in the list)", date, len(list))
+	return occurrenceJSON{}
+}
+
+func weeklyRule(start time.Time) string {
+	days := []string{"SU", "MO", "TU", "WE", "TH", "FR", "SA"}
+	return "FREQ=WEEKLY;BYDAY=" + days[start.UTC().Weekday()]
+}
+
+func atUTC(t time.Time, hour, min int) time.Time {
+	t = t.UTC()
+	return time.Date(t.Year(), t.Month(), t.Day(), hour, min, 0, 0, time.UTC)
+}
+
+func apiDo(t *testing.T, c *apiClient, method, path string, body any, want int) string {
+	t.Helper()
+	w := c.do(method, path, body, method != "GET")
+	if w.Code != want {
+		t.Fatalf("%s %s: %d %s, want %d", method, path, w.Code, w.Body.String(), want)
+	}
+	return w.Body.String()
+}
+
+func createGroupAs(t *testing.T, c *apiClient, name, visibility string) uint {
+	t.Helper()
+	w := c.do("POST", "/api/v1/groups", map[string]any{
+		"name": name, "visibility": visibility, "location": "Hall",
+	}, true)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("create group: %d %s", w.Code, w.Body.String())
+	}
+	var created struct {
+		Group groupSummaryJSON `json:"group"`
+	}
+	decodeJSON(t, w, &created)
+	return created.Group.ID
+}
+
+func addMemberEmail(t *testing.T, c *apiClient, gid uint, email string) uint {
+	t.Helper()
+	w := c.do("POST", "/api/v1/groups/"+itoa(gid)+"/members", map[string]any{"email": email}, true)
+	if w.Code != http.StatusOK {
+		t.Fatalf("add member: %d %s", w.Code, w.Body.String())
+	}
+	var body struct {
+		Membership struct {
+			UserID uint `json:"userId"`
+		} `json:"membership"`
+	}
+	decodeJSON(t, w, &body)
+	return body.Membership.UserID
+}
+
+func scheduleGroupEvent(t *testing.T, c *apiClient, gid uint, title string) eventJSON {
+	t.Helper()
+	w := c.do("POST", "/api/v1/groups/"+itoa(gid)+"/events", map[string]any{
+		"title": title, "startsLocal": "2026-12-01T19:00", "durationMinutes": 60, "tzid": "UTC",
+	}, true)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("create event: %d %s", w.Code, w.Body.String())
+	}
+	var created struct {
+		Event eventJSON `json:"event"`
+	}
+	decodeJSON(t, w, &created)
+	return created.Event
+}
+
+func setVisibility(t *testing.T, c *apiClient, eventID uint, visibility, reason string, want int) string {
+	t.Helper()
+	path := fmt.Sprintf("/api/v1/events/%d/visibility", eventID)
+	return apiDo(t, c, "PUT", path, visibilityBody(t, c, path, map[string]any{
+		"visibility": visibility, "reason": reason,
+	}), want)
+}
+
+type eventPage struct {
+	Event            eventJSON        `json:"event"`
+	Occurrences      []occurrenceJSON `json:"occurrences"`
+	CanManage        bool             `json:"canManage"`
+	CanSetVisibility bool             `json:"canSetVisibility"`
+}
+
+func getEvent(t *testing.T, c *apiClient, id uint, want int) (eventPage, string) {
+	t.Helper()
+	w := c.do("GET", fmt.Sprintf("/api/v1/events/%d", id), nil, false)
+	if w.Code != want {
+		t.Fatalf("get event: %d %s, want %d", w.Code, w.Body.String(), want)
+	}
+	var page eventPage
+	if want == http.StatusOK {
+		decodeJSON(t, w, &page)
+	}
+	return page, w.Body.String()
+}
+
+func noticeIDs(t *testing.T, c *apiClient) []notificationJSON {
+	t.Helper()
+	return feed(t, c, "")
+}
+
+func hasVisibilityNotice(ns []notificationJSON, titlePart, reason string) bool {
+	for _, n := range ns {
+		if n.Kind == "event.visibility_override" && strings.Contains(n.Title, titlePart) && strings.Contains(n.Body, reason) {
+			return true
+		}
+	}
+	return false
+}
+
+func register(t *testing.T, c *apiClient, eventID uint) {
+	t.Helper()
+	apiDo(t, c, "PUT", fmt.Sprintf("/api/v1/events/%d/registrations", eventID), map[string]any{
+		"status": "going", "date": "2026-12-01",
+	}, http.StatusOK)
+}
+
+func regCount(app *App, u *models.User, eventID uint) int64 {
+	var n int64
+	app.DB.Table("registrations").
+		Joins("JOIN event_occurrences ON event_occurrences.id = registrations.occurrence_id").
+		Where("registrations.user_id = ? AND event_occurrences.event_id = ?", u.ID, eventID).Count(&n)
+	return n
+}
+
+func eventRow(t *testing.T, app *App, id uint) models.Event {
+	t.Helper()
+	var ev models.Event
+	if err := app.DB.First(&ev, id).Error; err != nil {
+		t.Fatal(err)
+	}
+	return ev
+}
+
+// feed returns the user's feed for filter: open tasks first, then items.
+func feed(t *testing.T, c *apiClient, filter string) []notificationJSON {
+	t.Helper()
+	w := c.do("GET", "/api/v1/notifications?filter="+filter, nil, false)
+	if w.Code != http.StatusOK {
+		t.Fatalf("notifications: %d %s", w.Code, w.Body.String())
+	}
+	var body struct {
+		Waiting       []notificationJSON `json:"waiting"`
+		Notifications []notificationJSON `json:"notifications"`
+	}
+	decodeJSON(t, w, &body)
+	return append(body.Waiting, body.Notifications...)
+}
+
+func badge(t *testing.T, c *apiClient, etag string) (code int, unread, waiting int64, tag string) {
+	t.Helper()
+	req := httptest.NewRequest("GET", "/api/v1/notifications/badge", nil)
+	for _, ck := range c.jar {
+		req.AddCookie(ck)
+	}
+	if etag != "" {
+		req.Header.Set("If-None-Match", etag)
+	}
+	w := httptest.NewRecorder()
+	c.router.ServeHTTP(w, req)
+	var body struct{ Unread, Waiting int64 }
+	if w.Code == http.StatusOK {
+		decodeJSON(t, w, &body)
+	}
+	return w.Code, body.Unread, body.Waiting, w.Header().Get("ETag")
+}
+
+func findKind(ns []notificationJSON, kind string) *notificationJSON {
+	for i := range ns {
+		if ns[i].Kind == kind {
+			return &ns[i]
+		}
+	}
+	return nil
+}
+
+// drainNotices drains notice and direct-mail jobs for immediate outbox reads without
+// claiming push, message, or other jobs as unknown kinds. Failures wait an hour
+// so a failing sender cannot keep this loop busy. Later keeps its due time.
+func drainNotices(t *testing.T, app *App) {
+	t.Helper()
+	kinds := map[string]jobs.Kind{}
+	var names []string
+	for _, k := range append(app.notifyKinds(), app.mailKinds()...) {
+		kinds[k.Name] = k
+		names = append(names, k.Name)
+	}
+	for {
+		var job models.Job
+		err := app.DB.Raw(`UPDATE jobs SET status = ?, locked_at = now(), locked_by = ?, attempts = attempts + 1, updated_at = now()
+			WHERE id = (SELECT id FROM jobs WHERE kind IN ? AND
+				((status IN (?, ?) AND run_at <= now()) OR (status = ? AND locked_at < now() - make_interval(secs => ?)))
+				ORDER BY run_at, id FOR UPDATE SKIP LOCKED LIMIT 1)
+			RETURNING *`, models.JobRunning, "test:notices", names,
+			models.JobQueued, models.JobFailed, models.JobRunning, jobs.DefaultLease.Seconds()).Scan(&job).Error
+		if err != nil {
+			t.Fatal(err)
+		}
+		if job.ID == 0 {
+			return
+		}
+		runErr := kinds[job.Kind].Run(context.Background(), json.RawMessage(job.Payload))
+		updates := map[string]any{"status": models.JobDone, "locked_at": nil, "last_error": "", "updated_at": time.Now()}
+		if runErr != nil {
+			updates["status"] = models.JobFailed
+			updates["last_error"] = jobs.CleanError(runErr)
+			updates["run_at"] = time.Now().Add(time.Hour)
+			// Later's concrete type is private to jobs. Parse its public error
+			// string and confirm its identity, including wrapped errors.
+			for e := runErr; e != nil; e = errors.Unwrap(e) {
+				stamp, ok := strings.CutPrefix(e.Error(), "not due until ")
+				at, parseErr := time.Parse(time.RFC3339, stamp)
+				if ok && parseErr == nil && reflect.TypeOf(e) == reflect.TypeOf(jobs.Later(at)) {
+					updates["status"] = models.JobQueued
+					updates["attempts"] = gorm.Expr("attempts - 1")
+					updates["last_error"] = ""
+					updates["run_at"] = at
+					break
+				}
+			}
+		}
+		if err := app.DB.Model(&models.Job{}).Where("id = ? AND status = ? AND locked_by = ?", job.ID, models.JobRunning, "test:notices").Updates(updates).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// failJobEnqueue injects failure at jobs.Enqueue's INSERT, which uses Exec
+// rather than GORM Create. Removing the callback is safe both explicitly and
+// during cleanup, including when an assertion stops the test early.
+func failJobEnqueue(t *testing.T, db *gorm.DB, kind string) func() {
+	t.Helper()
+	return failJobEnqueueWith(t, db, kind, errors.New("injected job enqueue failure"))
+}
+
+// failJobEnqueueWith is failJobEnqueue with the error the insert fails with, for
+// a test that needs a particular SQLSTATE.
+func failJobEnqueueWith(t *testing.T, db *gorm.DB, kind string, failure error) func() {
+	t.Helper()
+	name := fmt.Sprintf("test:fail_enqueue:%d", queryCounterSeq.Add(1))
+	if err := db.Callback().Raw().Before("gorm:raw").Register(name, func(tx *gorm.DB) {
+		if strings.HasPrefix(tx.Statement.SQL.String(), "INSERT INTO jobs ") {
+			for _, arg := range tx.Statement.Vars {
+				if value, ok := arg.(string); ok && value == kind {
+					tx.AddError(failure)
+					return
+				}
+			}
+		}
+	}); err != nil {
+		t.Fatal(err)
+	}
+	var once sync.Once
+	stop := func() { once.Do(func() { _ = db.Callback().Raw().Remove(name) }) }
+	t.Cleanup(stop)
+	return stop
+}
+
+// cancelOnJobEnqueue runs cancel just before a job of kind is inserted, as if
+// the client disconnected between the request's checks and its durable write.
+// A write that rides the request context then fails; one that does not is
+// unaffected.
+func cancelOnJobEnqueue(t *testing.T, db *gorm.DB, kind string, cancel context.CancelFunc) {
+	t.Helper()
+	name := fmt.Sprintf("test:cancel_enqueue:%d", queryCounterSeq.Add(1))
+	if err := db.Callback().Raw().Before("gorm:raw").Register(name, func(tx *gorm.DB) {
+		if strings.HasPrefix(tx.Statement.SQL.String(), "INSERT INTO jobs ") {
+			for _, arg := range tx.Statement.Vars {
+				if value, ok := arg.(string); ok && value == kind {
+					cancel()
+					return
+				}
+			}
+		}
+	}); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Callback().Raw().Remove(name) })
+}
+
+type testDBOperationKey struct{}
+
+// pauseDBRead pauses one named participant just after its first read of table.
+// Operation names are scoped to the database context, so observer queries and
+// other participants never trip the barrier. Release precedes callback removal
+// on cleanup, so even a failed assertion cannot strand the worker.
+func pauseDBRead(t *testing.T, db *gorm.DB, operation, table string) (<-chan struct{}, func()) {
+	t.Helper()
+	reached, resume := make(chan struct{}), make(chan struct{})
+	var paused atomic.Bool
+	name := fmt.Sprintf("test:pause_read:%d", queryCounterSeq.Add(1))
+	if err := db.Callback().Query().After("gorm:query").Register(name, func(tx *gorm.DB) {
+		if tx.Statement.Table != table || tx.Statement.Context.Value(testDBOperationKey{}) != operation || paused.Swap(true) {
+			return
+		}
+		close(reached)
+		select {
+		case <-resume:
+		case <-tx.Statement.Context.Done():
+			tx.AddError(tx.Statement.Context.Err())
+		}
+	}); err != nil {
+		t.Fatal(err)
+	}
+	var once sync.Once
+	release := func() { once.Do(func() { close(resume) }) }
+	t.Cleanup(func() { release(); _ = db.Callback().Query().Remove(name) })
+	return reached, release
+}
+
+// startDBSession reserves the actual connection the participant uses, exposing
+// its backend PID so a race test can prove that this session reached a lock.
+func startDBSession(t *testing.T, db *gorm.DB, operation string, work func(*gorm.DB) error) (int, <-chan error) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	ctx = context.WithValue(ctx, testDBOperationKey{}, operation)
+	pid := make(chan int, 1)
+	done := make(chan error, 1)
+	finished := make(chan struct{})
+	go func() {
+		defer close(finished)
+		done <- db.WithContext(ctx).Connection(func(conn *gorm.DB) error {
+			conn = conn.Session(&gorm.Session{NewDB: true})
+			var id int
+			if err := conn.Raw("SELECT pg_backend_pid()").Scan(&id).Error; err != nil {
+				return err
+			}
+			pid <- id
+			return work(conn)
+		})
+	}()
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case <-finished:
+		case <-time.After(10 * time.Second):
+			t.Error("database participant did not stop")
+		}
+	})
+	select {
+	case id := <-pid:
+		return id, done
+	case err := <-done:
+		t.Fatalf("reserve database participant: %v", err)
+	case <-ctx.Done():
+		t.Fatal("timed out reserving database participant")
+	}
+	return 0, done
+}
+
+func awaitDBSignal(t *testing.T, reached <-chan struct{}) {
+	t.Helper()
+	select {
+	case <-reached:
+	case <-time.After(5 * time.Second):
+		t.Fatal("database participant did not reach the barrier")
+	}
+}
+
+func awaitDBResult(t *testing.T, done <-chan error) error {
+	t.Helper()
+	select {
+	case err := <-done:
+		return err
+	case <-time.After(10 * time.Second):
+		t.Fatal("database participant did not finish")
+		return nil
+	}
+}
+
+func waitDBBlocked(t *testing.T, db *gorm.DB, waiter, blocker int) {
+	t.Helper()
+	testdb.WaitBlocked(t, db, waiter, blocker)
+}
+
+func devOutbox(t *testing.T, app *App) *mail.DevOutbox {
+	t.Helper()
+	drainNotices(t, app)
+	ob, ok := mail.Unwrap(app.Mailer).(*mail.DevOutbox)
+	if !ok {
+		t.Fatal("test app has no devoutbox mailer")
+	}
+	return ob
+}
+
+func latestEmail(t *testing.T, app *App, to string) mail.OutboxMessage {
+	t.Helper()
+	drainNotices(t, app)
+	m, err := devOutbox(t, app).LatestTo(to)
+	if err != nil {
+		t.Fatalf("no email to %s: %v", to, err)
+	}
+	return m
+}
+
+var tokenRe = regexp.MustCompile(`token=([A-Za-z0-9_-]+)`)
+var manageTokenRe = regexp.MustCompile(`/guest/manage/([A-Za-z0-9_-]+)`)
+
+func tokenInEmail(t *testing.T, m mail.OutboxMessage) string {
+	t.Helper()
+	mt := tokenRe.FindStringSubmatch(m.Body)
+	if len(mt) != 2 {
+		t.Fatalf("no token in email to %s: %q", m.To, m.Body)
+	}
+	return mt[1]
+}
+
+// manageTokenInEmail pulls the manage token from a /guest/manage/<token>
+// link in an email body.
+func manageTokenInEmail(t *testing.T, m mail.OutboxMessage) string {
+	t.Helper()
+	mt := manageTokenRe.FindStringSubmatch(m.Body)
+	if len(mt) != 2 {
+		t.Fatalf("no manage token in email to %s: %q", m.To, m.Body)
+	}
+	return mt[1]
+}
+
+func auditCount(t *testing.T, app *App, action string) int64 {
+	t.Helper()
+	var n int64
+	if err := app.DB.Model(&models.AuditLog{}).Where("action = ?", action).Count(&n).Error; err != nil {
+		t.Fatalf("audit count: %v", err)
+	}
+	return n
+}
+
+func anonClient(t *testing.T, app *App, ip string) *apiClient {
+	t.Helper()
+	c := newAPIClient(t, app)
+	c.ip = ip
+	c.fetchCSRF()
+	return c
+}
+
+func signupBody(name, email, band, birth string) map[string]any {
+	body := map[string]any{"name": name, "email": email, "ageBand": band}
+	if birth != "" {
+		body["birthDate"] = birth
+	}
+	return body
+}
+
+func pendingRequest(t *testing.T, app *App, email string) models.AccountRequest {
+	t.Helper()
+	var req models.AccountRequest
+	if err := app.DB.Where("email = ? AND status = ?", email, models.RequestPending).First(&req).Error; err != nil {
+		t.Fatalf("pending request for %s: %v", email, err)
+	}
+	return req
+}
+
+func requestCount(t *testing.T, app *App, email string) int64 {
+	t.Helper()
+	var n int64
+	app.DB.Model(&models.AccountRequest{}).Where("email = ?", email).Count(&n)
+	return n
+}
+
+func adminNotification(t *testing.T, app *App, adminID, requestID uint) models.Notification {
+	t.Helper()
+	var n models.Notification
+	if err := app.DB.Where("user_id = ? AND kind = ? AND subject_id = ?", adminID, notify.AccountRequested, requestID).
+		First(&n).Error; err != nil {
+		t.Fatalf("admin notification for request %d: %v", requestID, err)
+	}
+	return n
+}
+
+func teenBirthDate() string {
+	return time.Now().UTC().AddDate(-15, 0, 0).Format("2006-01-02")
+}
+
+// tinyPNG returns a valid 1x1 PNG for upload tests.
+func tinyPNG(t *testing.T) []byte {
+	t.Helper()
+	img := image.NewRGBA(image.Rect(0, 0, 1, 1))
+	var buf bytes.Buffer
+	if err := png.Encode(&buf, img); err != nil {
+		t.Fatalf("encode png: %v", err)
+	}
+	return buf.Bytes()
+}
+
+func (c *apiClient) doMultipart(method, path, field, filename string, data []byte) *httptest.ResponseRecorder {
+	return c.doMultipartWith(method, path, field, filename, data, nil)
+}
+
+// doMultipartWith sends text fields beside the file.
+func (c *apiClient) doMultipartWith(method, path, field, filename string, data []byte, fields map[string]string) *httptest.ResponseRecorder {
+	var b bytes.Buffer
+	w := multipart.NewWriter(&b)
+	for name, value := range fields {
+		if err := w.WriteField(name, value); err != nil {
+			c.t.Fatalf("write form field: %v", err)
+		}
+	}
+	fw, err := w.CreateFormFile(field, filename)
+	if err != nil {
+		c.t.Fatalf("create form file: %v", err)
+	}
+	if _, err := fw.Write(data); err != nil {
+		c.t.Fatalf("write form file: %v", err)
+	}
+	if err := w.Close(); err != nil {
+		c.t.Fatalf("close writer: %v", err)
+	}
+	req := httptest.NewRequest(method, path, &b)
+	req.Header.Set("Content-Type", w.FormDataContentType())
+	for _, ck := range c.jar {
+		req.AddCookie(ck)
+	}
+	req.Header.Set("X-CSRF-Token", c.token)
+	rec := httptest.NewRecorder()
+	c.router.ServeHTTP(rec, req)
+	for _, ck := range rec.Result().Cookies() {
+		c.jar[ck.Name] = ck
+	}
+	return rec
+}
+
+func countSiteNameReads(t *testing.T, db *gorm.DB) *int {
+	t.Helper()
+	n := new(int)
+	name := fmt.Sprintf("test:site_name_reads:%d", queryCounterSeq.Add(1))
+	if err := db.Callback().Query().After("gorm:query").Register(name, func(tx *gorm.DB) {
+		if tx.Statement.Table == "settings" {
+			for _, v := range tx.Statement.Vars {
+				if v == "site_name" {
+					*n++
+					break
+				}
+			}
+		}
+	}); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Callback().Query().Remove(name) })
+	return n
+}
+
+// signInPaths are the routes that replace the browser credential
+// (replaceCredential), which rotates the CSRF token; web/src/api marks these
+// calls rotatesCsrf (and logout).
+var signInPaths = map[string]bool{
+	"/api/v1/auth/login":                  true,
+	"/api/v1/auth/password-reset/confirm": true,
+	"/api/v1/account-requests/confirm":    true,
+	"/api/v1/invitations/accept":          true,
+	"/api/v1/me/password":                 true,
+	"/api/v1/me/email/verify":             true,
+}
+
+func setsCookie(w *httptest.ResponseRecorder, name string) bool {
+	for _, ck := range w.Result().Cookies() {
+		if ck.Name == name {
+			return true
+		}
+	}
+	return false
+}
+
+func outboxTo(t *testing.T, app *App, to string) []models.MailOutbox {
+	t.Helper()
+	drainNotices(t, app)
+	var rows []models.MailOutbox
+	app.DB.Where("to_address = ?", to).Find(&rows)
+	return rows
+}
+
+// maxNoticeID is the newest stored notification id. A test that wants to know
+// which notices a call wrote takes it first and reads noticeIDsAfter after.
+func maxNoticeID(t *testing.T, db *gorm.DB) uint {
+	t.Helper()
+	var id uint
+	if err := db.Model(&models.Notification{}).Select("COALESCE(MAX(id), 0)").Scan(&id).Error; err != nil {
+		t.Fatal(err)
+	}
+	return id
+}
+
+// noticeIDsAfter lists, ascending, the notifications written after the id
+// maxNoticeID returned.
+func noticeIDsAfter(t *testing.T, db *gorm.DB, after uint) []uint {
+	t.Helper()
+	var ids []uint
+	if err := db.Model(&models.Notification{}).Where("id > ?", after).Order("id").Pluck("id", &ids).Error; err != nil {
+		t.Fatal(err)
+	}
+	return ids
+}
+
+// enqueueJob queues one job of a throwaway type with the given attempts, for
+// tests that seed the table with a kind of their own.
+func enqueueJob(db *gorm.DB, kind string, payload any, at time.Time, key string, attempts int) (bool, error) {
+	return jobs.Type{Name: kind, MaxAttempts: attempts}.Enqueue(db, payload, at, key)
+}
+
+func settingText(t *testing.T, app *App, key string) string {
+	t.Helper()
+	v, err := settingValueIn(app.DB, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return v
+}
+
+// useAttemptClock makes the App's clock read elapsed time since its attempt
+// state started: the process's monotonic time, advanced by hand.
+func (a *App) useAttemptClock(elapsed func() time.Duration) {
+	a.clock = func() time.Time {
+		if err := a.attempts.init(); err != nil {
+			panic(err)
+		}
+		return a.attempts.start.Add(elapsed())
+	}
+}
+
+// relIn, leadersIn and membersIn read group facts for assertions; a failed
+// read is a test panic.
+func relIn(db *gorm.DB, userID, groupID uint) policy.Rel {
+	rel, err := groupRel(db, userID, groupID)
+	if err != nil {
+		panic(err)
+	}
+	return rel
+}
+
+func leadersIn(db *gorm.DB, groupID uint) int {
+	n, err := leaderCount(db, groupID)
+	if err != nil {
+		panic(err)
+	}
+	return n
+}
+
+func membersIn(db *gorm.DB, groupID uint) int {
+	n, err := memberCount(db, groupID)
+	if err != nil {
+		panic(err)
+	}
+	return n
+}
+
+// rejectInsertsByName installs a BEFORE INSERT trigger on table that fails an
+// insert by its name column: "Reject Me" with SQLSTATE 22021 (Postgres refusing
+// the text) and "Break Me" with XX000 (an outage). Cleanup drops the trigger and
+// its function, so a later test sees a plain table.
+func rejectInsertsByName(t *testing.T, db *gorm.DB, table string) {
+	t.Helper()
+	fn := "test_reject_by_name_" + table
+	create := fmt.Sprintf(`CREATE FUNCTION %s() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+  IF NEW.name = 'Reject Me' THEN RAISE EXCEPTION 'test rejection' USING ERRCODE = '22021'; END IF;
+  IF NEW.name = 'Break Me' THEN RAISE EXCEPTION 'test outage' USING ERRCODE = 'XX000'; END IF;
+  RETURN NEW;
+END $$`, fn)
+	if err := db.Exec(create).Error; err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = db.Exec(fmt.Sprintf("DROP TRIGGER IF EXISTS %s ON %s", fn, table)).Error
+		_ = db.Exec(fmt.Sprintf("DROP FUNCTION IF EXISTS %s()", fn)).Error
+	})
+	if err := db.Exec(fmt.Sprintf("CREATE TRIGGER %s BEFORE INSERT ON %s FOR EACH ROW EXECUTE FUNCTION %s()", fn, table, fn)).Error; err != nil {
+		t.Fatal(err)
+	}
+}
+
+// serverErrorBody is the public wire body of an unexplained 5xx (errorBody in
+// api_errors.go).
+const serverErrorBody = `{"code":"server_error","error":"server error"}`
+
+// oneConnectionPool is a pool of one connection to app's test database. A
+// test points app.DB at it (with a short context, oneConnection) to prove a
+// snapshot read reads only through its own transaction and dispatches after
+// it: a statement on app.DB while the transaction is open waits for the one
+// connection the transaction holds and fails at the context's deadline.
+func oneConnectionPool(t *testing.T, app *App) *gorm.DB {
+	t.Helper()
+	var name string
+	gormMust(t, app.DB.Raw("SELECT current_database()").Scan(&name))
+	dsn, err := testdb.URL(name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	one, err := dbopen.Open(dsn, logger.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sqlDB, err := one.DB()
+	if err != nil {
+		t.Fatal(err)
+	}
+	sqlDB.SetMaxOpenConns(1)
+	t.Cleanup(func() { sqlDB.Close() })
+	orig := app.DB
+	t.Cleanup(func() { app.DB = orig })
+	return one
+}
+
+// oneConnection points app.DB at the one-connection pool for one call, with a
+// context that ends a wait for a second connection in a few seconds.
+func oneConnection(t *testing.T, app *App, one *gorm.DB) context.Context {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	t.Cleanup(cancel)
+	app.DB = one.WithContext(ctx)
+	return ctx
+}
+
+var (
+	eventVisibilityPath = regexp.MustCompile(`^/api/v1/events/(\d+)/visibility$`)
+	datePutPath         = regexp.MustCompile(`^/api/v1/events/(\d+)/occurrences/(\d{4}-\d{2}-\d{2})$`)
+	groupPutPath        = regexp.MustCompile(`^/api/v1/groups/(\d+)$`)
+)
+
+// visibilityPreviewPath is the preview a page runs before it sends body to
+// path (a PUT of an event's visibility, a date or a group).
+func visibilityPreviewPath(t *testing.T, path string, body map[string]any) string {
+	t.Helper()
+	q := url.Values{}
+	switch v := body["visibility"].(type) {
+	case nil:
+		q.Set("visibility", "series")
+	case string:
+		q.Set("visibility", v)
+	default:
+		t.Fatalf("visibility %v is not a string or null", v)
+	}
+	switch {
+	case eventVisibilityPath.MatchString(path):
+		if reset, _ := body["resetOverrides"].(bool); reset {
+			q.Set("resetOverrides", "1")
+		}
+		return path + "-impact?" + q.Encode()
+	case datePutPath.MatchString(path):
+		if s, ok := body["startsLocal"].(string); ok {
+			q.Set("startsLocal", s)
+		}
+		if d, ok := body["durationMinutes"]; ok {
+			q.Set("durationMinutes", fmt.Sprint(d))
+		}
+		return path + "/visibility-impact?" + q.Encode()
+	case groupPutPath.MatchString(path):
+		return path + "/visibility-impact?" + q.Encode()
+	}
+	t.Fatalf("%s has no visibility preview", path)
+	return ""
+}
+
+// confirmVisibility is body with the consent a page sends after its review
+// (DEC-158): the preview's token for exactly this change, read as c. A change
+// that needs no review ignores it.
+func confirmVisibility(t *testing.T, c *apiClient, path string, body map[string]any) map[string]any {
+	t.Helper()
+	var impact visibilityImpactJSON
+	if err := json.Unmarshal([]byte(apiDo(t, c, "GET", visibilityPreviewPath(t, path, body), nil, http.StatusOK)), &impact); err != nil {
+		t.Fatal(err)
+	}
+	if impact.Consent == "" {
+		t.Fatalf("the preview of %s carried no consent", path)
+	}
+	out := maps.Clone(body)
+	out["consent"] = impact.Consent
+	if eventVisibilityPath.MatchString(path) {
+		return visibilityBody(t, c, path, out)
+	}
+	if groupPutPath.MatchString(path) {
+		return groupBody(t, c, path, out)
+	}
+	return out
+}
+
+// groupBody is body for PUT /api/v1/groups/:id at path with the revision the
+// group form opened by c would hold (DEC-166): c reads the group page and its
+// revision goes with the save. A client that may not manage the group reads
+// none, and the server refuses it before judging the revision. A body that
+// already names a revision keeps it.
+func groupBody(t *testing.T, c *apiClient, path string, body map[string]any) map[string]any {
+	t.Helper()
+	if !groupPutPath.MatchString(path) {
+		t.Fatalf("%s is not a group save", path)
+	}
+	out := map[string]any{}
+	if w := c.do("GET", path+"?datePaging="+groupDetailDatePaging, nil, false); w.Code == http.StatusOK {
+		var page struct {
+			Group groupSummaryJSON `json:"group"`
+		}
+		decodeJSON(t, w, &page)
+		out["revision"] = page.Group.Revision
+	}
+	for k, v := range body {
+		out[k] = v
+	}
+	return out
+}
+
+// visibilityBody is body for PUT /api/v1/events/:id/visibility at path with
+// the revision the event page's visibility control would send, read by c just
+// before (DEC-163), and for PUT /api/v1/groups/:id the group form's
+// (groupBody, DEC-166). A client that may not manage the event reads none, and
+// the server refuses it before judging the revision. A body that already names
+// a revision keeps it. Another route's body is returned as it is, so a test
+// over several routes sends each body through it.
+func visibilityBody(t *testing.T, c *apiClient, path string, body map[string]any) map[string]any {
+	t.Helper()
+	if groupPutPath.MatchString(path) {
+		return groupBody(t, c, path, body)
+	}
+	m := eventVisibilityPath.FindStringSubmatch(path)
+	if m == nil {
+		return body
+	}
+	out := seriesBody(t, c, "/api/v1/events/"+m[1], nil)
+	for k, v := range body {
+		out[k] = v
+	}
+	return out
+}
+
+// seriesBody is body for PUT /api/v1/events/:id at path with the revision a
+// series editor opened by c would hold: c reads the event page and its
+// revision goes with the save. A client that may not manage the event reads
+// none, and the server refuses it before judging the revision.
+func seriesBody(t *testing.T, c *apiClient, path string, body map[string]any) map[string]any {
+	t.Helper()
+	out := map[string]any{}
+	if w := c.do("GET", path, nil, false); w.Code == http.StatusOK {
+		var page struct {
+			Event eventJSON `json:"event"`
+		}
+		decodeJSON(t, w, &page)
+		out["revision"] = page.Event.Revision
+	}
+	for k, v := range body {
+		out[k] = v
+	}
+	return out
+}
+
+func adminUserRevision(t *testing.T, c *apiClient, id uint) string {
+	t.Helper()
+	var list usersResponseJSON
+	decodeJSON(t, c.do("GET", "/api/v1/admin/users", nil, false), &list)
+	for _, user := range list.Users {
+		if user.ID == id && user.Revision != "" {
+			return user.Revision
+		}
+	}
+	t.Fatalf("admin user list did not include a revision for user %d", id)
+	return ""
+}
+
+func adminEditBody[V any](c *apiClient, id uint, fields map[string]V) map[string]any {
+	c.t.Helper()
+	body := make(map[string]any, len(fields)+1)
+	for key, value := range fields {
+		body[key] = value
+	}
+	body["revision"] = adminUserRevision(c.t, c, id)
+	return body
+}
+
+func adminSettingBody(c *apiClient, path, field, value string) map[string]any {
+	c.t.Helper()
+	var answer struct {
+		Revision string `json:"revision"`
+	}
+	decodeJSON(c.t, c.do("GET", path, nil, false), &answer)
+	if answer.Revision == "" {
+		c.t.Fatalf("%s did not include a revision", path)
+	}
+	return map[string]any{field: value, "revision": answer.Revision}
+}

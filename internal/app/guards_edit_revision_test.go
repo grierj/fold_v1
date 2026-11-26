@@ -1,0 +1,467 @@
+package app
+
+import (
+	"fmt"
+	"go/ast"
+	"slices"
+	"strings"
+	"testing"
+
+	"fold/internal/guardkit"
+)
+
+// ---------------------------------------------------------------------------
+// A manager's save names the read it was made from (DEC-162, DEC-163): each
+// handler that takes a revision compares it with the shared check
+// (edit_revision.go) inside its write transaction, under the row lock, so a
+// refusal writes nothing.
+//
+// Parse-only, package app. A check is a call named in editRevisionChecks
+// outside edit_revision.go. It is inside the transaction when
+// the nearest function literal around it is an argument of a call named
+// contactMutation or Transaction. The guard does not see a check reached
+// through a helper the handler calls, a transaction opened another way, or
+// whether the call comes after the row lock; the handlers' tests cover that.
+// A check that reads its row itself (editRevisionReaders) must get that
+// function literal's transaction as its first argument: the handle outside it
+// would read a row the lock does not hold.
+// ---------------------------------------------------------------------------
+
+// editRevisionCheckers is every handler that checks a save's revision, exactly.
+var editRevisionCheckers = []string{"apiAdminUpdateRoom", "apiAdminUpdateUser", "apiChangeTeenConsent", "apiGuardianChangeConsent", "apiScheduleMessage", "apiSetDateRoom", "apiSetEventVisibility", "apiSetSeriesRoom", "apiUpdateEvent", "apiUpdateGroup", "apiUpdateHouseholdPerson", "apiUpdateMessage", "apiUpdateMyHousehold", "saveRevisedSetting"}
+
+var editRevisionChecks = map[string]bool{"checkSettingRevision": true, "checkAdminUserRevision": true, "checkEventRevision": true, "checkGroupRevision": true, "checkDateRoomRevision": true, "checkMessageRevision": true, "checkRoomRevision": true, "checkHouseholdRevision": true, "checkHouseholdPersonRevision": true, "checkConsentRevision": true, "checkEditRevision": true}
+
+// editRevisionReaders are the checks that read their row on the handle given.
+var editRevisionReaders = map[string]bool{"checkSettingRevision": true, "checkAdminUserRevision": true, "checkGroupRevision": true, "checkDateRoomRevision": true, "checkMessageRevision": true, "checkRoomRevision": true, "checkHouseholdRevision": true, "checkHouseholdPersonRevision": true, "checkConsentRevision": true}
+
+var editRevisionTransactions = map[string]bool{"contactMutation": true, "Transaction": true}
+
+// editRevisionCensus is the sorted handlers whose checks all sit in a write
+// transaction, and a problem for each check that does not.
+func editRevisionCensus(p *guardkit.Parsed) (checkers, bad []string) {
+	bad = append(bad, p.Problems...)
+	for _, f := range p.Package("app") {
+		if f.Path == "internal/app/edit_revision.go" {
+			continue
+		}
+		for _, d := range f.AST.Decls {
+			fd, ok := d.(*ast.FuncDecl)
+			if !ok || fd.Body == nil {
+				continue
+			}
+			guardkit.InspectStack(fd.Body, func(n ast.Node, stack []ast.Node) bool {
+				call, ok := n.(*ast.CallExpr)
+				if !ok || !editRevisionChecks[guardkit.Callee(call)] {
+					return true
+				}
+				if editRevisionReaders[guardkit.Callee(call)] && !readsThroughItsTransaction(call, stack) {
+					bad = append(bad, fmt.Sprintf("%s:%d: %s reads the row for its revision check outside the transaction's handle", f.Path, p.Fset.Position(call.Pos()).Line, fd.Name.Name))
+				}
+				if inWriteTransaction(stack) {
+					if !slices.Contains(checkers, fd.Name.Name) {
+						checkers = append(checkers, fd.Name.Name)
+					}
+				} else {
+					bad = append(bad, fmt.Sprintf("%s:%d: %s checks a revision outside its write transaction", f.Path, p.Fset.Position(call.Pos()).Line, fd.Name.Name))
+				}
+				return true
+			})
+		}
+	}
+	slices.Sort(checkers)
+	return checkers, bad
+}
+
+// inWriteTransaction is whether the nearest function literal in stack (the
+// call's ancestors, the call last) is passed to a transaction.
+func inWriteTransaction(stack []ast.Node) bool {
+	for i := len(stack) - 2; i > 0; i-- {
+		lit, ok := stack[i].(*ast.FuncLit)
+		if !ok {
+			continue
+		}
+		outer, ok := stack[i-1].(*ast.CallExpr)
+		return ok && editRevisionTransactions[guardkit.Callee(outer)] && slices.Contains(outer.Args, ast.Expr(lit))
+	}
+	return false
+}
+
+// readsThroughItsTransaction is whether call's first argument is the first
+// parameter of the nearest function literal around it.
+func readsThroughItsTransaction(call *ast.CallExpr, stack []ast.Node) bool {
+	for i := len(stack) - 2; i >= 0; i-- {
+		lit, ok := stack[i].(*ast.FuncLit)
+		if !ok {
+			continue
+		}
+		params := lit.Type.Params.List
+		if len(call.Args) == 0 || len(params) == 0 || len(params[0].Names) == 0 {
+			return false
+		}
+		arg, ok := call.Args[0].(*ast.Ident)
+		return ok && arg.Name == params[0].Names[0].Name
+	}
+	return false
+}
+
+func editRevisionProblems(p *guardkit.Parsed) []string {
+	checkers, bad := editRevisionCensus(p)
+	if !slices.Equal(checkers, editRevisionCheckers) {
+		bad = append(bad, fmt.Sprintf("the handlers that check a revision in their write transaction are %v, want exactly %v (editRevisionCheckers)", checkers, editRevisionCheckers))
+	}
+	return bad
+}
+
+func TestSavesCheckTheirRevisionInTheirTransaction(t *testing.T) {
+	if bad := editRevisionProblems(guardkit.Production(t).Parse(0)); len(bad) > 0 {
+		t.Fatalf("revision checks (DEC-163):\n%v", bad)
+	}
+}
+
+func TestEditRevisionGuardCatchesABypass(t *testing.T) {
+	const visibility = `package app
+func (a *App) apiSetEventVisibility(c *gin.Context) {
+	a.contactMutation(contactChange{}, func(tx *gorm.DB) error {
+		return a.checkEventRevision(locked, body.Revision)
+	})
+}
+`
+	const series = `package app
+func (a *App) apiUpdateEvent(c *gin.Context) {
+	err := a.contactMutation(contactChange{}, func(tx *gorm.DB) error {
+		if err := a.checkEventRevision(lockedEv, body.Revision); err != nil {
+			return err
+		}
+		return nil
+	})
+}
+`
+	const group = `package app
+func (a *App) apiUpdateGroup(c *gin.Context) {
+	err := a.contactMutation(contactChange{}, func(tx *gorm.DB) error {
+		if err := a.checkGroupRevision(tx, locked.ID, body.Revision); err != nil {
+			return err
+		}
+		return nil
+	})
+}
+`
+	const rooms = `package app
+func (a *App) apiSetDateRoom(c *gin.Context) {
+	err := a.DB.Transaction(func(tx *gorm.DB) error {
+		if err := a.checkDateRoomRevision(tx, occ.ID, body.Revision); err != nil {
+			return err
+		}
+		return nil
+	})
+}
+func (a *App) apiSetSeriesRoom(c *gin.Context) {
+	err := a.DB.Transaction(func(tx *gorm.DB) error {
+		return a.checkEventRevision(locked, f.group, body.Revision)
+	})
+}
+`
+	const messages = `package app
+func (a *App) apiUpdateMessage(c *gin.Context) {
+	err := a.DB.Transaction(func(tx *gorm.DB) error {
+		return a.checkMessageRevision(tx, m.ID, body.Revision)
+	}, readCommitted)
+}
+func (a *App) apiScheduleMessage(c *gin.Context) {
+	err = a.DB.Transaction(func(tx *gorm.DB) error {
+		if err := a.checkMessageRevision(tx, m.ID, body.Revision); err != nil {
+			return err
+		}
+		return nil
+	}, readCommitted)
+}
+`
+	const roomEditor = `package app
+func (a *App) apiAdminUpdateRoom(c *gin.Context) {
+	err = a.DB.Transaction(func(tx *gorm.DB) error {
+		if err := a.checkRoomRevision(tx, room.ID, body.Revision); err != nil {
+			return err
+		}
+		return nil
+	}, readCommitted)
+}
+`
+	const admin = `package app
+func (a *App) apiAdminUpdateUser(c *gin.Context) {
+	a.contactMutation(contactChange{}, func(tx *gorm.DB) error {
+		return a.checkAdminUserRevision(tx, user.ID, body.Revision)
+	})
+}
+func (a *App) saveRevisedSetting() {
+	a.DB.Transaction(func(tx *gorm.DB) error {
+		return a.checkSettingRevision(tx, setting, given)
+	}, readCommitted)
+}
+`
+	const consents = `package app
+func (a *App) apiChangeTeenConsent(c *gin.Context) {
+	a.contactMutation(contactChange{}, func(tx *gorm.DB) error {
+		if change.namesARead() {
+			if err := a.checkConsentRevision(tx, teen.ID, body.Revision); err != nil {
+				return err
+			}
+		}
+		return a.changeTeenConsent(tx, c, teen, actor, change)
+	})
+}
+func (a *App) apiGuardianChangeConsent(c *gin.Context) {
+	a.contactMutation(contactChange{}, func(tx *gorm.DB) error {
+		if change.namesARead() {
+			if err := a.checkConsentRevision(tx, guardianTeen.ID, body.Revision); err != nil {
+				return err
+			}
+		}
+		return a.changeTeenConsent(tx, c, guardianTeen, guardian, change)
+	})
+}
+`
+	const households = `package app
+func (a *App) apiUpdateMyHousehold(c *gin.Context) {
+	a.DB.Transaction(func(tx *gorm.DB) error {
+		if err := a.checkHouseholdRevision(tx, householdID, given); err != nil {
+			return err
+		}
+		return nil
+	})
+}
+func (a *App) apiUpdateHouseholdPerson(c *gin.Context) {
+	a.DB.Transaction(func(tx *gorm.DB) error {
+		return a.checkHouseholdPersonRevision(tx, person.ID, input.Revision)
+	})
+}
+`
+	sound := guardkit.Sources{"internal/app/a.go": visibility, "internal/app/b.go": series, "internal/app/c.go": group, "internal/app/d.go": rooms, "internal/app/e.go": messages, "internal/app/f.go": roomEditor, "internal/app/g.go": admin, "internal/app/h.go": households, "internal/app/i.go": consents}
+	if bad := editRevisionProblems(sound.Parse(0)); len(bad) > 0 {
+		t.Fatalf("the sound shape was flagged: %v", bad)
+	}
+	sound["internal/app/g.go"] = strings.Replace(admin, "checkSettingRevision(tx,", "checkSettingRevision(a.DB,", 1)
+	if bad := editRevisionProblems(sound.Parse(0)); len(bad) == 0 {
+		t.Error("a setting checked on the connection outside its transaction passed the guard")
+	}
+	sound["internal/app/g.go"] = admin
+	for name, src := range map[string]string{
+		"a household save that skips the check":                                strings.Replace(households, "a.checkHouseholdRevision(tx, householdID, given)", "error(nil)", 1),
+		"a person save that skips the check":                                   strings.Replace(households, "return a.checkHouseholdPersonRevision(tx, person.ID, input.Revision)", "return nil", 1),
+		"a household save that reads its row outside its transaction's handle": strings.Replace(households, "checkHouseholdRevision(tx,", "checkHouseholdRevision(a.DB,", 1),
+		"a person save that reads its row outside its transaction's handle":    strings.Replace(households, "checkHouseholdPersonRevision(tx,", "checkHouseholdPersonRevision(a.DB,", 1),
+		"a person save checked before its transaction": `package app
+func (a *App) apiUpdateMyHousehold(c *gin.Context) {
+	a.DB.Transaction(func(tx *gorm.DB) error { return a.checkHouseholdRevision(tx, householdID, body.Revision) })
+}
+func (a *App) apiUpdateHouseholdPerson(c *gin.Context) {
+	if err := a.checkHouseholdPersonRevision(a.DB, person.ID, input.Revision); err != nil {
+		return
+	}
+	a.DB.Transaction(func(tx *gorm.DB) error { return nil })
+}
+`,
+	} {
+		if src == households {
+			t.Fatalf("%s: the mutation did not apply", name)
+		}
+		sound["internal/app/h.go"] = src
+		if bad := editRevisionProblems(sound.Parse(0)); len(bad) == 0 {
+			t.Errorf("%s passed the guard", name)
+		}
+	}
+	sound["internal/app/h.go"] = households
+	for name, src := range map[string]string{
+		"an admin grant that skips the check":                                  strings.Replace(consents, "a.checkConsentRevision(tx, teen.ID, body.Revision)", "error(nil)", 1),
+		"a guardian grant that skips the check":                                strings.Replace(consents, "a.checkConsentRevision(tx, guardianTeen.ID, body.Revision)", "error(nil)", 1),
+		"a guardian grant that reads its log outside its transaction's handle": strings.Replace(consents, "checkConsentRevision(tx, guardianTeen", "checkConsentRevision(a.DB, guardianTeen", 1),
+		"a grant that reads its log outside its transaction's handle":          strings.Replace(consents, "checkConsentRevision(tx,", "checkConsentRevision(a.DB,", 1),
+		"a grant checked in the consent writer": `package app
+func (a *App) apiChangeTeenConsent(c *gin.Context) {
+	a.contactMutation(contactChange{}, func(tx *gorm.DB) error { return a.changeTeenConsent(tx, c, teen, actor, change) })
+}
+func (a *App) apiGuardianChangeConsent(c *gin.Context) {
+	a.contactMutation(contactChange{}, func(tx *gorm.DB) error { return a.changeTeenConsent(tx, c, teen, guardian, change) })
+}
+func (a *App) changeTeenConsent(tx *gorm.DB, c *gin.Context, teen, actor *models.User, change teenConsentChange) error {
+	return a.checkConsentRevision(tx, teen.ID, change.Revision)
+}
+`,
+	} {
+		if src == consents {
+			t.Fatalf("%s: the mutation did not apply", name)
+		}
+		sound["internal/app/i.go"] = src
+		if bad := editRevisionProblems(sound.Parse(0)); len(bad) == 0 {
+			t.Errorf("%s passed the guard", name)
+		}
+	}
+	for name, src := range map[string]string{
+		"a room edit that skips the check": `package app
+func (a *App) apiAdminUpdateRoom(c *gin.Context) {
+	a.DB.Transaction(func(tx *gorm.DB) error { return nil }, readCommitted)
+}
+`,
+		"a room edit checked before its transaction": `package app
+func (a *App) apiAdminUpdateRoom(c *gin.Context) {
+	if err := a.checkRoomRevision(a.DB, room.ID, body.Revision); err != nil {
+		return
+	}
+	a.DB.Transaction(func(tx *gorm.DB) error { return nil }, readCommitted)
+}
+`,
+		"a room edit that reads its room outside its transaction's handle": `package app
+func (a *App) apiAdminUpdateRoom(c *gin.Context) {
+	a.DB.Transaction(func(tx *gorm.DB) error { return a.checkRoomRevision(a.DB, room.ID, body.Revision) }, readCommitted)
+}
+`,
+	} {
+		sources := guardkit.Sources{"internal/app/a.go": visibility, "internal/app/b.go": series, "internal/app/c.go": group, "internal/app/d.go": rooms, "internal/app/e.go": messages, "internal/app/f.go": src, "internal/app/g.go": admin, "internal/app/h.go": households, "internal/app/i.go": consents}
+		if bad := editRevisionProblems(sources.Parse(0)); len(bad) == 0 {
+			t.Errorf("%s passed the guard", name)
+		}
+	}
+	for name, src := range map[string]string{
+		"a date pick that skips the check": `package app
+func (a *App) apiSetDateRoom(c *gin.Context) {
+	a.DB.Transaction(func(tx *gorm.DB) error { return nil })
+}
+func (a *App) apiSetSeriesRoom(c *gin.Context) {
+	a.DB.Transaction(func(tx *gorm.DB) error { return a.checkEventRevision(locked, f.group, body.Revision) })
+}
+`,
+		"a date pick that reads its booking outside its transaction's handle": `package app
+func (a *App) apiSetDateRoom(c *gin.Context) {
+	a.DB.Transaction(func(tx *gorm.DB) error { return a.checkDateRoomRevision(a.DB, occ.ID, body.Revision) })
+}
+func (a *App) apiSetSeriesRoom(c *gin.Context) {
+	a.DB.Transaction(func(tx *gorm.DB) error { return a.checkEventRevision(locked, f.group, body.Revision) })
+}
+`,
+		"a date pick checked before its transaction": `package app
+func (a *App) apiSetDateRoom(c *gin.Context) {
+	if err := a.checkDateRoomRevision(a.DB, occ.ID, body.Revision); err != nil {
+		return
+	}
+	a.DB.Transaction(func(tx *gorm.DB) error { return nil })
+}
+func (a *App) apiSetSeriesRoom(c *gin.Context) {
+	a.DB.Transaction(func(tx *gorm.DB) error { return a.checkEventRevision(locked, f.group, body.Revision) })
+}
+`,
+		"a series pick checked in the helper it calls": `package app
+func (a *App) apiSetDateRoom(c *gin.Context) {
+	a.DB.Transaction(func(tx *gorm.DB) error { return a.checkDateRoomRevision(tx, occ.ID, body.Revision) })
+}
+func (a *App) apiSetSeriesRoom(c *gin.Context) {
+	a.DB.Transaction(func(tx *gorm.DB) error { return bookWholeSeries(tx, locked, body) })
+}
+func bookWholeSeries(tx *gorm.DB, ev *models.Event, body seriesBody) error {
+	return a.checkEventRevision(ev, nil, body.Revision)
+}
+`,
+	} {
+		sources := guardkit.Sources{"internal/app/a.go": visibility, "internal/app/b.go": series, "internal/app/c.go": group, "internal/app/d.go": src, "internal/app/e.go": messages, "internal/app/f.go": roomEditor, "internal/app/g.go": admin, "internal/app/h.go": households, "internal/app/i.go": consents}
+		if bad := editRevisionProblems(sources.Parse(0)); len(bad) == 0 {
+			t.Errorf("%s passed the guard", name)
+		}
+	}
+	for name, src := range map[string]string{
+		"a message edit that skips the check": `package app
+func (a *App) apiUpdateMessage(c *gin.Context) {
+	a.DB.Transaction(func(tx *gorm.DB) error { return nil }, readCommitted)
+}
+func (a *App) apiScheduleMessage(c *gin.Context) {
+	a.DB.Transaction(func(tx *gorm.DB) error { return a.checkMessageRevision(tx, m.ID, body.Revision) }, readCommitted)
+}
+`,
+		"a send checked before its transaction": `package app
+func (a *App) apiUpdateMessage(c *gin.Context) {
+	a.DB.Transaction(func(tx *gorm.DB) error { return a.checkMessageRevision(tx, m.ID, body.Revision) }, readCommitted)
+}
+func (a *App) apiScheduleMessage(c *gin.Context) {
+	if err := a.checkMessageRevision(a.DB, m.ID, body.Revision); err != nil {
+		return
+	}
+	a.DB.Transaction(func(tx *gorm.DB) error { return nil }, readCommitted)
+}
+`,
+		"a send that reads its message outside its transaction's handle": `package app
+func (a *App) apiUpdateMessage(c *gin.Context) {
+	a.DB.Transaction(func(tx *gorm.DB) error { return a.checkMessageRevision(tx, m.ID, body.Revision) }, readCommitted)
+}
+func (a *App) apiScheduleMessage(c *gin.Context) {
+	a.DB.Transaction(func(tx *gorm.DB) error { return a.checkMessageRevision(a.DB, m.ID, body.Revision) }, readCommitted)
+}
+`,
+	} {
+		sources := guardkit.Sources{"internal/app/a.go": visibility, "internal/app/b.go": series, "internal/app/c.go": group, "internal/app/d.go": rooms, "internal/app/e.go": src, "internal/app/f.go": roomEditor, "internal/app/g.go": admin, "internal/app/h.go": households, "internal/app/i.go": consents}
+		if bad := editRevisionProblems(sources.Parse(0)); len(bad) == 0 {
+			t.Errorf("%s passed the guard", name)
+		}
+	}
+	for name, src := range map[string]string{
+		"a handler that skips the check": `package app
+func (a *App) apiSetEventVisibility(c *gin.Context) {
+	a.contactMutation(contactChange{}, func(tx *gorm.DB) error { return nil })
+}
+`,
+		"a check before the transaction": `package app
+func (a *App) apiSetEventVisibility(c *gin.Context) {
+	if err := a.checkEventRevision(ev, body.Revision); err != nil {
+		return
+	}
+	a.contactMutation(contactChange{}, func(tx *gorm.DB) error { return nil })
+}
+`,
+		"a check in another closure": `package app
+func (a *App) apiSetEventVisibility(c *gin.Context) {
+	check := func() error { return a.checkEventRevision(ev, body.Revision) }
+	a.contactMutation(contactChange{}, func(tx *gorm.DB) error { return check() })
+}
+`,
+		"a group save that skips the check": `package app
+func (a *App) apiSetEventVisibility(c *gin.Context) {
+	a.contactMutation(contactChange{}, func(tx *gorm.DB) error { return a.checkEventRevision(locked, body.Revision) })
+}
+func (a *App) apiUpdateGroup(c *gin.Context) {
+	a.contactMutation(contactChange{}, func(tx *gorm.DB) error { return nil })
+}
+`,
+		"a group check before the transaction": `package app
+func (a *App) apiSetEventVisibility(c *gin.Context) {
+	a.contactMutation(contactChange{}, func(tx *gorm.DB) error { return a.checkEventRevision(locked, body.Revision) })
+}
+func (a *App) apiUpdateGroup(c *gin.Context) {
+	if err := a.checkGroupRevision(a.DB, g.ID, body.Revision); err != nil {
+		return
+	}
+	a.contactMutation(contactChange{}, func(tx *gorm.DB) error { return nil })
+}
+`,
+		"a group check that reads outside its transaction's handle": `package app
+func (a *App) apiSetEventVisibility(c *gin.Context) {
+	a.contactMutation(contactChange{}, func(tx *gorm.DB) error { return a.checkEventRevision(locked, body.Revision) })
+}
+func (a *App) apiUpdateGroup(c *gin.Context) {
+	a.contactMutation(contactChange{}, func(tx *gorm.DB) error { return a.checkGroupRevision(a.DB, locked.ID, body.Revision) })
+}
+`,
+		"an unlisted handler that checks": `package app
+func (a *App) apiSetEventVisibility(c *gin.Context) {
+	a.contactMutation(contactChange{}, func(tx *gorm.DB) error { return a.checkEventRevision(locked, body.Revision) })
+}
+func (a *App) apiSetGroup(c *gin.Context) {
+	a.DB.Transaction(func(tx *gorm.DB) error { return checkEditRevision(body.Revision, current, errEventChanged) })
+}
+`,
+	} {
+		sources := guardkit.Sources{"internal/app/a.go": src, "internal/app/b.go": series, "internal/app/d.go": rooms, "internal/app/e.go": messages, "internal/app/f.go": roomEditor, "internal/app/g.go": admin, "internal/app/h.go": households, "internal/app/i.go": consents}
+		if !strings.Contains(src, "apiUpdateGroup") {
+			sources["internal/app/c.go"] = group
+		}
+		if bad := editRevisionProblems(sources.Parse(0)); len(bad) == 0 {
+			t.Errorf("%s passed the guard", name)
+		}
+	}
+}

@@ -41,7 +41,7 @@ that changes how an operator upgrades, rolls back or restores. The operator-faci
   restore.
 - QC and deploy scripts never grep application source. What the QC-1 harness takes from the
   application is `deploy/digitalocean/qc1/app-facts.json` (`TestQC1AppFacts` and its siblings;
-  `UPDATE_QC1_FACTS=1 go test -run TestQC1AppFacts .` regenerates the `go` section for review).
+  `UPDATE_QC1_FACTS=1 go test -run TestQC1AppFacts ./internal/app` regenerates the `go` section for review).
   The facts include the text of the erasure's retention report and, once the QC-1 work that records
   it has merged, of discovery's first audit statement; a saved real-server log under
   `deploy/digitalocean/testdata/` is checked against that text (`TestQC1SuccessorIsTheLoggedStatement`,

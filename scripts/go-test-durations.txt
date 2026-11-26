@@ -1,4 +1,4 @@
-# Seconds per root-package test of 0.5s or more, for scripts/go-test.sh's shard plan.
+# Seconds per app-package test of 0.5s or more, for scripts/go-test.sh's shard plan.
 # Rewrite with FOLD_TEST_RECORD=1 scripts/go-test.sh (FOLD_TEST_SHARDS=8 is close to CI).
 2.6 TestAccountErasureDeletesBlocksReceiptsAndDeliveries
 5.5 TestAccountErasureEndsContactGrantsOnce

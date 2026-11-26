@@ -82,8 +82,8 @@ func ReadProduction(root string) (Sources, error) {
 	return out, nil
 }
 
-// Production is ReadProduction(".") for a test running in the repository root, the
-// working directory of the root package's tests. It fails the test on a read error.
+// Production is ReadProduction(".") for a test running in the repository root, where
+// package app's tests move to (its TestMain). It fails the test on a read error.
 func Production(t testing.TB) Sources {
 	t.Helper()
 	sources, err := ReadProduction(".")
@@ -146,7 +146,7 @@ func (p *Parsed) File(path string) *File {
 }
 
 // Package returns the files whose package clause names pkg. A guard whose
-// subject is one package (the root package main, say) uses this instead of a
+// subject is one package (package app, say) uses this instead of a
 // directory glob, so the choice is explicit and a moved file is still seen.
 func (p *Parsed) Package(pkg string) []*File {
 	var out []*File

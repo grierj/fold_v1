@@ -1,0 +1,97 @@
+package app
+
+import (
+	"fold/internal/policy"
+	"fold/models"
+	"time"
+
+	"gorm.io/gorm"
+)
+
+// visibleOccurrenceIDs is the scheduled dates this viewer may see, either by
+// ordinary access or through an exact-date grant. Cancelled and hidden dates
+// never reach a per-date lookup.
+func visibleOccurrenceIDs(vs visibleSet, viewer *models.User, occs []models.EventOccurrence, scoped map[uint]*occurrenceRead) []uint {
+	ids := make([]uint, 0, len(occs))
+	for i := range occs {
+		occ := &occs[i]
+		if occ.Status != models.OccurrenceScheduled {
+			continue
+		}
+		if scoped[occ.ID] != nil || vs.canSeeDate(viewer, vs.ByID[occ.EventID], occ) {
+			ids = append(ids, occ.ID)
+		}
+	}
+	return ids
+}
+
+func householdGoingChunked(db *gorm.DB, ids []uint, viewer *models.User, remoteOnly bool) (map[uint]bool, error) {
+	out := map[uint]bool{}
+	err := eachIDChunk(ids, func(chunk []uint) error {
+		part, err := householdGoingMap(db, chunk, viewer, remoteOnly)
+		for id := range part {
+			out[id] = true
+		}
+		return err
+	})
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// calendarScopeBatch holds only the viewer's own facts. Household rows are a
+// separate boolean on purpose: they put a date in scope without becoming the
+// viewer's RSVP state.
+type calendarScopeBatch struct {
+	ownStatus map[uint]string
+	household map[uint]bool
+}
+
+// loadCalendarScopeBatchIn reads the viewer's own and household answers on
+// db, the caller's snapshot.
+func loadCalendarScopeBatchIn(db *gorm.DB, viewer *models.User, occurrenceIDs []uint) (calendarScopeBatch, error) {
+	out := calendarScopeBatch{ownStatus: map[uint]string{}, household: map[uint]bool{}}
+	if viewer == nil || len(occurrenceIDs) == 0 {
+		return out, nil
+	}
+	err := eachIDChunk(occurrenceIDs, func(chunk []uint) error {
+		var own []models.Registration
+		if err := db.Select("occurrence_id", "status").Where(
+			"user_id = ? AND occurrence_id IN ? AND status IN ?", viewer.ID, chunk,
+			[]string{models.RegGoing, models.RegMaybe, models.RegWaitlisted, models.RegDeclined},
+		).Find(&own).Error; err != nil {
+			return err
+		}
+		for _, row := range own {
+			out.ownStatus[row.OccurrenceID] = row.Status
+		}
+		var householdIDs []uint
+		if err := db.Model(&models.Registration{}).Joins(listedRegistrations()).
+			Where("registrations.registered_by = ? AND registrations.household_person_id IS NOT NULL AND registrations.occurrence_id IN ? AND registrations.status IN ?", viewer.ID, chunk,
+				models.CurrentRegStatuses).
+			Distinct().Pluck("registrations.occurrence_id", &householdIDs).Error; err != nil {
+			return err
+		}
+		for _, id := range householdIDs {
+			out.household[id] = true
+		}
+		return nil
+	})
+	return out, err
+}
+
+func calendarScopeDecision(scope policy.CalendarScope, signedIn bool, ev *models.Event, occ *models.EventOccurrence, rel policy.Rel, hosted, household, exact, managerKept bool, ownStatus string, now time.Time) policy.CalendarDecision {
+	publicDate := false
+	churchWide := false
+	if ev != nil {
+		churchWide = ev.GroupID == nil
+		publicDate = policy.EffectiveVisibility(ev.Visibility, occ.VisibilityOverride) == models.VisibilityPublic
+	}
+	return policy.DecideCalendar(scope, policy.CalendarFacts{
+		Authorized: true, GroupMember: rel.Member, ChurchWide: churchWide,
+		Host: hosted, OwnStatus: ownStatus, HouseholdDate: household,
+		ExactDate: exact, PublicDate: publicDate, StartsAt: occ.StartsAt,
+		SignedOut: !signedIn, ManagerKept: managerKept,
+	}, now)
+}

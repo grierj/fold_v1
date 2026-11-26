@@ -1,0 +1,521 @@
+package app
+
+import (
+	"bytes"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/gob"
+	"encoding/json"
+	"fmt"
+	"fold/internal/guardkit"
+	"fold/internal/httpx"
+	"fold/models"
+	"github.com/gin-gonic/gin"
+	"github.com/gorilla/sessions"
+	"go/ast"
+	"go/parser"
+	"go/token"
+	"io"
+	"net"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
+	"os"
+	"regexp"
+	"strings"
+	"testing"
+	"time"
+)
+
+func TestSessionCookieExpiresOnServerAfterSevenDays(t *testing.T) {
+	secret := []byte("test-session-secret-at-least-32-bytes")
+	store := newSessionStore(secret, true)
+	if store.Options.MaxAge != 7*86400 || !store.Options.Secure || !store.Options.HttpOnly || store.Options.SameSite != http.SameSiteLaxMode {
+		t.Fatalf("cookie options: %+v", store.Options)
+	}
+	// Sign historical cookies using securecookie's documented wire format.
+	// A valid six-day cookie proves failure isn't a bad signature or payload.
+	for _, days := range []int{6, 8} {
+		var payload bytes.Buffer
+		if err := gob.NewEncoder(&payload).Encode(map[interface{}]interface{}{"user_id": uint(1)}); err != nil {
+			t.Fatal(err)
+		}
+		body := fmt.Sprintf("%d|%s", time.Now().Add(-time.Duration(days)*24*time.Hour).Unix(), base64.URLEncoding.EncodeToString(payload.Bytes()))
+		mac := hmac.New(sha256.New, secret)
+		mac.Write([]byte(sessionName + "|" + body))
+		value := base64.URLEncoding.EncodeToString(append([]byte(body+"|"), mac.Sum(nil)...))
+		req := httptest.NewRequest("GET", "/", nil)
+		req.AddCookie(&http.Cookie{Name: sessionName, Value: value})
+		session, err := store.Get(req, sessionName)
+		if days == 6 && (err != nil || session.IsNew) {
+			t.Fatalf("six-day cookie rejected: %v", err)
+		}
+		if days == 8 && (err == nil || !strings.Contains(err.Error(), "expired timestamp")) {
+			t.Fatalf("eight-day cookie should expire, got %v", err)
+		}
+	}
+}
+
+func TestDatabaseSessionStoreKeepsItsKeyUntilTheRestoreResetsIt(t *testing.T) {
+	app := testApp(t)
+	openStore := func() *sessions.CookieStore {
+		t.Helper()
+		store, err := newDatabaseSessionStore(app.DB, app.Config)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return store
+	}
+	writeCookie := func(store *sessions.CookieStore) *http.Cookie {
+		t.Helper()
+		s := sessions.NewSession(store, sessionName)
+		s.Options = store.Options
+		s.Values[csrfSessionKey] = "test-credential"
+		w := httptest.NewRecorder()
+		if err := s.Save(httptest.NewRequest("GET", "/", nil), w); err != nil {
+			t.Fatal(err)
+		}
+		return w.Result().Cookies()[0]
+	}
+	readCookie := func(store *sessions.CookieStore, cookie *http.Cookie, wantValid bool) {
+		t.Helper()
+		req := httptest.NewRequest("GET", "/", nil)
+		req.AddCookie(cookie)
+		s, err := store.Get(req, sessionName)
+		valid := err == nil && !s.IsNew && s.Values[csrfSessionKey] == "test-credential"
+		if valid != wantValid {
+			t.Fatalf("cookie valid = %t, want %t", valid, wantValid)
+		}
+	}
+
+	before := openStore()
+	cookie := writeCookie(before)
+	bootFence(t, app)
+	readCookie(openStore(), cookie, true)
+
+	if err := setSettingIn(app.DB, sessionSigningEpochKey, ""); err == nil {
+		t.Fatal("general settings writer changed the session signing epoch")
+	}
+	// Managed restore clears this key before the restored database can boot.
+	if err := app.DB.Exec("DELETE FROM settings WHERE key = ?", sessionSigningEpochKey).Error; err != nil {
+		t.Fatal(err)
+	}
+	if _, err := newDatabaseSessionStore(app.DB, app.Config); err == nil {
+		t.Fatal("missing epoch was accepted")
+	}
+	bootFence(t, app)
+	restored := openStore()
+	readCookie(restored, cookie, false)
+	readCookie(restored, writeCookie(restored), true)
+}
+
+func TestSetupWizardCreatesAdmin(t *testing.T) {
+	app := testApp(t)
+	r := app.setupRouter()
+
+	// Fetch the setup form to get a CSRF token (form posts need it too).
+	getW := httptest.NewRecorder()
+	r.ServeHTTP(getW, setupRequest(t, app, "GET", "/setup"))
+	formRe := regexp.MustCompile(`name="csrf_token" value="([^"]+)"`)
+	m := formRe.FindStringSubmatch(getW.Body.String())
+	if len(m) != 2 {
+		t.Fatalf("no csrf token in setup form")
+	}
+
+	form := url.Values{
+		"csrf_token": {m[1]}, "age_band": {"adult"},
+		"site_name": {"Fold Test"}, "timezone": {"America/Denver"},
+		"name": {"Root"}, "email": {"Root@Example.com"},
+		"password": {"pw12345678"}, "password_confirm": {"pw12345678"},
+	}
+	for _, band := range []string{"", "teen", "under13"} {
+		form.Set("age_band", band)
+		rejected := httptest.NewRecorder()
+		request := httptest.NewRequest("POST", "/setup", strings.NewReader(form.Encode()))
+		request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		for _, cookie := range getW.Result().Cookies() {
+			request.AddCookie(cookie)
+		}
+		r.ServeHTTP(rejected, request)
+		if rejected.Code != http.StatusBadRequest {
+			t.Fatalf("setup age %q: %d", band, rejected.Code)
+		}
+		var stored int64
+		app.DB.Model(&models.User{}).Count(&stored)
+		if stored != 0 {
+			t.Fatal("setup stored a non-adult account")
+		}
+	}
+	form.Set("age_band", "adult")
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest("POST", "/setup", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	for _, ck := range getW.Result().Cookies() {
+		req.AddCookie(ck)
+	}
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusSeeOther {
+		t.Fatalf("setup: got %d", w.Code)
+	}
+	var u models.User
+	if err := app.DB.Where("email = ?", "root@example.com").First(&u).Error; err != nil {
+		t.Fatalf("admin not created: %v", err)
+	}
+	if u.Role != models.RoleAdmin {
+		t.Fatalf("expected admin role, got %q", u.Role)
+	}
+	var s models.Setting
+	app.DB.Where("key = ?", "site_name").First(&s)
+	if s.Value != "Fold Test" {
+		t.Fatalf("site name not stored: %q", s.Value)
+	}
+	var tz models.Setting
+	app.DB.Where("key = ?", "timezone").First(&tz)
+	if tz.Value != "America/Denver" {
+		t.Fatalf("timezone not stored: %q", tz.Value)
+	}
+}
+
+func TestHealthz(t *testing.T) {
+	app := testApp(t)
+	w := httptest.NewRecorder()
+	app.setupRouter().ServeHTTP(w, httptest.NewRequest("GET", "/healthz", nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("healthz: got %d", w.Code)
+	}
+	if w.Body.Len() != 0 {
+		t.Fatalf("healthz body: %q", w.Body.String())
+	}
+}
+
+// Every phase a slow client can stall is bounded, and the write budget leaves
+// room for the longest synchronous mail send (syncMailTimeout) plus the
+// transaction work and the response around it.
+func TestHTTPServerBoundsEverySlowPhase(t *testing.T) {
+	srv := newHTTPServer(Config{Port: "9090"}, http.NotFoundHandler())
+	if srv.Addr != ":9090" || srv.Handler == nil {
+		t.Fatalf("addr/handler: %q %v", srv.Addr, srv.Handler)
+	}
+	if srv.ReadHeaderTimeout <= 0 || srv.ReadTimeout <= 0 || srv.WriteTimeout <= 0 || srv.IdleTimeout <= 0 || srv.MaxHeaderBytes <= 0 {
+		t.Fatalf("an unbounded phase: header %v read %v write %v idle %v maxHeader %d",
+			srv.ReadHeaderTimeout, srv.ReadTimeout, srv.WriteTimeout, srv.IdleTimeout, srv.MaxHeaderBytes)
+	}
+	if syncMailTimeout >= srv.WriteTimeout {
+		t.Fatalf("a synchronous send (%v) can outlast the write timeout (%v)", syncMailTimeout, srv.WriteTimeout)
+	}
+}
+
+// A client that sends part of its headers and stalls is cut off at
+// ReadHeaderTimeout instead of holding a connection open forever.
+func TestHTTPServerDropsStalledHeaders(t *testing.T) {
+	srv := newHTTPServer(Config{Port: "0"}, http.NotFoundHandler())
+	srv.ReadHeaderTimeout = 200 * time.Millisecond // short, so the test is quick
+	ts := httptest.NewUnstartedServer(nil)
+	ts.Config = srv
+	ts.Start()
+	defer ts.Close()
+
+	conn, err := net.Dial("tcp", ts.Listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	if _, err := conn.Write([]byte("GET / HTTP/1.1\r\nHost: x\r\n")); err != nil { // no blank line
+		t.Fatal(err)
+	}
+	start := time.Now()
+	_ = conn.SetReadDeadline(start.Add(5 * time.Second))
+	_, err = io.ReadAll(conn) // returns once the server closes the connection
+	if ne, ok := err.(net.Error); ok && ne.Timeout() {
+		t.Fatal("server never dropped the stalled connection")
+	}
+	if d := time.Since(start); d < 50*time.Millisecond || d > 5*time.Second {
+		t.Fatalf("dropped after %v, want between 50ms and 5s", d)
+	}
+}
+
+func TestOversizedBodyRefused(t *testing.T) {
+	app := testApp(t)
+	c := newAPIClient(t, app)
+	big := map[string]any{"email": strings.Repeat("a", maxRequestBytes), "password": "x"}
+	if w := c.do("POST", "/api/v1/auth/login", big, true); w.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("oversized login: %d", w.Code)
+	}
+}
+
+func TestSecurityHeaders(t *testing.T) {
+	for _, secure := range []bool{false, true} {
+		app := testApp(t)
+		app.Config.CookieSecure = secure
+		r := app.setupRouter()
+		for _, path := range []string{"/api/v1/auth/csrf", "/", "/groups/1", "/setup"} {
+			w := httptest.NewRecorder()
+			r.ServeHTTP(w, httptest.NewRequest("GET", path, nil))
+			h := w.Header()
+			csp := h.Get("Content-Security-Policy")
+			if !strings.Contains(csp, "default-src 'self'") || !strings.Contains(csp, "frame-ancestors 'self'") ||
+				!strings.Contains(csp, "object-src 'none'") || strings.Contains(csp, "unsafe") {
+				t.Fatalf("%s CSP: %q", path, csp)
+			}
+			for k, v := range map[string]string{
+				"X-Content-Type-Options": "nosniff",
+				"Referrer-Policy":        "same-origin",
+				"X-Frame-Options":        "SAMEORIGIN",
+				"Permissions-Policy":     "camera=(), microphone=(), geolocation=()",
+			} {
+				if h.Get(k) != v {
+					t.Fatalf("%s %s: %q", path, k, h.Get(k))
+				}
+			}
+			if hsts := h.Get("Strict-Transport-Security"); (hsts != "") != secure {
+				t.Fatalf("%s HSTS with secure=%v: %q", path, secure, hsts)
+			}
+		}
+	}
+}
+
+func TestSetupPageHasLanguageAndNoStaticLinks(t *testing.T) {
+	app := testApp(t)
+	w := httptest.NewRecorder()
+	app.setupRouter().ServeHTTP(w, httptest.NewRequest("GET", "/setup", nil))
+	body := w.Body.String()
+	if !strings.Contains(body, `<html lang="en">`) {
+		t.Error("setup page has no lang")
+	}
+	if strings.Contains(body, "/static/") {
+		t.Error("setup page links /static/")
+	}
+}
+
+// The setup page links the SPA's built stylesheet, whatever the bundle's hashed
+// name is. The test renders with a stand-in name, so it does not need web/dist.
+func TestSetupPageLinksTheBundleStylesheet(t *testing.T) {
+	const css = "/assets/index-abc123.css"
+	tmpl, err := parsePageTemplates(css)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := gin.New()
+	r.SetHTMLTemplate(tmpl)
+	r.GET("/setup", func(c *gin.Context) {
+		c.HTML(http.StatusOK, "setup.html", (setupInput{}).pageData(nil, ""))
+	})
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, httptest.NewRequest("GET", "/setup", nil))
+	if !strings.Contains(w.Body.String(), `href="`+css+`"`) {
+		t.Errorf("setup page does not link %s", css)
+	}
+}
+
+// The wizard's stylesheet loads before any account exists: the first-run gate
+// lets /assets/ through instead of sending it to /setup.
+func TestAssetsLoadBeforeSetup(t *testing.T) {
+	app := testApp(t)
+	w := httptest.NewRecorder()
+	app.setupRouter().ServeHTTP(w, httptest.NewRequest("GET", "/assets/index-abc123.css", nil))
+	if w.Code == http.StatusSeeOther {
+		t.Errorf("an asset request before setup was redirected to %s", w.Header().Get("Location"))
+	}
+}
+
+func TestMemberHelpIsEmbedded(t *testing.T) {
+	router := gin.New()
+	router.GET("/help/members", serveMemberHelp)
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, httptest.NewRequest("GET", "/help/members", nil))
+	if w.Code != http.StatusOK || w.Header().Get("Content-Type") != "text/plain; charset=utf-8" || w.Header().Get("X-Content-Type-Options") != "nosniff" {
+		t.Fatalf("help response %d %v", w.Code, w.Header())
+	}
+	source, err := os.ReadFile("docs/MEMBERS.md")
+	if err != nil || !bytes.Equal(source, w.Body.Bytes()) {
+		t.Fatalf("help differs from canonical document: %v", err)
+	}
+}
+
+// The email provider is a configuration choice (M3.2): the registry builds
+// whichever adapter the environment names, and a broken one stops the
+// server instead of dropping mail.
+func TestChooseMailer(t *testing.T) {
+	prod := Config{Env: "prod", EmailFrom: "Fold <noreply@example.com>"}
+	for _, tc := range []struct {
+		mod  func(*Config)
+		want string
+	}{
+		{func(*Config) {}, "none"},
+		{func(c *Config) { c.PostmarkServerToken = "tok" }, "postmark"},
+		{func(c *Config) {
+			c.EmailProvider, c.PostmarkServerToken, c.SMTPURL = "smtp", "tok", "smtp://localhost:25"
+		}, "smtp"},
+		{func(c *Config) { c.SMTPURL = "smtp://localhost:25" }, "smtp"},
+	} {
+		cfg := prod
+		tc.mod(&cfg)
+		s, err := chooseMailer(cfg, nil)
+		if err != nil {
+			t.Fatalf("%s: %v", tc.want, err)
+		}
+		if got := s.Capabilities().Name; got != tc.want {
+			t.Errorf("chose %s, want %s", got, tc.want)
+		}
+	}
+	for _, provider := range []string{"postmark", "pigeon", "smtp"} {
+		cfg := prod
+		cfg.EmailProvider = provider
+		if _, err := chooseMailer(cfg, nil); err == nil {
+			t.Error("a provider without its settings should be refused")
+		}
+	}
+}
+
+// The embedded templates parse, and every page the server renders is among them.
+func TestPageTemplatesParse(t *testing.T) {
+	tmpl, err := pageTemplates()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"setup.html", "setup-unlock.html", "outbox.html"} {
+		if tmpl.Lookup(name) == nil {
+			t.Errorf("template %s is not embedded", name)
+		}
+	}
+}
+
+// The manifest names the Home Screen app after the church (DEC-124); a
+// short name over 12 characters becomes "Fold".
+func TestManifestCarriesTheChurchName(t *testing.T) {
+	app := testApp(t)
+	newTestUser(t, app, "sam", "password1234", models.RoleMember)
+	r := app.setupRouter()
+	read := func() (httpx.WebManifest, *httptest.ResponseRecorder) {
+		w := httptest.NewRecorder()
+		r.ServeHTTP(w, httptest.NewRequest("GET", "/manifest.webmanifest", nil))
+		var m httpx.WebManifest
+		if err := json.Unmarshal(w.Body.Bytes(), &m); err != nil {
+			t.Fatalf("manifest: %d %v %q", w.Code, err, w.Body.String())
+		}
+		return m, w
+	}
+	m, w := read()
+	if w.Code != http.StatusOK || w.Header().Get("Content-Type") != "application/manifest+json" || w.Header().Get("Cache-Control") != "no-cache" {
+		t.Fatalf("manifest response %d %v", w.Code, w.Header())
+	}
+	if m.Name != "Fold" || m.ShortName != "Fold" {
+		t.Fatalf("no church name: %+v", m)
+	}
+	if m.ID != "/" || m.StartURL != "/?source=homescreen" || m.Scope != "/" || m.Display != "standalone" || m.BackgroundColor == "" || m.ThemeColor == "" {
+		t.Fatalf("manifest fields: %+v", m)
+	}
+	var sizes []string
+	for _, i := range m.Icons {
+		sizes = append(sizes, i.Sizes+" "+i.Purpose)
+	}
+	if strings.Join(sizes, ",") != "192x192 ,512x512 ,512x512 maskable" {
+		t.Fatalf("icons: %v", sizes)
+	}
+	for _, i := range m.Icons {
+		if !strings.HasPrefix(i.Src, "/assets/brand/") || i.Type != "image/png" {
+			t.Fatalf("icon %+v", i)
+		}
+	}
+
+	for name, short := range map[string]string{
+		"Grace Church":           "Grace Church", // 12 characters
+		"Iglesia Fé y Esperanza": "Fold",
+		"Église Sœur":            "Église Sœur", // runes, not bytes
+	} {
+		app.DB.Where("key = ?", "site_name").Delete(&models.Setting{})
+		if err := app.DB.Create(&models.Setting{Key: "site_name", Value: name}).Error; err != nil {
+			t.Fatal(err)
+		}
+		m, _ := read()
+		if m.Name != name || m.ShortName != short {
+			t.Fatalf("%q: name %q, short_name %q", name, m.Name, m.ShortName)
+		}
+	}
+}
+
+// serveBootProblems: in the function that runs bootRestoreFence, the boot step
+// (which declares the recovery level and rotates the consent epoch, DEC-158)
+// comes before setup, the router, the jobs and the listener, and its failure
+// returns a non-zero exit.
+func serveBootProblems(src string) []string {
+	fset := token.NewFileSet()
+	f, err := parser.ParseFile(fset, "internal/app/app.go", src, 0)
+	if err != nil {
+		return []string{err.Error()}
+	}
+	var bad []string
+	for _, d := range f.Decls {
+		fd, ok := d.(*ast.FuncDecl)
+		if !ok || fd.Body == nil {
+			continue
+		}
+		pos := map[string]token.Pos{}
+		var bootIf *ast.IfStmt
+		ast.Inspect(fd, func(n ast.Node) bool {
+			if ifs, ok := n.(*ast.IfStmt); ok && ifs.Init != nil {
+				ast.Inspect(ifs.Init, func(m ast.Node) bool {
+					if c, ok := m.(*ast.CallExpr); ok && guardkit.Callee(c) == "bootRestoreFence" {
+						bootIf = ifs
+					}
+					return true
+				})
+			}
+			if c, ok := n.(*ast.CallExpr); ok {
+				if name := guardkit.Callee(c); pos[name] == 0 {
+					pos[name] = c.Pos()
+				}
+			}
+			return true
+		})
+		boot, found := pos["bootRestoreFence"]
+		if !found {
+			continue
+		}
+		for _, later := range []string{"setupComplete", "setupRouter", "startJobs", "newHTTPServer"} {
+			if p, ok := pos[later]; !ok || p < boot {
+				bad = append(bad, fd.Name.Name+": "+later+" does not come after bootRestoreFence")
+			}
+		}
+		exits := false
+		if bootIf != nil {
+			for _, st := range bootIf.Body.List {
+				if r, ok := st.(*ast.ReturnStmt); ok && len(r.Results) == 1 {
+					if lit, ok := r.Results[0].(*ast.BasicLit); ok && lit.Value != "0" {
+						exits = true
+					}
+				}
+			}
+		}
+		if !exits {
+			bad = append(bad, fd.Name.Name+": a failed bootRestoreFence does not return a non-zero exit")
+		}
+		return bad
+	}
+	return append(bad, "no function runs bootRestoreFence")
+}
+
+func TestServeBootStepComesFirst(t *testing.T) {
+	b, err := os.ReadFile("internal/app/app.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	src := string(b)
+	for _, v := range serveBootProblems(src) {
+		t.Error(v)
+	}
+	bootFailure := "if err := app.bootRestoreFence(); err != nil {\n\t\tfmt.Fprintln(stderr, \"fold:\", err)\n\t\treturn "
+	for name, mutated := range map[string]string{
+		"the router before the boot": strings.Replace(src, "if err := app.bootRestoreFence(); err != nil {", "_ = app.setupRouter()\n\tif err := app.bootRestoreFence(); err != nil {", 1),
+		"a zero exit on failure":     strings.Replace(src, bootFailure+"1", bootFailure+"0", 1),
+		"no boot":                    strings.Replace(src, "app.bootRestoreFence()", "app.initAttempts()", 1),
+	} {
+		if mutated == src {
+			t.Fatalf("%s: the fixture did not change main.go", name)
+		}
+		if len(serveBootProblems(mutated)) == 0 {
+			t.Errorf("%s: the guard missed it", name)
+		}
+	}
+}

@@ -1,0 +1,326 @@
+package app
+
+import (
+	"errors"
+	"net/http"
+	"strconv"
+	"strings"
+	"time"
+
+	"fold/internal/audit"
+	"fold/internal/events"
+	"fold/internal/policy"
+	"fold/models"
+
+	"github.com/gin-gonic/gin"
+	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
+)
+
+// Room feeds (M2.2b, 8.2): an admin-issued secret link per room that
+// exports its confirmed bookings, so the church office or a calendar on
+// the door can follow the room. Only admins make or turn off the link
+// (section 6). The link is the only credential and anyone who can see the
+// screen can read it, so the feed describes only dates a signed-out viewer
+// can see; every other date is titled "Reserved" without identifying it.
+
+const roomFeedTitle = "Reserved"
+
+type roomFeedJSON struct {
+	HasToken  bool       `json:"hasToken"`
+	CreatedAt *time.Time `json:"createdAt"`
+	// URL is the raw link, only in the response that made it.
+	URL string `json:"url,omitempty"`
+}
+
+func (a *App) roomFeedURL(roomID uint, raw string) string {
+	return a.emailBaseURL() + "/cal/rooms/" + strconv.FormatUint(uint64(roomID), 10) + "/" + raw + ".ics"
+}
+
+func (a *App) adminRoom(c *gin.Context) (*models.Room, bool) {
+	id, err := strconv.ParseUint(c.Param("id"), 10, 63)
+	if err != nil {
+		jsonError(c, http.StatusNotFound, "room not found")
+		return nil, false
+	}
+	var room models.Room
+	if err := a.DB.First(&room, id).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			jsonError(c, http.StatusNotFound, "room not found")
+		} else {
+			jsonError(c, http.StatusInternalServerError, "could not load the room")
+		}
+		return nil, false
+	}
+	return &room, true
+}
+
+func activeRoomFeed(db *gorm.DB, roomID uint) (*models.RoomFeedToken, error) {
+	var tok models.RoomFeedToken
+	err := db.Where("room_id = ? AND revoked_at IS NULL", roomID).First(&tok).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, nil
+	}
+	return &tok, err
+}
+
+func roomFeedOf(tok *models.RoomFeedToken) roomFeedJSON {
+	if tok == nil {
+		return roomFeedJSON{}
+	}
+	at := tok.CreatedAt
+	return roomFeedJSON{HasToken: true, CreatedAt: &at}
+}
+
+func (a *App) apiAdminGetRoomFeed(c *gin.Context) {
+	room, ok := a.adminRoom(c)
+	if !ok {
+		return
+	}
+	tok, err := activeRoomFeed(a.DB, room.ID)
+	if err != nil {
+		jsonError(c, http.StatusInternalServerError, "could not load the room's calendar link")
+		return
+	}
+	c.JSON(http.StatusOK, roomFeedResponseJSON{Feed: roomFeedOf(tok)})
+}
+
+// apiAdminCreateRoomFeed makes the room's link, or a new one, which turns
+// the old one off. The raw token is in this response only.
+func (a *App) apiAdminCreateRoomFeed(c *gin.Context) {
+	room, ok := a.adminRoom(c)
+	if !ok {
+		return
+	}
+	if !room.Active {
+		jsonError(c, http.StatusNotFound, "room not found")
+		return
+	}
+	raw, err := newRawToken()
+	if err != nil {
+		jsonError(c, http.StatusInternalServerError, "could not make the calendar link")
+		return
+	}
+	tok := models.RoomFeedToken{RoomID: room.ID, TokenHash: hashToken(raw)}
+	err = a.DB.Transaction(func(tx *gorm.DB) error {
+		// The room row serializes two admins making a link at once.
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&models.Room{}, room.ID).Error; err != nil {
+			return err
+		}
+		me, err := lockRoomManagerIn(tx, apiUser(c), actorRead)
+		if err != nil {
+			return err
+		}
+		tok.CreatedBy = &me.ID
+		res := tx.Model(&models.RoomFeedToken{}).Where("room_id = ? AND revoked_at IS NULL", room.ID).Update("revoked_at", time.Now().UTC())
+		if res.Error != nil {
+			return res.Error
+		}
+		if err := tx.Create(&tok).Error; err != nil {
+			return err
+		}
+		return audit.Write(tx, audit.Entry{Actor: &me.ID, Action: audit.RoomFeedCreated, TargetType: "room", TargetID: room.ID,
+			Meta: map[string]any{"replaced": res.RowsAffected > 0}, IP: c.ClientIP()})
+	}, readCommitted)
+	if isAPIError(err) {
+		fail(c, err)
+		return
+	}
+	if err != nil {
+		jsonError(c, http.StatusInternalServerError, "could not make the calendar link")
+		return
+	}
+	out := roomFeedOf(&tok)
+	out.URL = a.roomFeedURL(room.ID, raw)
+	c.JSON(http.StatusOK, roomFeedResponseJSON{Feed: out})
+}
+
+func (a *App) apiAdminRevokeRoomFeed(c *gin.Context) {
+	room, ok := a.adminRoom(c)
+	if !ok {
+		return
+	}
+	err := a.DB.Transaction(func(tx *gorm.DB) error {
+		me, err := lockRoomManagerIn(tx, apiUser(c), actorShare)
+		if err != nil {
+			return err
+		}
+		res := tx.Model(&models.RoomFeedToken{}).Where("room_id = ? AND revoked_at IS NULL", room.ID).Update("revoked_at", time.Now().UTC())
+		if res.Error != nil || res.RowsAffected == 0 {
+			return res.Error
+		}
+		return audit.Write(tx, audit.Entry{Actor: &me.ID, Action: audit.RoomFeedRevoked, TargetType: "room", TargetID: room.ID, IP: c.ClientIP()})
+	}, readCommitted)
+	if isAPIError(err) {
+		fail(c, err)
+		return
+	}
+	if err != nil {
+		jsonError(c, http.StatusInternalServerError, "could not turn off the calendar link")
+		return
+	}
+	c.JSON(http.StatusOK, roomFeedResponseJSON{Feed: roomFeedJSON{}})
+}
+
+// feedRoom serves /cal/rooms/<roomId>/<token>.ics. Every failure that
+// isn't the server's is the same plain 404: rooms off, a wrong, revoked or
+// other room's token, or a room that was deactivated. Deactivating keeps
+// the link, so turning the room back on brings it back; an admin turns the
+// link off to end it. The switch, the link, the room and the bookings are
+// read in one snapshot (serveFeedSnapshot), so a link revoked or rooms turned
+// off never admit bookings written after that.
+func (a *App) feedRoom(c *gin.Context) {
+	param := c.Param("token")
+	roomID, err := strconv.ParseUint(c.Param("roomId"), 10, 63)
+	if err != nil || !strings.HasSuffix(param, ".ics") {
+		feedNotFound(c)
+		return
+	}
+	hash := hashToken(strings.TrimSuffix(param, ".ics"))
+	a.serveFeedSnapshot(c, func(tx *gorm.DB, now time.Time) (events.Feed, error) {
+		if on, err := boolSettingErrIn(tx, settingRoomsEnabled, false); err != nil {
+			return events.Feed{}, err
+		} else if !on {
+			return events.Feed{}, errFeedNotFound
+		}
+		var tok models.RoomFeedToken
+		if err := tx.Where("token_hash = ? AND revoked_at IS NULL", hash).Limit(1).Find(&tok).Error; err != nil {
+			return events.Feed{}, err
+		}
+		if tok.ID == 0 || uint64(tok.RoomID) != roomID {
+			return events.Feed{}, errFeedNotFound
+		}
+		var room models.Room
+		if err := tx.Where("id = ?", tok.RoomID).Limit(1).Find(&room).Error; err != nil {
+			return events.Feed{}, err
+		}
+		if room.ID == 0 || !room.Active {
+			return events.Feed{}, errFeedNotFound
+		}
+		if a.hooks.readerAuthorized != nil {
+			a.hooks.readerAuthorized("room feed")
+		}
+		return a.buildRoomFeedIn(tx, &room, now)
+	})
+}
+
+// buildRoomFeedIn lists, on db, the room's confirmed bookings whose date
+// starts in the feed window. Times are the event's, without setup and
+// teardown.
+func (a *App) buildRoomFeedIn(db *gorm.DB, room *models.Room, now time.Time) (events.Feed, error) {
+	windowStart, windowEnd := feedWindow(now)
+	roomLine := placeLine(&occurrenceRoomJSON{ID: room.ID, Name: room.Name, Building: room.Building}, "")
+	host := a.feedHost()
+	feed := events.Feed{Name: roomLine, Host: host, WindowStart: windowStart, WindowEnd: windowEnd, Singles: []events.FeedSingle{}}
+	tz := "UTC"
+	lenientReadIn(db, func(sp *gorm.DB) { tz = churchZoneOrUTC(sp).String() })
+
+	var bookings []models.RoomBooking
+	if err := db.Joins("JOIN event_occurrences o ON o.id = room_bookings.occurrence_id").
+		Where("room_bookings.room_id = ? AND room_bookings.status = ? AND o.status = ? AND o.starts_at >= ? AND o.starts_at < ?",
+			room.ID, models.BookingConfirmed, models.OccurrenceScheduled, windowStart, windowEnd).
+		Order("room_bookings.starts_at, room_bookings.id").Find(&bookings).Error; err != nil {
+		return events.Feed{}, err
+	}
+	if len(bookings) == 0 {
+		return feed, nil
+	}
+	occIDs := make([]uint, 0, len(bookings))
+	for _, b := range bookings {
+		occIDs = append(occIDs, b.OccurrenceID)
+	}
+	occByID := map[uint]*models.EventOccurrence{}
+	evByID := map[uint]*models.Event{}
+	groups := map[uint]*models.Group{}
+	if err := eachIDChunk(occIDs, func(chunk []uint) error {
+		var occs []models.EventOccurrence
+		if err := db.Where("id IN ?", chunk).Find(&occs).Error; err != nil {
+			return err
+		}
+		evIDs, gIDs := []uint{}, []uint{}
+		wantEv, wantGroup := map[uint]bool{}, map[uint]bool{}
+		for i := range occs {
+			occByID[occs[i].ID] = &occs[i]
+			if id := occs[i].EventID; evByID[id] == nil && !wantEv[id] {
+				wantEv[id] = true
+				evIDs = append(evIDs, id)
+			}
+		}
+		var evs []models.Event
+		if err := db.Where("id IN ?", evIDs).Find(&evs).Error; err != nil {
+			return err
+		}
+		for i := range evs {
+			evByID[evs[i].ID] = &evs[i]
+			if g := evs[i].GroupID; g != nil && groups[*g] == nil && !wantGroup[*g] {
+				wantGroup[*g] = true
+				gIDs = append(gIDs, *g)
+			}
+		}
+		// Soft-deleted groups aren't loaded, so their dates are Reserved.
+		var gs []models.Group
+		if err := db.Where("id IN ?", gIDs).Find(&gs).Error; err != nil {
+			return err
+		}
+		for i := range gs {
+			groups[gs[i].ID] = &gs[i]
+		}
+		return nil
+	}); err != nil {
+		return events.Feed{}, err
+	}
+
+	for _, b := range bookings {
+		occ := occByID[b.OccurrenceID]
+		if occ == nil {
+			continue
+		}
+		ev := evByID[occ.EventID]
+		single := events.FeedSingle{
+			UID:   "room-" + strconv.FormatUint(uint64(room.ID), 10) + "-booking-" + strconv.FormatUint(uint64(b.ID), 10) + "@" + host,
+			Title: roomFeedTitle, Location: roomLine, TZID: tz,
+			// The date's own and its group's change time too, so a booking that
+			// turns Reserved (a date override, a group archived or set back to
+			// pending) gets a newer DTSTAMP and calendars replace its old title.
+			StartsAt: b.StartsAt, EndsAt: b.EndsAt, UpdatedAt: laterTime(occ.UpdatedAt, b.UpdatedAt), Status: "CONFIRMED",
+		}
+		if ev != nil && ev.GroupID != nil && groups[*ev.GroupID] != nil {
+			// Group edits share one timestamp; all of them refresh the feed so a
+			// status change replaces any details already cached by calendars.
+			single.UpdatedAt = laterTime(single.UpdatedAt, groups[*ev.GroupID].UpdatedAt)
+		}
+		if ev != nil && roomFeedDescribes(ev, occ, groups) {
+			grp := (*models.Group)(nil)
+			if ev.GroupID != nil {
+				grp = groups[*ev.GroupID]
+			}
+			groupLoc := ""
+			if grp != nil && policy.CanSeeGroup(nil, asGroup(grp), policy.Rel{}) {
+				groupLoc = grp.Location // group-ok: the group is public, so its place isn't hidden
+			}
+			eff := occurrenceToJSON(ev, occ, groupLoc)
+			single.Title = eff.Title
+			single.Location = placeLine(&occurrenceRoomJSON{ID: room.ID, Name: room.Name, Building: room.Building}, eff.Location)
+			single.URL = a.emailBaseURL() + occurrenceDatePath(ev.ID, models.FormatCalendarDate(occ.OriginalDate))
+			single.UpdatedAt = laterTime(laterTime(laterTime(ev.UpdatedAt, occ.UpdatedAt), b.UpdatedAt), single.UpdatedAt)
+			// Only a public series contributes its description; a private or hidden
+			// series opened for one date shows the title alone.
+			if ev.Visibility == models.VisibilityPublic {
+				single.Description = ev.Description
+			}
+		}
+		feed.Singles = append(feed.Singles, single)
+	}
+	return feed, nil
+}
+
+// roomFeedDescribes: the room feed names a booking's event only when a
+// signed-out viewer could see that date. A feed has no viewer, so the link
+// holder is the public, and the rule is canSeeDate's signed-out path (PLAN
+// 8.2, policy.CanSeeEvent): a group event needs a loaded (not deleted),
+// active group and a public effective visibility. Every other confirmed
+// booking, including one whose group was archived or set back to pending
+// after booking, stays in the feed as a Reserved busy block.
+func roomFeedDescribes(ev *models.Event, occ *models.EventOccurrence, groups map[uint]*models.Group) bool {
+	return visibleSet{factSet: factSet{Groups: groups}}.canSeeDate(nil, ev, occ)
+}

@@ -42,9 +42,9 @@ covered=(
 	"./internal/jobs Dismiss"
 	"./internal/jobs decideDead"
 	"./internal/jobs PruneDone"
-	". App.decideDeadJob"
-	". App.deliverMessagePush"
-	". pushWaitIn"
+	"./internal/app App.decideDeadJob"
+	"./internal/app App.deliverMessagePush"
+	"./internal/app pushWaitIn"
 )
 
 manifest() {

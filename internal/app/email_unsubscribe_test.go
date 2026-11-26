@@ -1,0 +1,661 @@
+package app
+
+import (
+	"bytes"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/binary"
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"reflect"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"fold/internal/mail"
+	"fold/internal/notify"
+	"fold/models"
+
+	"gorm.io/gorm"
+)
+
+// legacyUnsubscribeToken reproduces the released v1 wire format.
+func legacyUnsubscribeToken(app *App, userID uint, scope string) string {
+	body := binary.AppendUvarint([]byte{1}, uint64(userID))
+	body = append(body, scope...)
+	mac := hmac.New(sha256.New, app.unsubscribeKey())
+	mac.Write(body)
+	return base64.RawURLEncoding.EncodeToString(append(body, mac.Sum(nil)[:16]...))
+}
+
+func TestUnsubscribeTokens(t *testing.T) {
+	app := &App{Config: Config{SessionSecret: []byte("test-session-secret-at-least-32-bytes")}}
+	const address = "mailbox@example.com"
+	tok := app.unsubscribeToken(42, "category:groups", address)
+	link, err := app.parseUnsubscribeToken(tok)
+	if err != nil || link.UserID != 42 || link.Scope != "category:groups" {
+		t.Fatalf("round trip: %+v %v", link, err)
+	}
+	if !link.boundTo(" MAILBOX@Example.Com ") || link.boundTo("other@example.com") {
+		t.Fatal("v2 binding did not normalize the destination")
+	}
+	v1, err := app.parseUnsubscribeToken(legacyUnsubscribeToken(app, 42, "category:groups"))
+	if err != nil || v1.UserID != 42 || v1.Scope != "category:groups" || v1.boundTo(address) {
+		t.Fatalf("v1: %+v %v", v1, err)
+	}
+	raw, err := base64.RawURLEncoding.DecodeString(tok)
+	if err != nil {
+		t.Fatal(err)
+	}
+	other := &App{Config: Config{SessionSecret: []byte("a different secret entirely, long enough")}}
+	for name, bad := range map[string]string{
+		"another secret": other.unsubscribeToken(42, "category:groups", address),
+		"not base64":     "%%%", "too short": "AQ",
+		"short v2":             base64.RawURLEncoding.EncodeToString([]byte{2, 42, 1, 2}),
+		"a scope we don't use": app.unsubscribeToken(42, "category:safety", address),
+		"no user":              app.unsubscribeToken(0, "category:groups", address),
+	} {
+		if _, err := app.parseUnsubscribeToken(bad); err == nil {
+			t.Errorf("%s: accepted", name)
+		}
+	}
+	for name, at := range map[string]int{"body": 2, "identity MAC": len(raw) - 32, "address MAC": len(raw) - 1} {
+		t.Run(name, func(t *testing.T) {
+			bad := append([]byte(nil), raw...)
+			bad[at] ^= 1
+			parsed, err := app.parseUnsubscribeToken(base64.RawURLEncoding.EncodeToString(bad))
+			if name == "address MAC" {
+				if err != nil || parsed.boundTo(address) {
+					t.Fatal("address-only tampering must leave identity valid and binding false")
+				}
+			} else if err == nil {
+				t.Fatal("tampered identity accepted")
+			}
+		})
+	}
+}
+
+// approveGroupFor gives the leader an optional email (their group was
+// approved, category groups) and returns the leader's latest outbox row.
+func approveGroupFor(t *testing.T, app *App, leader, admin *apiClient, name string) models.MailOutbox {
+	t.Helper()
+	var body struct {
+		Group groupSummaryJSON `json:"group"`
+	}
+	decodeJSON(t, leader.do("POST", "/api/v1/groups", map[string]any{"name": name}, true), &body)
+	if w := admin.do("POST", "/api/v1/admin/groups/"+itoa(body.Group.ID)+"/approve", map[string]any{}, true); w.Code != http.StatusOK {
+		t.Fatalf("approve: %d", w.Code)
+	}
+	var row models.MailOutbox
+	app.DB.Where("to_address = ?", testEmail("lee")).Order("id DESC").First(&row)
+	return row
+}
+
+func postOneClick(app *App, path, ua string) *httptest.ResponseRecorder {
+	req := httptest.NewRequest(http.MethodPost, path, bytes.NewBufferString("List-Unsubscribe=One-Click"))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("User-Agent", ua)
+	w := httptest.NewRecorder()
+	app.setupRouter().ServeHTTP(w, req)
+	return w
+}
+
+// Optional email carries a one-click link and a footer; the one-click POST
+// works with no cookie or CSRF token, turns off that kind of email at once
+// with an appended consent row, and leaves required mail alone (M3.3).
+func TestOneClickUnsubscribe(t *testing.T) {
+	app := testApp(t)
+	app.DB.Create(&models.Setting{Key: settingChurchAddress, Value: "Grace Church\r\n 12 Main St \n\nBoise, ID 83702"})
+	admin := newTestUser(t, app, "root", "password1234", models.RoleAdmin)
+	lee := newTestUser(t, app, "lee", "password1234", models.RoleMember)
+	adminClient, leeClient := loginAPI(t, app, "root", "password1234"), loginAPI(t, app, "lee", "password1234")
+
+	mail := approveGroupFor(t, app, leeClient, adminClient, "Book club")
+	base := app.emailBaseURL()
+	if !strings.HasPrefix(mail.ListUnsubscribe, base+"/u/unsubscribe/") {
+		t.Fatalf("no one-click link: %q", mail.ListUnsubscribe)
+	}
+	token := strings.TrimPrefix(mail.ListUnsubscribe, base+"/u/unsubscribe/")
+	if !strings.Contains(mail.Body, "You're getting group updates from") || !strings.Contains(mail.Body, base+"/email-settings/"+token) ||
+		!strings.Contains(mail.Body, "\nGrace Church\n12 Main St\nBoise, ID 83702") {
+		t.Fatalf("footer: %q", mail.Body)
+	}
+	// Required mail (the admin's new-group task) has neither.
+	var task models.MailOutbox
+	app.DB.Where("to_address = ?", admin.Email).Order("id DESC").First(&task)
+	if task.ListUnsubscribe != "" || strings.Contains(task.Body, "/email-settings/") {
+		t.Fatalf("required mail offered unsubscribe: %+v", task)
+	}
+
+	path := "/u/unsubscribe/" + token
+	if w := postOneClick(app, "/u/unsubscribe/"+token+"x", "Mail"); w.Code != http.StatusNotFound {
+		t.Fatalf("tampered: %d", w.Code)
+	}
+	if contactCount(t, app, &models.Consent{}, "user_id = ?", lee.ID) != 0 {
+		t.Fatal("a tampered link changed something")
+	}
+	for i := 0; i < 2; i++ {
+		if w := postOneClick(app, path, "Gmail one-click"); w.Code != http.StatusOK || !strings.Contains(w.Body.String(), "unsubscribed") {
+			t.Fatalf("one-click: %d %s", w.Code, w.Body.String())
+		}
+	}
+	var rows []models.Consent
+	app.DB.Where("user_id = ?", lee.ID).Find(&rows)
+	if len(rows) != 1 || rows[0].Scope != "category:groups" || rows[0].Status != models.ConsentOptedOut ||
+		rows[0].Source != models.ConsentSourceUnsubscribe || rows[0].UserAgent != "Gmail one-click" || rows[0].IP == "" || rows[0].At.IsZero() {
+		t.Fatalf("consent rows (one, even after a repeat): %+v", rows)
+	}
+
+	// The next group update is suppressed; other kinds and required mail
+	// still go.
+	approveGroupFor(t, app, leeClient, adminClient, "Second club")
+	var n models.Notification
+	app.DB.Where("user_id = ? AND kind = ?", lee.ID, notify.GroupApproved).Order("id DESC").First(&n)
+	if contactCount(t, app, &models.NotificationDelivery{}, "notification_id = ? AND status = ? AND reason = ?", n.ID, models.DeliverySuppressed, "optional email turned off") != 1 {
+		t.Fatal("the unsubscribed kind still sends")
+	}
+	var task2 models.Notification
+	app.DB.Where("user_id = ? AND kind = ?", admin.ID, notify.GroupPending).Order("id DESC").First(&task2)
+	if contactCount(t, app, &models.NotificationDelivery{}, "notification_id = ? AND status = ?", task2.ID, models.DeliverySent) != 1 {
+		t.Fatal("required mail stopped")
+	}
+	if w := postOneClick(app, "/u/unsubscribe/"+app.unsubscribeToken(lee.ID, "category:events", lee.Email), "x"); w.Code != http.StatusOK ||
+		contactCount(t, app, &models.Consent{}, "user_id = ?", lee.ID) != 2 {
+		t.Fatal("a second kind is its own row")
+	}
+	// A deleted account's links stop working.
+	app.DB.Delete(&models.User{}, lee.ID)
+	if w := postOneClick(app, path, "x"); w.Code != http.StatusNotFound {
+		t.Fatalf("deleted user: %d", w.Code)
+	}
+}
+
+// Outside dev, the one-click header goes out only over https (RFC 8058);
+// the footer link is there either way.
+func TestOneClickNeedsHTTPS(t *testing.T) {
+	app := testApp(t)
+	newTestUser(t, app, "root", "password1234", models.RoleAdmin)
+	newTestUser(t, app, "lee", "password1234", models.RoleMember)
+	adminClient, leeClient := loginAPI(t, app, "root", "password1234"), loginAPI(t, app, "lee", "password1234")
+	app.Config.Env = "prod"
+	app.Config.SiteURL = "http://groups.example.org"
+	if mail := approveGroupFor(t, app, leeClient, adminClient, "Plain http"); mail.ListUnsubscribe != "" || !strings.Contains(mail.Body, "http://groups.example.org/email-settings/") {
+		t.Fatalf("http: %+v", mail)
+	}
+	app.Config.SiteURL = "https://groups.example.org"
+	if mail := approveGroupFor(t, app, leeClient, adminClient, "Over https"); !strings.HasPrefix(mail.ListUnsubscribe, "https://groups.example.org/u/unsubscribe/") {
+		t.Fatalf("https: %+v", mail)
+	}
+}
+
+// consentTestPauseBeforeLock pauses the one request that is about to take
+// userID's setConsent lock: a Row callback that fires once, when the SQL is
+// the deleted_at-reading `FOR NO KEY UPDATE` select on users and its first
+// bound value is userID. Release precedes callback removal on cleanup, so a
+// failed assertion cannot strand the request.
+func consentTestPauseBeforeLock(t *testing.T, db *gorm.DB, userID uint) (<-chan struct{}, func()) {
+	t.Helper()
+	reached, resume := make(chan struct{}), make(chan struct{})
+	var fired atomic.Bool
+	name := fmt.Sprintf("test:consent_pause_before_lock:%d", queryCounterSeq.Add(1))
+	if err := db.Callback().Row().Before("gorm:row").Register(name, func(tx *gorm.DB) {
+		sql := tx.Statement.SQL.String()
+		if !strings.Contains(sql, "deleted_at FROM users WHERE id") || !strings.Contains(sql, "FOR NO KEY UPDATE") ||
+			len(tx.Statement.Vars) == 0 || fmt.Sprint(tx.Statement.Vars[0]) != fmt.Sprint(userID) || fired.Swap(true) {
+			return
+		}
+		close(reached)
+		select {
+		case <-resume:
+		case <-tx.Statement.Context.Done():
+			tx.AddError(tx.Statement.Context.Err())
+		}
+	}); err != nil {
+		t.Fatal(err)
+	}
+	var once sync.Once
+	release := func() { once.Do(func() { close(resume) }) }
+	t.Cleanup(func() { release(); _ = db.Callback().Row().Remove(name) })
+	return reached, release
+}
+
+// consentTestAsync runs a request in a goroutine and returns what waits for
+// its answer.
+func consentTestAsync(t *testing.T, request func() *httptest.ResponseRecorder) func() *httptest.ResponseRecorder {
+	t.Helper()
+	answer := make(chan *httptest.ResponseRecorder, 1)
+	go func() { answer <- request() }()
+	return func() *httptest.ResponseRecorder {
+		t.Helper()
+		select {
+		case w := <-answer:
+			return w
+		case <-time.After(10 * time.Second):
+			t.Fatal("the request never finished")
+			return nil
+		}
+	}
+}
+
+// consentTestSoftDeleteWhile holds userID FOR UPDATE with an uncommitted
+// deleted_at, starts the request, waits until a backend is blocked on a lock
+// running a statement matching like, then commits the soft delete and
+// returns the request's answer.
+func consentTestSoftDeleteWhile(t *testing.T, app *App, userID uint, like string, request func() *httptest.ResponseRecorder) *httptest.ResponseRecorder {
+	t.Helper()
+	locked, commit := make(chan struct{}), make(chan struct{})
+	_, done := startDBSession(t, app.DB, "consent-owner", func(db *gorm.DB) error {
+		return db.Transaction(func(tx *gorm.DB) error {
+			if err := tx.Exec("SELECT 1 FROM users WHERE id = ? FOR UPDATE", userID).Error; err != nil {
+				return err
+			}
+			if err := tx.Exec("UPDATE users SET deleted_at = now() WHERE id = ?", userID).Error; err != nil {
+				return err
+			}
+			close(locked)
+			select {
+			case <-commit:
+				return nil
+			case <-tx.Statement.Context.Done():
+				return tx.Statement.Context.Err()
+			}
+		})
+	})
+	var once sync.Once
+	release := func() { once.Do(func() { close(commit) }) }
+	t.Cleanup(release)
+	select {
+	case <-locked:
+	case err := <-done:
+		t.Fatalf("soft-delete session ended early: %v", err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("soft-delete session never took the lock")
+	}
+	wait := consentTestAsync(t, request)
+	waitForLockedUsersQuery(t, app, like)
+	release()
+	if err := awaitDBResult(t, done); err != nil {
+		t.Fatalf("soft-delete session: %v", err)
+	}
+	return wait()
+}
+
+// consentTestSeed stores one prior consent row with evidence, ip and user
+// agent filled in, so a refused write has something to leave untouched.
+func consentTestSeed(t *testing.T, app *App, u *models.User, channel, scope, status string) {
+	t.Helper()
+	if err := app.DB.Create(&models.Consent{UserID: u.ID, Channel: channel, Scope: scope, Status: status,
+		Source: models.ConsentSourceWebForm, EvidenceText: "Seeded evidence", IP: "203.0.113.9", UserAgent: "Seed agent"}).Error; err != nil {
+		t.Fatal(err)
+	}
+}
+
+// consentTestRows is every consent row of the person as JSON, in id order.
+func consentTestRows(t *testing.T, app *App, userID uint) []string {
+	t.Helper()
+	var rows []string
+	if err := app.DB.Raw("SELECT to_jsonb(c)::text FROM consents c WHERE user_id = ? ORDER BY id", userID).Scan(&rows).Error; err != nil {
+		t.Fatal(err)
+	}
+	return rows
+}
+
+// consentTestWriter is a setConsent write path, with the prior
+// row it is seeded over and what a gone owner answers.
+type consentTestWriter struct {
+	name      string
+	signedIn  bool
+	channel   string
+	scope     string
+	prior     string // status of the seeded row; the request writes the other one
+	gone      int
+	goneBody  string
+	run       func(t *testing.T, app *App, u *models.User, c *apiClient) *httptest.ResponseRecorder
+	newStatus string
+}
+
+func consentTestWriters() []consentTestWriter {
+	const groups = "category:groups"
+	return []consentTestWriter{
+		{name: "one-click unsubscribe", channel: models.ConsentEmail, scope: groups, prior: models.ConsentOptedIn,
+			newStatus: models.ConsentOptedOut, gone: http.StatusNotFound, goneBody: "This unsubscribe link isn't valid.",
+			run: func(t *testing.T, app *App, u *models.User, _ *apiClient) *httptest.ResponseRecorder {
+				return postOneClick(app, "/u/unsubscribe/"+app.unsubscribeToken(u.ID, groups, u.Email), "One-click agent")
+			}},
+		{name: "token page switch", channel: models.ConsentEmail, scope: groups, prior: models.ConsentOptedIn,
+			newStatus: models.ConsentOptedOut, gone: http.StatusNotFound, goneBody: "not found",
+			run: func(t *testing.T, app *App, u *models.User, _ *apiClient) *httptest.ResponseRecorder {
+				c := anonClient(t, app, "203.0.113.20")
+				c.holdNotices = true
+				return c.do("PUT", "/api/v1/email-settings/"+app.unsubscribeToken(u.ID, groups, u.Email),
+					map[string]any{"category": "groups", "off": true}, true)
+			}},
+		{name: "token page turn-on", channel: models.ConsentEmail, scope: groups, prior: models.ConsentOptedOut,
+			newStatus: models.ConsentOptedIn, gone: http.StatusNotFound, goneBody: "not found",
+			run: func(t *testing.T, app *App, u *models.User, _ *apiClient) *httptest.ResponseRecorder {
+				c := anonClient(t, app, "203.0.113.20")
+				c.holdNotices = true
+				return c.do("PUT", "/api/v1/email-settings/"+app.unsubscribeToken(u.ID, groups, u.Email),
+					map[string]any{"category": "groups", "off": false}, true)
+			}},
+		{name: "signed-in email turn-on", signedIn: true, channel: models.ConsentEmail, scope: groups, prior: models.ConsentOptedOut,
+			newStatus: models.ConsentOptedIn, gone: http.StatusUnauthorized, goneBody: "unauthorized",
+			run: func(t *testing.T, app *App, u *models.User, c *apiClient) *httptest.ResponseRecorder {
+				return c.do("PUT", "/api/v1/me/notification-settings", map[string]any{"category": "groups", "off": false}, true)
+			}},
+		{name: "signed-in email switch", signedIn: true, channel: models.ConsentEmail, scope: groups, prior: models.ConsentOptedIn,
+			newStatus: models.ConsentOptedOut, gone: http.StatusUnauthorized, goneBody: "unauthorized",
+			run: func(t *testing.T, app *App, u *models.User, c *apiClient) *httptest.ResponseRecorder {
+				return c.do("PUT", "/api/v1/me/notification-settings", map[string]any{"category": "groups", "off": true}, true)
+			}},
+		{name: "signed-in push switch", signedIn: true, channel: models.ConsentPush, scope: groups, prior: models.ConsentOptedIn,
+			newStatus: models.ConsentOptedOut, gone: http.StatusUnauthorized, goneBody: "unauthorized",
+			run: func(t *testing.T, app *App, u *models.User, c *apiClient) *httptest.ResponseRecorder {
+				return c.do("PUT", "/api/v1/me/notification-settings",
+					map[string]any{"channel": "push", "category": "groups", "off": true}, true)
+			}},
+		{name: "push turn off everywhere", signedIn: true, channel: models.ConsentPush, scope: "all", prior: models.ConsentOptedIn,
+			newStatus: models.ConsentOptedOut, gone: http.StatusUnauthorized, goneBody: "unauthorized",
+			run: func(t *testing.T, app *App, u *models.User, c *apiClient) *httptest.ResponseRecorder {
+				return c.do("POST", "/api/v1/push/turn-off", nil, true)
+			}},
+	}
+}
+
+// consentTestFixture makes the person, signs them in when the writer needs a
+// session, and seeds the writer's prior row.
+func consentTestFixture(t *testing.T, w consentTestWriter) (*App, *models.User, *apiClient) {
+	t.Helper()
+	app, _ := pushTestApp(t)
+	u := newTestUser(t, app, "lee", "password123456", models.RoleMember)
+	var c *apiClient
+	if w.signedIn {
+		c = loginAPI(t, app, "lee", "password123456")
+		c.holdNotices = true
+	}
+	consentTestSeed(t, app, u, w.channel, w.scope, w.prior)
+	return app, u, c
+}
+
+// A consent write takes the person's row lock and then looks at the row it
+// locked: an owner who was erased (or soft-deleted) while the write waited
+// gets no new consent row and the seeded one is untouched (F-9, M42).
+func TestConsentWritersRefuseAfterTheOwnerIsSoftDeleted(t *testing.T) {
+	for _, w := range consentTestWriters() {
+		t.Run(w.name, func(t *testing.T) {
+			app, u, c := consentTestFixture(t, w)
+			if w.name == "push turn off everywhere" {
+				newPushDevice(t, app, u, "lee-phone")
+			}
+			if w.newStatus == models.ConsentOptedIn && w.channel == models.ConsentEmail {
+				seedEmailAddressOff(t, app, u.Email, notify.CatGroups)
+				name := fmt.Sprintf("test:no_gone_choice_delete:%d", queryCounterSeq.Add(1))
+				var deletes atomic.Int64
+				if err := app.DB.Callback().Raw().Before("gorm:raw").Register(name, func(tx *gorm.DB) {
+					if strings.HasPrefix(tx.Statement.SQL.String(), "DELETE FROM email_address_optouts") {
+						deletes.Add(1)
+					}
+				}); err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() { _ = app.DB.Callback().Raw().Remove(name) })
+				defer func() {
+					if deletes.Load() != 0 {
+						t.Error("gone-owner turn-on reached the retained-choice delete")
+					}
+					if contactCount(t, app, &models.EmailAddressOptOut{}, "address_hash = ?", mail.AddressHash(u.Email)) != 1 {
+						t.Error("gone-owner turn-on changed retained records")
+					}
+				}()
+			}
+			before := consentTestRows(t, app, u.ID)
+			if len(before) != 1 {
+				t.Fatalf("seed: %d rows", len(before))
+			}
+			got := consentTestSoftDeleteWhile(t, app, u.ID, "%FROM users%FOR NO KEY UPDATE%", func() *httptest.ResponseRecorder {
+				return w.run(t, app, u, c)
+			})
+			if got.Code != w.gone || !strings.Contains(got.Body.String(), w.goneBody) {
+				t.Fatalf("answer %d %q, want %d containing %q", got.Code, got.Body.String(), w.gone, w.goneBody)
+			}
+			if after := consentTestRows(t, app, u.ID); !reflect.DeepEqual(before, after) {
+				t.Fatalf("consent rows changed for a gone owner:\n before %v\n after  %v", before, after)
+			}
+			if w.name == "push turn off everywhere" && len(userDevices(app, u)) != 1 {
+				t.Fatal("a gone owner's devices were deleted")
+			}
+		})
+	}
+	// R4-2d1b-2: the same writers against the real erasure, which now
+	// scrubs the owner's consent evidence right after its soft delete.
+	t.Run("real erasure", func(t *testing.T) {
+		for _, w := range consentTestWriters() {
+			t.Run(w.name, func(t *testing.T) {
+				t.Run("writer first", func(t *testing.T) { consentTestRealErasureWriterFirst(t, w) })
+				t.Run("erasure first", func(t *testing.T) { consentTestRealErasureFirst(t, w) })
+			})
+		}
+	})
+}
+
+// consentTestErasureFixture is consentTestFixture plus an admin who can erase
+// the person for real and a push device for the writer that deletes them.
+// Every client holds its notices (F1). erase answers the real
+// DELETE /api/v1/admin/users/:id.
+func consentTestErasureFixture(t *testing.T, w consentTestWriter) (*App, *models.User, *apiClient, func() *httptest.ResponseRecorder) {
+	t.Helper()
+	app, u, c := consentTestFixture(t, w)
+	newTestUser(t, app, "root", "password123456", models.RoleAdmin)
+	admin := loginAPI(t, app, "root", "password123456")
+	admin.holdNotices = true
+	if w.name == "push turn off everywhere" {
+		newPushDevice(t, app, u, "lee-phone")
+	}
+	return app, u, c, func() *httptest.ResponseRecorder {
+		return admin.do("DELETE", "/api/v1/admin/users/"+itoa(u.ID), nil, true)
+	}
+}
+
+func consentTestRowsOf(t *testing.T, app *App, userID uint) []models.Consent {
+	t.Helper()
+	var rows []models.Consent
+	if err := app.DB.Where("user_id = ?", userID).Order("id").Find(&rows).Error; err != nil {
+		t.Fatal(err)
+	}
+	return rows
+}
+
+// consentTestWantErased fails unless the erasure answered 200 with exactly the
+// report body {"erasure":{...}} and an all-zero report: the fixture's person has
+// no household, person row or guardian link for the household step to touch
+// (R4-3b-2).
+func consentTestWantErased(t *testing.T, got *httptest.ResponseRecorder) {
+	t.Helper()
+	var body map[string]json.RawMessage
+	if got.Code != http.StatusOK || json.Unmarshal(got.Body.Bytes(), &body) != nil || len(body) != 1 || body["erasure"] == nil {
+		t.Fatalf("erasure answered %d %q, want 200 with only an erasure report", got.Code, got.Body.String())
+	}
+	dec := json.NewDecoder(bytes.NewReader(body["erasure"]))
+	dec.DisallowUnknownFields()
+	var report erasureReportJSON
+	if err := dec.Decode(&report); err != nil || report != (erasureReportJSON{}) {
+		t.Fatalf("erasure report %q (%v), want every count zero", body["erasure"], err)
+	}
+}
+
+// consentTestWantBlank fails unless the row's three evidence columns are empty.
+func consentTestWantBlank(t *testing.T, what string, c models.Consent) {
+	t.Helper()
+	if c.IP != "" || c.UserAgent != "" || c.EvidenceText != "" {
+		t.Fatalf("%s still carries evidence: ip %q, user agent %q, evidence %q", what, c.IP, c.UserAgent, c.EvidenceText)
+	}
+}
+
+// Writer first: the writer has inserted its row and holds the owner's row
+// FOR NO KEY UPDATE, so the erasure waits at its own FOR UPDATE on that row
+// (the writer's backend is the recorded blocker, F7). When the writer commits,
+// the erasure runs and its scrub blanks the new row along with the seeded one.
+func consentTestRealErasureWriterFirst(t *testing.T, w consentTestWriter) {
+	t.Helper()
+	app, u, c, erase := consentTestErasureFixture(t, w)
+	var writerPID atomic.Int64
+	reached, release := erasureTestPause(t, app.DB, erasureTestPoint{Processor: "create", After: true, Step: "gorm:create", Table: "consents", PID: &writerPID})
+	wait := consentTestAsync(t, func() *httptest.ResponseRecorder { return w.run(t, app, u, c) })
+	awaitDBSignal(t, reached)
+	waitErased := consentTestAsync(t, erase)
+	erasurePID := waitForRowLockWaiter(t, app)
+	waitDBBlocked(t, app.DB, erasurePID, int(writerPID.Load()))
+	release()
+	got, erased := wait(), waitErased()
+	if got.Code != http.StatusOK {
+		t.Fatalf("writer answered %d %q, want 200", got.Code, got.Body.String())
+	}
+	if w.name == "token page switch" && !strings.Contains(got.Body.String(), "emailSettings") {
+		t.Fatalf("writer answered %q, want emailSettings", got.Body.String())
+	}
+	consentTestWantErased(t, erased)
+	rows := consentTestRowsOf(t, app, u.ID)
+	if len(rows) != 2 {
+		t.Fatalf("%d consent rows after the writer and the erasure, want the seeded row and the new one: %+v", len(rows), rows)
+	}
+	consentTestWantBlank(t, "the seeded row", rows[0])
+	consentTestWantBlank(t, "the row the writer committed first", rows[1])
+	if n := rows[1]; n.Channel != w.channel || n.Scope != w.scope || n.Status != w.newStatus {
+		t.Fatalf("new row %+v, want %s %s %s", n, w.channel, w.scope, w.newStatus)
+	}
+}
+
+// Erasure first: the writer is stopped before it takes the owner's row lock,
+// the real erasure completes (soft delete, then the scrub), and the writer then
+// finds a gone owner: it answers its own gone status, appends nothing, and the
+// scrubbed row stays scrubbed.
+func consentTestRealErasureFirst(t *testing.T, w consentTestWriter) {
+	t.Helper()
+	app, u, c, erase := consentTestErasureFixture(t, w)
+	reached, release := consentTestPauseBeforeLock(t, app.DB, u.ID)
+	wait := consentTestAsync(t, func() *httptest.ResponseRecorder { return w.run(t, app, u, c) })
+	awaitDBSignal(t, reached)
+	consentTestWantErased(t, erase())
+	release()
+	got := wait()
+	if got.Code != w.gone || !strings.Contains(got.Body.String(), w.goneBody) {
+		t.Fatalf("writer answered %d %q, want %d containing %q", got.Code, got.Body.String(), w.gone, w.goneBody)
+	}
+	rows := consentTestRowsOf(t, app, u.ID)
+	if len(rows) != 1 {
+		t.Fatalf("%d consent rows after the erasure, want only the seeded one: %+v", len(rows), rows)
+	}
+	consentTestWantBlank(t, "the seeded row", rows[0])
+	if r := rows[0]; r.Channel != w.channel || r.Scope != w.scope || r.Status != w.prior {
+		t.Fatalf("seeded row %+v, want %s %s %s kept", r, w.channel, w.scope, w.prior)
+	}
+}
+
+// The same seeds without the soft delete write what they always did.
+func TestConsentWritersAppendOneRowWhenTheOwnerIsLive(t *testing.T) {
+	for _, w := range consentTestWriters() {
+		t.Run(w.name, func(t *testing.T) {
+			app, u, c := consentTestFixture(t, w)
+			if got := w.run(t, app, u, c); got.Code != http.StatusOK {
+				t.Fatalf("answer %d %q", got.Code, got.Body.String())
+			}
+			var rows []models.Consent
+			app.DB.Where("user_id = ?", u.ID).Order("id").Find(&rows)
+			if len(rows) != 2 {
+				t.Fatalf("want the seeded row and one new one: %+v", rows)
+			}
+			if n := rows[1]; n.Channel != w.channel || n.Scope != w.scope || n.Status != w.newStatus {
+				t.Fatalf("new row %+v", n)
+			}
+		})
+	}
+	t.Run("all optional email", func(t *testing.T) {
+		app, _ := pushTestApp(t)
+		u := newTestUser(t, app, "lee", "password123456", models.RoleMember)
+		c := loginAPI(t, app, "lee", "password123456")
+		c.holdNotices = true
+		if got := c.do("PUT", "/api/v1/me/notification-settings", map[string]any{"optionalEmailOff": true}, true); got.Code != http.StatusOK {
+			t.Fatalf("answer %d %q", got.Code, got.Body.String())
+		}
+		want := int64(len(notify.OptionalEmailCategories()))
+		if n := contactCount(t, app, &models.Consent{}, "user_id = ? AND channel = ? AND status = ?", u.ID, models.ConsentEmail, models.ConsentOptedOut); n != want {
+			t.Fatalf("%d opted-out rows, want %d", n, want)
+		}
+	})
+}
+
+// A signed-in switch whose session was ended after the request began is
+// refused under the lock: logout bumps logout_version, which setConsent
+// compares with the session's.
+func TestConsentWritersRefuseAStaleSession(t *testing.T) {
+	for _, w := range consentTestWriters() {
+		if !w.signedIn {
+			continue
+		}
+		t.Run(w.name, func(t *testing.T) {
+			app, u, c := consentTestFixture(t, w)
+			before := consentTestRows(t, app, u.ID)
+			reached, release := consentTestPauseBeforeLock(t, app.DB, u.ID)
+			wait := consentTestAsync(t, func() *httptest.ResponseRecorder { return w.run(t, app, u, c) })
+			awaitDBSignal(t, reached)
+			// The paused request holds no user lock, so a real logout is not blocked.
+			if lw := c.do("POST", "/api/v1/auth/logout", nil, true); lw.Code != http.StatusOK {
+				t.Fatalf("logout: %d %s", lw.Code, lw.Body.String())
+			}
+			release()
+			if got := wait(); got.Code != http.StatusUnauthorized {
+				t.Fatalf("stale session: %d %s, want 401", got.Code, got.Body.String())
+			}
+			if after := consentTestRows(t, app, u.ID); !reflect.DeepEqual(before, after) {
+				t.Fatalf("consent rows changed for a stale session:\n before %v\n after  %v", before, after)
+			}
+		})
+	}
+}
+
+func TestOptionalEmailLinksBindTheActualDestination(t *testing.T) {
+	app := testApp(t)
+	u := newTestUser(t, app, "current-holder", "password1234", models.RoleMember)
+	const snapshotAddress = "snapshot@example.com"
+	footer := footerFacts{site: "Fold"}
+	kind, ok := notify.Lookup(notify.GroupApproved)
+	if !ok {
+		t.Fatal("missing optional kind")
+	}
+	notification := app.notificationEmailMessage(&models.Notification{EmailTitle: "Approved", Link: "/me"}, u, kind, footer)
+	check := func(url, address, scope string) {
+		t.Helper()
+		token := strings.TrimPrefix(url, app.emailBaseURL()+"/u/unsubscribe/")
+		link, err := app.parseUnsubscribeToken(token)
+		if err != nil || link.UserID != u.ID || link.Scope != scope || !link.boundTo(address) {
+			t.Fatalf("link did not bind the mail destination: user=%d scope=%q err=%v", link.UserID, link.Scope, err)
+		}
+		if address != u.Email && link.boundTo(u.Email) {
+			t.Fatal("snapshot mail link bound to the user's current address")
+		}
+	}
+	check(notification.ListUnsubscribe, notification.To, "category:groups")
+	msg := models.Message{Subject: "Hello", BodyHTML: "<p>Hello</p>", BodyText: "Hello"}
+	teen := newTestUser(t, app, "teen-reader", "password1234", models.RoleMember)
+	for _, copy := range []bool{false, true} {
+		row := models.MessageRecipient{UserID: u.ID, Address: snapshotAddress}
+		if copy {
+			row.CopyOfUserID = &teen.ID
+		}
+		rendered, err := app.messageEmail(&msg, row, u, map[uint]*models.User{u.ID: u, teen.ID: teen}, map[uint]map[string]string{u.ID: {}, teen.ID: {}}, footer)
+		if err != nil {
+			t.Fatal(err)
+		}
+		check(rendered.ListUnsubscribe, row.Address, "category:messages")
+	}
+	preview, err := app.renderMessageIn(app.DB, &msg, u, map[string]string{}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	check(preview.Unsubscribe, u.Email, "category:messages")
+}

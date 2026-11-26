@@ -1,0 +1,408 @@
+package app
+
+import (
+	"context"
+	"crypto/rand"
+	"encoding/hex"
+	"errors"
+	"log"
+	"math"
+	"net/http"
+	"os"
+	"strconv"
+	"strings"
+	"time"
+
+	"fold/internal/content"
+	"fold/internal/images"
+	"fold/internal/jobs"
+	"fold/internal/policy"
+	"fold/models"
+	"fold/storage"
+
+	"github.com/gin-gonic/gin"
+	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
+)
+
+func clampFocal(v float64) float64 {
+	if v < 0 {
+		return 0
+	}
+	if v > 100 {
+		return 100
+	}
+	return v
+}
+
+// The API's answers for an image it will not take. imageRefusal is the one place
+// images' plain refusals become these (internal/images knows nothing of the API).
+var (
+	errImageTooLarge   = apiErr(http.StatusBadRequest, "image_too_large", "that image is too large to process")
+	errImageUnreadable = apiErr(http.StatusBadRequest, "file_unreadable", "cannot read file")
+	errImageWebP       = apiErr(http.StatusBadRequest, "image_unsupported", "WebP images are not supported; use a JPEG or PNG")
+	errUploadBusy      = apiErr(http.StatusServiceUnavailable, "upload_busy", "other pictures are being processed; try again in a moment")
+	// errUploadCanceled is for a request whose client went away before or while
+	// its picture was read.
+	errUploadCanceled = apiErr(http.StatusRequestTimeout, "upload_canceled", "the upload was interrupted")
+)
+
+// imageRefusal maps an images.ReadUpload error to its declared answer; anything
+// it does not name is a server fault (errUploadFailed).
+func imageRefusal(err error) error {
+	switch {
+	case errors.Is(err, images.ErrFileSize):
+		return errFileTooLarge
+	case errors.Is(err, images.ErrEmpty):
+		return errEmptyFile
+	case errors.Is(err, images.ErrNotAllowed):
+		return errFileType
+	case errors.Is(err, images.ErrWebP):
+		return errImageWebP
+	case errors.Is(err, images.ErrTooLarge):
+		return errImageTooLarge
+	case errors.Is(err, images.ErrUnreadable):
+		return errImageUnreadable
+	case errors.Is(err, images.ErrBusy):
+		return errUploadBusy
+	}
+	return errUploadFailed
+}
+
+// readImageUpload takes the process-wide processing slot (images.Admit),
+// reads and normalizes the picture, and gives the slot back before returning,
+// so storage and database work never hold it. It runs after apiAuth, CSRF and
+// the handler's own policy check, so only a request that may upload can take a
+// slot. An account can hold one slot. A refusal answers at once (errUploadBusy).
+// Admission bounds copying and decoding, not the multipart parse csrfMiddleware
+// already did for the whole request, which maxRequestBytes caps per request but
+// nothing caps across requests.
+func readImageUpload(c *gin.Context, field string) (*os.File, string, string, error) {
+	release, err := images.Admit(apiUser(c).ID)
+	if err != nil {
+		return nil, "", "", imageRefusal(err)
+	}
+	defer release()
+	if c.Request.Context().Err() != nil {
+		return nil, "", "", errUploadCanceled
+	}
+	fh, err := c.FormFile(field)
+	if err != nil {
+		return nil, "", "", errMissingFile
+	}
+	tmp, ext, mime, err := images.ReadUpload(fh)
+	if err != nil {
+		return nil, "", "", imageRefusal(err)
+	}
+	// A decoder cannot be stopped, so a client that went away while it ran
+	// has held its slot until now; nothing is stored for it.
+	if c.Request.Context().Err() != nil {
+		tmp.Close()
+		os.Remove(tmp.Name())
+		return nil, "", "", errUploadCanceled
+	}
+	return tmp, ext, mime, nil
+}
+
+func randomHex(n int) (string, error) {
+	b := make([]byte, n)
+	if _, err := rand.Read(b); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(b), nil
+}
+
+// apiUploadAvatar replaces the current user's avatar. The file is stored and
+// the key switched under the user's row lock; old files are removed later by
+// the avatar.cleanup job (avatar_cleanup.go), never on this path.
+func (a *App) apiUploadAvatar(c *gin.Context) {
+	start := requestStart(c)
+	u := apiUser(c)
+	if !policy.CanUploadAvatar(asPerson(u)) {
+		fail(c, errTeenAvatar)
+		return
+	}
+	tmp, _, mime, err := readImageUpload(c, "avatar")
+	if err != nil {
+		fail(c, err)
+		return
+	}
+	defer tmp.Close()
+	defer os.Remove(tmp.Name())
+
+	st, err := tmp.Stat()
+	if err != nil {
+		jsonError(c, http.StatusInternalServerError, "server error")
+		return
+	}
+	avatarURL, err := a.storeAvatar(c.Request.Context(), u, tmp, st.Size(), mime, avatarTxDeadline(start, time.Now()))
+	switch {
+	case errors.Is(err, errSecuritySession):
+		fail(c, errSecuritySession)
+		return
+	case errors.Is(err, errTeenAvatar):
+		fail(c, errTeenAvatar)
+		return
+	case err != nil:
+		jsonError(c, http.StatusInternalServerError, "could not store avatar")
+		return
+	}
+	c.JSON(http.StatusOK, avatarUploadResponseJSON{AvatarURL: avatarURL})
+}
+
+func (a *App) apiDeleteAvatar(c *gin.Context) {
+	start := requestStart(c)
+	u := apiUser(c)
+	err := a.removeAvatar(c.Request.Context(), u, avatarTxDeadline(start, start))
+	switch {
+	case errors.Is(err, errSecuritySession):
+		fail(c, errSecuritySession)
+		return
+	case err != nil:
+		jsonError(c, http.StatusInternalServerError, "could not remove avatar")
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{})
+}
+
+// uploadsURLPrefix is where the local blob store is served (serveUpload); the
+// store builds URLs under it and uploadKeyFromURL reads them back.
+const uploadsURLPrefix = "/uploads"
+
+// uploadKeyFromURL returns the storage key for an /uploads/... URL, or
+// false when the value isn't a locally stored upload (a group without
+// a cover has an empty URL; covers are only ever set by upload).
+func uploadKeyFromURL(raw string) (string, bool) {
+	key, found := strings.CutPrefix(raw, uploadsURLPrefix+"/")
+	if !found {
+		return "", false
+	}
+	if err := storage.ValidateKey(key); err != nil {
+		return "", false
+	}
+	return key, true
+}
+
+// The cover endpoints take no revision: replacing or removing the file is its
+// own action, and the last one wins. Their image_url write changes the group's
+// token like any other column (groupRevisionIn), so a group form opened before
+// it is refused (DEC-166).
+func (a *App) apiUploadGroupCover(c *gin.Context) {
+	g, ok := a.loadManagedGroup(c)
+	if !ok {
+		return
+	}
+	tmp, ext, mime, err := readImageUpload(c, "cover")
+	if err != nil {
+		fail(c, err)
+		return
+	}
+	defer tmp.Close()
+	defer os.Remove(tmp.Name())
+	// The new image's focal point travels with it: sent with the details
+	// instead, a failed upload would leave the old photo cropped for the new.
+	updates := map[string]any{}
+	fx, hasX := c.GetPostForm("focalX")
+	fy, hasY := c.GetPostForm("focalY")
+	if hasX || hasY {
+		x, errX := strconv.ParseFloat(fx, 64)
+		y, errY := strconv.ParseFloat(fy, 64)
+		if errX != nil || errY != nil || math.IsNaN(x) || math.IsNaN(y) || math.IsInf(x, 0) || math.IsInf(y, 0) {
+			jsonError(c, http.StatusBadRequest, "invalid body")
+			return
+		}
+		updates["cover_focal_x"], updates["cover_focal_y"] = clampFocal(x), clampFocal(y)
+	}
+
+	rid, err := randomHex(16)
+	if err != nil {
+		jsonError(c, http.StatusInternalServerError, "server error")
+		return
+	}
+	key := storage.NewKey(storage.KindCovers, strconv.Itoa(int(g.ID)), rid, strings.TrimPrefix(ext, "."))
+	st, err := tmp.Stat()
+	if err != nil {
+		jsonError(c, http.StatusInternalServerError, "server error")
+		return
+	}
+	ctx := c.Request.Context()
+	if err := a.Uploads.Put(ctx, key, tmp, st.Size(), mime); err != nil {
+		jsonError(c, http.StatusInternalServerError, "could not store cover")
+		return
+	}
+	oldURL := g.ImageURL
+	g.ImageURL = a.Uploads.URL(key)
+	updates["image_url"] = g.ImageURL
+	if err := a.DB.Model(g).Updates(updates).Error; err != nil {
+		a.deleteCoverBlob(ctx, key)
+		jsonError(c, http.StatusInternalServerError, "could not save cover")
+		return
+	}
+	if oldKey, ok := uploadKeyFromURL(oldURL); ok {
+		a.deleteCoverBlob(ctx, oldKey)
+	}
+	c.JSON(http.StatusOK, coverUploadResponseJSON{ImageURL: g.ImageURL})
+}
+
+func (a *App) apiDeleteGroupCover(c *gin.Context) {
+	g, ok := a.loadManagedGroup(c)
+	if !ok {
+		return
+	}
+	oldURL := g.ImageURL
+	if err := a.DB.Model(g).Update("image_url", "").Error; err != nil {
+		jsonError(c, http.StatusInternalServerError, "could not remove cover")
+		return
+	}
+	if oldKey, ok := uploadKeyFromURL(oldURL); ok {
+		a.deleteCoverBlob(c.Request.Context(), oldKey)
+	}
+	c.JSON(http.StatusOK, gin.H{})
+}
+
+// deleteCoverBlob removes a cover no group row points at any more. The row is
+// already right, so a failure only leaves an unreferenced file: it is logged
+// (the store's errors carry no key) and not retried. Avatars have a cleanup
+// job because their owner folder can be listed; covers have no such store
+// contract, and building one is out of proportion to an orphaned image.
+func (a *App) deleteCoverBlob(ctx context.Context, key string) {
+	if err := a.Uploads.Delete(ctx, key); err != nil {
+		log.Printf("group cover: old file not removed: %s", jobs.CleanError(err))
+	}
+}
+
+// apiUploadMessageImage stores one picture for a message's body (DEC-118): a
+// draft, or a scheduled message, its author or an admin may still edit
+// (loadOwnMessage, editable). The picture is read and re-encoded like an avatar
+// or cover (readImageUpload: sniffed, EXIF dropped, 5MB), and nothing limits
+// how many a message may have (Grier, Nov 14 2026). The answer is the address
+// to put in the body; the body itself is saved, and checked, by the message's
+// own save (applyMessageBody). A picture the saved body never shows is removed
+// when the message is sent or the draft is discarded (pruneMessageImages).
+func (a *App) apiUploadMessageImage(c *gin.Context) {
+	m, ok := a.loadOwnMessage(c)
+	if !ok || !editable(c, m) {
+		return
+	}
+	tmp, ext, mime, err := readImageUpload(c, "image")
+	if err != nil {
+		fail(c, err)
+		return
+	}
+	defer tmp.Close()
+	defer os.Remove(tmp.Name())
+
+	rid, err := randomHex(16)
+	if err != nil {
+		jsonError(c, http.StatusInternalServerError, "server error")
+		return
+	}
+	key := storage.NewKey(storage.KindMessages, strconv.FormatUint(uint64(m.ID), 10), rid, strings.TrimPrefix(ext, "."))
+	st, err := tmp.Stat()
+	if err != nil {
+		jsonError(c, http.StatusInternalServerError, "server error")
+		return
+	}
+	// The message row is held FOR SHARE across the write, so a send's claim or a
+	// discard (both UPDATE it) waits until the file is stored, and their prune
+	// then sees it. Without the lock a prune could run first and leave this file
+	// with nothing to remove it. The actor is read plain, as the other message
+	// writers lock the user before the message and this takes no user lock.
+	errPutFailed := errors.New("store failed")
+	err = a.DB.Transaction(func(tx *gorm.DB) error {
+		if _, err := lockActorIn(tx, apiUser(c), actorRead); err != nil {
+			return err
+		}
+		var cur models.Message
+		if err := tx.Clauses(clause.Locking{Strength: "SHARE"}).Select("id, status").First(&cur, m.ID).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return errMessageLocked
+			}
+			return err
+		}
+		if !policy.MessageEditable(cur.Status) {
+			return errMessageLocked
+		}
+		if err := a.Uploads.Put(c.Request.Context(), key, tmp, st.Size(), mime); err != nil {
+			return errPutFailed
+		}
+		return nil
+	})
+	if answerStaleSession(c, err) {
+		return
+	}
+	if errors.Is(err, errPutFailed) {
+		jsonError(c, http.StatusInternalServerError, "could not store the picture")
+		return
+	}
+	if err != nil {
+		fail(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, messageImageResponseJSON{Key: key, URL: a.Uploads.URL(key)})
+}
+
+// pruneMessageImages removes the pictures in message id's folder that body no
+// longer shows; an empty body removes them all. It runs only once the body can
+// no longer change (the send's claim, a discarded draft), because a picture is
+// uploaded before the body that shows it is saved. Like deleteCoverBlob it is
+// best effort: the rows are right already, so a failure leaves unreferenced
+// files, logged (the store's errors carry no key) and not retried.
+func (a *App) pruneMessageImages(ctx context.Context, id uint, body string) {
+	if a.Uploads == nil {
+		return
+	}
+	owner, err := storage.MessageOwner(id)
+	if err != nil {
+		return
+	}
+	keep := map[string]bool{}
+	for _, src := range content.ImageSources(body) {
+		if key, ok := uploadKeyFromURL(src); ok {
+			keep[key] = true
+		}
+	}
+	for range 4 {
+		if err = a.Uploads.PruneOwner(ctx, owner, keep); !errors.Is(err, storage.ErrMoreRemain) {
+			break
+		}
+	}
+	if err != nil {
+		log.Printf("message pictures: unused files not removed: %s", jobs.CleanError(err))
+	}
+}
+
+// serveUpload serves a stored upload. Keys are validated so nothing outside
+// the upload directory is reachable. A future S3 implementation would
+// redirect to a presigned URL here instead of serving the file.
+func (a *App) serveUpload(c *gin.Context) {
+	key := strings.TrimPrefix(c.Param("filepath"), "/")
+	if err := storage.ValidateKey(key); err != nil {
+		c.Status(http.StatusNotFound)
+		return
+	}
+	// Open returns only a regular file that is the exact entry named, never
+	// a symlink's target. A wrapper that embeds *storage.LocalStore promotes
+	// it; a store without Open (S3) redirects.
+	opener, ok := a.Uploads.(interface {
+		Open(key string) (*os.File, error)
+	})
+	if !ok {
+		c.Redirect(http.StatusFound, a.Uploads.URL(key))
+		return
+	}
+	f, err := opener.Open(key)
+	if err != nil {
+		c.Status(http.StatusNotFound)
+		return
+	}
+	defer f.Close()
+	st, err := f.Stat()
+	if err != nil || !st.Mode().IsRegular() {
+		c.Status(http.StatusNotFound)
+		return
+	}
+	c.Header("X-Content-Type-Options", "nosniff")
+	c.Header("Cache-Control", "public, max-age=86400")
+	http.ServeContent(c.Writer, c.Request, st.Name(), st.ModTime(), f)
+}

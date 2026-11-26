@@ -1,0 +1,491 @@
+package app
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"html"
+	"net/http"
+	"slices"
+	"strconv"
+	"strings"
+	"time"
+
+	"fold/internal/content"
+	"fold/internal/events"
+	"fold/internal/jobs"
+	"fold/internal/notify"
+	"fold/internal/policy"
+	"fold/models"
+
+	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
+)
+
+// Email reminders (M3.6, PLAN 7.7, DEC-133). Each event says how long
+// before each date its reminder goes. An hourly sweep queues one
+// reminder.send job per date at its exact time; that job writes the
+// reminder as a message with no author (category reminder, one per date,
+// time and kind by reminder_key) and hands it to the M3.5 pipeline, which
+// sends it to the date's going registrants, and a "still on the waitlist"
+// note to its waitlist. Reminders follow the Event updates switch
+// (category:events) and never write a bell row (DEC-44).
+
+const (
+	kindReminderSweep = "reminders.sweep"
+	kindReminderSend  = "reminder.send"
+	// The sweep looks this far ahead, more than an hour so a late wake-up
+	// misses nothing, and this far back, so a reminder due while the
+	// process was down for a few hours, or for an event created after its
+	// reminder time, still goes as soon as it can (before the date starts).
+	reminderLookahead = 2 * time.Hour
+	reminderLookback  = 6 * time.Hour
+)
+
+// longestReminder bounds the sweep's scan to dates it could reach: the
+// longest of the choices below.
+var longestReminder = time.Duration(slices.Max(reminderChoices)) * time.Minute
+
+// Reminder times a leader can choose (DEC-133), in minutes before the
+// date; 0 is off.
+var reminderChoices = []int{0, 120, 1440, 2880, 10080}
+
+var errReminderTime = apiErr(http.StatusBadRequest, "event_reminder_time", reminderChoicesText())
+
+// reminderChoicesText names the choices: "reminderEmailMinutes must be 0
+// (off), 120, 1440, 2880 or 10080".
+func reminderChoicesText() string {
+	var words []string
+	for _, c := range reminderChoices {
+		if c == 0 {
+			words = append(words, "0 (off)")
+		} else {
+			words = append(words, strconv.Itoa(c))
+		}
+	}
+	return "reminderEmailMinutes must be " + strings.Join(words[:len(words)-1], ", ") + " or " + words[len(words)-1]
+}
+
+func validReminderMinutes(m int) bool {
+	for _, c := range reminderChoices {
+		if c == m {
+			return true
+		}
+	}
+	return false
+}
+
+// Who a reminder is for.
+const (
+	reminderGoing    = "going"
+	reminderWaitlist = "waitlist"
+)
+
+var reminderSendType = jobs.Type{Name: kindReminderSend}
+
+type reminderJob struct {
+	OccurrenceID uint  `json:"occurrenceId"`
+	StartsAt     int64 `json:"startsAt"`
+	Minutes      int   `json:"minutes"`
+}
+
+func (a *App) reminderKinds() []jobs.Kind {
+	return []jobs.Kind{{Type: reminderSendType, Label: "Sending an event reminder",
+		Run: func(ctx context.Context, payload json.RawMessage) error {
+			var p reminderJob
+			if err := json.Unmarshal(payload, &p); err != nil {
+				return err
+			}
+			return a.sendReminder(ctx, p, time.Now())
+		}}}
+}
+
+func (a *App) hourlyKinds() []jobs.Kind {
+	return []jobs.Kind{{Type: jobs.Type{Name: kindReminderSweep}, Hourly: true, Label: "Lining up event reminders",
+		Run: func(ctx context.Context, _ json.RawMessage) error { return a.sweepReminders(ctx, time.Now()) }},
+		{Type: jobs.Type{Name: kindNotifyReconcile}, Hourly: true, Label: "Checking for notices that still need sending",
+			Run: func(ctx context.Context, _ json.RawMessage) error { return a.reconcileNotifications(ctx, time.Now()) }}}
+}
+
+// sweepReminders queues reminder.send for each scheduled date whose
+// reminder falls between six hours back and two hours ahead. Whether
+// anyone is going is checked when the job runs, so someone who signs up
+// after this sweep and before the reminder time still gets it. The job key
+// names the date, its start and the reminder time, so the hourly overlap
+// and restarts queue nothing twice, and a date that moves gets a new job
+// (the old one finds the start changed and does nothing).
+func (a *App) sweepReminders(ctx context.Context, now time.Time) error {
+	type due struct {
+		ID       uint
+		StartsAt time.Time
+		Minutes  int
+	}
+	var rows []due
+	if err := a.DB.WithContext(ctx).Raw(`SELECT o.id, o.starts_at, e.reminder_email_minutes AS minutes
+		FROM event_occurrences o JOIN events e ON e.id = o.event_id AND e.deleted_at IS NULL
+		WHERE o.status = ? AND e.reminder_email_minutes > 0
+		  AND o.starts_at > ? AND o.starts_at <= ?
+		  AND o.starts_at - make_interval(mins => e.reminder_email_minutes::int) BETWEEN ? AND ?`,
+		models.OccurrenceScheduled, now, now.Add(longestReminder+reminderLookahead), now.Add(-reminderLookback), now.Add(reminderLookahead)).
+		Scan(&rows).Error; err != nil {
+		return err
+	}
+	for _, r := range rows {
+		at := r.StartsAt.Add(-time.Duration(r.Minutes) * time.Minute)
+		if at.Before(now) {
+			at = now
+		}
+		key := reminderKey{Kind: kindReminderSend, Occ: r.ID, Start: r.StartsAt.Unix(), Minutes: r.Minutes}.String()
+		if _, err := reminderSendType.Enqueue(a.DB.WithContext(ctx), reminderJob{OccurrenceID: r.ID, StartsAt: r.StartsAt.Unix(), Minutes: r.Minutes}, at, key); err != nil {
+			return err
+		}
+	}
+	// The 2-hour push reminders (M3.13d3), planned per person.
+	return a.sweepPushReminders(ctx, now)
+}
+
+// sendReminder is reminder.send. It does nothing when the date was
+// cancelled or moved, or the event's reminder time changed or was turned
+// off, since the job was queued (PLAN M3.6: a cancelled date cancels its
+// reminders). Otherwise it writes the going reminder and, with a waitlist,
+// the waitlist note, each once (reminder_key), and prepares them.
+func (a *App) sendReminder(ctx context.Context, p reminderJob, now time.Time) error {
+	db := a.DB.WithContext(ctx)
+	var occ models.EventOccurrence
+	if err := db.First(&occ, p.OccurrenceID).Error; errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil
+	} else if err != nil {
+		return err
+	}
+	var ev models.Event
+	if err := db.First(&ev, occ.EventID).Error; errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil
+	} else if err != nil {
+		return err
+	}
+	if occ.Status != models.OccurrenceScheduled || occ.StartsAt.Unix() != p.StartsAt || ev.ReminderEmailMinutes != p.Minutes ||
+		!occ.StartsAt.After(now) {
+		return nil
+	}
+	kinds := []string{reminderGoing}
+	if ev.WaitlistEnabled {
+		kinds = append(kinds, reminderWaitlist)
+	}
+	for _, kind := range kinds {
+		// Nobody with that status: no message at all.
+		var n int64
+		if err := db.Model(&models.Registration{}).Where("occurrence_id = ? AND status = ?", occ.ID, reminderStatus(kind)).Count(&n).Error; err != nil {
+			return err
+		}
+		if n == 0 {
+			continue
+		}
+		// A date moved a little later, or a reminder time shortened, after
+		// its reminder went: the one already sent covers it.
+		covered, err := reminderAlreadyCovers(db, occ.ID, kind, p)
+		if err != nil {
+			return err
+		}
+		if covered {
+			continue
+		}
+		id, err := a.writeReminder(db, &ev, &occ, p, kind, now)
+		if err != nil {
+			return err
+		}
+		if id == 0 {
+			continue
+		}
+		if err := a.prepareMessage(ctx, id); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// writeReminder writes one reminder message, or finds the one already
+// written, and returns its id if it still needs preparing (0 if not).
+func (a *App) writeReminder(db *gorm.DB, ev *models.Event, occ *models.EventOccurrence, p reminderJob, kind string, now time.Time) (uint, error) {
+	key := reminderKey{Kind: kind, Occ: occ.ID, Start: p.StartsAt, Minutes: p.Minutes}.String()
+	aud, _ := json.Marshal(audienceJSON{Type: policy.AudienceOccurrence, OccurrenceID: occ.ID, Statuses: []string{reminderStatus(kind)}})
+	subject, body := reminderText(kind, occurrencePlace(ev, occ), p.Minutes)
+	clean := content.SanitizeHTML(body)
+	// Due as soon as this job runs (now may be a test's clock).
+	at := time.Now()
+	m := models.Message{Channel: models.DeliveryEmail, Status: policy.MessageWriteEmailReminder.To(), Category: models.MessageCategoryReminder,
+		Subject: subject, BodyHTML: clean, BodyText: content.PlainText(clean), Audience: string(aud), ScheduledAt: &at,
+		OccurrenceID: &occ.ID, ReminderKey: &key}
+	res := db.Clauses(clause.OnConflict{Columns: []clause.Column{{Name: "reminder_key"}}, TargetWhere: clause.Where{Exprs: []clause.Expression{clause.Expr{SQL: "reminder_key IS NOT NULL"}}}, DoNothing: true}).Create(&m)
+	if res.Error != nil {
+		return 0, res.Error
+	}
+	if res.RowsAffected == 0 {
+		// Written by an earlier run: prepare it only if that run stopped
+		// before sending started.
+		if err := db.Select("id, status").Where("reminder_key = ?", key).First(&m).Error; err != nil {
+			return 0, err
+		}
+		if !policy.MessageClaim.Allows(m.Status) {
+			return 0, nil
+		}
+	}
+	return m.ID, nil
+}
+
+// occurrencePlace is the date's place: its own, else the event's. Never the
+// group's: a reminder's place is read by registrants who may not see the
+// group (events.EffectivePlace with no group place).
+func occurrencePlace(ev *models.Event, occ *models.EventOccurrence) string {
+	return effectiveOccurrencePlace(ev, occ, "")
+}
+
+// reminderText is a reminder's subject and body. The event, time and links
+// are merge fields, filled for each reader at send time; the place is the
+// date's own, which every registrant who can still see the date may see.
+func reminderText(kind, place string, minutes int) (string, string) {
+	where := ""
+	if place != "" {
+		// A place can't become a merge field.
+		where = "<p>Where: " + html.EscapeString(strings.ReplaceAll(place, "{{", "{ {")) + "</p>"
+	}
+	button := `<p><a class="fold-button" href="{{manage_link}}">See the details</a></p>`
+	if kind == reminderWaitlist {
+		// Inside the last two hours the waitlist no longer moves on its own
+		// (DEC-80), so the note doesn't promise a spot by email.
+		promise := "If a spot opens, we'll let you know."
+		if time.Duration(minutes)*time.Minute <= events.CutoffWindow {
+			promise = "The organizers can still add you if a spot opens."
+		}
+		return "Still on the waitlist: {{event_title}} on {{event_time}}",
+			"<p>Hi {{first_name}},</p><p>{{event_title}} is on {{event_time}} and it's still full, so you're on the waitlist. " + promise + "</p>" + where + button
+	}
+	return "Reminder: {{event_title}} on {{event_time}}",
+		"<p>Hi {{first_name}},</p><p>This is a reminder that you're going to <strong>{{event_title}}</strong> on {{event_time}}.</p>" + where + button +
+			"<p>Can't make it? Change your RSVP, so someone else can have your spot.</p>"
+}
+
+func reminderStatus(kind string) string {
+	if kind == reminderWaitlist {
+		return models.RegWaitlisted
+	}
+	return models.RegGoing
+}
+
+// skipCantSeeDate: a registrant who can no longer see the date (it was
+// made more private, or an exact-date invitation ended) gets no reminder.
+const skipCantSeeDate = "can't see this date anymore"
+
+// reminderReaders filters a reminder's readers by who may still see the
+// date (M1.13: the date's effective visibility, or a live exact-date
+// invitation), checked at send time. It returns the ids who may.
+func (a *App) reminderReaders(db *gorm.DB, occID uint, ids []uint, now time.Time) (map[uint]bool, error) {
+	return reminderReadersFrom(a.dbDates(db), occID, ids, now)
+}
+
+// reminderReadersFrom is reminderReaders on any fact source (dateFactSource).
+func reminderReadersFrom(src dateFactSource, occID uint, ids []uint, now time.Time) (map[uint]bool, error) {
+	occs, err := src.occurrences([]uint{occID})
+	if err != nil {
+		return nil, err
+	}
+	occ := occs[occID]
+	if occ == nil {
+		return nil, errAudienceGone
+	}
+	users, err := src.liveUsers(ids)
+	if err != nil {
+		return nil, err
+	}
+	out := map[uint]bool{}
+	for _, u := range users {
+		// A guest sees what a signed-out visitor sees, so only a public
+		// date, and holds no exact-date invitations (eventViewer).
+		viewer := src.viewer(u)
+		vs, err := src.candidates(viewer, occ.EventID)
+		if err != nil {
+			return nil, err
+		}
+		if ev := vs.ByID[occ.EventID]; ev != nil && vs.canSeeDate(viewer, ev, occ) {
+			out[u.ID] = true
+			continue
+		}
+		if viewer == nil {
+			continue
+		}
+		scoped, err := src.scoped(u, []uint{occ.ID}, false, now)
+		if err != nil {
+			return nil, err
+		}
+		if scoped[occ.ID] != nil {
+			out[u.ID] = true
+		}
+	}
+	return out, nil
+}
+
+// messageCategory is the email settings kind a message follows: event
+// updates for reminders (DEC-133), messages from leaders otherwise
+// (DEC-119).
+func messageCategory(m *models.Message) string {
+	if m.Category == models.MessageCategoryReminder {
+		return notify.CatEvents
+	}
+	return notify.CatMessages
+}
+
+// dateRemindersJSON is a date's email reminders as its event's managers see
+// them on the date page (M3.6b, DEC-133): the event's reminder time
+// (Minutes, 0 off), when this date's reminder goes (DueAt, absent when
+// off), whether one already sent covers that one so it won't go (Covered,
+// reminderAlreadyCovers' rule), and each reminder written for it, oldest
+// first.
+//
+// Push is the event's push reminder switch (M3.13d3), null when the church
+// turned push off; PushDueAt is when this date's push reminder goes on the
+// church's clock (2 hours before, or the last allowed minute before quiet
+// hours, as each person's is planned on their own clock), absent when it
+// is off, already written for this start, or skipped by quiet hours.
+type dateRemindersJSON struct {
+	Minutes   int                `json:"minutes"`
+	DueAt     *time.Time         `json:"dueAt"`
+	Covered   bool               `json:"covered"`
+	Push      *bool              `json:"push"`
+	PushDueAt *time.Time         `json:"pushDueAt"`
+	Messages  []dateReminderJSON `json:"messages"`
+}
+
+// dateReminderJSON is one reminder message: going (the reminder),
+// waitlist (the "still on the waitlist" note) or push (the push reminder,
+// M3.13d3), its status, and its people, guardian copies apart (DEC-132),
+// as the history counts them (M3.5b): Reached got it (sent or delivered),
+// Failed didn't (bounced, marked as spam, or failed), Skipped weren't sent
+// it (suppressed, with a reason), Waiting are push rows still to go. An
+// email reminder counts its email rows only, and a push reminder its push
+// rows.
+type dateReminderJSON struct {
+	MessageID uint       `json:"messageId"`
+	Kind      string     `json:"kind"`
+	Status    string     `json:"status"`
+	SentAt    *time.Time `json:"sentAt"`
+	Reached   int        `json:"reached"`
+	Failed    int        `json:"failed"`
+	Skipped   int        `json:"skipped"`
+	Waiting   int        `json:"waiting"`
+}
+
+// dateReminders reads them on db in one query, plus the push switch and the
+// church zone, whose failed reads show their defaults (on, UTC) and leave a
+// transaction usable (lenientReadIn). Call it only for a manager.
+func (a *App) dateReminders(db *gorm.DB, ev *models.Event, occ *models.EventOccurrence) (*dateRemindersJSON, error) {
+	out := &dateRemindersJSON{Minutes: ev.ReminderEmailMinutes, Messages: []dateReminderJSON{}}
+	if ev.ReminderEmailMinutes > 0 {
+		due := occ.StartsAt.Add(-time.Duration(ev.ReminderEmailMinutes) * time.Minute).UTC()
+		out.DueAt = &due
+	}
+	pushOn := true
+	lenientReadIn(db, func(sp *gorm.DB) { pushOn = boolSettingIn(sp, settingPushEnabled, true) })
+	if pushOn {
+		on := ev.ReminderPush
+		out.Push = &on
+	}
+	var rows []struct {
+		ID          uint
+		ReminderKey *string
+		Status      string
+		SentAt      *time.Time
+		Reached     int
+		Failed      int
+		Skipped     int
+		Waiting     int
+	}
+	if err := db.Raw(`SELECT m.id, m.reminder_key, m.status, m.sent_at,
+		count(r.id) FILTER (WHERE r.copy_of_user_id IS NULL AND r.status IN ?) AS reached,
+		count(r.id) FILTER (WHERE r.copy_of_user_id IS NULL AND r.status IN ?) AS failed,
+		count(r.id) FILTER (WHERE r.copy_of_user_id IS NULL AND r.status = ?) AS skipped,
+		count(r.id) FILTER (WHERE r.copy_of_user_id IS NULL AND r.status = ?) AS waiting
+		FROM messages m LEFT JOIN message_recipients r ON r.message_id = m.id
+			AND (r.channel = ?) = (m.reminder_key LIKE ?)
+		WHERE m.occurrence_id = ? AND m.category = ?
+		GROUP BY m.id ORDER BY m.id`,
+		[]string{models.RecipientSent, models.RecipientDelivered},
+		[]string{models.RecipientBounced, models.RecipientComplained, models.RecipientFailed}, models.RecipientSuppressed, models.RecipientQueued,
+		models.DeliveryPush, reminderKeyLike(reminderPushKind),
+		occ.ID, models.MessageCategoryReminder).Scan(&rows).Error; err != nil {
+		return nil, err
+	}
+	next := reminderJob{OccurrenceID: occ.ID, StartsAt: occ.StartsAt.Unix(), Minutes: ev.ReminderEmailMinutes}
+	pushWritten := false
+	for _, r := range rows {
+		m := models.Message{ReminderKey: r.ReminderKey}
+		kind := reminderKind(&m)
+		if kind == reminderPushKind {
+			// A push reminder for a start the date has moved from, that
+			// reached no one, is no news: its rows never went.
+			start, _ := pushReminderStart(r.ReminderKey)
+			if start == occ.StartsAt.Unix() {
+				pushWritten = true
+			} else if r.Reached == 0 {
+				continue
+			}
+		}
+		out.Messages = append(out.Messages, dateReminderJSON{MessageID: r.ID, Kind: kind, Status: r.Status,
+			SentAt: r.SentAt, Reached: r.Reached, Failed: r.Failed, Skipped: r.Skipped, Waiting: r.Waiting})
+		if kind != reminderGoing || r.ReminderKey == nil || ev.ReminderEmailMinutes == 0 {
+			continue
+		}
+		// The very reminder (written already, whatever came of it), or another sent
+		// one close enough before it, means it won't go again.
+		same, covers := reminderKeyCovers(*r.ReminderKey, next)
+		gone := r.Status == models.MessageSending || r.Status == models.MessageSent
+		if same || (covers && gone) {
+			out.Covered = true
+		}
+	}
+	if out.Push != nil && *out.Push && !pushWritten {
+		zone := time.UTC
+		lenientReadIn(db, func(sp *gorm.DB) { zone = churchZoneOrUTC(sp) })
+		if at, ok := a.pushQuietHours().LastAllowed(occ.StartsAt.Add(-pushReminderLead), zone, pushReminderMaxMove); ok {
+			at = at.UTC()
+			out.PushDueAt = &at
+		}
+	}
+	return out, nil
+}
+
+// reminderAlreadyCovers reports whether a reminder of this kind already
+// went for the date at a time still inside the new reminder's lead: its
+// own reminder time (from its reminderKey) is less than
+// p.Minutes before the new one. A date moved an hour later sends no second
+// email; a date moved a week later does, and so does a changed reminder
+// time (a 1-day reminder shortened to 2 hours sends the 2-hour one too:
+// the leader asked for it).
+func reminderAlreadyCovers(db *gorm.DB, occID uint, kind string, p reminderJob) (bool, error) {
+	var keys []string
+	if err := db.Model(&models.Message{}).Where("occurrence_id = ? AND category = ? AND reminder_key LIKE ? AND status IN ?",
+		occID, models.MessageCategoryReminder, reminderKeyLike(kind), []string{models.MessageSending, models.MessageSent}).
+		Pluck("reminder_key", &keys).Error; err != nil {
+		return false, err
+	}
+	for _, k := range keys {
+		if _, covers := reminderKeyCovers(k, p); covers {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// reminderKeyCovers compares a reminder already written under key
+// (a reminderKey) with the one p would send: same is the very
+// same reminder (date, start and time alike); covers is another one whose
+// time is less than p.Minutes before p's (reminderAlreadyCovers' rule).
+func reminderKeyCovers(key string, p reminderJob) (same, covers bool) {
+	k, ok := parseReminderKey(key)
+	if !ok {
+		return false, false
+	}
+	if k.Start == p.StartsAt && k.Minutes == p.Minutes {
+		return true, false
+	}
+	at, was := p.StartsAt-int64(p.Minutes)*60, k.Start-int64(k.Minutes)*60
+	return false, at-was < int64(p.Minutes)*60
+}
