@@ -15,10 +15,10 @@ import { answerNames, refusedAgain, useManagedSave } from "../lib/useRevisionSav
 import { isString } from "../lib/wireValues";
 import { formatDayLong } from "../lib/when";
 import type { OccurrenceRoom, SeriesBooking, SeriesDates, SeriesRoomsResponse } from "../types";
-import { Checkbox, Field, FormError, Select } from "./ui/Field";
+import { Checkbox, Field, FormError } from "./ui/Field";
 import { Button } from "./ui/Button";
 import { DoubleBookPrompt, useOverlapReason } from "./DoubleBookPrompt";
-import { RoomOptions } from "./RoomOptions";
+import { RoomSelect } from "./RoomSelect";
 import { pickGone, readRooms, RoomLoadStatus, RoomsOffLine, roomsTurnedOff, useRoomPicker } from "./useRoomPicker";
 import { useShowAll } from "./useShowAll";
 import { AlertCircleIcon } from "./icons";
@@ -289,11 +289,10 @@ function SeriesRoomControl({ eventId, id, read, show, onChanged, onGone }: {
         optional
         hint="Choose a room, then book it for every upcoming date. If bookings need an admin's approval, they wait for one. A date with a room of its own, booked or waiting for approval, keeps it unless you choose to change it too. “No series room” releases the rooms the series booked."
       >
-        <Select value={pick} disabled={busy} aria-busy={busy || undefined} aria-describedby={capacityId} onChange={(e) => choose(e.target.value)}>
+        <RoomSelect value={pick} disabled={busy} aria-busy={busy || undefined} aria-describedby={capacityId} onChange={(e) => choose(e.target.value)}
+          fallback={hidden} rooms={rooms} suggestions={suggestions} label={(r, reason) => r.id === current?.id ? roomName(r) : seriesRoomLabel(r, dates, reason)}>
           <option value={NO_ROOM}>No series room</option>
-          {hidden && <option value={String(hidden.id)}>{roomName(hidden)}</option>}
-          <RoomOptions rooms={rooms} suggestions={suggestions} label={(r, reason) => r.id === current?.id ? roomName(r) : seriesRoomLabel(r, dates, reason)} />
-        </Select>
+        </RoomSelect>
         {currentCapacity !== null && (
           <p id={capacityId} className="mt-1 text-sm text-text-muted">
             {count(currentCapacity, "seat")}{chosen?.tooSmall ? ". This room may be too small." : "."}
