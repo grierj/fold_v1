@@ -166,8 +166,9 @@ milestones until a first church is live (DEC-145) — that freeze was rescinded 
 - Brief: [`R2-R3-R4-people.md`](../briefs/audit-2026-11/R2-R3-R4-people.md) (R3).
 
 **M7.9 Frontend speed and discoverability (R15)**
-- Not started. Scope: lazy group and event detail pages with a tighter bundle budget, a small
-  query cache in `web/src/api/core.ts` that dies on logout, shared directory and calendar filters,
+- The group and event detail pages load lazily. CI enforces the browser journey limits in
+  [the testing guide](../../agents/testing.md#browser-journey-performance-419) and reports bundle sizes.
+- Remaining scope includes a small query cache in `web/src/api/core.ts` that dies on logout, shared directory and calendar filters,
   `ConfirmDialog` in place of every `window.confirm`, Messages in the phone and tablet nav, and a
   directory-first signed-out Home.
 - Brief: [`R15-R16-frontend.md`](../briefs/audit-2026-11/R15-R16-frontend.md) (R15).
