@@ -74,9 +74,10 @@ export function RoomFeedPanel({ room, onClose, onGone }: { room: Room; onClose: 
         Calendar feed for {room.name}
       </h2>
       <p className="text-sm text-text-muted">
-        Share this link with the office, or anyone who needs to see when this room is booked. Anyone
-        with the link sees each booking&rsquo;s title, time and link; invite-only dates show only as
-        Reserved. In a calendar app, choose Add calendar &rarr; From URL (or Subscribe) and paste the link.
+        Anyone with this link can see when this room is booked. Dates you can see when signed out
+        include the event title and link. Other bookings, including members-only and invite-only
+        dates, appear as Reserved. In a calendar app, choose Add calendar &rarr; From URL (or
+        Subscribe) and paste the link.
       </p>
       <RefusedSaveLine save={refusal} noun="calendar link status" choosing="This calendar link" />
       {uncertain && (
