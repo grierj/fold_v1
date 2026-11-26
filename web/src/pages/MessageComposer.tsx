@@ -27,7 +27,6 @@ import { Form } from "../components/ui/Form";
 import { FormActions } from "../components/ui/FormActions";
 import { Skeleton } from "../components/ui/Skeleton";
 
-// TipTap is big, so the editor arrives with import() (the bundle budget, web/scripts/bundle-size.mjs).
 const RichTextEditor = lazy(() => import("../components/messages/RichTextEditor").then((m) => ({ default: m.RichTextEditor })));
 const RichTextView = lazy(() => import("../components/messages/RichTextEditor").then((m) => ({ default: m.RichTextView })));
 

@@ -3,14 +3,9 @@ import { renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { cpus } from "node:os";
 import { eagerGzipBytes, gzipBytes } from "../scripts/bundle-size.mjs";
-import { exceedsLimit } from "../scripts/journey-report.mjs";
+import { journeyLimits, journeyProfile as profile, timingFailures } from "../scripts/journey-report.mjs";
 import { apiAs } from "./helpers";
 import { continuationGroup } from "./continuation-group";
-
-const profile = {
-  viewport: { width: 390, height: 844 }, cpuRate: 4, latency: 80,
-  downloadThroughput: 200_000, uploadThroughput: 90_000,
-};
 
 declare global {
   interface Window { journeyStart: number; journeyShift: number }
@@ -116,7 +111,7 @@ test("measure useful content and interactions", async ({ browser, request, baseU
     renameSync(reportFile + ".tmp", reportFile);
   }
 
-  for (const journey of ["directory", "date", "more-dates", "editor"]) {
+  for (const journey of Object.keys(journeyLimits)) {
     const verifySlowdown = journey === "date";
 
     for (let run = 0; run <= (verifySlowdown ? 6 : 5); run++) {
@@ -166,10 +161,10 @@ test("measure useful content and interactions", async ({ browser, request, baseU
 
         if (verifySlowdown && run === 6) {
           const normal = results.flatMap((r) => r.journey === journey ? [r.ms] : []).sort((a, b) => a - b);
-          const limit = { ceilingMs: normal[4] + 2000, increaseMs: normal[4] - normal[2] + 2000 };
 
           delayedDateMs = sample.ms;
-          expect(exceedsLimit(sample.ms, normal[2], limit), `delayed read took ${sample.ms} ms, normal range ${normal}`).toBe(true);
+          expect(sample.ms).toBeGreaterThan(normal[4] + 2000);
+          expect(timingFailures(sample.ms, sample.ms - normal[2], journeyLimits.date)).not.toHaveLength(0);
         } else if (run > 0) {
           const jsGzipBytes = sample.scripts.reduce((sum: number, asset: string) =>
             sum + gzipBytes(join(dist, asset)), 0);

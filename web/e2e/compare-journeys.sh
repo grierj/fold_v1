@@ -6,7 +6,7 @@ root=$(cd "$(dirname "$0")/../.." && pwd) || exit 1
 work=${RUNNER_TEMP:?}
 mkdir -p "$root/web/test-results" || exit 1
 results=$(mktemp -d "$root/web/test-results/comparison.XXXXXX") || exit 1
-summary=${GITHUB_STEP_SUMMARY:-/dev/stdout}
+report="$results/report.md"
 export CGO_ENABLED=0
 failed=0
 
@@ -32,12 +32,13 @@ for side in base head; do
   )
   status=$?
   if ((status)); then
-    echo "- $side build or measurement failed (exit $status)." >> "$summary"
+    echo "- $side build or measurement failed (exit $status)." >> "$report"
     failed=1
   else
-    echo "- $side measurement completed." >> "$summary"
+    echo "- $side measurement completed." >> "$report"
   fi
 done
 
-node "$root/web/scripts/journey-report.mjs" "$results/base/samples.json" "$results/head/samples.json" >> "$summary" || failed=1
+node "$root/web/scripts/journey-report.mjs" "$results/base/samples.json" "$results/head/samples.json" >> "$report" || failed=1
+cat "$report" >> "${GITHUB_STEP_SUMMARY:-/dev/stdout}" || failed=1
 exit "$failed"

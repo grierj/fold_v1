@@ -84,7 +84,7 @@ narratives and follow-up lists, is kept in
 | M7.6 Query ceilings and pool cap | Not started | |
 | M7.7 Baseline squash | Done | #258, #264–#267 |
 | M7.8 People and own-data export | Not started | |
-| M7.9 Frontend speed and discoverability | In progress. R15-1's lazy routes and bundle budget are verified with M8.1. The other slices remain. | |
+| M7.9 Frontend speed and discoverability | In progress. R15-1's lazy routes shipped with M8.1. CI now requires four browser journey timings and reports compressed sizes. The other slices remain. | |
 | M7.10 Generated web types | Not started | |
 | M7.11 Contact locks (freeze lifted by DEC-153) | Not started | |
 | M7.12 Cut execution and maintenance tax | In progress: the guard tiers and the UI ratchet down to zero remain | #316, #317, #326 |
