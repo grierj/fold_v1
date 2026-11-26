@@ -6,11 +6,11 @@ import { RefusedSaveLine, useRefusedSave } from "../../lib/refusedSave";
 import { outcomeOf } from "../../lib/rosterWrites";
 import type { Room } from "../../types";
 import { Button } from "../ui/Button";
-import { FormError } from "../ui/Field";
 import { SecretFeedLink, useSecretFeed } from "../SecretFeedLink";
 
 export function RoomFeedPanel({ room, onClose, onGone }: { room: Room; onClose: () => void; onGone: () => void }) {
   const headingRef = useRef<HTMLHeadingElement>(null);
+  const uncertainRef = useRef<HTMLParagraphElement>(null);
   const refusal = useRefusedSave();
   const [uncertain, setUncertain] = useState(false);
 
@@ -40,7 +40,7 @@ export function RoomFeedPanel({ room, onClose, onGone }: { room: Room; onClose: 
     // The button that was pressed is gone; keep keyboard users in the panel.
     onRevoked: () => headingRef.current?.focus(),
     recover: async (cause, retry) => {
-      if (cause instanceof ApiError && [401, 403, 404].includes(cause.status)) {
+      if (cause instanceof ApiError && !cause.unreadable && [401, 403, 404].includes(cause.status)) {
         onGone();
 
         return true;
@@ -63,6 +63,11 @@ export function RoomFeedPanel({ room, onClose, onGone }: { room: Room; onClose: 
   // The button that opened the panel is gone, so focus starts on its heading.
   useEffect(() => { headingRef.current?.focus(); }, [room.id]);
 
+  const { loaded, loadError } = feed;
+  useEffect(() => {
+    if (uncertain) uncertainRef.current?.focus();
+  }, [uncertain, loaded, loadError]);
+
   return (
     <section aria-labelledby={`room-feed-${room.id}`} className="bg-surface rounded-lg border border-border p-6 space-y-4 max-w-xl">
       <h2 id={`room-feed-${room.id}`} ref={headingRef} tabIndex={-1} className="text-lg font-bold focus:outline-none">
@@ -74,7 +79,11 @@ export function RoomFeedPanel({ room, onClose, onGone }: { room: Room; onClose: 
         Reserved. In a calendar app, choose Add calendar &rarr; From URL (or Subscribe) and paste the link.
       </p>
       <RefusedSaveLine save={refusal} noun="calendar link status" choosing="This calendar link" />
-      {uncertain && <FormError>We couldn&rsquo;t confirm whether your calendar link changed. Check its current status before trying again.</FormError>}
+      {uncertain && (
+        <p ref={uncertainRef} role="status" tabIndex={-1} className="rounded-lg border border-border bg-sunken px-4 py-3 text-sm">
+          We couldn&rsquo;t confirm whether your calendar link changed.{loaded ? " Its current status is shown below." : ""}
+        </p>
+      )}
       <SecretFeedLink
         feed={feed}
         id={`room-feed-link-${room.id}`}

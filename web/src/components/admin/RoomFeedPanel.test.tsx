@@ -131,10 +131,10 @@ describe("RoomFeedPanel (M2.2b)", () => {
 
 afterEach(() => vi.unstubAllGlobals());
 
-it("recovers an unreadable 200 write and status read through the room API", async () => {
+it.each([200, 404])("recovers an unreadable %i write and status read through the room API", async (status) => {
   const replies = [
     Response.json({ feed: { hasToken: false, createdAt: null, revision: "off" } }),
-    new Response("<html>Unavailable</html>"),
+    new Response("<html>Unavailable</html>", { status }),
     Response.json({ feed: { hasToken: true, createdAt: "2026-10-30T15:00:00Z" } }),
     Response.json({ feed: { hasToken: true, createdAt: "2026-10-30T15:00:00Z", revision: "on" } }),
   ];
@@ -151,16 +151,24 @@ it("recovers an unreadable 200 write and status read through the room API", asyn
 
     return next;
   }));
-  render(<RoomFeedPanel room={hall} onClose={() => {}} onGone={() => {}} />);
+  const onGone = vi.fn();
+  render(<RoomFeedPanel room={hall} onClose={() => {}} onGone={onGone} />);
   await userEvent.click(await screen.findByRole("button", { name: "Create calendar link" }));
   const retry = await screen.findByRole("button", { name: "Try again" });
-  expect(screen.getByText(/couldn.t confirm whether your calendar link changed/)).toBeVisible();
+  const message = screen.getByText(/couldn.t confirm whether your calendar link changed/);
+  expect(message).toHaveFocus();
+  expect(message).not.toHaveTextContent("Its current status is shown below.");
   expect(screen.queryByRole("button", { name: "Create calendar link" })).toBeNull();
   expect(screen.queryByRole("button", { name: "Make a new link" })).toBeNull();
   expect(screen.queryByRole("button", { name: "Copy link" })).toBeNull();
 
-  await userEvent.click(retry);
+  await userEvent.tab();
+  expect(retry).toHaveFocus();
+  await userEvent.keyboard("{Enter}");
   expect(await screen.findByText(/A calendar link is on, made/)).toBeVisible();
+  expect(message).toHaveFocus();
+  expect(message).toHaveTextContent("Its current status is shown below.");
+  expect(onGone).not.toHaveBeenCalled();
   expect(screen.queryByRole("button", { name: "Copy link" })).toBeNull();
   expect(requests).toEqual(["GET", "POST", "GET", "GET"]);
 });
