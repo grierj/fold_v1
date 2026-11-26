@@ -1,6 +1,7 @@
+import * as schema from "valibot";
 import { csrfFor } from "./helpers";
 import { expect, test } from "@playwright/test";
-import { signIn, signOut } from "./helpers";
+import { apiAs, groupDetailPath, signIn, signOut } from "./helpers";
 
 // M1.3 in the browser: /join with the age gate, the login page's request
 // link, invite-a-friend wording, the admin queue and self-signup
@@ -111,4 +112,35 @@ test("set-password page explains bad and missing links", async ({ page }) => {
   await page.getByLabel("Confirm password").fill("longenoughpassword");
   await page.getByRole("button", { name: "Set password" }).click();
   await expect(page.getByText(/expired or was already used/i)).toBeVisible();
+});
+
+// DEC-177: a lone leader's deletion request that someone else ended while the admin looked. Lee asks to delete their
+// group, Grier opens the queue, Sam joins (which withdraws the request), and Grier's Delete on the card still on screen
+// is refused: nothing is deleted, the card goes away on its own and the queue says the request is no longer open.
+test("a deletion request that ended while the admin looked is refused, and the card goes away", async ({ page, request }) => {
+  const name = `Lone study ${Date.now()}`;
+  const lee = await apiAs(request, "lee");
+  const { group } = schema.parse(schema.looseObject({ group: schema.looseObject({ id: schema.number() }) }), await lee("POST", "/groups", { name, visibility: "public", location: "Hall", tags: [] }));
+  await (await apiAs(request, "grier"))("POST", `/admin/groups/${group.id}/approve`, {});
+  await (await apiAs(request, "lee"))("POST", `/groups/${group.id}/deletion-request`, {});
+
+  await signIn(page, "grier");
+  await page.goto("/admin");
+  await expect(page.getByText("Deletion requests")).toBeVisible();
+  await expect(page.getByRole("link", { name })).toBeVisible();
+
+  await (await apiAs(request, "sam"))("POST", `/groups/${group.id}/join`, {});
+
+  const asked: string[] = [];
+  page.on("dialog", (dialog) => { asked.push(dialog.message()); void dialog.accept(); });
+  const refused = page.waitForResponse((res) => res.request().method() === "DELETE" && new URL(res.url()).pathname === `/api/v1/admin/groups/${group.id}`);
+  await page.getByRole("button", { name: "Delete group" }).click();
+  expect((await refused).status()).toBe(409);
+  expect(asked).toEqual([`Delete “${name}”? This removes the group, its members, and its events. 2 other people will be notified.`]);
+  const status = page.getByRole("status").filter({ hasText: `The request to delete “${name}” is no longer open, so nothing was changed.` });
+  await expect(status).toBeVisible();
+  await expect(status).toBeFocused();
+  await expect(page.getByRole("link", { name })).toHaveCount(0);
+  expect((await (await apiAs(request, "sam"))("GET", groupDetailPath(group.id))).group.id).toBe(group.id);
+  await markAllRead(page);
 });
