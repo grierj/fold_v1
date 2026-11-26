@@ -590,7 +590,9 @@ Run the installed `/opt/fold/restore.sh` as root. On its first use it checks
 that the complete tool set sits beside it (otherwise it stops, names the missing
 file and tells you to run the current `provision.sh`), copies the set into a
 root-owned `/opt/fold/recovery-tools`, and re-runs from there. A rejected
-preflight leaves the installed recovery tools unchanged.
+preflight leaves the installed recovery tools unchanged. Use deploy tools version 8 or later
+for a restore or rollback that checks the staged archive's recovery level and
+expires account links from the dump. See section 6 for how to install the release's tools before starting recovery.
 
 **Before you start** (every item is checked before anything stops, unless
 noted):
@@ -640,9 +642,11 @@ In order, `restore.sh`:
    otherwise it stops with the services still stopped).
 3. Restores the dump into a new database, `fold_restore_<id>`, in one
    transaction. Checks the target's recovery level against the staged database's
-   boot fence, then clears the restored browser-session signing epoch. Everyone
-   signs in again when the restored site opens with a release that uses the epoch.
-   If any step fails, `fold` has not been touched. The failed database
+   boot fence. Then it clears the browser-session signing epoch and expires the
+   dump's live setup, password-reset and email-change links, including the
+   verification and cancellation links. Everyone signs in again with a release
+   that uses the epoch. If any step fails, the original database stays intact.
+   The failed database
    is dropped and the phase is `collect-failed`; run `--abort` to reopen the
    original, or `--resume` to try again.
 4. Counts the accounts the dump would bring back: the accounts that are deleted
@@ -663,6 +667,11 @@ In order, `restore.sh`:
 7. Starts a private recovery instance: the pinned image, background work off
    (queued mail, push and scheduled jobs do not run), restart policy `no`, reachable only at
    `127.0.0.1:18080` on the droplet. Caddy and the app stay stopped.
+
+After reopening, ask anyone partway through account setup to contact a church admin for
+help setting their password. Members can request another password reset or start their
+email change again. Links issued after recovery work as usual. Other links, including
+invitations and guardian consent, keep the status and expiry they had in the dump.
 
 When `--uploads` is supplied, the tool stages and swaps the archive within the
 recovery fence. Before reopening, `fold restore settle-uploads` empties avatar
@@ -881,27 +890,30 @@ tabs after the smoke checks pass. See the [upgrade notes](../README.md#upgrade-n
 for what to do if a save keeps failing in an older tab.
 
 Use the target release's deploy tools when you first upgrade to a release with
-the browser-session signing epoch or when you upgrade from recovery level 3 or
-earlier to level 4. Prepare a separate trusted checkout of the target release
-at `/root/fold-release`.
+the browser-session signing epoch or account-link expiry on restore, or when
+you upgrade from recovery level 3 or earlier to level 4. Prepare a separate
+trusted checkout of the target release at `/root/fold-release`.
 For a build-based install, leave `/root/fold` at the deployed commit and fetch
 the target into it without checking it out. Run the matching image or build
 command below with `/root/fold-release/deploy/digitalocean/upgrade.sh` in
 place of `/opt/fold/upgrade.sh` and keep `--source-dir /root/fold`. This
 installs the release's tools and lets the script record the deployed commit
 for rollback before it checks out the target. The earlier installed script
-can upgrade the app while retaining tools that skip the archive's recovery
-level check before the database swap.
+can upgrade the app while retaining tools that skip the staged archive's
+recovery-level check or leave account links active before the database swap.
 
-After the upgrade, compare both installed copies of these files with the
-release checkout. Each comparison succeeds silently. If any comparison
-fails, finish the upgrade from the release checkout before restoring a dump.
+After the upgrade, check both installed copies against the release checkout.
+Each comparison succeeds silently. If any file differs, finish the upgrade from
+the release checkout before restoring a dump.
 
 ```bash
-for tool in checks.sh restore.sh deploy-tools-version; do
-  sudo cmp "/root/fold-release/deploy/digitalocean/$tool" "/opt/fold/$tool"
-  sudo cmp "/root/fold-release/deploy/digitalocean/$tool" "/opt/fold/deploy-tools/$tool"
-done
+(
+  set -e
+  for tool in restore.sh checks.sh deploy-tools-version; do
+    sudo cmp "/root/fold-release/deploy/digitalocean/$tool" "/opt/fold/$tool"
+    sudo cmp "/root/fold-release/deploy/digitalocean/$tool" "/opt/fold/deploy-tools/$tool"
+  done
+)
 ```
 
 When the installed tools match the target release's requirements, run
@@ -1003,7 +1015,7 @@ keeps this protection. The recorded pre-upgrade dump still contains the invitati
 at backup time. On an upgraded host, restore that dump with the level-4 release and its
 `restore.sh --dump`. The host floor still applies even to a rollback that would use the older dump.
 
-Follow the trusted-checkout steps above to install this release's deploy tools (version 7)
+Follow the trusted-checkout steps above to install this release's deploy tools (version 8)
 when upgrading. Use the same tools on a replacement host. After importing the archive
 into staging, they check the archive's own startup fence with the selected target's level.
 If it refuses, the original database and pin are intact, and the site stays closed. Run

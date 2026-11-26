@@ -96,7 +96,7 @@ fi
 if (( ! DRY )) && [[ "$MODE" != status ]]; then
   ops_lock_acquire "$DIR" "restore-$MODE" || exit $?
 fi
-for name in compose_in dc pg recovery_ids runtime_tools recovery_classify recovery_accepts image_recovery_level commit_recovery_level host_recovery_floor write_recovery_floor check_archive_recovery_level backup_coord_acquire backup_coord_release backup_service_defined backup_coordination_check backup_scheduler_select image_restore_uploads commit_restore_uploads assert_image; do
+for name in compose_in dc pg invalidate_restored_credentials_sql recovery_ids runtime_tools recovery_classify recovery_accepts image_recovery_level commit_recovery_level host_recovery_floor write_recovery_floor check_archive_recovery_level backup_coord_acquire backup_coord_release backup_service_defined backup_coordination_check backup_scheduler_select image_restore_uploads commit_restore_uploads assert_image; do
   declare -F "$name" >/dev/null || fail "checks.sh lacks $name; run the current provision.sh --deploy-dir $DIR to install the complete tool set"
 done
 for name in $(runtime_tools); do
@@ -1026,8 +1026,7 @@ collect() {
   deleted_list_drop || fail 'could not remove an old recovery-deleted.txt; phase kept, nothing restored. Wait, then --resume'
   if ! dc exec -T db pg_restore -U church -d "$R" --no-owner --no-acl --single-transaction --exit-on-error <"$DUMP"; then collect_failed; fi
   if ! check_archive_recovery_level "$R" "$(get .level)" >/dev/null; then collect_failed; fi
-  # A restored site must never boot with the archive's browser-session key.
-  if ! pg "$R" -q -c "DELETE FROM settings WHERE key = 'session_signing_epoch'"; then collect_failed; fi
+  if ! invalidate_restored_credentials_sql | pg "$R" -q --single-transaction -f -; then collect_failed; fi
   # Fold's user deletion is soft deletion (apiAdminDeleteUser tx.Delete(u),
   # User embeds gorm.DeletedAt). No production path hard-deletes users.
   # One stream; the live read is one statement, so one snapshot. Selection

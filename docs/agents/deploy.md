@@ -200,7 +200,11 @@ section at the end of `checks.sh`.
 - `restore.sh --dump` restores into a fresh database swapped in whole and keeps the public site
   closed and background deliveries paused in a worker-free private recovery instance until
   `--reopen`. It never restores into the live `fold` database.
-- Collection removes `session_signing_epoch` from the staging database before the swap.
+- Starting with tools version 7, collection expires the dump's live `account_setup`, `password_reset`,
+  `email_verify` and `email_change_cancel` tokens in the same transaction that removes
+  `session_signing_epoch` from staging. An error goes through `collect_failed` before the swap.
+  This applies to managed rollback too, regardless of the target binary. A queued email-change
+  verification cannot rotate an expired row. Setup and reset mail can issue fresh links at delivery.
   `bootRestoreFence` creates a random epoch when the row is absent. The cookie signing key
   comes from that epoch and `SESSION_SECRET`. Ordinary restarts retain the epoch.
   On a host still at recovery level 3, a permitted rollback to a pre-epoch release can
