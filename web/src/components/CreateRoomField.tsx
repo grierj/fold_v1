@@ -7,8 +7,8 @@ import { busyDatesNote, NO_ROOM, seriesRoomLabel } from "../lib/roomLabels";
 import type { WhenState } from "../lib/useWhenState";
 import type { RoomSuggestions, SeriesRoom } from "../types";
 import { seatsBody, seatsProblem, type SeatsValue } from "./SeatsField";
-import { Field, Select } from "./ui/Field";
-import { RoomOptions } from "./RoomOptions";
+import { Field } from "./ui/Field";
+import { RoomSelect } from "./RoomSelect";
 import { RoomLoadStatus } from "./useRoomPicker";
 import { weeklyRule } from "../lib/rrule";
 import { AlertCircleIcon } from "./icons";
@@ -168,11 +168,10 @@ export function CreateRoomField({ id, schedule, groupId, visibility, roomId, onC
   return (
     <div className="space-y-2">
       <Field id={id} label="Room" optional hint={hint}>
-        <Select value={value} disabled={!schedule} aria-busy={checking || undefined} onChange={(e) => choose(e.target.value)}>
+        <RoomSelect value={value} disabled={!schedule} aria-busy={checking || undefined} onChange={(e) => choose(e.target.value)}
+          fallback={shown} rooms={rooms} suggestions={suggestions} label={(r, reason) => seriesRoomLabel(r, dates, reason)}>
           <option value={NO_ROOM}>No room</option>
-          {shown && <option value={String(shown.id)}>{roomName(shown)}</option>}
-          <RoomOptions rooms={rooms} suggestions={suggestions} label={(r, reason) => seriesRoomLabel(r, dates, reason)} />
-        </Select>
+        </RoomSelect>
       </Field>
       <div role="status" className="space-y-2 empty:hidden">
         {checking && <p className="text-sm text-text-muted">Checking which rooms are free…</p>}
