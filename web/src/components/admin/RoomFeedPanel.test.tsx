@@ -45,6 +45,7 @@ describe("RoomFeedPanel (M2.2b)", () => {
     makeFeed.mockResolvedValue({ feed: { hasToken: true, createdAt: "2026-10-30T15:00:00Z", url: URL_ } });
     const { unmount } = render(<RoomFeedPanel room={hall} onClose={() => {}} />);
     expect(await screen.findByText(/doesn.t have a calendar link yet/)).toBeInTheDocument();
+    expect(screen.getByText(/members-only and invite-only dates, appear as Reserved/)).toBeVisible();
     await userEvent.click(screen.getByRole("button", { name: "Create calendar link" }));
     expect(makeFeed).toHaveBeenCalledWith(7);
     expect(await screen.findByLabelText("Calendar link")).toHaveValue(URL_);
