@@ -1,7 +1,7 @@
 import { bootstrapAnswer } from "../../test/credential";
 import { stubService } from "../../test/service";
 import { AdminRooms } from "../../api/rooms";
-import { render, screen } from "@testing-library/react";
+import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -105,6 +105,21 @@ describe("RoomFeedPanel (M2.2b)", () => {
     expect(confirm).toHaveBeenCalledTimes(2);
     expect(revokeFeed).toHaveBeenLastCalledWith(7, "replacement");
     expect(await screen.findByText("Calendar link turned off.")).toBeVisible();
+  });
+
+  it("closes when a stale write's status read confirms the room feed is unavailable", async () => {
+    getFeed.mockResolvedValueOnce({ feed: { hasToken: true, createdAt: "2026-10-30T15:00:00Z", revision: "first" } });
+    getFeed.mockRejectedValueOnce(new ApiError(404, "not found"));
+    revokeFeed.mockRejectedValueOnce(new ApiError(409, "changed", { code: "room_feed_changed" }));
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+    const onGone = vi.fn();
+    render(<RoomFeedPanel room={hall} onClose={() => {}} onGone={onGone} />);
+
+    await userEvent.click(await screen.findByRole("button", { name: "Turn off calendar link" }));
+    await waitFor(() => expect(onGone).toHaveBeenCalledOnce());
+    expect(getFeed).toHaveBeenCalledTimes(2);
+    expect(revokeFeed).toHaveBeenCalledExactlyOnceWith(7, "first");
+    expect(screen.queryByRole("button", { name: "Try again" })).not.toBeInTheDocument();
   });
 
   it("reads after a lost answer without replaying the write or claiming it succeeded", async () => {

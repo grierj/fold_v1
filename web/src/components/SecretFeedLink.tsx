@@ -77,6 +77,7 @@ export function useSecretFeed<T extends FeedInfo>({ load, deps, create, revoke, 
 
   return {
     loaded: current !== undefined,
+    loadCause: feed.error,
     loadError: feed.error ? errorText(feed.error, failed.load) : null,
     retry: feed.retry,
     hasToken: current?.hasToken ?? false,

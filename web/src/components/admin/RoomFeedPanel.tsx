@@ -8,6 +8,10 @@ import type { Room } from "../../types";
 import { Button } from "../ui/Button";
 import { SecretFeedLink, useSecretFeed } from "../SecretFeedLink";
 
+function feedGone(cause: unknown): boolean {
+  return cause instanceof ApiError && !cause.unreadable && [401, 403, 404].includes(cause.status);
+}
+
 export function RoomFeedPanel({ room, onClose, onGone }: { room: Room; onClose: () => void; onGone: () => void }) {
   const headingRef = useRef<HTMLHeadingElement>(null);
   const uncertainRef = useRef<HTMLParagraphElement>(null);
@@ -40,7 +44,7 @@ export function RoomFeedPanel({ room, onClose, onGone }: { room: Room; onClose: 
     // The button that was pressed is gone; keep keyboard users in the panel.
     onRevoked: () => headingRef.current?.focus(),
     recover: async (cause, retry) => {
-      if (cause instanceof ApiError && !cause.unreadable && [401, 403, 404].includes(cause.status)) {
+      if (feedGone(cause)) {
         onGone();
 
         return true;
@@ -63,10 +67,16 @@ export function RoomFeedPanel({ room, onClose, onGone }: { room: Room; onClose: 
   // The button that opened the panel is gone, so focus starts on its heading.
   useEffect(() => { headingRef.current?.focus(); }, [room.id]);
 
-  const { loaded, loadError } = feed;
+  const { loaded, loadError, loadCause } = feed;
+  const gone = feedGone(loadCause);
+  useEffect(() => {
+    if (gone) onGone();
+  }, [gone, onGone]);
   useEffect(() => {
     if (uncertain) uncertainRef.current?.focus();
   }, [uncertain, loaded, loadError]);
+
+  if (gone) return null;
 
   return (
     <section aria-labelledby={`room-feed-${room.id}`} className="bg-surface rounded-lg border border-border p-6 space-y-4 max-w-xl">
