@@ -79,7 +79,8 @@ func TestSeriesRoomChange(t *testing.T) {
 		{"Book anyway moves a waiting date of the old series room", admin, over(at(RoomBookingWaiting, hall)), &hall, &chapel, false, SeriesFollows},
 		{"a re-pick of the series request's room leaves its waiting date to it", leader, onKept(at(RoomBookingWaiting, hall)), &hall, &hall, false, SeriesLeftAlone},
 		{"a waiting date on the kept request with its room as its own is kept", leader, onKept(at(RoomBookingWaiting, hall)), &chapel, &hall, false, SeriesKept},
-		{"named, it is included as any own room is", leader, onKept(at(RoomBookingWaiting, hall)), &chapel, &hall, true, SeriesIncluded},
+		{"named, it still waits on the request the pick keeps", leader, onKept(at(RoomBookingWaiting, hall)), &chapel, &hall, true, SeriesKept},
+		{"named into another room, it is included as any own room is", leader, onKept(at(RoomBookingWaiting, hall)), &chapel, &annex, true, SeriesIncluded},
 		{"a lost date of the series room is booked again into the kept request", leader, onKept(at(RoomBookingLost, hall)), &hall, &hall, false, SeriesFollows},
 	} {
 		if got := SeriesRoomChange(tc.p, tc.b, tc.series, tc.pick, tc.named); got != tc.want {

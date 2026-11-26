@@ -1664,7 +1664,7 @@ func TestRecipientScopeKeepsRecipientRules(t *testing.T) {
 func TestExportedDatabaseEntryPointsAreDeliberate(t *testing.T) {
 	allowed := map[string]bool{
 		"WithRecipients": true, "Send": true, "QueueDelivery": true, "Protect": true,
-		"Resolve": true, "OpenTask": true, "LastResolution": true,
+		"Resolve": true, "Restate": true, "OpenTask": true, "LastResolution": true,
 		"Badge": true, "Feed": true, "Get": true, "SetRead": true, "SetArchived": true,
 		"ReadAll": true, "ArchiveRead": true, "Prune": true,
 	}
