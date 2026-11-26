@@ -49,7 +49,9 @@ async function applyProfile(page: Page) {
 interface JourneySample { ms: number; shift: number; scripts: string[] }
 
 async function measureReady(page: Page, journey: string, id: number) {
-  const measured = await page.waitForFunction(({ journey, id }) => {
+  const input = { journey, id };
+
+  const measured = await page.waitForFunction<JourneySample | false, typeof input>(({ journey, id }) => {
     const visible = (selector: string) => document.querySelector(selector)?.checkVisibility();
     let ready = false;
 
@@ -83,7 +85,7 @@ async function measureReady(page: Page, journey: string, id: number) {
       scripts: [...new Set(performance.getEntriesByType("resource").map((r) => new URL(r.name).pathname)
         .filter((p) => p.startsWith("/assets/") && p.endsWith(".js")))],
     })));
-  }, { journey, id }, { timeout: 15_000 });
+  }, input, { timeout: 15_000 });
 
   const sample = await measured.jsonValue();
 
