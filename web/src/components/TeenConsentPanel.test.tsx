@@ -95,13 +95,15 @@ it("a grant refused because someone else changed the consent writes nothing more
 
 it("a grant and a revoke by someone else since the read are a conflict, never a quiet resend of the grant", async () => {
   const refused = vi.fn();
+  const revoke: TeenConsent = { ...consent, id: 30, status: "revoked", grantedBy: 9, granterRole: "guardian", evidenceText: "" };
+  vi.mocked(AdminTeenConsents.list).mockResolvedValueOnce(log([revoke]));
   vi.mocked(AdminTeenConsents.change).mockRejectedValue(changed());
   render(panel({ onRefused: refused }));
   await userEvent.type(await screen.findByLabelText("Consent evidence"), "Signed parent form");
-  // The account looks as it did (not granted), but two changes landed since the panel read it.
+  // The account looks as it did (not granted, revoked last by the guardian), but two changes landed since the panel
+  // read it.
   vi.mocked(AdminTeenConsents.list).mockResolvedValue(log([
-    { ...consent, id: 31, status: "revoked", grantedBy: 9, granterRole: "guardian", evidenceText: "" },
-    { ...consent, id: 30, grantedBy: 9, granterRole: "guardian", evidenceText: "" },
+    { ...revoke, id: 32 }, { ...revoke, id: 31, status: "granted" }, revoke,
   ], "r3"));
   await userEvent.click(screen.getByRole("button", { name: "Grant consent" }));
   await waitFor(() => expect(refused).toHaveBeenCalledWith("changed"));
