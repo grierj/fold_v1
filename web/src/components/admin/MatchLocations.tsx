@@ -1,11 +1,13 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import { AdminRooms } from "../../api/rooms";
+import { currentCredential } from "../../api/core";
 import { errorText } from "../../lib/errors";
 import { roomName } from "../../lib/place";
 import { formatDayLong } from "../../lib/when";
 import type { MatchBusy, Room, TypedLocation } from "../../types";
 import { ErrorNotice } from "../ErrorNotice";
+import { readRooms } from "../useRoomPicker";
 import { Button } from "../ui/Button";
 import { EmptyState } from "../ui/EmptyState";
 import { Field, FormError, Select } from "../ui/Field";
@@ -141,8 +143,10 @@ export function MatchLocations({ rooms }: { rooms: Room[] | null }) {
   const load = useCallback(async () => {
     setError(null);
 
+    const pinned = currentCredential();
+
     try {
-      const { locations } = await AdminRooms.locations();
+      const { locations } = await readRooms(AdminRooms.locations(), pinned);
       setLocations(locations);
       // A place keeps what was picked for it; a new one is guessed from its name.
       setPicked((prev) => Object.fromEntries(locations.map((l) => [l.location, prev[l.location] ?? guess(l.location, roomsRef.current)])));
