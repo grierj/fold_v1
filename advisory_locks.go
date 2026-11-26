@@ -23,4 +23,6 @@ const (
 	// crafted, can take setupLockID, contactLockID, migrations.LockID or
 	// eventdates.LockID.
 	guestVerifyLockClass int32 = 7316195
+	// adminSettingLockClass serializes revision saves of each settings key.
+	adminSettingLockClass int32 = 7316196
 )

@@ -152,7 +152,7 @@ func TestEmailLoginAnyCaseAndOnlyWithPassword(t *testing.T) {
 	if err := app.DB.Create(&models.User{Email: "ALICE@example.com", Name: "x"}).Error; err == nil {
 		t.Fatal("database accepted a duplicate email")
 	}
-	w = admin.do("PUT", "/api/v1/admin/users/"+itoa(created.User.ID), map[string]string{"email": "alice@EXAMPLE.com"}, true)
+	w = admin.do("PUT", "/api/v1/admin/users/"+itoa(created.User.ID), adminEditBody(admin, created.User.ID, map[string]string{"email": "alice@EXAMPLE.com"}), true)
 	if w.Code != http.StatusConflict {
 		t.Fatalf("change to taken email: got %d, want 409", w.Code)
 	}
@@ -275,13 +275,13 @@ func TestChangesEndOtherSessions(t *testing.T) {
 			return a.do("POST", "/api/v1/admin/users/"+itoa(id)+"/password", map[string]string{"password": "another-password"}, true).Code
 		}},
 		{"role", func(a *apiClient, id uint) int {
-			return a.do("PUT", "/api/v1/admin/users/"+itoa(id), map[string]string{"role": "admin"}, true).Code
+			return a.do("PUT", "/api/v1/admin/users/"+itoa(id), adminEditBody(a, id, map[string]string{"role": "admin"}), true).Code
 		}},
 		{"disable", func(a *apiClient, id uint) int {
 			return a.do("PUT", "/api/v1/admin/users/"+itoa(id), map[string]string{"status": "disabled"}, true).Code
 		}},
 		{"email", func(a *apiClient, id uint) int {
-			return a.do("PUT", "/api/v1/admin/users/"+itoa(id), map[string]string{"email": "new-alice@example.com"}, true).Code
+			return a.do("PUT", "/api/v1/admin/users/"+itoa(id), adminEditBody(a, id, map[string]string{"email": "new-alice@example.com"}), true).Code
 		}},
 	}
 	for _, tc := range cases {
@@ -1030,5 +1030,59 @@ func TestSessionBootstrap(t *testing.T) {
 	want("ended elsewhere", stale, w, body, "anon")
 	if body.CSRFToken != staleToken {
 		t.Fatal("a stale cookie's T changed")
+	}
+}
+
+func TestSessionBootstrapAndLoginAfterSigningKeyChanges(t *testing.T) {
+	for _, change := range []string{"upgrade", "restore"} {
+		t.Run(change, func(t *testing.T) {
+			app := testApp(t)
+			alice := newTestUser(t, app, "alice", "password1234", models.RoleMember)
+			if change == "upgrade" {
+				app.Store = newSessionStore(app.Config.SessionSecret, app.Config.CookieSecure)
+			} else {
+				store, err := newDatabaseSessionStore(app.DB, app.Config)
+				if err != nil {
+					t.Fatal(err)
+				}
+				app.Store = store
+			}
+			browser := loginAPI(t, app, "alice", "password1234")
+			oldToken := browser.token
+			if change == "restore" {
+				gormMust(t, app.DB.Exec("DELETE FROM settings WHERE key = ?", sessionSigningEpochKey))
+				bootFence(t, app)
+			}
+			store, err := newDatabaseSessionStore(app.DB, app.Config)
+			if err != nil {
+				t.Fatal(err)
+			}
+			app.Store = store
+			browser.router = app.setupRouter()
+
+			body := map[string]string{"email": alice.Email, "password": "password1234"}
+			browser.pinned = true
+			pinned := browser.do("GET", "/api/v1/auth/me", nil, false)
+			browser.pinned = false
+			login := browser.do("POST", "/api/v1/auth/login", body, true)
+			for _, w := range []*httptest.ResponseRecorder{pinned, login} {
+				if w.Code != http.StatusForbidden || !strings.Contains(w.Body.String(), `"code":"session_expired"`) ||
+					len(w.Header().Values("Set-Cookie")) != 0 || w.Header().Get(sessionCheckedHeader) != "" {
+					t.Fatalf("expired credential returned %d %s with headers %v", w.Code, w.Body.String(), w.Header())
+				}
+			}
+
+			w, anon := bootstrapAs(t, browser)
+			if w.Code != http.StatusOK || anon.User != nil || anon.CSRFToken == "" || anon.CSRFToken == oldToken ||
+				!setsCookie(w, sessionName) || w.Header().Get(sessionCheckedHeader) != "v2 "+anon.CredentialMarker+" anon" {
+				t.Fatalf("anonymous bootstrap: %d %s", w.Code, w.Body.String())
+			}
+			browser.token = anon.CSRFToken
+			apiDo(t, browser, "POST", "/api/v1/auth/login", body, http.StatusOK)
+			w, signedIn := bootstrapAs(t, browser)
+			if w.Code != http.StatusOK || signedIn.User == nil || signedIn.User.ID != alice.ID {
+				t.Fatalf("bootstrap after fresh login: %d %s", w.Code, w.Body.String())
+			}
+		})
 	}
 }

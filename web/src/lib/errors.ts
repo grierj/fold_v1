@@ -1,6 +1,7 @@
 import { ApiError } from "../api/core";
 import type { KeptDateCount } from "../types";
 import { isJsonObject, isNumber, isString } from "./wireValues";
+import { formatEventDay } from "./when";
 
 // What people read when something goes wrong (UI makeover PR 4, DEC-61).
 // The API sends a stable code with every error; this is the only place
@@ -82,6 +83,7 @@ export const ERROR_COPY = {
   room_busy: "That room is already booked then. Pick another room, or ask an admin.",
   room_restricted: "Only an admin can book that room.",
   room_gone: "That room isn't available anymore. Pick another room.",
+  series_busy_dates_changed: "The dates in use changed. Check the event for current bookings.",
   series_request_kept: "Only an admin can change this event's room request now, so the room for every date could not be changed.",
   booking_admin_only: "Only an admin can change this date's room. Ask an admin if it needs to change.",
   rooms_off: "Room booking has been turned off, so rooms can't be picked here now.",
@@ -146,6 +148,7 @@ export const ERROR_COPY = {
   needs_host_successor: "Some church-wide events this person hosts alone still need a new host, or the list changed. Check the host for each event and try again.",
 
   group_full: "This group is full.",
+  group_member_email_unavailable: "We couldn't add them by email. If they need a Fold account, you can send an invitation.",
   invite_only: "This group is invite only. Ask a leader to invite you.",
   cannot_join: "You can't join this group. Ask a leader if you think that's a mistake.",
   members_only: "Only members can see who's in this group.",
@@ -154,7 +157,8 @@ export const ERROR_COPY = {
   group_not_approved: "This group isn't approved yet. You can invite people once an admin approves it.",
   group_add_not_approved: "This group isn't approved yet. You can add people once an admin approves it.",
   group_events_not_approved: "This group isn't approved yet. You can schedule events once an admin approves it.",
-  group_rooms_not_approved: "This group isn't approved yet. You can book rooms once an admin approves it.",
+  already_handled: "Someone already handled this request.",
+  group_rooms_not_approved: "Only active groups can book rooms. An admin can approve a pending group or reactivate an archived one.",
   group_has_members: "This group still has other members. Remove them or hand it to a new leader first.",
   removed_from_group: "A leader removed you from this group. Ask them if you'd like to come back.",
   leader_rule: "Only adults can be leaders, and every group needs at least one leader.",
@@ -167,10 +171,13 @@ export const ERROR_COPY = {
   event_full: "This event is full.",
   party_too_big: "There aren't enough seats left for everyone in your party. Try fewer guests.",
   too_many_guests: "That's more guests than this event allows. Try fewer.",
+  date_cancel_ended: "This date has already ended.",
   date_closed: "This date isn't open for registration anymore.",
   date_changed: "This date may have changed since you opened it. Check it and save again.",
   event_changed: "This event may have changed since you opened it, so your changes could not be saved. Check it and try again.",
   group_changed: "This group may have changed since you opened it, so your changes could not be saved. Check it and try again.",
+  setting_changed: "This setting may have changed, so your changes could not be saved. Check it and try again.",
+  admin_user_changed: "This account may have changed, so your changes could not be saved. Check it and try again.",
   room_changed: "This room may have changed since you opened it, so your changes could not be saved. Check it and try again.",
   date_room_changed: "This date's room changed while you were choosing, so your choice could not be saved. Check the room and try again.",
   date_needs_consent: "Saving this date would cancel some sign-ups. Check the question and save again.",
@@ -183,6 +190,7 @@ export const ERROR_COPY = {
   visibility_not_allowed: "That visibility isn't available for this event. Pick another.",
   cannot_host: "That account can't host an event.",
   teen_host: "Hosts need to be adults.",
+  date_add_person_not_found: "We couldn't find that person. Check the email address and try again.",
   no_account: "There's no account with that email. Check the spelling, or invite them first.",
   invalid_duration: "An event can last from 1 minute to 7 days.",
   recurrence_too_many: "That repeat rule makes too many dates. Choose a rule that repeats at most a few times a day.",
@@ -245,6 +253,10 @@ export const ERROR_COPY = {
 } as const;
 
 export type ErrorCode = keyof typeof ERROR_COPY;
+
+export function messageDailyLimitText(at: string | null, zone: string): string {
+  return ERROR_COPY.message_daily_limit.replace("for that day", at ? `on ${formatEventDay(at, zone)}` : "today");
+}
 
 const NETWORK = "We couldn't reach Fold. Check your connection and try again.";
 

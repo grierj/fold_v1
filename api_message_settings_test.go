@@ -57,14 +57,14 @@ func TestReplyToSetting(t *testing.T) {
 			t.Fatalf("%q: %d %s", bad, w.Code, w.Body.String())
 		}
 	}
-	w := root.do("PUT", "/api/v1/admin/settings/reply-to", map[string]any{"address": " office@example.org "}, true)
+	w := root.do("PUT", "/api/v1/admin/settings/reply-to", adminSettingBody(root, "/api/v1/admin/settings/reply-to", "address", " office@example.org "), true)
 	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"address":"office@example.org"`) || settingText(t, app, settingReplyTo) != "office@example.org" {
 		t.Fatalf("save: %d %s", w.Code, w.Body.String())
 	}
 	if !strings.Contains(root.do("GET", "/api/v1/admin/settings/reply-to", nil, false).Body.String(), "office@example.org") {
 		t.Fatal("read back")
 	}
-	if w := root.do("PUT", "/api/v1/admin/settings/reply-to", map[string]any{"address": ""}, true); w.Code != http.StatusOK || settingText(t, app, settingReplyTo) != "" {
+	if w := root.do("PUT", "/api/v1/admin/settings/reply-to", adminSettingBody(root, "/api/v1/admin/settings/reply-to", "address", ""), true); w.Code != http.StatusOK || settingText(t, app, settingReplyTo) != "" {
 		t.Fatalf("clear: %d %s", w.Code, w.Body.String())
 	}
 	if auditCount(t, app, audit.ReplyToChanged) != 2 {

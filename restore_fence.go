@@ -91,6 +91,8 @@ const (
 // waits for nothing else.
 const consentEpochRotateSQL = "INSERT INTO settings (key, value) VALUES (?, gen_random_uuid()::text) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value"
 
+const sessionSigningEpochInitSQL = "INSERT INTO settings (key, value) VALUES (?, gen_random_uuid()::text) ON CONFLICT (key) DO NOTHING"
+
 // declareRecoveryLevelIn declares this release's recovery level in tx, which
 // 00015's start fence requires before any write of the restore_fence row. It
 // is a declaration, not a secret: it keeps earlier releases off a database
@@ -105,14 +107,14 @@ func declareRecoveryLevelIn(tx *gorm.DB) error {
 var errRestoreDetected = apiErr(http.StatusServiceUnavailable, "restore_detected", "the database was restored while Fold was running")
 
 // errRestoreFenceKey is returned to a settings writer that would write one of
-// the boot step's own rows (the barrier's counter, the consent epoch) with a
+// the boot step's own rows with a
 // key it did not name in a literal.
 var errRestoreFenceKey = errors.New("the restore barrier's settings key cannot be written through a general settings writer")
 
 // refuseRestoreFenceKey is the one check every settings writer with a key it
 // does not spell as a constant makes (the census in restore_fence_test.go).
 func refuseRestoreFenceKey(key string) error {
-	if key == restoreFenceKey || key == consentEpochKey {
+	if key == restoreFenceKey || key == consentEpochKey || key == sessionSigningEpochKey {
 		return errRestoreFenceKey
 	}
 	return nil
@@ -185,6 +187,9 @@ func (a *App) bootRestoreFence() error {
 		}
 		if res.RowsAffected != 1 {
 			return errors.New("the settings row is missing")
+		}
+		if err := tx.Exec(sessionSigningEpochInitSQL, sessionSigningEpochKey).Error; err != nil {
+			return err
 		}
 		if err := tx.Exec(consentEpochRotateSQL, consentEpochKey).Error; err != nil {
 			return err

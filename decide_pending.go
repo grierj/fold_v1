@@ -2,6 +2,7 @@ package main
 
 import (
 	"errors"
+	"net/http"
 
 	"github.com/gin-gonic/gin"
 	"gorm.io/gorm"
@@ -9,7 +10,7 @@ import (
 
 // errAlreadyHandled: a pending item (group, guardian link, account request)
 // was decided by someone else first.
-var errAlreadyHandled = errors.New("already handled")
+var errAlreadyHandled = apiErr(http.StatusConflict, "already_handled", "This was already handled")
 
 // stillLive adds a condition to decidePendingIn's UPDATE for a queue whose
 // rows lapse with the clock. The row stays pending until a sweep stamps it, so

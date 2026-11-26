@@ -3,6 +3,7 @@ import { useLocation } from "react-router-dom";
 import { DateEditor, type DateDraftHold } from "./DateEditor";
 import { Button } from "./ui/Button";
 import { FormActions } from "./ui/FormActions";
+import { ManagerSaveStatus } from "./ui/ManagerSaveStatus";
 import { Skeleton } from "./ui/Skeleton";
 import { useShownInList } from "./ui/ConfirmDialog";
 import { useEditRead, type DateOpener } from "../lib/editBase";
@@ -13,29 +14,39 @@ import { useKeptDraft } from "../lib/unsavedChanges";
 // A date's "Edit this date" toggle and its editor's endings, the same on the event, group and date pages. The toggle is
 // off while the date's save is on its way, as the editor's own Close is: closing it would leave the page showing the
 // date as it was before a save that stored, and opening it again would show a new draft that the save's answer closes.
-export function useDateEditorToggle({ onEditDate, onChanged, onDateConflict, onTerminalRefresh }: {
+export function useDateEditorToggle({ onEditDate, onChanged, onDateUpdated, onDateConflict, onTerminalRefresh }: {
   // The editor opened, which clears what the page said about the date's last refused save.
   onEditDate: () => void;
   // Saved, or the room changed: the host reads its page again.
   onChanged: () => void;
+  // Lists report the save outside the row, since a moved date can leave the list.
+  onDateUpdated?: (updated: boolean) => void;
   onDateConflict: (why: RevisionConflict) => void;
   // The read was refused: the host checks its page.
   onTerminalRefresh: () => void;
 }) {
   // `saving` can outlast `open`: an editor closed while its save is on its way still answers it.
-  const [row, setRow] = useState({ open: false, saving: false });
+  const [row, setRow] = useState({ open: false, saving: false, updated: false });
   const close = useCallback(() => setRow((r) => ({ ...r, open: false })), []);
 
   return {
     open: row.open,
     close,
     saving: row.saving,
-    toggle: () => { onEditDate(); setRow((r) => ({ ...r, open: !r.open })); },
-    show: () => { onEditDate(); setRow((r) => ({ ...r, open: true })); },
+    status: <ManagerSaveStatus saving={row.saving} updated={row.updated} />,
+    toggle: () => { onEditDate(); setRow((r) => ({ ...r, open: !r.open, updated: false })); },
+    show: () => { onEditDate(); setRow((r) => ({ ...r, open: true, updated: false })); },
     editor: {
       saving: row.saving,
-      onSaving: (saving: boolean) => setRow((r) => ({ ...r, saving })),
-      onSaved: () => { close(); onChanged(); },
+      onSaving: (saving: boolean) => {
+        onDateUpdated?.(false);
+        setRow((r) => ({ ...r, saving }));
+      },
+      onSaved: () => {
+        setRow((r) => ({ ...r, open: false, updated: !onDateUpdated }));
+        onDateUpdated?.(true);
+        onChanged();
+      },
       onConflict: (why: RevisionConflict) => { close(); onDateConflict(why); },
       onClose: close,
       onRoomChanged: onChanged,

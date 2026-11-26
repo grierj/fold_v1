@@ -7,10 +7,12 @@ import (
 	"fold/internal/notify"
 	"fold/models"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/gin-gonic/gin"
 	"github.com/jackc/pgx/v5/pgconn"
 )
 
@@ -42,6 +44,78 @@ func TestAccountRequestsDeferAllMailForExistingAndNewAddresses(t *testing.T) {
 		if n := mailsTo(app, email); n != 1 {
 			t.Fatalf("delivered mail for %s: %d, want 1", email, n)
 		}
+	}
+}
+
+func TestAccountRequestDecisionRequiresCurrentAdmin(t *testing.T) {
+	app := testApp(t)
+	admin := newTestUser(t, app, "admin", "pw", models.RoleAdmin)
+	member := newTestUser(t, app, "member", "pw", models.RoleMember)
+	anon := anonClient(t, app, "10.1.0.1")
+	const email = "request@example.com"
+	apiDo(t, anon, "POST", "/api/v1/account-requests", signupBody("Applicant", email, "adult", ""), http.StatusOK)
+	req := pendingRequest(t, app, email)
+	mails := len(mailJobsOfKind(t, app, kindAccountRequestMail))
+	oldSession := *admin
+	oldSession.SessionVersion++
+	oldRole := *member
+	oldRole.Role = models.RoleAdmin
+
+	for _, attempt := range []struct {
+		name    string
+		session models.User
+		approve bool
+	}{
+		{"approve with an outdated session", oldSession, true},
+		{"reject without the admin role", oldRole, false},
+	} {
+		t.Run(attempt.name, func(t *testing.T) {
+			w := httptest.NewRecorder()
+			c, _ := gin.CreateTestContext(w)
+			c.Request = httptest.NewRequest(http.MethodPost, "/", nil)
+			c.Set("apiUser", &attempt.session)
+			app.decideAccountRequest(c, &req, attempt.approve, "", nil)
+			if w.Code != http.StatusUnauthorized {
+				t.Fatalf("decision status = %d, want 401", w.Code)
+			}
+		})
+	}
+	stored := pendingRequest(t, app, email)
+	if stored.DecidedBy != nil || stored.ApprovedUserID != nil {
+		t.Fatalf("pending request has a recorded decision: %+v", stored)
+	}
+	if len(mailJobsOfKind(t, app, kindAccountRequestMail)) != mails ||
+		auditCount(t, app, audit.AccountApproved)+auditCount(t, app, audit.AccountRejected) != 0 {
+		t.Fatal("refused decisions queued mail or recorded a decision")
+	}
+}
+
+func TestExpiredAccountRequestTakesPrecedenceOverConsentConflict(t *testing.T) {
+	app := testApp(t)
+	newTestUser(t, app, "admin", "pw", models.RoleAdmin)
+	admin := loginAPI(t, app, "admin", "pw")
+	anon := anonClient(t, app, "10.1.0.1")
+	email := testEmail("applicant")
+	apiDo(t, anon, "POST", "/api/v1/account-requests",
+		signupBody("Applicant", email, "teen", teenBirthDate()), http.StatusOK)
+	req := pendingRequest(t, app, email)
+	newTestUser(t, app, "applicant", "pw", models.RoleMember)
+	path := "/api/v1/admin/account-requests/" + itoa(req.ID) + "/approve"
+	body := map[string]string{"accountConsentEvidenceText": "Parent confirmed by phone"}
+	if got := apiDo(t, admin, "POST", path, body, http.StatusConflict); !strings.Contains(got, "consent_existing_account") {
+		t.Fatalf("current request: %s", got)
+	}
+	if err := app.DB.Model(&req).Update("expires_at", time.Now().Add(-time.Minute)).Error; err != nil {
+		t.Fatal(err)
+	}
+	if got := apiDo(t, admin, "POST", path, body, http.StatusConflict); !strings.Contains(got, "request_expired") {
+		t.Fatalf("expired request: %s", got)
+	}
+	if err := app.DB.First(&req, req.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if req.Status != models.RequestExpired || req.DecidedBy != nil || req.ApprovedUserID != nil {
+		t.Fatalf("expired request has the wrong status or a decision: %+v", req)
 	}
 }
 

@@ -23,11 +23,12 @@ export const Admin = {
   deletions: () => api<GroupListResponse>("/admin/deletions"),
   rejectDeletion: (id: Id) => api<unknown>(path`/admin/groups/${id}/reject-deletion`, { method: "POST" }),
   deleteGroup: (id: Id) => api<unknown>(path`/admin/groups/${id}`, { method: "DELETE" }),
-  setTimezone: (timezone: string) => api<TimezoneResponse>("/admin/timezone", { method: "PUT", body: { timezone } }),
+  timezone: () => api<TimezoneResponse>("/admin/timezone"),
+  setTimezone: (timezone: string, revision: string | undefined) => api<TimezoneResponse>("/admin/timezone", { method: "PUT", body: { timezone, revision } }),
   // The church's mailing address for email footers (DEC-116).
   churchAddress: () => api<SettingAddressResponse>("/admin/settings/church-address"),
-  setChurchAddress: (address: string) =>
-    api<SettingAddressResponse>("/admin/settings/church-address", { method: "PUT", body: { address } }),
+  setChurchAddress: (address: string, revision: string | undefined) =>
+    api<SettingAddressResponse>("/admin/settings/church-address", { method: "PUT", body: { address, revision } }),
   // Guardian copies of messages to teens (DEC-19) and where replies go (DEC-130).
   guardianCopies: () => api<SettingOnResponse>("/admin/settings/guardian-copies"),
   setGuardianCopies: (on: boolean) => api<SettingOnResponse>("/admin/settings/guardian-copies", { method: "PUT", body: { on } }),
@@ -35,7 +36,7 @@ export const Admin = {
   pushEnabled: () => api<SettingOnResponse>("/admin/settings/push-enabled"),
   setPushEnabled: (on: boolean) => api<SettingOnResponse>("/admin/settings/push-enabled", { method: "PUT", body: { on } }),
   replyTo: () => api<SettingAddressResponse>("/admin/settings/reply-to"),
-  setReplyTo: (address: string) => api<SettingAddressResponse>("/admin/settings/reply-to", { method: "PUT", body: { address } }),
+  setReplyTo: (address: string, revision: string | undefined) => api<SettingAddressResponse>("/admin/settings/reply-to", { method: "PUT", body: { address, revision } }),
 };
 
 export const AdminGroups = {

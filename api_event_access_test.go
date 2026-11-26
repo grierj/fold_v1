@@ -472,7 +472,7 @@ func (f eventWriterRace) revoke(t *testing.T, change string) {
 	t.Helper()
 	switch change {
 	case "demoted admin":
-		apiDo(t, f.admin, "PUT", "/api/v1/admin/users/"+itoa(f.user.ID), map[string]any{"role": models.RoleMember}, http.StatusOK)
+		apiDo(t, f.admin, "PUT", "/api/v1/admin/users/"+itoa(f.user.ID), adminEditBody(f.admin, f.user.ID, map[string]any{"role": models.RoleMember}), http.StatusOK)
 	case "disabled account":
 		apiDo(t, f.admin, "PUT", "/api/v1/admin/users/"+itoa(f.user.ID), map[string]any{"status": models.UserDisabled}, http.StatusOK)
 	case "removed leader":

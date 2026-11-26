@@ -27,7 +27,7 @@ func fillSlots(t *testing.T) []func() {
 		}
 	})
 	for i := 0; i < MaxConcurrentProcessing; i++ {
-		release, err := Admit()
+		release, err := Admit(uint(i + 1))
 		if err != nil {
 			t.Fatalf("slot %d: %v", i, err)
 		}
@@ -38,15 +38,47 @@ func fillSlots(t *testing.T) []func() {
 
 func TestAdmitRefusesAtOnceWhenFull(t *testing.T) {
 	releases := fillSlots(t)
-	if _, err := Admit(); !errors.Is(err, ErrBusy) {
+	if _, err := Admit(MaxConcurrentProcessing + 1); !errors.Is(err, ErrBusy) {
 		t.Fatalf("full: %v, want ErrBusy", err)
 	}
 	releases[0]()
-	release, err := Admit()
+	release, err := Admit(MaxConcurrentProcessing + 1)
 	if err != nil {
 		t.Fatalf("after a release: %v", err)
 	}
 	release()
+}
+
+func TestAdmitSharesSlotsBetweenAccounts(t *testing.T) {
+	first, err := Admit(1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer first()
+	if release, err := Admit(1); !errors.Is(err, ErrBusy) {
+		if release != nil {
+			release()
+		}
+		t.Fatalf("second slot for the same account: %v, want ErrBusy", err)
+	}
+	second, err := Admit(2)
+	if err != nil {
+		t.Fatalf("another account can use the free slot: %v", err)
+	}
+	defer second()
+	first()
+	again, err := Admit(1)
+	if err != nil {
+		t.Fatalf("the first account can upload again: %v", err)
+	}
+	defer again()
+	first()
+	if release, err := Admit(1); !errors.Is(err, ErrBusy) {
+		if release != nil {
+			release()
+		}
+		t.Fatalf("releasing the first upload freed its replacement: %v", err)
+	}
 }
 
 // Releasing twice frees one slot, not two, so a deferred release after an
@@ -55,12 +87,12 @@ func TestAdmitReleaseIsOnce(t *testing.T) {
 	releases := fillSlots(t)
 	releases[0]()
 	releases[0]()
-	first, err := Admit()
+	first, err := Admit(1)
 	if err != nil {
 		t.Fatalf("one slot was freed: %v", err)
 	}
 	defer first()
-	if _, err := Admit(); !errors.Is(err, ErrBusy) {
+	if _, err := Admit(MaxConcurrentProcessing + 1); !errors.Is(err, ErrBusy) {
 		t.Fatalf("a second release freed another holder's slot: %v", err)
 	}
 }
@@ -199,7 +231,7 @@ func TestMeasureNormalize(t *testing.T) {
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
-				release, err := Admit()
+				release, err := Admit(uint(i + 1))
 				ready <- struct{}{}
 				if err != nil {
 					errs <- err
@@ -215,7 +247,7 @@ func TestMeasureNormalize(t *testing.T) {
 		}
 		// Every slot is held by a call that has not begun: more are refused at once.
 		for i := 0; i < extraAttempts; i++ {
-			release, err := Admit()
+			release, err := Admit(MaxConcurrentProcessing + 1)
 			switch {
 			case errors.Is(err, ErrBusy):
 				refused++
@@ -239,7 +271,7 @@ func TestMeasureNormalize(t *testing.T) {
 	runtime.ReadMemStats(&after)
 	// Every slot must be free again.
 	for i := 0; i < MaxConcurrentProcessing; i++ {
-		release, err := Admit()
+		release, err := Admit(uint(i + 1))
 		if err != nil {
 			t.Fatalf("slot %d did not recover: %v", i+1, err)
 		}

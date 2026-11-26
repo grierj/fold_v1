@@ -68,7 +68,9 @@ push reminders or the service worker. Background: M3.13, DEC-121 to DEC-129,
   (`settlePushMissIn`), so whichever commits first, the other sees it. A notice has no queued
   state: a notice job waiting for quiet hours returns `jobs.Later` alone, so a sibling's miss can
   show until the morning delivery upgrades it to sent. The daily `reapMessagePushes` remains the
-  backstop for an announcement row whose last job stopped before deciding.
+  backstop for an announcement row with no recorded outcome or job left.
+  It reports delivery as unconfirmed because the service can accept the push
+  before Fold saves the outcome. Fold does not resend it.
 - `push.deliver` is one job per device.
 
 ## What a push may say

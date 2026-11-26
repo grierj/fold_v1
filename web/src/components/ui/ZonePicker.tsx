@@ -14,12 +14,14 @@ export function ZonePicker({
   value,
   onChange,
   forChurchSetting,
+  disabled,
 }: {
   value: string;
   onChange: (v: string) => void;
   // The admin's church-zone setting: the field *is* the church zone, so no
   // separate "Church" entry.
   forChurchSetting?: boolean;
+  disabled?: boolean;
 }) {
   const w = useField("ZonePicker");
   const church = useChurchZone();
@@ -92,6 +94,7 @@ export function ZonePicker({
         placeholder={value ? undefined : "Loading…"}
         title={selected ? `${selected.label} · ${selected.value}` : undefined}
         required
+        disabled={disabled}
         onFocus={(e) => e.currentTarget.select()}
         onClick={openList}
         onChange={(e) => {

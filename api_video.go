@@ -142,8 +142,6 @@ func videoWhen(ev *models.Event, canSee bool) (url string, hidden bool) {
 // link stays hidden until a caller that knows the viewer's facts —
 // occurrencesForEvents, the per-date editor — calls it again.
 func applyVideoReveal(inst *occurrenceJSON, ev *models.Event, isGoing, isManager bool) {
-	inst.VideoProvider = videoProviderOf(ev)
-	inst.VideoReveal = videoRevealOf(ev)
 	inst.VideoURL, inst.VideoHidden = videoShown(ev, isGoing, isManager)
 }
 

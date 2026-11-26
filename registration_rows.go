@@ -44,7 +44,7 @@ func saveRegistrationStep(tx *gorm.DB, move policy.RegistrationMove, from string
 }
 
 func writeRegistration(tx *gorm.DB, move policy.RegistrationMove, from string, r *models.Registration, allowed bool) error {
-	if !allowed || (from == policy.RegNone) != (r.ID == 0) {
+	if move == policy.RegPromote || !allowed || (from == policy.RegNone) != (r.ID == 0) {
 		return fmt.Errorf("registration %d: %q does not take %q to %q", r.ID, move, from, r.Status)
 	}
 	switch r.Status {

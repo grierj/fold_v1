@@ -187,7 +187,7 @@ func (a *App) alreadyHandled(c *gin.Context, kind string, subjectID uint) {
 	if by != nil {
 		ids = []uint{*by}
 	}
-	c.JSON(http.StatusConflict, gin.H{
-		"error": "This was already handled", "resolvedBy": publicNamesIn(a.DB, ids).actorName(by), "resolution": outcome,
-	})
+	fail(c, errAlreadyHandled.with(gin.H{
+		"resolvedBy": publicNamesIn(a.DB, ids).actorName(by), "resolution": outcome,
+	}))
 }

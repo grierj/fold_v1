@@ -637,7 +637,7 @@ func TestGuestInvitationUpgradeAndNoMembership(t *testing.T) {
 
 	w := admin.do("POST", "/api/v1/groups/"+itoa(gid)+"/members",
 		map[string]any{"email": "gail@example.com"}, true)
-	if w.Code != http.StatusForbidden {
+	if w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), `"code":"group_member_email_unavailable"`) {
 		t.Fatalf("adding a guest as a member: %d %s", w.Code, w.Body.String())
 	}
 
@@ -764,6 +764,12 @@ func TestGuestRedeemOnFullEventWithoutWaitlistCreatesNothing(t *testing.T) {
 // A promoted guest gets the promotion email at the guest address in the
 // devoutbox, with a working manage link.
 func TestPromotedGuestGetsEmail(t *testing.T) {
+	t.Run("current notice", func(t *testing.T) { promotedGuestGetsEmail(t, false) })
+	t.Run("pre-upgrade notice", func(t *testing.T) { promotedGuestGetsEmail(t, true) })
+}
+
+func promotedGuestGetsEmail(t *testing.T, legacy bool) {
+	t.Helper()
 	app := testApp(t)
 	newTestUser(t, app, "admin", "password1234", models.RoleAdmin)
 	admin := loginAPI(t, app, "admin", "password1234")
@@ -789,16 +795,39 @@ func TestPromotedGuestGetsEmail(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("guest confirm: %d %s", w.Code, w.Body.String())
 	}
+	var confirmed struct {
+		ManageToken string `json:"manageToken"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &confirmed); err != nil || confirmed.ManageToken == "" {
+		t.Fatalf("confirmation did not return a manage token: %v", err)
+	}
+	gu := guestUser(t, app, "gail@example.com")
 
 	// The member cancels; the guest is promoted and emailed.
+	mc.holdNotices = legacy
 	if code, _ := registerAs(mc, ev.ID, models.FormatCalendarDate(occ.OriginalDate), "declined", nil); code != http.StatusOK {
 		t.Fatalf("member cancel: %d", code)
 	}
+	if legacy {
+		var n models.Notification
+		gormMust(t, app.DB.Where("user_id = ? AND kind = ?", gu.ID, notify.RegistrationPromoted).First(&n))
+		if d := emailDeliveryOf(t, app, n.ID); d.Status != models.DeliveryQueued {
+			t.Fatalf("legacy fixture needs a queued promotion email, got %s", d.Status)
+		}
+		gormMust(t, app.DB.Model(&n).UpdateColumn("data", gorm.Expr("data - 'emailHouseholdPersonId'")))
+	}
 	m := latestEmail(t, app, "gail@example.com")
-	if !strings.Contains(m.Subject, "You're in") {
+	if legacy {
+		if m.Subject != "A waitlist spot opened" || strings.Contains(m.Subject+m.Body, gu.PublicName()) {
+			t.Fatalf("legacy promotion did not send the name-free email: %q", m.Subject)
+		}
+	} else if !strings.Contains(m.Subject, "You're in") {
 		t.Fatalf("promotion email subject: %q", m.Subject)
 	}
 	manageToken := manageTokenInEmail(t, m)
+	if manageToken == confirmed.ManageToken {
+		t.Fatal("promotion sent the old waitlisted registration token")
+	}
 	// Fetching the manage page changes nothing; the token still works.
 	w = anon.do("GET", "/api/v1/guest-registrations/manage/"+manageToken, nil, false)
 	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"status":"going"`) {
@@ -806,7 +835,6 @@ func TestPromotedGuestGetsEmail(t *testing.T) {
 	}
 	// Confirming the cancel sets cancelled and the old token then fails.
 	apiDo(t, anon, "POST", "/api/v1/guest-registrations/manage/"+manageToken+"/cancel", nil, http.StatusOK)
-	gu := guestUser(t, app, "gail@example.com")
 	if r := guestRegistrationRow(t, app, gu.ID); r.Status != models.RegCancelled {
 		t.Fatalf("after manage cancel: %q", r.Status)
 	}
@@ -1321,13 +1349,6 @@ func TestGuestRegistrationDefersMailForEveryAddressKind(t *testing.T) {
 }
 
 func TestGuestRegistrationWorkAndThrottleGates(t *testing.T) {
-	realPasswordCost(t)
-	// Calibrate a deliberately loose lower bound instead of hard-coding the
-	// machine's bcrypt speed. Observe work at the account lookup, not at the
-	// end of the request: the padding must precede all address-dependent work.
-	start := time.Now()
-	(&models.User{}).CheckPassword("not a real password")
-	minimumWork := time.Since(start) / 3
 	for _, tt := range []struct {
 		name      string
 		account   bool
@@ -1389,12 +1410,22 @@ func TestGuestRegistrationWorkAndThrottleGates(t *testing.T) {
 			if tt.gate == "site" {
 				seedThrottle("guestreg:site", publicSignupSiteLimit)
 			}
-			var lookupAt time.Duration
-			var started time.Time
+			workCalls := 0
+			app.hooks.wrapGuestPasswordCheck = func(check func(string) bool) func(string) bool {
+				return func(password string) bool {
+					result := check(password)
+					workCalls++
+					return result
+				}
+			}
+			lookedUp := false
 			const callback = "guest:observe-account-lookup"
 			if err := app.DB.Callback().Query().Before("gorm:query").Register(callback, func(db *gorm.DB) {
 				if db.Statement.Table == "users" {
-					lookupAt = time.Since(started)
+					lookedUp = true
+					if workCalls != 1 {
+						t.Errorf("account lookup after %d bcrypt calls, want 1", workCalls)
+					}
 				}
 			}); err != nil {
 				t.Fatal(err)
@@ -1407,7 +1438,6 @@ func TestGuestRegistrationWorkAndThrottleGates(t *testing.T) {
 			if tt.gate == "honeypot" {
 				body["website"] = "bot"
 			}
-			started = time.Now()
 			answer := guestSubmit(t, anon, ev.ID, body, http.StatusOK)
 			if !strings.Contains(answer, signupThanks) {
 				t.Fatalf("nonuniform answer: %s", answer)
@@ -1415,12 +1445,12 @@ func TestGuestRegistrationWorkAndThrottleGates(t *testing.T) {
 			hints := len(mailJobsOfKind(t, app, kindAccountExistsMail))
 			jobs := len(mailJobsOfKind(t, app, kindGuestVerifyMail))
 			if tt.gate != "" {
-				if lookupAt != 0 || jobs != 0 || hints != 0 || guestSignupCount(t, app, email) != 0 {
-					t.Fatalf("early gate inspected/stored/mailed address: lookup=%v jobs=%d hints=%d", lookupAt, jobs, hints)
+				if workCalls != 0 || lookedUp || jobs != 0 || hints != 0 || guestSignupCount(t, app, email) != 0 {
+					t.Fatalf("early gate did work or inspected/stored/mailed address: bcrypt=%d lookup=%t jobs=%d hints=%d", workCalls, lookedUp, jobs, hints)
 				}
 			} else {
-				if lookupAt < minimumWork {
-					t.Fatalf("account lookup before bcrypt work: %v, want >= %v", lookupAt, minimumWork)
+				if workCalls != 1 || !lookedUp {
+					t.Fatalf("expected one bcrypt call and an account lookup: bcrypt=%d lookup=%t", workCalls, lookedUp)
 				}
 				wantJobs, wantHints := 1, 0
 				if tt.account {

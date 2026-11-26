@@ -2,7 +2,7 @@ import { canRegisterAsGuest } from "../lib/can";
 import { Form } from "../components/ui/Form";
 import { useHousehold } from "../lib/useHousehold";
 import { SeriesEditor } from "../components/SeriesEditor";
-import { lazy, Suspense, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { ApiError } from "../api/core";
 import { Events } from "../api/events";
@@ -20,7 +20,7 @@ import { Button, ButtonLink } from "../components/ui/Button";
 import { ExternalLinkIcon } from "../components/icons";
 import { EventVisibilityControl } from "../components/EventVisibility";
 import type { RevisionConflict } from "../lib/useRevisionSave";
-import { RefusedSaveLine, useRefusedSave } from "../lib/refusedSave";
+import { RefusedSaveLine, ResourceRefusal, resourceRefused, useRefusedSave, useResourceRefusal } from "../lib/refusedSave";
 import { RsvpButtons } from "../components/RsvpButtons";
 import { GuestRegistrationForm } from "../components/GuestRegistrationForm";
 import { DateActions } from "../components/DateActions";
@@ -40,6 +40,7 @@ import { applyActorRsvpResults, type ActorRsvpResult, type SeriesFeedbackSignal 
 import { useRsvpMutationGate, type RsvpMutationGate } from "../lib/useRsvpMutationGate";
 import { ConfirmProvider, useConfirm, usePageFacts } from "../components/ui/ConfirmDialog";
 import { useLeaveQuestion } from "../lib/leaveQuestion";
+import { ManagerSaveStatus } from "../components/ui/ManagerSaveStatus";
 import { useRosterSettled } from "../lib/rosterWrites";
 import { seriesSchedules } from "../lib/registration";
 
@@ -74,6 +75,12 @@ function EventDetailContent() {
   const seriesAction = useAction();
   const visibilityAction = useAction();
   const panelBusy = seriesAction.running || visibilityAction.running;
+  const [panelUpdated, setPanelUpdated] = useState(false);
+  const [updatedDateId, setUpdatedDateId] = useState<number | null>(null);
+  const managerStatus = <ManagerSaveStatus saving={panelBusy} updated={panelUpdated} />;
+  useEffect(() => {
+    if (panelBusy) setPanelUpdated(false);
+  }, [panelBusy]);
   const editButton = useRef<HTMLButtonElement>(null);
   // A save in the panel reads the page again from nothing: focus still in the panel waits on the main region, and
   // focus the reload dropped goes back to Edit series, the panel's opener, once the page is shown.
@@ -103,10 +110,6 @@ function EventDetailContent() {
   // only the newest request may commit anything.
   const load = useLoad(() => Events.get(id ?? ""), [id], { enabled: !!id });
 
-  // A roster write on one of its dates (a row's, or a kept-dates panel's inside an editor) holds that date's Edit
-  // until this page shows an answer asked for after it.
-  const settling = useRosterSettled({ epoch: load.epoch, dataEpoch: load.dataEpoch, reload: () => refreshDates() }, (eventId) => eventId === Number(id));
-
   const page = load.data ?? null;
   const loading = load.loading;
   useLayoutEffect(() => {
@@ -129,6 +132,31 @@ function EventDetailContent() {
     if (!document.activeElement || document.activeElement === document.body) editButton.current?.focus();
   }, [editing]);
   const refusedSave = useRefusedSave(load);
+  const { retry } = load;
+  const { refused } = refusedSave;
+  const roomListRefused = useRef(false);
+
+  const refreshRefusal = useCallback((intent: "read" | "write") => {
+    setEditing(false);
+    setPickRequest(null);
+    setRoomsRevision((n) => n + 1);
+
+    if (intent === "write") refused("gone", "action");
+    else void retry();
+  }, [refused, retry]);
+
+  const roomListRead = useCallback((outcome: "loaded" | "refused") => {
+    if (outcome === "loaded") roomListRefused.current = false;
+    else if (!roomListRefused.current) {
+      // This list opens by itself after a page read. A second refusal stays with the list.
+      roomListRefused.current = true;
+      refreshRefusal("read");
+    }
+  }, [refreshRefusal]);
+
+  // A roster write holds that date's Edit until the page shows a read asked for after the write.
+  const settling = useRosterSettled({ epoch: load.epoch, dataEpoch: load.dataEpoch, reload: () => refreshDates() }, (eventId) => eventId === Number(id));
+
   // A date's save refused and not sent again (DEC-164): which date, for the line above the dates.
   const dateRefused = useRefusedSave(load);
   const [refusedDate, setRefusedDate] = useState<{ eventId: number; date: string } | null>(null);
@@ -187,18 +215,20 @@ function EventDetailContent() {
   if (loading || authLoading) {
     return (
       <div className="fold-page fold-page-narrow">
+        {managerStatus}
         <Skeleton kind="page" />
       </div>
     );
   }
 
   if (notFound) {
-    return <Missing title="Event not found" body="It may have been cancelled or removed, or it may be private." notice={<><RefusedSaveLine save={refusedSave} noun="event" /><RefusedSaveLine save={dateRefused} noun="date" /></>} />;
+    return <Missing title="Event not found" body="It may have been cancelled or removed, or it may be private." notice={<>{managerStatus}<RefusedSaveLine save={refusedSave} noun="event" /><RefusedSaveLine save={dateRefused} noun="date" /></>} />;
   }
 
   if (!page) {
     return (
       <div className="fold-page fold-page-narrow">
+        {managerStatus}
         <h1 className="text-3xl font-bold mb-6">Event unavailable</h1>
         <RefusedSaveLine save={refusedSave} noun="event" />
         <RefusedSaveLine save={dateRefused} noun="date" />
@@ -233,7 +263,10 @@ function EventDetailContent() {
       // Only the page that asked moves on: someone who went elsewhere meanwhile stays there.
       if (action.here()) navigate("/", { replace: true });
     } catch (e) {
-      if (action.here()) setDeleteError(errorText(e, "We couldn't delete the event."));
+      if (!action.here()) return;
+
+      if (resourceRefused(e)) refreshRefusal("write");
+      else setDeleteError(errorText(e, "We couldn't delete the event."));
     } finally {
       deletingNow.current = false;
       setDeleting(false);
@@ -241,7 +274,8 @@ function EventDetailContent() {
   }
 
   return (
-    <div className="fold-page fold-page-narrow">
+    <ResourceRefusal.Provider value={refreshRefusal}><div className="fold-page fold-page-narrow">
+      {managerStatus}
       {/* Edit series and More sit beside the title as secondary actions; an event page has no primary one (DEC-63, DEC-65). */}
       <div className="fold-page-header">
         <div className="min-w-0">
@@ -250,7 +284,7 @@ function EventDetailContent() {
         </div>
         {canManage && (
           <div className="flex w-full gap-2 sm:w-auto sm:shrink-0">
-            <Button ref={editButton} variant="secondary" layout="flex-1 sm:flex-none" aria-expanded={editing} disabled={panelBusy} onClick={() => { refusedSave.clear(); setEditing((v) => !v); }}>
+            <Button ref={editButton} variant="secondary" layout="flex-1 sm:flex-none" aria-expanded={editing} disabled={panelBusy} onClick={() => { refusedSave.clear(); setPanelUpdated(false); setUpdatedDateId(null); setEditing((v) => !v); }}>
               {event.recurrenceRule ? "Edit series" : "Edit event"}
             </Button>
             <Menu label="More event actions" items={[
@@ -293,6 +327,7 @@ function EventDetailContent() {
             onRoomChanged={() => { setRoomsRevision((n) => n + 1); void load.reload(); }}
             onSaved={() => {
               parkFocus();
+              setPanelUpdated(true);
               setEditing(false);
               setRoomsRevision((n) => n + 1);
               void load.retry();
@@ -319,6 +354,7 @@ function EventDetailContent() {
               revision={event.revision}
               onSaved={() => {
                 parkFocus();
+                setPanelUpdated(true);
                 void load.retry();
               }}
               onConflict={closeOnConflict}
@@ -336,11 +372,14 @@ function EventDetailContent() {
           hasDate={(d) => occurrences.some((o) => o.date === d)}
           onPick={(d) => setPickRequest((r) => ({ date: d, seq: (r?.seq ?? 0) + 1 }))}
           onGone={() => closeOnConflict("gone")}
+          onRead={roomListRead}
+          onRetryPage={() => refreshRefusal("read")}
         />
       )}
 
       {!single && <h2 className="text-xl font-semibold mt-6 mb-4">Upcoming dates</h2>}
       {householdError && <ErrorNotice message={householdError} onRetry={retryHousehold} />}
+      <ManagerSaveStatus saving={false} updated={updatedDateId !== null} updateKey={updatedDateId} />
       {/* Above the list, never in a row a long list may hide: focus brings it into view, and it names the day. */}
       {refusedDate && <RefusedSaveLine save={dateRefused} noun="date" about={formatDayFull(refusedDate.date)}
         canManage={occurrences.some((o) => o.eventId === refusedDate.eventId && o.date === refusedDate.date) ? canManage : undefined} />}
@@ -369,13 +408,18 @@ function EventDetailContent() {
             onSeriesFeedback={reportSeriesFeedback}
             onTerminalRefresh={() => void load.retry()}
             onChanged={refreshDates}
-            onEditDate={dateRefused.clear}
+            onDateUpdated={(updated) => setUpdatedDateId(updated ? m.id : null)}
+            onEditDate={() => {
+              dateRefused.clear();
+              setUpdatedDateId(null);
+              setPanelUpdated(false);
+            }}
             onDateConflict={(why) => dateConflict(why, m.eventId, m.date)}
             onNeedLogin={() => navigate("/login", { state: { from: `/events/${id}` } })}
           />}
         </CompactDates>
       </div>
-    </div>
+    </div></ResourceRefusal.Provider>
   );
 }
 
@@ -398,6 +442,7 @@ function DateRow({
   onSeriesFeedback,
   onTerminalRefresh,
   onChanged,
+  onDateUpdated,
   onEditDate,
   onDateConflict,
   onNeedLogin,
@@ -425,6 +470,7 @@ function DateRow({
   onSeriesFeedback: (eventId: number, date: string, actorResults: ActorRsvpResult[]) => void;
   onTerminalRefresh: () => void;
   onChanged: () => void;
+  onDateUpdated: (updated: boolean) => void;
   // The date's editor opened, which clears what the page said about its last refused save.
   onEditDate: () => void;
   onDateConflict: (why: RevisionConflict) => void;
@@ -432,7 +478,8 @@ function DateRow({
 }) {
   const navigate = useNavigate();
   const { canCompose } = useAuth();
-  const dateEditor = useDateEditorToggle({ onEditDate, onChanged, onDateConflict, onTerminalRefresh });
+  const dateEditor = useDateEditorToggle({ onEditDate, onChanged, onDateUpdated, onDateConflict, onTerminalRefresh });
+  const refreshRefusal = useResourceRefusal();
   const [managing, setManaging] = useState(manageRequested);
   const manageRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
@@ -488,7 +535,7 @@ function DateRow({
       // Stays "Cancelling…" until the refresh takes the date away.
       onChanged();
     } catch (e) {
-      setCancelError(errorText(e, "We couldn't cancel that date."));
+      if (!refreshRefusal(e)) setCancelError(errorText(e, "We couldn't cancel that date."));
       cancelNow.current = false;
       setCancelStep(null);
     }
@@ -531,6 +578,7 @@ function DateRow({
           <div className="text-sm text-text-muted">Tap Going below to get the video link.</div>
         ) : null}
         {cancelError && <FormError>{cancelError}</FormError>}
+        {dateEditor.status}
         {instance.overridden && (
           <div className="text-sm text-text-muted">This date was edited on its own, so series changes leave it alone.</div>
         )}
@@ -587,6 +635,8 @@ function HostEditor({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  const refreshRefusal = useResourceRefusal();
+
   async function add(e: React.FormEvent) {
     e.preventDefault();
 
@@ -599,7 +649,7 @@ function HostEditor({
       setEmail("");
       onChanged();
     } catch (err) {
-      setError(errorText(err, "We couldn't add that host."));
+      if (!refreshRefusal(err)) setError(errorText(err, "We couldn't add that host."));
     } finally {
       setBusy(false);
     }
@@ -613,7 +663,7 @@ function HostEditor({
       await Events.removeHost(eventId, userId);
       onChanged();
     } catch (err) {
-      setError(errorText(err, "We couldn't remove that host."));
+      if (!refreshRefusal(err)) setError(errorText(err, "We couldn't remove that host."));
     } finally {
       setBusy(false);
     }

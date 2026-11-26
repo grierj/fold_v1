@@ -1320,6 +1320,9 @@ func TestAuditErasureTeenRealLifecycles(t *testing.T) {
 // After an input changes, review its attribution rule before updating its pin.
 // No files are parsed by executing them or by loading application state.
 var auditWriterCensus = map[string]string{
+	"api_admin_settings.go:saveSetting":         "f3019fc0568259dc063c1fa1b84f7fe5690ad50b20e105c073cd0e4f8502af41",
+	"api_admin_settings.go:saveRevisedSetting":  "d02540e369249031c073953cbf9291b47678b9dd6b4ba9ecf079188415922189",
+	"api_admin_settings.go:writeAuditedSetting": "10cc718888efbfe112b1f9d198a48a9a9c7e8c74ba90ec721ad35ba8d555316c",
 	// System maintenance: no actor or IP, fixed host-removal metadata and a
 	// version/count-only sweep marker. The two existing erasure writers now
 	// accept a nil system actor, preserving their nonzero admin attribution.
@@ -1334,7 +1337,6 @@ var auditWriterCensus = map[string]string{
 	"api_admin_reasons_legacy.go:legacyPageIn":                    "133083e02fdac6fc98ca70715bf597db2a87dd80bfec7b3491f18bf0b7417fd4",
 	"age_rollover.go:flagHouseholdChild13":                        "1804d1f969590562b8e2282f42635834e8f5a3841b0c9679f4b400a4efe5d866",
 	"age_rollover.go:rolloverTeen":                                "4139500705a3da764c067accd4f73fefed8e9c88aa696be6dbc26978d7dbe20b",
-	"api_account_requests.go:apiSetSelfSignup":                    "46f34cd7e73d9cf344b3e9378c76b811b88b06d10a20b7f495aadac78da63e82",
 	"api_account_requests.go:decideAccountRequest":                "18bb2e5e2f8af270aef775f8a7cdbdf8f7eaa0f5d151615576dc938bd4d21fe9",
 	"api_account_requests.go:expirePendingRequests":               "b30d60d413fdc04420d5ef85fed5141945bbad23cd3c882a19a4e160d067446f",
 	"api_account_requests.go:storeAccountRequest":                 "a2a12aeb0ea4183b87c6773c1b5ba0f75b74d9bc2296be8c6edf2c4070aef3ec",
@@ -1359,6 +1361,7 @@ var auditWriterCensus = map[string]string{
 	"api_event_access.go:apiSetEventVisibility":                   "626cabf10d6c4ca7a7afac84935a07d9bbf4771f1bddeff97d1cdd7cdbb969e0",
 	"api_events.go:apiCreateEvent":                                "6019122679de6e09b703d6c79239bddda6fd5ec00bdfbeec42f1fd40e83b2f4b",
 	"api_events.go:apiDeleteEvent":                                "49605e07b47a70d91a057c264d22edafe81530cda07102d5c460d7d8ab893200",
+	"api_events.go:auditDateCancellation":                         "fd36241127e309b393e6cbc1c72471caa47689ec32974d2d3bc1926780a9385e",
 	"api_events.go:restoreSeriesDates":                            "ee6a331db732803f1fb43f4be87f742df27e444cfbfb01967be4c40b063180f1",
 	"api_feeds.go:apiCreateMyCalendarFeed":                        "4804978e0c2abafcb9ea1234cde1fc604bf1c3cce5bb3ad79c87f8b5fa1f1510",
 	"api_feeds.go:apiUpdateMyCalendarFeed":                        "9ea28d336e14eea85b7fadb379e258108df222066d72b736f387d91672712106",
@@ -1372,7 +1375,7 @@ var auditWriterCensus = map[string]string{
 	"api_guest.go:apiCancelGuestRegistration":                     "d92867ce53e9aa1d9e3f635bee6ae5946c7aa0fed892bebc76beba28bb017fbb",
 	"api_guest.go:createGuestUpgradeRequest":                      "d4efcca0c23809550c5f9d8996e03fad7134231186eb151392530f8a17e6341c",
 	"api_handoff.go:demoteEverywhere":                             "f8c19b38c31de43cb159e734182104c37d48a604e794b65c09b7d22b3483ba38",
-	"api_handoff.go:handOffLeadership":                            "e4c64e8d739a704a9ccc80a1aa8244ae996e392379b1d70f6b37e32b57f9ccda",
+	"api_handoff.go:handOffLeadership":                            "66d2bb5afd136a44e3569d394dc2f98df6c1f929e8ecd31c1b93077de40534c6",
 	"api_handoff.go:restoreMemberships":                           "7e5274985450108d91a71e530fe4d6256b0a330c3361cff5a271bfb0cf037773",
 	"api_host_handoff.go:handOffHosting":                          "93a50176317d4e93ff841272aef57f58ebecc26f8aa682ce85787ebd38232772",
 	"api_host_handoff.go:deleteHostRowsAudited":                   "e4840ae49c5b95f68150584f85c36abeed2bf195f0f91c7ae3f764bb2fe72277",
@@ -1387,7 +1390,6 @@ var auditWriterCensus = map[string]string{
 	"api_invitations.go:writeInvitationRefusal":                   "7b02d5b25e7c2b17d5c628c82fa102075c93ba82255b0a21b4eecb4c7dae6e0f",
 	"api_message_history.go:apiRetryMessage":                      "28f49307508e5f77df4a6aaebc4c63d59a94aca0cccb26e86b207e8d4024ce19",
 	"api_message_preview.go:apiTestMessage":                       "2ad44cd111947e52717b8a4d257d3fd6c307ab0b8be1d938139a9425f62c952a",
-	"api_message_settings.go:saveSetting":                         "94b67b44538247bff4e69419b7c8e347b1a204eb0bdef8b7626194279525c245",
 	"api_messages.go:apiCancelMessage":                            "072e942199cda3fee26b59da2a7cd384b18bb75c04052b6873cd0ded6b108fd7",
 	"api_messages.go:apiScheduleMessage":                          "c3812387e4ed2d94a8099978724a83523a859e25f6edd41167d14c35be69f5ca",
 	"api_messages.go:apiUpdateMessage":                            "488f229db14d0f858b82d153bd8a76dbe2e3d4f1d46a6c57564a9e9c73df9928",
@@ -1417,7 +1419,7 @@ var auditWriterCensus = map[string]string{
 	"api_room_series.go:bookWholeSeries":                          "3635d7f6e8ba87cf7a1adce12bb01c6ba358118b565f90a4d6072ab6389b2c0d",
 	"api_rooms.go:apiAdminCreateRoom":                             "00c14cd2b3e4d506f59158cf6a676fe89be5a8183760e27310b12b9e183b8f15",
 	"api_rooms.go:apiAdminUpdateRoom":                             "408c699d62a155af44bde0954c969b70965c0c9c583ded3ffc5a0464ffa5a30d",
-	"api_rooms.go:setRoomSwitch":                                  "a09e15ddbb19ba2435d0b35ce0e05fb57c75d2ffc0b55ac150bb25c937c9bd39",
+	"api_rooms.go:setRoomSwitch":                                  "fb7994f9786dc8d2278ff5e34e116f6597e407c0e62f5cc3bbbb4158227674de",
 	"api_teen_consent.go:changeTeenConsent":                       "f7124d9ee26a3b16b8f67a5fa0fadb7867bcd7b5d9e213e83f3efa8556d9449b",
 	"api_teen_guardians.go:apiClaimTeenGuardian":                  "059457aa963c16581146d2802d7bff428783101588e5a44a0cd3041cd868f55a",
 	"api_teen_guardians.go:nominateTeenGuardian":                  "c1ef0fab390bdda6d4522037a4a396e79108b8121784f33c9ac6c20058244672",

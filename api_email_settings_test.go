@@ -105,7 +105,7 @@ func TestChurchAddressSetting(t *testing.T) {
 	if w := sam.do("PUT", "/api/v1/admin/settings/church-address", map[string]any{"address": "x"}, true); w.Code != http.StatusForbidden {
 		t.Fatalf("member: %d", w.Code)
 	}
-	w := root.do("PUT", "/api/v1/admin/settings/church-address", map[string]any{"address": " Grace Church \r\n\r\n12 Main St\nBoise, ID "}, true)
+	w := root.do("PUT", "/api/v1/admin/settings/church-address", adminSettingBody(root, "/api/v1/admin/settings/church-address", "address", " Grace Church \r\n\r\n12 Main St\nBoise, ID "), true)
 	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"Grace Church\n12 Main St\nBoise, ID"`) {
 		t.Fatalf("save: %d %s", w.Code, w.Body.String())
 	}
@@ -125,7 +125,7 @@ func TestChurchAddressSetting(t *testing.T) {
 	if !strings.Contains(root.do("GET", "/api/v1/admin/settings/church-address", nil, false).Body.String(), "12 Main St") {
 		t.Fatal("read back")
 	}
-	if w := root.do("PUT", "/api/v1/admin/settings/church-address", map[string]any{"address": ""}, true); w.Code != http.StatusOK || settingText(t, app, settingChurchAddress) != "" {
+	if w := root.do("PUT", "/api/v1/admin/settings/church-address", adminSettingBody(root, "/api/v1/admin/settings/church-address", "address", ""), true); w.Code != http.StatusOK || settingText(t, app, settingChurchAddress) != "" {
 		t.Fatalf("clear: %d %q", w.Code, settingText(t, app, settingChurchAddress))
 	}
 }
@@ -317,7 +317,7 @@ func emailAddressChangeFixture(t *testing.T, mode string) (*App, *models.User, *
 	admin := loginAPI(t, app, "root", "password1234")
 	admin.holdNotices = true
 	return app, u, c, nextAddress, func() *httptest.ResponseRecorder {
-		return admin.do("PUT", "/api/v1/admin/users/"+itoa(u.ID), map[string]string{"email": nextAddress}, true)
+		return admin.do("PUT", "/api/v1/admin/users/"+itoa(u.ID), adminEditBody(admin, u.ID, map[string]string{"email": nextAddress}), true)
 	}
 }
 

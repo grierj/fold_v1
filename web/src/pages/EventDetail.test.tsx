@@ -891,6 +891,23 @@ describe("EventDetail: the event visibility review and the series editor's panel
     await userEvent.click(screen.getByRole("radio", { name: /^Invite only/ }));
   }
 
+  it("drops the event and editor immediately when reading the override count is refused", async () => {
+    const count = deferred<Awaited<ReturnType<typeof Events.visibilityImpact>>>();
+    const fresh = deferred<EventDetailResponse>();
+    vi.mocked(Events.visibilityImpact).mockReturnValueOnce(count.promise);
+    vi.mocked(Events.get).mockResolvedValueOnce(groupEvent).mockReturnValueOnce(fresh.promise);
+    renderPage();
+    await userEvent.click(await screen.findByRole("button", { name: "Edit event" }));
+    expect(screen.getByLabelText("Title")).toHaveValue("Hybrid study");
+
+    await act(async () => count.reject(new ApiError(404, "missing", { code: "not_found" })));
+    expect(screen.queryByText("Hybrid study")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("Title")).not.toBeInTheDocument();
+    await act(async () => fresh.reject(new ApiError(500, "offline")));
+    expect(await screen.findByRole("heading", { name: "Event unavailable" })).toBeInTheDocument();
+    expect(screen.queryByText("Hybrid study")).not.toBeInTheDocument();
+  });
+
   for (const op of ROSTER_OPS) {
     it(`a panel ${op} that begins during the preview's await opens no review and sends nothing`, async () => {
       await openSeries();
@@ -979,6 +996,31 @@ describe("EventDetail dates that need a room", () => {
     vi.mocked(Events.get).mockResolvedValue(series);
     vi.spyOn(Site, "get").mockResolvedValue({ name: "Fold", timezone: "UTC", selfSignup: "off", roomsEnabled: true, pushEnabled: true });
     vi.spyOn(DateRooms, "list").mockResolvedValue({ rooms: [], booking: null, dateRoom: { id: 70, revision: "r1" } });
+  });
+
+  it("rechecks the event after the first refused room list and again on manual retry", async () => {
+    const fresh = deferred<EventDetailResponse>();
+    const retried = deferred<EventDetailResponse>();
+    const shown = { ...page, canManage: true };
+    vi.mocked(Events.get).mockResolvedValueOnce(shown).mockReturnValueOnce(fresh.promise).mockReturnValueOnce(retried.promise);
+    vi.spyOn(SeriesRooms, "list").mockRejectedValue(new ApiError(403, "refused", { code: "not_allowed" }));
+    renderPage();
+    await waitFor(() => expect(Events.get).toHaveBeenCalledTimes(2));
+    expect(screen.queryByRole("heading", { name: "Hybrid study" })).not.toBeInTheDocument();
+    await act(async () => fresh.resolve(shown));
+    expect(await screen.findByRole("heading", { name: "Hybrid study" })).toBeInTheDocument();
+    const tryAgain = await screen.findByRole("button", { name: "Try again" });
+    expect(Events.get).toHaveBeenCalledTimes(2);
+    expect(SeriesRooms.list).toHaveBeenCalledTimes(2);
+
+    await userEvent.click(tryAgain);
+    await waitFor(() => expect(Events.get).toHaveBeenCalledTimes(3));
+    expect(screen.queryByRole("heading", { name: "Hybrid study" })).not.toBeInTheDocument();
+    await act(async () => retried.resolve({ ...shown, canManage: false }));
+    expect(await screen.findByRole("heading", { name: "Hybrid study" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Edit event" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Try again" })).not.toBeInTheDocument();
+    expect(SeriesRooms.list).toHaveBeenCalledTimes(2);
   });
 
   it("lists them for a manager and opens that date's editor from Pick a room", async () => {
@@ -1248,6 +1290,27 @@ describe("EventDetail asks every question in the app's dialog", () => {
     await userEvent.click(within(asked).getByRole("button", { name: "Add over capacity" }));
     await waitFor(() => expect(Events.restoreRegistration).toHaveBeenCalledWith(7, "2026-12-01", { userId: 4 }, "in_person", true));
     expect(Events.restoreRegistration).toHaveBeenCalledOnce();
+  });
+
+  it("keeps the roster and focuses the email so an address can be corrected after a missing-person reply", async () => {
+    vi.mocked(Events.addRegistration).mockRejectedValueOnce(new ApiError(404, "missing", { code: "date_add_person_not_found" }))
+      .mockResolvedValueOnce({});
+    renderPage();
+    const people = await roster();
+    const email = people.getByRole("textbox", { name: "Add someone" });
+    await userEvent.type(email, "sma@example.com");
+    await userEvent.click(people.getByRole("button", { name: "Add" }));
+
+    expect(email).toHaveValue("sma@example.com");
+    expect(email).toHaveFocus();
+    expect(email).toHaveAccessibleDescription(/Check the email address/);
+    expect(Events.get).toHaveBeenCalledOnce();
+    expect(screen.queryByText("Your last action could not be completed.")).not.toBeInTheDocument();
+
+    await userEvent.clear(email);
+    await userEvent.type(email, "sam@example.com");
+    await userEvent.click(people.getByRole("button", { name: "Add" }));
+    expect(Events.addRegistration).toHaveBeenLastCalledWith(7, "2026-12-01", "sam@example.com", undefined);
   });
 
   it("asks again after seats fill during an add, and a no keeps the refusal", async () => {
@@ -2831,6 +2894,50 @@ describe("EventDetail when a date's save meets someone else's change", () => {
     await waitFor(() => expect(screen.getByRole("button", { name: "Save this date" })).toBeEnabled());
     await userEvent.click(screen.getByRole("button", { name: "Save this date" }));
   }
+
+  it.each([
+    { overlap: false, refused: false },
+    { overlap: true, refused: false },
+    { overlap: true, refused: true },
+  ])("reports the last date save (overlapping: $overlap, refused: $refused)", async ({ overlap, refused }) => {
+    const second = occurrence({ id: 2, date: "2026-12-08", startsLocal: "2026-12-08T19:00" });
+    vi.mocked(Events.get).mockResolvedValue({ ...page, occurrences: [listed, second] });
+    renderPage();
+
+    for (const date of [listed, second]) {
+      await userEvent.click(await screen.findByRole("button", { name: `More for ${date.date}` }));
+      await userEvent.click(screen.getByRole("menuitem", { name: "Edit this date" }));
+      const card = screen.getByRole("button", { name: `More for ${date.date}` }).closest("article")!;
+      await userEvent.type(await within(card).findByLabelText("Title"), " night");
+    }
+
+    const [firstSave, secondSave] = screen.getAllByRole("button", { name: "Save this date" });
+    const firstReply = deferred<OccurrenceResponse>();
+    const secondReply = deferred<OccurrenceResponse>();
+    edits.answer(firstReply.promise, secondReply.promise);
+    await userEvent.click(firstSave);
+
+    if (overlap) await userEvent.click(secondSave);
+    await act(async () => { firstReply.resolve({ occurrence: { ...listed, revision: "stored" } }); await firstReply.promise; });
+    const announcement = await screen.findByText("Updated", { exact: true });
+    const firstText = announcement.firstChild;
+
+    if (!overlap) {
+      await userEvent.click(secondSave);
+      expect(announcement).toBeEmptyDOMElement();
+    }
+
+    if (refused) {
+      await act(async () => { secondReply.reject(new ApiError(400, "Invalid date", { code: "invalid_date" })); await secondReply.promise.catch(() => {}); });
+      await waitFor(() => expect(screen.queryByText("Updated", { exact: true })).not.toBeInTheDocument());
+
+      return;
+    }
+
+    await act(async () => { secondReply.resolve({ occurrence: { ...second, revision: "stored" } }); await secondReply.promise; });
+    await waitFor(() => expect(announcement).toHaveTextContent("Updated"));
+    expect(announcement.firstChild).not.toBe(firstText);
+  });
 
   // An earlier save's answer closes the editor: opening it again meanwhile would show a draft that answer then closes.
   it("keeps the row's Edit this date off while the date's save is on its way", async () => {

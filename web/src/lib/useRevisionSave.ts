@@ -42,7 +42,7 @@ export interface LostSend {
 }
 
 // The refusal each kind of save answers when the thing changed since the read it names.
-type ChangedCode = "event_changed" | "date_changed" | "group_changed" | "date_room_changed" | "message_changed" | "room_changed";
+type ChangedCode = "event_changed" | "date_changed" | "group_changed" | "date_room_changed" | "message_changed" | "room_changed" | "setting_changed" | "admin_user_changed";
 
 // What a save throws when every send was refused while nothing it writes changed, so the form says its ordinary
 // refusal for that code.
@@ -50,10 +50,20 @@ export const refusedAgain = (code: ChangedCode) => new ApiError(409, code.replac
 
 // What a save names in its answer: an event, a single date, a group, a date's room (named by its date's id), a
 // message, or a room.
-type AnswerKey = "event" | "occurrence" | "group" | "dateRoom" | "message" | "room";
+type AnswerKey = "event" | "occurrence" | "group" | "dateRoom" | "message" | "room" | "user";
 
 // What a save that landed answers: the thing it saved, with its new revision.
-type SavedAnswer = { [K in AnswerKey]: Record<K, RevisionRef> }[AnswerKey];
+interface SettingAnswer {
+  value: string;
+  revision: string;
+}
+
+type SavedAnswer = { [K in AnswerKey]: Record<K, RevisionRef> }[AnswerKey] | SettingAnswer;
+
+export function answerSetting(answer: unknown): answer is SettingAnswer {
+  return isObject(answer) && "value" in answer && isString(answer.value)
+    && "revision" in answer && isString(answer.revision) && answer.revision !== "";
+}
 
 // A save's answer names the thing saved: `{ [key]: { id, revision } }` with this id and a revision. Anything else (a
 // page from something in between, which reads as {}, or another thing's answer) is no answer.
@@ -65,13 +75,18 @@ export const answerNames = (key: AnswerKey, id: number) => (answer: unknown): an
       : key === "group" ? "group" in answer && answer.group
         : key === "message" ? "message" in answer && answer.message
           : key === "room" ? "room" in answer && answer.room
-            : "dateRoom" in answer && answer.dateRoom;
+            : key === "user" ? "user" in answer && answer.user
+              : "dateRoom" in answer && answer.dateRoom;
 
   return isObject(thing) && "id" in thing && "revision" in thing && isNumber(thing.id) && thing.id === id && isString(thing.revision) && thing.revision !== "";
 };
 
 // The revision a landed save's answer names.
 function answeredRevision(answer: SavedAnswer): string {
+  if ("revision" in answer) return answer.revision;
+
+  if ("user" in answer) return answer.user.revision;
+
   if ("event" in answer) return answer.event.revision;
 
   if ("occurrence" in answer) return answer.occurrence.revision;

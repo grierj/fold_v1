@@ -24,6 +24,7 @@ SSH_PUBKEY_FILE=""
 DEPLOY_DIR="/opt/fold"
 SOURCE_DIR=""
 IMAGE=""
+BACKUP_IMAGE=""
 TIMEZONE=""
 SWAP_MB=""
 SMTP_URL=""
@@ -102,6 +103,8 @@ Required for a deploy (unless --skip-deploy):
                              becomes FOLD_VERSION in .env.
                              Example: ghcr.io/grierj/fold:0.5.0
                              :latest is refused.
+  --backup-image REF         With --image, pull this backup image. Saves the
+                             tagged or digest reference as FOLD_BACKUP_IMAGE.
   --allow-onbox-build        Build on this machine: also copies
                              docker-compose.build.yml and sets COMPOSE_FILE in
                              .env (docker compose up --build). Off by default.
@@ -175,6 +178,7 @@ while [[ $# -gt 0 ]]; do
     --deploy-dir|--deploy-dir=*) take_value DEPLOY_DIR "$@"; shift "$OPT_SHIFT" ;;
     --source-dir|--source-dir=*) take_value SOURCE_DIR "$@"; shift "$OPT_SHIFT" ;;
     --image|--image=*) take_value IMAGE "$@"; shift "$OPT_SHIFT" ;;
+    --backup-image|--backup-image=*) take_value BACKUP_IMAGE "$@"; need_value --backup-image "$BACKUP_IMAGE"; shift "$OPT_SHIFT" ;;
     --timezone|--timezone=*) take_value TIMEZONE "$@"; shift "$OPT_SHIFT" ;;
     --swap-mb|--swap-mb=*) take_value SWAP_MB "$@"; shift "$OPT_SHIFT" ;;
     --smtp-url|--smtp-url=*) take_value SMTP_URL "$@"; shift "$OPT_SHIFT" ;;
@@ -199,6 +203,10 @@ validate() {
   if [[ -n "$IMAGE" ]]; then
     [[ "$IMAGE" =~ ^[A-Za-z0-9][A-Za-z0-9._:/-]*$ ]] || die "--image has characters this script will not put in a compose file"
     assert_pinned_image "$IMAGE" || exit 1
+  fi
+  if [[ -n "$BACKUP_IMAGE" ]]; then
+    [[ -n "$IMAGE" && "$SKIP_DEPLOY" == 0 && "$PIN_ONLY" == 0 ]] || die '--backup-image requires a deploy with --image'
+    assert_backup_image "$BACKUP_IMAGE" || exit 1
   fi
   if [[ -n "$TIMEZONE" ]]; then
     [[ "$TIMEZONE" =~ ^[A-Za-z0-9_+-]+(/[A-Za-z0-9_+-]+)*$ ]] || die "--timezone is not an IANA zone name"
@@ -244,6 +252,9 @@ validate() {
   fi
   [[ -f "$SOURCE_DIR/docker-compose.yml" && -f "$SOURCE_DIR/Caddyfile" ]] \
     || die "source dir $SOURCE_DIR has no docker-compose.yml and Caddyfile"
+  if [[ -n "$BACKUP_IMAGE" ]]; then
+    assert_backup_image_compose "$SOURCE_DIR/docker-compose.yml" || exit 1
+  fi
   if [[ "$SOURCE_DIR" == "$DEPLOY_DIR" && -n "$IMAGE" ]]; then
     die "refusing to rewrite docker-compose.yml inside the source tree; keep the default --deploy-dir /opt/fold"
   fi
@@ -789,6 +800,10 @@ ensure_release_pin() {
     version="${IMAGE##*:}"
     assert_pinned_version "$version" || exit 1
     echo "release: pulling ${IMAGE} (FOLD_VERSION=${version})"
+    if [[ -n "$BACKUP_IMAGE" ]]; then
+      unset FOLD_BACKUP_IMAGE
+      set_env_value "$env_file" FOLD_BACKUP_IMAGE "$BACKUP_IMAGE"
+    fi
     if (( DRY_RUN )) && [[ ! -f "$env_file" ]]; then
       echo "dry-run: set FOLD_VERSION=${version} in ${env_file}"
       return 0
@@ -944,6 +959,9 @@ preflight_recovery_level() {
     TARGET_LEVEL="$(image_recovery_level "$checked_image")"
   fi
   require_recovery_level "$TARGET_LEVEL" "$HOST_FLOOR" || exit 1
+  if [[ -n "$BACKUP_IMAGE" ]]; then
+    docker pull "$BACKUP_IMAGE"
+  fi
 }
 
 # The restore lock already checked the target immutable id. A tag that moves

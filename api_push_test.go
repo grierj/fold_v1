@@ -527,9 +527,9 @@ func TestPushDevicesEndWithSessions(t *testing.T) {
 			case "email_change":
 				apiDo(t, client, "POST", "/api/v1/me/email/verify", map[string]string{"token": tokens[models.TokenEmailVerify]}, http.StatusOK)
 			case "admin_email":
-				apiDo(t, admin, "PUT", target, map[string]string{"email": "cal-new@example.com"}, http.StatusOK)
+				apiDo(t, admin, "PUT", target, adminEditBody(admin, u.ID, map[string]string{"email": "cal-new@example.com"}), http.StatusOK)
 			case "role_change":
-				apiDo(t, admin, "PUT", target, map[string]string{"role": models.RoleAdmin}, http.StatusOK)
+				apiDo(t, admin, "PUT", target, adminEditBody(admin, u.ID, map[string]string{"role": models.RoleAdmin}), http.StatusOK)
 			case "disable":
 				apiDo(t, admin, "PUT", target, map[string]string{"status": models.UserDisabled}, http.StatusOK)
 			}
@@ -572,7 +572,7 @@ func TestPushDevicesOffNoticeOnlyWhenRevoked(t *testing.T) {
 	apiDo(t, pat, "DELETE", "/api/v1/push/subscriptions", map[string]string{"endpoint": phone.Endpoint}, http.StatusOK)
 	apiDo(t, pat, "POST", "/api/v1/auth/logout", map[string]string{"pushEndpoint": laptop.Endpoint}, http.StatusOK)
 	pat = loginAPI(t, app, "pat", "password123456")
-	apiDo(t, admin, "PUT", "/api/v1/admin/users/"+itoa(u.ID), map[string]string{"name": "Pat Lee"}, http.StatusOK)
+	apiDo(t, admin, "PUT", "/api/v1/admin/users/"+itoa(u.ID), adminEditBody(admin, u.ID, map[string]string{"name": "Pat Lee"}), http.StatusOK)
 	if !deviceExists(app, tablet.ID) {
 		t.Fatal("a name change deleted a device")
 	}

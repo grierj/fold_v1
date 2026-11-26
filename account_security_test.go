@@ -164,7 +164,7 @@ func TestCredentialChangesRevokeEveryPendingAccountToken(t *testing.T) {
 			case "admin_reset":
 				apiDo(t, admin, "POST", target+"/password", map[string]string{"password": "replacement1234"}, http.StatusOK)
 			case "admin_email":
-				apiDo(t, admin, "PUT", target, map[string]string{"email": "admin-corrected@example.com"}, http.StatusOK)
+				apiDo(t, admin, "PUT", target, adminEditBody(admin, user.ID, map[string]string{"email": "admin-corrected@example.com"}), http.StatusOK)
 			case "email_verify":
 				apiDo(t, client, "POST", "/api/v1/me/email/verify", map[string]string{"token": tokens[models.TokenEmailVerify]}, http.StatusOK)
 			case "disable":
@@ -229,7 +229,7 @@ func TestCredentialRevocationFailureRollsBackChange(t *testing.T) {
 			case "password_reset":
 				apiDo(t, anon, "POST", "/api/v1/auth/password-reset/confirm", map[string]string{"token": tokens[models.TokenPasswordReset], "password": "replacement1234"}, http.StatusInternalServerError)
 			case "admin_email":
-				apiDo(t, admin, "PUT", "/api/v1/admin/users/"+itoa(user.ID), map[string]string{"email": "should-not-save@example.com"}, http.StatusInternalServerError)
+				apiDo(t, admin, "PUT", "/api/v1/admin/users/"+itoa(user.ID), adminEditBody(admin, user.ID, map[string]string{"email": "should-not-save@example.com"}), http.StatusInternalServerError)
 			}
 			var fresh models.User
 			if err := app.DB.First(&fresh, user.ID).Error; err != nil {
