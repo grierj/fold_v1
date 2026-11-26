@@ -258,48 +258,60 @@ test("See all dates from a loaded group shows the event skeleton while the event
   await expect(page.getByRole("status").filter({ hasText: "Loading this event…" })).toHaveCount(0);
 });
 
-// When the chunk fails twice the page reloads once, for browsers that keep a
-// failed module for the whole document; a page that still fails after that
-// reload stops at the reload message instead of reloading again.
-async function failGroupChunk(page: Page, failures: number) {
-  let requests = 0;
+async function failGroupChunk(page: Page, failAfterReload: () => boolean) {
+  const reloads: string[] = [];
+  const chunkRequests = { beforeReload: 0, afterReload: 0 };
 
   await signIn(page, "sam");
   await page.mouse.move(0, 0);
-  await page.route(/\/assets\/GroupDetail-[^/]+\.js$/, async (route) => {
-    requests += 1;
-
-    if (requests <= failures) await route.abort("connectionreset");
-    else await route.continue();
-  });
   await page.goto("/");
-  await page.evaluate(() => {
-    document.documentElement.dataset.sameDocument = "yes";
+  page.on("request", (request) => {
+    if (request.isNavigationRequest() && request.frame() === page.mainFrame()) reloads.push(request.url());
+  });
+
+  // Vite's module preload and dynamic import can make separate requests for
+  // the same chunk. Keep it unavailable for the whole failing document.
+  await page.route(/\/assets\/GroupDetail-[^/]+\.js$/, async (route) => {
+    const afterReload = reloads.length > 0;
+    chunkRequests[afterReload ? "afterReload" : "beforeReload"] += 1;
+
+    if (!afterReload || failAfterReload()) await route.abort("connectionreset");
+    else await route.continue();
   });
   // Start the route load without warming the chunk on pointer entry or focus.
   await page.getByRole("heading", { name: "Room 201 class" }).dispatchEvent("click");
 
-  return () => requests;
+  return { reloads, chunkRequests };
 }
 
-test("a group page chunk that fails twice reloads the page once and then loads", async ({ page }) => {
+test("a group page chunk loads after one reload when it becomes available", async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 800 });
-  const requests = await failGroupChunk(page, 2);
+  const { reloads, chunkRequests } = await failGroupChunk(page, () => false);
 
   await expect(page.getByRole("heading", { level: 1, name: "Room 201 class" })).toBeVisible();
   await expect(page).toHaveURL(/\/groups\/\d+$/);
-  expect(requests()).toBe(3);
-  await expect(page.locator("html[data-same-document=yes]")).toHaveCount(0);
+  expect(reloads).toEqual([page.url()]);
+  expect(chunkRequests.beforeReload).toBeGreaterThan(0);
+  expect(chunkRequests.afterReload).toBeGreaterThan(0);
 });
 
 test("a group page chunk that keeps failing reloads only once, then offers a reload", async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 800 });
-  const requests = await failGroupChunk(page, Infinity);
+  let chunkUnavailable = true;
+  const { reloads, chunkRequests } = await failGroupChunk(page, () => chunkUnavailable);
 
+  const reloadButton = page.getByRole("button", { name: "Reload page" });
   await expect(page.getByRole("heading", { level: 1, name: "This page didn't load" })).toBeVisible();
-  await expect(page.getByRole("button", { name: "Reload page" })).toBeVisible();
-  expect(requests()).toBe(4);
-  await expect(page.locator("html[data-same-document=yes]")).toHaveCount(0);
+  await expect(page).toHaveURL(/\/groups\/\d+$/);
+  const groupURL = page.url();
+  expect(reloads).toEqual([groupURL]);
+  expect(chunkRequests.beforeReload).toBeGreaterThan(0);
+  expect(chunkRequests.afterReload).toBeGreaterThan(0);
+
+  chunkUnavailable = false;
+  await reloadButton.click();
+  await expect(page.getByRole("heading", { level: 1, name: "Room 201 class" })).toBeVisible();
+  expect(reloads).toEqual([groupURL, groupURL]);
 });
 
 // A failure that lands after the reader has left the group page is not this
