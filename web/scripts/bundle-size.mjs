@@ -4,10 +4,12 @@ import { gzipSync } from "node:zlib";
 
 const BUDGET_GZIP_KB = 145;
 
+/** @param {string} file */
 export function gzipBytes(file) {
   return gzipSync(readFileSync(file)).length;
 }
 
+/** @param {string} dist */
 export function eagerGzipBytes(dist) {
   const html = readFileSync(join(dist, "index.html"), "utf8");
   const entry = html.match(/<script[^>]+src="\/assets\/([^"]+\.js)"/)?.[1];

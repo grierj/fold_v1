@@ -760,7 +760,7 @@ test("a household user keeps one-date drafts while their own answer uses every s
   await chooseDatesForMe(page, first);
   await expect(page.getByRole("status").filter({ hasText: "Maybe for 4 dates" })).toHaveCount(1);
 
-  const refreshed = schema.parse(schema.looseObject({ occurrences: schema.array(schema.looseObject({ myRegistration: schema.union([schema.string(), schema.null_()]), myAttendanceMode: schema.union([schema.literal("in_person"), schema.literal("remote")]), myGuestCount: schema.number(), myChildcareCount: schema.number(), myChildcareAgesNote: schema.string() })) }), await parent("GET", `/events/${event.id}`));
+  const refreshed = schema.parse(schema.looseObject({ occurrences: schema.array(schema.looseObject({ myRegistration: schema.literal("maybe"), myAttendanceMode: schema.union([schema.literal("in_person"), schema.literal("remote")]), myGuestCount: schema.number(), myChildcareCount: schema.number(), myChildcareAgesNote: schema.string() })) }), await parent("GET", `/events/${event.id}`));
 
   for (let index = 0; index < 4; index++) {
     const form = forms.nth(index);
