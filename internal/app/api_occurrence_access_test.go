@@ -624,12 +624,16 @@ func TestDepartureOccurrenceAccessExactEndAndMoveCannotResurrect(t *testing.T) {
 	if err != nil || at[f.access.ID] != nil {
 		t.Fatal("departure access survived exact end", err, at)
 	}
+	mark := markNotices(t, f.app)
 	if err := f.app.sweepContacts(t.Context(), boundary); err != nil {
 		t.Fatal(err)
 	}
 	ended := savedOccurrenceAccess(t, f)
 	if ended.Status != policy.OccurrenceAccessEnded || ended.EndReason != policy.OccurrenceEnded || ended.EndedAt == nil || !ended.EndedAt.Equal(boundary) {
 		t.Fatalf("expiry not persisted at boundary: %+v", ended)
+	}
+	if got := noticesSince(t, f.app, f.recipient.ID, notify.OccurrenceUpdated, mark.notice); len(got) != 1 || got[0].ActorID != nil {
+		t.Fatalf("system expiry notices: %+v, want one without an actor", got)
 	}
 	future := boundary.AddDate(0, 0, 30)
 	if err := f.app.contactMutation(contactChange{EventID: f.event.ID}, func(tx *gorm.DB) error {

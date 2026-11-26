@@ -79,6 +79,8 @@ type contactChange struct {
 	UserID  uint
 	EventID uint
 	GroupID uint
+	// CancellationActorID applies only to access-end notices from the after pass.
+	CancellationActorID uint
 	// SingleDate marks a single-date edit; only singleDateMutation sets it.
 	// fn holds the event and that one date, runs the date's own "before"
 	// access pass under them on a clock read after its grant rows are locked,
