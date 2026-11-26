@@ -26,8 +26,9 @@ interface MessageDraft {
 export const Messages = {
   // eventId narrows it to that event: listed only when the viewer may write to it.
   options: (eventId?: Id) => api<ComposeOptions>(`/messages/compose${query({ event: eventId })}`),
-  audiencePreview: (audience: MessageAudience) =>
-    api<AudienceSummaryResponse>("/messages/audience-preview", { method: "POST", body: { audience } }),
+  editOptions: (id: Id) => api<ComposeOptions>(path`/messages/${id}/compose`),
+  audiencePreview: (audience: MessageAudience, id?: Id) =>
+    api<AudienceSummaryResponse>(id === undefined ? "/messages/audience-preview" : path`/messages/${id}/audience-preview`, { method: "POST", body: { audience } }),
   // Each page rechecks author/category access. Omitted limit keeps the legacy 200.
   list: (category?: "announcement" | "reminder", options?: { cursor?: string; search?: string; status?: string; limit?: number }) =>
     api<MessageListResponse>(`/messages${query({ category, ...options })}`),
