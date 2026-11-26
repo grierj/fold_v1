@@ -243,6 +243,41 @@ func TestGroupDeleteNamesAnArchivedGroupOnlyToItsLeaders(t *testing.T) {
 	wantGroupDeleted(t, f.app, "the leader", f.leaderUser.ID, f.leader, f.leaderUser.Email, mark, "Supper club was deleted")
 }
 
+// A guardian is never copied on a teen member's group.deleted, by the kind
+// (NoGuardianCopy) and not because the group happens to be gone when the copy
+// job runs: with the group's row made live again before the teen's email
+// goes out, no copy job is queued, and a copy job queued for the notice anyway
+// (as an older process would have) sends nothing.
+func TestGroupDeletedIsNeverCopiedEvenWithTheGroupLiveAgain(t *testing.T) {
+	f := newGroupDeleteFixture(t)
+	app := f.app
+	teen := activeTeen(t, app, "copied teen", f.adminUser.ID)
+	gormMust(t, app.DB.Create(&models.Membership{UserID: teen.ID, GroupID: f.group, Role: models.MembershipMember, Status: models.MembershipActive}))
+	guardian := newTestUser(t, app, "copied guardian", "password1234", models.RoleMember)
+	gormMust(t, app.DB.Create(&models.GuardianLink{GuardianUserID: guardian.ID, TeenUserID: &teen.ID, Status: models.GuardianConfirmed}))
+	gormMust(t, app.DB.Create(&models.Setting{Key: settingGuardianCopies, Value: "true"}))
+	mark := markNotices(t, app)
+
+	apiDo(t, f.admin, "DELETE", f.deletePath(), nil, http.StatusOK)
+	gormMust(t, app.DB.Unscoped().Model(&models.Group{}).Where("id = ?", f.group).Update("deleted_at", nil))
+	gormMust(t, app.DB.Create(&models.Membership{UserID: teen.ID, GroupID: f.group, Role: models.MembershipMember, Status: models.MembershipActive}))
+	drainNotices(t, app)
+	n := wantGroupDeleted(t, app, "the teen", teen.ID, nil, teen.Email, mark, "Supper club was deleted")
+	var queued int64
+	gormMust(t, app.DB.Model(&models.Job{}).Where("kind = ?", guardianCopyType.Name).Count(&queued))
+	if queued != 0 {
+		t.Fatalf("%d copy jobs were queued for a kind that is never copied", queued)
+	}
+	if _, err := guardianCopyType.Enqueue(app.DB, guardianCopyJob{NotificationID: n.ID, GuardianID: guardian.ID}, time.Now().UTC(), guardianCopyKey(n.ID, guardian.ID)); err != nil {
+		t.Fatal(err)
+	}
+	drainNotices(t, app)
+	if got := copiesTo(t, app, guardian.Email); len(got) != 0 {
+		t.Fatalf("the guardian got copies %v", got)
+	}
+	noSecrets(t, app, "the guardian", guardian.ID, guardian.Email, mark, []string{"Supper club"})
+}
+
 // A refused delete tells nobody and keeps every row: a member's own try (the
 // admin routes refuse it) and an admin's on a group that is already gone.
 func TestRefusedGroupDeleteTellsNobody(t *testing.T) {

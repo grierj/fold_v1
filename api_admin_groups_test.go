@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -243,5 +244,84 @@ func TestEveryAddWithdrawsTheDeletionRequest(t *testing.T) {
 			}
 			wantCode(t, "the card's delete", f.admin.do("DELETE", f.deletePath, nil, true), http.StatusConflict, "already_handled")
 		})
+	}
+}
+
+var openTasks = regexp.MustCompile(`open tasks=\d+`)
+
+// The card's Delete decides, under the group's row lock, that the request is
+// still the leader's alone: the flag is set and the group has at most one
+// listed member. A request that has since gained a second listed member by a
+// path that left the flag set (a member re-enabled after the leader asked, an
+// add from before every add withdrew it) is withdrawn there, which commits:
+// the delete is refused as already handled, the group, its members and its
+// events stay, and the admins' task is closed. So is a request whose leader
+// was disabled or erased and handed the group to a successor, which the
+// handoff withdraws. The count read is unchanged by any of it.
+func TestRequestCardRefusesARequestThatGainedAMember(t *testing.T) {
+	for _, path := range []string{"re-enabled member", "older add", "successor after a disable", "successor after an erasure"} {
+		t.Run(path, func(t *testing.T) {
+			f := newDeletionRequestFixture(t)
+			other := newTestUser(t, f.app, "request other "+itoa(uint(len(path))), "password1234", models.RoleMember)
+			switch path {
+			case "re-enabled member":
+				apiDo(t, f.lead, "DELETE", "/api/v1/groups/"+itoa(f.gid)+"/deletion-request", nil, http.StatusOK)
+				apiDo(t, f.admin, "POST", "/api/v1/admin/groups/"+itoa(f.gid)+"/members", map[string]any{"userId": other.ID}, http.StatusOK)
+				apiDo(t, f.admin, "PUT", "/api/v1/admin/users/"+itoa(other.ID), map[string]any{"status": models.UserDisabled}, http.StatusOK)
+				apiDo(t, f.lead, "POST", "/api/v1/groups/"+itoa(f.gid)+"/deletion-request", map[string]any{}, http.StatusOK)
+				apiDo(t, f.admin, "PUT", "/api/v1/admin/users/"+itoa(other.ID), map[string]any{"status": models.UserActive}, http.StatusOK)
+			case "older add":
+				gormMust(t, f.app.DB.Create(&models.Membership{UserID: other.ID, GroupID: f.gid, Role: models.MembershipMember, Status: models.MembershipActive}))
+			case "successor after a disable":
+				apiDo(t, f.admin, "PUT", "/api/v1/admin/users/"+itoa(f.leadUser.ID), map[string]any{"status": models.UserDisabled, "successors": map[string]uint{itoa(f.gid): f.adminUser.ID}}, http.StatusOK)
+			case "successor after an erasure":
+				apiDo(t, f.admin, "DELETE", "/api/v1/admin/users/"+itoa(f.leadUser.ID), map[string]any{"successors": map[string]uint{itoa(f.gid): f.adminUser.ID}}, http.StatusOK)
+			}
+			drainNotices(t, f.app)
+			count := groupDeleteCount(t, f.other, f.gid)
+			before := groupDeleteState(t, f.app, f.gid)
+			w := f.other.do("DELETE", f.deletePath, nil, true)
+			wantCode(t, "the card's delete after a "+path, w, http.StatusConflict, "already_handled")
+			if !strings.Contains(w.Body.String(), `"resolution":"withdrawn"`) {
+				t.Fatalf("the refusal: %s", w.Body.String())
+			}
+			after := groupDeleteState(t, f.app, f.gid)
+			if want := openTasks.ReplaceAllString(strings.Replace(before, "requested=true", "requested=false", 1), "open tasks=0"); after != want {
+				t.Fatalf("after the refused delete:\n%s\nwant\n%s", after, want)
+			}
+			task := findKind(feed(t, f.other, ""), notify.GroupDeletion)
+			if task == nil || task.Waiting || task.Resolution == nil || task.Resolution.Outcome != "withdrawn" {
+				t.Fatalf("the admins' task: %+v", task)
+			}
+			if got := groupDeleteCount(t, f.other, f.gid); got != count {
+				t.Fatalf("the count moved from %d to %d", count, got)
+			}
+			wantCode(t, "Keep group afterwards", f.other.do("POST", f.keepPath, nil, true), http.StatusConflict, "already_handled")
+		})
+	}
+}
+
+// A leader's request reads its eligibility under the group's row lock, which
+// every add takes: an add that commits while the request waits for the lock
+// is counted, and the request is refused with the flag left clear.
+func TestDeletionRequestCountsAnAddThatLandedWhileItWaited(t *testing.T) {
+	f := newDeletionRequestFixture(t)
+	apiDo(t, f.lead, "DELETE", "/api/v1/groups/"+itoa(f.gid)+"/deletion-request", nil, http.StatusOK)
+	hold := f.app.DB.Begin()
+	gormMust(t, hold)
+	defer hold.Rollback()
+	var g models.Group
+	gormMust(t, hold.Raw("SELECT * FROM groups WHERE id = ? FOR UPDATE", f.gid).Scan(&g))
+	asked := queueContact(func() *httptest.ResponseRecorder {
+		return f.lead.do("POST", "/api/v1/groups/"+itoa(f.gid)+"/deletion-request", map[string]any{}, true)
+	})
+	waitLockWaiters(t, f.app)
+	gormMust(t, hold.Create(&models.Membership{UserID: f.outsider.ID, GroupID: f.gid, Role: models.MembershipMember, Status: models.MembershipActive}))
+	gormMust(t, hold.Commit())
+	wantCode(t, "a request behind an add", awaitContactResponse(t, asked), http.StatusBadRequest, "group_has_members")
+	var after models.Group
+	gormMust(t, f.app.DB.First(&after, f.gid))
+	if after.DeletionRequested {
+		t.Fatal("the request was opened on a group with two members")
 	}
 }

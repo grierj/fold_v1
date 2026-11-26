@@ -378,6 +378,36 @@ describe("a deletion request that is no longer open", () => {
     expect(Admin.deletions).toHaveBeenCalledTimes(2);
     expect(screen.queryByText(/couldn't/)).not.toBeInTheDocument();
   });
+
+  // With no task to resolve (the only admin withdrew their own request) the answer has no resolution and names Fold;
+  // the line does not use either, so it still reads as a sentence.
+  const unresolved = new ApiError(409, "This was already handled", { code: "already_handled", resolution: "", resolvedBy: "Fold" });
+
+  it.each([
+    ["Delete group", "pending"],
+    ["Delete group", "failing"],
+    ["Keep group", "pending"],
+    ["Keep group", "failing"],
+  ])("%s takes the card away at once while the queue's read is %s", async (button, reload) => {
+    if (button === "Delete group") vi.mocked(Admin.deleteGroup).mockRejectedValue(unresolved);
+    else vi.mocked(Admin.rejectDeletion).mockRejectedValue(unresolved);
+
+    vi.mocked(AdminAccountRequests.list).mockResolvedValue({ requests: [] });
+    vi.mocked(Admin.deletions)
+      .mockResolvedValueOnce({ groups: [group(5, "Solo", { deletionRequested: true })] })
+      .mockImplementation(() => (reload === "pending" ? new Promise(() => {}) : Promise.reject(new ApiError(500, "x"))));
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+    render(<MemoryRouter initialEntries={["/admin"]}><AdminPage /></MemoryRouter>);
+    await userEvent.click(await screen.findByRole("button", { name: button }));
+    expect(await screen.findByText("The request to delete “Solo” is no longer open, so nothing was changed.")).toHaveAttribute("role", "status");
+    await waitFor(() => expect(Admin.deletions).toHaveBeenCalledTimes(2));
+
+    if (reload === "failing") await screen.findByRole("button", { name: "Try again" });
+
+    expect(screen.queryByRole("button", { name: "Delete group" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Keep group" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: "Solo" })).not.toBeInTheDocument();
+  });
 });
 
 it("keeps the delete status line in the page, empty, before anything is deleted", async () => {

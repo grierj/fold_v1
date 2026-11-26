@@ -893,9 +893,12 @@ PUT  /api/v1/groups/:id/members/:userId/role → 200 {members: [...]}  (auth; le
      snapshot): a caller who lost access since gets that read's 401, 403 or 404, and the change stays made
 POST /api/v1/groups/:id/deletion-request → 200 {group}  (auth; a leader)
 DELETE /api/v1/groups/:id/deletion-request → 200 {}    (auth; leader or admin)
-     — the request holds only while the leader is the group's one member: an add that brings someone else in (a join,
-       a leader's or an admin's add, an accepted invitation, an approved ask to add) withdraws it in the add's own
-       transaction, under the group's row lock (DEC-177)
+     — a leader asks only while they are the group's one listed member, counted under the group's row lock in the
+       transaction that opens the request; an add that brings someone else in (a join, a leader's or an admin's add,
+       an accepted invitation, an approved ask to add) withdraws it in the add's own transaction, and a sole leader's
+       handoff to a successor (their account disabled or deleted) withdraws it too. The request card's Delete checks
+       again, under the lock, that the group still has at most one listed member, and withdraws a request that no
+       longer holds (a member re-enabled since, or a request older than these rules) (DEC-177)
 GET  /api/v1/groups/:id/members → {members: [...]}  (auth; members and admins; 404 if you cannot see the group, 403 if you are not in it)
 ```
 
@@ -907,7 +910,9 @@ accepted only from a leader who is the group's only active member. Adding
 a member clears a pending request. A join, a role change or an add that waited behind an admin's
 delete of the group finds it gone and answers 404 (an add by email answers its usual 400
 `group_member_email_unavailable`), and a sign-up or withdrawal that waited on one of its dates answers the
-404 of a date not on the event; one that committed first is told (DEC-177).
+404 of a date not on the event. A join, a leave, a sign-up or a withdrawal that committed before the delete read
+who to tell is reflected in who is told: the new member or the sign-up is told, the one who left is not told as a
+member, and someone who withdrew their only sign-up first is not told at all (DEC-177).
 
 Role changes: only adults can be made leaders (teen accounts arrive in
 M1.10 and are refused), and a group never loses its last leader. Demoting
@@ -1801,14 +1806,19 @@ POST /api/v1/admin/groups/:id/reject       → 200 {}                    (admin;
 POST /api/v1/admin/groups/:id/reject-deletion → 200 {} | 409 already_handled | 404 (admin; keeps the group, clears the request)
      — only ever an answer to the request: once it is no longer open (the leader withdrew it, someone else joined,
        which withdraws it, or another admin kept the group) it writes nothing and answers 409 already_handled with
-       {resolvedBy, resolution} ("withdrawn" or "kept"), as the other approval queues do (DEC-177)
+       {resolvedBy, resolution}, as the other approval queues do (DEC-177). resolution is usually "withdrawn" or
+       "kept", and resolvedBy the person who ended it; when no admin task was ever written (the church's only admin
+       asked about their own group, so there was nobody else to tell) resolution is "" and resolvedBy is "Fold"
 DELETE /api/v1/admin/groups/:id?deletionRequest=1 → 200 {} | 409 already_handled | 400 | 404 (admin; deletes the group)
      — tells, in the delete's transaction, every other active member one group.deleted notice (named when they may
        see the group) and everyone else going or waitlisted on an upcoming date of its events (a household person's
        holder), and every other account holding a live exact-date grant on one, the event.deleted notice an event's
        own delete writes, one per event; a member signed up gets only group.deleted (DEC-177)
      — deletionRequest=1 marks the Approvals card's delete, which answers the leader's request: with it, a request
-       no longer open writes nothing and answers 409 already_handled as Keep does. Without it (the Groups tab) the
+       no longer open deletes nothing and answers 409 already_handled as Keep does. The request is open while the flag
+       is set and the group has at most one listed member, read under the group's row lock; a flag still set on a
+       group with a second listed member is withdrawn there (the flag cleared and the admins' task resolved
+       "withdrawn", which commits) and the delete is refused the same way. Without the marker (the Groups tab) the
        delete is never refused for the request's state. Any other value of deletionRequest is 400.
      — the group's row is locked and the admin read again under it (401 signed_out when their session ended or they
        are no longer an admin); a group gone while the request waited is 404

@@ -298,8 +298,7 @@ func groupDeleteTells(tx *gorm.DB, groupID, actor uint, now time.Time, lock bool
 // is gone) and has no place and no other person's name; everyone else signed
 // up for an upcoming date of one of its events the event.deleted notice an
 // event's own delete writes, one per event. A guardian is never copied on the
-// member notice: its group is gone with it, so the teen's live access to it,
-// which a copy needs, is never there.
+// member notice (notify.Kind.NoGuardianCopy).
 func notifyGroupDeleted(tx *gorm.DB, actor uint, g *models.Group, d groupDeletion) error {
 	if len(d.members) > 0 {
 		facts, err := loadNoticeFacts(tx, []uint{g.ID}, d.members)

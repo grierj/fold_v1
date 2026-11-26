@@ -468,6 +468,8 @@ function ApprovalsTab({ onCount, onGroupDecided }: { onCount: (n: number) => voi
               group={g}
               onDone={loadAfterOther}
               onStale={() => {
+                // The card goes at once, not when the queue's read comes back (or never, if it fails).
+                setDeletions((shown) => shown.filter((d) => d.id !== g.id));
                 setDecision({ kind: "no_longer_open", name: g.name });
                 void load();
               }}

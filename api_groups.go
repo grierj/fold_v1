@@ -1120,30 +1120,50 @@ func (a *App) apiRequestDeletion(c *gin.Context) {
 		return
 	}
 	u := apiUser(c)
-	var others int64
-	if err := a.DB.Model(&models.Membership{}).Joins(listedUsers("memberships")).
-		Where("memberships.group_id = ? AND memberships.status = ? AND memberships.user_id <> ?", g.ID, models.MembershipActive, u.ID).
-		Count(&others).Error; err != nil {
-		jsonError(c, http.StatusInternalServerError, "could not request deletion")
-		return
-	}
 	// A non-leader's answer is a 403 of its own, not the "group has members" 409.
 	if !rel.Leader {
 		jsonError(c, http.StatusForbidden, "only a group leader can request deletion")
 		return
 	}
-	if !policy.CanRequestDeletion(asPerson(u), rel, others) {
-		fail(c, errGroupHasMembers)
+	// Eligibility is read under the group's row lock, which every add takes
+	// before it writes a membership, so no join lands between the count and
+	// the flag.
+	err := a.DB.Transaction(func(tx *gorm.DB) error {
+		var locked models.Group
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&locked, g.ID).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return errGroupNotFound
+			}
+			return err
+		}
+		fresh, err := groupRel(tx, u.ID, g.ID)
+		if err != nil {
+			return err
+		}
+		var others int64
+		if err := tx.Model(&models.Membership{}).Joins(listedUsers("memberships")).
+			Where("memberships.group_id = ? AND memberships.status = ? AND memberships.user_id <> ?", g.ID, models.MembershipActive, u.ID).
+			Count(&others).Error; err != nil {
+			return err
+		}
+		if !fresh.Leader {
+			return errRoleRefused
+		}
+		if !policy.CanRequestDeletion(asPerson(u), fresh, others) {
+			return errGroupHasMembers
+		}
+		if locked.DeletionRequested {
+			return nil // already requested: the admins already have the task
+		}
+		if err := tx.Model(&models.Group{}).Where("id = ?", g.ID).Update("deletion_requested", true).Error; err != nil {
+			return err
+		}
+		return notifyDeletionRequested(tx, g, u.ID)
+	}, readCommitted)
+	if isAPIError(err) {
+		fail(c, err)
 		return
 	}
-	err := a.DB.Transaction(func(tx *gorm.DB) error {
-		res := tx.Model(&models.Group{}).Where("id = ? AND NOT deletion_requested", g.ID).Update("deletion_requested", true)
-		if res.Error != nil || res.RowsAffected == 0 {
-			return res.Error // already requested: the admins already have the task
-		}
-		err := notifyDeletionRequested(tx, g, u.ID)
-		return err
-	})
 	if err != nil {
 		jsonError(c, http.StatusInternalServerError, "could not request deletion")
 		return
@@ -1218,17 +1238,33 @@ func lockAdminGroupIn(tx *gorm.DB, me *models.User, groupID uint) (*models.Group
 // Registrations, occurrences, and memberships have no deleted-at column, so
 // they are removed outright. answering marks a delete that answers the lone
 // leader's request: once the request is no longer open (withdrawn, kept, or
-// someone else joined) it writes nothing and answers errAlreadyHandled. A
-// delete without the marker is never refused for the request's state.
+// someone else is now a listed member) it deletes nothing and answers
+// errAlreadyHandled. A delete without the marker is never refused for the
+// request's state.
 func (a *App) deleteGroup(ctx context.Context, me *models.User, groupID uint, answering bool, ip string) error {
 	var imageURL string
+	withdrawn := false
 	err := a.contactMutation(contactChange{GroupID: groupID}, func(tx *gorm.DB) error {
 		g, actor, err := lockAdminGroupIn(tx, me, groupID)
 		if err != nil {
 			return err
 		}
-		if answering && !g.DeletionRequested {
-			return errAlreadyHandled
+		if answering {
+			if !g.DeletionRequested {
+				return errAlreadyHandled
+			}
+			// The request is open only while the leader is the group's one
+			// listed member, decided here under the row lock: a member
+			// re-enabled, or a join or an older add that left the flag set,
+			// withdraws it now (that commits) and the delete is refused.
+			members, err := memberCount(tx, g.ID)
+			if err != nil {
+				return err
+			}
+			if members > 1 {
+				withdrawn = true
+				return clearDeletionRequestIn(tx, g.ID, nil, "withdrawn")
+			}
 		}
 		imageURL = g.ImageURL
 		tells, err := groupDeleteTells(tx, g.ID, actor.ID, a.now(), true)
@@ -1261,6 +1297,9 @@ func (a *App) deleteGroup(ctx context.Context, me *models.User, groupID uint, an
 	})
 	if err != nil {
 		return err
+	}
+	if withdrawn {
+		return errAlreadyHandled
 	}
 	// The group is gone; a cover that will not delete is only an orphaned file.
 	if key, ok := uploadKeyFromURL(imageURL); ok {

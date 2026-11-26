@@ -460,7 +460,7 @@ func TestBatchedMergeKeepsTheBadgeOnlyWhenEveryRowAgrees(t *testing.T) {
 // never copied without the teen's access to the group (which is gone).
 func TestGroupDeletedWords(t *testing.T) {
 	k, ok := Lookup(GroupDeleted)
-	if !ok || k.Category != CatGroups || !k.AllowEmail || k.Required || !k.AllowPush || k.PushSoon || k.CopyWithoutSubjectAccess {
+	if !ok || k.Category != CatGroups || !k.AllowEmail || k.Required || !k.AllowPush || k.PushSoon || k.CopyWithoutSubjectAccess || !k.NoGuardianCopy {
 		t.Fatalf("group.deleted: %+v", k)
 	}
 	for _, c := range []struct {

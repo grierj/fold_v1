@@ -192,10 +192,11 @@ an optional notice email sent to their teen. Plan section 7.4 has the rules; the
   carry the teen's manage and video links; `CopyTitleOnly` kinds show the title alone because their
   body can carry a leader's note. The copy has no link and uses the guardian's own unsubscribe.
 - **Live access follows the subject** (`teenSeesNoticeSubject`: occurrence, event or group; any other
-  subject type is not copied). So `group.deleted` (DEC-177), a member's notice that their group was deleted, is
-  never copied: its group is soft-deleted in the notice's own transaction, so the teen's live access is never
-  there, and a guardian never learns a private group's name from it (`TestNoticeGuardianCopyKindsAreClassified`
-  names the class; the delivery tests check no copy goes). The group's non-members are told by `event.deleted`,
+  subject type is not copied). `group.deleted` (DEC-177), a member's notice that their group was deleted, is
+  never copied by its kind, not by its subject: `Kind.NoGuardianCopy` stops `guardianCopyJobs` queuing a copy and
+  makes a queued copy job (from an older process) finish without sending, so a guardian never learns a private
+  group's name from it even if the group's row were live again (`TestNoticeGuardianCopyKindsAreClassified` names
+  the class; `TestGroupDeletedIsNeverCopiedEvenWithTheGroupLiveAgain`). The group's non-members are told by `event.deleted`,
   written by the same `tellEventDeleted` an event's own delete uses. `Kind.CopyWithoutSubjectAccess` skips only that check and is set on
   `registration.cancelled` (DEC-149) and `event.deleted` (DEC-175: the event and its dates are gone, so
   no live access is left to judge; `tellEventDeleted` stores the event's own title, never the group's name standing in for an
