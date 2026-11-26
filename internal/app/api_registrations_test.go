@@ -1881,8 +1881,9 @@ func TestRegistrationReadBudget(t *testing.T) {
 	}
 	n = 0
 	apiDo(t, admin, "GET", "/api/v1/events/"+itoa(eventID), nil, http.StatusOK)
-	if n > 22 {
-		t.Fatalf("admin GET read %d times, budget 22", n)
+	// The manager's reply reads restorable dates once for the whole event.
+	if n > 23 {
+		t.Fatalf("admin GET read %d times, budget 23", n)
 	}
 	// GET /me/household: reads don't grow per person or
 	// per account (18 before batching, 9 before slice 3; the pending-approval
