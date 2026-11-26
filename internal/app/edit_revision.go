@@ -124,8 +124,8 @@ type revisionRows struct {
 	also string
 }
 
-// groupRevisionRows: created_at never changes.
-var groupRevisionRows = revisionRows{table: "groups", kind: "g", key: "id", instants: []string{"updated_at"}, omit: []string{"created_at"}}
+// created_at never changes. The group form does not disclose who requested deletion.
+var groupRevisionRows = revisionRows{table: "groups", kind: "g", key: "id", instants: []string{"updated_at"}, omit: []string{"created_at", "deletion_requester_id"}}
 
 // digestSQL is the md5 of the row r: every column but the instants and the
 // omitted ones as JSON, then each instant's epoch, then also.
