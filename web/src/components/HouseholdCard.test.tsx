@@ -504,6 +504,9 @@ describe("household actions on their way", () => {
 });
 
 describe("household edits after a person became their own account, and invitations on their way", () => {
+  const adult: HouseholdPerson = { ...household.people[0], id: 6, firstName: "Mary", name: "Mary Smith", kind: "adult", birthDate: "1990-01-01", linkStatus: "none", canConvert: true, registrationEligibility: "eligible", revision: "p-6" };
+  const pending: HouseholdPerson = { ...adult, conversion: { email: "mary@example.com", expiresAt: "2026-12-01T12:00:00Z", state: "pending" } };
+
   beforeEach(() => vi.resetAllMocks());
 
   it("closes the form and says so when the person now has their own account", async () => {
@@ -526,11 +529,9 @@ describe("household edits after a person became their own account, and invitatio
   });
 
   it("keeps the card locked after an invitation is sent until the card shows it", async () => {
-    const mary: HouseholdPerson = { ...household.people[0], id: 6, firstName: "Mary", name: "Mary Smith", kind: "adult", birthDate: "1990-01-01", linkStatus: "none", canConvert: true, registrationEligibility: "eligible", revision: "p-6" };
     let refreshed: (answer: { household: Household }) => void = () => {};
-    const pending = { ...mary, conversion: { email: "mary@example.com", expiresAt: "2026-12-01T12:00:00Z", state: "pending" as const } };
 
-    mine.mockResolvedValueOnce({ household: { ...household, people: [mary] } })
+    mine.mockResolvedValueOnce({ household: { ...household, people: [adult] } })
       .mockReturnValueOnce(new Promise((resolve) => { refreshed = resolve; }));
     convert.mockResolvedValue({});
     render(<HouseholdCard />);
@@ -542,5 +543,56 @@ describe("household edits after a person became their own account, and invitatio
     refreshed({ household: { ...household, people: [pending] } });
     expect(await screen.findByText(/Invitation pending: mary@example.com/)).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Edit Mary Smith" })).toBeEnabled();
+  });
+
+  it("keeps Remove unavailable after a sent invitation until Try again reads the pending invitation", async () => {
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(false);
+
+    mine.mockResolvedValueOnce({ household: { ...household, people: [adult] } })
+      .mockRejectedValueOnce(new Error("offline"))
+      .mockRejectedValueOnce(new Error("still offline"))
+      .mockResolvedValueOnce({ household: { ...household, people: [pending] } });
+    convert.mockResolvedValue({});
+    render(<HouseholdCard />);
+    await userEvent.click(await screen.findByRole("button", { name: "Create their own account" }));
+    await userEvent.type(screen.getByLabelText("Their email address"), "mary@example.com");
+    await userEvent.click(screen.getByRole("button", { name: "Send account invitation" }));
+
+    const status = screen.getByRole("status");
+    expect(await screen.findByRole("button", { name: "Try again" })).toBeEnabled();
+    expect(screen.queryByRole("button", { name: "Remove Mary Smith" })).not.toBeInTheDocument();
+    expect(status).toHaveTextContent("Invitation sent for Mary Smith.");
+    expect(status).toHaveFocus();
+
+    await userEvent.click(screen.getByRole("button", { name: "Try again" }));
+    await screen.findByRole("button", { name: "Try again" });
+    expect(screen.queryByRole("button", { name: "Remove Mary Smith" })).not.toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "Try again" }));
+
+    expect(await screen.findByText(/Invitation pending: mary@example.com/)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Edit Mary Smith" })).toHaveFocus();
+    await userEvent.click(screen.getByRole("button", { name: "Remove Mary Smith" }));
+    expect(confirm).toHaveBeenCalledWith("Remove Mary Smith from your household? Any upcoming sign-ups for them will be cancelled. This also cancels their account invitation.");
+    expect(convert).toHaveBeenCalledTimes(1);
+    expect(Households.removePerson).not.toHaveBeenCalled();
+    confirm.mockRestore();
+  });
+
+  it.each(["household_person_converted", "household_conversion_unavailable"])("rereads the household after Remove is refused with %s", async (code) => {
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
+    mine.mockResolvedValueOnce({ household }).mockRejectedValueOnce(new Error("offline"))
+      .mockResolvedValueOnce({ household: { ...household, people: [] } });
+    vi.mocked(Households.removePerson).mockRejectedValue(new ApiError(409, "has an account", { code }));
+    render(<HouseholdCard />);
+    await userEvent.click(await screen.findByRole("button", { name: "Remove Kid Smith" }));
+
+    const line = await screen.findByText("Kid Smith. Your last action could not be completed.");
+    expect(line).toHaveFocus();
+    expect(screen.queryByRole("button", { name: "Remove Kid Smith" })).not.toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "Try again" }));
+    expect(await screen.findByText("No one in your household yet")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Remove Kid Smith" })).not.toBeInTheDocument();
+    expect(Households.removePerson).toHaveBeenCalledTimes(1);
+    confirm.mockRestore();
   });
 });

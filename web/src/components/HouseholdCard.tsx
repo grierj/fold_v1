@@ -281,8 +281,8 @@ export function HouseholdCard({ showHeading = true }: { showHeading?: boolean })
   // After a save or removal, where focus goes once the list re-renders (M1).
   const focusNext = useRef<number | "add" | "heading" | null>(null);
   const cardRef = useRef<HTMLElement>(null);
+  const statusRef = useRef<HTMLParagraphElement>(null);
   const refusal = useRefusedSave(load);
-  // The person whose save was refused, which the line names.
   const [refusedPerson, setRefusedPerson] = useState<{ id: number; name: string } | null>(null);
   // The read the open details form was made from: a save's answer replaces it only if nothing read the household since.
   const openedEpoch = useRef(0);
@@ -291,11 +291,19 @@ export function HouseholdCard({ showHeading = true }: { showHeading?: boolean })
   // While a form is open or an action is on its way, nothing that opens a form or reads the household again is offered:
   // a save names the read its form opened with, and an answer must reach what it was made for.
   const locked = editing !== null || metadata || converting !== null || acting;
+  const showStatus = status !== "" && loadError !== null && load.data === undefined;
 
   useEffect(() => {
     const target = focusNext.current;
 
-    if (target === null || editing !== null) return;
+    if (target === null || locked || load.loading) return;
+
+    if (showStatus) {
+      statusRef.current?.focus();
+
+      return;
+    }
+
     focusNext.current = null;
     const root = cardRef.current;
 
@@ -307,7 +315,7 @@ export function HouseholdCard({ showHeading = true }: { showHeading?: boolean })
           : root?.querySelector<HTMLElement>("#household-heading");
 
     (el ?? root?.querySelector<HTMLElement>("#household-heading") ?? root)?.focus();
-  }, [household, editing, converting]);
+  }, [household, locked, load.loading, showStatus]);
 
   // The refused line says "this is the household as it is now" about the list below it: whatever changes that list
   // withdraws it.
@@ -316,15 +324,14 @@ export function HouseholdCard({ showHeading = true }: { showHeading?: boolean })
     setRefusedPerson(null);
   }
 
-  // A save was refused: the form closes, and the card reads the household from nothing and says so.
-  function refused(why: RevisionConflict, person?: HouseholdPerson) {
+  function refused(why: RevisionConflict, person?: HouseholdPerson, what: "save" | "action" = "save") {
     focusNext.current = null;
     setEditing(null);
     setMetadata(false);
     setConverting(null);
     setStatus("");
     setRefusedPerson(person ? { id: person.id, name: person.name } : null);
-    refusal.refused(why);
+    refusal.refused(why, what);
   }
 
   async function remove(p: HouseholdPerson) {
@@ -339,10 +346,27 @@ export function HouseholdCard({ showHeading = true }: { showHeading?: boolean })
       focusNext.current = "heading";
       await load.reload();
     } catch (e) {
-      setError(errorText(e, "We couldn't remove that person."));
+      const code = errorCode(e);
+
+      if (code === "household_person_converted" || code === "household_conversion_unavailable") refused("gone", p, "action");
+      else setError(errorText(e, "We couldn't remove that person."));
     } finally {
       setActing(false);
     }
+  }
+
+  async function refreshInvitation(id: number, message: string) {
+    setStatus(message);
+    focusNext.current = id;
+
+    // Remove's confirmation needs the invitation state from a read made after the write.
+    if (await load.reload() === "failed") load.setData(undefined);
+  }
+
+  function retryRead() {
+    opening();
+    focusNext.current ??= "heading";
+    void load.retry();
   }
 
   function openDetails(invoker: HTMLButtonElement) {
@@ -376,9 +400,9 @@ export function HouseholdCard({ showHeading = true }: { showHeading?: boolean })
     <section ref={cardRef} className={`${showHeading ? "mt-6 " : ""}focus:outline-none`} tabIndex={showHeading ? undefined : -1} aria-labelledby={showHeading ? "household-heading" : undefined} aria-label={showHeading ? undefined : "My household"}>
       {showHeading && <h2 id="household-heading" tabIndex={-1} className="text-xl font-bold mb-1 focus:outline-none">My household</h2>}
       <p className="text-sm mb-2"><a className="inline-flex min-h-11 items-center text-primary underline" href="/help/members">Accounts and household help</a></p>
-      <p role="status" aria-live="polite" className="sr-only">{status}</p>
+      <p ref={statusRef} role="status" aria-live="polite" tabIndex={showStatus ? -1 : undefined} className={showStatus ? "mb-3 text-sm" : "sr-only"}>{status}</p>
       <RefusedSaveLine save={refusal} noun="household" canManage={load.data ? load.data.household !== null : undefined} about={refusedName} />
-      {loadError && <ErrorNotice message={loadError} onRetry={locked ? undefined : () => { opening(); void load.retry(); }} />}
+      {loadError && <ErrorNotice message={loadError} onRetry={locked ? undefined : retryRead} />}
       {!loadError && people.length === 0 && (household?.accounts.length ?? 0) <= 1 && editing !== "new" && !metadata && (
         <EmptyState
           level={2}
@@ -456,10 +480,10 @@ export function HouseholdCard({ showHeading = true }: { showHeading?: boolean })
                 {p.conversion && (p.conversion.state === "pending" || p.conversion.state === "expired") && <div className="mt-3 space-y-2">
                   <p className="text-sm text-text-muted break-words">{p.conversion.state === "expired" ? "Invitation expired" : "Invitation pending"}: {p.conversion.email}. Expires {formatWhen(p.conversion.expiresAt)}.</p>
                   <p className="text-sm text-text-muted">Changing their name, type or birth date cancels this invitation. Your household keeps managing their sign-ups.</p>
-                  <ConversionActions person={p} disabled={locked} onBusy={(busy) => { if (busy) opening(); setActing(busy); }} onChanged={async (message) => { setStatus(message); focusNext.current = p.id; await load.reload(); }} />
+                  <ConversionActions person={p} disabled={locked} onBusy={(busy) => { if (busy) opening(); setActing(busy); }} onChanged={(message) => refreshInvitation(p.id, message)} />
                 </div>}
                 {!p.conversion && p.canConvert && converting !== p.id && <Button variant="secondary" layout="mt-3" disabled={locked} onClick={() => { opening(); setConverting(p.id); }}>Create their own account</Button>}
-                {!p.conversion && converting === p.id && <ConversionForm person={p} onCancel={() => { focusNext.current = p.id; setConverting(null); }} onSent={async () => { focusNext.current = p.id; setStatus(`Invitation sent for ${p.name}. Their sign-ups will move after approval and any required consent and guardian checks.`); await load.reload(); setConverting(null); }} />}
+                {!p.conversion && converting === p.id && <ConversionForm person={p} onCancel={() => { focusNext.current = p.id; setConverting(null); }} onSent={async () => { await refreshInvitation(p.id, `Invitation sent for ${p.name}. Their sign-ups will move after approval and any required consent and guardian checks.`); setConverting(null); }} />}
               </li>
             ))}
           </ul>
