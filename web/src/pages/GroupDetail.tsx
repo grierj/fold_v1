@@ -37,7 +37,7 @@ import { EmptyState } from "../components/ui/EmptyState";
 import { Illustration } from "../components/ui/Illustration";
 import { Skeleton } from "../components/ui/Skeleton";
 import { focalPosition, prepareUpload } from "../lib/image";
-import { formatDayFull, formatTime, formatWhen } from "../lib/when";
+import { dayOf, formatDayFull, formatTime, formatWhen } from "../lib/when";
 import { RefusedSaveLine, ResourceRefusal, resourceRefused, useRefusedSave, useResourceRefusal } from "../lib/refusedSave";
 import type { RevisionConflict } from "../lib/useRevisionSave";
 import { errorText } from "../lib/errors";
@@ -94,7 +94,7 @@ function EventRow({
   mutationGate: RsvpMutationGate;
   onSeriesFeedback: (eventId: number, date: string, actorResults: ActorRsvpResult[]) => void;
   onTerminalRefresh: () => void;
-  onCancelled: (eventId: number, date: string) => void;
+  onCancelled: (instance: EventOccurrence) => void;
   onChanged: () => void;
   onDateUpdated: (updated: boolean) => void;
   // The date's editor opened, which clears what the page said about its last refused save.
@@ -113,6 +113,7 @@ function EventRow({
   const [cancelError, setCancelError] = useState<string | null>(null);
   const dateEditor = useDateEditorToggle({ onEditDate, onChanged, onDateUpdated, onDateConflict, onTerminalRefresh });
   const refreshRefusal = useResourceRefusal();
+  const day = dayOf(instance.startsAt);
   const time = formatTime(instance.startsAt);
   const loc = placeLine(instance.room, instance.location);
   const name = instance.title || groupName;
@@ -135,9 +136,9 @@ function EventRow({
       const told = await signedUpNotice(instance.eventId, instance.date);
       const still = asking.current;
 
-      if (!still.live || !still.canManage || !still.shown || !confirm(`Cancel this date on ${instance.date}? ${told}`)) return;
+      if (!still.live || !still.canManage || !still.shown || !confirm(`Cancel this date on ${formatDayFull(day)}? ${told}`)) return;
       await Events.cancelOccurrence(instance.eventId, instance.date);
-      onCancelled(instance.eventId, instance.date);
+      onCancelled(instance);
     } catch (e) {
       if (!refreshRefusal(e)) setCancelError(errorText(e, "We couldn't cancel that date."));
     } finally {
@@ -151,7 +152,7 @@ function EventRow({
       meta={<div className="text-sm text-text-muted">{time}{loc ? ` · ${loc}` : ""}</div>}
       menu={canManage && <Menu
         tone="quiet"
-        label={`More for ${name} on ${instance.date}`}
+        label={`More for ${name} on ${day}`}
         items={[
           { label: "Edit this date", onSelect: dateEditor.toggle, disabled: settlingDate || dateEditor.saving },
           // The event page opens its Manage sign-ups panel for this date (DEC-99).
@@ -283,7 +284,7 @@ function GroupDetailContent() {
   // One run for Save group (its preview and save) and the review's confirm, so neither starts while the other runs.
   // While it runs nothing on the page that reads the page again starts: that read would take the editor away mid-save.
   const groupSaveAction = useAction();
-  const [cancelledDate, setCancelledDate] = useState<{ eventId: number; date: string } | null>(null);
+  const [cancelledDate, setCancelledDate] = useState<{ eventId: number; startsAt: string } | null>(null);
   const [groupUpdated, setGroupUpdated] = useState(false);
   const [updatedDateId, setUpdatedDateId] = useState<number | null>(null);
   const managerStatus = <ManagerSaveStatus saving={groupSaveAction.running} updated={groupUpdated} />;
@@ -536,8 +537,8 @@ function GroupDetailContent() {
     setSeriesFeedback(signal);
   }
 
-  function handleCancelled(eventId: number, date: string) {
-    setCancelledDate({ eventId, date });
+  function handleCancelled({ eventId, date, startsAt }: EventOccurrence) {
+    setCancelledDate({ eventId, startsAt });
     setDetail((d) =>
       d
         ? {
@@ -816,7 +817,7 @@ function GroupDetailContent() {
                 {/* Above the list, never in a row a long list may hide: focus brings it into view, and it names the day. */}
                 {refusedDate && <RefusedSaveLine save={dateRefused} noun="date" about={formatDayFull(refusedDate.date)}
                   canManage={nextDates.some((d) => d.eventId === refusedDate.eventId && d.date === refusedDate.date) ? canManage : undefined} />}
-                {canManage && cancelledDate && <p role="status">You cancelled {formatDayFull(cancelledDate.date)}. <ButtonLink variant="link" to={`/events/${cancelledDate.eventId}`}>View event</ButtonLink></p>}
+                {canManage && cancelledDate && <p role="status">You cancelled {formatDayFull(dayOf(cancelledDate.startsAt))}. <ButtonLink variant="link" to={`/events/${cancelledDate.eventId}`}>View event</ButtonLink></p>}
                 <CompactDates dates={nextDates} loadedOnly={detail.hasMore} noun="events">
                   {(m) => <EventRow
                     key={`${m.eventId}-${m.date}`}
