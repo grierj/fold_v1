@@ -1104,6 +1104,7 @@ export interface Room {
 export interface RoomFeed {
   hasToken: boolean;
   createdAt: string | null;
+  revision: string;
   url?: string;
 }
 
