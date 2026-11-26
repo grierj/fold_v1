@@ -26,7 +26,7 @@ function seatsSuffix(room: { capacity: number | null }): string {
 
 // A room as the single-date picker words it: "Fellowship Hall · Main (80 seats)",
 // then what a leader should know before choosing it, then why it was suggested,
-// if it was (last, so a phone that clips the option still shows the busy note).
+// if it was.
 export function roomOptionLabel(room: RoomPickerItem, reason?: string): string {
   return `${roomName(room)}${seatsSuffix(room)}${room.busy ? note("in use at this time") : ""}${room.tooSmall ? note("may be too small") : ""}${reason ? note(reason) : ""}`;
 }
