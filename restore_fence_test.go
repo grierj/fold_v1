@@ -3362,8 +3362,8 @@ func TestRealServeRestartRotatesTheEpoch(t *testing.T) {
 
 // TestPriorProcessRunningAcrossTheUpgrade (C18): v0.1.0, already serving when
 // the current binary applies 00015, changes no event's or date's visibility
-// and cancels nobody (each answers 500 and writes nothing), keeps serving
-// everything else, and cannot start again.
+// and cancels nobody. Each protected write reaches the audit fence and answers
+// 500. The old binary still reads and edits an event, then refuses to restart.
 func TestPriorProcessRunningAcrossTheUpgrade(t *testing.T) {
 	cur, prior := buildFold(t, ""), buildFold(t, "v0.1.0")
 	name := testdb.Fresh(t, false)
@@ -3375,12 +3375,7 @@ func TestPriorProcessRunningAcrossTheUpgrade(t *testing.T) {
 		t.Fatalf("v0.1.0 migrate up: %v %s", err, out)
 	}
 	seedUsers(t, db)
-	// 00008-00014 change columns v0.1.0 reads with SELECT *, and a process
-	// that prepared those statements before they changed fails them with
-	// 0A000 (cached plan must not change result type) before it reaches any
-	// audit row. So v0.1.0 starts on the schema at 14, and only 00015, which
-	// changes no column, lands while it serves: every refusal below is the
-	// audit fence's.
+	// Apply 00008-00014 before v0.1.0 can cache queries over the schema at 00007.
 	sqlDB, err := db.DB()
 	if err != nil {
 		t.Fatal(err)
@@ -3435,17 +3430,19 @@ func TestPriorProcessRunningAcrossTheUpgrade(t *testing.T) {
 	curAdmin.want("PUT", p1, curAdmin.visibilityBody(p1, map[string]any{"visibility": "private", "resetOverrides": true, "consent": impact.Consent}), http.StatusOK, nil)
 
 	snapshot := func() string {
-		var rows []string
-		gormMust(t, db.Raw(`SELECT string_agg(x, ';' ORDER BY x) FROM (
-			SELECT 'event ' || id || ' ' || visibility || ' ' || leader_opened || ' ' || title AS x FROM events
-			UNION ALL SELECT 'date ' || id || ' ' || coalesce(visibility_override, '-') FROM event_occurrences
-			UNION ALL SELECT 'reg ' || id || ' ' || status FROM registrations
-			UNION ALL SELECT 'group ' || id || ' ' || visibility FROM groups
-			UNION ALL SELECT 'audit ' || action FROM audit_logs WHERE action IN ('event.visibility_changed', 'event.visibility_override', 'registration.cancelled', 'event.created')
-		) s`).Scan(&rows))
-		return strings.Join(rows, "")
+		var rows string
+		gormMust(t, db.Raw(`SELECT jsonb_build_object(
+			'events', (SELECT jsonb_agg(e ORDER BY id) FROM events e),
+			'dates', (SELECT jsonb_agg(d ORDER BY id) FROM event_occurrences d),
+			'registrations', (SELECT jsonb_agg(r ORDER BY id) FROM registrations r),
+			'groups', (SELECT jsonb_agg(g ORDER BY id) FROM groups g),
+			'audit', (SELECT jsonb_agg(a ORDER BY id) FROM audit_logs a),
+			'notices', (SELECT jsonb_agg(n ORDER BY id) FROM notifications n)
+		)::text`).Scan(&rows))
+		return rows
 	}
 	before := snapshot()
+	dateEditPath := fmt.Sprintf("/api/v1/events/%d/occurrences/%s", e1.Event.ID, day(10))
 	for _, r := range []struct {
 		label        string
 		method, path string
@@ -3453,31 +3450,43 @@ func TestPriorProcessRunningAcrossTheUpgrade(t *testing.T) {
 	}{
 		{"the stale empty reset", "PUT", p1, map[string]any{"visibility": "public", "resetOverrides": true, "confirm": false}},
 		{"a series opening", "PUT", fmt.Sprintf("/api/v1/events/%d/visibility", e2.Event.ID), map[string]any{"visibility": "public"}},
-		{"a date's own value", "PUT", fmt.Sprintf("/api/v1/events/%d/occurrences/%s", e1.Event.ID, day(10)), map[string]any{"visibility": "public"}},
+		{"a date's own value", "PUT", dateEditPath, map[string]any{"visibility": "public"}},
 		{"a group event with its own visibility", "POST", fmt.Sprintf("/api/v1/groups/%d/events", g.Group.ID), map[string]any{"title": "E4", "startsLocal": day(8) + "T19:00", "durationMinutes": 60, "tzid": "UTC", "visibility": "private"}},
 		{"a group tightening with nobody to cancel", "PUT", fmt.Sprintf("/api/v1/groups/%d", g3.Group.ID), map[string]any{"visibility": "private"}},
 		{"a tightening that cancels", "PUT", fmt.Sprintf("/api/v1/events/%d/visibility", e5.Event.ID), map[string]any{"visibility": "invite_only", "confirm": true}},
 	} {
-		mark := len(old.out.String())
-		code, body := admin.call(r.method, r.path, r.body, nil)
-		if code != http.StatusInternalServerError {
-			t.Errorf("v0.1.0 %s: %d %s, want 500", r.label, code, body)
+		const maxAttempts = 5
+		for attempt := 1; attempt <= maxAttempts; attempt++ {
+			mark := len(old.out.String())
+			code, body := admin.call(r.method, r.path, r.body, nil)
+			if after := snapshot(); after != before {
+				t.Fatalf("v0.1.0 %s attempt %d changed rows:\n%s\nwant\n%s", r.label, attempt, after, before)
+			}
+			// v0.1.0 maps any failed date lookup to this 404, including a stale plan.
+			dateLookupFailed := r.path == dateEditPath && code == http.StatusNotFound &&
+				strings.Contains(body, `"error":"that date is not on this event"`)
+			if code != http.StatusInternalServerError && !dateLookupFailed {
+				t.Fatalf("v0.1.0 %s attempt %d: %d %s, want 500", r.label, attempt, code, body)
+			}
+			var logged string
+			var fenced, stale bool
+			testdb.WaitUntil(t, fmt.Sprintf("v0.1.0 to log the database error for %s attempt %d", r.label, attempt), 5*time.Second, func() bool {
+				logged = old.out.String()[mark:]
+				for line := range strings.SplitSeq(logged, "\n") {
+					fenced = fenced || (strings.Contains(line, "checks visibility consent (DEC-158)") && strings.Contains(line, "SQLSTATE 23514"))
+					stale = stale || strings.Contains(line, "cached plan must not change result type (SQLSTATE 0A000)")
+				}
+				return fenced || stale
+			})
+			if fenced && code == http.StatusInternalServerError {
+				break
+			}
+			// 00018 changes SELECT * on dates. pgx discards each stale cached plan after 0A000.
+			if fenced || !stale || attempt == maxAttempts {
+				t.Fatalf("v0.1.0 %s attempt %d: %d %s, want the audit fence's 500:\n%s", r.label, attempt, code, body, logged)
+			}
+			t.Logf("v0.1.0 %s attempt %d returned %d with a stale plan, retrying", r.label, attempt, code)
 		}
-		// Each refusal is the audit fence's own, in v0.1.0's log.
-		testdb.WaitUntil(t, "v0.1.0 to log the refusal", 5*time.Second, func() bool {
-			logged := old.out.String()[mark:]
-			return strings.Contains(logged, "checks visibility consent (DEC-158)") && strings.Contains(logged, "SQLSTATE 23514")
-		})
-		if logged := old.out.String()[mark:]; strings.Contains(logged, "0A000") {
-			t.Errorf("v0.1.0 %s failed on a stale plan, not the fence:\n%s", r.label, logged)
-		}
-		if after := snapshot(); after != before {
-			t.Fatalf("v0.1.0 %s changed rows:\n%s\nwant\n%s", r.label, after, before)
-		}
-	}
-	out := old.out.String()
-	if !strings.Contains(out, "checks visibility consent (DEC-158)") || !strings.Contains(out, "SQLSTATE 23514") {
-		t.Fatalf("v0.1.0's log lacks the audit fence's refusal:\n%s", out)
 	}
 	if !old.healthy() {
 		t.Fatal("v0.1.0 stopped answering /healthz")
