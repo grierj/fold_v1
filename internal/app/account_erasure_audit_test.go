@@ -1362,7 +1362,7 @@ var auditWriterCensus = map[string]string{
 	"internal/app/api_events.go:apiCreateEvent":                                "6019122679de6e09b703d6c79239bddda6fd5ec00bdfbeec42f1fd40e83b2f4b",
 	"internal/app/api_events.go:apiDeleteEvent":                                "49605e07b47a70d91a057c264d22edafe81530cda07102d5c460d7d8ab893200",
 	"internal/app/api_events.go:auditDateCancellation":                         "fd36241127e309b393e6cbc1c72471caa47689ec32974d2d3bc1926780a9385e",
-	"internal/app/api_events.go:restoreSeriesDates":                            "ee6a331db732803f1fb43f4be87f742df27e444cfbfb01967be4c40b063180f1",
+	"internal/app/api_events.go:recordDatesRestored":                           "ee6a331db732803f1fb43f4be87f742df27e444cfbfb01967be4c40b063180f1",
 	"internal/app/api_feeds.go:apiCreateMyCalendarFeed":                        "4804978e0c2abafcb9ea1234cde1fc604bf1c3cce5bb3ad79c87f8b5fa1f1510",
 	"internal/app/api_feeds.go:apiUpdateMyCalendarFeed":                        "9ea28d336e14eea85b7fadb379e258108df222066d72b736f387d91672712106",
 	"internal/app/api_feeds.go:revokeCalendarToken":                            "83f1472c1958c30af21ed73ce001befedb879dcb35d2c0fc3fbfb531140505e9",
