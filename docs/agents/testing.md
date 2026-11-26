@@ -121,7 +121,7 @@ experiment only when the requested change specifically calls for it.
 
 ### Browser journey performance (#419)
 
-The report-only `journeys` CI job builds the production SPA and Go binary twice. On a PR
+The required `web` check includes the `journeys` CI job, which builds the production SPA and Go binary twice. On a PR
 it measures the base tip and GitHub's proposed merge commit. On master it compares HEAD
 to its first parent. Both binaries use `CGO_ENABLED=0` and `-trimpath`. They run on the same
 dedicated Ubuntu 24.04 VM with Postgres 16 and the head's pinned Playwright Chromium. Each binary gets a fresh database, the common
@@ -148,31 +148,45 @@ the endpoint, including eager chunks. They describe the build independently of H
 
 Read the job summary for median and range in milliseconds, base-to-head changes, largest
 shift and JS sizes. Download `journey-measurements` for individual samples, the CPU model,
-browser version and traces. Each build records its active journey and iteration before
+browser version, traces and a copy of the report (`report.md`). Each build records its active journey and iteration before
 opening the browser context and saves completed samples by atomic rename. After an
 interruption, earlier traces and samples remain in the artifact. Run 0 is the traced
 warm-up, runs 1–5 are timed, and date run 6 is the slowdown proof. A build or measurement
 failure still lets the other revision run. The summary lists each side's outcome,
 compares journeys with all five samples on each side, and gives sample counts for
-incomplete journeys. An incomplete run fails the diagnostic job.
+incomplete journeys. An interrupted run, missing file or invalid sample fails the check. Each side must supply
+one finite, nonnegative timing for each of runs 1–5 per journey. The CPU and Chromium
+version must match across revisions and both must use the configured browser profile.
+CI checks each report's revision against the commit it built for that side.
 
 From `web/`, use `npx playwright show-trace PATH.zip` to inspect requests, DOM snapshots and screenshots. To reproduce, set `DATABASE_URL` to
 a disposable developer database, then run `npm ci`, `npx playwright install chromium`,
-`npm run build` and `npm run journeys`.
+`npm run build` and `JOURNEY_REVISION=$(git rev-parse HEAD) npm run journeys` on a clean checkout.
 The server creates a database with the suffix `_e2e_journeys` and uses port 18419.
 Set unique `E2E_SHARD`, `E2E_PORT` and `E2E_OUTPUT_DIR` when running concurrent copies.
-To compare two saved samples files, run `node scripts/journey-report.mjs BASE.json HEAD.json`.
+To compare two saved samples files, run `node scripts/journey-report.mjs BASE.json HEAD.json`. The files must
+name distinct commit SHAs. To also check the expected commits, append their full base and head SHAs in that order.
 
-There are no approved timing thresholds yet. A proof run delays the real date read by
-four seconds and must cross a test-only ceiling two seconds above the slowest normal
-sample. The comparator tests also cover a change over the relative or absolute limit
-and a size increase with steady timings. The existing 145 KiB build gate remains in CI
-during calibration. Review ranges from repeated CI jobs on the same revision, including
-variation across VMs. CI measures the base first. Recheck borderline differences in
-reverse order before attributing them to a change. Use those results to choose an absolute
-ceiling and a tolerable increase in ms per journey. The comparator takes these values
-from an optional third JSON file, keyed by journey, with `ceilingMs` and `increaseMs`.
-After review, the rollout decision is to require stable checks and retire the fixed byte gate.
+The head median must meet both limits. Equality passes. Only an increase over the base
+median counts toward the change limit. Eager and route gzip sizes remain diagnostic.
+
+| Journey | Maximum median | Maximum increase over base |
+| --- | ---: | ---: |
+| Directory | 4,000 ms | +250 ms |
+| Event date and RSVP | 4,500 ms | +250 ms |
+| Load more dates | 200 ms | +30 ms |
+| Manager editor | 100 ms | +30 ms |
+
+The November 2026 calibration used 36 CI artifacts. All 32 complete same-run pairs fit
+these limits. Four artifacts lacked a complete comparison. Across nine groups of repeated
+measurements with the same revision, CPU, Chromium and profile, the largest spreads
+between medians were 94 ms for Directory, 74 ms for the date, 3 ms for more dates and
+14 ms for the editor. The largest same-run increases were 29, 57, 2 and 5 ms respectively.
+CI measures base first. Use the raw samples and traces to investigate a borderline change.
+
+The extra date run delays the real date API request by four seconds. It must finish over
+two seconds later than the slowest normal run and trip the date timing check. It is
+excluded from the five samples used for the median.
 Device checks are in `docs/FIRST-CHURCH-CHECKS.md`. Field data collection is a separate decision.
 
 ### Upload memory measurement
