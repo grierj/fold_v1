@@ -246,7 +246,7 @@ func (a *App) apiDateRooms(c *gin.Context) {
 	var out dateRoomsJSON
 	var judged sessionJudgment
 	err := decidingSnapshot(a.DB.WithContext(c.Request.Context()), func(tx *gorm.DB) error {
-		if err := roomsOnIn(tx); err != nil {
+		if err := roomsOnIn(tx, errRoomsOff); err != nil {
 			return err
 		}
 		t, err := a.managedDateTargetIn(tx, apiUser(c), id, c.Param("date"), &judged)

@@ -1,3 +1,4 @@
+import { isoTimestamp, literal, minLength, null_, object, optional, pipe, safeParse, string, undefined_, union, url } from "valibot";
 import type {
   AdminRoomsResponse,
   DateRoomsResponse,
@@ -14,7 +15,8 @@ import type {
   SeriesBooking,
   SeriesRoomsResponse,
 } from "../types";
-import { api, path, type Credential, type Id } from "./core";
+import { api, ApiError, credentialCurrent, currentCredential, path, recheckCredential, type Credential, type Id } from "./core";
+import { Site } from "./site";
 
 // Rooms (M2.1a). Everything answers 404 while rooms are off. On update, absent
 // fields keep their value and a null capacity clears the limit.
@@ -28,6 +30,49 @@ export interface RoomInput {
   restricted?: boolean;
   defaultSetupMinutes?: number;
   defaultTeardownMinutes?: number;
+}
+
+const revision = pipe(string(), minLength(1));
+const liveFeed = { hasToken: literal(true), createdAt: pipe(string(), isoTimestamp()), revision };
+const feedOff = object({ hasToken: literal(false), createdAt: null_(), revision, url: optional(undefined_()) });
+
+const feedAnswers = {
+  GET: object({ feed: union([feedOff, object({ ...liveFeed, url: optional(undefined_()) })]) }),
+  POST: object({ feed: object({ ...liveFeed, url: pipe(string(), url()) }) }),
+  DELETE: object({ feed: feedOff }),
+};
+
+async function roomFeed(id: Id, request: { method: "GET" } | { method: "POST" | "DELETE"; body: { revision: string } }, pinned: Credential | null): Promise<RoomFeedResponse> {
+  const answer = await api<unknown>(path`/admin/rooms/${id}/feed`, { ...request, pinned }).catch((cause: unknown) => {
+    // A pre-dispatch refusal can be the first sign that another tab changed the cookie.
+    if (pinned && currentCredential() === pinned && !credentialCurrent(pinned)) recheckCredential();
+
+    throw cause;
+  });
+
+  const parsed = safeParse(feedAnswers[request.method], answer);
+
+  if (!parsed.success) throw new ApiError(502, "unreadable room calendar link", {}, true);
+
+  return parsed.output;
+}
+
+async function getRoomFeed(id: Id, pinned: Credential | null): Promise<RoomFeedResponse> {
+  try {
+    return await roomFeed(id, { method: "GET" }, pinned);
+  } catch (cause) {
+    if (!(cause instanceof ApiError) || cause.code !== "session_expired" || !cause.unreadable || !credentialCurrent(pinned)) throw cause;
+
+    // The pre-authentication switch returns an unacknowledged 404. Only a fresh public
+    // settings read can confirm that the feed settings are unavailable on this credential.
+    const site = await Site.get().catch(() => null);
+
+    if (!credentialCurrent(pinned)) throw cause;
+
+    if (site?.roomsEnabled === false) throw new ApiError(404, "room booking is turned off", { code: "rooms_off" });
+
+    throw new ApiError(502, "unconfirmed room calendar link status", {}, true);
+  }
 }
 
 export const AdminRooms = {
@@ -45,9 +90,11 @@ export const AdminRooms = {
     api<MatchLocationResponse>("/admin/rooms/locations/match", { method: "POST", body: { location, roomId } }),
   // A room's calendar-feed link (M2.2b): makeFeed returns the link once and
   // turns any old one off.
-  getFeed: (id: Id) => api<RoomFeedResponse>(path`/admin/rooms/${id}/feed`),
-  makeFeed: (id: Id) => api<RoomFeedResponse>(path`/admin/rooms/${id}/feed`, { method: "POST" }),
-  revokeFeed: (id: Id) => api<RoomFeedResponse>(path`/admin/rooms/${id}/feed`, { method: "DELETE" }),
+  getFeed: getRoomFeed,
+  makeFeed: (id: Id, revision: string, pinned: Credential | null) =>
+    roomFeed(id, { method: "POST", body: { revision } }, pinned),
+  revokeFeed: (id: Id, revision: string, pinned: Credential | null) =>
+    roomFeed(id, { method: "DELETE", body: { revision } }, pinned),
 };
 
 // Open room requests (M2.1d, DEC-106): one per booking action, a date or a whole
