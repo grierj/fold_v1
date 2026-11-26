@@ -96,9 +96,8 @@ type contactChange struct {
 	SingleDate *singleDate
 	// Seal, when set, runs after reconcileContacts and immediately before the
 	// commit-reserve check (T07B-1b, R5-C01). It is a pointer so contactChange
-	// stays comparable; reconcileContacts reads only the three ids and
-	// SingleDate. Only fencedContactMutation sets it (from its callback's
-	// result); a nil Seal sends no extra statement.
+	// stays comparable. Only fencedContactMutation sets it (from its
+	// callback's result).
 	Seal *contactSeal
 }
 
