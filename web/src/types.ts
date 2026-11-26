@@ -475,6 +475,11 @@ export interface SoleHostedEventsResponse {
   candidates: HandoffCandidate[];
 }
 
+// How many people deleting an event, or cancelling one date, would tell. Shown, not bound to the press.
+export interface SignedUpCount {
+  people: number;
+}
+
 // What making a group more private does to its events (DEC-48).
 /** @public Go JSON contract, checked by TestWebTypesMatchGoJSON. */
 export interface VisibilityImpactEvent {

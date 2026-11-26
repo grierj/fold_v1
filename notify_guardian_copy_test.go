@@ -814,6 +814,7 @@ func TestNoticeGuardianCopyKindsAreClassified(t *testing.T) {
 	const (
 		copied  = "copied (its subject is a date, an event or a group the teen must still see)"
 		exempt  = "copied without the teen's access (owner decision, 2026-11-13)"
+		gone    = "copied with its title alone, without the teen's access (its event and dates are deleted)"
 		direct  = "already sent straight to the guardians"
 		neverTo = "never written to a teen (a leader, host or admin notice)"
 	)
@@ -826,6 +827,7 @@ func TestNoticeGuardianCopyKindsAreClassified(t *testing.T) {
 		notify.RegistrationNotRestored: copied,
 		notify.MemberNotRestored:       copied,
 		notify.RegistrationCancelled:   exempt,
+		notify.EventDeleted:            gone,
 		notify.MembershipDeparture:     direct,
 		notify.LeadershipChanged:       neverTo,
 		notify.YourRole:                neverTo,
@@ -850,7 +852,7 @@ func TestNoticeGuardianCopyKindsAreClassified(t *testing.T) {
 			t.Errorf("%s is an optional email kind with no copy decision: add it to this table", k.Key)
 			continue
 		}
-		if k.CopyWithoutSubjectAccess != (class == exempt) {
+		if k.CopyWithoutSubjectAccess != (class == exempt || class == gone) {
 			t.Errorf("%s: CopyWithoutSubjectAccess = %v but it is %s", k.Key, k.CopyWithoutSubjectAccess, class)
 		}
 	}

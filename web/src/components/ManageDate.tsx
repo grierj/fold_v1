@@ -19,6 +19,7 @@ import { Button, ButtonLink } from "./ui/Button";
 import { ConfirmProvider, useConfirm, usePageFacts } from "./ui/ConfirmDialog";
 import { Skeleton } from "./ui/Skeleton";
 import { FormError } from "./ui/Field";
+import { signedUpNotice } from "../lib/signedUp";
 
 const ManageRoster = lazy(() => import("./ManageRoster").then((module) => ({ default: module.ManageRoster })));
 
@@ -199,7 +200,9 @@ function ManageDateTools({ eventId, date, occurrenceId, startsAt, endsAt, author
     const action = beginCancel();
     const title = `Cancel this date on ${formatEventDay(startsAt)}?`;
     void cancellation.run(async () => {
-      if (!(await action.ask({ title, confirmLabel: "Cancel this date", cancelLabel: "Keep this date", tone: "danger", native: title })) || !action.current() || Date.now() >= deadline) return false;
+      const told = await signedUpNotice(eventId, date);
+
+      if (!(await action.ask({ title, body: told, confirmLabel: "Cancel this date", cancelLabel: "Keep this date", tone: "danger", native: `${title} ${told}` })) || !action.current() || Date.now() >= deadline) return false;
 
       try {
         await Events.cancelOccurrence(eventId, date);

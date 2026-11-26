@@ -17,6 +17,7 @@ import type {
   RegistrationBatch,
   RegistrationCommand,
   SeriesRegistrationResponse,
+  SignedUpCount,
   Visibility,
   VisibilityImpact,
 } from "../types";
@@ -60,6 +61,8 @@ export const Events = {
   restoreRegistration: (id: Id, date: string, target: { userId: number } | { personId: number; registeredBy: number }, attendanceMode: AttendanceMode, overCapacity: boolean) =>
     api<unknown>(path`/events/${id}/registrations/add`, { method: "POST", body: { date, ...target, attendanceMode, overCapacity } }),
   cancelOccurrence: (id: Id, date: string) => api<unknown>(path`/events/${id}/cancel`, { method: "POST", body: { date } }),
+  // How many people deleting the event (no date) or cancelling the date would tell.
+  signedUp: (id: Id, date?: string) => api<SignedUpCount>(`${path`/events/${id}/signed-up`}${query({ date })}`),
   // `time` is the start and duration the same save sends, so the count is for the date as it would be saved.
   dateVisibilityImpact: (id: Id, date: string, visibility: Visibility | "series", time?: { startsLocal?: string; durationMinutes?: number }) =>
     api<VisibilityImpact>(`${path`/events/${id}/occurrences/${date}/visibility-impact`}${query({ visibility, startsLocal: time?.startsLocal, durationMinutes: time?.durationMinutes })}`),

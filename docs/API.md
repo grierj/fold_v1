@@ -1129,6 +1129,12 @@ PUT  /api/v1/events/:id                     → 200 {event} | 409 event_changed 
 PUT  /api/v1/events/:id/visibility          → 200 {event} | 409 event_changed   (leader, host, or admin)
      body: {visibility, reason?, consent?, resetOverrides?, revision}
 DELETE /api/v1/events/:id                   → 200 {}        (leader, host, or admin)
+     — tells everyone else going or waitlisted on its upcoming dates (a household person's holder), and every
+       other account holding a live exact-date grant on them, one event.deleted notice each (DEC-175)
+GET  /api/v1/events/:id/signed-up?date=      → 200 {people}  (leader, host, or admin; one snapshot)
+     — how many other accounts the delete (no date) or that date's cancel would tell, for the
+       confirmation to show (the caller's own sign-ups, and ones they made for their household, are not
+       counted); never sent back and never checked by the delete or cancel
 POST /api/v1/events/:id/hosts               → 200 {hosts}   (admin; church-wide only)
      body: {email}
      — a person who already hosts it changes nothing and writes no audit row
@@ -2588,7 +2594,7 @@ inline; sensitive requests use navigation and explicit destination decisions.
 Resolved races return structured already-handled details. No contact data or
 hidden-group metadata may enter feed text; sensitive email is names-free. A
 notice about a date its recipient may not see (`event.cancelled`,
-`event.restored`, `registration.cancelled`, `registration.removed`,
+`event.restored`, `event.deleted`, `registration.cancelled`, `registration.removed`,
 `registration.not_restored`, `registration.promoted`) is the kind's nameless
 text: no title, time, place or link, no `subjectId`, no expiry tied to the
 date, and its push is never urgent. An invited or pending-consent account is
@@ -2692,6 +2698,7 @@ All but logout need a signed-in, active account and the CSRF token as usual (`cs
 |---|---|---|
 | `event.cancelled` | Cancelled: *event* | *when* |
 | `event.restored` | Back on: *event* | *when* |
+| `event.deleted` | Cancelled: *event* | Its upcoming dates are off. |
 | `event.changed` | Updated: *event* | The time (place, time and place) changed. *when* |
 | `registration.promoted` | You're in: *event* | *when* |
 | `registration.removed` | Registration removed: *event* | A leader or host removed your registration. |

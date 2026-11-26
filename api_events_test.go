@@ -3094,6 +3094,10 @@ func TestEventSiblingWritersRecheckAfterHeldBody(t *testing.T) {
 // the authenticated delete, so its transaction must judge the revoked actor.
 func TestDeleteEventRechecksAfterContactGate(t *testing.T) {
 	f := newEventWriterRace(t, true)
+	going := newTestUser(t, f.app, "going member", "password1234", models.RoleMember)
+	var occ models.EventOccurrence
+	gormMust(t, f.app.DB.Where("event_id = ?", f.event.ID).First(&occ))
+	signUp(t, f.app, going, occ.ID, models.RegGoing)
 	before := eventRow(t, f.app, f.event.ID)
 	gate := holdContactGate(t, f.app)
 	demotion := queueContact(func() *httptest.ResponseRecorder {
@@ -3122,6 +3126,168 @@ func TestDeleteEventRechecksAfterContactGate(t *testing.T) {
 	if n := contactCount(t, f.app, &models.AuditLog{}, "target_type = 'event' AND target_id = ? AND action = ?", f.event.ID, audit.EventDeleted); n != 0 {
 		t.Fatalf("refused delete wrote %d deletion audits", n)
 	}
+	if n := contactCount(t, f.app, &models.Notification{}, "kind = ?", notify.EventDeleted); n != 0 {
+		t.Fatalf("refused delete told %d people", n)
+	}
+	if n := contactCount(t, f.app, &models.Registration{}, "occurrence_id = ?", occ.ID); n != 1 {
+		t.Fatalf("refused delete left %d registrations, want 1", n)
+	}
+}
+
+// signedUpCount is what GET /events/:id/signed-up answers c (no date: the
+// whole event's delete).
+func signedUpCount(t *testing.T, c *apiClient, eventID uint, date string) int {
+	t.Helper()
+	path := "/api/v1/events/" + itoa(eventID) + "/signed-up"
+	if date != "" {
+		path += "?date=" + date
+	}
+	var out signedUpCountJSON
+	gormMust(t, &gorm.DB{Error: json.Unmarshal([]byte(apiDo(t, c, "GET", path, nil, http.StatusOK)), &out)})
+	return out.People
+}
+
+// toldSince is how many people got kind since mark.
+func toldSince(t *testing.T, app *App, kind string, mark uint) int {
+	t.Helper()
+	var n int64
+	gormMust(t, app.DB.Model(&models.Notification{}).Where("kind = ? AND id > ?", kind, mark).Distinct("user_id").Count(&n))
+	return int(n)
+}
+
+// The confirmation's count is the people the action then tells, for none, one
+// and many: a person on several dates counts once for the delete, a household
+// person counts as their holder, and the manager who presses is never counted
+// or told. The cancel's count is that date's people going or waitlisted.
+func TestSignedUpCountIsWhoTheActionTells(t *testing.T) {
+	for _, n := range []int{0, 1, 3} {
+		t.Run(itoa(uint(n)), func(t *testing.T) {
+			f := newDateEditFixture(t)
+			// The manager who presses is going too: with n = 0 they are the
+			// only one, and the count is the zero line's 0.
+			signUp(t, f.app, f.adminUser, f.dates[1].ID, models.RegGoing)
+			signUp(t, f.app, f.adminUser, f.dates[2].ID, models.RegGoing)
+			people := []*models.User{f.memberUser, f.leaderUser, f.outsiders[0]}[:n]
+			for i, u := range people {
+				status := models.RegGoing
+				if i == 1 {
+					status = models.RegWaitlisted
+				}
+				signUp(t, f.app, u, f.dates[1].ID, status)
+				signUp(t, f.app, u, f.dates[2].ID, models.RegGoing)
+			}
+			if n == 3 {
+				holder, _, _, child := householdFamily(t, f.app, f.admin, "count holder")
+				for _, occ := range []uint{f.dates[2].ID, f.dates[3].ID} {
+					gormMust(t, f.app.DB.Create(&models.Registration{HouseholdPersonID: &child.ID, RegisteredBy: &holder.ID, OccurrenceID: occ, Status: models.RegGoing, AttendanceMode: models.AttendanceInPerson, Source: "web"}))
+				}
+			}
+			wantDelete := n
+			if n == 3 {
+				wantDelete = 4
+			}
+
+			if got := signedUpCount(t, f.admin, f.event.ID, f.date(1)); got != n {
+				t.Fatalf("the date's count is %d, want %d", got, n)
+			}
+			mark := markNotices(t, f.app)
+			apiDo(t, f.admin, "POST", "/api/v1/events/"+itoa(f.event.ID)+"/cancel", map[string]any{"date": f.date(1)}, http.StatusOK)
+			if told := toldSince(t, f.app, notify.OccurrenceCancelled, mark.notice); told != n {
+				t.Fatalf("the cancel told %d people, its count said %d", told, n)
+			}
+			if got := signedUpCount(t, f.admin, f.event.ID, f.date(1)); got != 0 {
+				t.Fatalf("a cancelled date counts %d people", got)
+			}
+
+			if got := signedUpCount(t, f.admin, f.event.ID, ""); got != wantDelete {
+				t.Fatalf("the delete's count is %d, want %d", got, wantDelete)
+			}
+			mark = markNotices(t, f.app)
+			apiDo(t, f.admin, "DELETE", "/api/v1/events/"+itoa(f.event.ID), nil, http.StatusOK)
+			if told := toldSince(t, f.app, notify.EventDeleted, mark.notice); told != wantDelete {
+				t.Fatalf("the delete told %d people, its count said %d", told, wantDelete)
+			}
+			if got := noticesSince(t, f.app, f.adminUser.ID, notify.EventDeleted, mark.notice); len(got) != 0 {
+				t.Fatalf("the admin who deleted it was told: %+v", got)
+			}
+		})
+	}
+}
+
+// The count is who will be told, not who is going: a manager who signed up
+// only someone in their own household is that sign-up's holder, so nobody else
+// is counted or told.
+func TestSignedUpCountLeavesOutThePressersHousehold(t *testing.T) {
+	f := newDateEditFixture(t)
+	spouse := addMyPerson(t, f.admin, map[string]any{"firstName": "Mary", "kind": "adult", "birthDate": "1990-01-01"})
+	batchAnswer(t, f.admin, f.event.ID, f.date(1), map[string]any{"people": []map[string]any{{"personId": spouse.ID, "status": models.RegGoing}}}, http.StatusOK)
+	if n := contactCount(t, f.app, &models.Registration{}, "occurrence_id = ? AND household_person_id = ? AND status = ?", f.dates[1].ID, spouse.ID, models.RegGoing); n != 1 {
+		t.Fatalf("%d sign-ups for the manager's spouse, want 1", n)
+	}
+	for _, date := range []string{f.date(1), ""} {
+		if got := signedUpCount(t, f.admin, f.event.ID, date); got != 0 {
+			t.Fatalf("the count for date %q is %d, want 0: the only sign-up is the manager's own household", date, got)
+		}
+	}
+	mark := markNotices(t, f.app)
+	apiDo(t, f.admin, "DELETE", "/api/v1/events/"+itoa(f.event.ID), nil, http.StatusOK)
+	if told := toldSince(t, f.app, notify.EventDeleted, mark.notice); told != 0 {
+		t.Fatalf("the delete told %d people, its count said 0", told)
+	}
+}
+
+// Only a manager may read the count, in one snapshot that acknowledges the
+// viewer it judged; a member, an outsider and a signed-out visitor are refused
+// as every manager read refuses them, and a date not on the event is missing.
+func TestSignedUpCountIsAManagersRead(t *testing.T) {
+	f := newGroupReadFixture(t, models.VisibilityInviteOnly)
+	leader := pinnedAs(t, f.leader)
+	member := pinnedAs(t, f.member)
+	outsiderUser := newTestUser(t, f.app, "count outsider", "password1234", models.RoleMember)
+	outsider := pinnedAs(t, loginAPI(t, f.app, outsiderUser.Name, "password1234"))
+	anon := newAPIClient(t, f.app)
+	anon.fetchCSRF()
+	anon = pinnedAs(t, anon)
+	path := "/api/v1/events/" + itoa(f.event.ID) + "/signed-up"
+	day := models.FormatCalendarDate(f.dates[0].OriginalDate)
+
+	for _, p := range []string{path, path + "?date=" + day} {
+		w := leader.do("GET", p, nil, false)
+		if w.Code != http.StatusOK || w.Body.String() != `{"people":1}` {
+			t.Fatalf("%s: %d %s", p, w.Code, w.Body.String())
+		}
+		wantAck(t, "the leader's count", w, leader, f.leaderUser)
+		w = member.do("GET", p, nil, false)
+		wantCode(t, "a member's count", w, http.StatusForbidden, "not_allowed")
+		wantAck(t, "a member's count", w, member, f.memberUser)
+		w = outsider.do("GET", p, nil, false)
+		if w.Code != http.StatusNotFound {
+			t.Fatalf("an outsider's count: %d %s", w.Code, w.Body.String())
+		}
+		wantAck(t, "an outsider's count", w, outsider, outsiderUser)
+		w = anon.do("GET", p, nil, false)
+		wantCode(t, "a signed-out count", w, http.StatusUnauthorized, "signed_out")
+		wantNoAck(t, "a signed-out count", w)
+	}
+	if w := leader.do("GET", path+"?date=2001-01-01", nil, false); w.Code != http.StatusNotFound {
+		t.Fatalf("a date not on the event: %d %s", w.Code, w.Body.String())
+	}
+	wantCode(t, "a bad date", leader.do("GET", path+"?date=soon", nil, false), http.StatusBadRequest, "series_date_invalid")
+
+	var fired bool
+	f.app.hooks.readerBegin = func(surface string) {
+		if surface == "signed-up count" {
+			fired = true
+			apiDo(t, f.admin, "POST", "/api/v1/admin/users/"+itoa(f.leaderUser.ID)+"/password", map[string]string{"password": "replacement password"}, http.StatusOK)
+		}
+	}
+	defer func() { f.app.hooks.readerBegin = nil }()
+	w := leader.do("GET", path, nil, false)
+	if !fired {
+		t.Fatal("the snapshot never started")
+	}
+	wantCode(t, "a session ended before the snapshot", w, http.StatusUnauthorized, "signed_out")
+	wantNoAck(t, "a session ended before the snapshot", w)
 }
 
 // A user row held by an ungated writer must not stop these gated writers
@@ -3767,5 +3933,106 @@ func TestSeriesNullCapacityClearsTheLimit(t *testing.T) {
 	decodeJSON(t, w, &created)
 	if created.Event.ID == 0 || created.Event.Capacity != nil || created.Event.GuestsAllowed != 0 {
 		t.Fatalf("created with null: capacity %v guests %d", created.Event.Capacity, created.Event.GuestsAllowed)
+	}
+}
+
+// departedWithGrants is a former member of f's group holding live departure
+// grants, going, on each of these dates: they see the invite-only dates only
+// through the grants.
+func departedWithGrants(t *testing.T, f dateEditFixture, name string, dates ...uint) *models.User {
+	t.Helper()
+	return departedKeeping(t, f, name, models.RegGoing, dates...)
+}
+
+// departedKeeping is departedWithGrants with each kept date answered status.
+func departedKeeping(t *testing.T, f dateEditFixture, name, status string, dates ...uint) *models.User {
+	t.Helper()
+	w := newTestUser(t, f.app, name, "password1234", models.RoleMember)
+	membership := models.Membership{UserID: w.ID, GroupID: f.group, Role: models.MembershipMember, Status: models.MembershipActive}
+	gormMust(t, &gorm.DB{Error: f.app.DB.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Create(&membership).Error; err != nil {
+			return err
+		}
+		for _, occ := range dates {
+			r := models.Registration{UserID: &w.ID, OccurrenceID: occ, Status: status, Source: models.RegSourceAdmin, AttendanceMode: models.AttendanceInPerson}
+			if err := tx.Create(&r).Error; err != nil {
+				return err
+			}
+			if _, err := seedAccessGrantIn(tx, r.ID, accessGrant{Origin: policy.OccurrenceOriginDepartureSelf, DepartureMembershipID: &membership.ID, DepartureActorID: &w.ID}, &w.ID, time.Now().UTC()); err != nil {
+				return err
+			}
+		}
+		return nil
+	})})
+	gormMust(t, &gorm.DB{Error: f.app.contactMutation(contactChange{UserID: w.ID}, func(tx *gorm.DB) error {
+		return tx.Model(&models.Membership{}).Where("id = ?", membership.ID).Update("status", "removed").Error
+	})})
+	return w
+}
+
+// A holder of a live exact-date grant counts, and is told, as everyone else:
+// a date cancel tells them through the grant's end (occurrence.updated) and
+// an event delete with one nameless event.deleted, however many of its dates
+// they kept.
+func TestSignedUpCountIncludesGrantHolders(t *testing.T) {
+	f := newDateEditFixture(t)
+	w := departedWithGrants(t, f, "kept dates", f.dates[1].ID, f.dates[2].ID, f.dates[3].ID)
+	signUp(t, f.app, f.memberUser, f.dates[1].ID, models.RegGoing)
+
+	if got := signedUpCount(t, f.admin, f.event.ID, f.date(1)); got != 2 {
+		t.Fatalf("the date's count is %d, want 2", got)
+	}
+	mark := markNotices(t, f.app)
+	apiDo(t, f.admin, "POST", "/api/v1/events/"+itoa(f.event.ID)+"/cancel", map[string]any{"date": f.date(1)}, http.StatusOK)
+	cancelled, ended := toldSince(t, f.app, notify.OccurrenceCancelled, mark.notice), noticesSince(t, f.app, w.ID, notify.OccurrenceUpdated, mark.notice)
+	if cancelled != 1 || len(ended) != 1 {
+		t.Fatalf("the cancel told %d people and the grant holder %d times, want 1 and 1", cancelled, len(ended))
+	}
+
+	if got := signedUpCount(t, f.admin, f.event.ID, ""); got != 1 {
+		t.Fatalf("the delete's count is %d, want 1", got)
+	}
+	mark = markNotices(t, f.app)
+	apiDo(t, f.admin, "DELETE", "/api/v1/events/"+itoa(f.event.ID), nil, http.StatusOK)
+	drainNotices(t, f.app)
+	got := noticesSince(t, f.app, w.ID, notify.EventDeleted, mark.notice)
+	if len(got) != 1 || got[0].Title != "Cancelled: Church event" || got[0].SubjectID != nil {
+		t.Fatalf("the grant holder's deletion notices: %+v", got)
+	}
+	if n := noticesSince(t, f.app, w.ID, notify.OccurrenceUpdated, mark.notice); len(n) != 0 {
+		t.Fatalf("the grant holder was told twice: %+v", n)
+	}
+}
+
+// A date kept as Maybe after leaving the group holds a live grant: a date
+// cancel tells its holder through the grant's end and a delete with one
+// event.deleted, so both counts include them, once. An ordinary Maybe with no
+// grant is told by neither and counted by neither.
+func TestSignedUpCountIncludesAKeptMaybe(t *testing.T) {
+	f := newDateEditFixture(t)
+	w := departedKeeping(t, f, "kept maybe", models.RegMaybe, f.dates[1].ID, f.dates[2].ID, f.dates[3].ID)
+	signUp(t, f.app, f.memberUser, f.dates[1].ID, models.RegMaybe)
+	signUp(t, f.app, f.memberUser, f.dates[2].ID, models.RegMaybe)
+
+	if got := signedUpCount(t, f.admin, f.event.ID, f.date(1)); got != 1 {
+		t.Fatalf("the date's count is %d, want 1", got)
+	}
+	mark := markNotices(t, f.app)
+	apiDo(t, f.admin, "POST", "/api/v1/events/"+itoa(f.event.ID)+"/cancel", map[string]any{"date": f.date(1)}, http.StatusOK)
+	ended := noticesSince(t, f.app, w.ID, notify.OccurrenceUpdated, mark.notice)
+	if cancelled := toldSince(t, f.app, notify.OccurrenceCancelled, mark.notice); cancelled != 0 || len(ended) != 1 {
+		t.Fatalf("the cancel told %d people and the kept Maybe %d times, want 0 and 1", cancelled, len(ended))
+	}
+
+	if got := signedUpCount(t, f.admin, f.event.ID, ""); got != 1 {
+		t.Fatalf("the delete's count is %d, want 1", got)
+	}
+	mark = markNotices(t, f.app)
+	apiDo(t, f.admin, "DELETE", "/api/v1/events/"+itoa(f.event.ID), nil, http.StatusOK)
+	if told := toldSince(t, f.app, notify.EventDeleted, mark.notice); told != 1 {
+		t.Fatalf("the delete told %d people, want 1", told)
+	}
+	if got := noticesSince(t, f.app, w.ID, notify.EventDeleted, mark.notice); len(got) != 1 || got[0].Title != "Cancelled: Church event" {
+		t.Fatalf("the kept Maybe's deletion notices: %+v", got)
 	}
 }

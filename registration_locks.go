@@ -40,7 +40,9 @@ import (
 //     breaks the cycle with one 40P01 and one of the two requests fails whole.
 //   - A guest's signup row is claimed last, in its own statement.
 //   - A series write locks contact gate, actor, group, event, then its dates;
-//     rooms lock the event, then the date, then the room.
+//     rooms lock the event, then the date, then the room. An event delete
+//     locks the contact gate, the event, then its dates in id order, before it
+//     reads who to tell (eventDeleteTells).
 //
 // TestErasureHouseholdLockCensus pins who calls lockHousehold.
 
