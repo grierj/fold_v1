@@ -2,6 +2,7 @@ package main
 
 import (
 	"errors"
+	"fmt"
 	"log"
 	"net/http"
 	"strconv"
@@ -183,6 +184,13 @@ type guardianTeenJSON struct {
 	AccountConsent bool   `json:"accountConsent"`
 	SMSConsent     bool   `json:"smsConsent"`
 	PhotosConsent  bool   `json:"photosConsent"`
+	// Revision is what a grant made from this read names (DEC-176). Changes
+	// (how many consent changes the teen has, every scope) and LastChangeYours
+	// (this guardian made the newest) let the card tell its own grant whose
+	// answer was lost from anyone else's change, which a status alone cannot.
+	Revision        string `json:"revision"`
+	Changes         int    `json:"changes"`
+	LastChangeYours bool   `json:"lastChangeYours"`
 }
 
 func (a *App) apiMyGuardianTeens(c *gin.Context) {
@@ -191,17 +199,37 @@ func (a *App) apiMyGuardianTeens(c *gin.Context) {
 		jsonError(c, http.StatusForbidden, "forbidden")
 		return
 	}
+	var out []guardianTeenJSON
+	err := a.DB.Transaction(func(tx *gorm.DB) error {
+		var err error
+		out, err = a.guardianTeensIn(tx, me.ID, 0)
+		return err
+	}, readSnapshot)
+	if err != nil {
+		consentError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, guardianTeensResponseJSON{Teens: out})
+}
+
+// guardianTeensIn is the guardian's card rows, for every confirmed link or
+// only linkID's, as tx sees them: a reader's snapshot, or the writer's
+// transaction after its write.
+func (a *App) guardianTeensIn(tx *gorm.DB, guardianID, linkID uint) ([]guardianTeenJSON, error) {
 	var rows []struct {
 		LinkID      uint
 		TeenUserID  uint
 		Name        string
 		DisplayName string
 	}
-	if err := a.DB.Table("guardian_links l").Select("l.id AS link_id, t.id AS teen_user_id, t.name, t.display_name").
+	q := tx.Table("guardian_links l").Select("l.id AS link_id, t.id AS teen_user_id, t.name, t.display_name").
 		Joins("JOIN users t ON t.id = l.teen_user_id AND t.deleted_at IS NULL AND t.account_type = ?", models.AccountTeen).
-		Where("l.guardian_user_id = ? AND l.status = ?", me.ID, models.GuardianConfirmed).Order("l.id").Scan(&rows).Error; err != nil {
-		consentError(c, err)
-		return
+		Where("l.guardian_user_id = ? AND l.status = ?", guardianID, models.GuardianConfirmed)
+	if linkID != 0 {
+		q = q.Where("l.id = ?", linkID)
+	}
+	if err := q.Order("l.id").Scan(&rows).Error; err != nil {
+		return nil, err
 	}
 	out := make([]guardianTeenJSON, len(rows))
 	ids := make([]uint, 0, len(rows))
@@ -212,13 +240,12 @@ func (a *App) apiMyGuardianTeens(c *gin.Context) {
 		byTeen[row.TeenUserID] = &out[i]
 		ids = append(ids, row.TeenUserID)
 	}
-	var latest []models.TeenConsent
-	if len(ids) > 0 {
-		var err error
-		if latest, err = latestConsentIn(a.DB, ids); err != nil {
-			consentError(c, err)
-			return
-		}
+	if len(ids) == 0 {
+		return out, nil
+	}
+	latest, err := latestConsentIn(tx, ids)
+	if err != nil {
+		return nil, err
 	}
 	for _, consent := range latest {
 		row := byTeen[consent.TeenUserID]
@@ -232,7 +259,22 @@ func (a *App) apiMyGuardianTeens(c *gin.Context) {
 			row.PhotosConsent = granted
 		}
 	}
-	c.JSON(http.StatusOK, guardianTeensResponseJSON{Teens: out})
+	var counts []struct {
+		TeenUserID uint
+		Changes    int
+		Yours      bool
+	}
+	if err := tx.Raw(`SELECT teen_user_id, count(*) AS changes, (array_agg(granted_by = ? AND granter_role = ? ORDER BY id DESC))[1] AS yours
+		FROM teen_consents WHERE teen_user_id IN ? GROUP BY teen_user_id`, guardianID, models.ConsentGuardian, ids).Scan(&counts).Error; err != nil {
+		return nil, err
+	}
+	for _, n := range counts {
+		byTeen[n.TeenUserID].Changes, byTeen[n.TeenUserID].LastChangeYours = n.Changes, n.Yours
+	}
+	for id, row := range byTeen {
+		row.Revision = a.consentRevision(id, row.Changes)
+	}
+	return out, nil
 }
 
 func ownTeenLink(db *gorm.DB, c *gin.Context) (*models.GuardianLink, error) {
@@ -252,25 +294,46 @@ func (a *App) apiGuardianChangeConsent(c *gin.Context) {
 		return
 	}
 	var body struct {
-		Scope  string `json:"scope"`
-		Status string `json:"status"`
+		Scope    string `json:"scope"`
+		Status   string `json:"status"`
+		Revision string `json:"revision"`
 	}
 	if err := c.ShouldBindJSON(&body); err != nil {
 		jsonError(c, http.StatusBadRequest, "invalid request body")
 		return
 	}
 	me := apiUser(c)
+	change := teenConsentChange{Scope: body.Scope, Status: body.Status, ConfirmedGuardian: true}
+	out := guardianConsentChangedJSON{Teen: revisionRefJSON{ID: *link.TeenUserID}}
 	err = a.contactMutation(contactChange{UserID: *link.TeenUserID}, func(tx *gorm.DB) error {
 		guardian, teen, _, err := lockedTeenGuardian(tx, me.ID, *link.TeenUserID, link.ID)
 		if err != nil || !sessionCurrent(guardian, me) {
 			return errConsentForbidden
 		}
-		err = a.changeTeenConsent(tx, c, teen, guardian, teenConsentChange{Scope: body.Scope, Status: body.Status, ConfirmedGuardian: true})
-		return err
+		if _, _, err := teenConsentRefusal(teen, guardian, change); err != nil {
+			return err
+		}
+		if change.namesARead() {
+			if err := a.checkConsentRevision(tx, teen.ID, body.Revision); err != nil {
+				return err
+			}
+		}
+		if err := a.changeTeenConsent(tx, c, teen, guardian, change); err != nil {
+			return err
+		}
+		rows, err := a.guardianTeensIn(tx, guardian.ID, link.ID)
+		if err != nil {
+			return err
+		}
+		if len(rows) != 1 {
+			return fmt.Errorf("guardian link %d: %d card rows after a consent change", link.ID, len(rows))
+		}
+		out.GuardianTeen, out.Teen.Revision = rows[0], rows[0].Revision
+		return nil
 	})
 	if err != nil {
 		consentError(c, err)
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{})
+	c.JSON(http.StatusOK, out)
 }

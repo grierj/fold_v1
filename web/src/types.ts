@@ -694,6 +694,11 @@ export interface GuardianTeen {
   accountConsent: boolean;
   smsConsent: boolean;
   photosConsent: boolean;
+  // What a grant made from this read names (DEC-176), how many consent changes the teen has (every scope), and
+  // whether this guardian made the newest: the card's own lost grant against anyone else's change.
+  revision: string;
+  changes: number;
+  lastChangeYours: boolean;
 }
 
 export interface GuardianEmailPreview {
@@ -1728,6 +1733,15 @@ export interface EmailSettingsLinkResponse {
 export interface TeenConsentsResponse {
   consents: TeenConsent[];
   administrativelyDisabled: boolean;
+  // What a grant made from this read names (DEC-176).
+  revision: string;
+}
+
+// A landed consent change (DEC-176): the teen with the token that follows it, and the history as it left it.
+export interface TeenConsentChangedResponse {
+  teen: RevisionRef;
+  consents: TeenConsent[];
+  administrativelyDisabled: boolean;
 }
 
 export interface GuardianLinksResponse {
@@ -1962,6 +1976,12 @@ export interface TimezoneResponse {
 
 export interface GuardianTeensResponse {
   teens: GuardianTeen[];
+}
+
+// A guardian's landed consent change (DEC-176): the teen with the token that follows it, and their card row.
+export interface GuardianConsentChangedResponse {
+  teen: RevisionRef;
+  guardianTeen: GuardianTeen;
 }
 
 export interface AudienceSummaryResponse {

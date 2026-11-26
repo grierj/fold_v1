@@ -1367,7 +1367,7 @@ func TestTeenConsentNoticeBadgesTeenForOtherAdmins(t *testing.T) {
 	if err := app.DB.Model(teen).Update("role", models.RoleAdmin).Error; err != nil {
 		t.Fatal(err)
 	}
-	apiDo(t, admin, "POST", consentPath(teen), map[string]string{"scope": "account", "status": "granted", "evidenceText": "Paper"}, 200)
+	apiDo(t, admin, "POST", consentPath(teen), withConsentRevision(t, admin, teen, map[string]string{"scope": "account", "status": "granted", "evidenceText": "Paper"}), 200)
 	var rows []models.Notification
 	if err := app.DB.Where("kind = ?", notify.TeenConsentChanged).Find(&rows).Error; err != nil {
 		t.Fatal(err)

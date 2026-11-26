@@ -384,3 +384,39 @@ func (a *App) checkHouseholdPersonRevision(tx *gorm.DB, id uint, given string) e
 	}
 	return checkEditRevision(given, current, errHouseholdPersonChanged)
 }
+
+// errConsentChanged refuses a grant of teen consent made from an older read of
+// the teen's consent log than the one it would add to (DEC-176). Nothing is
+// written.
+var errConsentChanged = apiErr(http.StatusConflict, "consent_changed", "the teen's consent changed since this change was based on it")
+
+// consentRevision is the token an admin's consent panel or a guardian's card
+// holds for a teen whose consent log has changes rows (0 before the first).
+// teen_consents is append only (trigger teen_consents_append_only) and its rows
+// are never deleted, erasure included, so the count moves with every change of
+// every scope and never comes back; a restore restarts the process, whose new
+// generation ends every earlier token. Every append holds the teen's user row
+// lock, which a grant takes before it compares.
+func (a *App) consentRevision(teenID uint, changes int) string {
+	return a.editRevision(fmt.Sprintf("t%d", teenID), changes)
+}
+
+// consentRevisionIn is consentRevision as tx counts the teen's log: a writer
+// calls it under the teen's user row lock.
+func (a *App) consentRevisionIn(tx *gorm.DB, teenID uint) (string, error) {
+	var changes int
+	if err := tx.Raw(`SELECT count(*) FROM teen_consents WHERE teen_user_id = ?`, teenID).Row().Scan(&changes); err != nil {
+		return "", err
+	}
+	return a.consentRevision(teenID, changes), nil
+}
+
+// checkConsentRevision refuses given unless it is the token of the teen's
+// consent log as tx reads it under the teen's user row lock.
+func (a *App) checkConsentRevision(tx *gorm.DB, teenID uint, given string) error {
+	current, err := a.consentRevisionIn(tx, teenID)
+	if err != nil {
+		return err
+	}
+	return checkEditRevision(given, current, errConsentChanged)
+}

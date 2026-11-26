@@ -1,7 +1,7 @@
 import AxeBuilder from "@axe-core/playwright";
 import { expect, test, type Page } from "@playwright/test";
 import { mkdir, writeFile } from "node:fs/promises";
-import { apiAs, email, fromMore, nextFrames, PASSWORD, saveGroup, signIn, signInTo, soon } from "./helpers";
+import { apiAs, grantTeenConsent, email, fromMore, nextFrames, PASSWORD, saveGroup, signIn, signInTo, soon } from "./helpers";
 import { measure } from "./ui-measure.mjs";
 
 test("name picker keeps safe identities, teen guidance and existing adult add controls", async ({ page, request }) => {
@@ -21,7 +21,7 @@ test("name picker keeps safe identities, teen guidance and existing adult add co
   const adult = await create(`picker-adult-${suffix}`, patName);
   const other = await create(`picker-other-${suffix}`, patName);
   const teen = await create(`picker-teen-${suffix}`, teenName, true);
-  await admin("POST", `/admin/users/${teen.id}/teen-consents`, { scope: "account", status: "granted", evidenceText: "Parent consent recorded for picker test" });
+  await grantTeenConsent(admin, teen.id, "Parent consent recorded for picker test");
   const group = async (name: string, visibility = "public") => (await admin("POST", "/groups", { name: `${name} ${suffix}`, description: "Picker proof", tags: [], location: "Hall", visibility, memberLimit: null })).group;
   const destination = await group("Picker group");
   await admin("POST", `/admin/groups/${destination.id}/members`, { userId: leader.id, role: "leader" });

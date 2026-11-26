@@ -102,7 +102,7 @@ func TestTeenConversionApprovalConsentAndFreshLink(t *testing.T) {
 			// The stored association survives an account email change.
 			apiDo(t, admin, "PUT", "/api/v1/admin/users/"+itoa(f.user.ID), adminEditBody(admin, f.user.ID, map[string]string{"email": first + "-changed@example.com"}), 200)
 			grant := func() {
-				apiDo(t, admin, "POST", consentPath(&f.user), map[string]string{"scope": "account", "status": "granted", "evidenceText": "Signed paper consent"}, 200)
+				apiDo(t, admin, "POST", consentPath(&f.user), withConsentRevision(t, admin, &f.user, map[string]string{"scope": "account", "status": "granted", "evidenceText": "Signed paper consent"}), 200)
 			}
 			confirm := func() {
 				apiDo(t, admin, "POST", "/api/v1/admin/guardian-links/"+itoa(f.link.ID)+"/confirm", map[string]string{"checkNote": "Checked teen account relationship"}, 200)
@@ -123,6 +123,19 @@ func TestTeenConversionApprovalConsentAndFreshLink(t *testing.T) {
 			if first == "consent" {
 				confirm()
 			} else {
+				// A grant from a read older than another change is refused and
+				// leaves the conversion where it was (DEC-176).
+				stale := consentRevision(t, admin, &f.user)
+				apiDo(t, admin, "POST", consentPath(&f.user), map[string]string{"scope": "photos", "status": "revoked"}, 200)
+				apiDo(t, admin, "POST", consentPath(&f.user), map[string]string{"scope": "account", "status": "granted", "evidenceText": "Signed paper consent", "revision": stale}, 409)
+				f.unchanged(t, app)
+				var refused models.HouseholdPerson
+				app.DB.First(&refused, f.person.ID)
+				var still models.User
+				app.DB.First(&still, f.user.ID)
+				if refused.ConvertedUserID != nil || still.Status != models.UserPendingConsent || auditCount(t, app, audit.HouseholdPersonConverted) != 0 {
+					t.Fatalf("a refused grant moved the conversion: %+v, status %s", refused, still.Status)
+				}
 				grant()
 			}
 			var person models.HouseholdPerson
@@ -196,7 +209,7 @@ func TestTeenConversionStatusMovesEndSessionsAndAreAudited(t *testing.T) {
 	}
 	start := load()
 
-	apiDo(t, admin, "POST", consentPath(&f.user), map[string]string{"scope": "account", "status": "granted", "evidenceText": "Signed paper consent"}, 200)
+	apiDo(t, admin, "POST", consentPath(&f.user), withConsentRevision(t, admin, &f.user, map[string]string{"scope": "account", "status": "granted", "evidenceText": "Signed paper consent"}), 200)
 	waiting := load()
 	// One bump for consent's activation, one for the conversion's wait.
 	if waiting.Status != models.UserPendingConsent || waiting.SessionVersion != start.SessionVersion+2 {
@@ -357,7 +370,7 @@ func TestTeenConversionOnlyOriginalHouseholdGuardianCompletes(t *testing.T) {
 	if err := app.DB.Create(&unrelated).Error; err != nil {
 		t.Fatal(err)
 	}
-	apiDo(t, admin, "POST", consentPath(&f.user), map[string]string{"scope": "account", "status": "granted", "evidenceText": "Paper"}, 200)
+	apiDo(t, admin, "POST", consentPath(&f.user), withConsentRevision(t, admin, &f.user, map[string]string{"scope": "account", "status": "granted", "evidenceText": "Paper"}), 200)
 	f.unchanged(t, app)
 	var user models.User
 	app.DB.First(&user, f.user.ID)
@@ -386,7 +399,7 @@ func TestTeenConversionStagingPreservesHouseholdManagement(t *testing.T) {
 		t.Fatal(body)
 	}
 	apiDo(t, admin, "PUT", "/api/v1/admin/users/"+itoa(f.user.ID), map[string]string{"status": "disabled"}, 200)
-	apiDo(t, admin, "POST", consentPath(&f.user), map[string]string{"scope": "account", "status": "granted", "evidenceText": "Paper"}, 200)
+	apiDo(t, admin, "POST", consentPath(&f.user), withConsentRevision(t, admin, &f.user, map[string]string{"scope": "account", "status": "granted", "evidenceText": "Paper"}), 200)
 	apiDo(t, admin, "POST", "/api/v1/admin/guardian-links/"+itoa(f.link.ID)+"/confirm", map[string]string{"checkNote": "Checked"}, 200)
 	f.unchanged(t, app)
 	apiDo(t, admin, "PUT", "/api/v1/admin/users/"+itoa(f.user.ID), map[string]string{"status": "active"}, 200)
@@ -437,9 +450,10 @@ func TestTeenConversionLocksHolderBeforeTeenAndMovesLatestAnswer(t *testing.T) {
 	if err := hold.Exec("SELECT 1 FROM users WHERE id = ? FOR NO KEY UPDATE", f.holder.ID).Error; err != nil {
 		t.Fatal(err)
 	}
+	body := withConsentRevision(t, admin, &f.user, map[string]string{"scope": "account", "status": "granted", "evidenceText": "Paper"})
 	response := make(chan int, 1)
 	go func() {
-		response <- admin.do("POST", consentPath(&f.user), map[string]string{"scope": "account", "status": "granted", "evidenceText": "Paper"}, true).Code
+		response <- admin.do("POST", consentPath(&f.user), body, true).Code
 	}()
 	testdb.WaitUntil(t, "consent to wait for the household holder", 5*time.Second, func() bool {
 		var blocked bool

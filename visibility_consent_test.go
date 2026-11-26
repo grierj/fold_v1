@@ -2542,7 +2542,7 @@ func identityRows() []lifecycleRow {
 				var link models.GuardianLink
 				gormMust(t, f.app.DB.Where("teen_user_id = ? AND guardian_user_id = ?", x.teen.ID, p.o1.ID).First(&link))
 				x.link = link.ID
-				apiDo(t, f.admin, "POST", consentPath(&x.teen), map[string]string{"scope": "account", "status": "granted", "evidenceText": "Signed paper consent"}, http.StatusOK)
+				apiDo(t, f.admin, "POST", consentPath(&x.teen), withConsentRevision(t, f.admin, &x.teen, map[string]string{"scope": "account", "status": "granted", "evidenceText": "Signed paper consent"}), http.StatusOK)
 				if got := x.status(t, f); got != models.RegGoing {
 					t.Fatalf("fixture: the teen's row is %s before the conversion", got)
 				}

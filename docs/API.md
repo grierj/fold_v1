@@ -292,8 +292,11 @@ GET    /api/v1/admin/guardian-links?status=pending  → 200 {guardianLinks, nomi
 POST   /api/v1/admin/guardian-links/:id/confirm     → 200 {guardianLink}    {checkNote} (admin; note required; not your own link while another active admin exists, DEC-79)
 POST   /api/v1/admin/guardian-links/:id/reject      → 200 {guardianLink}    {note?} (admin)
 POST   /api/v1/me/guardian-claims                   → 200 {message}        {email} (active adult)
-GET    /api/v1/me/guardian-teens                    → 200 {teens}          (confirmed guardian)
-POST   /api/v1/me/guardian-links/:id/consents        → 200 {}               {scope, status} (confirmed guardian)
+GET    /api/v1/me/guardian-teens                    → 200 {teens}          (confirmed guardian; each teen has revision, changes, lastChangeYours, DEC-176)
+POST   /api/v1/me/guardian-links/:id/consents        → 200 {teen: {id, revision}, guardianTeen} {scope, status, revision?} (confirmed guardian)
+     — a grant must name the teen's revision from GET /me/guardian-teens; a missing or stale one is 409 consent_changed
+       with nothing written, answered after any 403 or 400 (DEC-176); a revoke needs none
+     — guardianTeen is the card row as the change left it: statuses only, nothing an admin wrote
 POST   /api/v1/me/guardian-links/:id/consent-email   → 200 {message}        (confirmed guardian)
 GET    /api/v1/guardian-consent?token=...           → 200 {teenName, scope, status, expiresAt} | 400 (public preview)
 POST   /api/v1/guardian-consent                     → 200 {} | 400          {token} (public, CSRF required)
@@ -1798,9 +1801,14 @@ POST /api/v1/admin/groups/:id/members      → 200 {membership}          (admin)
 DELETE /api/v1/admin/groups/:id/members/:userId → 200 {departure} (admin; same confirmed body and transaction as the leader route)
 GET  /api/v1/admin/users                   → {users: [user]}           (admin; each user includes revision and may carry emailSuppression: {reason, since})
 POST /api/v1/admin/users/:id/email-suppression/clear → 200 {cleared} (admin; audited email.suppression_cleared; M3.2c)
-GET  /api/v1/admin/users/:id/teen-consents  → {consents: [teenConsent], administrativelyDisabled} (admin)
-POST /api/v1/admin/users/:id/teen-consents → 200 {} | 400 | 403 | 409  (admin)
-     body: {scope: "account"|"sms"|"photos", status: "granted"|"revoked", evidenceText?}
+GET  /api/v1/admin/users/:id/teen-consents  → {consents: [teenConsent], administrativelyDisabled, revision} (admin; one snapshot)
+POST /api/v1/admin/users/:id/teen-consents → 200 {teen: {id, revision}, consents, administrativelyDisabled} | 400 | 403 | 409  (admin)
+     body: {scope: "account"|"sms"|"photos", status: "granted"|"revoked", evidenceText?, revision?}
+     — a grant must name the revision its read returned: the teen's token over every scope, so any consent change since
+       (a guardian's, another admin's, another scope's) makes it stale; a missing or stale one is 409 consent_changed
+       with nothing written, answered after any 403, 400 or consent_teen_only (DEC-176)
+     — a revoke needs no revision and goes through as before; the answer is the history the change left, with the
+       next revision
 GET  /api/v1/admin/users/:id/sole-leader-groups → {groups: [{id, name, status, candidates: [{id, name, admin}]}]}  (admin; DEC-36)
 GET  /api/v1/admin/users/:id/sole-host-events → {events: [{id, title, nextStartsAt?}], candidates: [{id, name, admin}]}  (admin; M7.4 owner decision 3)
 POST /api/v1/admin/users                    → 201 {user}                (admin)
