@@ -312,6 +312,14 @@ const (
 	resetWindow  = time.Hour
 )
 
+func (a *App) checkDummyPassword() {
+	check := (&models.User{}).CheckPassword
+	if wrap := a.hooks.wrapDummyPasswordCheck; wrap != nil {
+		check = wrap(check)
+	}
+	check("not a real password")
+}
+
 // apiRequestPasswordReset starts a password reset. It always answers 200
 // with the uniform message. A known address queues a single-use link valid
 // for 24 hours from delivery preparation. Inside the IP/address budget, both
@@ -347,7 +355,7 @@ func (a *App) apiRequestPasswordReset(c *gin.Context) {
 	// Both paths pay the same password-check cost, and neither waits on
 	// the email: the job sends it later, so response time doesn't
 	// reveal whether the account exists (#93).
-	(&models.User{}).CheckPassword("not a real password")
+	a.checkDummyPassword()
 	if !found {
 		c.JSON(http.StatusOK, noticeResponseJSON{Message: resetRequestMessage})
 		return
