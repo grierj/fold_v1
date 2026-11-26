@@ -93,7 +93,10 @@ export interface BootstrapSession {
 }
 
 let current: Credential | null = null;
-let lastAdopted: Credential | null = null;
+
+// A suspended tab may still show the previous viewer's form. Keep only their identity
+// across invalidation so a queued write cannot take a different viewer's token.
+let lastViewer: Credential["viewer"] | undefined;
 let lastSession: BootstrapSession | null = null;
 
 // Each bootstrap request's order; an answer older than the one adopted is not shown.
@@ -145,7 +148,6 @@ function notify(session: BootstrapSession | null) {
 function invalidateCredential() {
   invalidations++;
   current = null;
-  lastAdopted = null;
   lastSession = null;
   notify(null);
 }
@@ -182,9 +184,10 @@ async function runBootstrap(at: number): Promise<BootstrapSession> {
     // Another tab's first visit won the cookie: ask again for the pair it holds.
     if (live !== null && live !== marker) continue;
     const next: Credential = { token: read.csrfToken, marker, viewer, seen: live, verified: acked && live === marker };
-    const same = lastAdopted !== null && (["token", "marker", "viewer", "seen", "verified"] as const).every((k) => lastAdopted?.[k] === next[k]);
-    const credential = same && lastAdopted ? lastAdopted : next;
-    current = lastAdopted = credential;
+    const same = current !== null && (["token", "marker", "viewer", "seen", "verified"] as const).every((k) => current?.[k] === next[k]);
+    const credential = same && current ? current : next;
+    current = credential;
+    lastViewer = viewer;
     adoptedAt = order;
     const session = { credential, user: read.user, canCompose: !!read.user && read.canCompose };
     lastSession = session;
@@ -245,13 +248,12 @@ function acknowledgment(credential: Credential): string {
 // credential, a new one for the same viewer is used; one for someone else is
 // the session_expired refusal the server would give.
 async function ensureCsrf(): Promise<string> {
+  const viewer = lastViewer;
+
   while (rotation) await rotation;
-  const held = current;
+  const credential = credentialCurrent(current) ? current : (await bootstrapCredential()).credential;
 
-  if (held && liveMarker() === held.seen) return held.token;
-  const { credential } = await bootstrapCredential();
-
-  if (held && credential.viewer !== held.viewer) throw new CredentialLost(false);
+  if (viewer !== undefined && viewer !== credential.viewer) throw new CredentialLost(false);
 
   return credential.token;
 }

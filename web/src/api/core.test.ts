@@ -329,6 +329,33 @@ describe("browser credential", () => {
     expect(s.core.currentCredential()).toMatchObject({ token: "t9", viewer: 9 });
   });
 
+  it.each([5, 9, null])("a plain write submitted during a marker recheck is sent only for its original viewer (next %s)", async (viewer) => {
+    const s = await tab();
+    const { Profile } = await import("./profile");
+    await s.core.bootstrapCredential();
+    const pending = held();
+    const stop = s.core.watchCredential(() => {});
+
+    try {
+      vi.mocked(fetch).mockImplementationOnce(() => pending.promise);
+      setMarkerCookie("m-t2");
+      window.dispatchEvent(new Event("focus"));
+      expect(s.core.currentCredential()).toBeNull();
+      const save = Profile.update({ displayName: "Lee" });
+      pending.release(bootstrapAnswer({ token: "t2", user: viewer === null ? null : { id: viewer } }));
+
+      if (viewer === 5) {
+        await save;
+        expect(s.calls.find((call) => call.url === "/api/v1/me")?.headers.get("X-CSRF-Token")).toBe("t2");
+      } else {
+        await expect(save).rejects.toMatchObject({ code: "session_expired", unreadable: false });
+        expect(s.calls.some((call) => call.url === "/api/v1/me")).toBe(false);
+      }
+    } finally {
+      stop();
+    }
+  });
+
   it("a 401 from before a sign-in cannot sign out its replacement; a live one does", async () => {
     const s = await tab();
     const onUnauthorized = vi.fn();
