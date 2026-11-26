@@ -404,20 +404,37 @@ describe("focus while a delete's count is read", () => {
   });
 });
 
+it("lets one Groups row delete at a time: while one's count is read, no other row can start a delete", async () => {
+  vi.mocked(AdminGroups.list).mockResolvedValue({ groups: [group(3, "Choir"), group(4, "Youth")] });
+  vi.mocked(Admin.deleteCount).mockReturnValue(new Promise(() => {}));
+  const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(true);
+  render(<MemoryRouter initialEntries={["/admin?tab=groups"]}><AdminPage /></MemoryRouter>);
+  await userEvent.click(await screen.findByRole("button", { name: "More for Choir" }));
+  await userEvent.click(screen.getByRole("menuitem", { name: "Delete" }));
+  await screen.findByText("Checking who deleting “Choir” will notify…");
+  await userEvent.click(screen.getByRole("button", { name: "More for Youth" }));
+  const other = screen.getByRole("menuitem", { name: "Delete" });
+  expect(other).toBeDisabled();
+  await userEvent.click(other);
+  expect(Admin.deleteCount).toHaveBeenCalledTimes(1);
+  expect(screen.getByText("Checking who deleting “Choir” will notify…")).toBeInTheDocument();
+  expect(confirmSpy).not.toHaveBeenCalled();
+});
+
 describe("a deletion request that is no longer open", () => {
   const handled = new ApiError(409, "This was already handled", { code: "already_handled", resolution: "withdrawn", resolvedBy: "" });
 
   it.each([
     ["Delete group", () => vi.mocked(Admin.deleteGroup).mockRejectedValue(handled)],
     ["Keep group", () => vi.mocked(Admin.rejectDeletion).mockRejectedValue(handled)],
-  ])("%s takes the card away, reads the queue again and says nothing was changed", async (button, refuse) => {
+  ])("%s takes the card away, reads the queue again and says the group is still there", async (button, refuse) => {
     refuse();
     vi.mocked(AdminAccountRequests.list).mockResolvedValue({ requests: [] });
     vi.mocked(Admin.deletions).mockResolvedValueOnce({ groups: [group(5, "Solo", { deletionRequested: true })] }).mockResolvedValue({ groups: [] });
     vi.spyOn(window, "confirm").mockReturnValue(true);
     render(<MemoryRouter initialEntries={["/admin"]}><AdminPage /></MemoryRouter>);
     await userEvent.click(await screen.findByRole("button", { name: button }));
-    const status = await screen.findByText("The request to delete “Solo” is no longer open, so nothing was changed.");
+    const status = await screen.findByText("The request to delete “Solo” is no longer open. The group is still there.");
     expect(status).toHaveAttribute("role", "status");
     await waitFor(() => expect(status).toHaveFocus());
     expect(screen.queryByRole("button", { name: "Delete group" })).not.toBeInTheDocument();
@@ -444,11 +461,15 @@ describe("a deletion request that is no longer open", () => {
       .mockImplementation(() => (reload === "pending" ? new Promise(() => {}) : Promise.reject(new ApiError(500, "x"))));
     vi.spyOn(window, "confirm").mockReturnValue(true);
     render(<MemoryRouter initialEntries={["/admin"]}><AdminPage /></MemoryRouter>);
+    expect(await screen.findByRole("tab", { name: "Approvals, 1 waiting" })).toBeInTheDocument();
     await userEvent.click(await screen.findByRole("button", { name: button }));
-    expect(await screen.findByText("The request to delete “Solo” is no longer open, so nothing was changed.")).toHaveAttribute("role", "status");
+    expect(await screen.findByText("The request to delete “Solo” is no longer open. The group is still there.")).toHaveAttribute("role", "status");
     await waitFor(() => expect(Admin.deletions).toHaveBeenCalledTimes(2));
 
     if (reload === "failing") await screen.findByRole("button", { name: "Try again" });
+
+    // The badge counts the cards shown, so the refused card leaves it too.
+    expect(screen.getByRole("tab", { name: /^Approvals/ })).not.toHaveAccessibleName(/waiting/);
 
     expect(screen.queryByRole("button", { name: "Delete group" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Keep group" })).not.toBeInTheDocument();

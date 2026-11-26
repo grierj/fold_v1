@@ -137,7 +137,7 @@ test("a deletion request that ended while the admin looked is refused, and the c
   await page.getByRole("button", { name: "Delete group" }).click();
   expect((await refused).status()).toBe(409);
   expect(asked).toEqual([`Delete “${name}”? This removes the group, its members, and its events. 2 other people will be notified.`]);
-  const status = page.getByRole("status").filter({ hasText: `The request to delete “${name}” is no longer open, so nothing was changed.` });
+  const status = page.getByRole("status").filter({ hasText: `The request to delete “${name}” is no longer open. The group is still there.` });
   await expect(status).toBeVisible();
   await expect(status).toBeFocused();
   await expect(page.getByRole("link", { name })).toHaveCount(0);
