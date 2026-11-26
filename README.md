@@ -90,6 +90,12 @@ Before the release is written it also checks both images pull with no login.
 
 ## Upgrade notes
 
+- **Open Fold tabs.** Ask people to finish and save their edits before the
+  upgrade, then reload any open Fold tabs after the site is back. A tab left
+  open during the upgrade can keep running the old version of a form. If a
+  save keeps failing with "Please try again in a minute", copy any unsaved text
+  you want to keep, reload the page, and make the edit again.
+
 - **Browser sessions after a database restore.** The first upgrade with this
   change asks everyone to sign in again. On DigitalOcean, update and verify
   the restore tools when you upgrade. See [Upgrades and rollback](docs/DEPLOY-DIGITALOCEAN.md#6-upgrades-and-rollback).

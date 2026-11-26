@@ -884,6 +884,9 @@ addresses.
 Pin every upgrade to an image tag or a git commit. `:latest` is refused.
 Read the release notes first. `README.md` records operator steps (for
 example the `SESSION_SECRET` length).
+Ask people to finish editing before the upgrade and reload their open Fold
+tabs after the smoke checks pass. See the [upgrade notes](../README.md#upgrade-notes)
+for what to do if a save keeps failing in an older tab.
 
 When upgrading to the browser-session signing epoch or to deploy tools version 7
 (account-link expiry on restore), prepare a separate trusted checkout of the release at
