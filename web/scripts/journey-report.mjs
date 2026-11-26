@@ -1,5 +1,10 @@
 import { readFileSync } from "node:fs";
 
+/**
+ * @param {number} ms
+ * @param {number} baselineMs
+ * @param {{ ceilingMs: number, increaseMs: number }} limit
+ */
 export function exceedsLimit(ms, baselineMs, limit) {
   return ms > limit.ceilingMs || ms - baselineMs > limit.increaseMs;
 }
