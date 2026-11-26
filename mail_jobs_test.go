@@ -1057,7 +1057,7 @@ func queueHeldInvitationMail(t *testing.T, app *App, conversion, bound bool) hel
 		if bound {
 			body["groupId"] = f.group.ID
 		}
-		apiDo(t, f.client, "POST", "/api/v1/invitations", body, http.StatusCreated)
+		apiDo(t, f.client, "POST", "/api/v1/invitations", body, http.StatusOK)
 	}
 	if err := app.DB.Where("email = ?", "invited@example.com").First(&f.inv).Error; err != nil {
 		t.Fatal(err)
@@ -1174,7 +1174,7 @@ func TestInvitationMailSkipsClosedInvitations(t *testing.T) {
 }
 
 func TestInvitationMailRechecksOrdinaryAuthority(t *testing.T) {
-	for _, change := range []string{"admin demoted", "leadership lost", "membership missing", "only led group archived", "bound group archived", "bound group pending", "bound group deleted", "full group"} {
+	for _, change := range []string{"admin demoted", "leadership lost", "membership missing", "only led group archived", "bound group archived", "bound group pending", "bound group deleted", "address now held", "full group"} {
 		t.Run(change, func(t *testing.T) {
 			app := testApp(t)
 			f := queueHeldInvitationMail(t, app, false, change != "only led group archived")
@@ -1200,6 +1200,8 @@ func TestInvitationMailRechecksOrdinaryAuthority(t *testing.T) {
 				err = app.DB.Model(f.group).Update("status", models.GroupPending).Error
 			case "bound group deleted":
 				err = app.DB.Delete(f.group).Error
+			case "address now held":
+				newTestUser(t, app, f.inv.Email, "pw", models.RoleMember)
 			case "full group":
 				err = app.DB.Model(f.group).Update("member_limit", 1).Error
 			}

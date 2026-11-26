@@ -5740,3 +5740,67 @@ func TestGroupStatusCheckWaitsAtMostFiveSeconds(t *testing.T) {
 	}
 	upTo(t, p, groupStatusCheckVersion)
 }
+
+func TestContactFinalityMigration(t *testing.T) {
+	t.Parallel()
+	const version = 17
+	_, db, provider := freshAt(t, version-1)
+	exec := func(statement string) {
+		t.Helper()
+		if _, err := db.Exec(statement); err != nil {
+			t.Fatal(err)
+		}
+	}
+	exec(`INSERT INTO users(id, email) VALUES (1, 'leader@example.test'), (2, 'subject@example.test')`)
+	exec(`INSERT INTO contact_requests
+		(id, requester_id, subject_user_id, context_type, context_id, fields, reason, needs_admin, admin_decision, created_at, expires_at)
+		VALUES (1,1,2,'group',1,'email','Meeting plans',false,'not_needed','2026-11-10T00:00Z','2026-11-24T00:00Z'),
+		       (2,1,2,'group',2,'email','Meeting plans',false,'not_needed','2026-11-10T00:00Z','2026-11-24T00:00Z')`)
+	exec(`UPDATE contact_requests SET status = 'granted', subject_decision = 'approved', subject_decided_by = 2,
+		subject_decided_at = '2026-11-11T00:00Z', completed_at = '2026-11-11T00:00Z' WHERE id = 2`)
+	exec(`INSERT INTO contact_grants (id, request_id, leader_id, subject_user_id, context_type, context_id, fields, granted_at)
+		VALUES (1,2,1,2,'group',2,'email','2026-11-11T00:00Z')`)
+
+	const requests = `SELECT id, to_jsonb(r)::text FROM contact_requests r`
+	const grants = `SELECT id, to_jsonb(g)::text FROM contact_grants g`
+	requestsBefore, grantsBefore := snapshotRows[int64](t, db, requests), snapshotRows[int64](t, db, grants)
+	upTo(t, provider, version)
+	sameRows(t, "requests after Up", snapshotRows[int64](t, db, requests), requestsBefore)
+	sameRows(t, "grants after Up", snapshotRows[int64](t, db, grants), grantsBefore)
+
+	const triggers = `SELECT tgname FROM pg_trigger WHERE NOT tgisinternal AND tgenabled = 'O'
+		AND ((tgrelid = 'public.contact_requests'::regclass AND tgname = 'contact_request_terminal')
+		  OR (tgrelid = 'public.contact_grants'::regclass AND tgname = 'contact_grant_terminal')) ORDER BY tgname`
+	if got := queryLines(t, db, triggers); got != "contact_grant_terminal\ncontact_request_terminal" {
+		t.Fatalf("terminal triggers after Up: %q", got)
+	}
+
+	exec(`UPDATE contact_requests SET status = 'withdrawn', withdrawn_by_id = 1, completed_at = '2026-11-12T00:00Z' WHERE id = 1`)
+	exec(`UPDATE contact_grants SET ended_at = '2026-11-12T00:00Z', end_reason = 'revoked_by_subject', ended_by = 2 WHERE id = 1`)
+	exec(`UPDATE contact_requests SET status = status WHERE id = 1`)
+	exec(`UPDATE contact_grants SET ended_at = ended_at WHERE id = 1`)
+	for _, check := range []struct{ name, sql, message string }{
+		{"request completion time", `UPDATE contact_requests SET completed_at = completed_at + interval '1 second' WHERE id = 1`, "a finished contact request outcome is immutable"},
+		{"grant end time", `UPDATE contact_grants SET ended_at = ended_at + interval '1 second' WHERE id = 1`, "an ended contact grant is immutable"},
+	} {
+		_, err := db.Exec(check.sql)
+		wantPgError(t, check.name, err, "23514", check.message)
+	}
+	exec(`UPDATE users SET deleted_at = '2026-11-13T00:00Z' WHERE id = 2`)
+	exec(`UPDATE contact_requests SET reason = '' WHERE id = 2`)
+	if got := queryLines(t, db, `SELECT status || ':' || (reason = '')::text FROM contact_requests ORDER BY id`); got != "withdrawn:false\ngranted:true" {
+		t.Fatalf("request outcomes after erasure scrub: %q", got)
+	}
+	if got := queryLines(t, db, `SELECT end_reason FROM contact_grants WHERE ended_at IS NOT NULL`); got != "revoked_by_subject" {
+		t.Fatalf("grant outcome after erasure scrub: %q", got)
+	}
+
+	requestsBefore, grantsBefore = snapshotRows[int64](t, db, requests), snapshotRows[int64](t, db, grants)
+	downTo(t, provider, version-1)
+	if got := queryLines(t, db, triggers); got != "" {
+		t.Fatalf("terminal triggers after Down: %q", got)
+	}
+	sameRows(t, "requests after Down", snapshotRows[int64](t, db, requests), requestsBefore)
+	sameRows(t, "grants after Down", snapshotRows[int64](t, db, grants), grantsBefore)
+	upTo(t, provider, version)
+}

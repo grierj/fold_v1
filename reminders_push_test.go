@@ -562,6 +562,41 @@ func TestPushReminderHistory(t *testing.T) {
 	}
 }
 
+func TestPushReminderHistoryReportsUnconfirmedDelivery(t *testing.T) {
+	f, fp, phone := pushReminderFixture(t)
+	due := f.groupOcc.StartsAt.Add(-2 * time.Hour)
+	sweepAt(t, f.app, due.Add(-30*time.Minute))
+	stop := failStatements(t, f.app.DB, func(sql string) bool {
+		return strings.HasPrefix(sql, "UPDATE message_recipients") && strings.Contains(sql, "'push'") && strings.Contains(sql, "sent_at =")
+	})
+	deliverAt(t, f.app, due)
+	stop()
+	m, rows := pushReminderOf(t, f.app, f.groupOcc)
+	row := rows[f.teen.Email]
+	if row.Status != models.RecipientQueued || fp.count(phone.path) != 1 {
+		t.Fatalf("accepted push outcome was recorded: %+v, %d sends", row, fp.count(phone.path))
+	}
+	if err := f.app.reapMessages(t.Context(), time.Now().Add(2*time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+
+	check := func(t *testing.T) {
+		t.Helper()
+		w := f.leader.do("GET", "/api/v1/messages/"+itoa(m.ID)+"/recipients", nil, false)
+		var history messageRecipientsJSON
+		decodeJSON(t, w, &history)
+		if w.Code != http.StatusOK || history.CanRetry || history.Counts.Push.Missed["delivery could not be confirmed"] != 1 ||
+			len(history.Recipients) != 1 || history.Recipients[0].Status != "unconfirmed" {
+			t.Fatalf("history: %d %s", w.Code, w.Body.String())
+		}
+	}
+	t.Run("current wording", check)
+	t.Run("older reaped row", func(t *testing.T) {
+		gormMust(t, f.app.DB.Model(&row).Update("reason", "didn't go out"))
+		check(t)
+	})
+}
+
 // The date page: when the push reminder goes before it is written, and
 // nothing about push when the church turned it off.
 func TestDateRemindersPushLine(t *testing.T) {

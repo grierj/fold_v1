@@ -133,6 +133,23 @@ assert_pinned_image() {
   fi
 }
 
+assert_backup_image() {
+  local image="$1"
+  [[ "$image" =~ ^[A-Za-z0-9][A-Za-z0-9._:/@-]*$ ]] \
+    || { check_fail '--backup-image must be an image reference with a tag or SHA-256 digest'; return 1; }
+  if [[ "$image" == *@* ]]; then
+    [[ "$image" =~ ^[A-Za-z0-9][A-Za-z0-9._:/-]*@sha256:[0-9a-f]{64}$ ]] \
+      || { check_fail '--backup-image has an invalid SHA-256 digest'; return 1; }
+    return 0
+  fi
+  assert_pinned_image "$image"
+}
+
+assert_backup_image_compose() {
+  grep -Fq "\${FOLD_BACKUP_IMAGE:-" "$1" \
+    || check_fail '--backup-image needs a source Compose file that reads FOLD_BACKUP_IMAGE'
+}
+
 # assert_deploy_pinned DIR: the FOLD_VERSION a deploy dir's .env will pull.
 # An explicit --image pin (the marker line) was checked when it was written. A
 # source build (COMPOSE_FILE names the build override) only needs a local

@@ -97,8 +97,8 @@ func TestRoomApprovalOneDate(t *testing.T) {
 	if n := contactCount(t, f.app, &models.Notification{}, "kind = ? AND waiting AND resolved_at IS NULL", notify.RoomRequested); n != 0 {
 		t.Fatalf("%d open admin tasks after confirming", n)
 	}
-	if w := f.admin.do("POST", "/api/v1/admin/room-requests/"+itoa(reqs[0].ID)+"/confirm", map[string]any{}, true); w.Code != http.StatusConflict {
-		t.Fatalf("confirming twice: %d", w.Code)
+	if w := f.admin.do("POST", "/api/v1/admin/room-requests/"+itoa(reqs[0].ID)+"/confirm", map[string]any{}, true); w.Code != http.StatusConflict || !strings.Contains(w.Body.String(), `"code":"already_handled"`) {
+		t.Fatalf("confirming twice: %d %s", w.Code, w.Body.String())
 	}
 
 	// An admin's own booking confirms at once, approval or not.

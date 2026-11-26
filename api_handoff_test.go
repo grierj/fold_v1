@@ -22,6 +22,10 @@ func TestSoleLeaderHandoff(t *testing.T) {
 			g2 := newTestGroup(t, app, leaving, "Beta", models.GroupPending)
 			shared := newTestGroup(t, app, leaving, "Gamma", models.GroupActive)
 			addMember(t, app, ann, g1, models.MembershipMember)
+			addMember(t, app, ann, g2, models.MembershipMember)
+			gormMust(t, app.DB.Model(g2).Update("member_limit", 1))
+			gone := models.Membership{GroupID: g2.ID, UserID: me.ID, Status: models.MembershipRemoved, Role: models.MembershipMember}
+			gormMust(t, app.DB.Create(&gone))
 			addMember(t, app, ann, shared, models.MembershipLeader) // not sole-led
 			admin := loginAPI(t, app, "admin", "password1234")
 
@@ -80,6 +84,14 @@ func TestSoleLeaderHandoff(t *testing.T) {
 				if !relIn(app.DB, want.ID, g.ID).Leader || fresh.LeaderID != want.ID || leadersIn(app.DB, g.ID) != 1 {
 					t.Fatalf("%s: leader %d, contact %d, leaders %d", g.Name, want.ID, fresh.LeaderID, leadersIn(app.DB, g.ID))
 				}
+			}
+			over, meta := auditRows(t, app, audit.AddedOverLimit)
+			if len(over) != 1 || over[0].TargetID != g2.ID || over[0].ActorID == nil ||
+				*over[0].ActorID != me.ID || meta[0].UserID != me.ID || meta[0].Limit != 1 {
+				t.Fatalf("over-limit audit: %+v %+v", over, meta)
+			}
+			if count, err := memberCount(app.DB, g2.ID); err != nil || count != 2 {
+				t.Fatalf("the successor did not replace the departing seat: count %d, error %v", count, err)
 			}
 			// Deletion ends memberships; disabling keeps them as plain member (DEC-38).
 			want := map[string]string{"delete": "none", "disable": "active"}[action]

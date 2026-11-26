@@ -1120,10 +1120,9 @@ type Notification struct {
 	DedupeKey   *string
 	Title       string `gorm:"not null"`
 	Body        string `gorm:"not null;default:''"`
-	// EmailTitle/EmailBody are the link-only rendering for email (5.12,
-	// M1.2): RenderEmailSafe when the kind has one, Render otherwise. The
-	// in-app title/body may name people; the email variants of sensitive
-	// kinds name nobody.
+	// EmailTitle/EmailBody store the kind's rendering for email (5.12).
+	// Sensitive kinds store link-only text. Delivery can use the kind's
+	// name-free text after erasure (O-16).
 	EmailTitle string `gorm:"not null;default:''"`
 	EmailBody  string `gorm:"not null;default:''"`
 	// PushTitle/PushBody are the lock-screen text (M3.13b, DEC-124): the

@@ -27,6 +27,18 @@ suppressions. The guards named here are parse-only; each test file states its ow
   skips it. If the sender holds the lock first, Dismiss waits. Once a successful send commits,
   the row stays sent. A provider can still accept mail before the sender's transaction fails,
   leaving that acceptance unrecorded.
+- A kind that emails a person's name declares its source and name-free text in the notice registry.
+  Direct delivery checks those IDs after claiming the email row at Read Committed. A guardian
+  copy checks them in its existing eligibility snapshot and still uses the bell copy rules.
+  An erasure committed before that read takes effect for the attempt. An email already in flight
+  may still reach the provider. Every attempt reads again and a failed read retries.
+- Registration notices with a visible date put the named household person's ID in private
+  notice data. A zero records that the text names no household person. Concealed dates and
+  older registration notices lack the attribution and use the name-free text. In direct
+  promotion mail, Fold also keeps the existing cancellation token when it still controls
+  a going registration for that recipient and date. Fold builds the cancellation URL on its
+  current origin. Guardian copies use their own footer and unsubscribe. See O-16 and T26 in
+  the erasure inventory.
 
 ## Optional email choices
 
@@ -54,8 +66,9 @@ suppressions. The guards named here are parse-only; each test file states its ow
   confirmation's `schedule` works that set out again under the message's lock and schedules only
   when it is the same; a change is answered with who now gets it (named) and who no longer does
   (named only while the audience still lists them, otherwise counted; never why). There is no
-  second notion of audience: the review reads `resolveAudienceIn` and `audienceReachIn`, as the
-  preview and the send count do. The same check covers an edit that changes a scheduled message's
+  second notion of audience: a save, review and schedule check that the original author is active
+  and may message the audience, as preparation does. The session user still owns the review
+  token and decides whether individual skip reasons are shown. The same check covers an edit that changes a scheduled message's
   audience or push switch (`PUT /messages/:id`): it writes nothing until the sender confirms who the
   proposal reaches. The check is at composition only: a scheduled message goes to the list as it
   stands when it goes out, guardian copies are added then and are not part of the review, and a

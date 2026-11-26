@@ -63,7 +63,7 @@ beforeEach(async () => {
 const challenge = (registrants: number, consent = "c".repeat(32)) => new ApiError(409, "x", { code: "date_needs_consent", impact: { visibility: "private", currentVisibility: "public", tightened: [{ id: 7, title: "Supper", visibility: "public", registrants, occurrenceId: 1 }], leaderOpened: [], consent } });
 
 // What EventDate hands ManageDate, as spies.
-const pageCallbacks = () => ({ onDateChanged: vi.fn(), onConflict: vi.fn(), onOpenEditor: vi.fn(), onGone: vi.fn(), onRetryPage: vi.fn() });
+const pageCallbacks = () => ({ onDateChanged: vi.fn(), onCancelled: vi.fn(), onConflict: vi.fn(), onOpenEditor: vi.fn(), onGone: vi.fn(), onRetryPage: vi.fn() });
 
 // A question asked under the page's own provider, as EventDate's own actions ask.
 interface Probe { ask: () => Promise<boolean> }
@@ -80,7 +80,7 @@ function PageProbe({ out }: { out: RefObject<Probe | null> }) {
 interface Mounted {
   store: RosterWrites;
   probe: RefObject<Probe | null>;
-  callbacks: { onDateChanged: ReturnType<typeof vi.fn>; onConflict: ReturnType<typeof vi.fn>; onOpenEditor: ReturnType<typeof vi.fn>; onGone: ReturnType<typeof vi.fn>; onRetryPage: ReturnType<typeof vi.fn> };
+  callbacks: ReturnType<typeof pageCallbacks>;
   setAuthority: (authority: ManageAuthority) => void;
 }
 

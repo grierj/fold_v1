@@ -592,9 +592,11 @@ func (w *residueWorld) subject(scenario string) *models.User {
 	w.create(&models.Message{AuthorID: &u.ID, Status: models.MessageDraft, Subject: r.text(residueU, scenario, "draftsubject", "O-8-subject"),
 		BodyText: r.text(residueU, scenario, "draftbody", "O-8-body-text"), BodyHTML: "<p>" + r.text(residueU, scenario, "drafthtml", "O-8-body-html") + "</p>"})
 	// A notice another person received that names the erased person: it was
-	// rendered once, with no variables kept, and stays with its reader (O-16).
+	// recorded for a living reader, with both stored copies covered by O-16.
 	w.create(&models.Notification{UserID: w.l.ID, Kind: "residue.test", Category: "groups", Title: "Update about " + r.text(residueU, scenario, "othernoticetitle", "O-16-title"),
-		Body: r.text(residueU, scenario, "othernoticebody", "O-16"), Link: "/"})
+		Body:       r.text(residueU, scenario, "othernoticebody", "O-16"),
+		EmailTitle: r.text(residueU, scenario, "othernoticeemailtitle", "O-16-email-title"),
+		EmailBody:  r.text(residueU, scenario, "othernoticeemailbody", "O-16-email-body"), Link: "/"})
 	return u
 }
 
@@ -1169,6 +1171,7 @@ func TestErasureResidueRefusesWhatThePlanDoesNotName(t *testing.T) {
 	stray := reg.text(residueU, "x", "stray", "O-21")
 	onOther := reg.text(residueU, "x", "onother", "O-17-invitation")
 	lStray := reg.text(residueL, "x", "lstray", "L-user")
+	noticeName := reg.text(residueU, "x", "notice", "O-16-email-body")
 	pre := []residueHit{
 		hit("audit_logs", "ip", "", essential, map[string]any{"action": "none"}),
 		hit("messages", "body_text", "", messageText, nil), hit("invitations", "email", "", moved, nil), hit("users", "phone", "", misowned, nil),
@@ -1181,10 +1184,18 @@ func TestErasureResidueRefusesWhatThePlanDoesNotName(t *testing.T) {
 	// An address a rule excuses, on another row of its column than the one seeded.
 	post[len(pre)-1].RowID = "2"
 	post = append(post, hit("somewhere", "else", "", "snt-u-nowhere-nothing", nil))
+	pre = append(pre, hit("notifications", "email_body", "", noticeName, nil))
+	post = append(post,
+		hit("notifications", "push_title", "", noticeName, nil),
+		hit("notifications", "push_body", "", noticeName, nil),
+		hit("notifications", "data", "name", noticeName, nil))
 	got := check.problems(pre, post)
 	want := []string{
 		"misplaced O-17-invitation invitations.name",
 		"misplaced L-user users.phone",
+		"misplaced O-16-email-body notifications.push_title",
+		"misplaced O-16-email-body notifications.push_body",
+		"misplaced O-16-email-body notifications.data.name",
 		"moved O-17-invitation invitations.email",
 		"undispositioned RETAIN_ESSENTIAL audit_logs.ip",
 		"unaccepted messages.body_text",

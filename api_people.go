@@ -102,6 +102,10 @@ func (a *App) canSearchPeople(db *gorm.DB, actor *models.User) (bool, error) {
 
 var errPeopleAddForbidden = apiErr(http.StatusForbidden, "", "forbidden")
 
+func selectablePeople(db *gorm.DB) *gorm.DB {
+	return db.Where("status = ? AND account_type IN ?", models.UserActive, []string{models.AccountAdult, models.AccountTeen})
+}
+
 // peopleAddActor runs after the contact gate, shared with account and role
 // revocation. Request authentication alone cannot authorize a queued add.
 func peopleAddActor(tx *gorm.DB, authenticated *models.User) (*models.User, error) {
@@ -134,7 +138,7 @@ func (a *App) resolvePeopleSelection(c *gin.Context, token string) (*models.User
 	}
 	id, err := a.parsePeopleSelection(token, actor.ID, time.Now())
 	var target models.User
-	if !allowed || err != nil || a.DB.Where("id = ? AND status = ? AND account_type IN ?", id, models.UserActive, []string{models.AccountAdult, models.AccountTeen}).First(&target).Error != nil {
+	if !allowed || err != nil || selectablePeople(a.DB).First(&target, id).Error != nil {
 		fail(c, errPeopleSelectionUnavailable)
 		return nil, false
 	}
@@ -179,7 +183,7 @@ func (a *App) apiSearchPeople(c *gin.Context) {
 	// Escape SQL wildcards: punctuation must not become an account-browse query.
 	pattern := "%" + strings.NewReplacer("\\", "\\\\", "%", "\\%", "_", "\\_").Replace(query) + "%"
 	var users []models.User
-	if err := db.Select("id", "name", "display_name", "account_type", "avatar_key", "avatar_focal_x", "avatar_focal_y").Where("status = ? AND account_type IN ? AND (name ILIKE ? OR display_name ILIKE ?)", models.UserActive, []string{models.AccountAdult, models.AccountTeen}, pattern, pattern).Order("lower(" + models.PublicNameSQL("") + "), id").Limit(10).Find(&users).Error; err != nil {
+	if err := selectablePeople(db).Select("id", "name", "display_name", "account_type", "avatar_key", "avatar_focal_x", "avatar_focal_y").Where("name ILIKE ? OR display_name ILIKE ?", pattern, pattern).Order("lower(" + models.PublicNameSQL("") + "), id").Limit(10).Find(&users).Error; err != nil {
 		jsonError(c, 500, "could not search people")
 		return
 	}

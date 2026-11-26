@@ -1361,6 +1361,7 @@ var auditWriterCensus = map[string]string{
 	"api_event_access.go:apiSetEventVisibility":                   "626cabf10d6c4ca7a7afac84935a07d9bbf4771f1bddeff97d1cdd7cdbb969e0",
 	"api_events.go:apiCreateEvent":                                "6019122679de6e09b703d6c79239bddda6fd5ec00bdfbeec42f1fd40e83b2f4b",
 	"api_events.go:apiDeleteEvent":                                "49605e07b47a70d91a057c264d22edafe81530cda07102d5c460d7d8ab893200",
+	"api_events.go:auditDateCancellation":                         "fd36241127e309b393e6cbc1c72471caa47689ec32974d2d3bc1926780a9385e",
 	"api_events.go:restoreSeriesDates":                            "ee6a331db732803f1fb43f4be87f742df27e444cfbfb01967be4c40b063180f1",
 	"api_feeds.go:apiCreateMyCalendarFeed":                        "4804978e0c2abafcb9ea1234cde1fc604bf1c3cce5bb3ad79c87f8b5fa1f1510",
 	"api_feeds.go:apiUpdateMyCalendarFeed":                        "9ea28d336e14eea85b7fadb379e258108df222066d72b736f387d91672712106",
@@ -1374,7 +1375,7 @@ var auditWriterCensus = map[string]string{
 	"api_guest.go:apiCancelGuestRegistration":                     "d92867ce53e9aa1d9e3f635bee6ae5946c7aa0fed892bebc76beba28bb017fbb",
 	"api_guest.go:createGuestUpgradeRequest":                      "d4efcca0c23809550c5f9d8996e03fad7134231186eb151392530f8a17e6341c",
 	"api_handoff.go:demoteEverywhere":                             "f8c19b38c31de43cb159e734182104c37d48a604e794b65c09b7d22b3483ba38",
-	"api_handoff.go:handOffLeadership":                            "e4c64e8d739a704a9ccc80a1aa8244ae996e392379b1d70f6b37e32b57f9ccda",
+	"api_handoff.go:handOffLeadership":                            "66d2bb5afd136a44e3569d394dc2f98df6c1f929e8ecd31c1b93077de40534c6",
 	"api_handoff.go:restoreMemberships":                           "7e5274985450108d91a71e530fe4d6256b0a330c3361cff5a271bfb0cf037773",
 	"api_host_handoff.go:handOffHosting":                          "93a50176317d4e93ff841272aef57f58ebecc26f8aa682ce85787ebd38232772",
 	"api_host_handoff.go:deleteHostRowsAudited":                   "e4840ae49c5b95f68150584f85c36abeed2bf195f0f91c7ae3f764bb2fe72277",
@@ -1418,6 +1419,7 @@ var auditWriterCensus = map[string]string{
 	"api_room_series.go:bookWholeSeries":                          "3635d7f6e8ba87cf7a1adce12bb01c6ba358118b565f90a4d6072ab6389b2c0d",
 	"api_rooms.go:apiAdminCreateRoom":                             "00c14cd2b3e4d506f59158cf6a676fe89be5a8183760e27310b12b9e183b8f15",
 	"api_rooms.go:apiAdminUpdateRoom":                             "408c699d62a155af44bde0954c969b70965c0c9c583ded3ffc5a0464ffa5a30d",
+	"api_rooms.go:setRoomSwitch":                                  "fb7994f9786dc8d2278ff5e34e116f6597e407c0e62f5cc3bbbb4158227674de",
 	"api_teen_consent.go:changeTeenConsent":                       "f7124d9ee26a3b16b8f67a5fa0fadb7867bcd7b5d9e213e83f3efa8556d9449b",
 	"api_teen_guardians.go:apiClaimTeenGuardian":                  "059457aa963c16581146d2802d7bff428783101588e5a44a0cd3041cd868f55a",
 	"api_teen_guardians.go:nominateTeenGuardian":                  "c1ef0fab390bdda6d4522037a4a396e79108b8121784f33c9ac6c20058244672",
@@ -1697,8 +1699,8 @@ func TestAuditErasureWriterCensus(t *testing.T) {
 	if p := auditCensusProblems(c); len(p) > 0 {
 		t.Fatal(strings.Join(p, "\n"))
 	}
-	if len(c.Sites) != 112 {
-		t.Fatalf("audit.Write sites = %d, expected 112; review every changed site", len(c.Sites))
+	if len(c.Sites) != 114 {
+		t.Fatalf("audit.Write sites = %d, expected 114; review every changed site", len(c.Sites))
 	}
 	for _, site := range c.Sites {
 		t.Log(site)

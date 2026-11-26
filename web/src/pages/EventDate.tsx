@@ -29,7 +29,7 @@ import { DateReminderLines } from "../components/DateReminders";
 import { ConfirmProvider, useConfirm, type PendingAction } from "../components/ui/ConfirmDialog";
 import { useLeaveQuestion } from "../lib/leaveQuestion";
 import { manageAuthority } from "../lib/manageAuthority";
-import { RefusedSaveLine, useRefusedSave } from "../lib/refusedSave";
+import { RefusedSaveLine, ResourceRefusal, resourceRefused, useRefusedSave } from "../lib/refusedSave";
 
 const ManageDate = lazy(() => import("../components/ManageDate").then((module) => ({ default: module.ManageDate })));
 
@@ -199,9 +199,20 @@ function DateDetail({ id, date }: { id: string; date: string }) {
 
   const reloadPage = useCallback(() => void reload(), [reload]);
   const retryPage = useCallback(() => void recheck(), [recheck]);
+  const [cancelledHere, setCancelledHere] = useState(false);
+
+  const onCancelled = useCallback(() => {
+    refocus.current = true;
+    setCancelledHere(true);
+    retryPage();
+  }, [retryPage]);
+
   // A date save refused and not sent again (DEC-164): the editor closed, and the page reads from nothing, failing
   // closed like any recheck, and then says so.
   const refusedSave = useRefusedSave({ loading: load.loading, data: load.data, retry: recheck });
+
+  const { refused } = refusedSave;
+  const rosterRefused = useCallback(() => refused("gone", "action"), [refused]);
 
   // Coming back to the window is a recheck too (useLoad retries on focus): it hides results and the held page.
   useEffect(() => {
@@ -298,7 +309,8 @@ function DateDetail({ id, date }: { id: string; date: string }) {
     } catch (e) {
       if (!mounted.current) return;
 
-      if (e instanceof ApiError && [401, 403, 404].includes(e.status)) gone();
+      if (resourceRefused(e)) refusedSave.refused("gone", "action");
+      else if (e instanceof ApiError && [401, 403, 404].includes(e.status)) gone();
       else if (load.epoch() === epoch) setFailure({ epoch, text: errorText(e) });
     } finally {
       release();
@@ -334,7 +346,8 @@ function DateDetail({ id, date }: { id: string; date: string }) {
     } catch (e) {
       if (!mounted.current) return;
 
-      if (e instanceof ApiError && [401, 403, 404].includes(e.status)) gone();
+      if (resourceRefused(e)) refusedSave.refused("gone", "action");
+      else if (e instanceof ApiError && [401, 403, 404].includes(e.status)) gone();
       else if (load.epoch() === epoch) setFailure({ epoch, text: errorText(e) });
     } finally {
       release();
@@ -376,6 +389,7 @@ function DateDetail({ id, date }: { id: string; date: string }) {
 
       if (e instanceof ApiError && e.status === 401) gone();
       // A refusal can take away the series alone: forget what the series showed and read this date again, fail closed.
+      else if (resourceRefused(e)) refusedSave.refused("gone", "action");
       else if (e instanceof ApiError && [403, 404].includes(e.status)) void recheck();
       else if (load.epoch() === epoch) setFailure({ epoch, text: errorText(e, "We couldn't save your answer for those dates.") });
     } finally {
@@ -424,7 +438,8 @@ function DateDetail({ id, date }: { id: string; date: string }) {
       const text = errorText(e, "We couldn't undo that answer.");
 
       // What may have changed is read again, fail closed; its message waits for that read so it stays on screen.
-      if (REFRESH_UNDO_CODES.has(code) || (e instanceof ApiError && [403, 404].includes(e.status))) {
+      if (resourceRefused(e)) refusedSave.refused("gone", "action");
+      else if (REFRESH_UNDO_CODES.has(code) || (e instanceof ApiError && [403, 404].includes(e.status))) {
         void recheck().then((outcome) => { if (outcome === "loaded" && mounted.current) setFailure({ epoch: load.epoch(), text }); });
       } else if (load.epoch() === epoch) setFailure({ epoch, text });
     } finally {
@@ -535,7 +550,9 @@ function DateDetail({ id, date }: { id: string; date: string }) {
         </div>
       </div>
       {!loaded && !selfReading && <p role="status">Loading this date…</p>}
-      {loaded && !occurrence && <EmptyState title="This date is not available" body="Your invitation may have ended, or this date may not be available to you. Check your calendar for dates you can open." />}
+      {loaded && !occurrence && (cancelledHere
+        ? <div role="status"><EmptyState title="This date was cancelled" body="Your calendar shows the dates that are still on." /></div>
+        : <EmptyState title="This date is not available" body="Your invitation may have ended, or this date may not be available to you. Check your calendar for dates you can open." />)}
       {(occurrence || selfReading) && <section aria-label="This event date" className="space-y-6">
         {/* The six answers come first (M8.1 brief 5.1); everything else follows them. */}
         <div className="space-y-3">
@@ -569,10 +586,10 @@ function DateDetail({ id, date }: { id: string; date: string }) {
       </section>}
     </div>
     <RefusedSaveLine save={refusedSave} noun="date" canManage={occurrence ? occurrence.canManage === true : undefined} />
-    {showManage && <Suspense fallback={<Skeleton kind="lines" label="Loading the manager tools…" />}>
-      <ManageDate eventId={Number(id)} date={date} occurrenceId={occurrence?.id} authority={authority} onDateChanged={reloadPage}
+    {showManage && <ResourceRefusal.Provider value={rosterRefused}><Suspense fallback={<Skeleton kind="lines" label="Loading the manager tools…" />}>
+      <ManageDate eventId={Number(id)} date={date} occurrenceId={occurrence?.id} startsAt={occurrence?.startsAt} endsAt={occurrence?.endsAt} authority={authority} onDateChanged={reloadPage} onCancelled={onCancelled}
         onConflict={refusedSave.refused} onOpenEditor={refusedSave.clear} onGone={retryPage} onRetryPage={retryPage} />
-    </Suspense>}
+    </Suspense></ResourceRefusal.Provider>}
     {barShown && <StickyRsvpBar label="Answer this date">
       {actions.length > 0 && <div ref={answerGroup} role="group" aria-label="Your answer" className="flex min-w-0 flex-1 sm:max-w-sm">
         {actions.map((status) => <SegmentButton key={status} pressed={!!occurrence && pressed(status)}

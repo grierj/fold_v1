@@ -16,6 +16,7 @@ import (
 	"fold/internal/notify"
 	"fold/models"
 
+	"github.com/gin-gonic/gin"
 	"gorm.io/gorm"
 )
 
@@ -126,6 +127,35 @@ func roomPickOK(t *testing.T, c *apiClient, path string, body map[string]any) {
 	t.Helper()
 	if w := roomPick(t, c, path, body); w.Code != http.StatusOK {
 		t.Fatalf("PUT %s: %d %s", path, w.Code, w.Body.String())
+	}
+}
+
+func TestDateRoomPaddingRequiresCurrentAdminEvenForAnEventManager(t *testing.T) {
+	f := newBookingFixture(t)
+	path := f.path(f.eventA, "/room")
+	revision := roomRevision(t, f.leader, path)
+	if revision == "" {
+		t.Fatal("event manager could not read the room picker")
+	}
+	body := fmt.Sprintf(`{"roomId":%d,"setupMinutes":15,"revision":%q}`, f.hall.ID, revision)
+	session := *f.leaderUser
+	session.Role = models.RoleAdmin
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodPut, path, strings.NewReader(body))
+	c.Set("apiUser", &session)
+	c.AddParam("id", itoa(f.eventA.ID))
+	c.AddParam("date", feedDate(f.startOn))
+	f.app.apiSetDateRoom(c)
+	if w.Code != http.StatusForbidden || !strings.Contains(w.Body.String(), "only an admin can change a booking") {
+		t.Fatalf("padding override returned %d %s", w.Code, w.Body.String())
+	}
+	if n := contactCount(t, f.app, &models.RoomBooking{}, "room_id = ?", f.hall.ID); n != 0 {
+		t.Fatalf("booking count after refusal = %d, want 0", n)
+	}
+	if code, body := f.book(t, f.leader, f.eventA, map[string]any{"roomId": f.hall.ID}); code != http.StatusOK ||
+		!strings.Contains(body, fmt.Sprintf(`"setupMinutes":%d`, f.hall.DefaultSetupMinutes)) {
+		t.Fatalf("booking with the room defaults returned %d %s", code, body)
 	}
 }
 

@@ -407,6 +407,12 @@ func (a *App) prepareInvitationMail(tx *gorm.DB, id uint) (mail.Message, bool, e
 		if !policy.CanInvite(asPerson(&inviter), inv.GroupID != nil, leadsTarget, leadsAnywhere) {
 			return none, false, nil
 		}
+		if !policy.IsAdmin(asPerson(&inviter)) {
+			hold, err := emailHeldBy(tx, inv.Email, inv.ID, 0, true)
+			if err != nil || hold != "" {
+				return none, false, err
+			}
+		}
 		// Capacity is checked at acceptance. A temporarily full group does
 		// not make an invitation permanently ineligible for delivery.
 	}

@@ -69,7 +69,7 @@ func closeEmptyRoomRequests(tx *gorm.DB) error {
 // pick can open the one the event may have (idx_room_requests_one_series),
 // and returns its id for the caller to close its task (resolveWithdrawn)
 // once its notices are written. The caller holds the event's lock, which
-// every decision takes before the request's (lockRequest), so this needs no
+// every decision takes before the request's (lockRoomDecisionIn), so this needs no
 // SKIP LOCKED.
 func withdrawSeriesRequest(tx *gorm.DB, eventID uint) ([]uint, error) {
 	return moveRoomRequestsWhere(tx, policy.RoomRequestWithdrawSeries, "event_id = ? AND series", eventID)
@@ -150,25 +150,32 @@ func (a *App) apiAdminRoomRequests(c *gin.Context) {
 
 var errRequestDecided = errors.New("request decided")
 
-// lockRequest loads a pending request and its event under their locks,
-// event first: the same order as every other booking write.
-func lockRequest(tx *gorm.DB, id uint) (*models.RoomRequest, *models.Event, error) {
+// lockRoomDecisionIn locks the event first, like every other booking write.
+// A plain actor read avoids reversing the user and event lock order.
+func lockRoomDecisionIn(tx *gorm.DB, session *models.User, id uint) (*models.User, *models.RoomRequest, *models.Event, error) {
 	var peek models.RoomRequest
 	if err := tx.First(&peek, id).Error; err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	var ev models.Event
 	if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&ev, peek.EventID).Error; err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	var req models.RoomRequest
 	if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&req, id).Error; err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
+	}
+	actor, err := lockActorIn(tx, session, actorRead)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	if !policy.CanDecideRoomRequest(asPerson(actor)) {
+		return nil, nil, nil, errSecuritySession
 	}
 	if !policy.RoomRequestUndecided(req.Status) {
-		return nil, nil, errRequestDecided
+		return nil, nil, nil, errRequestDecided
 	}
-	return &req, &ev, nil
+	return actor, &req, &ev, nil
 }
 
 // requestBookings locks a request's waiting dates (dates, then room) and
@@ -221,15 +228,10 @@ func (a *App) apiConfirmRoomRequest(c *gin.Context) {
 		fail(c, errOverlapReasonTooLong)
 		return
 	}
-	me := apiUser(c)
-	if !policy.CanDecideRoomRequest(asPerson(me)) {
-		jsonError(c, http.StatusForbidden, "admin required")
-		return
-	}
 	var confirmed, overlapped int
 	lost := []string{}
 	err := a.DB.Transaction(func(tx *gorm.DB) error {
-		req, ev, err := lockRequest(tx, id)
+		me, req, ev, err := lockRoomDecisionIn(tx, apiUser(c), id)
 		if err != nil {
 			return err
 		}
@@ -304,7 +306,7 @@ func (a *App) apiConfirmRoomRequest(c *gin.Context) {
 		// Tell the leaders (which locks their user rows) BEFORE closing the admins'
 		// tasks: see settleRoomDecision.
 		return settleRoomDecision(tx, ev, req.ID, me.ID, "approved", note, "confirmed")
-	})
+	}, readCommitted)
 	if a.requestFailed(c, id, err) {
 		return
 	}
@@ -330,13 +332,8 @@ func (a *App) apiRejectRoomRequest(c *gin.Context) {
 		fail(c, errOverlapReasonTooLong)
 		return
 	}
-	me := apiUser(c)
-	if !policy.CanDecideRoomRequest(asPerson(me)) {
-		jsonError(c, http.StatusForbidden, "admin required")
-		return
-	}
 	err := a.DB.Transaction(func(tx *gorm.DB) error {
-		req, ev, err := lockRequest(tx, id)
+		me, req, ev, err := lockRoomDecisionIn(tx, apiUser(c), id)
 		if err != nil {
 			return err
 		}
@@ -370,7 +367,7 @@ func (a *App) apiRejectRoomRequest(c *gin.Context) {
 			note = room.Name + " wasn't approved: " + reason + " Pick another room on the event page."
 		}
 		return settleRoomDecision(tx, ev, req.ID, me.ID, "not approved", note, "rejected")
-	})
+	}, readCommitted)
 	if a.requestFailed(c, id, err) {
 		return
 	}
@@ -385,7 +382,7 @@ func (a *App) requestFailed(c *gin.Context, id uint, err error) bool {
 		jsonError(c, http.StatusNotFound, "room request not found")
 	case errors.Is(err, errRequestDecided):
 		a.alreadyHandled(c, notify.RoomRequested, id)
-	case errors.Is(err, errGroupRoomsNotApproved):
+	case isAPIError(err):
 		fail(c, err)
 	default:
 		jsonError(c, http.StatusInternalServerError, "could not save the room request")

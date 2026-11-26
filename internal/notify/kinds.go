@@ -139,6 +139,7 @@ type Kind struct {
 	// (minors, consent, contact access): it names nobody and only links
 	// into Fold. Nil means Render is already safe.
 	RenderEmailSafe func(Vars) (title, body string)
+	namedEmail      namedEmail
 	// AllowPush sends the row to the recipient's devices with push on
 	// (M3.13b, DEC-124). A lock screen is public, so PushRender is the
 	// kind's own short text, never the bell body cut short: never a
@@ -442,7 +443,8 @@ func init() {
 	})
 	register(Kind{
 		Key: GroupPending, Category: CatAdmin, Waiting: true, AllowEmail: true,
-		Actions: []Action{{Key: ActionApproveGroup, Label: "Approve"}},
+		namedEmail: namedEmail{emailActor, "A new group is waiting for approval", "Sign in to Fold to review the group."},
+		Actions:    []Action{{Key: ActionApproveGroup, Label: "Approve"}},
 		Render: func(v Vars) (string, string) {
 			return or(v.Actor, "Someone") + " started a group: " + or(v.Group, "a new group"),
 				"It needs an admin's approval before people can find it."
@@ -452,6 +454,7 @@ func init() {
 	})
 	register(Kind{
 		Key: GroupDeletion, Category: CatAdmin, Waiting: true, AllowEmail: true,
+		namedEmail: namedEmail{emailActor, "A request to delete a group is waiting", "Sign in to Fold to review the request."},
 		Render: func(v Vars) (string, string) {
 			return or(v.Actor, "Someone") + " asked to delete " + or(v.Group, "a group"),
 				"They are its only member. Delete the group or keep it."
@@ -460,6 +463,7 @@ func init() {
 	})
 	register(Kind{
 		Key: LeadershipChanged, Category: CatAdmin, AllowEmail: true,
+		namedEmail: namedEmail{emailLeadership, "Group leadership changed", "Open Fold to review the group."},
 		Render: func(v Vars) (string, string) {
 			actor, person := or(v.Actor, "Fold"), or(v.Person, "Someone")
 			var title string
@@ -530,6 +534,7 @@ func init() {
 	})
 	register(Kind{
 		Key: MembershipLeft, Category: CatGroups, AllowEmail: true,
+		namedEmail: namedEmail{emailActor, "A member left your group", "Their group membership has ended."},
 		Render: func(v Vars) (string, string) {
 			return or(v.Person, "Someone") + " left " + or(v.Group, "your group"), "Their group membership has ended."
 		},
@@ -581,6 +586,7 @@ func init() {
 	})
 	register(Kind{
 		Key: VisibilityOverride, Category: CatGroups, AllowEmail: true, CopyTitleOnly: true,
+		namedEmail: namedEmail{emailActor, "An event was opened up", "Open Fold to review who can see the event."},
 		Render: func(v Vars) (string, string) {
 			body := fmt.Sprintf("%s opened it up. Now %s. The group is %s.", or(v.Actor, "Someone"), v.Visibility, v.GroupVis)
 			if v.Note != "" {
@@ -636,6 +642,7 @@ func init() {
 		// the signed manage link with the one-click "I can't come"
 		// cancel; the bell never shows the token.
 		Key: RegistrationPromoted, Category: CatEvents, AllowEmail: true,
+		namedEmail: namedEmail{emailHousehold, "A waitlist spot opened", "Open Fold to review the registration update."},
 		Render: func(v Vars) (string, string) {
 			if v.Person != "" {
 				return v.Person + " is in: " + or(v.Event, "an event"), join(v.When, v.Place)
@@ -651,7 +658,7 @@ func init() {
 				body += "\n\nJoin by video: " + v.VideoURL
 			}
 			if v.ManageURL != "" {
-				body += "\n\nCan't come after all? Cancel your registration here:\n" + v.ManageURL
+				body += PromotionManagePart(v.ManageURL)
 			}
 			return title, body
 		},
@@ -667,6 +674,7 @@ func init() {
 		// A leader or host pruned a registration (DEC-20, DEC-30, M1.5).
 		// The note reaches only the removed person.
 		Key: RegistrationRemoved, Category: CatEvents, AllowEmail: true, CopyTitleOnly: true,
+		namedEmail: namedEmail{emailHousehold, "A registration was removed", "Open Fold to review the registration update."},
 		Render: func(v Vars) (string, string) {
 			body := "A leader or host removed your registration for " + or(v.Event, "an event") + "."
 			if v.Person != "" {
@@ -693,6 +701,7 @@ func init() {
 		// also the case for a date they can no longer see (the caller then
 		// names no event).
 		Key: RegistrationNotRestored, Category: CatEvents, AllowEmail: true,
+		namedEmail: namedEmail{emailHousehold, "A registration couldn't be restored", "Open Fold to review the registration update."},
 		Render: func(v Vars) (string, string) {
 			if v.Person != "" {
 				return v.Person + " could not be added back to " + or(v.Event, "an event"), "Ask a leader or host to add them after checking their household details and available seats."
@@ -733,6 +742,7 @@ func init() {
 		// one per booking action (DEC-106). Change is the room and the date
 		// count in words; resolved when an admin decides or the dates go.
 		Key: RoomRequested, Category: CatAdmin, Waiting: true, AllowEmail: true,
+		namedEmail: namedEmail{emailActor, "A room request is waiting for approval", "Sign in to Fold to review the request."},
 		Render: func(v Vars) (string, string) {
 			return or(v.Actor, "Someone") + " asked for a room for " + or(v.Event, "an event"),
 				or(v.Change, "A room") + ". Needs an admin's approval."
@@ -769,6 +779,7 @@ func init() {
 		// came out, in words the writer builds from its own counts. No room
 		// name: a room can say where a group meets (DEC-124).
 		Key: RoomChanged, Category: CatEvents, AllowEmail: true, CopyTitleOnly: true,
+		namedEmail: namedEmail{emailActor, "An event's room plans changed", "Open Fold to review the room plans."},
 		Render: func(v Vars) (string, string) {
 			who, event, when := or(v.Actor, "Someone"), or(v.Event, "an event"), or(v.When, "one date")
 			var title, body string

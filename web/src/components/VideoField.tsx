@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { useResourceRefusal } from "../lib/refusedSave";
 import { Events } from "../api/events";
 import { errorCode, errorText } from "../lib/errors";
 import type { VideoProvider, VideoReveal } from "../types";
@@ -59,6 +60,7 @@ export function VideoField({
   // The form's empty-link or server error for the link, if any.
   error?: string | null;
 }) {
+  const refreshRefusal = useResourceRefusal();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -70,7 +72,7 @@ export function VideoField({
       const { url } = await Events.generateJitsi();
       onChange({ ...value, provider: "jitsi", url });
     } catch (err) {
-      setError(errorText(err, "We couldn't make a Jitsi link."));
+      if (!refreshRefusal(err)) setError(errorText(err, "We couldn't make a Jitsi link."));
     } finally {
       setBusy(false);
     }

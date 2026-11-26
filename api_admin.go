@@ -612,6 +612,9 @@ func (a *App) apiAdminDeleteUser(c *gin.Context) {
 	// server to it too (R4-CTX).
 	ctx, cancel := context.WithTimeout(context.Background(), adminDeleteBudget)
 	defer cancel()
+	if wrap := a.hooks.wrapDeleteContext; wrap != nil {
+		ctx = wrap(ctx)
+	}
 	// The whole call retries when a household row is busy (R4-3b-1, inventory
 	// 9.6 requirement 5): each attempt starts from the target's id alone and
 	// reads the account, the actor and every set again under its own locks, so

@@ -447,15 +447,12 @@ func occurrenceToJSON(ev *models.Event, o *models.EventOccurrence, groupLoc stri
 		TZID: ev.TZID, DurationMinutes: dur, Location: location, Title: title,
 		Description:    ev.Description,
 		RecurrenceRule: ev.RRule, RRuleUntil: until, SeriesStartsLocal: ev.StartsLocal,
-		Overridden:  o.Customized(),
-		SeriesTitle: ev.Title, SeriesLocation: ev.Location, SeriesDurationMinutes: ev.DurationMinutes,
-		Registrations:        registrationCounts(nil, false),
-		Capacity:             events.EffectiveCapacity(ev.Capacity, o.CapacityOverride),
-		WaitlistEnabled:      ev.WaitlistEnabled,
-		GuestsAllowed:        ev.GuestsAllowed,
-		ReminderEmailMinutes: ev.ReminderEmailMinutes,
-		ReminderPush:         ev.ReminderPush,
-		ChildcareAvailable:   ev.ChildcareAvailable, ChildcareNotes: ev.ChildcareNotes,
+		Overridden:         o.Customized(),
+		Registrations:      registrationCounts(nil, false),
+		Capacity:           events.EffectiveCapacity(ev.Capacity, o.CapacityOverride),
+		WaitlistEnabled:    ev.WaitlistEnabled,
+		GuestsAllowed:      ev.GuestsAllowed,
+		ChildcareAvailable: ev.ChildcareAvailable, ChildcareNotes: ev.ChildcareNotes,
 		ChildcareCapacity: ev.ChildcareCapacity, ChildcareAges: ev.ChildcareAges,
 		RemoteAvailable: ev.RemoteAvailable,
 		RemoteCapacity:  events.EffectiveCapacity(ev.RemoteCapacity, o.RemoteCapacityOverride),
@@ -1251,6 +1248,9 @@ func (a *App) apiUpdateEvent(c *gin.Context) {
 		if err := recordSeriesClocks(tx, &locked, x, occs, addedDays, now, oldSchedule); err != nil {
 			return err
 		}
+		if err := auditDateCancellation(tx, me.ID, c.ClientIP(), ev.ID, models.CancelSourceSeries, cancelled); err != nil {
+			return err
+		}
 		err = notifyOccurrences(tx, me.ID, cancelled, notify.OccurrenceCancelled)
 		if err != nil {
 			return err
@@ -1573,6 +1573,8 @@ func deleteEventRows(tx *gorm.DB, eventIDs []uint) error {
 	return closeEmptyRoomRequests(tx)
 }
 
+var errDateCancelEnded = apiErr(http.StatusConflict, "date_cancel_ended", "This date has already ended.")
+
 func (a *App) apiCancelOccurrence(c *gin.Context) {
 	ev, ok := a.loadManagedEvent(c)
 	if !ok {
@@ -1589,35 +1591,40 @@ func (a *App) apiCancelOccurrence(c *gin.Context) {
 		fail(c, errSeriesDateInvalid)
 		return
 	}
-	var occ models.EventOccurrence
-	if err := a.DB.Where("event_id = ? AND original_date = ?", ev.ID, body.Date).First(&occ).Error; err != nil {
-		jsonError(c, http.StatusNotFound, "that date is not on this event")
-		return
-	}
 	err := a.contactMutation(contactChange{EventID: ev.ID}, func(tx *gorm.DB) error {
 		actor, _, _, err := lockManagedEventIn(tx, apiUser(c), ev.ID)
 		if err != nil {
 			return err
 		}
-		res := tx.Model(&models.EventOccurrence{}).Where("id = ? AND status <> ?", occ.ID, models.OccurrenceCancelled).
-			Updates(map[string]any{"status": models.OccurrenceCancelled, "cancel_source": models.CancelSourceManual})
-		if res.Error != nil || res.RowsAffected == 0 {
-			if res.Error == nil {
-				// Already cancelled: nobody is told twice. A person asking for
-				// this date to be cancelled makes it theirs, so a later series
-				// edit will not bring it back.
-				res.Error = tx.Model(&models.EventOccurrence{}).
-					Where("id = ? AND status = ? AND cancel_source = ?", occ.ID, models.OccurrenceCancelled, models.CancelSourceSeries).
-					Update("cancel_source", models.CancelSourceManual).Error
+		var occ models.EventOccurrence
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
+			Where("event_id = ? AND original_date = ?", ev.ID, body.Date).First(&occ).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return errOccurrenceNotFound
 			}
-			return res.Error
-		}
-		err = notifyOccurrences(tx, actor.ID, []uint{occ.ID}, notify.OccurrenceCancelled)
-		if err != nil {
 			return err
 		}
-		// A cancelled date frees its room (9.2).
-		return releaseRoomBookings(tx, []uint{occ.ID})
+		alreadyCancelled := occ.Status == models.OccurrenceCancelled
+		if alreadyCancelled && occ.CancelSource != models.CancelSourceSeries {
+			return nil
+		}
+		if !occ.EndsAt.After(a.now()) {
+			return errDateCancelEnded
+		}
+		if err := tx.Model(&occ).Updates(map[string]any{"status": models.OccurrenceCancelled, "cancel_source": models.CancelSourceManual}).Error; err != nil {
+			return err
+		}
+		ids := []uint{occ.ID}
+		if err := auditDateCancellation(tx, actor.ID, c.ClientIP(), ev.ID, models.CancelSourceManual, ids); err != nil {
+			return err
+		}
+		if alreadyCancelled {
+			return nil
+		}
+		if err := notifyOccurrences(tx, actor.ID, ids, notify.OccurrenceCancelled); err != nil {
+			return err
+		}
+		return releaseRoomBookings(tx, ids)
 	})
 	if err != nil {
 		answerEventWrite(c, err, "could not cancel")
@@ -1686,6 +1693,14 @@ func (a *App) apiRetiredDatePut(c *gin.Context) {
 	fail(c, err)
 }
 
+func auditDateCancellation(tx *gorm.DB, actor uint, ip string, eventID uint, source string, ids []uint) error {
+	if len(ids) == 0 {
+		return nil
+	}
+	return audit.Write(tx, audit.Entry{Actor: &actor, Action: audit.EventDatesCancelled, TargetType: "event", TargetID: eventID,
+		Meta: map[string]any{"occurrenceIds": ids, "source": source}, IP: ip})
+}
+
 // restoreSeriesDates records dates a series edit just brought back and tells
 // the people signed up for them. It runs in the series edit's transaction,
 // after the rows are scheduled again, so the audit row, the notices and the
@@ -1716,39 +1731,36 @@ type occurrenceJSON struct {
 	// the guarded date edit names it. Own and Cancelled are set only on the
 	// manager's edit base (GET /events/:id/occurrences/:date, and the edit's
 	// answer), which also answers a cancelled date.
-	Revision              string           `json:"revision,omitempty"`
-	Own                   *dateOwnJSON     `json:"own,omitempty"`
-	Cancelled             bool             `json:"cancelled,omitempty"`
-	EventID               uint             `json:"eventId"`
-	Date                  string           `json:"date"`
-	DateURL               string           `json:"dateUrl,omitempty"`
-	VisibilityOverride    *string          `json:"visibilityOverride,omitempty"`
-	SeriesVisibility      string           `json:"seriesVisibility,omitempty" series:"omit"`
-	GroupVisibility       string           `json:"groupVisibility,omitempty"`
-	StartsAt              time.Time        `json:"startsAt"`
-	EndsAt                time.Time        `json:"endsAt"`
-	StartsLocal           string           `json:"startsLocal"`
-	EndsLocal             string           `json:"endsLocal"`
-	TZID                  string           `json:"tzid"`
-	DurationMinutes       int              `json:"durationMinutes"`
-	Location              string           `json:"location"`
-	Title                 string           `json:"title"`
-	Description           string           `json:"description" series:"blank"`
-	RecurrenceRule        string           `json:"recurrenceRule" series:"omit"`
-	RRuleUntil            string           `json:"rruleUntil,omitempty" series:"omit"`
-	SeriesStartsLocal     string           `json:"seriesStartsLocal" series:"omit"`
-	SeriesTitle           string           `json:"seriesTitle" series:"omit"`
-	SeriesLocation        string           `json:"seriesLocation" series:"omit"`
-	SeriesDurationMinutes int              `json:"seriesDurationMinutes" series:"omit"`
-	Overridden            bool             `json:"overridden"`
-	Registrations         map[string]int64 `json:"registrations"`
-	MyRegistration        *string          `json:"myRegistration"`
-	Visibility            string           `json:"visibility"`
-	LeaderOpened          bool             `json:"leaderOpened"`
-	ChurchWide            bool             `json:"churchWide"`
-	GroupID               *uint            `json:"groupId,omitempty"`
-	GroupName             string           `json:"groupName,omitempty"`
-	HostedBy              string           `json:"hostedBy,omitempty"`
+	Revision           string           `json:"revision,omitempty"`
+	Own                *dateOwnJSON     `json:"own,omitempty"`
+	Cancelled          bool             `json:"cancelled,omitempty"`
+	EventID            uint             `json:"eventId"`
+	Date               string           `json:"date"`
+	DateURL            string           `json:"dateUrl,omitempty"`
+	VisibilityOverride *string          `json:"visibilityOverride,omitempty"`
+	SeriesVisibility   string           `json:"seriesVisibility,omitempty" series:"omit"`
+	GroupVisibility    string           `json:"groupVisibility,omitempty"`
+	StartsAt           time.Time        `json:"startsAt"`
+	EndsAt             time.Time        `json:"endsAt"`
+	StartsLocal        string           `json:"startsLocal"`
+	EndsLocal          string           `json:"endsLocal"`
+	TZID               string           `json:"tzid"`
+	DurationMinutes    int              `json:"durationMinutes"`
+	Location           string           `json:"location"`
+	Title              string           `json:"title"`
+	Description        string           `json:"description" series:"blank"`
+	RecurrenceRule     string           `json:"recurrenceRule" series:"omit"`
+	RRuleUntil         string           `json:"rruleUntil,omitempty" series:"omit"`
+	SeriesStartsLocal  string           `json:"seriesStartsLocal" series:"omit"`
+	Overridden         bool             `json:"overridden"`
+	Registrations      map[string]int64 `json:"registrations"`
+	MyRegistration     *string          `json:"myRegistration"`
+	Visibility         string           `json:"visibility"`
+	LeaderOpened       bool             `json:"leaderOpened"`
+	ChurchWide         bool             `json:"churchWide"`
+	GroupID            *uint            `json:"groupId,omitempty"`
+	GroupName          string           `json:"groupName,omitempty"`
+	HostedBy           string           `json:"hostedBy,omitempty"`
 	// Room is the date's confirmed room, shown as its place (9.2, M2.1b).
 	Room *occurrenceRoomJSON `json:"room,omitempty"`
 	// AttendeesVisible is false when the caller gets a count only. An empty
@@ -1771,11 +1783,6 @@ type occurrenceJSON struct {
 	SpotsLeft       *int `json:"spotsLeft"`
 	WaitlistEnabled bool `json:"waitlistEnabled"`
 	GuestsAllowed   int  `json:"guestsAllowed"`
-	// ReminderEmailMinutes is the series' reminder time (M3.6), for its
-	// Edit series form; 0 is off. ReminderPush is its 2-hour push
-	// reminder switch (M3.13d3).
-	ReminderEmailMinutes int  `json:"reminderEmailMinutes"`
-	ReminderPush         bool `json:"reminderPush"`
 	// Remote attendance (M1.8 slice 2): a second seat pool. The remote
 	// fields mirror the in-person ones; remoteCapacity is the effective
 	// cap for this date (per-date override wins), null is unlimited.
@@ -1804,10 +1811,8 @@ type occurrenceJSON struct {
 	// may see it for this date (policy.CanSeeVideoLink); VideoHidden says
 	// a link exists but is being withheld, so the UI can say "Register
 	// to get the link".
-	VideoProvider string `json:"videoProvider"`
-	VideoURL      string `json:"videoUrl,omitempty"`
-	VideoReveal   string `json:"videoReveal"`
-	VideoHidden   bool   `json:"videoHidden,omitempty"`
+	VideoURL    string `json:"videoUrl,omitempty"`
+	VideoHidden bool   `json:"videoHidden,omitempty"`
 }
 
 // hideSeriesDetails withdraws the series from a viewer who may see only this

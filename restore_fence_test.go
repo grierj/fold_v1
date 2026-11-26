@@ -3482,7 +3482,20 @@ func TestPriorProcessRunningAcrossTheUpgrade(t *testing.T) {
 	if !old.healthy() {
 		t.Fatal("v0.1.0 stopped answering /healthz")
 	}
-	admin.want("PUT", fmt.Sprintf("/api/v1/events/%d", e3.Event.ID), map[string]any{"title": "E3 renamed", "startsLocal": day(5) + "T19:00", "durationMinutes": 60, "tzid": "UTC"}, http.StatusOK, nil)
+	path := fmt.Sprintf("/api/v1/events/%d", e6.Event.ID)
+	var page struct {
+		Event eventJSON `json:"event"`
+	}
+	admin.want("GET", path, nil, http.StatusOK, &page)
+	if page.Event.ID != e6.Event.ID {
+		t.Fatalf("v0.1.0 read event %d, want %d", page.Event.ID, e6.Event.ID)
+	}
+	admin.want("PUT", path, map[string]any{"title": "E6 renamed", "startsLocal": day(6) + "T19:00", "durationMinutes": 60, "tzid": "UTC", "revision": page.Event.Revision}, http.StatusOK, nil)
+	var title string
+	gormMust(t, db.Raw("SELECT title FROM events WHERE id = ?", e6.Event.ID).Scan(&title))
+	if title != "E6 renamed" {
+		t.Fatalf("title after v0.1.0 edit: %q", title)
+	}
 	old.stop()
 	wantRefusedStart(t, startFold(t, prior, name), "v0.1.0's restart")
 }
