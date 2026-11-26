@@ -1716,7 +1716,7 @@ func (a *App) restoreDateIn(tx *gorm.DB, ev *models.Event, occ *models.EventOccu
 	}
 	ids := []uint{occ.ID}
 	if ev.DefaultRoomID != nil {
-		switch err := roomsOnIn(tx); {
+		switch err := roomsOnIn(tx, errRoomsOff); {
 		case err == nil:
 			if err := settleDateRooms(tx, ev, nil, ids, &actor.ID); err != nil {
 				return err
