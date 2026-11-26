@@ -102,30 +102,49 @@ type teenConsentChange struct {
 	ConfirmedGuardian bool
 }
 
+// namesARead is whether the change must name the read it was made from on the
+// admin panel and the guardian card (DEC-176): a grant does, and a revoke, the
+// protective direction, always goes through.
+func (change teenConsentChange) namesARead() bool {
+	return change.Status == models.ConsentGranted
+}
+
+// teenConsentRefusal is the authority and validation of change: a bound
+// caller asks it before it compares the read change names, so a 403 or a 400
+// never becomes a 409 that says the log moved. It answers the role the row is
+// written with and the evidence as stored.
+func teenConsentRefusal(teen, actor *models.User, change teenConsentChange) (role, evidence string, err error) {
+	if actor.Status != models.UserActive || !policy.CanChangeTeenConsent(asPerson(actor), change.ConfirmedGuardian) {
+		return "", "", errConsentForbidden
+	}
+	if teen.AccountType != models.AccountTeen || teen.DeletedAt.Valid {
+		return "", "", errConsentTeen
+	}
+	if (change.Scope != models.TeenConsentAccount && change.Scope != models.TeenConsentSMS && change.Scope != models.TeenConsentPhotos) ||
+		(change.Status != models.ConsentGranted && change.Status != models.ConsentRevoked) {
+		return "", "", errConsentInvalid
+	}
+	evidence = strings.TrimSpace(change.EvidenceText)
+	if len(evidence) > 1000 {
+		return "", "", errConsentEvidenceLong
+	}
+	role = models.ConsentGuardian
+	if policy.IsAdmin(asPerson(actor)) && !change.ConfirmedGuardian {
+		role = models.ConsentAdmin
+		if change.Status == models.ConsentGranted && evidence == "" {
+			return "", "", errConsentEvidence
+		}
+	}
+	return role, evidence, nil
+}
+
 // changeTeenConsent is shared by admin, guardian, email and approval paths.
 // The caller holds the actor and teen user locks, rechecks authentication,
 // and supplies any guardian authority from a locked, confirmed link.
 func (a *App) changeTeenConsent(tx *gorm.DB, c *gin.Context, teen, actor *models.User, change teenConsentChange) error {
-	if actor.Status != models.UserActive || !policy.CanChangeTeenConsent(asPerson(actor), change.ConfirmedGuardian) {
-		return errConsentForbidden
-	}
-	if teen.AccountType != models.AccountTeen || teen.DeletedAt.Valid {
-		return errConsentTeen
-	}
-	if (change.Scope != models.TeenConsentAccount && change.Scope != models.TeenConsentSMS && change.Scope != models.TeenConsentPhotos) ||
-		(change.Status != models.ConsentGranted && change.Status != models.ConsentRevoked) {
-		return errConsentInvalid
-	}
-	evidence := strings.TrimSpace(change.EvidenceText)
-	if len(evidence) > 1000 {
-		return errConsentEvidenceLong
-	}
-	role := models.ConsentGuardian
-	if policy.IsAdmin(asPerson(actor)) && !change.ConfirmedGuardian {
-		role = models.ConsentAdmin
-		if change.Status == models.ConsentGranted && evidence == "" {
-			return errConsentEvidence
-		}
+	role, evidence, err := teenConsentRefusal(teen, actor, change)
+	if err != nil {
+		return err
 	}
 	now := a.newTxClock()
 	row := models.TeenConsent{TeenUserID: teen.ID, Scope: change.Scope, Status: change.Status,
@@ -231,21 +250,38 @@ func consentError(c *gin.Context, err error) {
 	fail(c, err)
 }
 
-func (a *App) apiListTeenConsents(c *gin.Context) {
-	u, ok := a.adminTargetUser(c)
-	if !ok {
-		return
-	}
+// teenConsentLogIn is the teen's consent history, newest first, and the token
+// a grant made from it names, as tx sees them: a reader's snapshot, or the
+// writer's transaction after its write.
+func (a *App) teenConsentLogIn(tx *gorm.DB, teenID uint) ([]teenConsentJSON, string, error) {
 	var rows []models.TeenConsent
-	if err := a.DB.Where("teen_user_id = ?", u.ID).Order("at DESC, id DESC").Find(&rows).Error; err != nil {
-		consentError(c, err)
-		return
+	if err := tx.Where("teen_user_id = ?", teenID).Order("at DESC, id DESC").Find(&rows).Error; err != nil {
+		return nil, "", err
 	}
 	consents := make([]teenConsentJSON, 0, len(rows))
 	for _, row := range rows {
 		consents = append(consents, consentJSON(row))
 	}
-	c.JSON(http.StatusOK, teenConsentsJSON{Consents: consents, AdministrativelyDisabled: u.AdministrativelyDisabled})
+	revision, err := a.consentRevisionIn(tx, teenID)
+	return consents, revision, err
+}
+
+func (a *App) apiListTeenConsents(c *gin.Context) {
+	u, ok := a.adminTargetUser(c)
+	if !ok {
+		return
+	}
+	out := teenConsentsJSON{AdministrativelyDisabled: u.AdministrativelyDisabled}
+	err := a.DB.Transaction(func(tx *gorm.DB) error {
+		var err error
+		out.Consents, out.Revision, err = a.teenConsentLogIn(tx, u.ID)
+		return err
+	}, readSnapshot)
+	if err != nil {
+		consentError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, out)
 }
 
 func (a *App) apiChangeTeenConsent(c *gin.Context) {
@@ -253,6 +289,7 @@ func (a *App) apiChangeTeenConsent(c *gin.Context) {
 		Scope        string `json:"scope"`
 		Status       string `json:"status"`
 		EvidenceText string `json:"evidenceText"`
+		Revision     string `json:"revision"`
 	}
 	if err := c.ShouldBindJSON(&body); err != nil {
 		jsonError(c, http.StatusBadRequest, "invalid request body")
@@ -264,6 +301,8 @@ func (a *App) apiChangeTeenConsent(c *gin.Context) {
 		return
 	}
 	me := apiUser(c)
+	change := teenConsentChange{Scope: body.Scope, Status: body.Status, EvidenceText: body.EvidenceText}
+	out := teenConsentChangedJSON{Teen: revisionRefJSON{ID: uint(id)}}
 	err = a.contactMutation(contactChange{UserID: uint(id)}, func(tx *gorm.DB) error {
 		actor, teen, err := lockConsentUsers(tx, me.ID, uint(id))
 		if err != nil {
@@ -272,12 +311,24 @@ func (a *App) apiChangeTeenConsent(c *gin.Context) {
 		if !adminCurrent(actor, me) {
 			return errConsentForbidden
 		}
-		err = a.changeTeenConsent(tx, c, teen, actor, teenConsentChange{Scope: body.Scope, Status: body.Status, EvidenceText: body.EvidenceText})
+		if _, _, err := teenConsentRefusal(teen, actor, change); err != nil {
+			return err
+		}
+		if change.namesARead() {
+			if err := a.checkConsentRevision(tx, teen.ID, body.Revision); err != nil {
+				return err
+			}
+		}
+		if err := a.changeTeenConsent(tx, c, teen, actor, change); err != nil {
+			return err
+		}
+		out.AdministrativelyDisabled = teen.AdministrativelyDisabled
+		out.Consents, out.Teen.Revision, err = a.teenConsentLogIn(tx, teen.ID)
 		return err
 	})
 	if err != nil {
 		consentError(c, err)
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{})
+	c.JSON(http.StatusOK, out)
 }

@@ -349,3 +349,60 @@ func (a *App) checkAdminUserRevision(tx *gorm.DB, id uint, given string) error {
 	}
 	return checkEditRevision(given, current, errAdminUserChanged)
 }
+
+// errConsentChanged refuses a grant of teen consent made from an older read of
+// the teen's consent log than the one it would add to (DEC-176). Nothing is
+// written.
+var errConsentChanged = apiErr(http.StatusConflict, "consent_changed", "the teen's consent changed since this change was based on it")
+
+// consentRevisionsIn is the token an admin's consent panel or a guardian's
+// card holds for each of teenIDs, keyed by id: bound to the teen's highest
+// consent row in every scope (0 before the first), since teen_consents is
+// append only, so any change of any scope moves it. Every append holds the
+// teen's user row lock, which a grant takes before it compares. The id goes in
+// as a keyed digest under this process's key: the ids count consent rows
+// across the church, which a guardian must not read.
+func (a *App) consentRevisionsIn(tx *gorm.DB, teenIDs []uint) (map[uint]string, error) {
+	last := make(map[uint]uint, len(teenIDs))
+	err := eachIDChunk(teenIDs, func(chunk []uint) error {
+		var rows []struct {
+			TeenUserID uint
+			Last       uint
+		}
+		if err := tx.Raw(`SELECT teen_user_id, max(id) AS last FROM teen_consents WHERE teen_user_id IN ? GROUP BY teen_user_id`, chunk).Scan(&rows).Error; err != nil {
+			return err
+		}
+		for _, r := range rows {
+			last[r.TeenUserID] = r.Last
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	out := make(map[uint]string, len(teenIDs))
+	for _, id := range teenIDs {
+		m := hmac.New(sha256.New, a.processKey("teen-consent-revision:v1"))
+		fmt.Fprintf(m, "%d.%d", id, last[id])
+		out[id] = a.editRevision(fmt.Sprintf("t%d", id), hex.EncodeToString(m.Sum(nil)[:16]))
+	}
+	return out, nil
+}
+
+// consentRevisionIn is consentRevisionsIn for one teen: a reader calls it in
+// the snapshot that read the consent it shows, a writer under the teen's user
+// row lock.
+func (a *App) consentRevisionIn(tx *gorm.DB, teenID uint) (string, error) {
+	revisions, err := a.consentRevisionsIn(tx, []uint{teenID})
+	return revisions[teenID], err
+}
+
+// checkConsentRevision refuses given unless it is the token of the teen's
+// consent log as tx reads it under the teen's user row lock.
+func (a *App) checkConsentRevision(tx *gorm.DB, teenID uint, given string) error {
+	current, err := a.consentRevisionIn(tx, teenID)
+	if err != nil {
+		return err
+	}
+	return checkEditRevision(given, current, errConsentChanged)
+}

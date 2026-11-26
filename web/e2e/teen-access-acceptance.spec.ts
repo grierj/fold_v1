@@ -1,6 +1,6 @@
 import { expect, test, type APIRequestContext, type Page } from "@playwright/test";
 import { writeFile } from "node:fs/promises";
-import { apiAs, attemptPendingSignIn, email, fromMore, PASSWORD, signIn } from "./helpers";
+import { apiAs, grantTeenConsent, attemptPendingSignIn, email, fromMore, PASSWORD, signIn } from "./helpers";
 
 async function capture(page: Page, name: string) {
   if (!process.env.SCREENS_DIR) return;
@@ -51,7 +51,7 @@ test("a consented teen joins general events with restricted roles, private ident
 
   await attemptPendingSignIn(page, "acceptance-teen");
   expect((await page.request.get(`/api/v1/events/${event.id}`)).status()).toBe(200);
-  await admin("POST", `/admin/users/${teen.id}/teen-consents`, { scope: "account", status: "granted", evidenceText: "Parent signed account consent at the church office" });
+  await grantTeenConsent(admin, teen.id, "Parent signed account consent at the church office");
   await signIn(page, "acceptance-teen");
   expect((await page.request.get("/api/v1/auth/me")).status()).toBe(200);
   await page.goto(`/groups/${group.id}`);
@@ -164,11 +164,11 @@ test("a consented teen joins general events with restricted roles, private ident
   await checkFeed("account consent revoked", 404);
   await admin("PUT", `/admin/users/${teen.id}`, { status: "active" });
   await checkFeed("enabled without consent, pending", 404);
-  await admin("POST", `/admin/users/${teen.id}/teen-consents`, { scope: "account", status: "granted", evidenceText: "Parent renewed account consent" });
+  await grantTeenConsent(admin, teen.id, "Parent renewed account consent");
   await checkFeed("consent restored", 200);
   await admin("PUT", `/admin/users/${teen.id}`, { status: "disabled" });
   await checkFeed("administratively disabled", 404);
-  await admin("POST", `/admin/users/${teen.id}/teen-consents`, { scope: "account", status: "granted", evidenceText: "Parent consent remains on file" });
+  await grantTeenConsent(admin, teen.id, "Parent consent remains on file");
   await checkFeed("consent grant preserves suspension", 404);
   await admin("PUT", `/admin/users/${teen.id}`, { status: "active" });
   await checkFeed("administrator enabled with consent", 200);

@@ -3,6 +3,8 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -47,7 +49,7 @@ func TestTeenConsentInitialGrantKeepsExistingPlaces(t *testing.T) {
 	if err := app.DB.Create(&r).Error; err != nil {
 		t.Fatal(err)
 	}
-	apiDo(t, admin, "POST", consentPath(teen), map[string]string{"scope": "account", "status": "granted", "evidenceText": "Paper form"}, 200)
+	apiDo(t, admin, "POST", consentPath(teen), withConsentRevision(t, admin, teen, map[string]string{"scope": "account", "status": "granted", "evidenceText": "Paper form"}), 200)
 	var count int64
 	app.DB.Model(&models.Membership{}).Where("id = ?", m.ID).Count(&count)
 	if count != 1 || regStatus(t, app, teen.ID, occurrence.ID) != models.RegGoing {
@@ -70,7 +72,7 @@ func TestTeenConsentInitialGrantKeepsExistingPlaces(t *testing.T) {
 	if regStatus(t, app, waitingUser.ID, occurrence.ID) != models.RegGoing {
 		t.Fatal("revocation failed to free seat and promote waiter")
 	}
-	apiDo(t, admin, "POST", consentPath(teen), map[string]string{"scope": "account", "status": "granted", "evidenceText": "Renewed form"}, 200)
+	apiDo(t, admin, "POST", consentPath(teen), withConsentRevision(t, admin, teen, map[string]string{"scope": "account", "status": "granted", "evidenceText": "Renewed form"}), 200)
 	app.DB.Model(&models.Registration{}).Where("id = ?", r.ID).Count(&count)
 	if count != 0 {
 		t.Fatal("renewed consent overfilled the event")
@@ -103,7 +105,7 @@ func TestTeenConsentAuthorityAndAtomicRollback(t *testing.T) {
 	if err := app.DB.Exec(`ALTER TABLE notifications ADD CONSTRAINT reject_consent_notice CHECK (kind <> 'teen_consent.changed')`).Error; err != nil {
 		t.Fatal(err)
 	}
-	apiDo(t, admin, "POST", consentPath(teen), map[string]string{"scope": "account", "status": "granted", "evidenceText": "Paper"}, 500)
+	apiDo(t, admin, "POST", consentPath(teen), withConsentRevision(t, admin, teen, map[string]string{"scope": "account", "status": "granted", "evidenceText": "Paper"}), 500)
 	if err := app.DB.Exec(`ALTER TABLE notifications DROP CONSTRAINT reject_consent_notice`).Error; err != nil {
 		t.Fatal(err)
 	}
@@ -130,7 +132,7 @@ func TestTeenConsentAdminGuardianNoticeAndAdultHistory(t *testing.T) {
 	if err := app.DB.Create(&models.GuardianLink{TeenUserID: &teen.ID, GuardianUserID: other.ID, Status: models.GuardianConfirmed}).Error; err != nil {
 		t.Fatal(err)
 	}
-	apiDo(t, admin, "POST", consentPath(teen), map[string]string{"scope": "account", "status": "granted", "evidenceText": "Paper"}, 200)
+	apiDo(t, admin, "POST", consentPath(teen), withConsentRevision(t, admin, teen, map[string]string{"scope": "account", "status": "granted", "evidenceText": "Paper"}), 200)
 	var count int64
 	app.DB.Model(&models.Notification{}).Where("user_id = ? AND kind = ?", other.ID, notify.TeenConsentChanged).Count(&count)
 	if count != 1 {
@@ -168,7 +170,7 @@ func TestTeenEnableReadsConsentAfterLifecycleLock(t *testing.T) {
 	adminUser := newTestUser(t, app, "admin", "pw", models.RoleAdmin)
 	admin := loginAPI(t, app, "admin", "pw")
 	teen := consentTeen(t, app)
-	apiDo(t, admin, "POST", consentPath(teen), map[string]string{"scope": "account", "status": "granted", "evidenceText": "Paper"}, 200)
+	apiDo(t, admin, "POST", consentPath(teen), withConsentRevision(t, admin, teen, map[string]string{"scope": "account", "status": "granted", "evidenceText": "Paper"}), 200)
 	apiDo(t, admin, "PUT", "/api/v1/admin/users/"+itoa(teen.ID), map[string]string{"status": "disabled"}, 200)
 	tx := app.DB.Begin()
 	defer tx.Rollback()
@@ -210,9 +212,10 @@ func TestTeenConsentRechecksAdminUnderLock(t *testing.T) {
 	if err := tx.Clauses(clause.Locking{Strength: "NO KEY UPDATE"}).First(&models.User{}, adminUser.ID).Error; err != nil {
 		t.Fatal(err)
 	}
+	body := withConsentRevision(t, admin, teen, map[string]string{"scope": "account", "status": "granted", "evidenceText": "Paper"})
 	done := make(chan int, 1)
 	go func() {
-		done <- admin.do("POST", consentPath(teen), map[string]string{"scope": "account", "status": "granted", "evidenceText": "Paper"}, true).Code
+		done <- admin.do("POST", consentPath(teen), body, true).Code
 	}()
 	waitForBlockedConsent(t, app)
 	if err := tx.Model(&models.User{}).Where("id = ?", adminUser.ID).Updates(map[string]any{"role": models.RoleMember, "session_version": gorm.Expr("session_version + 1")}).Error; err != nil {
@@ -307,6 +310,60 @@ func consentPath(teen *models.User) string {
 	return "/api/v1/admin/users/" + itoa(teen.ID) + "/teen-consents"
 }
 
+// consentRevision is the revision c's read of teen's consent panel names
+// (DEC-176), or "" when c may not read it.
+func consentRevision(t *testing.T, c *apiClient, teen *models.User) string {
+	t.Helper()
+	w := c.do("GET", consentPath(teen), nil, false)
+	var out teenConsentsJSON
+	if w.Code == 200 {
+		if err := json.Unmarshal(w.Body.Bytes(), &out); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return out.Revision
+}
+
+// withConsentRevision is body naming a fresh read of teen's consent panel, as
+// the panel sends a grant.
+func withConsentRevision(t *testing.T, c *apiClient, teen *models.User, body map[string]string) map[string]string {
+	t.Helper()
+	out := map[string]string{"revision": consentRevision(t, c, teen)}
+	for k, v := range body {
+		out[k] = v
+	}
+	return out
+}
+
+// guardianRevision is the revision c's card row for linkID names, or "".
+func guardianRevision(t *testing.T, c *apiClient, linkID uint) string {
+	t.Helper()
+	w := c.do("GET", "/api/v1/me/guardian-teens", nil, false)
+	var out guardianTeensResponseJSON
+	if w.Code == 200 {
+		if err := json.Unmarshal(w.Body.Bytes(), &out); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, teen := range out.Teens {
+		if teen.LinkID == linkID {
+			return teen.Revision
+		}
+	}
+	return ""
+}
+
+// withGuardianRevision is body naming a fresh read of the guardian's card, as
+// the card sends a grant.
+func withGuardianRevision(t *testing.T, c *apiClient, linkID uint, body map[string]string) map[string]string {
+	t.Helper()
+	out := map[string]string{"revision": guardianRevision(t, c, linkID)}
+	for k, v := range body {
+		out[k] = v
+	}
+	return out
+}
+
 func TestAdminTeenConsentScopesAndHistory(t *testing.T) {
 	app := testApp(t)
 	newTestUser(t, app, "admin", "pw", models.RoleAdmin)
@@ -318,7 +375,7 @@ func TestAdminTeenConsentScopesAndHistory(t *testing.T) {
 	apiDo(t, admin, "POST", path, map[string]string{"scope": "other", "status": "granted", "evidenceText": "paper"}, 400)
 	apiDo(t, admin, "POST", path, map[string]string{"scope": "sms", "status": "granted", "evidenceText": strings.Repeat("a", 1001)}, 400)
 	for _, scope := range []string{"sms", "photos", "account"} {
-		apiDo(t, admin, "POST", path, map[string]string{"scope": scope, "status": "granted", "evidenceText": " Signed paper form on file "}, 200)
+		apiDo(t, admin, "POST", path, withConsentRevision(t, admin, teen, map[string]string{"scope": scope, "status": "granted", "evidenceText": " Signed paper form on file "}), 200)
 		app.DB.First(teen, teen.ID)
 		want := models.UserPendingConsent
 		if scope == "account" {
@@ -373,7 +430,7 @@ func TestTeenConsentPreservesAdministrativeSuspension(t *testing.T) {
 	teen := consentTeen(t, app)
 	path := "/api/v1/admin/users/" + itoa(teen.ID)
 	change := func(status string) {
-		apiDo(t, admin, "POST", consentPath(teen), map[string]string{"scope": "account", "status": status, "evidenceText": "Paper form"}, 200)
+		apiDo(t, admin, "POST", consentPath(teen), withConsentRevision(t, admin, teen, map[string]string{"scope": "account", "status": status, "evidenceText": "Paper form"}), 200)
 	}
 	change("granted")
 	apiDo(t, admin, "PUT", path, map[string]string{"status": "disabled"}, 200)
@@ -466,7 +523,7 @@ func TestTeenConsentNoticesSerializeWithRealAdminDelete(t *testing.T) {
 				grant := func(name string, want int) func() error {
 					return func() error {
 						order = name
-						return doExpect(actor, "POST", consentPath(teen), map[string]string{"scope": "photos", "status": "granted", "evidenceText": "Paper form"}, want)
+						return doExpect(actor, "POST", consentPath(teen), withConsentRevision(t, actor, teen, map[string]string{"scope": "photos", "status": "granted", "evidenceText": "Paper form"}), want)
 					}
 				}
 				lostWant := 200
@@ -498,5 +555,190 @@ func TestTeenConsentNoticesSerializeWithRealAdminDelete(t *testing.T) {
 				}
 			})
 		})
+	}
+}
+
+// consentFamily is a teen with a confirmed guardian, and the admin's and the
+// guardian's clients.
+type consentFamily struct {
+	app             *App
+	teen            *models.User
+	link            *models.GuardianLink
+	admin, guardian *apiClient
+}
+
+func newConsentFamily(t *testing.T) consentFamily {
+	t.Helper()
+	app, _, teen, link, guardian, admin := pendingGuardianEmailSetup(t)
+	apiDo(t, admin, "POST", "/api/v1/admin/guardian-links/"+itoa(link.ID)+"/confirm", map[string]string{"checkNote": "known family"}, 200)
+	return consentFamily{app: app, teen: teen, link: link, admin: admin, guardian: guardian}
+}
+
+// consentTrail is what a consent change writes: its row, its audit row, its
+// notices, and the teen's status and sessions.
+type consentTrail struct {
+	consents, audits, notices int64
+	status                    string
+	sessionVersion            int
+}
+
+func (f consentFamily) trail(t *testing.T) consentTrail {
+	t.Helper()
+	var teen models.User
+	if err := f.app.DB.First(&teen, f.teen.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	return consentTrail{
+		consents:       countRows(t, f.app.DB, "teen_consents", "teen_user_id = ?", f.teen.ID),
+		audits:         countRows(t, f.app.DB, "audit_logs", "action IN ?", []string{audit.TeenConsentGranted, audit.TeenConsentRevoked}),
+		notices:        countRows(t, f.app.DB, "notifications", "kind = ?", notify.TeenConsentChanged),
+		status:         teen.Status,
+		sessionVersion: teen.SessionVersion,
+	}
+}
+
+func refusedAsChanged(t *testing.T, w *httptest.ResponseRecorder) {
+	t.Helper()
+	if w.Code != http.StatusConflict || !strings.Contains(w.Body.String(), `"code":"consent_changed"`) {
+		t.Fatalf("answered %d %s, want 409 consent_changed", w.Code, w.Body.String())
+	}
+}
+
+func TestAdminGrantFromAReadOlderThanAGuardiansRevokeIsRefused(t *testing.T) {
+	f := newConsentFamily(t)
+	apiDo(t, f.admin, "POST", consentPath(f.teen), withConsentRevision(t, f.admin, f.teen, map[string]string{"scope": "account", "status": "granted", "evidenceText": "Paper form"}), 200)
+	opened := consentRevision(t, f.admin, f.teen)
+	apiDo(t, f.guardian, "POST", guardianConsentPath(f.link.ID), map[string]string{"scope": "account", "status": "revoked"}, 200)
+	before := f.trail(t)
+	refusedAsChanged(t, f.admin.do("POST", consentPath(f.teen), map[string]string{"scope": "account", "status": "granted", "evidenceText": "Paper form", "revision": opened}, true))
+	if after := f.trail(t); after != before || after.status != models.UserDisabled {
+		t.Fatalf("a refused grant wrote: before %+v, after %+v", before, after)
+	}
+	fresh := consentRevision(t, f.admin, f.teen)
+	body := apiDo(t, f.admin, "POST", consentPath(f.teen), map[string]string{"scope": "account", "status": "granted", "evidenceText": "Renewed form", "revision": fresh}, 200)
+	var out teenConsentChangedJSON
+	if err := json.Unmarshal([]byte(body), &out); err != nil {
+		t.Fatal(err)
+	}
+	if out.Teen.ID != f.teen.ID || out.Teen.Revision == "" || out.Teen.Revision == fresh || out.Teen.Revision != consentRevision(t, f.admin, f.teen) {
+		t.Fatalf("the answer names %+v, want the teen with the token the next read shows", out.Teen)
+	}
+	if len(out.Consents) != 3 || out.Consents[0].Status != models.ConsentGranted || out.Consents[0].EvidenceText != "Renewed form" {
+		t.Fatalf("the answer's history is %+v, want the new grant first", out.Consents)
+	}
+	if after := f.trail(t); after.consents != before.consents+1 || after.status != models.UserActive {
+		t.Fatalf("the fresh grant did not land: %+v", after)
+	}
+	// The answer's token is the next read: a grant made from it lands.
+	apiDo(t, f.admin, "POST", consentPath(f.teen), map[string]string{"scope": "sms", "status": "granted", "evidenceText": "SMS form", "revision": out.Teen.Revision}, 200)
+}
+
+func TestAdminGrantAfterAChangeOfAnotherScopeIsRefused(t *testing.T) {
+	f := newConsentFamily(t)
+	opened := consentRevision(t, f.admin, f.teen)
+	apiDo(t, f.guardian, "POST", guardianConsentPath(f.link.ID), withGuardianRevision(t, f.guardian, f.link.ID, map[string]string{"scope": "sms", "status": "granted"}), 200)
+	before := f.trail(t)
+	refusedAsChanged(t, f.admin.do("POST", consentPath(f.teen), map[string]string{"scope": "photos", "status": "granted", "evidenceText": "Paper form", "revision": opened}, true))
+	if after := f.trail(t); after != before {
+		t.Fatalf("a refused grant wrote: before %+v, after %+v", before, after)
+	}
+}
+
+func TestConsentRevokeFromAnOlderReadLands(t *testing.T) {
+	f := newConsentFamily(t)
+	opened := consentRevision(t, f.admin, f.teen)
+	apiDo(t, f.guardian, "POST", guardianConsentPath(f.link.ID), withGuardianRevision(t, f.guardian, f.link.ID, map[string]string{"scope": "sms", "status": "granted"}), 200)
+	apiDo(t, f.admin, "POST", consentPath(f.teen), map[string]string{"scope": "sms", "status": "revoked", "revision": opened}, 200)
+	apiDo(t, f.admin, "POST", consentPath(f.teen), map[string]string{"scope": "photos", "status": "revoked"}, 200)
+	card := guardianRevision(t, f.guardian, f.link.ID)
+	apiDo(t, f.admin, "POST", consentPath(f.teen), withConsentRevision(t, f.admin, f.teen, map[string]string{"scope": "photos", "status": "granted", "evidenceText": "Photo form"}), 200)
+	apiDo(t, f.guardian, "POST", guardianConsentPath(f.link.ID), map[string]string{"scope": "photos", "status": "revoked", "revision": card}, 200)
+	apiDo(t, f.guardian, "POST", guardianConsentPath(f.link.ID), map[string]string{"scope": "sms", "status": "revoked"}, 200)
+	if n := countRows(t, f.app.DB, "teen_consents", "teen_user_id = ? AND status = ?", f.teen.ID, models.ConsentRevoked); n != 4 {
+		t.Fatalf("%d revokes landed, want 4", n)
+	}
+}
+
+func TestFirstConsentGrantNamesTheEmptyLog(t *testing.T) {
+	f := newConsentFamily(t)
+	empty := consentRevision(t, f.admin, f.teen)
+	if empty == "" || empty != guardianRevision(t, f.guardian, f.link.ID) {
+		t.Fatalf("the empty log's tokens are %q and %q, want one real token", empty, guardianRevision(t, f.guardian, f.link.ID))
+	}
+	other := consentTeen(t, f.app)
+	if consentRevision(t, f.admin, other) == empty {
+		t.Fatal("two teens with no consent share a token")
+	}
+	for _, body := range []map[string]string{
+		{"scope": "account", "status": "granted", "evidenceText": "Paper form"},
+		{"scope": "account", "status": "granted", "evidenceText": "Paper form", "revision": ""},
+		{"scope": "account", "status": "granted", "evidenceText": "Paper form", "revision": "not a token"},
+	} {
+		refusedAsChanged(t, f.admin.do("POST", consentPath(f.teen), body, true))
+	}
+	guardianBody := map[string]string{"scope": "photos", "status": "granted"}
+	refusedAsChanged(t, f.guardian.do("POST", guardianConsentPath(f.link.ID), guardianBody, true))
+	if n := countRows(t, f.app.DB, "teen_consents", "teen_user_id = ?", f.teen.ID); n != 0 {
+		t.Fatalf("a grant naming no read wrote %d rows", n)
+	}
+	apiDo(t, f.admin, "POST", consentPath(f.teen), map[string]string{"scope": "account", "status": "granted", "evidenceText": "Paper form", "revision": empty}, 200)
+	refusedAsChanged(t, f.admin.do("POST", consentPath(f.teen), map[string]string{"scope": "sms", "status": "granted", "evidenceText": "SMS form", "revision": empty}, true))
+	refusedAsChanged(t, f.guardian.do("POST", guardianConsentPath(f.link.ID), map[string]string{"scope": "sms", "status": "granted", "revision": empty}, true))
+}
+
+// A refusal a person can act on comes before the read is compared: a 409 that
+// says the log moved never stands in for a 403 or a 400.
+func TestConsentRefusalsComeBeforeTheStaleRead(t *testing.T) {
+	f := newConsentFamily(t)
+	stale := consentRevision(t, f.admin, f.teen)
+	apiDo(t, f.admin, "POST", consentPath(f.teen), map[string]string{"scope": "account", "status": "granted", "evidenceText": "Paper form", "revision": stale}, 200)
+	newTestUser(t, f.app, "consent-member", "pw", models.RoleMember)
+	member := loginAPI(t, f.app, "consent-member", "pw")
+	adult := newTestUser(t, f.app, "consent-adult", "pw", models.RoleMember)
+	for _, tc := range []struct {
+		name   string
+		client *apiClient
+		path   string
+		body   map[string]string
+		want   int
+		code   string
+	}{
+		{"a member", member, consentPath(f.teen), map[string]string{"scope": "sms", "status": "granted", "evidenceText": "Paper"}, 403, ""},
+		{"an adult target", f.admin, consentPath(adult), map[string]string{"scope": "sms", "status": "granted", "evidenceText": "Paper"}, 409, "consent_teen_only"},
+		{"missing evidence", f.admin, consentPath(f.teen), map[string]string{"scope": "sms", "status": "granted"}, 400, "consent_evidence_required"},
+		{"a bad scope", f.admin, consentPath(f.teen), map[string]string{"scope": "other", "status": "granted", "evidenceText": "Paper"}, 400, "consent_invalid"},
+		{"long evidence", f.admin, consentPath(f.teen), map[string]string{"scope": "sms", "status": "granted", "evidenceText": strings.Repeat("a", 1001)}, 400, "consent_evidence_long"},
+		{"a guardian's bad scope", f.guardian, guardianConsentPath(f.link.ID), map[string]string{"scope": "other", "status": "granted"}, 400, "consent_invalid"},
+		{"another person's link", member, guardianConsentPath(f.link.ID), map[string]string{"scope": "sms", "status": "granted"}, 403, ""},
+	} {
+		tc.body["revision"] = stale
+		w := tc.client.do("POST", tc.path, tc.body, true)
+		if w.Code != tc.want || (tc.code != "" && !strings.Contains(w.Body.String(), `"code":"`+tc.code+`"`)) {
+			t.Errorf("%s with a stale read: %d %s, want %d %s", tc.name, w.Code, w.Body.String(), tc.want, tc.code)
+		}
+	}
+}
+
+// The read's token is what the write checks: both come from one snapshot of
+// the log, so a grant from the read lands and the token follows each change.
+func TestConsentReadRevisionIsTheWritesBase(t *testing.T) {
+	f := newConsentFamily(t)
+	for _, scope := range []string{"account", "sms", "photos"} {
+		read := consentRevision(t, f.admin, f.teen)
+		var current string
+		if err := f.app.DB.Transaction(func(tx *gorm.DB) error {
+			var err error
+			current, err = f.app.consentRevisionIn(tx, f.teen.ID)
+			return err
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if read != current {
+			t.Fatalf("the panel read %q, the write would compare %q", read, current)
+		}
+		apiDo(t, f.admin, "POST", consentPath(f.teen), map[string]string{"scope": scope, "status": "granted", "evidenceText": "Paper", "revision": read}, 200)
+		if consentRevision(t, f.admin, f.teen) == read {
+			t.Fatalf("a %s grant left the token where it was", scope)
+		}
 	}
 }

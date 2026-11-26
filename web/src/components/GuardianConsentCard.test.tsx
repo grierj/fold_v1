@@ -1,11 +1,11 @@
 import { stubService } from "../test/service";
-import { act, render, screen, waitFor, within } from "@testing-library/react";
+import { act, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, expect, test, vi } from "vitest";
 import { MemoryRouter } from "react-router-dom";
 import { ApiError } from "../api/core";
 import { Contacts } from "../api/contacts";
-import type { ContactGrant } from "../types";
+import type { ContactGrant, GuardianConsentChangedResponse, GuardianTeen } from "../types";
 import { GuardianConsentCard } from "./GuardianConsentCard";
 import { Guardians } from "../api/guardians";
 
@@ -13,7 +13,14 @@ stubService(Guardians, () => ({ teens: vi.fn(), claim: vi.fn(), change: vi.fn(),
 
 stubService(Contacts, () => ({ grants: vi.fn(), reveal: vi.fn(), revoke: vi.fn() }));
 
-const teen = { linkId: 1, teenUserId: 2, teenName: "Sam Teen", accountConsent: true, smsConsent: false, photosConsent: false };
+const teen: GuardianTeen = { linkId: 1, teenUserId: 2, teenName: "Sam Teen", accountConsent: true, smsConsent: false, photosConsent: false, revision: "r1", changes: 1, lastChangeYours: false };
+
+// What a landed change answers: the card row as it left it, named with the token that follows it.
+const stored = (row: GuardianTeen, revision = "r2"): GuardianConsentChangedResponse => ({
+  teen: { id: row.teenUserId, revision }, guardianTeen: { ...row, revision },
+});
+
+const changed = () => new ApiError(409, "private", { code: "consent_changed" });
 const grant: ContactGrant = { id: 1, requestId: 1, requesterId: 10, requesterName: "Lee", subjectUserId: 2, subjectName: "Sam Teen", contextType: "group", fields: "email", needsAdmin: true, grantedAt: "2026-10-02T12:00:00Z", endReason: "", canReveal: false, canRevoke: true };
 
 beforeEach(() => {
@@ -22,7 +29,7 @@ beforeEach(() => {
 });
 
 test("a failed guardian list can be retried without reloading profile", async () => {
-  vi.mocked(Guardians.teens).mockRejectedValueOnce(new Error("offline")).mockResolvedValueOnce({ teens: [{ linkId: 1, teenUserId: 2, teenName: "Sam Teen", accountConsent: false, smsConsent: false, photosConsent: false }] });
+  vi.mocked(Guardians.teens).mockRejectedValueOnce(new Error("offline")).mockResolvedValueOnce({ teens: [{ ...teen, accountConsent: false }] });
   render(<GuardianConsentCard />);
   await userEvent.click(await screen.findByRole("button", { name: "Try again" }));
   expect(await screen.findByRole("heading", { name: "Sam Teen" })).toBeVisible();
@@ -30,11 +37,11 @@ test("a failed guardian list can be retried without reloading profile", async ()
   expect(screen.queryByRole("button", { name: "Try again" })).not.toBeInTheDocument();
 });
 
-test("successful account consent revocation closes active grants before the parent reloads; reopening fetches current access", async () => {
-  let finishReload!: (value: { teens: typeof teen[] }) => void;
-  const reload = new Promise<{ teens: typeof teen[] }>((resolve) => { finishReload = resolve; });
-  vi.mocked(Guardians.teens).mockResolvedValueOnce({ teens: [teen] }).mockReturnValueOnce(reload);
-  vi.mocked(Guardians.change).mockResolvedValue({});
+test("successful account consent revocation closes active grants and shows what its answer stored; reopening fetches current access", async () => {
+  let finish!: (value: GuardianConsentChangedResponse) => void;
+  const answer = new Promise<GuardianConsentChangedResponse>((resolve) => { finish = resolve; });
+  vi.mocked(Guardians.teens).mockResolvedValueOnce({ teens: [teen] });
+  vi.mocked(Guardians.change).mockReturnValueOnce(answer);
   vi.mocked(Contacts.grants).mockResolvedValueOnce({ grants: [grant] }).mockResolvedValueOnce({ grants: [] });
   render(<MemoryRouter><GuardianConsentCard /></MemoryRouter>);
   await userEvent.click(await screen.findByRole("button", { name: "View active contact access" }));
@@ -42,13 +49,14 @@ test("successful account consent revocation closes active grants before the pare
   expect(screen.getByRole("button", { name: "Revoke access" })).toBeInTheDocument();
   await userEvent.click(screen.getByRole("button", { name: "Revoke consent" }));
   expect(window.confirm).toHaveBeenCalledWith(expect.stringContaining("They will be signed out"));
-  expect(Guardians.change).toHaveBeenCalledWith(1, "account", "revoked");
+  expect(Guardians.change).toHaveBeenCalledWith(1, "account", "revoked", "r1");
+  await act(async () => { finish(stored({ ...teen, accountConsent: false, changes: 2, lastChangeYours: true })); });
+  expect(await screen.findByText("Account consent revoked.")).toBeInTheDocument();
   expect(screen.queryByRole("region", { name: "Active teen contact grants" })).not.toBeInTheDocument();
   expect(screen.queryByRole("button", { name: "Revoke access" })).not.toBeInTheDocument();
   expect(screen.getByRole("button", { name: "View active contact access" })).toHaveAttribute("aria-expanded", "false");
-  await act(async () => { finishReload({ teens: [{ ...teen, accountConsent: false }] }); });
-  expect(await screen.findByText("Account consent revoked.")).toBeInTheDocument();
   expect(screen.getByText("Consent not granted")).toBeInTheDocument();
+  expect(Guardians.teens).toHaveBeenCalledOnce();
   await userEvent.click(screen.getByRole("button", { name: "View active contact access" }));
   expect(await screen.findByText("No active contact grants")).toBeInTheDocument();
   expect(Contacts.grants).toHaveBeenCalledTimes(2);
@@ -59,8 +67,8 @@ test("successful account consent revocation closes active grants before the pare
 test("a grant load pending at consent revocation cannot restore ended access after reopening", async () => {
   let finishOld!: (value: { grants: ContactGrant[] }) => void;
   const old = new Promise<{ grants: ContactGrant[] }>((resolve) => { finishOld = resolve; });
-  vi.mocked(Guardians.teens).mockResolvedValueOnce({ teens: [teen] }).mockResolvedValue({ teens: [{ ...teen, accountConsent: false }] });
-  vi.mocked(Guardians.change).mockResolvedValue({});
+  vi.mocked(Guardians.teens).mockResolvedValueOnce({ teens: [teen] });
+  vi.mocked(Guardians.change).mockResolvedValue(stored({ ...teen, accountConsent: false, changes: 2, lastChangeYours: true }));
   vi.mocked(Contacts.grants).mockReturnValueOnce(old).mockResolvedValueOnce({ grants: [] });
   render(<MemoryRouter><GuardianConsentCard /></MemoryRouter>);
   await userEvent.click(await screen.findByRole("button", { name: "View active contact access" }));
@@ -93,36 +101,6 @@ test.each(["cancelled", "failed"])("%s consent revocation preserves the expanded
   expect(Guardians.teens).toHaveBeenCalledTimes(1);
 });
 
-test("a consent change that saved but whose refresh failed offers no consent action until a refresh lands (#430)", async () => {
-  vi.mocked(Guardians.teens).mockResolvedValueOnce({ teens: [teen] }).mockRejectedValueOnce(new Error("offline")).mockRejectedValueOnce(new Error("offline"))
-    .mockResolvedValueOnce({ teens: [{ ...teen, accountConsent: false }] });
-  vi.mocked(Guardians.change).mockResolvedValue({});
-  render(<MemoryRouter><GuardianConsentCard /></MemoryRouter>);
-  await userEvent.click(await screen.findByRole("button", { name: "Revoke consent" }));
-  expect(await screen.findByRole("status")).toHaveTextContent("Account consent revoked.");
-  expect(screen.getByRole("alert")).toHaveTextContent("Your change is saved, but we couldn't load Sam Teen's latest consent. Refresh to see it before you change anything else.");
-
-  const stale = () => {
-    expect(screen.queryByText("Consent granted")).not.toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: /^(Grant|Revoke) consent$/ })).not.toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "Email me a consent link" })).not.toBeInTheDocument();
-    expect(screen.queryByRole("combobox", { name: /^Consent/ })).not.toBeInTheDocument();
-  };
-
-  stale();
-  const refresh = screen.getByRole("button", { name: "Refresh consent" });
-  await userEvent.click(refresh);
-  await waitFor(() => expect(screen.getByRole("alert")).toHaveTextContent("couldn't reach"));
-  stale();
-  expect(screen.getByRole("status")).toHaveTextContent("Account consent revoked.");
-  expect(refresh).toHaveFocus();
-  await userEvent.click(refresh);
-  expect(await screen.findByText("Consent not granted")).toBeInTheDocument();
-  expect(screen.queryByRole("button", { name: "Refresh consent" })).not.toBeInTheDocument();
-  expect(screen.getByRole("button", { name: "Grant consent" })).toHaveFocus();
-  expect(Guardians.change).toHaveBeenCalledOnce();
-});
-
 test("changing the consent type while a change is on its way keeps that change's answer", async () => {
   vi.mocked(Guardians.teens).mockResolvedValue({ teens: [teen] });
   let refuse!: (cause: unknown) => void;
@@ -151,70 +129,84 @@ test("a new guardian link request clears the last one's success line (#430)", as
   expect(screen.queryByText("Request sent.")).not.toBeInTheDocument();
 });
 
-function held<T>() {
-  let resolve!: (value: T) => void;
-  let reject!: (cause: unknown) => void;
-  const promise = new Promise<T>((yes, no) => { resolve = yes; reject = no; });
-
-  return { promise, resolve, reject };
-}
-
-const ana = { linkId: 1, teenUserId: 2, teenName: "Ana Teen", accountConsent: true, smsConsent: false, photosConsent: false };
-const ben = { linkId: 2, teenUserId: 3, teenName: "Ben Teen", accountConsent: true, smsConsent: false, photosConsent: false };
-const section = (name: string) => screen.getByRole("heading", { name }).parentElement!;
-
-test("an older guardian read that lands after a newer refresh never brings back the actions it took away", async () => {
-  const anaRead = held<{ teens: typeof ana[] }>();
-  vi.mocked(Guardians.teens).mockResolvedValueOnce({ teens: [ana, ben] }).mockReturnValueOnce(anaRead.promise)
-    .mockRejectedValueOnce(new Error("offline")).mockResolvedValueOnce({ teens: [{ ...ana, accountConsent: false }, { ...ben, accountConsent: false }] });
-  vi.mocked(Guardians.change).mockResolvedValue({});
+test("a grant refused because someone else changed the consent shows the consent as it is now and sends nothing more", async () => {
+  const opened = { ...teen, accountConsent: false };
+  vi.mocked(Guardians.teens).mockResolvedValueOnce({ teens: [opened] })
+    .mockResolvedValueOnce({ teens: [{ ...opened, accountConsent: true, changes: 2, revision: "r2" }] });
+  vi.mocked(Guardians.change).mockRejectedValue(changed());
   render(<MemoryRouter><GuardianConsentCard /></MemoryRouter>);
-  await screen.findByRole("heading", { name: "Ana Teen" });
-  await userEvent.click(within(section("Ana Teen")).getByRole("button", { name: "Revoke consent" }));
-  await userEvent.click(within(section("Ben Teen")).getByRole("button", { name: "Revoke consent" }));
-  await userEvent.click(await within(section("Ben Teen")).findByRole("button", { name: "Refresh consent" }));
-  expect(await within(section("Ben Teen")).findByRole("button", { name: "Grant consent" })).toBeInTheDocument();
-  await act(async () => { anaRead.resolve({ teens: [ana, ben] }); await anaRead.promise; });
-  expect(within(section("Ben Teen")).getByRole("button", { name: "Grant consent" })).toBeInTheDocument();
-  expect(within(section("Ben Teen")).queryByRole("button", { name: "Revoke consent" })).not.toBeInTheDocument();
-  expect(within(section("Ben Teen")).queryByRole("button", { name: "Refresh consent" })).not.toBeInTheDocument();
-  expect(within(section("Ana Teen")).getByRole("button", { name: "Grant consent" })).toBeInTheDocument();
+  await userEvent.click(await screen.findByRole("button", { name: "Grant consent" }));
+  expect(await screen.findByText("Sam Teen's consent changed while you were choosing, so your choice could not be saved. This is the consent as it is now.")).toHaveFocus();
+  expect(screen.getByText("Consent granted")).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Revoke consent" })).toBeInTheDocument();
+  expect(Guardians.change).toHaveBeenCalledOnce();
+  expect(screen.queryByRole("alert")).not.toBeInTheDocument();
 });
 
-test("a change whose read a newer, failed read replaced is told as stale, never as current", async () => {
-  const anaRead = held<{ teens: typeof ana[] }>();
-  vi.mocked(Guardians.teens).mockResolvedValueOnce({ teens: [ana, ben] }).mockReturnValueOnce(anaRead.promise).mockRejectedValueOnce(new Error("offline"));
-  vi.mocked(Guardians.change).mockResolvedValue({});
+test("a grant and a revoke by someone else since the read are a conflict, never a quiet resend of the grant", async () => {
+  const opened = { ...teen, accountConsent: false };
+  // The account looks as it did (not granted), but two changes landed since the card read it.
+  vi.mocked(Guardians.teens).mockResolvedValueOnce({ teens: [opened] })
+    .mockResolvedValueOnce({ teens: [{ ...opened, changes: 3, revision: "r3" }] });
+  vi.mocked(Guardians.change).mockRejectedValue(changed());
   render(<MemoryRouter><GuardianConsentCard /></MemoryRouter>);
-  await screen.findByRole("heading", { name: "Ana Teen" });
-  await userEvent.click(within(section("Ana Teen")).getByRole("button", { name: "Revoke consent" }));
-  await userEvent.click(within(section("Ben Teen")).getByRole("button", { name: "Revoke consent" }));
-  expect(await within(section("Ben Teen")).findByRole("button", { name: "Refresh consent" })).toBeInTheDocument();
-  await act(async () => { anaRead.resolve({ teens: [{ ...ana, accountConsent: false }, ben] }); await anaRead.promise; });
-  expect(await within(section("Ana Teen")).findByRole("button", { name: "Refresh consent" })).toBeInTheDocument();
-  expect(within(section("Ana Teen")).queryByRole("button", { name: /^(Grant|Revoke) consent$/ })).not.toBeInTheDocument();
+  await userEvent.click(await screen.findByRole("button", { name: "Grant consent" }));
+  expect(await screen.findByText(/could not be saved/)).toBeInTheDocument();
+  expect(Guardians.change).toHaveBeenCalledOnce();
+  expect(screen.getByText("Consent not granted")).toBeInTheDocument();
 });
 
-test("moves focus from the pressed button to Refresh consent when the refresh after a change fails", async () => {
-  vi.mocked(Guardians.teens).mockResolvedValueOnce({ teens: [teen] }).mockRejectedValueOnce(new Error("offline"));
-  vi.mocked(Guardians.change).mockResolvedValue({});
+test("a grant whose answer was lost and is pressed again is saved, not refused", async () => {
+  const opened = { ...teen, accountConsent: false };
+  vi.mocked(Guardians.teens).mockResolvedValueOnce({ teens: [opened] })
+    .mockResolvedValueOnce({ teens: [{ ...opened, accountConsent: true, changes: 2, lastChangeYours: true, revision: "r2" }] });
+  vi.mocked(Guardians.change).mockRejectedValueOnce(new ApiError(502, "bad gateway", {})).mockRejectedValueOnce(changed());
+  render(<MemoryRouter><GuardianConsentCard /></MemoryRouter>);
+  await userEvent.click(await screen.findByRole("button", { name: "Grant consent" }));
+  expect(await screen.findByRole("alert")).toBeInTheDocument();
+  await userEvent.click(screen.getByRole("button", { name: "Grant consent" }));
+  expect(await screen.findByText("Account consent granted.")).toBeInTheDocument();
+  expect(screen.queryByText(/could not be saved/)).not.toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Revoke consent" })).toBeInTheDocument();
+  expect(vi.mocked(Guardians.change).mock.calls.map((call) => call[3])).toEqual(["r1", "r1"]);
+});
+
+test("a lost grant whose read shows someone else's grant is a conflict, not this guardian's save", async () => {
+  const opened = { ...teen, accountConsent: false };
+  vi.mocked(Guardians.teens).mockResolvedValueOnce({ teens: [opened] })
+    .mockResolvedValueOnce({ teens: [{ ...opened, accountConsent: true, changes: 2, lastChangeYours: false, revision: "r2" }] });
+  vi.mocked(Guardians.change).mockRejectedValueOnce(new ApiError(502, "bad gateway", {})).mockRejectedValueOnce(changed());
+  render(<MemoryRouter><GuardianConsentCard /></MemoryRouter>);
+  await userEvent.click(await screen.findByRole("button", { name: "Grant consent" }));
+  await screen.findByRole("alert");
+  await userEvent.click(screen.getByRole("button", { name: "Grant consent" }));
+  expect(await screen.findByText(/could not be saved/)).toBeInTheDocument();
+});
+
+test("a revoke and then a grant each name what the last change left, and focus follows the button that replaced the pressed one", async () => {
+  vi.mocked(Guardians.teens).mockResolvedValueOnce({ teens: [teen] });
+  vi.mocked(Guardians.change)
+    .mockResolvedValueOnce(stored({ ...teen, accountConsent: false, changes: 2, lastChangeYours: true }, "r2"))
+    .mockResolvedValueOnce(stored({ ...teen, accountConsent: true, changes: 3, lastChangeYours: true }, "r3"));
   render(<MemoryRouter><GuardianConsentCard /></MemoryRouter>);
   (await screen.findByRole("button", { name: "Revoke consent" })).focus();
   await userEvent.keyboard("{Enter}");
-  const refresh = await screen.findByRole("button", { name: "Refresh consent" });
-  await waitFor(() => expect(refresh).toHaveFocus());
+  expect(await screen.findByText("Account consent revoked.")).toBeInTheDocument();
+  await waitFor(() => expect(screen.getByRole("button", { name: "Grant consent" })).toHaveFocus());
+  await userEvent.keyboard("{Enter}");
+  expect(await screen.findByText("Account consent granted.")).toBeInTheDocument();
+  await waitFor(() => expect(screen.getByRole("button", { name: "Revoke consent" })).toHaveFocus());
+  expect(vi.mocked(Guardians.change).mock.calls.map((call) => [call[2], call[3]])).toEqual([["revoked", "r1"], ["granted", "r2"]]);
+  expect(Guardians.teens).toHaveBeenCalledOnce();
 });
 
-
-test("moves focus from the consent selector to Refresh consent when a pending read fails", async () => {
-  let failRead!: (cause: unknown) => void;
-  const read = new Promise<{ teens: typeof teen[] }>((_, fail) => { failRead = fail; });
-  vi.mocked(Guardians.teens).mockResolvedValueOnce({ teens: [teen] }).mockReturnValueOnce(read);
-  vi.mocked(Guardians.change).mockResolvedValue({});
+test("a grant whose read no longer finds the link reads the links again and says the change could not be saved", async () => {
+  const opened = { ...teen, accountConsent: false };
+  vi.mocked(Guardians.teens).mockResolvedValueOnce({ teens: [opened] }).mockResolvedValue({ teens: [] });
+  vi.mocked(Guardians.change).mockRejectedValue(changed());
   render(<MemoryRouter><GuardianConsentCard /></MemoryRouter>);
-  await userEvent.click(await screen.findByRole("button", { name: "Revoke consent" }));
-  await waitFor(() => expect(Guardians.teens).toHaveBeenCalledTimes(2));
-  screen.getByRole("combobox", { name: "Consent" }).focus();
-  await act(async () => failRead(new Error("offline")));
-  expect(await screen.findByRole("button", { name: "Refresh consent" })).toHaveFocus();
+  await userEvent.click(await screen.findByRole("button", { name: "Grant consent" }));
+  expect(await screen.findByText("Your changes could not be saved.")).toHaveFocus();
+  expect(screen.queryByRole("heading", { name: "Sam Teen" })).not.toBeInTheDocument();
+  expect(Guardians.change).toHaveBeenCalledOnce();
 });

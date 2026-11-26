@@ -18,6 +18,7 @@ import type {
   SoleHostedEventsResponse,
   SoleLedGroupsResponse,
   TeenConsent,
+  TeenConsentChangedResponse,
   TeenConsentsResponse,
   UserResponse,
   UsersResponse,
@@ -353,6 +354,7 @@ export const AdminUsers = {
 
 export const AdminTeenConsents = {
   list: (userId: Id) => api<TeenConsentsResponse>(path`/admin/users/${userId}/teen-consents`),
-  change: (userId: Id, data: Pick<TeenConsent, "scope" | "status" | "evidenceText">) =>
-    api<Record<string, never>>(path`/admin/users/${userId}/teen-consents`, { method: "POST", body: data }),
+  // `revision` is the read a grant was made from (DEC-176).
+  change: (userId: Id, data: Pick<TeenConsent, "scope" | "status" | "evidenceText"> & { revision?: string }) =>
+    api<TeenConsentChangedResponse>(path`/admin/users/${userId}/teen-consents`, { method: "POST", body: data }),
 };

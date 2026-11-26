@@ -28,12 +28,12 @@ import (
 // ---------------------------------------------------------------------------
 
 // editRevisionCheckers is every handler that checks a save's revision, exactly.
-var editRevisionCheckers = []string{"apiAdminUpdateRoom", "apiAdminUpdateUser", "apiScheduleMessage", "apiSetDateRoom", "apiSetEventVisibility", "apiSetSeriesRoom", "apiUpdateEvent", "apiUpdateGroup", "apiUpdateMessage", "saveRevisedSetting"}
+var editRevisionCheckers = []string{"apiAdminUpdateRoom", "apiAdminUpdateUser", "apiChangeTeenConsent", "apiGuardianChangeConsent", "apiScheduleMessage", "apiSetDateRoom", "apiSetEventVisibility", "apiSetSeriesRoom", "apiUpdateEvent", "apiUpdateGroup", "apiUpdateMessage", "saveRevisedSetting"}
 
-var editRevisionChecks = map[string]bool{"checkSettingRevision": true, "checkAdminUserRevision": true, "checkEventRevision": true, "checkGroupRevision": true, "checkDateRoomRevision": true, "checkMessageRevision": true, "checkRoomRevision": true, "checkEditRevision": true}
+var editRevisionChecks = map[string]bool{"checkSettingRevision": true, "checkAdminUserRevision": true, "checkEventRevision": true, "checkGroupRevision": true, "checkDateRoomRevision": true, "checkMessageRevision": true, "checkRoomRevision": true, "checkConsentRevision": true, "checkEditRevision": true}
 
 // editRevisionReaders are the checks that read their row on the handle given.
-var editRevisionReaders = map[string]bool{"checkSettingRevision": true, "checkAdminUserRevision": true, "checkGroupRevision": true, "checkDateRoomRevision": true, "checkMessageRevision": true, "checkRoomRevision": true}
+var editRevisionReaders = map[string]bool{"checkSettingRevision": true, "checkAdminUserRevision": true, "checkGroupRevision": true, "checkDateRoomRevision": true, "checkMessageRevision": true, "checkRoomRevision": true, "checkConsentRevision": true}
 
 var editRevisionTransactions = map[string]bool{"contactMutation": true, "Transaction": true}
 
@@ -199,7 +199,29 @@ func (a *App) saveRevisedSetting() {
 	}, readCommitted)
 }
 `
-	sound := guardkit.Sources{"a.go": visibility, "b.go": series, "c.go": group, "d.go": rooms, "e.go": messages, "f.go": roomEditor, "g.go": admin}
+	const consents = `package main
+func (a *App) apiChangeTeenConsent(c *gin.Context) {
+	a.contactMutation(contactChange{}, func(tx *gorm.DB) error {
+		if change.namesARead() {
+			if err := a.checkConsentRevision(tx, teen.ID, body.Revision); err != nil {
+				return err
+			}
+		}
+		return a.changeTeenConsent(tx, c, teen, actor, change)
+	})
+}
+func (a *App) apiGuardianChangeConsent(c *gin.Context) {
+	a.contactMutation(contactChange{}, func(tx *gorm.DB) error {
+		if change.namesARead() {
+			if err := a.checkConsentRevision(tx, guardianTeen.ID, body.Revision); err != nil {
+				return err
+			}
+		}
+		return a.changeTeenConsent(tx, c, guardianTeen, guardian, change)
+	})
+}
+`
+	sound := guardkit.Sources{"a.go": visibility, "b.go": series, "c.go": group, "d.go": rooms, "e.go": messages, "f.go": roomEditor, "g.go": admin, "i.go": consents}
 	if bad := editRevisionProblems(sound.Parse(0)); len(bad) > 0 {
 		t.Fatalf("the sound shape was flagged: %v", bad)
 	}
@@ -207,6 +229,33 @@ func (a *App) saveRevisedSetting() {
 	if bad := editRevisionProblems(sound.Parse(0)); len(bad) == 0 {
 		t.Error("a setting checked on the connection outside its transaction passed the guard")
 	}
+	sound["g.go"] = admin
+	for name, src := range map[string]string{
+		"an admin grant that skips the check":                                  strings.Replace(consents, "a.checkConsentRevision(tx, teen.ID, body.Revision)", "error(nil)", 1),
+		"a guardian grant that skips the check":                                strings.Replace(consents, "a.checkConsentRevision(tx, guardianTeen.ID, body.Revision)", "error(nil)", 1),
+		"a guardian grant that reads its log outside its transaction's handle": strings.Replace(consents, "checkConsentRevision(tx, guardianTeen", "checkConsentRevision(a.DB, guardianTeen", 1),
+		"a grant that reads its log outside its transaction's handle":          strings.Replace(consents, "checkConsentRevision(tx,", "checkConsentRevision(a.DB,", 1),
+		"a grant checked in the consent writer": `package main
+func (a *App) apiChangeTeenConsent(c *gin.Context) {
+	a.contactMutation(contactChange{}, func(tx *gorm.DB) error { return a.changeTeenConsent(tx, c, teen, actor, change) })
+}
+func (a *App) apiGuardianChangeConsent(c *gin.Context) {
+	a.contactMutation(contactChange{}, func(tx *gorm.DB) error { return a.changeTeenConsent(tx, c, teen, guardian, change) })
+}
+func (a *App) changeTeenConsent(tx *gorm.DB, c *gin.Context, teen, actor *models.User, change teenConsentChange) error {
+	return a.checkConsentRevision(tx, teen.ID, change.Revision)
+}
+`,
+	} {
+		if src == consents {
+			t.Fatalf("%s: the mutation did not apply", name)
+		}
+		sound["i.go"] = src
+		if bad := editRevisionProblems(sound.Parse(0)); len(bad) == 0 {
+			t.Errorf("%s passed the guard", name)
+		}
+	}
+	sound["i.go"] = consents
 	for name, src := range map[string]string{
 		"a room edit that skips the check": `package main
 func (a *App) apiAdminUpdateRoom(c *gin.Context) {
@@ -227,7 +276,7 @@ func (a *App) apiAdminUpdateRoom(c *gin.Context) {
 }
 `,
 	} {
-		sources := guardkit.Sources{"a.go": visibility, "b.go": series, "c.go": group, "d.go": rooms, "e.go": messages, "f.go": src, "g.go": admin}
+		sources := guardkit.Sources{"a.go": visibility, "b.go": series, "c.go": group, "d.go": rooms, "e.go": messages, "f.go": src, "g.go": admin, "i.go": consents}
 		if bad := editRevisionProblems(sources.Parse(0)); len(bad) == 0 {
 			t.Errorf("%s passed the guard", name)
 		}
@@ -272,7 +321,7 @@ func bookWholeSeries(tx *gorm.DB, ev *models.Event, body seriesBody) error {
 }
 `,
 	} {
-		sources := guardkit.Sources{"a.go": visibility, "b.go": series, "c.go": group, "d.go": src, "e.go": messages, "f.go": roomEditor, "g.go": admin}
+		sources := guardkit.Sources{"a.go": visibility, "b.go": series, "c.go": group, "d.go": src, "e.go": messages, "f.go": roomEditor, "g.go": admin, "i.go": consents}
 		if bad := editRevisionProblems(sources.Parse(0)); len(bad) == 0 {
 			t.Errorf("%s passed the guard", name)
 		}
@@ -306,7 +355,7 @@ func (a *App) apiScheduleMessage(c *gin.Context) {
 }
 `,
 	} {
-		sources := guardkit.Sources{"a.go": visibility, "b.go": series, "c.go": group, "d.go": rooms, "e.go": src, "f.go": roomEditor, "g.go": admin}
+		sources := guardkit.Sources{"a.go": visibility, "b.go": series, "c.go": group, "d.go": rooms, "e.go": src, "f.go": roomEditor, "g.go": admin, "i.go": consents}
 		if bad := editRevisionProblems(sources.Parse(0)); len(bad) == 0 {
 			t.Errorf("%s passed the guard", name)
 		}
@@ -367,7 +416,7 @@ func (a *App) apiSetGroup(c *gin.Context) {
 }
 `,
 	} {
-		sources := guardkit.Sources{"a.go": src, "b.go": series, "d.go": rooms, "e.go": messages, "f.go": roomEditor, "g.go": admin}
+		sources := guardkit.Sources{"a.go": src, "b.go": series, "d.go": rooms, "e.go": messages, "f.go": roomEditor, "g.go": admin, "i.go": consents}
 		if !strings.Contains(src, "apiUpdateGroup") {
 			sources["c.go"] = group
 		}

@@ -90,6 +90,16 @@ export async function apiAs(request: APIRequestContext, name: string) {
   };
 }
 
+// grantTeenConsent is an admin's grant of a teen's consent as the consent panel sends it (DEC-176): the revision from
+// that admin's own read of the teen's consent history.
+export async function grantTeenConsent(api: Awaited<ReturnType<typeof apiAs>>, teenId: number, evidenceText: string, scope = "account") {
+  const read = await api("GET", `/admin/users/${teenId}/teen-consents`);
+
+  if (!isString(read?.revision) || !read.revision) throw new Error(`The consent panel's read of ${teenId} carried no revision`);
+
+  return api("POST", `/admin/users/${teenId}/teen-consents`, { scope, status: "granted", evidenceText, revision: read.revision });
+}
+
 // pickDateRoom is a manager's pick of a date's room as the Room control sends it (DEC-167): the revision from that
 // manager's own read of the date's room control.
 export async function pickDateRoom(api: Awaited<ReturnType<typeof apiAs>>, eventId: number, date: string, body: { roomId: number | null }) {

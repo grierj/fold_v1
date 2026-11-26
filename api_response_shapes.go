@@ -80,6 +80,17 @@ type emailSettingsLinkJSON struct {
 type teenConsentsJSON struct {
 	Consents                 []teenConsentJSON `json:"consents"`
 	AdministrativelyDisabled bool              `json:"administrativelyDisabled"`
+	// Revision is what a grant made from this read names (DEC-176).
+	Revision string `json:"revision"`
+}
+
+// teenConsentChangedJSON is POST /admin/users/:id/teen-consents: the teen,
+// named with the token that follows the change, and the history as the
+// change left it.
+type teenConsentChangedJSON struct {
+	Teen                     revisionRefJSON   `json:"teen"`
+	Consents                 []teenConsentJSON `json:"consents"`
+	AdministrativelyDisabled bool              `json:"administrativelyDisabled"`
 }
 
 // guardianLinksResponseJSON is GET /admin/guardian-links.
@@ -594,6 +605,14 @@ type guardianLinkResponseJSON struct {
 
 type guardianTeensResponseJSON struct {
 	Teens []guardianTeenJSON `json:"teens"`
+}
+
+// guardianConsentChangedJSON is POST /me/guardian-links/:id/consents: the
+// teen, named with the token that follows the change, and the guardian's card
+// row as the change left it.
+type guardianConsentChangedJSON struct {
+	Teen         revisionRefJSON  `json:"teen"`
+	GuardianTeen guardianTeenJSON `json:"guardianTeen"`
 }
 
 type guestRegistrationResponseJSON struct {

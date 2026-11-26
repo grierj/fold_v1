@@ -175,11 +175,11 @@ func TestGuardianEmailPreviewAndExplicitSingleUseGrant(t *testing.T) {
 	// the teen's authenticated session.
 	teenClient := loginAPI(t, app, "teen", "password1234")
 	for _, scope := range []string{"sms", "photos"} {
-		apiDo(t, client, "POST", guardianConsentPath(link.ID), map[string]string{"scope": scope, "status": "granted"}, 200)
+		apiDo(t, client, "POST", guardianConsentPath(link.ID), withGuardianRevision(t, client, link.ID, map[string]string{"scope": scope, "status": "granted"}), 200)
 	}
 	apiDo(t, client, "POST", guardianConsentPath(link.ID), map[string]string{"scope": "account", "status": "revoked"}, 200)
 	apiDo(t, teenClient, "GET", "/api/v1/auth/me", nil, 401)
-	apiDo(t, client, "POST", guardianConsentPath(link.ID), map[string]string{"scope": "account", "status": "granted"}, 200)
+	apiDo(t, client, "POST", guardianConsentPath(link.ID), withGuardianRevision(t, client, link.ID, map[string]string{"scope": "account", "status": "granted"}), 200)
 }
 
 func TestGuardianEmailRejectsStaleAuthority(t *testing.T) {
@@ -316,7 +316,7 @@ func TestAdminGuardianUsesConfirmedGuardianCapacity(t *testing.T) {
 	if err := app.DB.Model(guardian).Update("role", models.RoleAdmin).Error; err != nil {
 		t.Fatal(err)
 	}
-	apiDo(t, client, "POST", guardianConsentPath(link.ID), map[string]string{"scope": "account", "status": "granted"}, 200)
+	apiDo(t, client, "POST", guardianConsentPath(link.ID), withGuardianRevision(t, client, link.ID, map[string]string{"scope": "account", "status": "granted"}), 200)
 	var row models.TeenConsent
 	app.DB.Where("teen_user_id = ?", teen.ID).First(&row)
 	if row.GranterRole != models.ConsentGuardian {

@@ -43,15 +43,15 @@ export interface LostSend {
 }
 
 // The refusal each kind of save answers when the thing changed since the read it names.
-type ChangedCode = "event_changed" | "date_changed" | "group_changed" | "date_room_changed" | "message_changed" | "room_changed" | "setting_changed" | "admin_user_changed";
+type ChangedCode = "event_changed" | "date_changed" | "group_changed" | "date_room_changed" | "message_changed" | "room_changed" | "setting_changed" | "admin_user_changed" | "consent_changed";
 
 // What a save throws when every send was refused while nothing it writes changed, so the form says its ordinary
 // refusal for that code.
 export const refusedAgain = (code: ChangedCode) => new ApiError(409, code.replace(/_/g, " "), { code });
 
 // What a save names in its answer: an event, a single date, a group, a date's room (named by its date's id), a
-// message, or a room.
-type AnswerKey = "event" | "occurrence" | "group" | "dateRoom" | "message" | "room" | "user";
+// message, a room, an account, or a teen's consent log (named by the teen's id).
+type AnswerKey = "event" | "occurrence" | "group" | "dateRoom" | "message" | "room" | "user" | "teen";
 
 // What a save that landed answers: the thing it saved, with its new revision.
 interface SettingAnswer {
@@ -77,7 +77,8 @@ export const answerNames = (key: AnswerKey, id: number) => (answer: unknown): an
         : key === "message" ? "message" in answer && answer.message
           : key === "room" ? "room" in answer && answer.room
             : key === "user" ? "user" in answer && answer.user
-              : "dateRoom" in answer && answer.dateRoom;
+              : key === "teen" ? "teen" in answer && answer.teen
+                : "dateRoom" in answer && answer.dateRoom;
 
   return isObject(thing) && "id" in thing && "revision" in thing && isNumber(thing.id) && thing.id === id && isString(thing.revision) && thing.revision !== "";
 };
@@ -97,6 +98,8 @@ function answeredRevision(answer: SavedAnswer): string {
   if ("message" in answer) return answer.message.revision;
 
   if ("room" in answer) return answer.room.revision;
+
+  if ("teen" in answer) return answer.teen.revision;
 
   return answer.dateRoom.revision;
 }

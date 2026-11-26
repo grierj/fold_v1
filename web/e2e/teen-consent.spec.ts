@@ -1,6 +1,6 @@
 import { expect, test, type Page } from "@playwright/test";
 import AxeBuilder from "@axe-core/playwright";
-import { apiAs, attemptPendingSignIn, fromMore, PASSWORD, signIn, signInTo, soon } from "./helpers";
+import { apiAs, attemptPendingSignIn, email, fromMore, grantTeenConsent, PASSWORD, signIn, signInTo, soon } from "./helpers";
 import { measure } from "./ui-measure.mjs";
 
 async function shoot(page: Page, name: string) {
@@ -74,6 +74,39 @@ test("admin scoped consent enables sign-in, revokes it, and keeps history", asyn
     await (await soon(panel.getByText("Consent history (3)"))).click();
     await expect(panel.getByText("Parent signed SMS form at church office")).toBeVisible();
   } finally { await teenContext.close(); }
+});
+
+test("an admin's grant from an open panel is refused after a guardian revoked, and the page says so (DEC-176)", async ({ page, request }) => {
+  test.setTimeout(process.env.SCREENS_DIR ? 90_000 : 45_000);
+  const admin = await apiAs(request, "grier");
+  const { user: teen } = await admin("POST", "/admin/users", { name: "Conflict Quinn", email: email("consent-quinn"), password: PASSWORD, ageBand: "teen", birthDate });
+  await admin("POST", "/admin/users", { name: "Quinn Guardian", email: email("consent-quinn-guardian"), password: PASSWORD, ageBand: "adult" });
+  const guardian = await apiAs(request, "consent-quinn-guardian");
+  await guardian("POST", "/me/guardian-claims", { email: email("consent-quinn") });
+  const adminAgain = await apiAs(request, "grier");
+  const { guardianLinks } = await adminAgain("GET", "/admin/guardian-links");
+  const link = guardianLinks.find((row: { teenUserId?: number }) => row.teenUserId === teen.id);
+  await adminAgain("POST", `/admin/guardian-links/${link.id}/confirm`, { checkNote: "Known family" });
+  await grantTeenConsent(adminAgain, teen.id, "Parent signed account form");
+
+  await signInTo(page, "grier", "/admin?tab=users");
+  await fromMore(page, "Manage consent", "More for Conflict Quinn");
+  const panel = page.locator('[aria-label="Consent for Conflict Quinn"]');
+  await panel.getByRole("radio", { name: "SMS", exact: true }).click();
+  await panel.getByLabel("Consent evidence").fill("Parent signed SMS form");
+
+  // While the panel is open, the guardian revokes account consent from their own card.
+  const guardianAgain = await apiAs(request, "consent-quinn-guardian");
+  await guardianAgain("POST", `/me/guardian-links/${link.id}/consents`, { scope: "account", status: "revoked" });
+
+  await panel.getByRole("button", { name: "Grant consent" }).click();
+  await expect(page.getByText("Conflict Quinn's consent changed while you were editing. Your changes could not be saved.")).toBeFocused();
+  await expect(panel).toHaveCount(0);
+  await shoot(page, "consent-conflict");
+  const { consents } = await (await apiAs(request, "grier"))("GET", `/admin/users/${teen.id}/teen-consents`);
+  expect(consents.map((row: { scope: string; status: string }) => `${row.scope} ${row.status}`)).toEqual(["account revoked", "account granted"]);
+  await fromMore(page, "Manage consent", "More for Conflict Quinn");
+  await expect(await soon(panel.getByText("Account access: Not granted"))).toBeVisible();
 });
 
 test("admin approves a teen request and records account consent together", async ({ page }) => {

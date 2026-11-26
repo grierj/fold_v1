@@ -2,7 +2,7 @@ import type { JsonValue } from "../src/lib/wireValues";
 import AxeBuilder from "@axe-core/playwright";
 import { expect, test, type Page } from "@playwright/test";
 import { mkdirSync, writeFileSync } from "node:fs";
-import { apiAs, email, fromMore, PASSWORD, signIn, signInTo, soon } from "./helpers";
+import { apiAs, grantTeenConsent, email, fromMore, PASSWORD, signIn, signInTo, soon } from "./helpers";
 import { measure } from "./ui-measure.mjs";
 import { expectModalDialog } from "./dialogs";
 import type { EventOccurrence } from "../src/types";
@@ -60,7 +60,7 @@ for (const scenario of ["adult-decline", "adult-block", "teen-removal"] as const
     const admin = await apiAs(request, adminName);
     const { user } = await admin("POST", "/admin/users", { name, email: email(login), password: PASSWORD, ageBand: teen ? "teen" : "adult", birthDate: teen ? `${new Date().getUTCFullYear() - 15}-01-01` : undefined });
 
-    if (teen) await admin("POST", `/admin/users/${user.id}/teen-consents`, { scope: "account", status: "granted", evidenceText: "Parent signed account consent" });
+    if (teen) await grantTeenConsent(admin, user.id, "Parent signed account consent");
     const { group } = await admin("POST", "/groups", { name: `Hidden organizer ${scenario}`, visibility: "invite_only", tags: [] });
     const date = new Date(Date.now() + 7 * 86400_000).toISOString().slice(0, 10);
     const title = `Three hidden dates ${scenario}`;
