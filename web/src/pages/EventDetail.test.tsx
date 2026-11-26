@@ -2780,6 +2780,13 @@ describe("EventDetail when a series save meets someone else's change", () => {
       expect(roomRead).toHaveBeenCalledExactlyOnceWith(7, "2026-12-01", credential);
       expect(listRead).toHaveBeenCalledExactlyOnceWith(7, credential);
 
+      // Another tab has replaced the cookie. AuthProvider still reports the first viewer.
+      setMarkerCookie("replacement-marker");
+      await act(async () => quiet.resolve({ ...opened, event: { ...opened.event, title: "Late event read" } }));
+      showsNothingOfTheEvent();
+      expect(screen.queryByText("Late event read")).not.toBeInTheDocument();
+      expect(screen.queryByText("First account room isn't free then.")).not.toBeInTheDocument();
+
       sessionCredential = null;
       view.rerender(tree());
       showsNothingOfTheEvent();
@@ -2790,7 +2797,6 @@ describe("EventDetail when a series save meets someone else's change", () => {
       expect(Events.get).toHaveBeenLastCalledWith("7", sessionCredential);
 
       await act(async () => {
-        quiet.resolve({ ...opened, event: { ...opened.event, title: "Late event read" } });
         room.resolve({ rooms: [{ id: 2, name: "Late room read", building: "", capacity: 10, features: "", restricted: false, busy: false, tooSmall: false }], booking: null, dateRoom: { id: 1, revision: "r1" } });
         preview.resolve({ visibility: "private", currentVisibility: "public", tightened: [], leaderOpened: [] });
       });
