@@ -31,8 +31,8 @@
 #                               restore.sh --commit/--image toward LANE_BASE
 #                               (level 0) and toward the landing (level 1), each
 #                               from the installed copy and from the candidate
-#                               tool copy, must exit 1 naming what the older
-#                               release lacks (the restore barrier for level 0,
+#                               tool copy, must exit 1 naming what the host
+#                               requires (the restore barrier for level 0,
 #                               reason review for both), reach no backup/record/
 #                               checkout/pin/stop/swap step in an xtrace, and
 #                               leave snapshot_state byte-identical.
@@ -302,22 +302,21 @@ crossing_validate_revisions() {
   (( bad == 0 ))
 }
 
-# What require_recovery_level says an older release lacks, for a target and a
-# host floor (checks.sh words it; this restates the words the acceptance needs).
-crossing_missing_text() { # target floor
-  local target="$1" floor="$2" missing=""
-  if (( target < 1 && floor >= 1 )); then missing="the restore barrier (level 1)"; fi
-  if (( target < 2 && floor >= 2 )); then missing="${missing:+$missing and }reason review (level 2)"; fi
-  if (( target < 3 && floor >= 3 )); then missing="${missing:+$missing and }exact visibility consent (level 3)"; fi
-  if (( target < 4 && floor >= 4 )); then missing="${missing:+$missing and }invitation audit erasure (level 4)"; fi
-  printf '%s' "$missing"
+# The protections require_recovery_level names for a target and a host floor.
+crossing_required_text() { # target floor
+  local target="$1" floor="$2" required=""
+  if (( target < 1 && floor >= 1 )); then required="the restore barrier (level 1)"; fi
+  if (( target < 2 && floor >= 2 )); then required="${required:+$required and }reason review (level 2)"; fi
+  if (( target < 3 && floor >= 3 )); then required="${required:+$required and }exact visibility consent (level 3)"; fi
+  if (( target < 4 && floor >= 4 )); then required="${required:+$required and }invitation audit erasure (level 4)"; fi
+  printf '%s' "$required"
 }
 
 # The ERE the first `check:` line of a refusal must match.
 crossing_refusal_re() { # target floor
   local text
-  text="$(crossing_missing_text "$1" "$2" | sed 's/[][\.*^$()+?{|]/\\&/g')"
-  printf '^check: target recovery level %s is below host level %s\\. The older release lacks %s\\.' "$1" "$2" "$text"
+  text="$(crossing_required_text "$1" "$2" | sed 's/[][\.*^$()+?{|]/\\&/g')"
+  printf '^check: target recovery level %s is below host level %s\\. The host requires %s\\.' "$1" "$2" "$text"
 }
 
 # public tables named by a pg_restore -l listing ("TABLE DATA" entries excluded).
@@ -356,13 +355,13 @@ crossing_owner_migration() {
 # kind: forward-commit, forward-image, rollback-commit, rollback-image,
 # restore-commit or restore-image. target and floor are the recovery levels of
 # the release asked for and of the host: the refusal must come from
-# require_recovery_level <target> <floor> and name what the target lacks.
+# require_recovery_level <target> <floor> and name what the host requires.
 # Extra arguments name provisioner paths that must never appear in the trace
 # (a checkout's provision.sh is data, never a tool).
 crossing_problems() {
   local kind="$1" target="$2" floor="$3" rc="$4" trace="$5" before="$6" after="$7" path; shift 7
   if [[ "$rc" != 1 ]]; then echo "exit code $rc, want 1"; fi
-  if ! grep -Eq "$(crossing_refusal_re "$target" "$floor")" "$trace"; then echo "refusal message naming $(crossing_missing_text "$target" "$floor") is missing"; fi
+  if ! grep -Eq "$(crossing_refusal_re "$target" "$floor")" "$trace"; then echo "refusal message naming $(crossing_required_text "$target" "$floor") is missing"; fi
   if ! cmp -s "$before" "$after"; then echo 'snapshot_state changed'; fi
   if ! grep -Eq "^\\++ require_recovery_level $target $floor( |\$)" "$trace"; then echo "refusal did not come from require_recovery_level $target $floor"; fi
   case "$kind" in

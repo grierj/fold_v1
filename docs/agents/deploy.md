@@ -73,7 +73,9 @@ that changes how an operator upgrades, rolls back or restores. The operator-faci
   there, checks the target before backup or checkout, and runs that copy's provisioner. An older
   checkout's script run by hand can bypass these checks. Installed upgrades keep their frozen
   tools; install newer tools from a newer trusted checkout, subject to the `deploy-tools-version`
-  check.
+  check. For the upgrade to level 4, use the trusted-checkout procedure in
+  [Upgrades and rollback](../DEPLOY-DIGITALOCEAN.md#6-upgrades-and-rollback) to install and verify
+  the tools that check the staged database before the swap.
 - **Releases and the real-droplet restore checks (DEC-165).** Release 0.1.0 reports level 2 and is
   published, and the next release does not wait for the remaining real-droplet restore checks in
   `docs/FIRST-CHURCH-CHECKS.md` (Grier, Nov 24, 2026). Those checks stay owed; local refusal drills
@@ -201,8 +203,8 @@ section at the end of `checks.sh`.
 - Collection removes `session_signing_epoch` from the staging database before the swap.
   `bootRestoreFence` creates a random epoch when the row is absent. The cookie signing key
   comes from that epoch and `SESSION_SECRET`. Ordinary restarts retain the epoch.
-  Recovery stays at level 3. A rollback to a build without this check can accept cookies
-  that the older build previously issued.
+  On a host still at recovery level 3, a permitted rollback to a pre-epoch release can
+  accept cookies that release previously issued.
 - `--uploads` restores the matching uploads archive inside the fence. Before reopen,
   `fold restore settle-uploads` empties erased and unowned avatar folders; active accounts'
   folders remain. A target without the required `restoreUploads` capability is refused.

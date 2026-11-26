@@ -322,8 +322,8 @@ different secrets reject each other's sign-ins and confirmations.
 The first upgrade to a release with the browser-session signing epoch asks
 everyone to sign in again. Later ordinary restarts keep sessions. Use the
 current installed restore tools and an epoch-aware release to end browser
-sessions on restore. Recovery stays at level 3, so a permitted rollback to an
-older release can accept cookies that release previously issued.
+sessions on restore. On a host still at recovery level 3, a permitted rollback
+to a pre-epoch release can accept cookies that release previously issued.
 
 The Compose network is `172.30.0.0/24`, which is the default
 `FOLD_TRUSTED_PROXIES`. Change the subnet and that variable together.
@@ -880,26 +880,32 @@ Ask people to finish editing before the upgrade and reload their open Fold
 tabs after the smoke checks pass. See the [upgrade notes](../README.md#upgrade-notes)
 for what to do if a save keeps failing in an older tab.
 
-For the first upgrade to a release with the browser-session signing epoch,
-prepare a separate trusted checkout of the release at `/root/fold-release`.
+Use the target release's deploy tools when you first upgrade to a release with
+the browser-session signing epoch or when you upgrade from recovery level 3 or
+earlier to level 4. Prepare a separate trusted checkout of the target release
+at `/root/fold-release`.
 For a build-based install, leave `/root/fold` at the deployed commit and fetch
 the target into it without checking it out. Run the matching image or build
 command below with `/root/fold-release/deploy/digitalocean/upgrade.sh` in
 place of `/opt/fold/upgrade.sh` and keep `--source-dir /root/fold`. This
 installs the release's tools and lets the script record the deployed commit
 for rollback before it checks out the target. The earlier installed script
-can upgrade the app while retaining its old restore tools.
+can upgrade the app while retaining tools that skip the archive's recovery
+level check before the database swap.
 
-After the upgrade, check both installed copies against the release checkout.
-Each comparison succeeds silently. If either differs, finish the upgrade from
-the release checkout before restoring a dump.
+After the upgrade, compare both installed copies of these files with the
+release checkout. Each comparison succeeds silently. If any comparison
+fails, finish the upgrade from the release checkout before restoring a dump.
 
 ```bash
-sudo cmp /root/fold-release/deploy/digitalocean/restore.sh /opt/fold/restore.sh
-sudo cmp /root/fold-release/deploy/digitalocean/restore.sh /opt/fold/deploy-tools/restore.sh
+for tool in checks.sh restore.sh deploy-tools-version; do
+  sudo cmp "/root/fold-release/deploy/digitalocean/$tool" "/opt/fold/$tool"
+  sudo cmp "/root/fold-release/deploy/digitalocean/$tool" "/opt/fold/deploy-tools/$tool"
+done
 ```
 
-For subsequent upgrades, run the installed `/opt/fold/upgrade.sh`. It uses its enforcing copy in
+When the installed tools match the target release's requirements, run
+`/opt/fold/upgrade.sh`. It uses its enforcing copy in
 `/opt/fold/deploy-tools`, checks the target before backup or checkout, and
 runs that copy's provisioner. A target checkout supplies build inputs, never
 the provisioner. A script run by hand from an older checkout can bypass these
@@ -914,18 +920,18 @@ sudo /opt/fold/upgrade.sh \
   --source-dir /root/fold
 ```
 
-For the first upgrade with mirrored images, check out the trusted release that
-introduces `--backup-image` in `/root/fold`. Run its upgrade script so it can
-install the matching tools and recognize the new flag:
+For the first upgrade with mirrored images, use a trusted checkout of the
+target release with `--backup-image` at `/root/fold-release`. Run its upgrade
+script to install the matching tools.
 
 ```bash
-sudo /root/fold/deploy/digitalocean/upgrade.sh \
+sudo /root/fold-release/deploy/digitalocean/upgrade.sh \
   --image registry.example.com/church/fold:x.y.z \
   --backup-image registry.example.com/church/fold-backup:x.y.z \
   --source-dir /root/fold
 ```
 
-Later upgrades can use `/opt/fold/upgrade.sh`. Omitting `--backup-image`
+With the matching tools installed, omitting `--backup-image`
 keeps the saved `FOLD_BACKUP_IMAGE`. Before changing that setting, record its
 previous value, including whether it was unset. If the replacement backup
 image fails, use `sudoedit /opt/fold/.env` before rollback. Restore the
@@ -997,8 +1003,8 @@ keeps this protection. The recorded pre-upgrade dump still contains the invitati
 at backup time. On an upgraded host, restore that dump with the level-4 release and its
 `restore.sh --dump`. The host floor still applies even to a rollback that would use the older dump.
 
-Install this release's deploy tools (version 7) from its trusted checkout before upgrading,
-and install them on a replacement host as well. After importing the archive
+Follow the trusted-checkout steps above to install this release's deploy tools (version 7)
+when upgrading. Use the same tools on a replacement host. After importing the archive
 into staging, they check the archive's own startup fence with the selected target's level.
 If it refuses, the original database and pin are intact, and the site stays closed. Run
 `restore.sh --abort`, then retry with a release that meets the archive's floor.
