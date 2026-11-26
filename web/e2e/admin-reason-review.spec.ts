@@ -34,11 +34,11 @@ const NO_ACCOUNTS = "No deleted accounts have reasons left to review.";
 const ACCOUNT_EMPTY = "This account has no reasons left to review.";
 const PRE_SAVE = "Saving blanks the text you chose right away. It can't be brought back in Fold. Backups made before now still contain it.";
 const SAVED = "Saved.";
-const CHANGED = "Some reasons changed since you loaded them. Check the marked ones, then save again.";
+const CHANGED = "These choices could not be saved because some reasons changed. Review the reasons shown before saving again.";
 const CHECKING = "Checking what happened to this save…";
-const NOT_APPLIED = "These choices weren't saved. Reload to see what's left.";
+const NOT_APPLIED = "These choices could not be saved.";
 const TOO_OLD = "This save was too old to run, so Fold didn't run it. Fold is checking what happened.";
-const NOT_SAVED = /weren't saved|not saved|wasn't saved|was not saved/i;
+const NOT_SAVED = /could not be saved|weren't saved|not saved|wasn't saved|was not saved/i;
 
 // Decides some of an account's reasons through the API, as another admin session
 // would: one mint, one PUT.

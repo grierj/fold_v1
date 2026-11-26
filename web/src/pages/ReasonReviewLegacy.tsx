@@ -12,6 +12,7 @@ import { LEGACY_REVIEW_PATH, LEGACY_REVIEW_TITLE, LEGACY_SEARCH_LIMIT, LEGACY_NO
 import { ERROR_COPY } from "../lib/errors";
 import {
   LEGACY_CHECKING,
+  LEGACY_NOT_APPLIED,
   LEGACY_SAVED,
   legacyMintFailure,
   legacySaveFailure,
@@ -201,10 +202,8 @@ type Phase =
   | { kind: "checking" }
   // Settle could not say yet: Check again asks the same id.
   | { kind: "still" }
-  // Fold cannot tell whether the earlier save finished: nothing more until a reload succeeds.
-  | { kind: "history" }
-  // Nothing more can be done from here; `reload` is a restore that a reload lifts.
-  | { kind: "locked"; reload: boolean };
+  | { kind: "refreshing"; after: "history" | "restore" }
+  | { kind: "locked" };
 
 type Note = { text: string; alert: boolean };
 
@@ -346,33 +345,36 @@ function LegacyAccountView({ account, onEmpty }: { account: string; onEmpty: (us
     return load.retry();
   }
 
-  async function unlock(resume = false) {
+  async function unlock(after: "history" | "restore", resume = false) {
     const outcome = await reload(resume ? undefined : null);
 
     if (outcome !== "loaded" || !mounted.current) return;
     setPhase(IDLE);
-    setNote(null);
+
+    if (after === "restore") setNote({ text: LEGACY_NOT_APPLIED, alert: true });
     box.current?.focus();
   }
-
-  const unlocksOnReload = phase.kind === "history" || (phase.kind === "locked" && phase.reload);
 
   // Ends the attempt without a save. The server ended the id before it answered,
   // or never saw it, so the next press mints a fresh one.
   function refuse(failure: LegacyRefusal) {
     attempt.current = null;
     working.current = false;
-
-    if (failure.kind === "locked") {
-      if (failure.reloadToUnlock) requireRestoreReload();
-      setPhase({ kind: "locked", reload: failure.reloadToUnlock === true });
-    } else {
-      setPhase(IDLE);
-    }
-
     setNote({ text: failure.text, alert: true });
 
-    if (failure.kind === "changed") void reload(priorChoices());
+    if (failure.kind === "locked") {
+      if (failure.reloadToUnlock) {
+        requireRestoreReload();
+        setPhase({ kind: "refreshing", after: "restore" });
+        void unlock("restore");
+      } else {
+        setPhase({ kind: "locked" });
+      }
+    } else {
+      setPhase(IDLE);
+
+      if (failure.kind === "refresh") void reload(priorChoices());
+    }
   }
 
   function decided(text: string) {
@@ -405,14 +407,14 @@ function LegacyAccountView({ account, onEmpty }: { account: string; onEmpty: (us
         void reload(null);
         break;
       case "not_applied":
-        decided(step.text);
-        void reload(priorChoices());
+        refuse({ kind: "refresh", text: step.text });
         break;
       case "history":
         attempt.current = null;
         working.current = false;
-        setPhase({ kind: "history" });
+        setPhase({ kind: "refreshing", after: "history" });
         setNote({ text: step.text, alert: false });
+        void unlock("history");
         break;
       case "still":
         if (step.restore) requireRestoreReload();
@@ -483,8 +485,8 @@ function LegacyAccountView({ account, onEmpty }: { account: string; onEmpty: (us
   const unchosen = items.filter((item) => choices[item.requestId] === undefined).length;
   const blanking = items.some((item) => choices[item.requestId] === "remove");
   // A refusal that no press can fix shows no reasons: the session, the right
-  // to review or the account itself is gone. A restore keeps them for the reload.
-  const shown = !(phase.kind === "locked" && !phase.reload) && failure === null;
+  // to review or the account itself is gone.
+  const shown = phase.kind !== "locked" && failure === null;
   const canSave = phase.kind === "idle" && items.length > 0 && unchosen === 0;
 
   return (
@@ -499,10 +501,9 @@ function LegacyAccountView({ account, onEmpty }: { account: string; onEmpty: (us
         {failure?.kind === "gone" && <p>{failure.text}</p>}
         {(failure?.kind === "locked" || failure?.kind === "retry") && <FormError>{failure.text}</FormError>}
         {failure?.kind === "retry" && (
-          <Button variant="secondary" onClick={() => void (unlocksOnReload ? unlock(true) : reload())}>Try again</Button>
+          <Button variant="secondary" onClick={() => void (phase.kind === "refreshing" ? unlock(phase.after, true) : reload())}>Try again</Button>
         )}
         {phase.kind === "still" && <Button variant="secondary" onClick={checkAgain}>Check again</Button>}
-        {unlocksOnReload && !load.loading && failure === null && <Button variant="secondary" onClick={() => void unlock()}>Reload</Button>}
       </div>
       {shown && page && items.length === 0 && <EmptyState title={ACCOUNT_EMPTY} />}
       {shown && items.length > 0 && (

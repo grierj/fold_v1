@@ -381,15 +381,15 @@ describe("opening one account", () => {
 const X1 = "ab".repeat(40);
 const X2 = "cd".repeat(40);
 const SAVED = "Saved.";
-const NOT_APPLIED = "These choices weren't saved. Reload to see what's left.";
-const HISTORY = "Fold can't tell whether your earlier save finished. Reload to see what's left.";
+const NOT_APPLIED = "These choices could not be saved.";
+const HISTORY = "Fold can't tell whether your earlier save finished.";
 const CHECKING = "Checking what happened to this save…";
 const STILL = "Still checking. Fold can't tell yet whether your choices were saved. Check again in a moment.";
-const CHANGED = "Some reasons changed since you loaded them. Check the marked ones, then save again.";
+const CHANGED = "These choices could not be saved because some reasons changed. Review the reasons shown before saving again.";
 const ACCOUNT_EMPTY = "This account has no reasons left to review.";
 const PRE_SAVE = "Saving blanks the text you chose right away. It can't be brought back in Fold. Backups made before now still contain it.";
 const DELETION_WORDING = /delete again|delete this account|delete request|Ask another admin to delete/;
-const NOT_SAVED_WORDING = /weren't saved|wasn't saved|not saved|nothing was saved/i;
+const NOT_SAVED_WORDING = /could not be saved|weren't saved|wasn't saved|not saved|nothing was saved/i;
 
 const pageOf = (...items: ErasureReasonItem[]): ErasureReasonPage => ({ items, next: null, reviewRequired: true });
 
@@ -789,22 +789,22 @@ describe("pressing Save", () => {
       noDeletionWording();
     });
 
-    it("locks on a restore until a reload that starts afterwards succeeds, and leaves the process-wide hold for the deletes", async () => {
+    it("reads again after a restore and leaves the process-wide hold for deletes", async () => {
       await readyToSave();
+      const fresh = deferred<ErasureReasonPage>();
+      pageCall.mockReturnValueOnce(fresh.promise);
       mint.mockResolvedValueOnce({ attemptId: X1 });
       put.mockRejectedValueOnce(new ApiError(503, "x", { code: "restore_detected" }));
       await pressSave();
       expect(await screen.findByRole("alert")).toHaveTextContent(ERROR_COPY.restore_detected);
       expect(needsRestoreReload()).toBe(true);
-      expect(saveButton()).toBeDisabled();
-      expect(radio(1, 3, "Keep text")).toBeDisabled();
-      expect(settleCall).not.toHaveBeenCalled();
-      pageCall.mockResolvedValueOnce(pageOf(...three()));
-      await userEvent.click(screen.getByRole("button", { name: "Reload" }));
-      await screen.findByRole("group", { name: "Reason 1 of 3" });
       expect(pageCall).toHaveBeenCalledTimes(2);
-      expect(screen.queryByRole("alert")).not.toBeInTheDocument();
-      // Nothing carries over a restore: the choices are made again.
+      expect(screen.queryByRole("button", { name: "Save" })).not.toBeInTheDocument();
+      expect(screen.queryByRole("radio")).not.toBeInTheDocument();
+      expect(settleCall).not.toHaveBeenCalled();
+      fresh.resolve(pageOf(...three()));
+      await screen.findByRole("group", { name: "Reason 1 of 3" });
+      expect(await screen.findByRole("alert")).toHaveTextContent(NOT_APPLIED);
       expect(checkedRadios()).toHaveLength(0);
       expect(saveButton()).toBeDisabled();
       await chooseAll(3, "Keep text");
@@ -816,16 +816,14 @@ describe("pressing Save", () => {
       await readyToSave();
       mint.mockResolvedValueOnce({ attemptId: X1 });
       put.mockRejectedValueOnce(new ApiError(503, "x", { code: "restore_detected" }));
-      await pressSave();
-      await screen.findByText(ERROR_COPY.restore_detected);
       pageCall.mockRejectedValueOnce(new TypeError("Failed to fetch")).mockResolvedValueOnce(pageOf(...three()));
-      await userEvent.click(screen.getByRole("button", { name: "Reload" }));
-      const alerts = await screen.findAllByRole("alert");
-      expect(alerts.map((a) => a.textContent)).toContain(BUSY);
+      await pressSave();
+      const retry = await screen.findByRole("button", { name: "Try again" });
+      expect(screen.getByText(BUSY)).toBeInTheDocument();
       expect(screen.queryByRole("button", { name: "Save" })).not.toBeInTheDocument();
-      await userEvent.click(screen.getByRole("button", { name: "Try again" }));
+      await userEvent.click(retry);
       await screen.findByRole("group", { name: "Reason 1 of 3" });
-      expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+      expect(await screen.findByRole("alert")).toHaveTextContent(NOT_APPLIED);
     });
   });
 
@@ -859,14 +857,16 @@ describe("pressing Save", () => {
       expect(screen.queryByRole("button")).not.toBeInTheDocument();
     });
 
-    it("locks on a restore with a Reload", async () => {
+    it("reads the reasons again when minting discovers a restore", async () => {
       await readyToSave();
       mint.mockRejectedValueOnce(new ApiError(503, "x", { code: "restore_detected" }));
+      pageCall.mockResolvedValueOnce(pageOf(...three()));
       await pressSave();
-      expect(await screen.findByRole("alert")).toHaveTextContent(ERROR_COPY.restore_detected);
+      expect(await screen.findByRole("alert")).toHaveTextContent(NOT_APPLIED);
       expect(needsRestoreReload()).toBe(true);
       expect(put).not.toHaveBeenCalled();
-      expect(screen.getByRole("button", { name: "Reload" })).toBeInTheDocument();
+      expect(pageCall).toHaveBeenCalledTimes(2);
+      expect(checkedRadios()).toHaveLength(0);
     });
   });
 });
@@ -946,7 +946,7 @@ describe("an answer that does not say what happened", () => {
       settleCall.mockResolvedValueOnce({ result: "not_applied" });
       pageCall.mockResolvedValueOnce(pageOf(...items));
       await pressSave();
-      expect(await screen.findByText(NOT_APPLIED)).toBeInTheDocument();
+      expect(await screen.findByRole("alert")).toHaveTextContent(NOT_APPLIED);
       await screen.findByRole("group", { name: "Reason 1 of 3" });
       await waitFor(() => expect(checkedRadios()).toHaveLength(3));
       expect(screen.queryByText(/Changed since you looked/)).not.toBeInTheDocument();
@@ -963,16 +963,17 @@ describe("an answer that does not say what happened", () => {
     it("history_unavailable: drops the id, holds Save and the list off until a reload succeeds, and keeps no choice", async () => {
       await uncertainSave();
       settleCall.mockResolvedValueOnce({ result: "history_unavailable" });
+      const fresh = deferred<ErasureReasonPage>();
+      pageCall.mockReturnValueOnce(fresh.promise);
       await pressSave();
       expect(await screen.findByText(HISTORY)).toBeInTheDocument();
-      expect(saveButton()).toBeDisabled();
-      expect(radio(1, 3, "Keep text")).toBeDisabled();
+      expect(screen.queryByRole("button", { name: "Save" })).not.toBeInTheDocument();
+      expect(screen.queryByRole("radio")).not.toBeInTheDocument();
       expect(screen.queryByRole("button", { name: "Check again" })).not.toBeInTheDocument();
-      expect(pageCall).toHaveBeenCalledTimes(1);
-      pageCall.mockResolvedValueOnce(pageOf(...three()));
-      await userEvent.click(screen.getByRole("button", { name: "Reload" }));
+      expect(pageCall).toHaveBeenCalledTimes(2);
+      fresh.resolve(pageOf(...three()));
       await screen.findByRole("group", { name: "Reason 1 of 3" });
-      expect(screen.queryByText(HISTORY)).not.toBeInTheDocument();
+      expect(screen.getByText(HISTORY)).toBeInTheDocument();
       expect(checkedRadios()).toHaveLength(0);
       expect(saveButton()).toBeDisabled();
       await chooseAll(3, "Keep text");
@@ -983,10 +984,9 @@ describe("an answer that does not say what happened", () => {
     it("history_unavailable stays held when the reload fails", async () => {
       await uncertainSave();
       settleCall.mockResolvedValueOnce({ result: "history_unavailable" });
+      pageCall.mockRejectedValueOnce(new ApiError(503, "x", { code: "reason_review_busy" }));
       await pressSave();
       await screen.findByText(HISTORY);
-      pageCall.mockRejectedValueOnce(new ApiError(503, "x", { code: "reason_review_busy" }));
-      await userEvent.click(screen.getByRole("button", { name: "Reload" }));
       expect(await screen.findByRole("alert")).toHaveTextContent(BUSY);
       expect(screen.queryByRole("button", { name: "Save" })).not.toBeInTheDocument();
     });

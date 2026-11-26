@@ -16,24 +16,24 @@ import { LEGACY_NOT_ALLOWED, LEGACY_NO_ACCOUNT } from "./legacyReview";
 // claimed before settle answers not_applied.
 
 export const LEGACY_SAVED = "Saved.";
-const CHANGED = "Some reasons changed since you loaded them. Check the marked ones, then save again.";
+const CHANGED = "These choices could not be saved because some reasons changed. Review the reasons shown before saving again.";
 const TOO_OLD = "This save was too old to run, so Fold didn't run it. Fold is checking what happened.";
 export const LEGACY_CHECKING = "Checking what happened to this save…";
 const STILL = "Still checking. Fold can't tell yet whether your choices were saved. Check again in a moment.";
-const NOT_APPLIED = "These choices weren't saved. Reload to see what's left.";
-const HISTORY = "Fold can't tell whether your earlier save finished. Reload to see what's left.";
+export const LEGACY_NOT_APPLIED = "These choices could not be saved.";
+const HISTORY = "Fold can't tell whether your earlier save finished.";
 const DIDNT_WORK = "That didn't work.";
 
 // What a failed save means.
 // - uncertain: the server may have saved; settle the same attempt id.
 // - retry: nothing was saved, the choices stay; the next press mints a fresh id.
-// - changed: the reasons differ from what was shown; reload and keep what still matches.
+// - refresh: read the reasons again and keep choices where the review hash still matches.
 // - locked: nothing more can be done from this page. `reloadToUnlock` is a
 //   restore the server noticed: a reload that starts afterwards lifts it.
 export type LegacyFailure =
   | { kind: "uncertain"; text: string }
   | { kind: "retry"; text: string }
-  | { kind: "changed"; text: string }
+  | { kind: "refresh"; text: string }
   | { kind: "locked"; text: string; reloadToUnlock?: true };
 
 // A failure that ended the attempt without a save.
@@ -67,7 +67,7 @@ export function legacySaveFailure(cause: unknown): LegacyFailure {
 
   if (code === "attempt_closed" || code === "legacy_save_outcome_unknown") return { kind: "uncertain", text: ERROR_COPY[code] };
 
-  if (code === "reason_review_changed") return { kind: "changed", text: CHANGED };
+  if (code === "reason_review_changed") return { kind: "refresh", text: CHANGED };
   const end = ending(cause);
 
   if (end) return end;
@@ -120,7 +120,7 @@ export function legacySettleStep(res: JsonValue | AttemptSettleResponse | undefi
 
   if (result === "applied") return { kind: "applied", text: LEGACY_SAVED };
 
-  if (result === "not_applied") return { kind: "not_applied", text: NOT_APPLIED };
+  if (result === "not_applied") return { kind: "not_applied", text: LEGACY_NOT_APPLIED };
 
   if (result === "history_unavailable") return { kind: "history", text: HISTORY };
 
