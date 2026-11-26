@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
+	"database/sql"
 	"encoding/base64"
 	"errors"
 	"fmt"
@@ -324,7 +325,11 @@ func (a *App) acknowledgeDecision(c *gin.Context, j sessionJudgment, decided boo
 // refusal it ended, so it is never acknowledged and is answered as the generic
 // 500. A panic in read rolls back and panics again.
 func decidingSnapshot(db *gorm.DB, read func(tx *gorm.DB) error) error {
-	tx := db.Begin(readSnapshot)
+	return decidingTransaction(db, readSnapshot, read)
+}
+
+func decidingTransaction(db *gorm.DB, opts *sql.TxOptions, decide func(tx *gorm.DB) error) error {
+	tx := db.Begin(opts)
 	if tx.Error != nil {
 		return tx.Error
 	}
@@ -334,7 +339,7 @@ func decidingSnapshot(db *gorm.DB, read func(tx *gorm.DB) error) error {
 			tx.Rollback()
 		}
 	}()
-	err := read(tx)
+	err := decide(tx)
 	ended = true
 	if err != nil {
 		if rerr := tx.Rollback().Error; rerr != nil {
