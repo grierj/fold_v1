@@ -760,11 +760,8 @@ func wantUnconfirmedRefusal(t *testing.T, what string, w *httptest.ResponseRecor
 
 // TestSnapshotRefusalsNeedAConfirmedRollback: a participating reader's refusal
 // (M8.1) is acknowledged only once its snapshot's ROLLBACK came back. When the
-// ROLLBACK is lost (never forwarded) or its answer is (forwarded, then the
-// connection cut), the group reads, the event page, the manager's exact date
-// and the household answer the generic 500 with no acknowledgment, a missing
-// resource byte for byte like a hidden one. The fault is the proxy's, on the
-// reader's own connection, after the refusal was decided.
+// ROLLBACK is lost or its answer is lost, the reader answers the generic 500
+// with no acknowledgment. Missing and hidden resources answer identically.
 func TestSnapshotRefusalsNeedAConfirmedRollback(t *testing.T) {
 	modes := []struct {
 		name string
@@ -832,6 +829,19 @@ func TestSnapshotRefusalsNeedAConfirmedRollback(t *testing.T) {
 		hidden, missing := fmt.Sprintf("/api/v1/events/%d", f.event.ID), fmt.Sprintf("/api/v1/events/%d", f.event.ID+100000)
 		parity(t, fault, "an outsider's event", outsider, outsiderUser, http.StatusNotFound, hidden, missing)
 		parity(t, fault, "a visitor's event", anon, nil, http.StatusNotFound, hidden, missing)
+	})
+
+	t.Run("event visibility preview", func(t *testing.T) {
+		f := newGroupReadFixture(t, models.VisibilityInviteOnly)
+		outsiderUser := newTestUser(t, f.app, "rollback outsider", "password1234", models.RoleMember)
+		outsider := pinnedAs(t, loginAPI(t, f.app, outsiderUser.Name, "password1234"))
+		leader := pinnedAs(t, f.leader)
+		fault := snapshotRollbackFault(t, f.app)
+		const suffix = "/visibility-impact?visibility=unknown"
+		hidden := "/api/v1/events/" + itoa(f.event.ID) + suffix
+		missing := "/api/v1/events/" + itoa(f.event.ID+100000) + suffix
+		parity(t, fault, "an outsider's preview", outsider, outsiderUser, http.StatusNotFound, hidden, missing)
+		parity(t, fault, "an invalid preview", leader, f.leaderUser, http.StatusBadRequest, hidden)
 	})
 
 	t.Run("managed date", func(t *testing.T) {

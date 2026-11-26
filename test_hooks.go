@@ -86,14 +86,12 @@ type testHooks struct {
 	// its transaction, before COMMIT is sent. A test ends the backend there to
 	// prove a failed commit answers nothing of what was read.
 	groupReadEnd func(tx *gorm.DB)
-	// readerBegin runs inside a snapshot reader's transaction ("event
-	// detail", "my household") before its first query, so no snapshot is
-	// fixed yet and the session the middleware accepted is not judged yet.
+	// readerBegin runs inside a snapshot reader's transaction before its first
+	// query, before it judges the session the middleware accepted.
 	readerBegin func(surface string)
 	// readerEnd runs once a snapshot reader has built its whole answer, given
-	// its surface ("event detail", "my household") and its transaction,
-	// before COMMIT is sent. A test ends the backend there to prove a failed
-	// commit answers, and acknowledges, nothing of what was read.
+	// its surface and transaction, before COMMIT is sent. A test ends the
+	// backend there to check the response to a failed commit.
 	readerEnd func(surface string, tx *gorm.DB)
 	// departureStep runs inside a departure confirmation's transaction, given
 	// that transaction: "granted" right after applyDeparture, while the gate,
@@ -143,8 +141,8 @@ type testHooks struct {
 	// "calendar group" once the calendar's group filter is judged, "calendar
 	// kept dates" once the calendar's dates in range are loaded, before its
 	// managers' kept-date counts and carried dates are read (DEC-157), "date
-	// visibility preview" once its manager authority is judged, "room
-	// calendar" once the rooms switch is read (the snapshot's first
+	// visibility preview" and "event visibility preview" once manager
+	// authority is judged, "room calendar" once the rooms switch is read (the snapshot's first
 	// statement), "preparation" once message.send has decided the audience,
 	// "message preview", "compose picker", "message", "message recipients",
 	// "message list" and "message reply" once the viewer's right to that
