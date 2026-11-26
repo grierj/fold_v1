@@ -37,10 +37,10 @@ const TITLE = "Deleted accounts with reasons to review";
 const SAVED = "Saved.";
 const ACCOUNT_EMPTY = "This account has no reasons left to review.";
 const STILL = "Still checking. Fold can't tell yet whether your choices were saved. Check again in a moment.";
-const NOT_APPLIED = "These choices weren't saved. Reload to see what's left.";
-const HISTORY = "Fold can't tell whether your earlier save finished. Reload to see what's left.";
-const CHANGED = "Some reasons changed since you loaded them. Check the marked ones, then save again.";
-const NOT_SAVED = /weren't saved|not saved|wasn't saved|was not saved/i;
+const NOT_APPLIED = "These choices could not be saved.";
+const HISTORY = "Fold can't tell whether your earlier save finished.";
+const CHANGED = "These choices could not be saved because some reasons changed. Review the reasons shown before saving again.";
+const NOT_SAVED = /could not be saved|weren't saved|not saved|wasn't saved|was not saved/i;
 const SIGNED_OUT = /signed out|sign in/i;
 
 const DELETED = "The account was deleted.";
@@ -685,21 +685,17 @@ for (const width of [390, 1280]) if (partSelected("reason-review", width)) test.
       await page.unroute(`**${SETTLE}`);
       await page.unroute(`**${LEGACY}/${fx.id}`);
 
-      // An id the server no longer remembers (over an hour, or a restart) is "can't tell": Save stays
-      // off, and a Reload that works starts the page afresh with no choice kept.
       await ageFirstPut(page, fx.id, request, 61 * 60 + 30);
       await saveButton(page).click();
       await expect(page.getByText(HISTORY)).toBeVisible();
       await expect(page.getByText(NOT_SAVED)).toHaveCount(0);
+      await expect(reasonItems(page)).toHaveCount(3);
+      await expect(checkedRadios(page)).toHaveCount(0);
       await expect(saveButton(page)).toBeDisabled();
       await expect.poll(() => focusedText(page)).toContain("Fold can't tell");
       await checkState(page, "reason-review-session", "legacy-history-unavailable");
       await setClock(request, 0);
-      await page.getByRole("button", { name: "Reload" }).click();
-      await expect(page.getByText(HISTORY)).toHaveCount(0);
-      await expect(reasonItems(page)).toHaveCount(3);
-      await expect(checkedRadios(page)).toHaveCount(0);
-      lost("an attempt the server forgot (clock shifted 61 minutes, standing in for a restart)", "deleted-accounts page", "all choices; the Reload starts clean");
+      lost("an attempt the server forgot (clock shifted 61 minutes, standing in for a restart)", "deleted-accounts page", "all choices; the fresh read starts clean");
       await page.unroute(`**${LEGACY}/${fx.id}`);
 
       // A session that ends mid-review: another admin sets this admin's password, which ends every
