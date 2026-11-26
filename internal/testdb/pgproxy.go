@@ -3,7 +3,7 @@ package testdb
 // A fault-injecting PostgreSQL proxy for tests (R4-CTX). It forwards the wire
 // protocol unchanged (the client must use sslmode=disable) and can, per armed
 // connection, hold, drop or cut the few messages that decide what a client
-// believes about its transaction: COMMIT and ROLLBACK, the CancelRequest a
+// believes about its transaction: result completion, COMMIT and ROLLBACK, the CancelRequest a
 // driver sends on a new connection, and the Terminate and FIN that end a
 // connection.
 //
@@ -88,14 +88,10 @@ type Faults struct {
 	Rollback RollbackFault
 	Cancel   CancelFault
 	Close    CloseFault
-	// CutAfterDataRows, when positive, cuts the connection (both sides) right after
-	// this many DataRow frames of a statement containing Match were forwarded to
-	// the client: a result stream that fails part-way, after the client has read
-	// some rows and while it may still be reading the rest. The server never
-	// delivers a CommandComplete for such a statement; the TagEvent says how many
-	// frames the proxy saw and nothing else (the server's own total is unknown,
-	// and nothing is claimed about work the server did after the connection broke).
-	CutAfterDataRows int
+	// CutResultOn holds the matching statement's CommandComplete and cuts the
+	// connection when the channel signals. DataRows can reach the client while
+	// the proxy waits for the test to signal client-side progress.
+	CutResultOn <-chan struct{}
 }
 
 // What happened to a logged message.
@@ -128,11 +124,9 @@ type Event struct {
 	Action string
 }
 
-// TagEvent is the end of one statement's result as the proxy saw it: the
-// CommandComplete tag the server sent (for example "SELECT 256") and the number
-// of DataRow frames observed and forwarded for the statement. A cut or failed
-// stream has no command tag; Rows is only what the proxy observed, not the
-// statement's total.
+// TagEvent describes one statement's result: its command tag (for example
+// "SELECT 256") and the DataRow counts observed and forwarded by the proxy.
+// A cut or failed stream carries no command tag to the client.
 type TagEvent struct {
 	Conn      int
 	PID       uint32
@@ -353,7 +347,7 @@ type proxyConn struct {
 	pid      atomic.Uint32
 
 	// dataRows counts the DataRow frames of the statement now running; lastRun is
-	// its SQL. Both are for TagEvents and CutAfterDataRows.
+	// its SQL. Both are for TagEvents.
 	dataRows      atomic.Int64
 	forwardedRows atomic.Int64
 	lastRun       atomic.Value
@@ -784,19 +778,20 @@ func (c *proxyConn) fromServer() {
 		}
 		switch typ {
 		case 'D':
-			n := c.dataRows.Add(1)
-			if cut := c.f().CutAfterDataRows; cut > 0 && int(n) >= cut && c.runMatches() {
-				if !c.clientClosed.Load() {
-					if writeMsg(c.client, typ, body) == nil {
-						c.forwardedRows.Add(1)
-					}
+			c.dataRows.Add(1)
+		case 'C':
+			f := c.f()
+			if f.CutResultOn != nil && strings.Contains(strings.ToLower(c.lastRunSQL()), strings.ToLower(f.Match)) {
+				select {
+				case <-f.CutResultOn:
+				case <-c.p.closed:
+					return
 				}
-				c.p.recordTag(TagEvent{Conn: c.id, PID: c.pid.Load(), SQL: c.lastRunSQL(), Rows: int(n), Forwarded: int(c.forwardedRows.Swap(0)), Cut: true})
+				c.p.recordTag(TagEvent{Conn: c.id, PID: c.pid.Load(), SQL: c.lastRunSQL(), Rows: int(c.dataRows.Load()), Forwarded: int(c.forwardedRows.Load()), Cut: true})
 				c.closeClient()
 				c.upstream.Close()
 				return
 			}
-		case 'C':
 			tag, _ := cstring(body)
 			c.p.recordTag(TagEvent{Conn: c.id, PID: c.pid.Load(), SQL: c.lastRunSQL(), Tag: tag, Rows: int(c.dataRows.Swap(0)), Forwarded: int(c.forwardedRows.Swap(0))})
 		case 'E':
@@ -827,10 +822,4 @@ func (c *proxyConn) fromServer() {
 func (c *proxyConn) lastRunSQL() string {
 	s, _ := c.lastRun.Load().(string)
 	return s
-}
-
-// runMatches says whether the statement now running contains the armed fault's
-// Match, so a cut applies to the statement it was armed for and no other.
-func (c *proxyConn) runMatches() bool {
-	return strings.Contains(strings.ToLower(c.lastRunSQL()), strings.ToLower(c.f().Match))
 }
