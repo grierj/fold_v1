@@ -764,6 +764,45 @@ func TestRosterIsForMembers(t *testing.T) {
 	}
 }
 
+func TestGroupRosterOrdersTiedJoinTimes(t *testing.T) {
+	app := testApp(t)
+	lead := newTestUser(t, app, "leader", "password1234", models.RoleMember)
+	laterID := newTestUser(t, app, "sam", "password1234", models.RoleMember)
+	earlierID := newTestUser(t, app, "ann", "password1234", models.RoleMember)
+	earlierJoin := newTestUser(t, app, "pat", "password1234", models.RoleMember)
+	g := newTestGroup(t, app, lead, "Choir", models.GroupActive)
+	joined := time.Date(2025, time.January, 2, 12, 0, 0, 0, time.UTC)
+
+	// Insert the tied memberships in descending ID order so the expected
+	// order can't come from the order of inserts or the users' IDs.
+	for _, row := range []models.Membership{
+		{ID: 20, UserID: laterID.ID, JoinedAt: joined},
+		{ID: 10, UserID: earlierID.ID, JoinedAt: joined},
+		{ID: 30, UserID: earlierJoin.ID, JoinedAt: joined.Add(-time.Hour)},
+	} {
+		row.GroupID = g.ID
+		gormMust(t, app.DB.Create(&row))
+	}
+
+	viewer := loginAPI(t, app, lead.Name, "password1234")
+	want := []uint{earlierJoin.ID, earlierID.ID, laterID.ID, lead.ID}
+	for _, path := range []string{groupDetailPath(g.ID), "/api/v1/groups/" + itoa(g.ID) + "/members"} {
+		w := viewer.do("GET", path, nil, false)
+		if w.Code != http.StatusOK {
+			t.Fatalf("%s: %d %s", path, w.Code, w.Body.String())
+		}
+		var body membersResponseJSON
+		decodeJSON(t, w, &body)
+		var got []uint
+		for _, member := range body.Members {
+			got = append(got, member.ID)
+		}
+		if !slices.Equal(got, want) {
+			t.Errorf("%s roster order: got %v, want %v", path, got, want)
+		}
+	}
+}
+
 func TestLeadersRemoveMembers(t *testing.T) {
 	app := testApp(t)
 	newTestUser(t, app, "admin", "password1234", models.RoleAdmin)
