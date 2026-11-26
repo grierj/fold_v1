@@ -245,13 +245,14 @@ func (a *App) apiDeletionRequests(c *gin.Context) {
 }
 
 // apiRejectDeletion keeps a group whose lone leader asked to delete it. It is
-// only ever an answer to the request, so a request no longer open (withdrawn,
-// kept by another admin, or ended by someone joining) writes nothing and
-// answers errAlreadyHandled. No contact gate: the group's row lock orders it
-// with the delete, a join and the leader's own withdrawal.
+// only an answer to an open request. The contact gate keeps the asker's
+// account and access stable while the group lock orders the decision.
 func (a *App) apiRejectDeletion(c *gin.Context) {
 	id, _ := strconv.Atoi(c.Param("id"))
-	err := a.DB.Transaction(func(tx *gorm.DB) error {
+	err := a.DB.WithContext(c.Request.Context()).Transaction(func(tx *gorm.DB) error {
+		if err := lockContacts(tx); err != nil {
+			return err
+		}
 		g, actor, err := lockAdminGroupIn(tx, apiUser(c), uint(id))
 		if err != nil {
 			return err
@@ -259,8 +260,11 @@ func (a *App) apiRejectDeletion(c *gin.Context) {
 		if !g.DeletionRequested {
 			return errAlreadyHandled
 		}
+		if err := notifyDeletionKept(tx, g, actor.ID); err != nil {
+			return err
+		}
 		return clearDeletionRequestIn(tx, g.ID, &actor.ID, "kept")
-	}, readCommitted)
+	}, contactGateTx)
 	if a.answerAlreadyHandled(c, err, notify.GroupDeletion, uint(id)) {
 		return
 	}

@@ -81,6 +81,26 @@ func notifyDeletionRequested(tx *gorm.DB, g *models.Group, actor uint) error {
 	return err
 }
 
+func notifyDeletionKept(tx *gorm.DB, g *models.Group, actor uint) error {
+	asker, err := deletionRequesterIn(tx, g)
+	if err != nil || asker == 0 || asker == actor {
+		return err
+	}
+	to := []uint{asker}
+	facts, err := loadNoticeFacts(tx, []uint{g.ID}, to)
+	if err != nil {
+		return err
+	}
+	m := notify.Msg{Kind: notify.GroupDeletionKept, To: to, Actor: &actor, Link: "/my-groups"}
+	if facts.canSeeGroup(asker, g) {
+		m.Vars.Group = g.Name // group-ok: only for an asker who can still see the group
+		m.Link = fmt.Sprintf("/groups/%d", g.ID)
+		m.SubjectType, m.SubjectID = "group", g.ID
+	}
+	_, err = notify.Send(tx, m)
+	return err
+}
+
 // notifyLeadership tells the other admins about a leadership change, from
 // the RoleChanged or MemberRemoved entry just written (DEC-31).
 func notifyLeadership(tx *gorm.DB, e audit.Entry) error {

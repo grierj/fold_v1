@@ -643,15 +643,12 @@ func OpenTask(tx *gorm.DB, kind string, subjectID uint) (bool, error) {
 	return n > 0, err
 }
 
-// OpenTaskActors is who caused the open tasks of kind about subjectID (each
-// row's actor), distinct and ascending: for a deletion request, who asked.
-// Another admin's row can still name an asker who was erased; they are no
-// longer a listed member, so a caller matching against members finds nobody.
-func OpenTaskActors(tx *gorm.DB, kind string, subjectID uint) ([]uint, error) {
-	var ids []uint
-	err := tx.Model(&models.Notification{}).Where("kind = ? AND subject_id = ? AND actor_id IS NOT NULL AND "+sqlTask, kind, subjectID).
-		Distinct("actor_id").Order("actor_id").Pluck("actor_id", &ids).Error
-	return ids, err
+// OpenTaskActor returns zero unless every open task names the same actor.
+func OpenTaskActor(tx *gorm.DB, kind string, subjectID uint) (uint, error) {
+	var actor uint
+	err := tx.Model(&models.Notification{}).Where("kind = ? AND subject_id = ? AND "+sqlTask, kind, subjectID).
+		Select("CASE WHEN count(actor_id) = count(*) AND min(actor_id) = max(actor_id) THEN min(actor_id) ELSE 0 END").Scan(&actor).Error
+	return actor, err
 }
 
 // LastResolution is the most recent resolution of a task, for the 409 an
