@@ -151,7 +151,7 @@ describe("AudiencePicker", () => {
     expect(screen.getAllByText("Book club")).toHaveLength(1);
     unmount();
 
-    for (const [target, title] of [["all", "Everyone at church"], ["occurrence:99", "The date you chose earlier"], ["group:99", "The group you chose earlier"], ["event:99", "The event you chose earlier"]]) {
+    for (const [target, title] of [["all", "Everyone at church"], ["occurrence:99", "Previously selected date"], ["group:99", "Previously selected group"], ["event:99", "Previously selected event"]]) {
       const view = render(<LongHarness target={target} everyone />);
       select = screen.getByRole("combobox", { name: "Send to" });
       expect(select).toHaveAttribute("title", title);
@@ -185,10 +185,10 @@ describe("AudiencePicker", () => {
     const calls = pending();
     render(<Harness start={{ ...emptyChoice(), target: "group:7" }} />);
     await wait();
-    expect(Messages.audiencePreview).toHaveBeenLastCalledWith({ type: "group", groupId: 7, roles: ["member", "leader"] });
+    expect(Messages.audiencePreview).toHaveBeenLastCalledWith({ type: "group", groupId: 7, roles: ["member", "leader"] }, undefined);
     fireEvent.click(screen.getByRole("button", { name: "Leaders" }));
     await wait();
-    expect(Messages.audiencePreview).toHaveBeenLastCalledWith({ type: "group", groupId: 7, roles: ["member"] });
+    expect(Messages.audiencePreview).toHaveBeenLastCalledWith({ type: "group", groupId: 7, roles: ["member"] }, undefined);
     expect(calls).toHaveLength(2);
     // The newer answer lands first; the older one must not replace it.
     await act(async () => { calls[1](summary({ people: 2, eligible: 2, teens: 0, skipped: {} })); });
