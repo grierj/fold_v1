@@ -79,22 +79,29 @@ load_state() {
   db_name_ok "$DB_NAME" || die "state database name is not a verify database"
 }
 
-# port_owned_by PID PORT succeeds when PID owns the listening socket.
+# A failed socket query is distinct from an unowned port during startup.
 port_owned_by() {
-  ss -Hltnp "sport = :$2" 2>/dev/null | grep -F "pid=$1," >/dev/null
+  local listeners
+  listeners="$(ss -Hltnp "sport = :$2")" || return 2
+  [[ "$listeners" == *"pid=$1,"* ]]
 }
 
 free_port() {
-  local p previous="$1"
+  local p listeners previous="$1"
   for _ in $(seq 1 50); do
     p=$(( (RANDOM % 20000) + 30000 ))
     [[ "$p" != "$previous" ]] || continue
-    ss -Hltn "sport = :$p" | grep -q . || { echo "$p"; return 0; }
+    listeners="$(ss -Hltn "sport = :$p")" || die "could not inspect listeners on port $p"
+    if [[ -z "$listeners" ]]; then
+      echo "$p"
+      return 0
+    fi
   done
   die "no free port"
 }
 
 cmd_up() {
+  ss -Hltnp >/dev/null || die "cannot inspect listening sockets with ss (iproute2)"
   ensure_db
   local run db port="" secret work evidence url attempt pid
   run="$(date -u +%Y%m%dT%H%M%SZ)-$$"
@@ -110,7 +117,10 @@ cmd_up() {
   (cd "$ROOT/web" && npm run build)
   CGO_ENABLED=0 go build -C "$ROOT" -o "$work/fold" .
   for attempt in 1 2 3; do
-    port="$(free_port "$port")"
+    if ! port="$(free_port "$port")"; then
+      psql_admin -c "DROP DATABASE \"${db}\"" >&2
+      die "could not select a port for run $run"
+    fi
     (
       cd "$ROOT"
       export APP_ENV=prod PORT="$port" DATABASE_URL="$url" \
@@ -142,9 +152,15 @@ EOF
         tail -n 40 "$work/server.log" >&2 || true
         die "server exited before /healthz answered"
       fi
-      if port_owned_by "$pid" "$port" && curl -sf --max-time 1 -o /dev/null "http://127.0.0.1:${port}/healthz"; then
-        printf 'RUN_ID=%s\nURL=http://127.0.0.1:%s\nEVIDENCE=%s\n' "$run" "$port" "$evidence"
-        return 0
+      if port_owned_by "$pid" "$port"; then
+        if curl -sf --max-time 1 -o /dev/null "http://127.0.0.1:${port}/healthz"; then
+          printf 'RUN_ID=%s\nURL=http://127.0.0.1:%s\nEVIDENCE=%s\n' "$run" "$port" "$evidence"
+          return 0
+        fi
+      elif [[ $? == 2 ]]; then
+        tail -n 40 "$work/server.log" >&2 || true
+        cmd_down "$run" >&2
+        die "could not check listener ownership on port $port"
       fi
       sleep 0.5
     done
@@ -164,7 +180,7 @@ cmd_doctor() {
   local cmd
   cmd="$(tr '\0' ' ' <"/proc/$PID/cmdline")"
   [[ "$cmd" == *"serve"* ]] || die "pid $PID command is not serve: $cmd"
-  port_owned_by "$PID" "$PORT" || die "pid $PID does not listen on port $PORT"
+  port_owned_by "$PID" "$PORT" || die "could not verify that pid $PID listens on port $PORT"
   local live_url
   live_url="$(tr '\0' '\n' <"/proc/$PID/environ" | sed -n 's/^DATABASE_URL=//p')"
   [[ "$live_url" == "$DATABASE_URL" ]] || die "process DATABASE_URL does not match state"
