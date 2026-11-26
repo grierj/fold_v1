@@ -2,8 +2,9 @@ import { afterEach, expect, it, vi } from "vitest";
 import { bootstrapAnswer, clearMarkerCookie, sentChecks, setMarkerCookie } from "../test/credential";
 import { readRooms } from "../components/useRoomPicker";
 import { deferred } from "../test/keptPanel";
+import type { AdminRoomsResponse, RoomLocationsResponse, RoomRequestsResponse } from "../types";
 import { bootstrapCredential, currentCredential, type Credential } from "./core";
-import { AdminRooms } from "./rooms";
+import { AdminRooms, RoomRequests } from "./rooms";
 
 const endpoint = "/api/v1/admin/rooms/7/feed";
 const oldViewer = { token: "before", user: { id: 5 } };
@@ -89,7 +90,11 @@ it.each([
   await bootstrapCredential();
 });
 
-const adminLists = [{ path: "/admin/rooms", read: AdminRooms.list }];
+const adminLists: Array<{ path: string; read: () => Promise<AdminRoomsResponse | RoomLocationsResponse | RoomRequestsResponse> }> = [
+  { path: "/admin/rooms", read: AdminRooms.list },
+  { path: "/admin/rooms/locations", read: AdminRooms.locations },
+  { path: "/admin/room-requests", read: RoomRequests.list },
+];
 
 it.each(adminLists)("accepts $path only with the captured admin acknowledgment", async ({ path, read }) => {
   let acknowledged: string | undefined;

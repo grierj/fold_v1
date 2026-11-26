@@ -1604,7 +1604,13 @@ export function AdminPage() {
   const needApproval = roomsLoad.data ? roomsLoad.data.needApproval : null;
   const roomsError = roomsLoad.error ? errorText(roomsLoad.error, "We couldn't load the rooms.") : null;
   const roomCount = rooms ? rooms.length : null;
-  const requestsLoad = useLoad(async () => (await RoomRequests.list()).requests, [], { enabled: adminReady && roomsEnabled === true });
+
+  const requestsLoad = useLoad(async () => {
+    const pinned = currentCredential();
+
+    return (await readRooms(RoomRequests.list(), pinned)).requests;
+  }, [], { enabled: adminReady && roomsEnabled === true });
+
   const requests = requestsLoad.data ?? null;
   const requestsError = requestsLoad.error ? errorText(requestsLoad.error, "We couldn't load the bookings waiting for approval.") : null;
   // Background tasks that ran out of attempts (M3.1b): loaded here so the

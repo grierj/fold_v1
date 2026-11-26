@@ -57,6 +57,7 @@
   "room-revision.spec.ts": 4.0,
   "room-feed.spec.ts": 1.7,
   "room-match.spec.ts": 3.2,
+  "admin-room-requests-switch.spec.ts": 8.0,
   "rooms.spec.ts": 4.6,
   "roster.spec.ts": 0.6,
   "screens.spec.ts": 0,

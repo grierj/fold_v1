@@ -63,13 +63,13 @@ const maxMatchBusy = 100
 
 func (a *App) apiAdminTypedLocations(c *gin.Context) {
 	out := []typedLocationJSON{}
-	if err := a.DB.Raw(`SELECT mode() WITHIN GROUP (ORDER BY loc) AS location, count(*) AS dates, count(DISTINCT event_id) AS events
-		FROM (SELECT o.event_id, ` + effectiveLocationSQL + ` AS loc ` + unbookedDatesSQL + `) d
-		WHERE loc <> '' GROUP BY lower(loc) ORDER BY count(*) DESC, lower(loc) LIMIT 200`).Scan(&out).Error; err != nil {
-		jsonError(c, http.StatusInternalServerError, "could not list locations")
-		return
+	if a.readAdminRoomList(c, "admin typed locations", func(tx *gorm.DB) error {
+		return tx.Raw(`SELECT mode() WITHIN GROUP (ORDER BY loc) AS location, count(*) AS dates, count(DISTINCT event_id) AS events
+			FROM (SELECT o.event_id, ` + effectiveLocationSQL + ` AS loc ` + unbookedDatesSQL + `) d
+			WHERE loc <> '' GROUP BY lower(loc) ORDER BY count(*) DESC, lower(loc) LIMIT 200`).Scan(&out).Error
+	}) {
+		c.JSON(http.StatusOK, roomLocationsResponseJSON{Locations: out})
 	}
-	c.JSON(http.StatusOK, roomLocationsResponseJSON{Locations: out})
 }
 
 // apiAdminMatchLocation books a room for every free upcoming date whose
