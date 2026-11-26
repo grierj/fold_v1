@@ -360,7 +360,7 @@ func TestAgeRolloverPromotesHouseholdRelationWithoutGuardianship(t *testing.T) {
 	if n, err := app.rolloverAges(rolloverInstant(t, "2026-10-22T12:00:00Z")); err != nil || n != 1 {
 		t.Fatalf("rollover %d %v", n, err)
 	}
-	apiDo(t, client, "PUT", "/api/v1/me/household", map[string]string{"name": "Renamed"}, 200)
+	editMyHousehold(t, client, map[string]any{"name": "Renamed"}, 200)
 	app.DB.First(&account, account.ID)
 	if account.Relation != models.HouseholdRelationAdult {
 		t.Fatalf("household relation %s", account.Relation)

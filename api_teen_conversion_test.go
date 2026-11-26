@@ -371,9 +371,11 @@ func TestTeenConversionStagingPreservesHouseholdManagement(t *testing.T) {
 	admin, gid := openGroup(t, app, "Stage management")
 	f := pendingTeenConversion(t, app, admin, gid, "manage", true)
 	path := "/api/v1/me/household/people/" + itoa(f.person.ID)
-	apiDo(t, f.parent, "PUT", path, map[string]any{"firstName": "Changed", "careNotes": "must roll back"}, 409)
+	if got := apiDo(t, f.parent, "PUT", path, withRevision(map[string]any{"firstName": "Changed", "careNotes": "must roll back"}, myPersonRevision(t, f.parent, f.person.ID)), 409); !strings.Contains(got, "household_conversion_consent") {
+		t.Fatalf("a staged identity edit: %s, want household_conversion_consent", got)
+	}
 	apiDo(t, f.parent, "DELETE", path, nil, 409)
-	apiDo(t, f.parent, "PUT", path, map[string]any{"careNotes": "Care remains manageable", "photoConsent": true}, 200)
+	editMyPerson(t, f.parent, f.person.ID, map[string]any{"careNotes": "Care remains manageable", "photoConsent": true}, 200)
 	var person models.HouseholdPerson
 	app.DB.First(&person, f.person.ID)
 	if person.FullName() != f.person.Name || person.CareNotes != "Care remains manageable" || !person.PhotoConsent {
