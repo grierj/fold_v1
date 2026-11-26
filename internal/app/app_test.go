@@ -22,6 +22,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"os/exec"
 	"regexp"
 	"strings"
 	"testing"
@@ -54,6 +55,17 @@ func TestSessionCookieExpiresOnServerAfterSevenDays(t *testing.T) {
 		if days == 8 && (err == nil || !strings.Contains(err.Error(), "expired timestamp")) {
 			t.Fatalf("eight-day cookie should expire, got %v", err)
 		}
+	}
+}
+
+func resetRestoredCredentials(t *testing.T, app *App) {
+	t.Helper()
+	statements, err := exec.Command("bash", "-c", "source deploy/digitalocean/checks.sh && invalidate_restored_credentials_sql").Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := app.DB.Exec(string(statements)).Error; err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -97,10 +109,7 @@ func TestDatabaseSessionStoreKeepsItsKeyUntilTheRestoreResetsIt(t *testing.T) {
 	if err := setSettingIn(app.DB, sessionSigningEpochKey, ""); err == nil {
 		t.Fatal("general settings writer changed the session signing epoch")
 	}
-	// Managed restore clears this key before the restored database can boot.
-	if err := app.DB.Exec("DELETE FROM settings WHERE key = ?", sessionSigningEpochKey).Error; err != nil {
-		t.Fatal(err)
-	}
+	resetRestoredCredentials(t, app)
 	if _, err := newDatabaseSessionStore(app.DB, app.Config); err == nil {
 		t.Fatal("missing epoch was accepted")
 	}

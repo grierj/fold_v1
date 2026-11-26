@@ -1761,7 +1761,7 @@ func TestEmailVerifyMailRetryAfterExpiryDoesNotRevive(t *testing.T) {
 }
 
 func TestEmailVerifyMailSkipsClosedRequests(t *testing.T) {
-	for _, state := range []string{"cancelled", "completed", "superseded", "expired", "used", "disabled", "deleted", "no longer able to sign in"} {
+	for _, state := range []string{"cancelled", "completed", "superseded", "expired", "restored", "used", "disabled", "deleted", "no longer able to sign in"} {
 		t.Run(state, func(t *testing.T) {
 			app := testApp(t)
 			f := queueHeldEmailChange(t, app)
@@ -1780,6 +1780,9 @@ func TestEmailVerifyMailSkipsClosedRequests(t *testing.T) {
 				apiDo(t, f.client, "PUT", "/api/v1/me", map[string]string{"email": "other.new@example.com", "currentPassword": "password1234"}, http.StatusOK)
 			case "expired":
 				err = app.DB.Model(&models.AccountToken{}).Where("id = ?", f.verify.ID).Update("expires_at", time.Now().Add(-time.Minute)).Error
+			case "restored":
+				resetRestoredCredentials(t, app)
+				bootFence(t, app)
 			case "used":
 				err = app.DB.Model(&models.AccountToken{}).Where("id = ?", f.verify.ID).Update("used_at", time.Now()).Error
 			case "disabled":
