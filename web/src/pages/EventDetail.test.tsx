@@ -1144,7 +1144,9 @@ describe("Email people going (M3.4c)", () => {
     composer.on = true;
 
     try {
-      vi.mocked(Events.get).mockResolvedValue({ ...page, event: { ...page.event, recurrenceRule: "FREQ=WEEKLY" }, occurrences: [occurrence({ id: 41, recurrenceRule: "FREQ=WEEKLY" }), occurrence({ id: 42, date: "2026-12-08", recurrenceRule: "FREQ=WEEKLY" })] });
+      const first = occurrence({ id: 41, recurrenceRule: "FREQ=WEEKLY" });
+      const second = occurrence({ id: 42, date: "2026-12-08", startsAt: "2026-12-08T19:00:00Z", endsAt: "2026-12-08T20:00:00Z", startsLocal: "2026-12-08T19:00", recurrenceRule: "FREQ=WEEKLY" });
+      vi.mocked(Events.get).mockResolvedValue({ ...page, event: { ...page.event, recurrenceRule: "FREQ=WEEKLY" }, occurrences: [first, second] });
       const router = createMemoryRouter([{ path: "/events/:id", element: <EventDetail /> }, { path: "/messages/new", element: <p>Composer</p> }], { initialEntries: ["/events/7"] });
       render(<RouterProvider router={router} />);
       await userEvent.click(await screen.findByRole("button", { name: "More event actions" }));
@@ -1283,8 +1285,20 @@ describe("EventDetail asks every question in the app's dialog", () => {
     renderPage();
     await userEvent.click(await screen.findByRole("button", { name: "More for 2026-12-01" }));
     await userEvent.click(screen.getByRole("menuitem", { name: "Cancel this date" }));
-    const cancelling = await screen.findByRole("dialog", { name: "Cancel this date on 2026-12-01?" });
+    const cancelling = await screen.findByRole("dialog", { name: "Cancel this date on Tuesday, December 1, 2026?" });
     expect(cancelling).toHaveAccessibleDescription(line);
+    await userEvent.click(within(cancelling).getByRole("button", { name: "Cancel this date" }));
+    await waitFor(() => expect(Events.cancelOccurrence).toHaveBeenCalledExactlyOnceWith(7, "2026-12-01"));
+    expect(Events.signedUp).toHaveBeenCalledExactlyOnceWith(7, "2026-12-01");
+  });
+
+  it("names the moved day when cancelling and sends the original recurrence date", async () => {
+    const moved = occurrence({ startsAt: "2026-12-03T19:00:00Z", endsAt: "2026-12-03T20:00:00Z", startsLocal: "2026-12-03T19:00" });
+    vi.mocked(Events.get).mockResolvedValue({ ...page, occurrences: [moved] });
+    renderPage();
+    await userEvent.click(await screen.findByRole("button", { name: "More for 2026-12-03" }));
+    await userEvent.click(screen.getByRole("menuitem", { name: "Cancel this date" }));
+    const cancelling = await screen.findByRole("dialog", { name: "Cancel this date on Thursday, December 3, 2026?" });
     await userEvent.click(within(cancelling).getByRole("button", { name: "Cancel this date" }));
     await waitFor(() => expect(Events.cancelOccurrence).toHaveBeenCalledExactlyOnceWith(7, "2026-12-01"));
     expect(Events.signedUp).toHaveBeenCalledExactlyOnceWith(7, "2026-12-01");
@@ -1295,13 +1309,13 @@ describe("EventDetail asks every question in the app's dialog", () => {
     const more = await screen.findByRole("button", { name: "More for 2026-12-01" });
     await userEvent.click(more);
     await userEvent.click(screen.getByRole("menuitem", { name: "Cancel this date" }));
-    await userEvent.click(within(screen.getByRole("dialog", { name: "Cancel this date on 2026-12-01?" })).getByRole("button", { name: "Keep this date" }));
+    await userEvent.click(within(screen.getByRole("dialog", { name: "Cancel this date on Tuesday, December 1, 2026?" })).getByRole("button", { name: "Keep this date" }));
     expect(Events.cancelOccurrence).not.toHaveBeenCalled();
     expect(more).toHaveFocus();
 
     await userEvent.click(more);
     await userEvent.click(screen.getByRole("menuitem", { name: "Cancel this date" }));
-    await userEvent.click(within(screen.getByRole("dialog", { name: "Cancel this date on 2026-12-01?" })).getByRole("button", { name: "Cancel this date" }));
+    await userEvent.click(within(screen.getByRole("dialog", { name: "Cancel this date on Tuesday, December 1, 2026?" })).getByRole("button", { name: "Cancel this date" }));
     await waitFor(() => expect(Events.cancelOccurrence).toHaveBeenCalledWith(7, "2026-12-01"));
     expect(Events.cancelOccurrence).toHaveBeenCalledOnce();
   });
@@ -1311,7 +1325,7 @@ describe("EventDetail asks every question in the app's dialog", () => {
     await roster();
     await userEvent.click(screen.getByRole("button", { name: "More for 2026-12-01" }));
     await userEvent.click(screen.getByRole("menuitem", { name: "Cancel this date" }));
-    const yes = within(screen.getByRole("dialog", { name: "Cancel this date on 2026-12-01?" })).getByRole("button", { name: "Cancel this date" });
+    const yes = within(screen.getByRole("dialog", { name: "Cancel this date on Tuesday, December 1, 2026?" })).getByRole("button", { name: "Cancel this date" });
     vi.mocked(Events.get).mockResolvedValue({ ...page, canManage: false });
     // Manage sign-ups refreshes the page when the window comes back.
     act(() => { window.dispatchEvent(new Event("focus")); });
@@ -3451,7 +3465,7 @@ describe("EventDetail when a date's save meets someone else's change", () => {
     { overlap: true, refused: false },
     { overlap: true, refused: true },
   ])("reports the last date save (overlapping: $overlap, refused: $refused)", async ({ overlap, refused }) => {
-    const second = occurrence({ id: 2, date: "2026-12-08", startsLocal: "2026-12-08T19:00" });
+    const second = occurrence({ id: 2, date: "2026-12-08", startsAt: "2026-12-08T19:00:00Z", endsAt: "2026-12-08T20:00:00Z", startsLocal: "2026-12-08T19:00" });
     vi.mocked(Events.get).mockResolvedValue({ ...page, occurrences: [listed, second] });
     renderPage();
 

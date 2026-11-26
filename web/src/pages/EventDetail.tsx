@@ -24,7 +24,7 @@ import { RefusedSaveLine, ResourceRefusal, resourceRefused, useRefusedSave, useR
 import { RsvpButtons } from "../components/RsvpButtons";
 import { GuestRegistrationForm } from "../components/GuestRegistrationForm";
 import { DateActions } from "../components/DateActions";
-import { formatDayFull, formatEventDay, formatTime, heldIn } from "../lib/when";
+import { dayOf, formatDayFull, formatEventDay, formatTime, heldIn } from "../lib/when";
 import { placeLine } from "../lib/place";
 import { dateLine, whenLine } from "../lib/repeat";
 import type { EventHostRow, EventOccurrence, HouseholdPerson, RestorableDate } from "../types";
@@ -677,6 +677,7 @@ function DateRow({
   const cancelNow = useRef(false);
   const [cancelError, setCancelError] = useState<string | null>(null);
   const beginCancel = useConfirm();
+  const day = dayOf(instance.startsAt);
   const time = formatTime(instance.startsAt);
   const held = heldIn(instance.startsAt, instance.tzid);
   const place = placeLine(instance.room, instance.location);
@@ -686,7 +687,7 @@ function DateRow({
     const action = beginCancel();
     cancelNow.current = true;
     setCancelStep("asking");
-    const question = `Cancel this date on ${instance.date}?`;
+    const question = `Cancel this date on ${formatDayFull(day)}?`;
     const told = await signedUpNotice(instance.eventId, instance.date);
 
     if (!(await action.ask({ title: question, body: told, confirmLabel: "Cancel this date", cancelLabel: "Keep this date", tone: "danger", native: `${question} ${told}` }))) {
@@ -725,7 +726,7 @@ function DateRow({
       </>}
       menu={canManage && <Menu
         tone="quiet"
-        label={`More for ${instance.date}`}
+        label={`More for ${day}`}
         items={[
           { label: "Edit this date", onSelect: () => { setFocusRoom(false); dateEditor.toggle(); }, disabled: settlingDate || dateEditor.saving },
           { label: "Manage sign-ups", onSelect: () => setManaging((v) => !v) },

@@ -61,7 +61,8 @@ const hosts: Array<{ name: string; open: (page: Page, s: Series) => Promise<void
     name: "the event page",
     open: async (page, s) => {
       await signInTo(page, s.leader, `/events/${s.id}`);
-      await page.getByRole("button", { name: `More for ${s.date}` }).click();
+      await page.getByRole("article", { name: s.title, exact: true }).first()
+        .getByRole("button", { name: /^More for / }).click();
       await page.getByRole("menuitem", { name: "Edit this date" }).click();
     },
     line: (s) => `${fullDay(s.date)}. ${CHANGED}`,
