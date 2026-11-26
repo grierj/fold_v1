@@ -1826,8 +1826,9 @@ DELETE /api/v1/admin/groups/:id?deletionRequest=1 → 200 {} | 409 already_handl
        own delete writes, one per event; a member signed up gets only group.deleted (DEC-177)
      — deletionRequest=1 marks the Approvals card's delete, which answers the leader's request: with it, a request
        no longer open deletes nothing and answers 409 already_handled as Keep does. Under the group's row lock the request is open only while the flag is set and the group's one listed member matches the recorded requester (or, for an older
-       request, the person identified by every open task). A flag with no identifiable requester or on
-       a group with no listed member, a second one, or one who did not ask (a successor after a handoff, a co-leader
+       request, the person identified by every open task). With an older request that left no open task, the
+       lone admin member can press Delete to renew their request. Other flags with no identifiable requester,
+       no listed member, a second one, or one who did not ask (a successor after a handoff, a co-leader
        left alone when the asker departed) is withdrawn there (the flag cleared and the admins'
        tasks resolved "withdrawn", which commits, as does the contact reconciliation this delete's transaction runs) and
        the delete is refused the same way. Without the marker (the Groups tab) the

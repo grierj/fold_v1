@@ -558,7 +558,7 @@ func TestRequestCardRefusesARequestThatOutlivedItsAsker(t *testing.T) {
 }
 
 func TestRequestCardDeletesAnAdminLeadersOwnRequest(t *testing.T) {
-	for _, presser := range []string{"another admin", "newly appointed admin", "the asker"} {
+	for _, presser := range []string{"another admin", "newly appointed admin", "the asker", "the legacy asker"} {
 		t.Run(presser, func(t *testing.T) {
 			app := testApp(t)
 			asker := newTestUser(t, app, "lone admin", "password1234", models.RoleAdmin)
@@ -574,6 +574,9 @@ func TestRequestCardDeletesAnAdminLeadersOwnRequest(t *testing.T) {
 			gormMust(t, app.DB.Model(&models.Notification{}).Where("kind = ? AND subject_id = ?", notify.GroupDeletion, gid).Count(&tasks))
 			if (tasks > 0) != (presser == "another admin") {
 				t.Fatalf("fixture: %d task rows", tasks)
+			}
+			if presser == "the legacy asker" {
+				gormMust(t, app.DB.Model(&models.Group{}).Where("id = ?", gid).Update("deletion_requester_id", nil))
 			}
 			if presser == "newly appointed admin" {
 				newTestUser(t, app, "late admin", "password1234", models.RoleAdmin)

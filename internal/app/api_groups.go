@@ -1233,13 +1233,21 @@ func deletionRequesterIn(tx *gorm.DB, g *models.Group) (uint, error) {
 	return notify.OpenTaskActor(tx, notify.GroupDeletion, g.ID)
 }
 
-func deletionRequestHolds(tx *gorm.DB, g *models.Group) (bool, error) {
+func deletionRequestHolds(tx *gorm.DB, g *models.Group, presser uint) (bool, error) {
 	members, err := memberIDs(tx, g.ID)
 	if err != nil || len(members) != 1 {
 		return false, err
 	}
 	asker, err := deletionRequesterIn(tx, g)
-	return asker == members[0], err
+	if err != nil || asker != 0 {
+		return asker == members[0], err
+	}
+	if members[0] != presser {
+		return false, nil
+	}
+	// DEC-177 lets the lone admin renew their own older request that wrote no task.
+	open, err := notify.OpenTask(tx, notify.GroupDeletion, g.ID)
+	return !open, err
 }
 
 func clearDeletionRequestIn(tx *gorm.DB, groupID uint, by *uint, outcome string) error {
@@ -1310,7 +1318,7 @@ func (a *App) deleteGroup(ctx context.Context, me *models.User, groupID uint, an
 			}
 			// A flag that no longer stands for who asked is withdrawn here,
 			// under the row lock (that commits), and the delete is refused.
-			holds, err := deletionRequestHolds(tx, g)
+			holds, err := deletionRequestHolds(tx, g, actor.ID)
 			if err != nil {
 				return err
 			}
