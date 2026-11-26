@@ -2,13 +2,16 @@ package main
 
 import (
 	"fmt"
+	"slices"
 	"strconv"
+	"time"
 
 	"fold/internal/audit"
 	"fold/internal/notify"
 	"fold/models"
 
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 // Notices about groups: approval, leadership and who may see what. The rule
@@ -203,4 +206,128 @@ func notifyVisibilityOverride(tx *gorm.DB, actor uint, ev *models.Event, g *mode
 		Data: map[string]any{"eventId": ev.ID, "groupId": g.ID},
 	})
 	return err
+}
+
+// groupDeletion is who deleting a group tells (DEC-177): its members, and for
+// each of its events the other people eventDeleteTells reads, with the
+// members left out so nobody hears twice. eventIDs is every event the delete
+// removes, soft-deleted ones included.
+type groupDeletion struct {
+	members  []uint
+	events   []eventDeletion
+	eventIDs []uint
+}
+
+// eventDeletion is one event's part of a group's deletion: the rows and dates
+// tellEventDeleted takes.
+type eventDeletion struct {
+	ev   *models.Event
+	rows []signedUp
+	occs map[uint]*models.EventOccurrence
+}
+
+// people is how many people the deletion tells: its confirmation's count.
+func (d groupDeletion) people() int {
+	seen := map[uint]bool{}
+	for _, id := range d.members {
+		seen[id] = true
+	}
+	for _, e := range d.events {
+		for _, r := range e.rows {
+			seen[r.UserID] = true
+		}
+	}
+	return len(seen)
+}
+
+// groupDeleteTells is who deleting groupID tells, for the delete's notices and
+// its confirmation's count: every active member whose account is listed
+// (listedUsers) but the actor, and everyone else a delete of one of its live
+// events would tell (eventDeleteTells). With lock, the delete's, the caller
+// holds the group's row; this takes every event row of the group, then all
+// their dates, each in one statement in id order (the order event-wide
+// writers use, registration_locks.go), before it reads anyone. A join, a leave
+// or a role change waits on the contact gate and the group row, and a sign-up
+// or a withdrawal holds its date until it commits, so every answer that
+// returned before the delete is read here, and one still in flight finds its
+// group or date gone.
+func groupDeleteTells(tx *gorm.DB, groupID, actor uint, now time.Time, lock bool) (groupDeletion, error) {
+	var d groupDeletion
+	q := tx.Unscoped().Where("group_id = ?", groupID).Order("id")
+	if lock {
+		q = q.Clauses(clause.Locking{Strength: "UPDATE"})
+	}
+	var evs []models.Event
+	if err := q.Find(&evs).Error; err != nil {
+		return d, err
+	}
+	for _, ev := range evs {
+		d.eventIDs = append(d.eventIDs, ev.ID)
+	}
+	if lock && len(d.eventIDs) > 0 {
+		var held []models.EventOccurrence
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Select("id").
+			Where("event_id IN ?", d.eventIDs).Order("id").Find(&held).Error; err != nil {
+			return d, err
+		}
+	}
+	if err := listedMembers(tx, groupID).Where("memberships.user_id <> ?", actor).
+		Order("memberships.user_id").Pluck("memberships.user_id", &d.members).Error; err != nil {
+		return d, err
+	}
+	for i := range evs {
+		if evs[i].DeletedAt.Valid {
+			continue
+		}
+		rows, occs, err := eventDeleteTells(tx, evs[i].ID, actor, now, false)
+		if err != nil {
+			return d, err
+		}
+		rows = slices.DeleteFunc(rows, func(r signedUp) bool { return slices.Contains(d.members, r.UserID) })
+		if len(rows) > 0 {
+			d.events = append(d.events, eventDeletion{ev: &evs[i], rows: rows, occs: occs})
+		}
+	}
+	return d, nil
+}
+
+// notifyGroupDeleted tells the people d names that g was deleted, in the
+// delete's transaction before the rows go: each member one group.deleted
+// notice, named when they may see the group, which links home (the group page
+// is gone) and has no place and no other person's name; everyone else signed
+// up for an upcoming date of one of its events the event.deleted notice an
+// event's own delete writes, one per event. A guardian is never copied on the
+// member notice (notify.Kind.NoGuardianCopy).
+func notifyGroupDeleted(tx *gorm.DB, actor uint, g *models.Group, d groupDeletion) error {
+	if len(d.members) > 0 {
+		facts, err := loadNoticeFacts(tx, []uint{g.ID}, d.members)
+		if err != nil {
+			return err
+		}
+		err = notify.WithRecipients(tx, d.members, func(scope *notify.Scope) error {
+			for _, uid := range d.members {
+				m := notify.Msg{
+					Kind: notify.GroupDeleted, To: []uint{uid}, Actor: &actor, Link: "/", Scope: scope,
+					DedupeKey: fmt.Sprintf("%s:%d", notify.GroupDeleted, g.ID),
+				}
+				if facts.canSeeGroup(uid, g) {
+					m.Vars.Group = g.Name // group-ok: only for a member noticeFacts says may see it
+					m.SubjectType, m.SubjectID = "group", g.ID
+				}
+				if _, err := notify.Send(tx, m); err != nil {
+					return err
+				}
+			}
+			return nil
+		})
+		if err != nil {
+			return err
+		}
+	}
+	for _, e := range d.events {
+		if err := tellEventDeleted(tx, actor, e.ev, e.rows, e.occs); err != nil {
+			return err
+		}
+	}
+	return nil
 }

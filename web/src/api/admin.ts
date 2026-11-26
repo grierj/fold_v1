@@ -7,9 +7,10 @@ import type {
   GroupResponse,
   SettingAddressResponse,
   SettingOnResponse,
+  SignedUpCount,
   TimezoneResponse,
 } from "../types";
-import { api, path, type Id } from "./core";
+import { api, path, query, type Id } from "./core";
 
 export const Admin = {
   pending: () => api<GroupListResponse>("/admin/pending"),
@@ -22,7 +23,12 @@ export const Admin = {
     api<unknown>(path`/admin/groups/${id}/reject`, { method: "POST", body: message ? { message } : undefined }),
   deletions: () => api<GroupListResponse>("/admin/deletions"),
   rejectDeletion: (id: Id) => api<unknown>(path`/admin/groups/${id}/reject-deletion`, { method: "POST" }),
-  deleteGroup: (id: Id) => api<unknown>(path`/admin/groups/${id}`, { method: "DELETE" }),
+  // answering: the Approvals card's delete, which answers the leader's request and is refused (already_handled) once
+  // the request is no longer open. The Groups tab's delete sends no marker and is never refused for it.
+  deleteGroup: (id: Id, answering?: boolean) =>
+    api<unknown>(`${path`/admin/groups/${id}`}${query({ deletionRequest: answering })}`, { method: "DELETE" }),
+  // How many other people deleting the group would notify, for its confirmation (DEC-177).
+  deleteCount: (id: Id) => api<SignedUpCount>(path`/admin/groups/${id}/delete-count`),
   timezone: () => api<TimezoneResponse>("/admin/timezone"),
   setTimezone: (timezone: string, revision: string | undefined) => api<TimezoneResponse>("/admin/timezone", { method: "PUT", body: { timezone, revision } }),
   // The church's mailing address for email footers (DEC-116).

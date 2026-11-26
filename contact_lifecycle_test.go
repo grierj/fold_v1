@@ -400,7 +400,7 @@ func TestContactEventGraceAndHostRemoval(t *testing.T) {
 			case "delete-group":
 				// Make it a group event again before deleting its context.
 				f.app.DB.Model(&ev).Update("group_id", f.group.ID)
-				if err := f.app.deleteGroup(context.Background(), f.group, &f.admin.ID); err != nil {
+				if err := f.app.deleteGroup(context.Background(), f.admin, f.group.ID, false, ""); err != nil {
 					t.Fatal(err)
 				}
 			}

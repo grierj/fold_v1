@@ -6,7 +6,7 @@ import { PeoplePicker } from "../components/ui/PeoplePicker";
 import type { PersonSearchResult } from "../types";
 import { ContactDetails } from "../components/ContactDetails";
 import { GroupDepartureDialog } from "../components/GroupDepartureDialog";
-import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { Badge } from "../components/ui/Badge";
 import { Tabs } from "../components/ui/Tabs";
 import { roleLabel, accountStatusLabel, groupStatusLabel } from "../lib/status";
@@ -58,13 +58,16 @@ import { Illustration } from "../components/ui/Illustration";
 import { Skeleton } from "../components/ui/Skeleton";
 import { ContactHistory } from "../api/contactHistory";
 import { formatShortDay } from "../lib/when";
+import { groupDeleteNotice } from "../lib/signedUp";
+import { useFocusHome, useLockedFocus } from "../lib/focusHome";
 
 type AdminTab = "approvals" | "groups" | "rooms" | "users" | "invite" | "settings" | "system";
 
 const TeenConsentPanel = lazy(() => import("../components/TeenConsentPanel"));
 
 
-type Decision = { kind: "approved" | "rejected"; id: number; name: string; leaderName: string };
+// What the admin just decided on a new group, or a deletion request that someone else ended first.
+type Decision = { kind: "approved" | "rejected"; id: number; name: string; leaderName: string } | { kind: "no_longer_open"; name: string; gone: boolean };
 
 function PendingCard({ group, onDone }: { group: GroupSummary; onDone: (decision: Decision) => void }) {
   const [tags, setTags] = useState(group.tags.join(", "));
@@ -151,41 +154,68 @@ function PendingCard({ group, onDone }: { group: GroupSummary; onDone: (decision
   );
 }
 
-function DeletionCard({ group, onDone }: { group: GroupSummary; onDone: () => void }) {
-  const [busy, setBusy] = useState(false);
+// The card's Delete and Keep group answer the leader's request. When the request is no longer open (the leader
+// withdrew it, someone joined, another admin kept or deleted the group) the server refuses and changes nothing, and the
+// card goes away while the queue reads again (onStale).
+// What the card is waiting on, said in its status line: the count before the prompt, then the answer.
+const DELETION_WAIT = { counting: "Checking who will be notified…", deleting: "Deleting the group…", keeping: "Keeping the group…" } as const;
+
+// onStale(gone): the request is no longer open (gone: the group itself was already deleted).
+function DeletionCard({ group, onDone, onStale }: { group: GroupSummary; onDone: () => void; onStale: (gone: boolean) => void }) {
+  const [waiting, setWaiting] = useState<keyof typeof DELETION_WAIT | null>(null);
+  const busy = waiting !== null;
   const [error, setError] = useState<string | null>(null);
+  // A press disables both buttons while the count and the answer are read: focus waits on the card, never the page,
+  // and goes back to the button pressed when the prompt is dismissed.
+  const home = useFocusHome<HTMLDivElement>();
+  useLockedFocus(home, busy);
+  // The browser's prompt opens only after the count arrives: by then the card may be gone (the queue read again, or
+  // the admin left the tab), and then the press asks nothing.
+  const live = useRef(false);
+  useLayoutEffect(() => {
+    live.current = true;
+
+    return () => { live.current = false; };
+  }, []);
 
   async function approve() {
-    if (!confirm(`Delete “${group.name}”? This removes the group, its members, and its events.`)) return;
-    setBusy(true);
+    if (busy) return;
+    setWaiting("counting");
     setError(null);
 
     try {
-      await Admin.deleteGroup(group.id);
+      const told = await groupDeleteNotice(group.id);
+
+      if (!live.current || !confirm(`Delete “${group.name}”? This removes the group, its members, and its events. ${told}`)) return;
+      setWaiting("deleting");
+      await Admin.deleteGroup(group.id, true);
       onDone();
     } catch (e) {
-      setError(errorText(e, "We couldn't delete that."));
+      if (e instanceof ApiError && (e.code === "already_handled" || e.status === 404)) onStale(e.status === 404);
+      else setError(errorText(e, "We couldn't delete that."));
     } finally {
-      setBusy(false);
+      setWaiting(null);
     }
   }
 
   async function keep() {
-    setBusy(true);
+    if (busy) return;
+    setWaiting("keeping");
     setError(null);
 
     try {
       await Admin.rejectDeletion(group.id);
       onDone();
     } catch (e) {
-      setError(errorText(e, "We couldn't keep the group."));
+      if (e instanceof ApiError && (e.code === "already_handled" || e.status === 404)) onStale(e.status === 404);
+      else setError(errorText(e, "We couldn't keep the group."));
     } finally {
-      setBusy(false);
+      setWaiting(null);
     }
   }
 
   return (
-    <div className="fold-list-row bg-surface border-b border-border px-4">
+    <div ref={home.ref} tabIndex={-1} role="group" aria-label={`Deletion request for ${group.name}`} className="fold-list-row bg-surface border-b border-border px-4 focus:outline-none">
       <Link to={`/groups/${group.id}`} className="text-xl font-bold hover:text-primary">
         {group.name}
       </Link>
@@ -195,9 +225,10 @@ function DeletionCard({ group, onDone }: { group: GroupSummary; onDone: () => vo
       </div>
       <p className="text-text-muted mt-3">The leader asked for this group to be deleted.</p>
       {error && <FormError layout="mt-2">{error}</FormError>}
+      <p role="status" className="sr-only">{waiting ? DELETION_WAIT[waiting] : ""}</p>
       <div className="flex gap-3 mt-4">
         <Button variant="danger-outline" onClick={approve} disabled={busy}>
-          {busy ? "…" : "Delete group"}
+          Delete group
         </Button>
         <Button variant="primary" onClick={keep} disabled={busy}>
           Keep group
@@ -317,6 +348,7 @@ function ApprovalsTab({ onCount, onGroupDecided }: { onCount: (n: number) => voi
   const focusLinks = useRef(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const loaded = useRef(false);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -332,13 +364,19 @@ function ApprovalsTab({ onCount, onGroupDecided }: { onCount: (n: number) => voi
       setGroups(pending.groups);
       setDeletions(requested.groups);
       setRequests(accounts.requests);
-      onCount(pending.groups.length + requested.groups.length + accounts.requests.length + guardian.guardianLinks.length);
+      loaded.current = true;
     } catch (e) {
       setError(errorText(e, "We couldn't load the approval queue."));
     } finally {
       setLoading(false);
     }
-  }, [onCount]);
+  }, []);
+
+  // The badge counts the cards shown, so a card taken away (a refusal, even with the queue's read failing) leaves it
+  // too. Nothing is counted before the first read answers.
+  useEffect(() => {
+    if (loaded.current) onCount(groups.length + deletions.length + requests.length + links.length);
+  }, [groups, deletions, requests, links, onCount]);
 
   useEffect(() => {
     load();
@@ -371,9 +409,15 @@ function ApprovalsTab({ onCount, onGroupDecided }: { onCount: (n: number) => voi
       <p role="status" aria-live="polite" className="sr-only">{announce}</p>
       {decision && (
         <p ref={decisionRef} role="status" tabIndex={-1} className="mb-4 rounded-lg border border-border bg-sunken px-4 py-3 text-sm focus:outline-none">
-          “{decision.name}” {decision.kind}. {decision.leaderName ? `${decision.leaderName} was told.` : "Its leaders were told."}
-          {decision.kind === "approved" && (
-            <>{" "}<Link to={`/groups/${decision.id}`} className="text-link">View group</Link></>
+          {decision.kind === "no_longer_open" ? (
+            decision.gone ? `“${decision.name}” was already deleted.` : `The request to delete “${decision.name}” is no longer open. The group is still there.`
+          ) : (
+            <>
+              “{decision.name}” {decision.kind}. {decision.leaderName ? `${decision.leaderName} was told.` : "Its leaders were told."}
+              {decision.kind === "approved" && (
+                <>{" "}<Link to={`/groups/${decision.id}`} className="text-link">View group</Link></>
+              )}
+            </>
           )}
         </p>
       )}
@@ -439,7 +483,17 @@ function ApprovalsTab({ onCount, onGroupDecided }: { onCount: (n: number) => voi
         <div className="space-y-4 mt-8">
           <h2 className="text-xl font-bold">Deletion requests</h2>
           {deletions.map((g) => (
-            <DeletionCard key={g.id} group={g} onDone={loadAfterOther} />
+            <DeletionCard
+              key={g.id}
+              group={g}
+              onDone={loadAfterOther}
+              onStale={(gone) => {
+                // The card goes at once, not when the queue's read comes back (or never, if it fails).
+                setDeletions((shown) => shown.filter((d) => d.id !== g.id));
+                setDecision({ kind: "no_longer_open", name: g.name, gone });
+                void load();
+              }}
+            />
           ))}
         </div>
       )}
@@ -649,6 +703,8 @@ function GroupsTab({ users, groups, error, reload, onDeleted }: {
   const [deletingId, setDeletingId] = useState<number | null>(null);
   const [deleteError, setDeleteError] = useState<string | null>(null);
   const [deleted, setDeleted] = useState("");
+  // The wait for the count before the prompt, announced without moving focus (it stays on the row's More button).
+  const [checking, setChecking] = useState("");
   const deletedRef = useRef<HTMLParagraphElement>(null);
   const manageMemberButtons = useRef(new Map<number, HTMLButtonElement>());
 
@@ -663,12 +719,20 @@ function GroupsTab({ users, groups, error, reload, onDeleted }: {
   }, [deleted]);
 
   async function deleteGroup(g: GroupSummary) {
-    if (!confirm(`Delete “${g.name}”? This removes the group, its members, and its events.`)) return;
+    if (deletingId !== null) return;
     setDeletingId(g.id);
-    setDeleteError(null);
-    setDeleted("");
+    setChecking(`Checking who deleting “${g.name}” will notify…`);
 
     try {
+      const told = await groupDeleteNotice(g.id);
+
+      setChecking("");
+
+      // The prompt opens after the count arrives: by then the row may be off screen (another page or search, or the
+      // tab left), and then the press asks nothing.
+      if (!rowsShown.current.has(g.id) || !confirm(`Delete “${g.name}”? This removes the group, its members, and its events. ${told}`)) return;
+      setDeleteError(null);
+      setDeleted("");
       await Admin.deleteGroup(g.id);
       onDeleted(g.id);
       setDeleted(`“${g.name}” was deleted.`);
@@ -676,6 +740,7 @@ function GroupsTab({ users, groups, error, reload, onDeleted }: {
     } catch (e) {
       setDeleteError(errorText(e, "We couldn't delete that."));
     } finally {
+      setChecking("");
       setDeletingId(null);
     }
   }
@@ -683,6 +748,12 @@ function GroupsTab({ users, groups, error, reload, onDeleted }: {
   const needle = query.trim().toLowerCase();
   const shown = sortGroups(groups ?? []).filter((g) => (!statusFilter || g.status === statusFilter) && (!needle || g.name.toLowerCase().includes(needle) || g.leaderName.toLowerCase().includes(needle)));
   const paging = usePage(shown, query + statusFilter);
+  const rowsShown = useRef(new Set<number>());
+  useLayoutEffect(() => {
+    rowsShown.current = new Set(paging.rows.map((g) => g.id));
+
+    return () => { rowsShown.current = new Set(); };
+  });
 
   if (!groups) return error ? <ErrorNotice message={error} onRetry={reload} /> : <Skeleton kind="lines" />;
 
@@ -695,6 +766,7 @@ function GroupsTab({ users, groups, error, reload, onDeleted }: {
       <PageCount paging={paging} noun="groups" />
       {deleteError && <FormError>{deleteError}</FormError>}
       {/* Always rendered so screen readers announce the text when it arrives; empty, it takes no room. */}
+      <p role="status" className="sr-only">{checking}</p>
       <p ref={deletedRef} role="status" tabIndex={-1} className={deleted ? "text-sm text-text-muted focus:outline-none" : "sr-only"}>{deleted}</p>
       {paging.rows.map((g) => (
         <div key={g.id} className="fold-list-row bg-surface border-b border-border px-4">
@@ -737,7 +809,8 @@ function GroupsTab({ users, groups, error, reload, onDeleted }: {
             {/* Manage members is the row's one action; Delete lives in More (DEC-63). */}
             <Menu
               label={`More for ${g.name}`}
-              items={[{ label: "Delete", onSelect: () => void deleteGroup(g), danger: true, disabled: deletingId === g.id }]}
+              // One delete at a time: each reads its count and asks before it goes, so a second would talk over it.
+              items={[{ label: "Delete", onSelect: () => void deleteGroup(g), danger: true, disabled: deletingId !== null }]}
             />
           </div>
           {openMembers === g.id && <MemberManager group={g} users={users} onUnavailable={closeMembers}

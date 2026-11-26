@@ -7,6 +7,7 @@ import (
 	"errors"
 	"log"
 	"net/http"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -681,6 +682,9 @@ func (a *App) apiJoinGroup(c *gin.Context) {
 		case errRoleRefused:
 			fail(c, errCannotJoin)
 			return
+		case errGroupNotFound:
+			fail(c, err)
+			return
 		default:
 			jsonError(c, http.StatusInternalServerError, "could not join group")
 			return
@@ -689,19 +693,8 @@ func (a *App) apiJoinGroup(c *gin.Context) {
 	a.membershipAdded(c, g, u.ID)
 }
 
-// membershipAdded clears a lone leader's deletion request once someone else
-// is in the group, and answers with the membership.
+// membershipAdded answers an add with the membership.
 func (a *App) membershipAdded(c *gin.Context, g *models.Group, userID uint) {
-	if g.DeletionRequested {
-		members, err := memberCount(a.DB, g.ID)
-		if err == nil && members > 1 {
-			err = a.clearDeletionRequest(g.ID, nil, "withdrawn")
-		}
-		if err != nil {
-			fail(c, err)
-			return
-		}
-	}
 	var m models.Membership
 	if err := a.DB.Where("user_id = ? AND group_id = ?", userID, g.ID).First(&m).Error; err != nil {
 		fail(c, err)
@@ -810,6 +803,9 @@ func (a *App) apiSetMemberRole(c *gin.Context) {
 	case errRoleRefused:
 		fail(c, errLeaderRuleMembers)
 		return
+	case errGroupNotFound:
+		fail(c, err)
+		return
 	default:
 		jsonError(c, http.StatusInternalServerError, "could not change role")
 		return
@@ -902,8 +898,11 @@ func (a *App) changeRoleIn(tx *gorm.DB, actor *models.User, ip string, g *models
 		actor = fresh
 	}
 	if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(g, g.ID).Error; err != nil {
-		if byEmail && errors.Is(err, gorm.ErrRecordNotFound) {
+		switch {
+		case byEmail && errors.Is(err, gorm.ErrRecordNotFound):
 			return errGroupMemberEmailUnavailable
+		case errors.Is(err, gorm.ErrRecordNotFound): // deleted while this waited for the gate
+			return errGroupNotFound
 		}
 		return err
 	}
@@ -966,6 +965,15 @@ func (a *App) changeRoleIn(tx *gorm.DB, actor *models.User, ip string, g *models
 		if err := tx.Model(&m).Updates(map[string]any{"role": newRole, "status": models.MembershipActive}).Error; err != nil {
 			return err
 		}
+	}
+	// A lone leader's deletion request holds only while nobody else is in the
+	// group, so the add that brings someone else in withdraws it, under the
+	// group lock a delete answering the request takes too (DEC-177).
+	if adding && g.DeletionRequested && count > 0 {
+		if err := clearDeletionRequestIn(tx, g.ID, nil, "withdrawn"); err != nil {
+			return err
+		}
+		g.DeletionRequested = false
 	}
 	if oldRole == models.MembershipLeader || newRole == models.MembershipLeader {
 		if err := fixPrimaryContact(tx, g); err != nil {
@@ -1113,30 +1121,48 @@ func (a *App) apiRequestDeletion(c *gin.Context) {
 		return
 	}
 	u := apiUser(c)
-	var others int64
-	if err := a.DB.Model(&models.Membership{}).Joins(listedUsers("memberships")).
-		Where("memberships.group_id = ? AND memberships.status = ? AND memberships.user_id <> ?", g.ID, models.MembershipActive, u.ID).
-		Count(&others).Error; err != nil {
-		jsonError(c, http.StatusInternalServerError, "could not request deletion")
-		return
-	}
 	// A non-leader's answer is a 403 of its own, not the "group has members" 409.
 	if !rel.Leader {
 		jsonError(c, http.StatusForbidden, "only a group leader can request deletion")
 		return
 	}
-	if !policy.CanRequestDeletion(asPerson(u), rel, others) {
-		fail(c, errGroupHasMembers)
+	// Eligibility is read under the group's row lock, which every add takes
+	// before it writes a membership, so no join lands between the count and
+	// the flag.
+	err := a.DB.Transaction(func(tx *gorm.DB) error {
+		var locked models.Group
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&locked, g.ID).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return errGroupNotFound
+			}
+			return err
+		}
+		fresh, err := groupRel(tx, u.ID, g.ID)
+		if err != nil {
+			return err
+		}
+		var others int64
+		if err := listedMembers(tx, g.ID).Where("memberships.user_id <> ?", u.ID).Count(&others).Error; err != nil {
+			return err
+		}
+		if !fresh.Leader {
+			return errRoleRefused
+		}
+		if !policy.CanRequestDeletion(asPerson(u), fresh, others) {
+			return errGroupHasMembers
+		}
+		if locked.DeletionRequested {
+			return nil // already requested: the admins already have the task
+		}
+		if err := tx.Model(&models.Group{}).Where("id = ?", g.ID).Update("deletion_requested", true).Error; err != nil {
+			return err
+		}
+		return notifyDeletionRequested(tx, g, u.ID)
+	}, readCommitted)
+	if isAPIError(err) {
+		fail(c, err)
 		return
 	}
-	err := a.DB.Transaction(func(tx *gorm.DB) error {
-		res := tx.Model(&models.Group{}).Where("id = ? AND NOT deletion_requested", g.ID).Update("deletion_requested", true)
-		if res.Error != nil || res.RowsAffected == 0 {
-			return res.Error // already requested: the admins already have the task
-		}
-		err := notifyDeletionRequested(tx, g, u.ID)
-		return err
-	})
 	if err != nil {
 		jsonError(c, http.StatusInternalServerError, "could not request deletion")
 		return
@@ -1168,6 +1194,25 @@ func (a *App) clearDeletionRequest(groupID uint, by *uint, outcome string) error
 	})
 }
 
+// deletionRequestHolds is whether a set deletion flag still stands for the
+// lone leader who asked (DEC-177): the group's one listed member is the person
+// who asked, the actor of an open group.deletion task, or the admin pressing
+// Delete, whose own request wrote them no task and who asks again by pressing.
+// Nothing else stored names who asked, so a flag on a group with no listed
+// member, a second one, or one who did not ask (a successor after a handoff, a
+// co-leader left alone when the asker departed) does not stand.
+func deletionRequestHolds(tx *gorm.DB, groupID, presser uint) (bool, error) {
+	members, err := memberIDs(tx, groupID)
+	if err != nil || len(members) != 1 {
+		return false, err
+	}
+	if members[0] == presser {
+		return true, nil
+	}
+	askers, err := notify.OpenTaskActors(tx, notify.GroupDeletion, groupID)
+	return slices.Contains(askers, members[0]), err
+}
+
 func clearDeletionRequestIn(tx *gorm.DB, groupID uint, by *uint, outcome string) error {
 	if err := tx.Model(&models.Group{}).Where("id = ?", groupID).Update("deletion_requested", false).Error; err != nil {
 		return err
@@ -1185,17 +1230,74 @@ func auditAndNotifyLeadership(tx *gorm.DB, e audit.Entry) error {
 	return notifyLeadership(tx, e)
 }
 
-// deleteGroup removes the group and the rows that belong to it. Events and
-// the group itself are soft-deleted. Registrations, occurrences, and
-// memberships have no deleted-at column, so they are removed outright.
-func (a *App) deleteGroup(ctx context.Context, g *models.Group, by *uint) error {
-	imageURL := g.ImageURL
-	err := a.contactMutation(contactChange{GroupID: g.ID}, func(tx *gorm.DB) error {
-		var eventIDs []uint
-		if err := tx.Unscoped().Model(&models.Event{}).Where("group_id = ?", g.ID).Pluck("id", &eventIDs).Error; err != nil {
+// lockAdminGroupIn locks the group's row and then rechecks the acting admin
+// with a plain read (the order api_event_access.go's host removal takes under
+// a held row: a share lock on the actor could cycle with their own ungated
+// registration change). A group gone while the request waited is
+// errGroupNotFound. tx must be Read Committed, so the actor read after a wait
+// sees what committed during it.
+func lockAdminGroupIn(tx *gorm.DB, me *models.User, groupID uint) (*models.Group, *models.User, error) {
+	var g models.Group
+	if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&g, groupID).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, nil, errGroupNotFound
+		}
+		return nil, nil, err
+	}
+	actor, err := lockAdminIn(tx, me, actorRead)
+	if err != nil {
+		return nil, nil, err
+	}
+	return &g, actor, nil
+}
+
+// deleteGroup removes the group and the rows that belong to it, and tells the
+// people it affects (DEC-177). Events and the group itself are soft-deleted.
+// Registrations, occurrences, and memberships have no deleted-at column, so
+// they are removed outright. answering marks a delete that answers the lone
+// leader's request: once the request is no longer open (withdrawn, kept, or
+// someone else is now a listed member) it deletes nothing and answers
+// errAlreadyHandled. A delete without the marker is never refused for the
+// request's state.
+func (a *App) deleteGroup(ctx context.Context, me *models.User, groupID uint, answering bool, ip string) error {
+	var imageURL string
+	withdrawn := false
+	err := a.contactMutation(contactChange{GroupID: groupID}, func(tx *gorm.DB) error {
+		g, actor, err := lockAdminGroupIn(tx, me, groupID)
+		if err != nil {
 			return err
 		}
-		if err := deleteEventRows(tx, eventIDs); err != nil {
+		if answering {
+			if !g.DeletionRequested {
+				return errAlreadyHandled
+			}
+			// A flag that no longer stands for who asked is withdrawn here,
+			// under the row lock (that commits), and the delete is refused.
+			holds, err := deletionRequestHolds(tx, g.ID, actor.ID)
+			if err != nil {
+				return err
+			}
+			if !holds {
+				withdrawn = true
+				return clearDeletionRequestIn(tx, g.ID, nil, "withdrawn")
+			}
+		}
+		imageURL = g.ImageURL
+		tells, err := groupDeleteTells(tx, g.ID, actor.ID, a.now(), true)
+		if err != nil {
+			return err
+		}
+		if err := audit.Write(tx, audit.Entry{Actor: &actor.ID, Action: audit.GroupDeleted, TargetType: "group", TargetID: g.ID,
+			Meta: map[string]any{"name": g.Name}, IP: ip}); err != nil {
+			return err
+		}
+		if err := notifyGroupDeleted(tx, actor.ID, g, tells); err != nil {
+			return err
+		}
+		if a.hooks.deleteNoticed != nil {
+			a.hooks.deleteNoticed(tx)
+		}
+		if err := deleteEventRows(tx, tells.eventIDs); err != nil {
 			return err
 		}
 		if err := tx.Where("group_id = ?", g.ID).Delete(&models.Membership{}).Error; err != nil {
@@ -1203,22 +1305,22 @@ func (a *App) deleteGroup(ctx context.Context, g *models.Group, by *uint) error 
 		}
 		// Any task still open about the group is done.
 		for _, kind := range []string{notify.GroupPending, notify.GroupDeletion} {
-			if _, err := notify.Resolve(tx, kind, g.ID, by, "deleted"); err != nil {
+			if _, err := notify.Resolve(tx, kind, g.ID, &actor.ID, "deleted"); err != nil {
 				return err
 			}
 		}
-		if err := tx.Delete(&models.Group{}, g.ID).Error; err != nil {
-			return err
-		}
-		return audit.Write(tx, audit.Entry{Actor: by, Action: audit.GroupDeleted, TargetType: "group", TargetID: g.ID, Meta: map[string]any{"name": g.Name}})
+		return tx.Delete(&models.Group{}, g.ID).Error
 	})
 	if err != nil {
 		return err
 	}
+	if withdrawn {
+		return errAlreadyHandled
+	}
 	// The group is gone; a cover that will not delete is only an orphaned file.
 	if key, ok := uploadKeyFromURL(imageURL); ok {
 		if err := a.Uploads.Delete(ctx, key); err != nil {
-			log.Printf("delete cover of group %d: %v", g.ID, err)
+			log.Printf("delete cover of group %d: %v", groupID, err)
 		}
 	}
 	return nil

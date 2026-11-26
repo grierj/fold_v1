@@ -42,7 +42,10 @@ import (
 //   - A series write locks contact gate, actor, group, event, then its dates;
 //     rooms lock the event, then the date, then the room. An event delete
 //     locks the contact gate, the event, then its dates in id order, before it
-//     reads who to tell (eventDeleteTells).
+//     reads who to tell (eventDeleteTells). A group delete locks the contact
+//     gate, the group, every event of the group, then all their dates, each in
+//     one statement in id order, before it reads who to tell
+//     (groupDeleteTells).
 //
 // TestErasureHouseholdLockCensus pins who calls lockHousehold.
 

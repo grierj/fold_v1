@@ -817,6 +817,10 @@ func TestNoticeGuardianCopyKindsAreClassified(t *testing.T) {
 		gone    = "copied with its title alone, without the teen's access (its event and dates are deleted)"
 		direct  = "already sent straight to the guardians"
 		neverTo = "never written to a teen (a leader, host or admin notice)"
+		// A guardian must not learn a private group's name from it, so the
+		// kind itself says no copy (NoGuardianCopy), whatever its group looks
+		// like when a copy job runs (DEC-177).
+		groupGone = "never copied (NoGuardianCopy: the group's name stays with the teen)"
 	)
 	want := map[string]string{
 		notify.OccurrenceCancelled:     copied,
@@ -833,6 +837,7 @@ func TestNoticeGuardianCopyKindsAreClassified(t *testing.T) {
 		notify.YourRole:                neverTo,
 		notify.GroupApproved:           neverTo,
 		notify.GroupRejected:           neverTo,
+		notify.GroupDeleted:            groupGone,
 		notify.MembershipLeft:          neverTo,
 		notify.VisibilityOverride:      neverTo,
 		notify.RoomRequestDecided:      neverTo,
@@ -854,6 +859,9 @@ func TestNoticeGuardianCopyKindsAreClassified(t *testing.T) {
 		}
 		if k.CopyWithoutSubjectAccess != (class == exempt || class == gone) {
 			t.Errorf("%s: CopyWithoutSubjectAccess = %v but it is %s", k.Key, k.CopyWithoutSubjectAccess, class)
+		}
+		if k.NoGuardianCopy != (class == groupGone) {
+			t.Errorf("%s: NoGuardianCopy = %v but it is %s", k.Key, k.NoGuardianCopy, class)
 		}
 	}
 	for key := range want {

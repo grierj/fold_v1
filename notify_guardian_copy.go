@@ -48,7 +48,7 @@ func (a *App) guardianCopyKind() jobs.Kind {
 // copied. It runs inside the claim, before the mail is sent: a failed read
 // returns its error so the claim rolls back with nothing sent.
 func guardianCopyJobs(tx *gorm.DB, n *models.Notification, k notify.Kind, recipient *models.User, now time.Time) ([]jobs.Spec, error) {
-	if k.Required || recipient.AccountType != models.AccountTeen {
+	if k.Required || k.NoGuardianCopy || recipient.AccountType != models.AccountTeen {
 		return nil, nil
 	}
 	on, err := boolSettingErrIn(tx, settingGuardianCopies, false)
@@ -123,7 +123,7 @@ func (a *App) prepareGuardianCopy(tx *gorm.DB, p guardianCopyJob) (msg mail.Mess
 	}
 	now := a.now()
 	k, ok := notify.Lookup(n.Kind)
-	if !ok || !k.AllowEmail || k.Required {
+	if !ok || !k.AllowEmail || k.Required || k.NoGuardianCopy {
 		return msg, nil, false, nil
 	}
 	// The job exists only with the teen's sent email; the savepoint in the

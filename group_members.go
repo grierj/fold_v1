@@ -36,13 +36,25 @@ func leaderIDs(db *gorm.DB, groupID uint) ([]uint, error) {
 	return ids, err
 }
 
+// listedMembers is a group's listed active memberships.
+func listedMembers(db *gorm.DB, groupID uint) *gorm.DB {
+	return db.Model(&models.Membership{}).Joins(listedUsers("memberships")).
+		Where("memberships.group_id = ? AND memberships.status = ?", groupID, models.MembershipActive)
+}
+
 // memberCount counts a group's listed active members. A failed read is an
 // error: GroupHasRoom never sees a made-up zero.
 func memberCount(db *gorm.DB, groupID uint) (int, error) {
 	var n int64
-	err := db.Model(&models.Membership{}).Joins(listedUsers("memberships")).
-		Where("memberships.group_id = ? AND memberships.status = ?", groupID, models.MembershipActive).Count(&n).Error
+	err := listedMembers(db, groupID).Count(&n).Error
 	return int(n), err
+}
+
+// memberIDs is a group's listed active members, by user id.
+func memberIDs(db *gorm.DB, groupID uint) ([]uint, error) {
+	var ids []uint
+	err := listedMembers(db, groupID).Order("memberships.user_id").Pluck("memberships.user_id", &ids).Error
+	return ids, err
 }
 
 // roleNone is the role audit rows record for a person who had no active

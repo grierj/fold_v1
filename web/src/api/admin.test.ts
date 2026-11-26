@@ -21,3 +21,12 @@ it("approves a group from the bell with the notification id, and from the queue 
   await Admin.approve(9, ["youth"]);
   expect(posted(fetcher).map((p) => p.body)).toEqual([{ fromNotification: 2 }, { tags: ["youth"] }]);
 });
+
+it("marks a request card's delete as its answer, and sends no marker from the Groups tab", async () => {
+  const fetcher = vi.fn<typeof fetch>(async (url) => String(url).endsWith("/auth/bootstrap") ? bootstrapAnswer() : new Response("{}"));
+  vi.stubGlobal("fetch", fetcher);
+  await Admin.deleteGroup(9, true);
+  await Admin.deleteGroup(9);
+  const deletes = fetcher.mock.calls.filter(([, opts]) => opts?.method === "DELETE").map(([url]) => String(url));
+  expect(deletes).toEqual(["/api/v1/admin/groups/9?deletionRequest=1", "/api/v1/admin/groups/9"]);
+});

@@ -587,17 +587,6 @@ func (a *App) completeGroupAsk(tx *gorm.DB, op *contactOperation, r *models.Cont
 	if err != nil {
 		return err
 	}
-	if g.DeletionRequested {
-		members, err := memberCount(tx, g.ID)
-		if err != nil {
-			return err
-		}
-		if members > 1 {
-			if err := clearDeletionRequestIn(tx, g.ID, nil, "withdrawn"); err != nil {
-				return err
-			}
-		}
-	}
 	var m models.Membership
 	if err = tx.Where("group_id = ? AND user_id = ? AND status = ?", r.ContextID, r.SubjectUserID, models.MembershipActive).First(&m).Error; err != nil {
 		return err

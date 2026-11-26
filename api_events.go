@@ -1518,8 +1518,8 @@ func (a *App) apiDeleteEvent(c *gin.Context) {
 		if err := notifyEventDeleted(tx, actor.ID, ev, a.now()); err != nil {
 			return err
 		}
-		if a.hooks.eventDeleteNoticed != nil {
-			a.hooks.eventDeleteNoticed(tx)
+		if a.hooks.deleteNoticed != nil {
+			a.hooks.deleteNoticed(tx)
 		}
 		return deleteEventRows(tx, []uint{ev.ID})
 	})

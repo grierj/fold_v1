@@ -38,6 +38,7 @@ const (
 	GroupDeletion           = "group.deletion"
 	GroupApproved           = "group.approved"
 	GroupRejected           = "group.rejected"
+	GroupDeleted            = "group.deleted"
 	LeadershipChanged       = "group.leadership_changed"
 	MembershipDeparture     = "membership.departure"
 	MembershipLeft          = "membership.left"
@@ -180,6 +181,12 @@ type Kind struct {
 	// stores it only when the teen could see the date. Every other copy check
 	// still applies.
 	CopyWithoutSubjectAccess bool
+	// NoGuardianCopy marks a kind a guardian is never copied on, decided by
+	// the kind and not by what its subject looks like when a copy job runs:
+	// group.deleted, whose group name a guardian must not learn (DEC-177).
+	// No copy job is queued for it, and a queued one (from an older process)
+	// sends nothing.
+	NoGuardianCopy bool
 }
 
 // SubjectTeen and SubjectChild are the Vars.SubjectKind values that show a
@@ -533,6 +540,20 @@ func init() {
 		// The admin's note stays in Fold.
 		AllowPush: true, PushRender: func(v Vars) (string, string) {
 			return or(v.Group, "Your group") + " wasn't approved", "Open Fold to see more."
+		},
+	})
+	// A member hears that their group was deleted (DEC-177). Only its members
+	// get it, named when they may see it; nobody signed up gets it as well as
+	// event.deleted. No link to the group, which is gone, and no place. Not
+	// PushSoon: the group and its dates are gone, so a push has no clock to
+	// read. Never copied to a guardian (NoGuardianCopy).
+	groupDeleted := func(v Vars) (string, string) {
+		return or(v.Group, "One of your groups") + " was deleted", "Its events are off, and you're no longer a member."
+	}
+	register(Kind{
+		Key: GroupDeleted, Category: CatGroups, AllowEmail: true, NoGuardianCopy: true, Render: groupDeleted,
+		AllowPush: true, PushRender: func(v Vars) (string, string) {
+			return or(v.Group, "One of your groups") + " was deleted", "Its events are off."
 		},
 	})
 	register(Kind{
