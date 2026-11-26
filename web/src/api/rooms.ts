@@ -76,7 +76,7 @@ async function getRoomFeed(id: Id, pinned: Credential | null): Promise<RoomFeedR
 }
 
 export const AdminRooms = {
-  list: () => api<AdminRoomsResponse>("/admin/rooms"),
+  list: () => api<AdminRoomsResponse>("/admin/rooms", { pinned: true }),
   create: (body: RoomInput) => api<RoomResponse>("/admin/rooms", { method: "POST", body }),
   // An edit names the read it was made from (DEC-171): an older one is 409 room_changed.
   update: (id: Id, body: RoomInput, revision: string | undefined) =>
