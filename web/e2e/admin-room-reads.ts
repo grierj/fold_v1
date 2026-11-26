@@ -1,6 +1,13 @@
 import { expect, test } from "@playwright/test";
 import { apiAs, checkState, email, PASSWORD, signIn } from "./helpers";
 
+function responseGate() {
+  let open = () => {};
+  const promise = new Promise<void>((resolve) => { open = resolve; });
+
+  return { promise, open };
+}
+
 export function adminRoomReadTests({ path, otherRead, evidence }: { path: string; otherRead: string; evidence: string }) {
   for (const change of ["rooms off", "admin demoted"] as const) {
     test(`${path} refuses a stale admin room read when ${change}`, async ({ page, request }, testInfo) => {
@@ -10,7 +17,7 @@ export function adminRoomReadTests({ path, otherRead, evidence }: { path: string
       await signIn(page, login);
 
       const url = `**/api/v1${path}`;
-      const dispatch = Promise.withResolvers<void>();
+      const dispatch = responseGate();
       await page.route(url, async (route) => {
         await dispatch.promise;
         await route.continue();
@@ -29,7 +36,7 @@ export function adminRoomReadTests({ path, otherRead, evidence }: { path: string
           await page.screenshot({ path: testInfo.outputPath("rooms-on-390.png"), fullPage: true });
           await admin("PUT", "/admin/settings/rooms", { enabled: false });
 
-          const releaseSite = Promise.withResolvers<void>();
+          const releaseSite = responseGate();
           const siteUrl = "**/api/v1/site";
           await page.route(siteUrl, async (route) => {
             await releaseSite.promise;
@@ -39,7 +46,7 @@ export function adminRoomReadTests({ path, otherRead, evidence }: { path: string
           try {
             const refused = page.waitForResponse(url);
             const recheck = page.waitForRequest(siteUrl);
-            dispatch.resolve();
+            dispatch.open();
             const response = await refused;
             expect(response.status()).toBe(404);
             expect(await response.headerValue("fold-session-checked")).toBeNull();
@@ -50,7 +57,7 @@ export function adminRoomReadTests({ path, otherRead, evidence }: { path: string
             await expect(rooms).toHaveAttribute("aria-selected", "true");
             const focused = path.endsWith("/locations") ? page.getByRole("tabpanel", { name: /^Rooms\b/ }) : rooms;
             await focused.focus();
-            releaseSite.resolve();
+            releaseSite.open();
 
             const approvals = page.getByRole("tab", { name: /^Approvals\b/ });
             await expect(rooms).toHaveCount(0);
@@ -61,7 +68,7 @@ export function adminRoomReadTests({ path, otherRead, evidence }: { path: string
             expect(await me.json()).toMatchObject({ user: { email: email(login), role: "admin" } });
             await checkState(page, evidence, "rooms-off");
           } finally {
-            releaseSite.resolve();
+            releaseSite.open();
             await admin("PUT", "/admin/settings/rooms", { enabled: true });
           }
         } else {
@@ -69,7 +76,7 @@ export function adminRoomReadTests({ path, otherRead, evidence }: { path: string
           const fresh = users.find((row: { id: number }) => row.id === user.id);
           await admin("PUT", `/admin/users/${user.id}`, { role: "member", revision: fresh.revision });
           const refused = page.waitForResponse(url);
-          dispatch.resolve();
+          dispatch.open();
           const response = await refused;
           expect(response.status()).toBe(401);
           expect(await response.headerValue("fold-session-checked")).toBeNull();
@@ -82,7 +89,7 @@ export function adminRoomReadTests({ path, otherRead, evidence }: { path: string
           await expect(page.getByText("This page is for church admins only.")).toBeVisible();
         }
       } finally {
-        dispatch.resolve();
+        dispatch.open();
       }
     });
   }
