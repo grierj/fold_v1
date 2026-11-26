@@ -246,7 +246,8 @@ func effectiveLink(links []models.GuardianLink) (string, *uint) {
 
 // revision is the person's row token (householdPersonRevisionRows), read in
 // the snapshot that read person.
-func (a *App) toHouseholdPersonJSON(person *models.HouseholdPerson, revision string, links []models.GuardianLink, viewer *models.User, batch *conversionBatch) (householdPersonJSON, error) {
+func (a *App) toHouseholdPersonJSON(person *models.HouseholdPerson, revision string, batch *conversionBatch) (householdPersonJSON, error) {
+	links, viewer := batch.links[person.ID], batch.actor
 	status, linkID := effectiveLink(links)
 	if person.Kind == models.HouseholdAdult {
 		// An adult needs no approval, whatever links a former kind left.
@@ -294,24 +295,31 @@ func (a *App) toHouseholdPersonJSON(person *models.HouseholdPerson, revision str
 	}, nil
 }
 
+func (a *App) householdPersonJSONIn(tx *gorm.DB, person *models.HouseholdPerson, batch *conversionBatch) (householdPersonJSON, error) {
+	revision, err := a.rowRevisionIn(tx, householdPersonRevisionRows, person.ID)
+	if err != nil {
+		return householdPersonJSON{}, err
+	}
+	return a.toHouseholdPersonJSON(person, revision, batch)
+}
+
 // toHouseholdJSON is the household id as one read-only snapshot shows it to
 // viewer, so each revision names the fields beside it.
 func (a *App) toHouseholdJSON(id uint, viewer *models.User) (out householdJSON, err error) {
 	err = a.DB.Transaction(func(tx *gorm.DB) error {
-		var household models.Household
-		if err := tx.First(&household, id).Error; err != nil {
-			return err
-		}
-		out, err = a.toHouseholdJSONIn(tx, &household, viewer, time.Now().UTC())
+		out, err = a.toHouseholdJSONIn(tx, id, viewer, time.Now().UTC())
 		return err
 	}, readSnapshot)
 	return out, err
 }
 
 // toHouseholdJSONIn is the household as db shows it, with ages, care-note
-// windows and conversions decided at now. db is the snapshot that read
-// household.
-func (a *App) toHouseholdJSONIn(db *gorm.DB, household *models.Household, viewer *models.User, now time.Time) (householdJSON, error) {
+// windows and conversions decided at now.
+func (a *App) toHouseholdJSONIn(db *gorm.DB, id uint, viewer *models.User, now time.Time) (householdJSON, error) {
+	var household models.Household
+	if err := db.First(&household, id).Error; err != nil {
+		return householdJSON{}, err
+	}
 	out := householdJSON{
 		ID: household.ID, Name: household.Name, Address: household.Address,
 		CreatedBy: household.CreatedBy,
@@ -376,7 +384,7 @@ func (a *App) toHouseholdJSONIn(db *gorm.DB, household *models.Household, viewer
 		}
 	}
 	for i := range people {
-		row, err := a.toHouseholdPersonJSON(&people[i], revisions[people[i].ID], links[people[i].ID], viewer, batch)
+		row, err := a.toHouseholdPersonJSON(&people[i], revisions[people[i].ID], batch)
 		if err != nil {
 			return out, err
 		}
@@ -495,11 +503,7 @@ func (a *App) apiGetMyHousehold(c *gin.Context) {
 		if !policy.CanManageHousehold(asPerson(me), householdRelOf(acct, true)) {
 			return errHouseholdForbidden
 		}
-		var household models.Household
-		if err := tx.First(&household, acct.HouseholdID).Error; err != nil {
-			return err
-		}
-		h, err := a.toHouseholdJSONIn(tx, &household, me, now)
+		h, err := a.toHouseholdJSONIn(tx, acct.HouseholdID, me, now)
 		if err != nil {
 			return err
 		}

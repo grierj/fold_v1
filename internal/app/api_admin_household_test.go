@@ -287,3 +287,152 @@ func TestAdminHouseholdConcurrentCreationConflicts(t *testing.T) {
 		t.Fatal("concurrent creation duplicated household data")
 	}
 }
+
+func TestAdminHouseholdRepliesJudgeAuthorityInTheirSnapshot(t *testing.T) {
+	const address = "Original household address"
+	const note = "Original care note"
+	const later = "Changed after the admin was read"
+	for _, route := range []struct {
+		name, method, suffix string
+		status               int
+	}{
+		{"read household", "GET", "", http.StatusOK},
+		{"create household", "POST", "", http.StatusCreated},
+		{"add person", "POST", "/people", http.StatusCreated},
+	} {
+		for _, change := range []string{"after admin read", "ended session", "lost admin role", "holder moved"} {
+			t.Run(route.name+"/"+change, func(t *testing.T) {
+				app := testApp(t)
+				admin := newTestUser(t, app, "admin", "pw", models.RoleAdmin)
+				holder := newTestUser(t, app, "holder", "pw", models.RoleMember)
+				client := pinnedAs(t, loginAPI(t, app, admin.Name, "pw"))
+				path := "/api/v1/admin/users/" + itoa(holder.ID) + "/household"
+				create := map[string]any{"address": address}
+				child := map[string]any{"firstName": "Child", "kind": "child", "guardianUserId": holder.ID, "careNotes": note}
+				var body any
+				if route.name == "create household" {
+					body = create
+				} else {
+					apiDo(t, client, "POST", path, create, http.StatusCreated)
+					if route.name == "read household" {
+						apiDo(t, client, "POST", path+"/people", child, http.StatusCreated)
+					} else {
+						body = child
+					}
+				}
+
+				writer := app.DB
+				oneConnection(t, app, oneConnectionPool(t, app))
+				want := route.status
+				fired := false
+				switch change {
+				case "after admin read":
+					app.hooks.readerAuthorized = func(surface string) {
+						if surface != "admin household" {
+							return
+						}
+						fired = true
+						err := writer.Transaction(func(tx *gorm.DB) error {
+							if err := tx.Model(admin).Update("role", models.RoleMember).Error; err != nil {
+								return err
+							}
+							if err := tx.Model(&models.Household{}).Where("created_by = ?", admin.ID).Update("address", later).Error; err != nil {
+								return err
+							}
+							return tx.Model(&models.HouseholdPerson{}).Where("created_by = ?", admin.ID).Update("care_notes", later).Error
+						})
+						if err != nil {
+							t.Fatal(err)
+						}
+					}
+				case "ended session", "lost admin role":
+					want = http.StatusUnauthorized
+					app.hooks.readerBegin = func(surface string) {
+						if surface == "admin household" {
+							fired = true
+							if change == "lost admin role" {
+								gormMust(t, writer.Model(admin).Update("role", models.RoleMember))
+							} else {
+								gormMust(t, writer.Model(admin).Update("session_version", sessionVersionBump()))
+							}
+						}
+					}
+				case "holder moved":
+					if route.method == "POST" {
+						want = http.StatusConflict
+					}
+					app.hooks.readerBegin = func(surface string) {
+						if surface == "admin household" {
+							fired = true
+							other := models.Household{Name: "Other household", Address: later, CreatedBy: admin.ID}
+							gormMust(t, writer.Create(&other))
+							gormMust(t, writer.Model(&models.HouseholdAccount{}).Where("user_id = ?", holder.ID).Update("household_id", other.ID))
+						}
+					}
+				}
+
+				w := client.do(route.method, path+route.suffix, body, true)
+				if !fired || w.Code != want {
+					t.Fatalf("snapshot hook ran %t, got %d %s, want %d", fired, w.Code, w.Body.String(), want)
+				}
+				raw := w.Body.String()
+				switch change {
+				case "after admin read":
+					wantOut(t, change, raw, later)
+					if route.suffix == "" {
+						wantIn(t, change, raw, address)
+					}
+					if route.name != "create household" {
+						wantIn(t, change, raw, note)
+					}
+				case "ended session", "lost admin role":
+					wantOut(t, change, raw, address, note, `"household"`, `"person"`)
+					wantNoAck(t, change, w)
+				case "holder moved":
+					wantOut(t, change, raw, address, note)
+					if route.method == "GET" {
+						wantIn(t, change, raw, later)
+					} else {
+						wantIn(t, change, raw, errHouseholdRequired.Code)
+						wantOut(t, change, raw, later)
+					}
+				}
+				if want != http.StatusUnauthorized {
+					wantAck(t, change, w, client, admin)
+				}
+				if route.method == "POST" {
+					action := audit.HouseholdCreated
+					if route.suffix != "" {
+						action = audit.HouseholdPersonAdded
+					}
+					if got := contactCount(t, app, &models.AuditLog{}, "actor_id = ? AND action = ?", admin.ID, action); got != 1 {
+						t.Fatalf("expected the write to have committed once, got %d audit rows", got)
+					}
+				}
+			})
+		}
+	}
+}
+
+func TestAdminHouseholdPersonReplyRequiresTheOriginalPerson(t *testing.T) {
+	app := testApp(t)
+	admin := newTestUser(t, app, "admin", "pw", models.RoleAdmin)
+	holder := newTestUser(t, app, "holder", "pw", models.RoleMember)
+	client := pinnedAs(t, loginAPI(t, app, admin.Name, "pw"))
+	path := "/api/v1/admin/users/" + itoa(holder.ID) + "/household"
+	apiDo(t, client, "POST", path, map[string]any{}, http.StatusCreated)
+	other := models.Household{Name: "Another household", CreatedBy: admin.ID}
+	gormMust(t, app.DB.Create(&other))
+	app.hooks.readerBegin = func(surface string) {
+		if surface == "admin household" {
+			gormMust(t, app.DB.Model(&models.HouseholdPerson{}).Where("created_by = ?", admin.ID).Update("household_id", other.ID))
+		}
+	}
+	w := client.do("POST", path+"/people", map[string]any{"kind": "adult", "firstName": "New person"}, true)
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("got %d %s, want 404", w.Code, w.Body.String())
+	}
+	wantIn(t, "person no longer in this household", w.Body.String(), errHouseholdPersonGone.Message)
+	wantOut(t, "person no longer in this household", w.Body.String(), "New person")
+	wantAck(t, "person no longer in this household", w, client, admin)
+}

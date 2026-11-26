@@ -64,33 +64,53 @@ func (a *App) apiAdminGetHousehold(c *gin.Context) {
 	if !ok {
 		return
 	}
-	var holder models.User
-	if err := a.DB.First(&holder, id).Error; err != nil {
-		a.adminHouseholdError(c, err)
-		return
-	}
-	if !policy.CanDelegateHousehold(asPerson(apiUser(c)), asPerson(&holder), holder.CanSignIn()) {
-		a.adminHouseholdError(c, errHouseholdHolder)
-		return
-	}
-	var account models.HouseholdAccount
-	if err := a.DB.Where("user_id = ?", holder.ID).First(&account).Error; errors.Is(err, gorm.ErrRecordNotFound) {
-		c.JSON(http.StatusOK, gin.H{"household": nil})
-		return
-	} else if err != nil {
-		a.adminHouseholdError(c, err)
-		return
-	}
-	a.adminHouseholdResponse(c, account.HouseholdID, http.StatusOK)
+	a.answerAdminHousehold(c, id, 0, http.StatusOK)
 }
 
-func (a *App) adminHouseholdResponse(c *gin.Context, householdID uint, status int) {
-	out, err := a.toHouseholdJSON(householdID, apiUser(c))
+// A GET follows the holder's current link. A write may only return the
+// household it changed, even if the holder has since joined another one.
+func (a *App) readAdminHousehold(c *gin.Context, holderID, writtenHouseholdID uint, read func(*gorm.DB, *models.User, uint) error) error {
+	return a.readAdminSnapshot(c, "admin household", func(tx *gorm.DB, admin *models.User) error {
+		var holder models.User
+		if err := tx.First(&holder, holderID).Error; errors.Is(err, gorm.ErrRecordNotFound) {
+			return errAdminTargetGone
+		} else if err != nil {
+			return err
+		}
+		if !policy.CanDelegateHousehold(asPerson(admin), asPerson(&holder), holder.CanSignIn()) {
+			return errHouseholdHolder
+		}
+		var account models.HouseholdAccount
+		if err := tx.Where("user_id = ?", holder.ID).Limit(1).Find(&account).Error; err != nil {
+			return err
+		}
+		if writtenHouseholdID != 0 {
+			if account.HouseholdID != writtenHouseholdID {
+				return errHouseholdRequired
+			}
+			if !householdRelOf(account, true).Adult {
+				return errHouseholdHolder
+			}
+		}
+		if account.HouseholdID == 0 {
+			return nil
+		}
+		return read(tx, admin, account.HouseholdID)
+	})
+}
+
+func (a *App) answerAdminHousehold(c *gin.Context, holderID, writtenHouseholdID uint, status int) {
+	var out myHouseholdResponseJSON
+	err := a.readAdminHousehold(c, holderID, writtenHouseholdID, func(tx *gorm.DB, admin *models.User, householdID uint) error {
+		household, err := a.toHouseholdJSONIn(tx, householdID, admin, a.now().UTC())
+		out.Household = &household
+		return err
+	})
 	if err != nil {
-		jsonError(c, http.StatusInternalServerError, "could not load household")
+		fail(c, err)
 		return
 	}
-	c.JSON(status, gin.H{"household": out})
+	c.JSON(status, out)
 }
 
 // Creation is explicit and atomic. Unlike first-use self-service, an existing
@@ -154,7 +174,7 @@ func (a *App) apiAdminCreateHousehold(c *gin.Context) {
 		a.adminHouseholdError(c, err)
 		return
 	}
-	a.adminHouseholdResponse(c, household.ID, http.StatusCreated)
+	a.answerAdminHousehold(c, id, household.ID, http.StatusCreated)
 }
 
 func (a *App) apiAdminAddHouseholdPerson(c *gin.Context) {
@@ -218,9 +238,23 @@ func (a *App) apiAdminAddHouseholdPerson(c *gin.Context) {
 		a.adminHouseholdError(c, err)
 		return
 	}
-	row, err := a.householdPersonRow(person.ID, apiUser(c))
+	var row householdPersonJSON
+	err = a.readAdminHousehold(c, id, person.HouseholdID, func(tx *gorm.DB, admin *models.User, householdID uint) error {
+		var fresh models.HouseholdPerson
+		if err := tx.Where("household_id = ? AND converted_user_id IS NULL", householdID).First(&fresh, person.ID).Error; errors.Is(err, gorm.ErrRecordNotFound) {
+			return errHouseholdPersonGone
+		} else if err != nil {
+			return err
+		}
+		batch, err := a.loadConversionBatch(tx, admin, householdID, []uint{fresh.ID})
+		if err != nil {
+			return err
+		}
+		row, err = a.householdPersonJSONIn(tx, &fresh, batch)
+		return err
+	})
 	if err != nil {
-		jsonError(c, http.StatusInternalServerError, "could not load that person")
+		fail(c, err)
 		return
 	}
 	c.JSON(http.StatusCreated, householdPersonResponseJSON{Person: row})

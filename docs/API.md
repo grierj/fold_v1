@@ -350,6 +350,14 @@ are atomic. `createdBy` and the audit actor identify the admin, not the holder
 or guardian. There is no household directory, search, delegated edit/delete,
 or admin household UI in this slice.
 
+The GET and both POST replies check the admin session, holder eligibility and household link in the
+same snapshot that returns the fields. A GET for an eligible holder with no link returns
+`{"household":null}`. If the admin session ended, the reply is 401. If the holder lost their link
+to the household a POST changed, its reply is `409 household_required`. The add-person reply is
+404 if the person is gone from that household. A refusal at this point leaves the write committed.
+A participating request receives the session acknowledgment for the admin judged in the reply
+snapshot on success or an actionable refusal.
+
 Guardian claims return the same message for unknown addresses, adults,
 duplicates, and throttled submissions. The IP cap is 10/hour; the target
 address cap is 3/hour and 10/day. Pending links grant no access and do not
