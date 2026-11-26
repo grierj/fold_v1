@@ -1411,8 +1411,7 @@ var auditWriterCensus = map[string]string{
 	"internal/app/api_registrations.go:auditRegistration":                      "011710eca9426fd208c2fdb6e0a05ce1d0e5ec0a1ed6782306d219f634afdd14",
 	"internal/app/api_registrations.go:registrationMeta":                       "8236e28a52344add82f99db6ef37c4957bf2019ef8cf20563e76e13442a0a795",
 	"internal/app/api_room_bookings.go:pickDateRoom":                           "a652069f361dc047b2ede42fc715d0dcdb816c3bf73b55b71e96a3b8bad08f71",
-	"internal/app/api_room_feeds.go:apiAdminCreateRoomFeed":                    "e8017f2ddcb5315ab98d24dd76d573f7370388622ed80718017febe611a3645f",
-	"internal/app/api_room_feeds.go:apiAdminRevokeRoomFeed":                    "005bdd3c42b72a9573ed1a99b50daacd3ee179774dfa72b0dc5bb20d09127c39",
+	"internal/app/api_room_feeds.go:changeRoomFeed":                            "512c2334ab1fe0a2450b399681a015abfc96fd7f539149fe42d6b35812614400",
 	"internal/app/api_room_locations.go:apiAdminMatchLocation":                 "41d378115f2b99224020e0f4111a0680c603e43c79cdba3de188db6e3b9bc649",
 	"internal/app/api_room_requests.go:apiConfirmRoomRequest":                  "62159e14c4f4f61d298da229012e101b0610513eb562705d5093ee2893d9acd7",
 	"internal/app/api_room_requests.go:apiRejectRoomRequest":                   "c456ce9c686358af5eb186fb835d3892975779cc85ba6bc59ab0fe2e77418228",
@@ -1699,8 +1698,8 @@ func TestAuditErasureWriterCensus(t *testing.T) {
 	if p := auditCensusProblems(c); len(p) > 0 {
 		t.Fatal(strings.Join(p, "\n"))
 	}
-	if len(c.Sites) != 114 {
-		t.Fatalf("audit.Write sites = %d, expected 114; review every changed site", len(c.Sites))
+	if len(c.Sites) != 113 {
+		t.Fatalf("audit.Write sites = %d, expected 113; review every changed site", len(c.Sites))
 	}
 	for _, site := range c.Sites {
 		t.Log(site)
