@@ -973,7 +973,6 @@ it("asks nothing when Edit event leaves after a date edit was saved: the save cl
 it("asks before Edit event leaves a date edit that has a change typed, and keeps the draft when told to stay", async () => {
   vi.mocked(Groups.get).mockResolvedValue({ ...page, canManage: true, upcomingEvents: [occurrence({ groupId: 1 })] });
   vi.mocked(Events.managedDate).mockImplementation(async () => forGroup({ occurrence: { ...occurrence({}), revision: "r0" } }));
-  const confirm = vi.spyOn(window, "confirm").mockReturnValue(false);
 
   const router = createMemoryRouter([
     { path: "/groups/:id", element: <><UnsavedChangesBlocker /><RosterWritesProvider><GroupDetail /></RosterWritesProvider></> },
@@ -988,13 +987,13 @@ it("asks before Edit event leaves a date edit that has a change typed, and keeps
   await userEvent.type(title, "!");
   await userEvent.click(more);
   await userEvent.click(screen.getByRole("menuitem", { name: "Edit event" }));
-  expect(confirm).toHaveBeenCalledOnce();
+  const question = await screen.findByRole("dialog", { name: "Leave without saving?" });
+  await userEvent.click(within(question).getByRole("button", { name: "Keep editing" }));
   expect(screen.getByLabelText("Title")).toHaveValue("Supper!");
-  confirm.mockReturnValue(true);
   await userEvent.click(more);
   await userEvent.click(screen.getByRole("menuitem", { name: "Edit event" }));
+  await userEvent.click(await screen.findByRole("button", { name: /^Leave without saving$/ }));
   expect(await screen.findByText("At /events/7?edit=series")).toBeInTheDocument();
-  confirm.mockRestore();
 });
 
 it("keeps the group form, its Cancel off, until a save on its way settles; its failure shows there and not in the next edit", async () => {
@@ -1110,7 +1109,6 @@ it("opens More options when editing, with tags, member limit and cover inside", 
 it("asks before leaving an edited group form, and not once saved", async () => {
   vi.mocked(Groups.get).mockResolvedValue({ ...page, canManage: true });
   vi.mocked(Groups.update).mockResolvedValue({ group: page.group });
-  const confirm = vi.spyOn(window, "confirm").mockReturnValue(false);
 
   const router = createMemoryRouter([
     { path: "/groups/:id", element: <><UnsavedChangesBlocker /><Link to="/elsewhere">Elsewhere</Link><GroupDetail /></> },
@@ -1121,20 +1119,20 @@ it("asks before leaving an edited group form, and not once saved", async () => {
   await userEvent.click(await screen.findByRole("button", { name: "More group actions" }));
   await userEvent.click(screen.getByRole("menuitem", { name: "Edit group" }));
   await userEvent.click(screen.getByRole("link", { name: "Elsewhere" }));
-  expect(confirm).not.toHaveBeenCalled(); // nothing edited yet
+  expect(await screen.findByText("Elsewhere page")).toBeInTheDocument();
   await router.navigate("/groups/1");
   await userEvent.click(await screen.findByRole("button", { name: "More group actions" }));
   await userEvent.click(screen.getByRole("menuitem", { name: "Edit group" }));
   await userEvent.type(screen.getByLabelText("Group name"), " Two");
   await userEvent.click(screen.getByRole("link", { name: "Elsewhere" }));
-  expect(confirm).toHaveBeenCalledWith("Leave without saving? Your changes will be lost.");
+  const question = await screen.findByRole("dialog", { name: "Leave without saving?" });
   expect(screen.queryByText("Elsewhere page")).not.toBeInTheDocument();
+  await userEvent.click(within(question).getByRole("button", { name: "Keep editing" }));
   await userEvent.click(screen.getByRole("button", { name: "Save group" }));
   await waitFor(() => expect(Groups.update).toHaveBeenCalled());
-  confirm.mockClear();
+  expect(await screen.findByText("Updated", { exact: true })).toHaveAttribute("aria-live", "polite");
   await userEvent.click(await screen.findByRole("link", { name: "Elsewhere" }));
-  expect(screen.getByText("Elsewhere page")).toBeInTheDocument();
-  expect(confirm).not.toHaveBeenCalled();
+  expect(await screen.findByText("Elsewhere page")).toBeInTheDocument();
 });
 
 it("shows a booked room as the place on a date card, and the typed location without one (M2.1b)", async () => {

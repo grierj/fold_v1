@@ -136,6 +136,8 @@ chosen when the row is made, or is a setting that may change to any value its ow
 - The shapes to copy, each one value that names the state: `web/src/lib/useLoad.ts` (a load),
   `web/src/components/DeleteUserPanel.tsx` and `web/src/pages/ReasonReviewLegacy.tsx` (`Phase`, a
   delete and its review) and `web/src/lib/pushState.ts` (`DeviceState`, `PushCardState`).
+- The group, series, event visibility and single-date forms use `ManagerSaveStatus` to
+  announce “Saving…” and show and announce “Updated” when the save succeeds (DEC-163).
 - A manager's save that names the read it was made from (the series editor, an event's
   visibility, one date's edit, the group form, the two room controls, the message composer, the admin room editor
   and its Deactivate and Reactivate; DEC-162 to DEC-164, DEC-166, DEC-167, DEC-169, DEC-171) goes through `web/src/lib/useRevisionSave.ts`:
