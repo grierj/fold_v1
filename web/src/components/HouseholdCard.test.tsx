@@ -461,3 +461,44 @@ describe("a household save someone else's change refused", () => {
     ask.mockRestore();
   });
 });
+
+describe("household actions on their way", () => {
+  beforeEach(() => vi.resetAllMocks());
+
+  it("offers no other form or action while a removal is on its way", async () => {
+    const { Households } = await import("../api/households");
+    const ask = vi.spyOn(window, "confirm").mockReturnValue(true);
+    let answer: () => void = () => {};
+    const mary = { ...household.people[0], id: 6, firstName: "Mary", name: "Mary Smith", revision: "p-6" };
+
+    mine.mockResolvedValue({ household: { ...household, people: [household.people[0], mary] } });
+    vi.mocked(Households.removePerson).mockReturnValue(new Promise((resolve) => { answer = () => resolve({}); }));
+    render(<HouseholdCard />);
+    await userEvent.click(await screen.findByRole("button", { name: "Remove Kid Smith" }));
+    expect(screen.getByRole("button", { name: "Edit Mary Smith" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Rename" })).toBeDisabled();
+    answer();
+    await vi.waitFor(() => expect(screen.getByRole("button", { name: "Edit Mary Smith" })).toBeEnabled());
+    ask.mockRestore();
+  });
+
+  it("hands nothing on when the household save's answer comes after the card was left", async () => {
+    const { Households } = await import("../api/households");
+    let answer: (r: { household: Household }) => void = () => {};
+    const home: Household = { ...household, people: [] };
+
+    mine.mockResolvedValue({ household: home });
+    vi.mocked(Households.update).mockReturnValue(new Promise((resolve) => { answer = resolve; }));
+    const { unmount } = render(<HouseholdCard />);
+    await userEvent.click(await screen.findByRole("button", { name: "Rename" }));
+    await userEvent.type(screen.getByLabelText(/^Household name/), " home");
+    await userEvent.click(screen.getByRole("button", { name: "Save household" }));
+    unmount();
+    render(<HouseholdCard />);
+    expect(await screen.findByText("Smith household")).toBeInTheDocument();
+    answer({ household: { ...home, name: "Smith household home", revision: "h-2" } });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(screen.queryByText("Smith household home")).not.toBeInTheDocument();
+    expect(screen.getByRole("status")).toHaveTextContent("");
+  });
+});

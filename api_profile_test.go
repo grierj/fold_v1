@@ -2308,7 +2308,10 @@ func TestHouseholdFirstUseNamesTheLockedRow(t *testing.T) {
 }
 
 // TestHouseholdConcurrentFirstUseMakesOneHousehold: two first uses for one
-// user wait on the same user lock, then leave one household and one seat.
+// user wait on the same user lock, then leave one household and one seat. Each
+// names a field and no revision: the one that made the household had no read
+// to name and saves, and the other, which would change a household it never
+// read, is refused (DEC-173).
 func TestHouseholdConcurrentFirstUseMakesOneHousehold(t *testing.T) {
 	s := newHWScene(t, false)
 	second := *s.c
@@ -2317,23 +2320,34 @@ func TestHouseholdConcurrentFirstUseMakesOneHousehold(t *testing.T) {
 		second.jar[name] = ck
 	}
 	blocker, commit := hwHoldUser(t, s.app, s.u.ID, "")
-	one := bgDo(s.c, "PUT", "/api/v1/me/household", map[string]any{})
-	two := bgDo(&second, "PUT", "/api/v1/me/household", map[string]any{})
+	one := bgDo(s.c, "PUT", "/api/v1/me/household", map[string]any{"name": "One"})
+	two := bgDo(&second, "PUT", "/api/v1/me/household", map[string]any{"name": "Two"})
 	waiters := hwWaiters(t, s.app, 2)
 	hwOneBlockedBy(t, s.app, waiters, blocker) // the other may queue behind its peer
 	commit()
+	codes := map[int]int{}
 	for _, ch := range []<-chan httpResult{one, two} {
-		if got := awaitResult(t, ch); got.code != http.StatusOK {
-			t.Fatalf("first use: %d %s, want 200", got.code, got.body)
+		got := awaitResult(t, ch)
+		codes[got.code]++
+		if got.code == http.StatusConflict && !strings.Contains(got.body, "household_changed") {
+			t.Fatalf("the refused first use: %s, want household_changed", got.body)
 		}
 	}
-	if n := countRows(t, s.app.DB, "households", "created_by = ?", s.u.ID); n != 1 {
-		t.Errorf("%d households, want 1", n)
+	if codes[http.StatusOK] != 1 || codes[http.StatusConflict] != 1 {
+		t.Fatalf("first uses answered %v, want one 200 and one 409", codes)
+	}
+	var names []string
+	gormMust(t, s.app.DB.Raw("SELECT name FROM households WHERE created_by = ?", s.u.ID).Scan(&names))
+	if len(names) != 1 || (names[0] != "One" && names[0] != "Two") {
+		t.Errorf("households %v, want one, named by the request that made it", names)
 	}
 	if n := countRows(t, s.app.DB, "household_accounts", "user_id = ?", s.u.ID); n != 1 {
 		t.Errorf("%d seats, want 1", n)
 	}
 	if n := auditCount(t, s.app, audit.HouseholdCreated); n != 1 {
 		t.Errorf("%d household.created rows, want 1", n)
+	}
+	if n := auditCount(t, s.app, audit.HouseholdUpdated); n != 1 {
+		t.Errorf("%d household.updated rows, want the one save's", n)
 	}
 }

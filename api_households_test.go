@@ -510,6 +510,11 @@ func TestHouseholdRevisionsFollowTheirRows(t *testing.T) {
 	if !regexp.MustCompile(`^1\.[0-9a-f]{16}\.p`+itoa(f.kit.ID)+`\.[0-9a-f]{32}$`).MatchString(kit) || kit != myPersonRevision(t, f.c, f.kit.ID) {
 		t.Fatalf("Kit's token %q, the read's %q", kit, myPersonRevision(t, f.c, f.kit.ID))
 	}
+	var plain string
+	gormMust(t, f.app.DB.Raw("SELECT "+householdPersonRevisionRows.digestSQL()+" FROM household_people r WHERE r.id = ?", f.kit.ID).Scan(&plain))
+	if strings.HasSuffix(kit, "."+plain) {
+		t.Fatalf("Kit's token %q is the plain digest of the row, which an adult who can't read the care notes could test a guess against", kit)
+	}
 	household := token(householdRevisionRows, f.householdID)
 	if !regexp.MustCompile(`^1\.[0-9a-f]{16}\.h` + itoa(f.householdID) + `\.[0-9a-f]{32}$`).MatchString(household) {
 		t.Fatalf("the household's token %q", household)
@@ -562,4 +567,54 @@ func TestHouseholdRevisionsFollowTheirRows(t *testing.T) {
 	if now := token(householdPersonRevisionRows, f.mary.ID); now == mary {
 		t.Fatal("the conversion left Mary's token as it was")
 	}
+}
+
+// The answers of the household writes read each revision in the snapshot that
+// read the fields beside it (toHouseholdJSON, householdPersonRow): an edit
+// committed right after the row was read leaves the answer with the older
+// fields and the older revision, never the older fields with the newer one.
+func TestHouseholdAnswersReadFieldsAndRevisionsInOneSnapshot(t *testing.T) {
+	f := newHouseholdEditFixture(t)
+	seam := func(t *testing.T, table, change string, id uint) *atomic.Bool {
+		var fired atomic.Bool
+		name := "test:household_answer_seam_" + table
+		gormMust(t, &gorm.DB{Error: f.app.DB.Callback().Query().After("gorm:query").Register(name, func(tx *gorm.DB) {
+			if tx.Statement.Table == table && fired.CompareAndSwap(false, true) {
+				if err := f.app.DB.Exec(change, id).Error; err != nil {
+					t.Error(err)
+				}
+			}
+		})})
+		t.Cleanup(func() { _ = f.app.DB.Callback().Query().Remove(name) })
+		return &fired
+	}
+	token := func(rows revisionRows, id uint) string {
+		got, err := f.app.rowRevisionIn(f.app.DB, rows, id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return got
+	}
+	t.Run("the household", func(t *testing.T) {
+		before := token(householdRevisionRows, f.householdID)
+		fired := seam(t, "households", "UPDATE households SET name = 'Committed meanwhile', updated_at = now() WHERE id = ?", f.householdID)
+		out, err := f.app.toHouseholdJSON(f.householdID, f.holder)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !fired.Load() || out.Name == "Committed meanwhile" || out.Revision != before || token(householdRevisionRows, f.householdID) == before {
+			t.Fatalf("fired %t: the answer %q with %q, the token before %q", fired.Load(), out.Name, out.Revision, before)
+		}
+	})
+	t.Run("a person", func(t *testing.T) {
+		before := token(householdPersonRevisionRows, f.kit.ID)
+		fired := seam(t, "household_people", "UPDATE household_people SET care_notes = 'Committed meanwhile', updated_at = now() WHERE id = ?", f.kit.ID)
+		row, err := f.app.householdPersonRow(f.kit.ID, f.holder)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !fired.Load() || row.CareNotes == nil || *row.CareNotes != "Private allergy note" || row.Revision != before || token(householdPersonRevisionRows, f.kit.ID) == before {
+			t.Fatalf("fired %t: the answer %+v, the token before %q", fired.Load(), row, before)
+		}
+	})
 }

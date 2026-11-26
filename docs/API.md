@@ -310,9 +310,12 @@ The household's details and each person's edit name the read they were made from
 person in every household answer (`GET /me/household`, the answers of these writes, the admin household routes) carry
 a `revision`, read in the same snapshot as the fields beside it: a digest of the row (`households` kind `h`,
 `household_people` kind `p`, `updated_at` and a removal's `deleted_at` as instants, `created_at` left out), so there is
-no column and no migration. `PUT /me/household/people/:id` requires the person's revision, and `PUT /me/household`
+no column and no migration. A person's digest goes through a key of the running process: an adult of the household who
+is not the person's confirmed guardian holds the token but may not read their care notes, and a plain digest of a row
+whose other columns they see would let them test a guess at them. `PUT /me/household/people/:id` requires the person's revision, and `PUT /me/household`
 requires the household's whenever the body names a field; an empty body names nothing and needs none, and the request
-that creates the household on first use had no read to name, so its fields save without one. Under the locks each
+that creates the household on first use had no read to name, so its fields save without one (of two first uses that
+race, each naming a field, the one that made the household saves and the other is refused). Under the locks each
 write already takes (the acting account's row, then the household's), after the account is read again and its seat
 and the person are checked, any revision but the row's current one is 409 `household_changed` or
 `household_person_changed`, and nothing happens: no field is written, no account invitation is revoked, no sign-up is

@@ -299,9 +299,11 @@ export function HouseholdCard({ showHeading = true }: { showHeading?: boolean })
   const [refusedPerson, setRefusedPerson] = useState<{ id: number; name: string } | null>(null);
   // The read the open details form was made from: a save's answer replaces it only if nothing read the household since.
   const openedEpoch = useRef(0);
-  // While a form is open, nothing that opens another or reads the household again is offered: its save names the read
-  // it opened with, and its answer must reach the form it was made for.
-  const locked = editing !== null || metadata || converting !== null;
+  // A removal or an invitation action on its way.
+  const [acting, setActing] = useState(false);
+  // While a form is open or an action is on its way, nothing that opens a form or reads the household again is offered:
+  // a save names the read its form opened with, and an answer must reach what it was made for.
+  const locked = editing !== null || metadata || converting !== null || acting;
 
   useEffect(() => {
     const target = focusNext.current;
@@ -342,6 +344,7 @@ export function HouseholdCard({ showHeading = true }: { showHeading?: boolean })
     if (!confirm(removeQuestion(p))) return;
     opening();
     setError(null);
+    setActing(true);
 
     try {
       await Households.removePerson(p.id);
@@ -350,6 +353,8 @@ export function HouseholdCard({ showHeading = true }: { showHeading?: boolean })
       await load.reload();
     } catch (e) {
       setError(errorText(e, "We couldn't remove that person."));
+    } finally {
+      setActing(false);
     }
   }
 
@@ -464,7 +469,7 @@ export function HouseholdCard({ showHeading = true }: { showHeading?: boolean })
                 {p.conversion && (p.conversion.state === "pending" || p.conversion.state === "expired") && <div className="mt-3 space-y-2">
                   <p className="text-sm text-text-muted break-words">{p.conversion.state === "expired" ? "Invitation expired" : "Invitation pending"}: {p.conversion.email}. Expires {formatWhen(p.conversion.expiresAt)}.</p>
                   <p className="text-sm text-text-muted">Changing their name, type or birth date cancels this invitation. Your household keeps managing their sign-ups.</p>
-                  <ConversionActions person={p} disabled={locked} onStart={opening} onChanged={async (message) => { setStatus(message); focusNext.current = p.id; await load.reload(); }} />
+                  <ConversionActions person={p} disabled={locked} onBusy={(busy) => { if (busy) opening(); setActing(busy); }} onChanged={async (message) => { setStatus(message); focusNext.current = p.id; await load.reload(); }} />
                 </div>}
                 {!p.conversion && p.canConvert && converting !== p.id && <Button variant="secondary" layout="mt-3" disabled={locked} onClick={() => { opening(); setConverting(p.id); }}>Create their own account</Button>}
                 {!p.conversion && converting === p.id && <ConversionForm person={p} onCancel={() => { focusNext.current = p.id; setConverting(null); }} onSent={async () => { focusNext.current = p.id; setConverting(null); setStatus(`Invitation sent for ${p.name}. Their sign-ups will move after approval and any required consent and guardian checks.`); await load.reload(); }} />}
@@ -517,19 +522,19 @@ function ConversionForm({ person, onCancel, onSent }: { person: HouseholdPerson;
   </Form>;
 }
 
-function ConversionActions({ person, disabled, onStart, onChanged }: { person: HouseholdPerson; disabled: boolean; onStart: () => void; onChanged: (message: string) => Promise<void> }) {
+function ConversionActions({ person, disabled, onBusy, onChanged }: { person: HouseholdPerson; disabled: boolean; onBusy: (busy: boolean) => void; onChanged: (message: string) => Promise<void> }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   async function act(cancel: boolean) {
-    onStart();
+    onBusy(true);
     setBusy(true); setError(null);
 
     try {
       if (cancel) await Households.cancelConversion(person.id); else await Households.resendConversion(person.id);
       await onChanged(cancel ? "Invitation cancelled. Their sign-ups are unchanged." : "Invitation resent. The previous link can no longer be used.");
     } catch (e) { setError(errorText(e, "We couldn't update the invitation. Try again.")); }
-    finally { setBusy(false); }
+    finally { setBusy(false); onBusy(false); }
   }
 
   return <div>
