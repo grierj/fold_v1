@@ -124,8 +124,31 @@ it.each([
     await userEvent.click(await screen.findByRole("button", { name: /^More for .* on 2026-12-01$/ }));
     await userEvent.click(screen.getByRole("menuitem", { name: "Cancel this date" }));
     await waitFor(() => expect(Events.cancelOccurrence).toHaveBeenCalledExactlyOnceWith(7, "2026-12-01"));
-    expect(prompt).toHaveBeenCalledExactlyOnceWith(`Cancel this date on 2026-12-01? ${line}`);
+    expect(prompt).toHaveBeenCalledExactlyOnceWith(`Cancel this date on Tuesday, December 1, 2026? ${line}`);
     expect(Events.signedUp).toHaveBeenCalledExactlyOnceWith(7, "2026-12-01");
+  } finally {
+    prompt.mockRestore();
+  }
+});
+
+it("names the moved day when cancelling a date and sends its original date key", async () => {
+  vi.mocked(Groups.get).mockResolvedValue({ ...page, canManage: true, upcomingEvents: [
+    occurrence({ date: "2026-12-01", startsAt: "2026-12-03T19:00:00Z" }),
+  ] });
+  vi.mocked(Events.signedUp).mockResolvedValue({ people: 0 });
+  vi.mocked(Events.cancelOccurrence).mockResolvedValue({});
+  const prompt = vi.spyOn(window, "confirm").mockReturnValue(true);
+
+  try {
+    open();
+    const menu = await screen.findByRole("button", { name: /^More for .* on 2026-12-03$/ });
+    await userEvent.click(menu);
+    await userEvent.click(screen.getByRole("menuitem", { name: "Cancel this date" }));
+    expect(await screen.findByText(/^You cancelled Thursday, December 3, 2026\./)).toBeInTheDocument();
+    expect(menu).not.toBeInTheDocument();
+    expect(prompt).toHaveBeenCalledExactlyOnceWith("Cancel this date on Thursday, December 3, 2026? No one else will be notified.");
+    expect(Events.signedUp).toHaveBeenCalledExactlyOnceWith(7, "2026-12-01");
+    expect(Events.cancelOccurrence).toHaveBeenCalledExactlyOnceWith(7, "2026-12-01");
   } finally {
     prompt.mockRestore();
   }
@@ -178,7 +201,7 @@ it("keeps focus in the event list when a fresh read replaces a focused date row"
   await userEvent.click(await screen.findByRole("button", { name: "Going" }));
   await waitFor(() => expect(Groups.get).toHaveBeenCalledTimes(2));
   screen.getByRole("button", { name: "More for Week one on 2026-12-01" }).focus();
-  await act(async () => fresh.resolve({ ...shown, upcomingEvents: [occurrence({ id: 2, title: "Week two", date: "2026-12-08" })] }));
+  await act(async () => fresh.resolve({ ...shown, upcomingEvents: [occurrence({ id: 2, title: "Week two", date: "2026-12-08", startsAt: "2026-12-08T19:00:00Z" })] }));
   expect(await screen.findByRole("button", { name: "More for Week two on 2026-12-08" })).toBeInTheDocument();
   expect(screen.getByRole("group", { name: "Upcoming events" })).toHaveFocus();
 });
@@ -1820,7 +1843,7 @@ describe("GroupDetail: the date question in the app's dialog", () => {
     vi.mocked(window.confirm).mockReturnValue(false);
     await userEvent.click(await screen.findByRole("button", { name: /^More for .* on 2026-12-01$/ }));
     await userEvent.click(screen.getByRole("menuitem", { name: "Cancel this date" }));
-    await waitFor(() => expect(window.confirm).toHaveBeenCalledExactlyOnceWith("Cancel this date on 2026-12-01? Anyone else signed up for this date will be notified."));
+    await waitFor(() => expect(window.confirm).toHaveBeenCalledExactlyOnceWith("Cancel this date on Tuesday, December 1, 2026? Anyone else signed up for this date will be notified."));
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
   });
 });

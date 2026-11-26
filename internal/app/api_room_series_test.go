@@ -266,6 +266,96 @@ func TestRoomSeriesEditsBookAddedAndRestoredDates(t *testing.T) {
 	}
 }
 
+func TestManualRestoreUsesCurrentSeriesRoom(t *testing.T) {
+	for _, scenario := range []string{"free", "busy", "approval", "rooms off"} {
+		t.Run(scenario, func(t *testing.T) {
+			f := newBookingFixture(t)
+			if scenario == "approval" {
+				apiDo(t, f.admin, "PUT", "/api/v1/admin/settings/room-approval", map[string]bool{"enabled": true}, 200)
+			}
+			ev := createFeedEvent(t, f.leader, f.group, "Weekly", f.startOn, "FREQ=WEEKLY;COUNT=2")
+			if code, _ := f.seriesRoom(t, f.leader, ev, map[string]any{"roomId": f.hall.ID}); code != 200 {
+				t.Fatalf("series room: %d", code)
+			}
+			path, day := "/api/v1/events/"+itoa(ev.ID), feedDate(f.startOn)
+			apiDo(t, f.leader, "POST", path+"/cancel", map[string]string{"date": day}, 200)
+			if scenario == "busy" {
+				if code, body := f.book(t, f.leader, f.eventA, map[string]any{"roomId": f.hall.ID}); code != 200 {
+					t.Fatal(code, body)
+				}
+			}
+			if scenario == "rooms off" {
+				apiDo(t, f.admin, "PUT", "/api/v1/admin/settings/rooms", map[string]bool{"enabled": false}, 200)
+			}
+			apiDo(t, f.leader, "POST", path+"/restore", map[string]string{"date": day, "revision": editBaseOf(t, f.leader, ev.ID, day).Revision}, 200)
+			room, status, waiting, _ := dateBookingOf(t, f.app, ev, day)
+			if scenario == "rooms off" {
+				if room != 0 {
+					t.Fatal("restore booked a room while rooms were off")
+				}
+				return
+			}
+			want := models.BookingConfirmed
+			if scenario != "free" {
+				want = models.BookingRequested
+			}
+			if room != f.hall.ID || status != want || waiting != (scenario == "approval") {
+				t.Fatalf("restore room %d, status %q, waiting %v", room, status, waiting)
+			}
+			if scenario == "free" {
+				apiDo(t, f.admin, "PUT", path, seriesBody(t, f.admin, path, map[string]any{"durationMinutes": 90}), 200)
+				var date models.EventOccurrence
+				gormMust(t, f.app.DB.Where("event_id = ? AND original_date = ?", ev.ID, day).First(&date))
+				if date.EndsAt.Sub(date.StartsAt) != 90*time.Minute {
+					t.Fatal("a restore that matched the series stopped following its duration")
+				}
+			}
+			if scenario == "busy" && contactCount(t, f.app, &models.Notification{}, "kind = ? AND user_id = ?", notify.RoomLost, f.leaderUser.ID) != 1 {
+				t.Fatal("manager not told the room was taken")
+			}
+		})
+	}
+}
+
+func TestManualRestoreKeepsOneOffAcrossSeriesEdits(t *testing.T) {
+	f := newBookingFixture(t)
+	ev := createFeedEvent(t, f.leader, f.group, "Weekly", f.startOn, "FREQ=WEEKLY;COUNT=2")
+	path, day := "/api/v1/events/"+itoa(ev.ID), feedDate(f.startOn)
+	if code, _ := f.seriesRoom(t, f.leader, ev, map[string]any{"roomId": f.hall.ID}); code != 200 {
+		t.Fatalf("series room: %d", code)
+	}
+	var before models.EventOccurrence
+	gormMust(t, f.app.DB.Where("event_id = ? AND original_date = ?", ev.ID, day).First(&before))
+	if before.Customized() {
+		t.Fatal("fixture already has a date override")
+	}
+	signUp(t, f.app, f.leaderUser, before.ID, models.RegGoing)
+	apiDo(t, f.admin, "POST", path+"/cancel", map[string]string{"date": day}, 200)
+	edit := func(changes map[string]any) {
+		apiDo(t, f.admin, "PUT", path, seriesBody(t, f.admin, path, changes), 200)
+	}
+	edit(map[string]any{"startsLocal": f.startOn.AddDate(0, 0, 7).Format("2006-01-02T15:04")})
+	apiDo(t, f.admin, "POST", path+"/restore", map[string]string{"date": day, "revision": editBaseOf(t, f.admin, ev.ID, day).Revision}, 200)
+
+	mark := markNotices(t, f.app)
+	for _, changes := range []map[string]any{
+		{"title": "Weekly supper"},
+		{"startsLocal": f.startOn.Add(time.Hour).Format("2006-01-02T15:04"), "durationMinutes": 90},
+	} {
+		edit(changes)
+		o := occurrenceRow(t, f.app, before.ID)
+		if o.Status != models.OccurrenceScheduled || !o.StartsAt.Equal(before.StartsAt) || !o.EndsAt.Equal(before.EndsAt) {
+			t.Fatalf("after edit %v: %s, %s to %s", changes, o.Status, o.StartsAt, o.EndsAt)
+		}
+		if room, status, _, _ := dateBookingOf(t, f.app, ev, day); room != f.hall.ID || status != models.BookingConfirmed {
+			t.Fatalf("after edit %v: room %d, status %q", changes, room, status)
+		}
+	}
+	if n := toldSince(t, f.app, notify.OccurrenceCancelled, mark.notice); n != 0 {
+		t.Fatalf("series edits sent %d cancellation notices", n)
+	}
+}
+
 func TestRoomSeriesSwitchRooms(t *testing.T) {
 	f := newBookingFixture(t)
 	var chapel struct {
