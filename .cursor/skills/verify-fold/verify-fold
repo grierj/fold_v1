@@ -129,18 +129,8 @@ cmd_up() {
       exec setsid "$work/fold" serve
     ) >"$work/server.log" 2>&1 &
     pid=$!
-    cat >"$work/state.env" <<EOF
-RUN_ID=$run
-PORT=$port
-URL=http://127.0.0.1:$port
-PID=$pid
-DATABASE_URL=$url
-DB_NAME=$db
-WORK=$work
-EVIDENCE=$evidence
-BINARY=$work/fold
-DEV_DATABASE_URL=$DEV_DATABASE_URL
-EOF
+    printf 'RUN_ID=%q\nPORT=%q\nURL=%q\nPID=%q\nDATABASE_URL=%q\nDB_NAME=%q\nWORK=%q\nEVIDENCE=%q\nBINARY=%q\nDEV_DATABASE_URL=%q\n' \
+      "$run" "$port" "http://127.0.0.1:$port" "$pid" "$url" "$db" "$work" "$evidence" "$work/fold" "$DEV_DATABASE_URL" >"$work/state.env"
     for _ in $(seq 1 60); do
       if ! kill -0 "$pid" 2>/dev/null; then
         wait "$pid" || true
