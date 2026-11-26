@@ -8,7 +8,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { ApiError } from "../api/core";
 import { Dates, Events } from "../api/events";
 import { Site } from "../api/site";
-import type { Attendee, EventDate, EventDateRead, EventDateAttendee, EventDateSeries, EventDateUsual, EventOccurrence, OccurrenceResponse, RegistrationResponse, SeriesRegistrationResponse } from "../types";
+import type { Attendee, ComposeOptions, EventDate, EventDateRead, EventDateAttendee, EventDateSeries, EventDateUsual, EventOccurrence, OccurrenceResponse, RegistrationResponse, SeriesRegistrationResponse } from "../types";
 import { coverSrc } from "../lib/covers";
 import { invalidateSite } from "../lib/useSite";
 import { occurrence as rosterOccurrence } from "../test/occurrence";
@@ -35,6 +35,14 @@ const registration: RegistrationResponse = { registrationId: 8, userId: 2, event
 const page = () => <MemoryRouter initialEntries={["/events/7/dates/2026-12-01"]}><Routes><Route path="/events/:id/dates/:date" element={<EventDatePage />} /><Route path="/login" element={<p>Sign in first</p>} /></Routes></MemoryRouter>;
 
 function mount() { return render(page()); }
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (cause: unknown) => void;
+  const promise = new Promise<T>((res, rej) => { resolve = res; reject = rej; });
+
+  return { promise, resolve, reject };
+}
 
 beforeEach(() => { vi.resetAllMocks(); actor.user = { id: 2 }; actor.canCompose = false; vi.mocked(Dates.get).mockResolvedValue({ occurrence: occurrence() }); vi.mocked(Dates.register).mockResolvedValue({ registration }); vi.mocked(Dates.end).mockResolvedValue({}); nativePromptsFail(); });
 
@@ -467,6 +475,39 @@ it("offers Email people going for this date to someone who may write to the even
   mount();
   expect(await screen.findByRole("link", { name: "Email people going" })).toHaveAttribute("href", "/messages/new?occurrence=51");
   expect(Messages.options).toHaveBeenCalledWith(7);
+});
+
+it.each(["shown", "pending"])("rechecks the email link after host removal when the earlier check is %s", async (initial) => {
+  actor.canCompose = true;
+  const date = occurrence({ visibility: "public", canManage: true, canDecline: false, canBlock: false });
+  const afterRemoval: ComposeOptions = { canCompose: true, canMessageEveryone: false, pushEnabled: true, groups: [], events: [] };
+  const asHost: ComposeOptions = { ...afterRemoval, events: [{ id: 7, title: date.title, churchWide: true, dates: [] }] };
+  const old = deferred<ComposeOptions>();
+  const fresh = deferred<ComposeOptions>();
+  vi.mocked(Dates.get).mockResolvedValue({ occurrence: date });
+  vi.mocked(Messages.options)
+    .mockReturnValueOnce(initial === "pending" ? old.promise : Promise.resolve(asHost))
+    .mockReturnValueOnce(fresh.promise);
+
+  mount();
+  const link = { name: "Email people going" };
+  expect(await screen.findByRole("heading", { name: date.title })).toBeInTheDocument();
+  await waitFor(() => expect(Messages.options).toHaveBeenCalledExactlyOnceWith(7));
+
+  if (initial === "shown") expect(await screen.findByRole("link", link)).toHaveAttribute("href", "/messages/new?occurrence=51");
+
+  vi.mocked(Dates.get).mockResolvedValue({ occurrence: { ...date, canManage: false } });
+  fireEvent(window, new Event("focus"));
+  expect(await screen.findByRole("heading", { name: date.title })).toBeInTheDocument();
+  expect(screen.queryByRole("region", { name: "Manage this date" })).not.toBeInTheDocument();
+  expect(screen.queryByRole("link", link)).not.toBeInTheDocument();
+  await waitFor(() => expect(vi.mocked(Messages.options).mock.calls).toEqual([[7], [7]]));
+
+  await act(async () => { fresh.resolve(afterRemoval); });
+
+  if (initial === "pending") await act(async () => { old.resolve(asHost); });
+
+  expect(screen.queryByRole("link", link)).not.toBeInTheDocument();
 });
 
 it("doesn't offer it for an event the viewer can't write to, or ask when they can't compose", async () => {
@@ -1397,14 +1438,6 @@ describe("the answer bar", () => {
     vi.mocked(Dates.get).mockResolvedValue({ occurrence: read });
     mount();
     await screen.findByRole("heading", { level: 1, name: read.title });
-  }
-
-  function deferred<T>() {
-    let resolve!: (value: T) => void;
-    let reject!: (cause: unknown) => void;
-    const promise = new Promise<T>((res, rej) => { resolve = res; reject = rej; });
-
-    return { promise, resolve, reject };
   }
 
   it("is the one answer group and one status, with the details in the page's flow", async () => {
