@@ -3,17 +3,16 @@ import { useEffect, useRef, useState, type KeyboardEvent } from "react";
 import { DateRooms, type DateRoomInput } from "../api/rooms";
 import { useAuth } from "../auth";
 import { errorCode } from "../lib/errors";
-import { roomName } from "../lib/place";
 import { RefusedSaveLine, useRefusedSave, type ResourceReadOutcome } from "../lib/refusedSave";
 import { NO_ROOM, roomOptionLabel } from "../lib/roomLabels";
 import { outcomeOf } from "../lib/rosterWrites";
 import { useAction } from "../lib/useAction";
 import { answerNames, refusedAgain, useManagedSave } from "../lib/useRevisionSave";
 import type { DateRoomsResponse, RoomBooking, RoomBookingResponse } from "../types";
-import { Field, FormError, Input, Select } from "./ui/Field";
+import { Field, FormError, Input } from "./ui/Field";
 import { Button } from "./ui/Button";
 import { DoubleBookPrompt, useOverlapReason } from "./DoubleBookPrompt";
-import { RoomOptions } from "./RoomOptions";
+import { RoomSelect } from "./RoomSelect";
 import { pickGone, readRooms, RoomLoadStatus, RoomsOffLine, roomsTurnedOff, useRoomPicker } from "./useRoomPicker";
 import { AlertCircleIcon } from "./icons";
 
@@ -282,12 +281,12 @@ function DateRoomControl({ eventId, date, id, read, show, onChanged, onGone }: {
   return (
     <>
       <Field id={id} label="Room" optional hint="Saved as soon as you choose it, so you don't need to press Save. If bookings need an admin's approval, it waits for one.">
-        <Select value={value} aria-describedby={suggestionId} aria-busy={busy || undefined} onChange={(e) => choose(e.target.value)}>
+        <RoomSelect value={value} aria-describedby={suggestionId} aria-busy={busy || undefined} onChange={(e) => choose(e.target.value)}
+          fallback={held && { id: held.roomId, name: held.roomName, building: held.building }}
+          rooms={rooms} suggestions={suggestions} label={roomOptionLabel} reasonBeside={selectedSuggestion?.roomId} unavailable={(r) => r.busy && !isAdmin}>
           {requested && <option value="">Pick a room</option>}
           <option value={NO_ROOM}>No room</option>
-          {held && <option value={String(held.roomId)}>{roomName({ name: held.roomName, building: held.building })}</option>}
-          <RoomOptions rooms={rooms} suggestions={suggestions} label={roomOptionLabel} reasonBeside={selectedSuggestion?.roomId} disabled={(r) => r.busy && !isAdmin} />
-        </Select>
+        </RoomSelect>
         {selectedSuggestion && <p id={suggestionId} className="mt-1 text-sm text-text-muted wrap-anywhere">{selectedSuggestion.reason}</p>}
       </Field>
       <RefusedSaveLine save={refusal} noun="room" choosing="This date's room" />
