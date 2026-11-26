@@ -268,6 +268,89 @@ func TestAudiencePreview(t *testing.T) {
 	}
 }
 
+func TestSavedComposerUsesAuthorAudiencesAndViewerSkipReasons(t *testing.T) {
+	f := newComposeFixture(t)
+	group := map[string]any{"type": "group", "groupId": f.group.ID}
+	path := f.draft(t, f.leader, "News", "<p>Hello</p>", group)
+	for _, status := range []string{"draft", "scheduled"} {
+		t.Run(status, func(t *testing.T) {
+			if status == "scheduled" {
+				send := confirmedSend(t, f.leader, path, map[string]any{"scheduledAt": f.app.now().Add(24 * time.Hour)})
+				wantCode(t, "schedule", f.leader.do("POST", path+"/schedule", send, true), http.StatusOK, "")
+			}
+			var options composeOptions
+			decodeJSON(t, f.admin.do("GET", path+"/compose", nil, false), &options)
+			if !reflect.DeepEqual(options, f.options(t, f.leader)) {
+				t.Fatalf("admin editing leader message: %+v", options)
+			}
+			preview := func(c *apiClient, aud map[string]any) *httptest.ResponseRecorder {
+				return c.do("POST", path+"/audience-preview", map[string]any{"audience": aud}, true)
+			}
+			for _, aud := range []map[string]any{{"type": "all_members"}, {"type": "group", "groupId": f.otherGroup.ID}, {"type": "event_series", "eventId": f.otherCW.ID}} {
+				wantCode(t, "outside author audience", preview(f.admin, aud), http.StatusForbidden, "message_not_yours")
+			}
+			for _, viewer := range []*apiClient{f.admin, f.leader} {
+				var count audienceSummaryResponseJSON
+				decodeJSON(t, preview(viewer, group), &count)
+				reasons := map[string]int{}
+				for _, r := range count.Summary.Recipients {
+					reasons[r.Skipped]++
+				}
+				want := map[string]int{"": 2, skipHidden: 2}
+				if viewer == f.admin {
+					want = map[string]int{"": 2, skipOptedOut: 1, skipNotWorking: 1}
+				}
+				if count.Summary.People != 4 || count.Summary.Eligible != 2 || !reflect.DeepEqual(reasons, want) {
+					t.Fatalf("wrong count or skip reasons: %+v", count)
+				}
+			}
+			wantCode(t, "another leader's options", f.host.do("GET", path+"/compose", nil, false), http.StatusNotFound, "not_found")
+			wantCode(t, "another leader's preview", preview(f.host, group), http.StatusNotFound, "not_found")
+		})
+	}
+	wantCode(t, "cancel", f.admin.do("POST", path+"/cancel", nil, true), http.StatusOK, "")
+	wantCode(t, "closed options", f.admin.do("GET", path+"/compose", nil, false), http.StatusConflict, "message_locked")
+	wantCode(t, "closed preview", f.admin.do("POST", path+"/audience-preview", map[string]any{"audience": group}, true), http.StatusConflict, "message_locked")
+}
+
+func TestSavedComposerJudgesAuthorInEditorsSnapshot(t *testing.T) {
+	for _, route := range []string{"compose", "audience-preview"} {
+		t.Run(route, func(t *testing.T) {
+			f := newComposeFixture(t)
+			group := map[string]any{"type": "group", "groupId": f.group.ID}
+			path := f.draft(t, f.leader, "News", "<p>Hello</p>", group)
+			fired := false
+			f.app.hooks.readerAuthorized = func(surface string) {
+				if surface == "message audience" && !fired {
+					fired = true
+					gormMust(t, f.app.DB.Model(f.leaderUser).Update("status", models.UserDisabled))
+				}
+			}
+			if route == "compose" {
+				var before, after composeOptions
+				decodeJSON(t, f.admin.do("GET", path+"/compose", nil, false), &before)
+				decodeJSON(t, f.admin.do("GET", path+"/compose", nil, false), &after)
+				if !before.CanCompose || len(before.Groups) != 1 || after.CanCompose || after.CanMessageEveryone || len(after.Groups)+len(after.Events) != 0 {
+					t.Fatalf("author disabled during picker: before %+v, after %+v", before, after)
+				}
+			} else {
+				preview := func() *httptest.ResponseRecorder {
+					return f.admin.do("POST", path+"/audience-preview", map[string]any{"audience": group}, true)
+				}
+				var before audienceSummaryResponseJSON
+				decodeJSON(t, preview(), &before)
+				if before.Summary.People != 4 {
+					t.Fatalf("author disabled during count: %+v", before)
+				}
+				wantCode(t, "inactive author", preview(), http.StatusForbidden, "message_not_yours")
+			}
+			if !fired {
+				t.Fatal("the author did not change during the read")
+			}
+		})
+	}
+}
+
 // The preview skips someone whose address has an open row, hashed or legacy,
 // in either order, with the same words; a cleared row skips nobody. A complaint
 // alone says "marked our email as spam"; beside a bounce the bounce wins.
