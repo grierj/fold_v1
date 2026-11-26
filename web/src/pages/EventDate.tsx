@@ -199,6 +199,14 @@ function DateDetail({ id, date }: { id: string; date: string }) {
 
   const reloadPage = useCallback(() => void reload(), [reload]);
   const retryPage = useCallback(() => void recheck(), [recheck]);
+  const [cancelledHere, setCancelledHere] = useState(false);
+
+  const onCancelled = useCallback(() => {
+    refocus.current = true;
+    setCancelledHere(true);
+    retryPage();
+  }, [retryPage]);
+
   // A date save refused and not sent again (DEC-164): the editor closed, and the page reads from nothing, failing
   // closed like any recheck, and then says so.
   const refusedSave = useRefusedSave({ loading: load.loading, data: load.data, retry: recheck });
@@ -542,7 +550,9 @@ function DateDetail({ id, date }: { id: string; date: string }) {
         </div>
       </div>
       {!loaded && !selfReading && <p role="status">Loading this date…</p>}
-      {loaded && !occurrence && <EmptyState title="This date is not available" body="Your invitation may have ended, or this date may not be available to you. Check your calendar for dates you can open." />}
+      {loaded && !occurrence && (cancelledHere
+        ? <div role="status"><EmptyState title="This date was cancelled" body="Your calendar shows the dates that are still on." /></div>
+        : <EmptyState title="This date is not available" body="Your invitation may have ended, or this date may not be available to you. Check your calendar for dates you can open." />)}
       {(occurrence || selfReading) && <section aria-label="This event date" className="space-y-6">
         {/* The six answers come first (M8.1 brief 5.1); everything else follows them. */}
         <div className="space-y-3">
@@ -577,7 +587,7 @@ function DateDetail({ id, date }: { id: string; date: string }) {
     </div>
     <RefusedSaveLine save={refusedSave} noun="date" canManage={occurrence ? occurrence.canManage === true : undefined} />
     {showManage && <ResourceRefusal.Provider value={rosterRefused}><Suspense fallback={<Skeleton kind="lines" label="Loading the manager tools…" />}>
-      <ManageDate eventId={Number(id)} date={date} occurrenceId={occurrence?.id} authority={authority} onDateChanged={reloadPage}
+      <ManageDate eventId={Number(id)} date={date} occurrenceId={occurrence?.id} startsAt={occurrence?.startsAt} endsAt={occurrence?.endsAt} authority={authority} onDateChanged={reloadPage} onCancelled={onCancelled}
         onConflict={refusedSave.refused} onOpenEditor={refusedSave.clear} onGone={retryPage} onRetryPage={retryPage} />
     </Suspense></ResourceRefusal.Provider>}
     {barShown && <StickyRsvpBar label="Answer this date">

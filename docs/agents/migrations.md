@@ -184,6 +184,11 @@ it is for.
   changes no row. Direct reuse with an earlier binary is still ruled out by `00015`.
   `TestGroupStatusCheckMigration`, `TestGroupStatusCheckRefusesAnUnknownStoredValue` and
   `TestGroupStatusCheckWaitsAtMostFiveSeconds` prove it.
+- `00017` adds UPDATE triggers that preserve a finished direct-contact request's scope,
+  options, decision and timing, and an ended contact grant's recorded outcome. The
+  direct-contact reason scrub follows the existing DEC-141 path. Up and Down touch
+  no rows. `TestContactFinalityMigration` covers rollback, ordinary decisions and
+  grant endings, and the erasure scrub.
 - A development database migrated by the pre-squash chain must be recreated before a new binary
   runs on it; there is no converter.
 - `scripts/baseline-proof.sh proof` re-proves a tree against the frozen pre-squash chain with a

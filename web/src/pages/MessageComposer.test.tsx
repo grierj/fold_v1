@@ -771,6 +771,26 @@ describe("push notification too", () => {
       "And 1 more",
     ]);
   });
+
+  it("shows an unconfirmed push-only reminder in the recipient history", async () => {
+    vi.mocked(Messages.get).mockResolvedValue({ message: message({
+      status: "sent", channel: "push", category: "reminder", editable: false,
+    }) });
+    const base = adminRecipients();
+    vi.mocked(Messages.recipients).mockResolvedValue({
+      ...base,
+      counts: { ...base.counts, sent: 0, delivered: 0, skipped: 0, push: { sent: 0, waiting: [], missed: { "delivery could not be confirmed": 1 } } },
+      recipients: [{ name: "Ann Adult", teen: false, status: "unconfirmed" }],
+      more: false,
+      canRetry: false,
+    });
+    open("/messages/5");
+    expect(await screen.findByText("Push notifications: 1 unconfirmed")).toBeInTheDocument();
+    await userEvent.click(screen.getByText("See who got it"));
+    const row = within(screen.getByRole("list")).getByRole("listitem");
+    expect(row).toHaveTextContent("Push delivery unconfirmed");
+    expect(row).not.toHaveTextContent("Didn't get it");
+  });
 });
 
 // An edit and a send name what the sender saw (DEC-169): the save names the read it was made from, the send the text

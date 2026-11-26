@@ -1097,8 +1097,8 @@ POST /api/v1/events/:id/hosts               → 200 {hosts}   (admin; church-wid
      body: {email}
      — a person who already hosts it changes nothing and writes no audit row
 DELETE /api/v1/events/:id/hosts/:userId     → 200 {hosts}   (admin; refuses the last live host)
-POST /api/v1/events/:id/cancel              → 200 {}        (leader, host, or admin)
-     body: {date: "YYYY-MM-DD"} — cancels that stored date
+POST /api/v1/events/:id/cancel              → 200 {} | 409 date_cancel_ended   (leader, host, or admin)
+     body: {date: "YYYY-MM-DD"} — cancels that stored date before its end, including while underway
 PUT  /api/v1/events/:id/occurrences/:date   → 409 date_page_outdated  (leader, host, or admin; retired)
      edit payload: ignored after standard CSRF processing; writes nothing (see Cutover under Guarded date edit)
 GET  /api/v1/events/:id/occurrences/:date   → 200 {occurrence}  (leader, host, or admin; the date's edit base, scheduled or cancelled)
@@ -1122,6 +1122,13 @@ session, role, and leadership or hosting again inside the writing transaction,
 after the body arrives on routes that take one. A session that ended answers
 401. Lost management rights answer 403, or 404 on the per-date edit endpoint.
 A visibility value no longer allowed answers 400 `visibility_not_allowed`.
+
+Manual cancellation judges the date's end under its lock. A manual
+cancellation supersedes a series cancellation before the date ends.
+Repeating a manual cancellation makes no further changes. Manual and series
+cancellations each record `event.dates_cancelled` with the affected occurrence
+IDs and `source` of `manual` or `series`. A manager can still correct a
+cancelled date's time through the guarded date edit.
 
 `GET /groups/:id/events` pages all visible scheduled dates within its original-date
 window, with no per-series cap. Like group detail, `limit` defaults to 25
@@ -2063,6 +2070,9 @@ and the primary contact, the account is deleted (memberships end) or disabled (m
 as plain member). Audit: `membership.role_changed` per group
 with `reason` `account_deleted` or `account_disabled` and
 `departingUserId`, plus `user.deleted` or `user.disabled`.
+Choosing an eligible admin authorizes filling the departing leader's seat.
+If adding or reactivating that admin leaves the group over its member limit
+after the departure, the same transaction records `membership.added_over_limit`.
 
 Sole-host handoff (M7.4 owner decision 3, slice R4-H): deleting the only
 non-deleted host of a church-wide event needs `hostSuccessors`, a new host
@@ -2407,6 +2417,13 @@ PUT  /api/v1/admin/settings/reply-to     → 200 {address} | 400 reply_to_invali
 The privacy rule is the composer preview's. The counts, by status and by reason, are for everyone who may see the message. That includes how many marked our email as spam and the "marked our email as spam" count in `skippedBy`: by design, since the composer's preview already shows leaders counts by reason (PLAN 7.3), and a count names no one. Each person's `status` is `sent`, `delivered`, `waiting` (queued) or `missed`, which covers skipped, bounced, marked as spam and failed alike, so a leader or host can't tell one person's consent, bounce or complaint. Only an admin gets each person's `reason` ("turned off messages from leaders", "bounced: the address doesn't take email", "couldn't send: …"). No response carries an address: `message_recipients.address` never leaves the worker (DEC-31), and send errors are stored with addresses replaced by `[email]`.
 
 A message's `error` follows DEC-52. Fold's own plain texts reach everyone as they are: the send-time refusals, "We couldn't get this ready to send. Try again to send it.", "Sending stopped before these went out." and "No email service is set up yet…". One table, `ownMessageErrors`, lists them, with M3.5a's older wording of the not-ready text ("…Schedule it again to try once more."), which stored rows still carry and which Try again also accepts; a test keeps every `why*` text in it. Any other stored error is a provider's own words, which a leader or host can't act on, so they read "The email service didn't take it. Try again in a little while. If it keeps happening, ask an admin to open this message to see what went wrong." Admins read the provider's text.
+
+When a push has no recorded outcome and its jobs have ended, history reports
+`delivery could not be confirmed` for that push. The count and personal push
+badge can show this to anyone who can read the history. If the person has
+only a push row, the recipient's history `status` is `unconfirmed`. Other
+individual push reasons are available to admins. An unconfirmed push is
+never resent.
 
 `canRetry` shows "Try again" (DEC-131): the message is `sent` or `failed` with failed rows (guardian copies included), or failed before anyone was chosen because it couldn't be got ready, and its author is active and may still write to its audience. `retry` checks the same, then in one transaction sets only the `failed` rows back to `queued` (clearing their error), the message to `sending` (clearing its error), queues `message.deliver_batch` jobs for those rows under fresh keys, and audits `message.retried` with the count. Rows that were sent, delivered, bounced or skipped are never queued again, so nobody it reached gets it twice. A message that never got ready goes back to `scheduled` for now and `message.send` prepares it from the start. Whoever presses it, an admin included, it goes out in the author's name, so the author's rights are what is checked: an author who can no longer write to these people is 403 `message_retry_refused` and nothing changes. A message that is already going out again (someone else pressed it first) is 409 `message_retry_sending`, "It's already sending again."; one with nothing to retry is 409 `message_nothing_to_retry`. An announcement retry counts toward the leader's daily group-message limit on the church day it goes out; the message itself is excluded from the count, so retrying it on the same day does not use a second slot. Admins remain exempt.
 

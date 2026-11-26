@@ -128,6 +128,10 @@ const (
 	// event. Meta: title, groupId (absent when church-wide).
 	EventDeleted = "event.deleted"
 
+	// EventDatesCancelled records a manager's manual or series cancellation.
+	// Target is the event. Meta: occurrenceIds and source.
+	EventDatesCancelled = "event.dates_cancelled"
+
 	// EventDatesRestored: a series edit whose rule includes dates an earlier
 	// series edit had cancelled brought them back on (cancel_source series).
 	// Target is the event. Meta: dates (original dates), occurrenceIds.

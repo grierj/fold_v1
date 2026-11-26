@@ -23,7 +23,7 @@ const actor: TestSession = { user: { id: 2 }, canCompose: false };
 
 const render = renderWithAuth(() => actor);
 
-stubService(Events, () => ({ register: vi.fn(), registerSeries: vi.fn(), undoSeriesRegistration: vi.fn(), managedDate: vi.fn(), dateVisibilityImpact: vi.fn(), removeRegistration: vi.fn(), promoteRegistration: vi.fn(), restoreRegistration: vi.fn(), addRegistration: vi.fn() }));
+stubService(Events, () => ({ cancelOccurrence: vi.fn(), register: vi.fn(), registerSeries: vi.fn(), undoSeriesRegistration: vi.fn(), managedDate: vi.fn(), dateVisibilityImpact: vi.fn(), removeRegistration: vi.fn(), promoteRegistration: vi.fn(), restoreRegistration: vi.fn(), addRegistration: vi.fn() }));
 
 stubService(Dates, () => ({ get: vi.fn(), register: vi.fn(), end: vi.fn() }));
 
@@ -45,6 +45,33 @@ function nativePromptsFail() {
 }
 
 const QUESTIONS = { "Can't go": "Can't go to this date?", "Don't add me again": "Don't add me again?" } as const;
+
+it.each([true, false])("offers cancellation when opening a manager's date that is still underway: %s", async (underway) => {
+  const end = Date.now() + (underway ? 45 * 60_000 : 0);
+  const row = occurrence({ visibility: "public", canManage: true, startsAt: new Date(end - 60 * 60_000).toISOString(), endsAt: new Date(end).toISOString() });
+  vi.mocked(Dates.get).mockResolvedValue({ occurrence: row });
+  mount();
+  const manage = await screen.findByRole("region", { name: "Manage this date" });
+
+  if (!underway) {
+    expect(within(manage).queryByRole("button", { name: "Cancel this date" })).not.toBeInTheDocument();
+    expect(Events.cancelOccurrence).not.toHaveBeenCalled();
+
+    return;
+  }
+
+  vi.mocked(Events.cancelOccurrence).mockImplementation(async () => {
+    vi.mocked(Dates.get).mockRejectedValue(new ApiError(404, "Date unavailable"));
+
+    return {};
+  });
+  await userEvent.click(within(manage).getByRole("button", { name: "Cancel this date" }));
+  const confirmation = await screen.findByRole("dialog", { name: /^Cancel this date on / });
+  expect(Events.cancelOccurrence).not.toHaveBeenCalled();
+  await userEvent.click(within(confirmation).getByRole("button", { name: "Cancel this date" }));
+  expect(await screen.findByText("This date was cancelled")).toBeInTheDocument();
+  expect(Events.cancelOccurrence).toHaveBeenCalledExactlyOnceWith(7, "2026-12-01");
+});
 
 it("renders only date disclosures, never hidden parent/group/host/roster/household navigation", async () => {
   const row = { ...occurrence(), groupName: "SECRET GROUP", groupId: 88, hosts: [{ name: "SECRET HOST" }], attendees: [{ name: "SECRET ATTENDEE" }], description: "SECRET DESCRIPTION" };
@@ -805,6 +832,74 @@ describe("the manager section", () => {
   });
 
   const managerAnswer = () => ({ occurrence: occurrence({ canManage: true, canDecline: false, canBlock: false, myRegistration: null }) });
+
+  it.each([403, 404])("reads from empty after a cancellation refusal (%s), including an open roster", async (status) => {
+    const row = occurrence({ canManage: true, visibility: "private", endsAt: new Date(Date.now() + 60 * 60_000).toISOString() });
+    vi.mocked(Dates.get).mockResolvedValue({ occurrence: row });
+    vi.mocked(Events.cancelOccurrence).mockRejectedValue(new ApiError(status, "Refused"));
+    mountManager();
+    await openManagerTools({ minutes: false });
+    expect(screen.getByText("Old care note", { exact: false })).toBeVisible();
+    const reread = later<EventDateRead>();
+    vi.mocked(Dates.get).mockReturnValue(reread.promise);
+
+    await userEvent.click(screen.getByRole("button", { name: "Cancel this date" }));
+    const question = screen.getByRole("dialog");
+    await userEvent.click(within(question).getByRole("button", { name: "Cancel this date" }));
+
+    expectNone(["One invited date", "Room 2", "Old Name", "old@example.com", "Old care note"]);
+    expect(screen.queryByRole("button", { name: "Manage sign-ups" })).not.toBeInTheDocument();
+    expect(screen.getByText("Checking that you can still manage this date…")).toBeVisible();
+    expect(Dates.get).toHaveBeenCalledTimes(2);
+
+    await act(async () => reread.reject(new ApiError(404, "Unavailable")));
+    expect(await screen.findByText("This date is not available")).toBeVisible();
+    expect(screen.queryByRole("region", { name: "Manage this date" })).not.toBeInTheDocument();
+    expect(screen.getByText("Your changes could not be saved.")).toHaveFocus();
+  });
+
+  it("dismisses the cancellation question at the end and sends no cancellation", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+
+    try {
+      const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+      const end = Date.now() + 60_000;
+      vi.mocked(Dates.get).mockResolvedValue({ occurrence: { ...managerAnswer().occurrence, startsAt: new Date(end - 10 * 60_000).toISOString(), endsAt: new Date(end).toISOString() } });
+      mountManager();
+      await user.click(await screen.findByRole("button", { name: "Cancel this date" }));
+      const yes = within(screen.getByRole("dialog")).getByRole("button", { name: "Cancel this date" });
+
+      act(() => { vi.advanceTimersByTime(end - Date.now()); });
+
+      expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+      expect(screen.queryByRole("button", { name: "Cancel this date" })).not.toBeInTheDocument();
+      fireEvent.click(yes);
+      expect(Events.cancelOccurrence).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("names the rescheduled day and submits the original occurrence date", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+
+    try {
+      vi.setSystemTime(new Date("2026-12-03T19:15:00Z"));
+      const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+      const row = { ...managerAnswer().occurrence, startsAt: "2026-12-03T19:00:00Z", endsAt: "2026-12-03T20:00:00Z" };
+      vi.mocked(Dates.get).mockResolvedValue({ occurrence: row });
+      vi.mocked(Events.cancelOccurrence).mockResolvedValue({});
+      mountManager();
+      expect(await screen.findByText(/^Thursday, Dec 3/)).toBeVisible();
+
+      await user.click(await screen.findByRole("button", { name: "Cancel this date" }));
+      const question = screen.getByRole("dialog", { name: /^Cancel this date on Thursday, Dec 3/ });
+      await user.click(within(question).getByRole("button", { name: "Cancel this date" }));
+      expect(Events.cancelOccurrence).toHaveBeenCalledExactlyOnceWith(7, "2026-12-01");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 
   it("shows no section without canManage, and the section with it", async () => {
     vi.mocked(Dates.get).mockResolvedValue({ occurrence: occurrence() });

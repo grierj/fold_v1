@@ -114,10 +114,11 @@ func TestJoinLeaveAndRSVP(t *testing.T) {
 		t.Fatalf("expected 2 memberships, got %d", n)
 	}
 
-	// Leader creates a weekly event. 2026-10-14 is a Wednesday.
+	start := atUTC(time.Now().UTC().AddDate(0, 0, 7), 18, 30)
+	window := "/api/v1/groups/" + gid + "/events?from=" + start.AddDate(0, 0, -1).Format(time.DateOnly) + "&to=" + start.AddDate(0, 0, 22).Format(time.DateOnly)
 	w = admin.do("POST", "/api/v1/groups/"+gid+"/events", map[string]any{
-		"startsLocal": "2026-10-14T18:30", "durationMinutes": 90, "tzid": "UTC",
-		"recurrenceRule": "FREQ=WEEKLY;BYDAY=WE",
+		"startsLocal": start.Format("2006-01-02T15:04"), "durationMinutes": 90, "tzid": "UTC",
+		"recurrenceRule": weeklyRule(start),
 	}, true)
 	if w.Code != http.StatusCreated {
 		t.Fatalf("create event: %d %s", w.Code, w.Body.String())
@@ -128,8 +129,8 @@ func TestJoinLeaveAndRSVP(t *testing.T) {
 	decodeJSON(t, w, &mcreated)
 	mid := itoa(mcreated.Event.ID)
 
-	// The stored series covers Oct 14, 21, 28 and Nov 4.
-	w = sam.do("GET", "/api/v1/groups/"+gid+"/events?from=2026-10-06&to=2026-11-06", nil, false)
+	// Four dates fall inside the requested window.
+	w = sam.do("GET", window, nil, false)
 	var mlist struct {
 		Events []occurrenceJSON `json:"events"`
 	}
@@ -146,7 +147,7 @@ func TestJoinLeaveAndRSVP(t *testing.T) {
 		t.Fatalf("register: %d %s", w.Code, w.Body.String())
 	}
 
-	w = sam.do("GET", "/api/v1/groups/"+gid+"/events?from=2026-10-06&to=2026-11-06", nil, false)
+	w = sam.do("GET", window, nil, false)
 	decodeJSON(t, w, &mlist)
 	if mlist.Events[0].Registrations["going"] != 1 {
 		t.Fatalf("registration count: %+v", mlist.Events[0].Registrations)
@@ -161,7 +162,7 @@ func TestJoinLeaveAndRSVP(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("cancel: %d %s", w.Code, w.Body.String())
 	}
-	w = sam.do("GET", "/api/v1/groups/"+gid+"/events?from=2026-10-06&to=2026-11-06", nil, false)
+	w = sam.do("GET", window, nil, false)
 	decodeJSON(t, w, &mlist)
 	if len(mlist.Events) != 3 {
 		t.Fatalf("expected 3 after cancel, got %d", len(mlist.Events))
@@ -169,7 +170,7 @@ func TestJoinLeaveAndRSVP(t *testing.T) {
 
 	// Non-leader cannot create events.
 	w = sam.do("POST", "/api/v1/groups/"+gid+"/events", map[string]any{
-		"startsLocal": "2026-10-14T18:30", "durationMinutes": 60, "tzid": "UTC",
+		"startsLocal": start.Format("2006-01-02T15:04"), "durationMinutes": 60, "tzid": "UTC",
 	}, true)
 	if w.Code != http.StatusForbidden {
 		t.Fatalf("non-leader create event: %d", w.Code)

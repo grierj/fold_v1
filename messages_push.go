@@ -39,9 +39,8 @@ const (
 	// sending at 8:00 AM" (research 2.6). Use pushWaitReason and
 	// pushWaitUntil, which write and read it.
 	pushWaitPrefix = "outside quiet hours · sending at "
-	// pushWhyStopped: the daily reaper found a push row still queued with
-	// no job left to send it.
-	pushWhyStopped = "didn't go out"
+	// A provider can accept a push before its outcome is lost.
+	pushWhyUnconfirmed = "delivery could not be confirmed"
 	// messagePushSnippet is how much of the plain text a push carries.
 	messagePushSnippet = 120
 	// messagePushOpen ends every announcement push (PLAN 7.3).
@@ -494,7 +493,7 @@ func messagePushText(m *models.Message, vals map[string]string) (title, body str
 // (its devices were added after the snapshot, or its job stopped) is
 // suppressed, so a history never waits forever.
 func reapMessagePushes(db *gorm.DB, now time.Time) (int64, error) {
-	return moveRecipientsWhere(db, policy.RecipientPushReaped, map[string]any{"reason": pushWhyStopped, "updated_at": now},
+	return moveRecipientsWhere(db, policy.RecipientPushReaped, map[string]any{"reason": pushWhyUnconfirmed, "updated_at": now},
 		`r.updated_at < ? AND NOT EXISTS (SELECT 1 FROM jobs j WHERE j.kind = ? AND j.status IN ('queued', 'running', 'failed')
 			AND (j.payload->>?)::bigint = r.id)`,
 		now.Add(-time.Hour), kindPushDeliver, pushJobRecipientField)

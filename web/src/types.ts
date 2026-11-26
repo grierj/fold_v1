@@ -1453,7 +1453,7 @@ export interface MessagePushWait {
 
 // "missed" is a skip, bounce, complaint or failure: a leader or host sees
 // only that; an admin also gets each person's reason.
-export type HistoryStatus = "sent" | "delivered" | "missed" | "waiting";
+export type HistoryStatus = "sent" | "delivered" | "missed" | "waiting" | "unconfirmed";
 
 // One person in a message's history: a name, a Teen badge, a guardian
 // copy's teen (copyOf, admins only: DEC-132), never an address (DEC-31).
@@ -1471,7 +1471,7 @@ export interface MessageHistoryRecipient {
 // end on their clock, "" for about to go) or missed, with the reason for an
 // admin.
 export interface MessageHistoryPush {
-  status: HistoryStatus;
+  status: Exclude<HistoryStatus, "unconfirmed">;
   until?: string;
   reason?: string;
 }

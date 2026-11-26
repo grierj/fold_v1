@@ -463,11 +463,14 @@ export function guardianLine(c: Pick<MessageRecipientCounts, "guardianCopies" | 
 export const failedLine = (failed: number, copies: number) =>
   failed > 0 || copies === 0 ? `${people(failed)} didn't get this` : `${guardianCopies(copies)} didn't go out`;
 
+const UNCONFIRMED_PUSH_LABEL = "Push delivery unconfirmed";
+
 export const HISTORY_WORDS: Record<HistoryStatus, string> = {
   sent: "Sent",
   delivered: "Delivered",
   missed: "Didn't get it",
   waiting: "Waiting",
+  unconfirmed: UNCONFIRMED_PUSH_LABEL,
 };
 
 // retryQuestion is the confirm before "Try again" (DEC-131), in the
@@ -520,7 +523,7 @@ const PUSH_REASONS = new Map<string, [one: string, many: string]>([
   ["the push service refused it", ["refused by the push service", "refused by the push service"]],
   ["the push service couldn't be reached", ["the push service couldn't be reached", "the push service couldn't be reached"]],
   ["the notification was too large to push", ["too large to push", "too large to push"]],
-  ["didn't go out", ["didn't go out", "didn't go out"]],
+  ["delivery could not be confirmed", ["unconfirmed", "unconfirmed"]],
   ["push turned off for event updates", ["turned notifications off for event updates", "turned notifications off for event updates"]],
   ["outside quiet hours", ["skipped: it would have come during quiet hours", "skipped: it would have come during quiet hours"]],
   ["date cancelled or moved", ["not sent: the date was cancelled or moved", "not sent: the date was cancelled or moved"]],
@@ -540,6 +543,8 @@ export function pushBadge(p: MessageHistoryPush): string {
     case "waiting":
       return p.until ? `Push waiting until ${p.until}` : "Push waiting";
   }
+
+  if (p.reason === "delivery could not be confirmed") return UNCONFIRMED_PUSH_LABEL;
 
   return p.reason ? `Push didn't go out: ${PUSH_REASONS.get(p.reason)?.[0] ?? p.reason}` : "Push didn't go out";
 }
