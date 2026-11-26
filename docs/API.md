@@ -310,10 +310,10 @@ The household's details and each person's edit name the read they were made from
 person in every household answer (`GET /me/household`, the answers of these writes, the admin household routes) carry
 a `revision`, read in the same snapshot as the fields beside it: a digest of the row (`households` kind `h`,
 `household_people` kind `p`, `updated_at` and a removal's `deleted_at` as instants, `created_at` left out), so there is
-no column and no migration. A person's care notes stay out of their digest: an adult of the household who is not the
-person's confirmed guardian holds the token but may not read the notes, and a digest over them would let that adult
-test a guess at them. Every write of the notes still moves the token, since the edit stamps `updated_at` and the
-erasure's scrub sets `deleted_at`. `PUT /me/household/people/:id` requires the person's revision, and `PUT /me/household`
+no column and no migration. A person's care notes stay out of their digest: an adult of the household who is neither an
+admin nor the person's confirmed guardian holds the token but may not read the notes, and a digest over them would let that adult
+test a guess at them. Every write of a listed person's notes still moves the token, since the edit stamps `updated_at` and the
+erasure's scrub of a live person sets `deleted_at`. `PUT /me/household/people/:id` requires the person's revision, and `PUT /me/household`
 requires the household's whenever the body names a field; an empty body names nothing and needs none. The request
 that creates the household on first use had no read to name, so it is compared with the household as its own creation
 left it: its fields save unless another device saved the new household first, and then it is refused (of two first
