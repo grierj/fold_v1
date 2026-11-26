@@ -2,28 +2,51 @@ package app
 
 import (
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
 
 	"fold/internal/audit"
+	"fold/internal/testdb"
 	"fold/models"
+
+	"gorm.io/gorm"
 )
+
+func roomFeedPath(roomID uint) string {
+	return "/api/v1/admin/rooms/" + itoa(roomID) + "/feed"
+}
+
+func feedAnswer(t *testing.T, w *httptest.ResponseRecorder) roomFeedJSON {
+	t.Helper()
+	if w.Code != http.StatusOK {
+		t.Fatalf("room feed status: %d, want 200", w.Code)
+	}
+	var out roomFeedResponseJSON
+	decodeJSON(t, w, &out)
+	if out.Feed.Revision == "" {
+		t.Fatal("room feed has no revision")
+	}
+	return out.Feed
+}
+
+func readRoomFeed(t *testing.T, client *apiClient, roomID uint) roomFeedJSON {
+	t.Helper()
+	feed := feedAnswer(t, client.do("GET", roomFeedPath(roomID), nil, false))
+	if feed.URL != "" {
+		t.Fatal("the feed read returned a secret URL")
+	}
+	return feed
+}
 
 func (f bookingFixture) roomFeed(t *testing.T, roomID uint) string {
 	t.Helper()
-	w := f.admin.do("POST", "/api/v1/admin/rooms/"+itoa(roomID)+"/feed", nil, true)
-	if w.Code != http.StatusOK {
-		t.Fatalf("make room feed: %d %s", w.Code, w.Body.String())
+	feed := feedAnswer(t, f.admin.do("POST", roomFeedPath(roomID), withRevision(nil, readRoomFeed(t, f.admin, roomID).Revision), true))
+	if !feed.HasToken || feed.URL == "" {
+		t.Fatal("the successful write gave no feed URL")
 	}
-	var out struct {
-		Feed roomFeedJSON `json:"feed"`
-	}
-	decodeJSON(t, w, &out)
-	if !out.Feed.HasToken || out.Feed.URL == "" {
-		t.Fatalf("feed: %+v", out.Feed)
-	}
-	return out.Feed.URL[strings.Index(out.Feed.URL, "/cal/rooms/"):]
+	return feed.URL[strings.Index(feed.URL, "/cal/rooms/"):]
 }
 
 func TestRoomFeedLinks(t *testing.T) {
@@ -76,8 +99,17 @@ func TestRoomFeedLinks(t *testing.T) {
 	}
 	f.app.DB.Model(&models.Room{}).Where("id = ?", f.hall.ID).Update("active", true)
 
-	if w := f.admin.do("DELETE", path, nil, true); w.Code != http.StatusOK {
-		t.Fatalf("turn off: %d", w.Code)
+	beforeOff := readRoomFeed(t, f.admin, f.hall.ID)
+	off := feedAnswer(t, f.admin.do("DELETE", path, withRevision(nil, beforeOff.Revision), true))
+	if off.HasToken || off.CreatedAt != nil || off.URL != "" || off.Revision == beforeOff.Revision {
+		t.Fatal("turn off did not return a new revision for the absent link")
+	}
+	if read := readRoomFeed(t, f.admin, f.hall.ID); read != off {
+		t.Fatal("turn off and the next read saw different states")
+	}
+	again := feedAnswer(t, f.admin.do("DELETE", path, withRevision(nil, off.Revision), true))
+	if again != off {
+		t.Fatal("turning an absent link off changed its state")
 	}
 	if w := fetchFeed(t, anon, second); w.Code != http.StatusNotFound {
 		t.Fatalf("revoked link: %d", w.Code)
@@ -89,6 +121,235 @@ func TestRoomFeedLinks(t *testing.T) {
 	f.app.DB.Model(&models.RoomFeedToken{}).Where("room_id = ?", f.hall.ID).Count(&kept)
 	if kept != 2 {
 		t.Fatalf("revoked links stay as history: %d rows", kept)
+	}
+}
+
+func TestRoomFeedWritesNameTheReviewedLink(t *testing.T) {
+	f := newBookingFixture(t)
+	path := roomFeedPath(f.hall.ID)
+	absent := readRoomFeed(t, f.admin, f.hall.ID)
+	otherRoom := readRoomFeed(t, f.admin, f.nursery.ID)
+	f.roomFeed(t, f.nursery.ID)
+	if now := readRoomFeed(t, f.admin, f.hall.ID); now != absent {
+		t.Fatal("another room's creation changed this room's revision")
+	}
+	for _, method := range []string{"POST", "DELETE"} {
+		for _, body := range []map[string]any{nil, {}, withRevision(nil, otherRoom.Revision), withRevision(nil, "malformed")} {
+			wantCode(t, "missing or wrong revision", f.admin.do(method, path, body, true), http.StatusConflict, "room_feed_changed")
+		}
+	}
+
+	first := feedAnswer(t, f.admin.do("POST", path, withRevision(nil, absent.Revision), true))
+	wantCode(t, "stale Create", f.admin.do("POST", path, withRevision(nil, absent.Revision), true), http.StatusConflict, "room_feed_changed")
+	next := feedAnswer(t, f.admin.do("POST", path, withRevision(nil, first.Revision), true))
+	var admin models.User
+	gormMust(t, f.app.DB.Where("email = ?", testEmail("admin")).First(&admin))
+	pinned := pinnedAs(t, f.admin)
+	staleOff := pinned.do("DELETE", path, withRevision(nil, first.Revision), true)
+	wantCode(t, "stale Turn off", staleOff, http.StatusConflict, "room_feed_changed")
+	wantAck(t, "stale Turn off", staleOff, pinned, &admin)
+	if !next.HasToken || next.URL == "" || next.Revision == first.Revision {
+		t.Fatal("rotation didn't return a new live link and revision")
+	}
+	if w := fetchFeed(t, newAPIClient(t, f.app), strings.TrimPrefix(next.URL, f.app.emailBaseURL())); w.Code != http.StatusOK {
+		t.Fatalf("the replacement link is no longer live: %d", w.Code)
+	}
+
+	off := feedAnswer(t, f.admin.do("DELETE", path, withRevision(nil, next.Revision), true))
+	if off.HasToken || off.Revision == absent.Revision {
+		t.Fatal("the absent state after revoke reused the original revision")
+	}
+	wantCode(t, "Create replay after revoke", f.admin.do("POST", path, withRevision(nil, absent.Revision), true), http.StatusConflict, "room_feed_changed")
+	wantCode(t, "Turn off replay after revoke", f.admin.do("DELETE", path, withRevision(nil, next.Revision), true), http.StatusConflict, "room_feed_changed")
+	if auditCount(t, f.app, audit.RoomFeedCreated) != 3 || auditCount(t, f.app, audit.RoomFeedRevoked) != 1 {
+		t.Fatal("a refused action wrote an audit row")
+	}
+	if n := contactCount(t, f.app, &models.RoomFeedToken{}, "room_id = ?", f.hall.ID); n != 2 {
+		t.Fatalf("room feed history has %d rows, want 2", n)
+	}
+}
+
+func TestConcurrentRoomFeedWritesHaveOneWinner(t *testing.T) {
+	for _, initial := range []string{"create", "rotate"} {
+		t.Run(initial, func(t *testing.T) {
+			f := newBookingFixture(t)
+			newTestUser(t, f.app, "admin2", "password1234", models.RoleAdmin)
+			other := loginAPI(t, f.app, "admin2", "password1234")
+			wantRows := int64(1)
+			if initial == "rotate" {
+				f.roomFeed(t, f.hall.ID)
+				wantRows++
+			}
+			path := roomFeedPath(f.hall.ID)
+			a := readRoomFeed(t, f.admin, f.hall.ID)
+			b := readRoomFeed(t, other, f.hall.ID)
+			if a.Revision != b.Revision {
+				t.Fatal("the two admins reviewed different states")
+			}
+
+			holder := f.app.DB.Begin()
+			defer holder.Rollback()
+			if _, err := lockRoom(holder, f.hall.ID); err != nil {
+				t.Fatal(err)
+			}
+			answers := make(chan *httptest.ResponseRecorder, 2)
+			go func() { answers <- f.admin.do("POST", path, withRevision(nil, a.Revision), true) }()
+			go func() { answers <- other.do("POST", path, withRevision(nil, b.Revision), true) }()
+			testdb.WaitUntil(t, "both feed writes waiting on the room lock", 10*time.Second, func() bool {
+				var waiting int
+				gormMust(t, f.app.DB.Raw(`SELECT count(*) FROM pg_stat_activity WHERE datname = current_database()
+					AND wait_event_type = 'Lock' AND state = 'active' AND query LIKE '%rooms%FOR UPDATE%'`).Scan(&waiting))
+				return waiting == 2
+			})
+			gormMust(t, holder.Commit())
+			winner, loser := <-answers, <-answers
+			if winner.Code != http.StatusOK {
+				winner, loser = loser, winner
+			}
+			made := feedAnswer(t, winner)
+			wantCode(t, "the other write", loser, http.StatusConflict, "room_feed_changed")
+			if made.URL == "" || strings.Contains(loser.Body.String(), "/cal/rooms/") {
+				t.Fatal("only the winning answer may carry the URL")
+			}
+			if read := readRoomFeed(t, other, f.hall.ID); !read.HasToken || read.Revision != made.Revision || !read.CreatedAt.Equal(*made.CreatedAt) {
+				t.Fatal("the current state differs from what the winner wrote")
+			}
+			if w := fetchFeed(t, newAPIClient(t, f.app), strings.TrimPrefix(made.URL, f.app.emailBaseURL())); w.Code != http.StatusOK {
+				t.Fatalf("the winner's link is dead: %d", w.Code)
+			}
+			if n := auditCount(t, f.app, audit.RoomFeedCreated); n != wantRows {
+				t.Fatalf("%d creation audit rows, want %d", n, wantRows)
+			}
+			if n := contactCount(t, f.app, &models.RoomFeedToken{}, "room_id = ?", f.hall.ID); n != wantRows {
+				t.Fatalf("%d feed rows, want %d", n, wantRows)
+			}
+		})
+	}
+}
+
+func TestRoomFeedRevokeKeepsAdminUntilCommit(t *testing.T) {
+	f := newBookingFixture(t)
+	path := roomFeedPath(f.hall.ID)
+	f.roomFeed(t, f.hall.ID)
+	before := readRoomFeed(t, f.admin, f.hall.ID)
+
+	holder := f.app.DB.Begin()
+	defer holder.Rollback()
+	gormMust(t, holder.Exec("SELECT id FROM room_feed_tokens WHERE room_id = ? FOR UPDATE", f.hall.ID))
+	done := make(chan *httptest.ResponseRecorder, 1)
+	go func() { done <- f.admin.do("DELETE", path, withRevision(nil, before.Revision), true) }()
+	waitForLockedUsersQuery(t, f.app, "%UPDATE%room_feed_tokens%")
+	demote := func(tx *gorm.DB) error {
+		return tx.Exec("UPDATE users SET role = ?, session_version = session_version + 1 WHERE email = ?", models.RoleMember, testEmail("admin")).Error
+	}
+	for _, change := range []func(*gorm.DB) error{demote, func(tx *gorm.DB) error {
+		return setSettingIn(tx, settingRoomsEnabled, "false")
+	}} {
+		err := f.app.DB.Transaction(func(tx *gorm.DB) error {
+			if err := tx.Exec("SET LOCAL lock_timeout = '250ms'").Error; err != nil {
+				return err
+			}
+			return change(tx)
+		})
+		if pgCode(err) != pgLockNotAvailable {
+			t.Errorf("authority change during an authorized revoke = %v, want lock timeout", err)
+		}
+	}
+	gormMust(t, holder.Commit())
+	if got := feedAnswer(t, <-done); got.HasToken || got.Revision == before.Revision {
+		t.Fatal("revoke did not turn off the reviewed link")
+	}
+	if err := demote(f.app.DB); err != nil {
+		t.Fatal(err)
+	}
+	if w := f.admin.do("GET", path, nil, false); w.Code != http.StatusUnauthorized {
+		t.Fatalf("session after demotion: %d", w.Code)
+	}
+}
+
+func TestRoomFeedHidesDisabledRoutes(t *testing.T) {
+	f := newBookingFixture(t)
+	if err := setSettingIn(f.app.DB, settingRoomsEnabled, "false"); err != nil {
+		t.Fatal(err)
+	}
+	anon := newAPIClient(t, f.app)
+	anon.fetchCSRF()
+	for _, c := range []*apiClient{anon, f.leader, f.admin} {
+		for _, method := range []string{"GET", "POST", "DELETE"} {
+			wantCode(t, method, c.do(method, roomFeedPath(f.hall.ID), nil, method != "GET"), http.StatusNotFound, "not_found")
+		}
+	}
+}
+
+func TestRoomFeedChecksAuthorityAfterLockWait(t *testing.T) {
+	for _, tc := range []struct {
+		name, method string
+		status       int
+		code         string
+		change       func(*testing.T, bookingFixture, *gorm.DB)
+	}{
+		{"admin demoted", "POST", http.StatusUnauthorized, "signed_out", func(t *testing.T, f bookingFixture, tx *gorm.DB) {
+			gormMust(t, tx.Exec("UPDATE users SET role = ?, session_version = session_version + 1 WHERE email = ?", models.RoleMember, testEmail("admin")))
+		}},
+		{"rooms off", "DELETE", http.StatusNotFound, "not_found", func(t *testing.T, f bookingFixture, tx *gorm.DB) {
+			if err := setSettingIn(tx, settingRoomsEnabled, "false"); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{"room deactivated", "POST", http.StatusNotFound, "not_found", func(t *testing.T, f bookingFixture, tx *gorm.DB) {
+			gormMust(t, tx.Model(&models.Room{}).Where("id = ?", f.hall.ID).Update("active", false))
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newBookingFixture(t)
+			f.roomFeed(t, f.hall.ID)
+			holder := f.app.DB.Begin()
+			defer holder.Rollback()
+			waiting := "%rooms%FOR UPDATE%"
+			if tc.name == "admin demoted" {
+				gormMust(t, holder.Exec("SELECT id FROM users WHERE email = ? FOR NO KEY UPDATE", testEmail("admin")))
+				waiting = "%users%FOR SHARE%"
+			} else if _, err := lockRoom(holder, f.hall.ID); err != nil {
+				t.Fatal(err)
+			}
+			original := f.app.DB
+			f.app.DB = repeatableReadPool(t, f.app)
+			t.Cleanup(func() { f.app.DB = original })
+			answer := make(chan *httptest.ResponseRecorder, 1)
+			go func() { answer <- f.admin.do(tc.method, roomFeedPath(f.hall.ID), withRevision(nil, "stale"), true) }()
+			waitForLockedUsersQuery(t, f.app, waiting)
+			tc.change(t, f, holder)
+			gormMust(t, holder.Commit())
+			w := <-answer
+			wantCode(t, "write after authority changed", w, tc.status, tc.code)
+			if strings.Contains(w.Body.String(), "revision") {
+				t.Fatalf("write after authority changed: %d %s", w.Code, w.Body.String())
+			}
+			if auditCount(t, f.app, audit.RoomFeedCreated) != 1 || auditCount(t, f.app, audit.RoomFeedRevoked) != 0 {
+				t.Fatal("the refused write changed the feed")
+			}
+		})
+	}
+}
+
+func TestAdminRoomFeedReadKeepsItsJudgedSnapshot(t *testing.T) {
+	f := newBookingFixture(t)
+	absent := readRoomFeed(t, f.admin, f.hall.ID)
+	admin := newTestUser(t, f.app, "admin2", "password1234", models.RoleAdmin)
+	other := pinnedAs(t, loginAPI(t, f.app, "admin2", "password1234"))
+	fired := atReaderSeam(f.app, "authorized", "admin room feed", func() {
+		f.roomFeed(t, f.hall.ID)
+		if err := setSettingIn(f.app.DB, settingRoomsEnabled, "false"); err != nil {
+			t.Fatal(err)
+		}
+	})
+	w := other.do("GET", roomFeedPath(f.hall.ID), nil, false)
+	if got := feedAnswer(t, w); !fired.Load() || got != absent {
+		t.Fatal("the admin read saw the creation after the snapshot judged the switch")
+	}
+	wantAck(t, "admin feed read", w, other, admin)
+	if w := other.do("GET", roomFeedPath(f.hall.ID), nil, false); w.Code != http.StatusNotFound || strings.Contains(w.Body.String(), "revision") {
+		t.Fatalf("room feed after switch off: %d %s", w.Code, w.Body.String())
 	}
 }
 
@@ -410,7 +671,7 @@ func TestRoomFeedReadsItsLinkAndSwitchInOneSnapshot(t *testing.T) {
 				}
 				var w interface{ Result() *http.Response }
 				if change == "revoked" {
-					w = f.admin.do("DELETE", "/api/v1/admin/rooms/"+itoa(f.hall.ID)+"/feed", nil, true)
+					w = f.admin.do("DELETE", roomFeedPath(f.hall.ID), withRevision(nil, readRoomFeed(t, f.admin, f.hall.ID).Revision), true)
 				} else {
 					w = f.admin.do("PUT", "/api/v1/admin/settings/rooms", map[string]any{"enabled": false}, true)
 				}
