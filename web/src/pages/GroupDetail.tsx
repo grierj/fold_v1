@@ -48,6 +48,7 @@ import { Button, ButtonLink } from "../components/ui/Button";
 import { applyActorRsvpResults, type ActorRsvpResult, type SeriesFeedbackSignal } from "../lib/rsvpFeedback";
 import { useRsvpMutationGate, type RsvpMutationGate } from "../lib/useRsvpMutationGate";
 import { seriesSchedules } from "../lib/registration";
+import { signedUpNotice } from "../lib/signedUp";
 
 type Tab = "events" | "about" | "members";
 
@@ -117,11 +118,12 @@ function EventRow({
   const name = instance.title || groupName;
 
   async function cancel() {
-    if (!confirm(`Cancel this date on ${instance.date}?`)) return;
+    if (cancelling) return;
     setCancelling(true);
     setCancelError(null);
 
     try {
+      if (!confirm(`Cancel this date on ${instance.date}? ${await signedUpNotice(instance.eventId, instance.date)}`)) return;
       await Events.cancelOccurrence(instance.eventId, instance.date);
       onCancelled(instance.eventId, instance.date);
     } catch (e) {

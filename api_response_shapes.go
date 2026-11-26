@@ -26,6 +26,12 @@ type sessionBootstrapJSON struct {
 	CredentialMarker string    `json:"credentialMarker"`
 }
 
+// signedUpCountJSON is GET /events/:id/signed-up: how many people the
+// delete (no date) or the date's cancel would tell.
+type signedUpCountJSON struct {
+	People int `json:"people"`
+}
+
 // siteJSON is GET /site.
 type siteJSON struct {
 	Name         string `json:"name"`

@@ -1515,6 +1515,9 @@ func (a *App) apiDeleteEvent(c *gin.Context) {
 			Meta: meta, IP: c.ClientIP()}); err != nil {
 			return err
 		}
+		if err := notifyEventDeleted(tx, actor.ID, ev, a.now()); err != nil {
+			return err
+		}
 		return deleteEventRows(tx, []uint{ev.ID})
 	})
 	if err != nil {
@@ -1522,6 +1525,53 @@ func (a *App) apiDeleteEvent(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{})
+}
+
+// apiSignedUpCount is how many people deleting the event (no date) or
+// cancelling one date would tell, for the confirmation to show. It binds
+// nothing: the delete and the cancel read the people again under their locks.
+func (a *App) apiSignedUpCount(c *gin.Context) {
+	id, _ := strconv.Atoi(c.Param("id"))
+	date := c.Query("date")
+	if date != "" && !isCalendarDate(date) {
+		fail(c, errSeriesDateInvalid)
+		return
+	}
+	var out signedUpCountJSON
+	var judged sessionJudgment
+	err := decidingSnapshot(a.DB.WithContext(c.Request.Context()), func(tx *gorm.DB) error {
+		if a.hooks.readerBegin != nil {
+			a.hooks.readerBegin("signed-up count")
+		}
+		t, err := a.managedEventTargetIn(tx, apiUser(c), id, &judged)
+		if err != nil {
+			return err
+		}
+		now := a.now()
+		var rows []signedUp
+		if date == "" {
+			rows, _, err = eventDeleteTells(tx, t.ev.ID, t.me.ID, now)
+		} else {
+			var occ models.EventOccurrence
+			if err := tx.Where("event_id = ? AND original_date = ?", t.ev.ID, date).Limit(1).Find(&occ).Error; err != nil {
+				return err
+			}
+			if occ.ID == 0 {
+				return errOccurrenceNotFound
+			}
+			rows, err = cancelTells(tx, &occ, t.me.ID, now)
+		}
+		out.People = peopleIn(rows)
+		return err
+	})
+	if ackErr := a.acknowledgeDecision(c, judged, err == nil || decidedRefusal(err)); ackErr != nil {
+		err = ackErr
+	}
+	if err != nil {
+		fail(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, out)
 }
 
 // deleteEventRows removes an event's registrations, guest signups, occurrences, and hosts,

@@ -23,7 +23,7 @@ const actor: TestSession = { user: { id: 2 }, canCompose: false };
 
 const render = renderWithAuth(() => actor);
 
-stubService(Events, () => ({ cancelOccurrence: vi.fn(), register: vi.fn(), registerSeries: vi.fn(), undoSeriesRegistration: vi.fn(), managedDate: vi.fn(), dateVisibilityImpact: vi.fn(), removeRegistration: vi.fn(), promoteRegistration: vi.fn(), restoreRegistration: vi.fn(), addRegistration: vi.fn() }));
+stubService(Events, () => ({ cancelOccurrence: vi.fn(), signedUp: vi.fn(), register: vi.fn(), registerSeries: vi.fn(), undoSeriesRegistration: vi.fn(), managedDate: vi.fn(), dateVisibilityImpact: vi.fn(), removeRegistration: vi.fn(), promoteRegistration: vi.fn(), restoreRegistration: vi.fn(), addRegistration: vi.fn() }));
 
 stubService(Dates, () => ({ get: vi.fn(), register: vi.fn(), end: vi.fn() }));
 
@@ -71,6 +71,25 @@ it.each([true, false])("offers cancellation when opening a manager's date that i
   await userEvent.click(within(confirmation).getByRole("button", { name: "Cancel this date" }));
   expect(await screen.findByText("This date was cancelled")).toBeInTheDocument();
   expect(Events.cancelOccurrence).toHaveBeenCalledExactlyOnceWith(7, "2026-12-01");
+});
+
+it.each([
+  [0, "Nobody is signed up."],
+  [1, "1 person is signed up and will be notified."],
+  [2, "2 people are signed up and will be notified."],
+])("asks to cancel the date saying who is told when %s people are signed up", async (people, line) => {
+  const end = Date.now() + 45 * 60_000;
+  vi.mocked(Dates.get).mockResolvedValue({ occurrence: occurrence({ visibility: "public", canManage: true, startsAt: new Date(end - 60 * 60_000).toISOString(), endsAt: new Date(end).toISOString() }) });
+  vi.mocked(Events.signedUp).mockResolvedValue({ people });
+  vi.mocked(Events.cancelOccurrence).mockResolvedValue({});
+  mount();
+  const manage = await screen.findByRole("region", { name: "Manage this date" });
+  await userEvent.click(within(manage).getByRole("button", { name: "Cancel this date" }));
+  const confirmation = await screen.findByRole("dialog", { name: /^Cancel this date on / });
+  expect(confirmation).toHaveAccessibleDescription(line);
+  expect(Events.signedUp).toHaveBeenCalledExactlyOnceWith(7, "2026-12-01");
+  await userEvent.click(within(confirmation).getByRole("button", { name: "Cancel this date" }));
+  await waitFor(() => expect(Events.cancelOccurrence).toHaveBeenCalledExactlyOnceWith(7, "2026-12-01"));
 });
 
 it("renders only date disclosures, never hidden parent/group/host/roster/household navigation", async () => {

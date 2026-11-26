@@ -45,6 +45,7 @@ import { ManagerSaveStatus } from "../components/ui/ManagerSaveStatus";
 import { useRosterSettled } from "../lib/rosterWrites";
 import { seriesSchedules } from "../lib/registration";
 import { EventReadPin } from "../lib/eventReadPin";
+import { signedUpNotice } from "../lib/signedUp";
 
 const ManageRoster = lazy(() => import("../components/ManageRoster").then((module) => ({ default: module.ManageRoster })));
 
@@ -355,9 +356,10 @@ function EventDetailContent() {
     deletingNow.current = true;
     setDeleting(true);
     const question = `Delete “${title}”?`;
-    const consequence = "This removes every date and its registrations.";
 
     try {
+      const consequence = `This removes every date and its registrations. ${await signedUpNotice(event.id)}`;
+
       if (!(await action.ask({ title: question, body: consequence, confirmLabel: "Delete event", tone: "danger", native: `${question} ${consequence}` })) || !credentialCurrent(pin)) return;
       setDeleteError(null);
       await Events.delete(event.id);
@@ -632,8 +634,9 @@ function DateRow({
     cancelNow.current = true;
     setCancelStep("asking");
     const question = `Cancel this date on ${instance.date}?`;
+    const told = await signedUpNotice(instance.eventId, instance.date);
 
-    if (!(await action.ask({ title: question, confirmLabel: "Cancel this date", cancelLabel: "Keep this date", tone: "danger", native: question }))) {
+    if (!(await action.ask({ title: question, body: told, confirmLabel: "Cancel this date", cancelLabel: "Keep this date", tone: "danger", native: `${question} ${told}` }))) {
       cancelNow.current = false;
       setCancelStep(null);
 

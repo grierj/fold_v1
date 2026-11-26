@@ -252,23 +252,54 @@ func TestCopyTextCarriesNoRecipientOnlyContent(t *testing.T) {
 	}
 }
 
-// Only the kind written for someone who has just lost access to its subject
-// is copied without the teen's access to that subject (Grier, 2026-11-13).
-func TestOnlyRegistrationCancelledIsCopiedWithoutSubjectAccess(t *testing.T) {
+// Only the kinds written for someone who has just lost their subject are
+// copied without the teen's access to it: registration.cancelled (Grier,
+// 2026-11-13) and event.deleted, whose event and dates are gone. Neither ever
+// names a group or a place, and a registration.cancelled names no date.
+func TestOnlyLostSubjectKindsAreCopiedWithoutSubjectAccess(t *testing.T) {
+	lost := map[string][]string{RegistrationCancelled: {"Hidden group", "Home", "Fri"}, EventDeleted: {"Hidden group", "Home"}}
 	for _, k := range Kinds() {
-		if k.CopyWithoutSubjectAccess != (k.Key == RegistrationCancelled) {
+		if _, want := lost[k.Key]; k.CopyWithoutSubjectAccess != want {
 			t.Errorf("%s: CopyWithoutSubjectAccess = %v", k.Key, k.CopyWithoutSubjectAccess)
 		}
 	}
-	k, _ := Lookup(RegistrationCancelled)
-	if !k.AllowEmail || k.Required {
-		t.Errorf("registration.cancelled must be optional email: %+v", k)
-	}
-	title, body := k.Render(Vars{Event: "Retreat", Group: "Hidden group", Place: "Home", When: "Fri"})
-	for _, bad := range []string{"Hidden group", "Home", "Fri"} {
-		if strings.Contains(title+body, bad) {
-			t.Errorf("registration.cancelled names %q: %q", bad, title+body)
+	for key, never := range lost {
+		k, _ := Lookup(key)
+		if !k.AllowEmail || k.Required {
+			t.Errorf("%s must be optional email: %+v", key, k)
 		}
+		v := Vars{Event: "Retreat", Group: "Hidden group", Place: "Home", When: "Fri"}
+		title, body := k.Render(v)
+		pushTitle, pushBody, _ := k.RenderForPush(v)
+		for _, bad := range never {
+			if strings.Contains(title+body+pushTitle+pushBody, bad) {
+				t.Errorf("%s names %q: %q %q", key, bad, title+body, pushTitle+pushBody)
+			}
+		}
+	}
+}
+
+// An event's deletion reads right with its next date, without one (the
+// nameless row) and as a guardian's copy, which has the title alone.
+func TestEventDeletedWords(t *testing.T) {
+	k, _ := Lookup(EventDeleted)
+	for _, c := range []struct {
+		v           Vars
+		title, body string
+	}{
+		{Vars{Event: "Supper", When: "Tue, Dec 1, 7:00 PM"}, "Cancelled: Supper", "This event was deleted, so its upcoming dates are off, starting Tue, Dec 1, 7:00 PM."},
+		{Vars{}, "Cancelled: Church event", "This event was deleted, so its upcoming dates are off."},
+	} {
+		if title, body := k.Render(c.v); title != c.title || body != c.body {
+			t.Errorf("%+v: %q / %q", c.v, title, body)
+		}
+	}
+	title, body, ok := k.LostAccessCopyText(`{"eventTitle":"Supper"}`)
+	if !ok || title != "Cancelled: Supper" || body != "This event was deleted, so its upcoming dates are off." {
+		t.Errorf("copy: %q / %q %v", title, body, ok)
+	}
+	if title, body, ok := k.RenderForPush(Vars{Event: "Supper", When: "Tue"}); !ok || title != "Cancelled: Supper" || body != "Its upcoming dates are off." {
+		t.Errorf("push: %q / %q %v", title, body, ok)
 	}
 }
 

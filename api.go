@@ -303,6 +303,7 @@ func (a *App) registerAPIRoutes(r *gin.Engine) {
 	v1.POST("/events/:id/hosts", a.apiAuth(), a.apiAdmin(), a.apiAddEventHost)
 	v1.DELETE("/events/:id/hosts/:userId", a.apiAuth(), a.apiAdmin(), a.apiRemoveEventHost)
 	v1.POST("/events/:id/cancel", a.apiAuth(), a.apiCancelOccurrence)
+	v1.GET("/events/:id/signed-up", a.apiAuth(), a.apiSignedUpCount)
 	// The retired date writer: a tab from before the guarded edit is told to
 	// reload (date_page_outdated).
 	v1.PUT("/events/:id/occurrences/:date", a.apiAuth(), a.apiRetiredDatePut)

@@ -78,6 +78,7 @@ var tsContracts = []struct {
 	{hostJSON{}, "EventHostRow"},
 	{impactEventJSON{}, "VisibilityImpactEvent"},
 	{visibilityImpactJSON{}, "VisibilityImpact"},
+	{signedUpCountJSON{}, "SignedUpCount"},
 	{impactResetDateJSON{}, "ImpactResetDate"},
 	{householdJSON{}, "Household"},
 	{householdPersonJSON{}, "HouseholdPerson"}, // Includes the teen conversion block reason.

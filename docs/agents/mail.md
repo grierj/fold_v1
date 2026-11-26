@@ -193,7 +193,9 @@ an optional notice email sent to their teen. Plan section 7.4 has the rules; the
   body can carry a leader's note. The copy has no link and uses the guardian's own unsubscribe.
 - **Live access follows the subject** (`teenSeesNoticeSubject`: occurrence, event or group; any other
   subject type is not copied). `Kind.CopyWithoutSubjectAccess` skips only that check and is set on
-  `registration.cancelled` alone (DEC-149). That copy is **not** `CopyText` of the stored notice: the
+  `registration.cancelled` (DEC-149) and `event.deleted` (DEC-173: the event and its dates are gone, so
+  no live access is left to judge; `notifyEventDeleted` stores the title only for a teen who could see
+  one of their dates). That copy is **not** `CopyText` of the stored notice: the
   teen's title can carry the date (the single-date path), and a title can hold any separator, so the
   copy is `Kind.LostAccessCopyText` of the plain title the writer stored in the notice's `data`
   (`notify.DataEventTitle`). A notice without it gets no copy. Never parse the stored title. The
@@ -203,7 +205,8 @@ an optional notice email sent to their teen. Plan section 7.4 has the rules; the
   guardians learn it. A tightened cancelled date showed its title only to someone entitled to its
   tombstone (`policy.CanSeeCancelledOccurrence`), so a holder whose only row on it is a household
   person's is told no title either. Its siblings `event.cancelled` and `event.restored`
-  (`notifyOccurrences`; DEC-91 keeps "back on" for everyone still signed up), and
+  (`notifyOccurrences`; DEC-91 keeps "back on" for everyone still signed up), `event.deleted`
+  (`notifyEventDeleted`, one row per person, named from the first of their dates they may see), and
   `registration.removed`, `registration.not_restored` (`registrationNoticeIn`) and
   `registration.promoted` (`registrationNotice`, which adds the manage and video links only when
   shown), do the same for a registrant who cannot see the date now. Eligibility counts an invited or

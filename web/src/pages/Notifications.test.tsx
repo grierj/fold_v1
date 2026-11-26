@@ -104,7 +104,7 @@ it("links to the email settings", async () => {
 
 describe("icons by kind", () => {
   const cases: [string, string][] = [
-    ["event.cancelled", "calendar"], ["event.changed", "calendar"], ["event.restored", "calendar"],
+    ["event.cancelled", "calendar"], ["event.changed", "calendar"], ["event.restored", "calendar"], ["event.deleted", "calendar"],
     ["occurrence.changed", "calendar"], ["registration.promoted", "calendar"], ["waitlist.cutoff", "calendar"],
     ["account.requested", "person"], ["add.admin_review", "person"], ["household.link_pending", "person"],
     ["group.pending", "group"], ["group.approved", "check"],
