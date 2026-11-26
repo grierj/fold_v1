@@ -89,7 +89,7 @@ var factColumnsLeftOut = map[string]map[string]string{
 	"event_occurrences": {
 		"location_override": "place", "starts_at_override": "unused (starts_at is the date's start)",
 		"duration_override": "unused (ends_at)", "capacity_override": "unused", "remote_capacity_override": "unused",
-		"cancel_source": "unused", "edit_revision": "date edit token only", "edit_receipt": "edit bookkeeping",
+		"cancel_source": "unused", "edit_revision": "date edit token only",
 		"created_at": "unused", "updated_at": "unused",
 	},
 	"registrations": {

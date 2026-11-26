@@ -836,11 +836,11 @@ func (a *App) shift() error {
 		return tx.Exec(` + "`" + `UPDATE event_occurrences AS o SET starts_at = o.starts_at + interval '1 day', "ends_at" = o.ends_at + interval '1 day'` + "`" + `).Error
 	})
 }` + helpers, "raw UPDATE of ends_at", "without refuseKeptDates"},
-		{"a receipt write is not an end", `package main
+		{"a title write is not an end", `package main
 func (a *App) move(id uint) error {
 	return a.contactMutation(change, func(tx *gorm.DB) error {
 		if err := refuseKeptDates(tx, nil); err != nil { return err }
-		tx.Exec("UPDATE event_occurrences SET edit_receipt = ? WHERE ends_at > now()", nil)
+		tx.Exec("UPDATE event_occurrences SET title_override = ? WHERE ends_at > now()", title)
 		return tx.Model(&models.EventOccurrence{}).Where("id = ?", id).UpdateColumn("ends_at", later).Error
 	})
 }` + helpers, `UpdateColumn("ends_at")`, ""},

@@ -70,9 +70,6 @@ it is for.
   earlier release starts on the upgraded database). Its writes advance the
   counters (proven with raw SQL in the migration test, not a previous binary).
   A binary that predates `00008`, including v0.1.0, requires the pre-upgrade dump.
-  The server no longer reads or writes `edit_receipt` (DEC-164); the column and the trigger's
-  clearing of it stay until a contract migration drops them, which the contract gate allows only
-  once a tagged release holds `00010`.
 - `00011` adds `push_subscriptions.binding_generation` with a BEFORE UPDATE trigger that adds one
   whenever the owner or a key changes and keeps the stored value otherwise, overwriting what a
   writer supplies, so a previous binary's writes count too. A push service's answer changes a
@@ -189,6 +186,21 @@ it is for.
   direct-contact reason scrub follows the existing DEC-141 path. Up and Down touch
   no rows. `TestContactFinalityMigration` covers rollback, ordinary decisions and
   grant endings, and the erasure scrub.
+- `00018` drops `event_occurrences.edit_receipt` and removes receipt handling from the date's
+  revision trigger (DEC-164). Both revision counters retain their values and both triggers
+  keep counting tracked writes. Down restores the nullable column, its 32-byte check, and the
+  previous trigger function. Restored columns start with NULL receipts because the original
+  values were tied to a past process. `TestDateEditReceiptContract` checks Up, Down and Up again
+  with existing rows and both triggers in use.
+  - `v0.1.1` shipped `00010` at `a433a7aa4f1062dbdcac2a41eea09ea2c371b8a3` with the receipt
+    reader and writer already retired. All six release jobs passed. The promote summary and
+    the release record carry the verified GHCR digests. Both indexes include `linux/amd64`
+    and `linux/arm64`. [Release run](https://github.com/grierj/fold/actions/runs/45742526594) ·
+    [v0.1.1 release](https://github.com/grierj/fold/releases/tag/v0.1.1)
+  - App digest `sha256:b12a582ef0a813b4efa4b723be10726d872da4ed9a7896f3dde3a638965455f9`.
+    [App attestation](https://github.com/grierj/fold/attestations/72465978)
+  - Backup digest `sha256:03bf5a4e96a0dee17aacf9ec6be7a3806a45bc64566feeaf00915d0086a3a4f5`.
+    [Backup attestation](https://github.com/grierj/fold/attestations/72466014)
 - A development database migrated by the pre-squash chain must be recreated before a new binary
   runs on it; there is no converter.
 - `scripts/baseline-proof.sh proof` re-proves a tree against the frozen pre-squash chain with a

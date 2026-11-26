@@ -108,7 +108,7 @@ func TestDateFactsDecodeLikeGorm(t *testing.T) {
 	if err := db.Model(f.other).Updates(map[string]any{"birth_date": birth, "account_type": models.AccountTeen, "deleted_at": time.Now()}).Error; err != nil {
 		t.Fatal(err)
 	}
-	if err := db.Exec("UPDATE event_occurrences SET edit_receipt = decode(repeat('ab', 32), 'hex'), visibility_override = 'public', starts_at_override = now() WHERE id = ?", f.dates[0].ID).Error; err != nil {
+	if err := db.Exec("UPDATE event_occurrences SET visibility_override = 'public', starts_at_override = now() WHERE id = ?", f.dates[0].ID).Error; err != nil {
 		t.Fatal(err)
 	}
 	if err := db.Exec("UPDATE events SET rrule_until = '2030-01-02' WHERE id = ?", f.event.ID).Error; err != nil {

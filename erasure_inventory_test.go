@@ -173,7 +173,6 @@ var erasureColumns = []erasureColumn{
 	{"event_occurrences", "visibility_override", "T09", "NA", []string{"T09"}},
 	{"event_occurrences", "cancel_source", "T09", "NA", []string{"T09"}},
 	{"event_occurrences", "edit_revision", "T09", "NA", []string{"T09"}},
-	{"event_occurrences", "edit_receipt", "T09", "NA", []string{"T09"}},
 
 	// T10 events
 	{"events", "id", "T10", "RET", []string{"T10"}},
