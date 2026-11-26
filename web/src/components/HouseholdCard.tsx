@@ -316,15 +316,14 @@ export function HouseholdCard({ showHeading = true }: { showHeading?: boolean })
     setRefusedPerson(null);
   }
 
-  // A save was refused: the form closes, and the card reads the household from nothing and says so.
-  function refused(why: RevisionConflict, person?: HouseholdPerson) {
+  function refused(why: RevisionConflict, person?: HouseholdPerson, what: "save" | "action" = "save") {
     focusNext.current = null;
     setEditing(null);
     setMetadata(false);
     setConverting(null);
     setStatus("");
     setRefusedPerson(person ? { id: person.id, name: person.name } : null);
-    refusal.refused(why);
+    refusal.refused(why, what);
   }
 
   async function remove(p: HouseholdPerson) {
@@ -339,7 +338,8 @@ export function HouseholdCard({ showHeading = true }: { showHeading?: boolean })
       focusNext.current = "heading";
       await load.reload();
     } catch (e) {
-      setError(errorText(e, "We couldn't remove that person."));
+      if (errorCode(e) === "household_conversion_consent") refused("changed", p, "action");
+      else setError(errorText(e, "We couldn't remove that person."));
     } finally {
       setActing(false);
     }
