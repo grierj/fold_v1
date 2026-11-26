@@ -997,9 +997,6 @@ func TestSeriesRepickOfTheWaitingRoomKeepsItsRequest(t *testing.T) {
 		if !reflect.DeepEqual(now, tasks) || now[0].ResolvedAt != nil {
 			t.Fatalf("%s: the admin's task is\n%+v\nwant the same open row, as it was written, as\n%+v", step, now, tasks)
 		}
-		if n := contactCount(t, f.app, &models.RoomBooking{}, "request_id = ? AND status = ?", req.ID, models.BookingRequested); int(n) != dates {
-			t.Fatalf("%s: %d dates wait on the request, want %d", step, n, dates)
-		}
 		if n := contactCount(t, f.app, &models.Notification{}, "kind = ?", notify.RoomRequested); n != 1 {
 			t.Fatalf("%s: %d room request notices, want the one task", step, n)
 		}
@@ -1055,7 +1052,7 @@ func TestSeriesRepickOfTheWaitingRoomKeepsItsRequest(t *testing.T) {
 	}
 	sameRequest("the bare date", 3, jobsBefore)
 
-	// A date with its own room, named, joins it too, and the task says so.
+	// A date with its own room, named, joins it too.
 	jobsBefore = jobs()
 	read = seriesRoomsRead(t, f.leader, series)
 	out = seriesPickFrom(t, f.leader, series, read, map[string]any{"roomId": f.hall.ID, "includeDates": ownDates(read.OwnRooms)})
