@@ -38,6 +38,7 @@ const (
 	GroupDeletion           = "group.deletion"
 	GroupApproved           = "group.approved"
 	GroupRejected           = "group.rejected"
+	GroupDeleted            = "group.deleted"
 	LeadershipChanged       = "group.leadership_changed"
 	MembershipDeparture     = "membership.departure"
 	MembershipLeft          = "membership.left"
@@ -533,6 +534,21 @@ func init() {
 		// The admin's note stays in Fold.
 		AllowPush: true, PushRender: func(v Vars) (string, string) {
 			return or(v.Group, "Your group") + " wasn't approved", "Open Fold to see more."
+		},
+	})
+	// A member hears that their group was deleted (DEC-177). Only its members
+	// get it, named when they may see it; nobody signed up gets it as well as
+	// event.deleted. No link to the group, which is gone, and no place. Not
+	// PushSoon: the group and its dates are gone, so a push has no clock to
+	// read. Never copied to a guardian: the copy needs the teen's live access
+	// to the group, which is deleted with it.
+	groupDeleted := func(v Vars) (string, string) {
+		return or(v.Group, "One of your groups") + " was deleted", "Its events are off, and you're no longer a member."
+	}
+	register(Kind{
+		Key: GroupDeleted, Category: CatGroups, AllowEmail: true, Render: groupDeleted,
+		AllowPush: true, PushRender: func(v Vars) (string, string) {
+			return or(v.Group, "One of your groups") + " was deleted", "Its events are off."
 		},
 	})
 	register(Kind{

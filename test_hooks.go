@@ -44,10 +44,10 @@ type testHooks struct {
 	legacySaveBeforeSeal     func(*gorm.DB)
 	legacySaveBeforeRetry    func()
 	conversionAfterUserLocks func(*gorm.DB)
-	// eventDeleteNoticed runs in apiDeleteEvent after its notices are written
-	// and before the rows go, given the open transaction.
-	eventDeleteNoticed func(*gorm.DB)
-	sealAttempts       *atomic.Int64
+	// deleteNoticed runs in apiDeleteEvent and deleteGroup after their
+	// notices are written and before the rows go, given the open transaction.
+	deleteNoticed func(*gorm.DB)
+	sealAttempts  *atomic.Int64
 	// messageLimitAfterCount runs inside the schedule, scheduled-edit and
 	// Try again transactions, after a daily-limit count that did not refuse
 	// and before the message write or claim, given the open transaction

@@ -1546,7 +1546,7 @@ func TestSelfDepartureNoticeSerializesWithRealAdminDelete(t *testing.T) {
 //   - the removed member (an adult). Sender first: the removal stops after it
 //     wrote their notice; the real delete waits on the gate and removes it.
 //     Deletion first: the removal waits on the gate and finds the subject gone
-//     (loadDepartureFacts answers errDepartureNotFound) and answers 404 "group
+//     (loadDepartureFacts answers errGroupNotFound) and answers 404 "group
 //     not found", leaving no removal audit and no notice. The person is the
 //     subject, so Send's skip is not reached in that order.
 //   - a confirmed guardian of a removed teen. The snapshot does not cover

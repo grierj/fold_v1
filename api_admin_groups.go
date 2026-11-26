@@ -244,32 +244,111 @@ func (a *App) apiDeletionRequests(c *gin.Context) {
 	a.respondGroups(c, groups)
 }
 
+// apiRejectDeletion keeps a group whose lone leader asked to delete it. It is
+// only ever an answer to the request, so a request no longer open (withdrawn,
+// kept by another admin, or ended by someone joining) writes nothing and
+// answers errAlreadyHandled. No contact gate: the group's row lock orders it
+// with the delete, a join and the leader's own withdrawal.
 func (a *App) apiRejectDeletion(c *gin.Context) {
 	id, _ := strconv.Atoi(c.Param("id"))
-	var g models.Group
-	if err := a.DB.First(&g, id).Error; err != nil {
-		jsonError(c, http.StatusNotFound, "group not found")
+	err := a.DB.Transaction(func(tx *gorm.DB) error {
+		g, actor, err := lockAdminGroupIn(tx, apiUser(c), uint(id))
+		if err != nil {
+			return err
+		}
+		if !g.DeletionRequested {
+			return errAlreadyHandled
+		}
+		return clearDeletionRequestIn(tx, g.ID, &actor.ID, "kept")
+	}, readCommitted)
+	if a.answerAlreadyHandled(c, err, notify.GroupDeletion, uint(id)) {
 		return
 	}
-	if err := a.clearDeletionRequest(g.ID, &apiUser(c).ID, "kept"); err != nil {
-		jsonError(c, http.StatusInternalServerError, "could not reject deletion")
+	if err != nil {
+		answerAdminGroupWrite(c, err, "could not keep the group")
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{})
 }
 
-// apiAdminDeleteGroup removes any group. Unlike a leader's request, this
-// does not wait for a membership check.
+// errDeletionMarker: the marker that a delete answers a deletion request is
+// either absent or exactly "1"; anything else is refused rather than read as
+// a delete that is never refused.
+var errDeletionMarker = apiErr(http.StatusBadRequest, "", "deletionRequest must be 1 or left out")
+
+// apiAdminDeleteGroup removes any group. ?deletionRequest=1 marks the
+// Approvals card's delete, which answers the leader's request and is refused
+// once that request is no longer open; the Groups tab's delete sends no
+// marker and is never refused for the request's state.
 func (a *App) apiAdminDeleteGroup(c *gin.Context) {
 	id, _ := strconv.Atoi(c.Param("id"))
-	var g models.Group
-	if err := a.DB.First(&g, id).Error; err != nil {
-		jsonError(c, http.StatusNotFound, "group not found")
+	marker, marked := c.GetQuery("deletionRequest")
+	if marked && marker != "1" {
+		fail(c, errDeletionMarker)
 		return
 	}
-	if err := a.deleteGroup(c.Request.Context(), &g, &apiUser(c).ID); err != nil {
-		jsonError(c, http.StatusInternalServerError, "could not delete group")
+	err := a.deleteGroup(c.Request.Context(), apiUser(c), uint(id), marked, c.ClientIP())
+	if a.answerAlreadyHandled(c, err, notify.GroupDeletion, uint(id)) {
+		return
+	}
+	if err != nil {
+		answerAdminGroupWrite(c, err, "could not delete group")
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{})
+}
+
+// answerAdminGroupWrite answers a failed admin write on a locked group: its
+// own answer (a group gone while the request waited, a session that ended),
+// else a 500.
+func answerAdminGroupWrite(c *gin.Context, err error, failure string) {
+	if isAPIError(err) {
+		fail(c, err)
+		return
+	}
+	jsonError(c, http.StatusInternalServerError, failure)
+}
+
+// apiGroupDeleteCount is how many other people deleting the group would tell
+// (groupDeleteTells), for the confirmation to show. One snapshot judges the
+// admin and reads the people; it binds nothing: the delete reads them again
+// under its locks.
+func (a *App) apiGroupDeleteCount(c *gin.Context) {
+	id, _ := strconv.Atoi(c.Param("id"))
+	var out signedUpCountJSON
+	var judged sessionJudgment
+	err := decidingSnapshot(a.DB.WithContext(c.Request.Context()), func(tx *gorm.DB) error {
+		if a.hooks.readerBegin != nil {
+			a.hooks.readerBegin("group delete count")
+		}
+		me, err := snapshotViewerIn(tx, apiUser(c))
+		if err != nil {
+			return err
+		}
+		if me == nil {
+			return errSecuritySession
+		}
+		judged.judge(me)
+		if !policy.IsAdmin(asPerson(me)) {
+			return errSecuritySession
+		}
+		var g models.Group
+		if err := tx.Where("id = ?", id).Limit(1).Find(&g).Error; err != nil {
+			return err
+		}
+		if g.ID == 0 {
+			return errGroupNotFound
+		}
+		d, err := groupDeleteTells(tx, g.ID, me.ID, a.now(), false)
+		out.People = d.people()
+		return err
+	})
+	if ackErr := a.acknowledgeDecision(c, judged, err == nil || decidedRefusal(err)); ackErr != nil {
+		err = ackErr
+	}
+	if err != nil {
+		fail(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, out)
 }

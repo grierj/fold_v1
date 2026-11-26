@@ -46,6 +46,7 @@ var (
 	errMissingFile                            = apiErr(http.StatusBadRequest, "file_unreadable", "missing file")
 	errGroupFull                              = apiErrExtra(http.StatusConflict, "group_full", "This group is full", gin.H{"full": true}) // full tells the SPA it may offer the explicit over-limit choice (DEC-39)
 	errGroupHasMembers                        = apiErr(http.StatusBadRequest, "group_has_members", "the group still has other members")
+	errGroupNotFound                          = apiErr(http.StatusNotFound, "", "group not found")
 	errGroupInactive                          = apiErr(http.StatusConflict, "group_inactive", "that group is no longer active")
 	errGroupNotApprovedToInvite               = apiErr(http.StatusConflict, "group_not_approved", "this group isn't approved yet; you can invite people once an admin approves it")
 	errInvalidUpcomingPage                    = apiErr(http.StatusBadRequest, "group_upcoming_page", "invalid upcoming date page; reload the group")

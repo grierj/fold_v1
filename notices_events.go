@@ -193,7 +193,18 @@ func eventDeleteTells(tx *gorm.DB, eventID, actor uint, now time.Time, lock bool
 }
 
 // notifyEventDeleted tells everyone signed up for ev's upcoming dates that it
-// was deleted, one notice each however many of its dates they had. It runs in
+// was deleted (tellEventDeleted), as eventDeleteTells reads them under the
+// dates' locks.
+func notifyEventDeleted(tx *gorm.DB, actor uint, ev *models.Event, now time.Time) error {
+	rows, occs, err := eventDeleteTells(tx, ev.ID, actor, now, true)
+	if err != nil {
+		return err
+	}
+	return tellEventDeleted(tx, actor, ev, rows, occs)
+}
+
+// tellEventDeleted tells the people rows name that ev was deleted, one
+// notice each however many of its dates (occs, by id) they had. It runs in
 // the delete's transaction before the rows go. A holder of a live exact-date
 // grant, whom a date cancel tells through the grant's own end
 // (endRegistrationAccess), is told here: the grant ends quietly with its date
@@ -203,10 +214,9 @@ func eventDeleteTells(tx *gorm.DB, eventID, actor uint, now time.Time, lock bool
 // anyone else gets the nameless text through withheldDate. The notice links
 // home and has the event's plain title in Data, which is all a guardian's
 // copy shows.
-func notifyEventDeleted(tx *gorm.DB, actor uint, ev *models.Event, now time.Time) error {
-	rows, occs, err := eventDeleteTells(tx, ev.ID, actor, now, true)
-	if err != nil || len(rows) == 0 {
-		return err
+func tellEventDeleted(tx *gorm.DB, actor uint, ev *models.Event, rows []signedUp, occs map[uint]*models.EventOccurrence) error {
+	if len(rows) == 0 {
+		return nil
 	}
 	dates := map[uint][]*models.EventOccurrence{}
 	var userIDs []uint

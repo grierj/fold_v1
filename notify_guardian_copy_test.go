@@ -817,6 +817,10 @@ func TestNoticeGuardianCopyKindsAreClassified(t *testing.T) {
 		gone    = "copied with its title alone, without the teen's access (its event and dates are deleted)"
 		direct  = "already sent straight to the guardians"
 		neverTo = "never written to a teen (a leader, host or admin notice)"
+		// The copy follows the teen's live access to the group, which is
+		// deleted with the notice's transaction, so no copy ever goes and a
+		// private group's name stays with the teen (DEC-177).
+		groupGone = "never copied (its group is deleted with it, so the teen's live access is never there)"
 	)
 	want := map[string]string{
 		notify.OccurrenceCancelled:     copied,
@@ -833,6 +837,7 @@ func TestNoticeGuardianCopyKindsAreClassified(t *testing.T) {
 		notify.YourRole:                neverTo,
 		notify.GroupApproved:           neverTo,
 		notify.GroupRejected:           neverTo,
+		notify.GroupDeleted:            groupGone,
 		notify.MembershipLeft:          neverTo,
 		notify.VisibilityOverride:      neverTo,
 		notify.RoomRequestDecided:      neverTo,

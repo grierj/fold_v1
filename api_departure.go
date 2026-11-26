@@ -29,7 +29,6 @@ import (
 )
 
 var (
-	errDepartureNotFound    = apiErr(http.StatusNotFound, "", "group not found")
 	errDepartureForbidden   = apiErr(http.StatusForbidden, "", "forbidden")
 	errDepartureUnavailable = apiErr(http.StatusConflict, "departure_unavailable", "this departure is no longer available; refresh the group and check membership and leadership")
 	errDepartureStale       = apiErr(http.StatusConflict, "departure_stale", "this departure changed; review the updated dates before trying again")
@@ -254,7 +253,7 @@ func loadDepartureFacts(tx *gorm.DB, authenticated *models.User, groupID, subjec
 	var group models.Group
 	if err := tx.First(&group, groupID).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return facts, errDepartureNotFound
+			return facts, errGroupNotFound
 		}
 		return facts, err
 	}
@@ -264,7 +263,7 @@ func loadDepartureFacts(tx *gorm.DB, authenticated *models.User, groupID, subjec
 	}
 	actorRel := membershipRel(actorMembership)
 	if !policy.CanSeeGroup(asPerson(&actor), asGroup(&group), actorRel) {
-		return facts, errDepartureNotFound
+		return facts, errGroupNotFound
 	}
 	if actor.ID != subjectID && !policy.CanManageGroup(asPerson(&actor), actorRel) {
 		return facts, errDepartureForbidden
@@ -272,7 +271,7 @@ func loadDepartureFacts(tx *gorm.DB, authenticated *models.User, groupID, subjec
 	var subject models.User
 	if err := tx.First(&subject, subjectID).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return facts, errDepartureNotFound
+			return facts, errGroupNotFound
 		}
 		return facts, err
 	}
@@ -764,7 +763,7 @@ func (a *App) departureConfirm(c *gin.Context, subjectID uint) {
 		var group models.Group
 		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&group, groupID).Error; err != nil {
 			if errors.Is(err, gorm.ErrRecordNotFound) {
-				return errDepartureNotFound
+				return errGroupNotFound
 			}
 			return err
 		}

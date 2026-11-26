@@ -822,7 +822,7 @@ func TestEventDeleteSettlesAnswersInFlight(t *testing.T) {
 			}
 			mark := markNotices(t, f.app)
 			var rsvp <-chan *httptest.ResponseRecorder
-			f.app.hooks.eventDeleteNoticed = func(*gorm.DB) {
+			f.app.hooks.deleteNoticed = func(*gorm.DB) {
 				rsvp = queueContact(func() *httptest.ResponseRecorder {
 					return f.member.do("PUT", "/api/v1/events/"+itoa(f.event.ID)+"/registrations", map[string]any{"date": f.date(1), "status": answer}, true)
 				})
@@ -833,7 +833,7 @@ func TestEventDeleteSettlesAnswersInFlight(t *testing.T) {
 				})
 			}
 			apiDo(t, f.admin, "DELETE", "/api/v1/events/"+itoa(f.event.ID), nil, http.StatusOK)
-			f.app.hooks.eventDeleteNoticed = nil
+			f.app.hooks.deleteNoticed = nil
 			w := awaitContactResponse(t, rsvp)
 			told := len(noticesSince(t, f.app, f.memberUser.ID, notify.EventDeleted, mark.notice)) == 1
 			if w.Code != http.StatusNotFound {
