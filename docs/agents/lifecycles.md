@@ -144,7 +144,8 @@ chosen when the row is made, or is a setting that may change to any value its ow
   DEC-166, DEC-167, DEC-169, DEC-171, DEC-176) goes through `web/src/lib/useRevisionSave.ts`:
   sent, then on a refusal read once and done, sent again or handed to the page as a conflict,
   which `web/src/lib/refusedSave.tsx` tells. A form that shows the stored row after an outcome uses the same file's
-  `useManagedSave` (the room editor and its Deactivate and Reactivate, the two room controls), which
+  `useManagedSave` (the room editor and its Deactivate and Reactivate, the two room controls, the two teen consent
+  controls), which
   returns that row from the write's answer or from the read the protocol made, and gives a conflict the row the read
   found. A save counts only when its answer names what it
   saved (`answerNames`); after a send with no answer, a refusal is never sent again under a newer

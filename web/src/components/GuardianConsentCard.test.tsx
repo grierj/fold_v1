@@ -156,6 +156,17 @@ test("a grant and a revoke by someone else since the read are a conflict, never 
   expect(screen.getByText("Consent not granted")).toBeInTheDocument();
 });
 
+test("a grant refused only because the token moved (a restart) goes again under the new one and lands", async () => {
+  const opened = { ...teen, accountConsent: false };
+  vi.mocked(Guardians.teens).mockResolvedValueOnce({ teens: [opened] }).mockResolvedValueOnce({ teens: [{ ...opened, revision: "r9" }] });
+  vi.mocked(Guardians.change).mockRejectedValueOnce(changed()).mockResolvedValueOnce(stored({ ...opened, accountConsent: true, changes: 2, lastChangeYours: true }, "r10"));
+  render(<MemoryRouter><GuardianConsentCard /></MemoryRouter>);
+  await userEvent.click(await screen.findByRole("button", { name: "Grant consent" }));
+  expect(await screen.findByText("Account consent granted.")).toBeInTheDocument();
+  expect(vi.mocked(Guardians.change).mock.calls.map((call) => call[3])).toEqual(["r1", "r9"]);
+  expect(screen.queryByText(/could not be saved/)).not.toBeInTheDocument();
+});
+
 test("a grant whose answer was lost and is pressed again is saved, not refused", async () => {
   const opened = { ...teen, accountConsent: false };
   vi.mocked(Guardians.teens).mockResolvedValueOnce({ teens: [opened] })

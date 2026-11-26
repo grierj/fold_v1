@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -740,5 +741,43 @@ func TestConsentReadRevisionIsTheWritesBase(t *testing.T) {
 		if consentRevision(t, f.admin, f.teen) == read {
 			t.Fatalf("a %s grant left the token where it was", scope)
 		}
+	}
+}
+
+// Both consent reads take their rows and their token from one snapshot: a
+// change that commits between the two statements is in neither, so a grant
+// made from the read is refused rather than passing with a token newer than
+// the picture it was made from.
+func TestConsentReadsTakeTheirTokenInTheirRowsSnapshot(t *testing.T) {
+	f := newConsentFamily(t)
+	var adminID uint
+	if err := f.app.DB.Raw("SELECT id FROM users WHERE email = ?", testEmail("admin")).Row().Scan(&adminID); err != nil {
+		t.Fatal(err)
+	}
+	for _, read := range []struct {
+		name  string
+		token func() string
+		grant func(revision string) *httptest.ResponseRecorder
+	}{
+		{"the admin panel", func() string { return consentRevision(t, f.admin, f.teen) }, func(revision string) *httptest.ResponseRecorder {
+			return f.admin.do("POST", consentPath(f.teen), map[string]string{"scope": "photos", "status": "granted", "evidenceText": "Paper", "revision": revision}, true)
+		}},
+		{"the guardian card", func() string { return guardianRevision(t, f.guardian, f.link.ID) }, func(revision string) *httptest.ResponseRecorder {
+			return f.guardian.do("POST", guardianConsentPath(f.link.ID), map[string]string{"scope": "photos", "status": "granted", "revision": revision}, true)
+		}},
+	} {
+		var fired atomic.Bool
+		name := fmt.Sprintf("test:consent_between_statements:%d", queryCounterSeq.Add(1))
+		gormMust(t, &gorm.DB{Error: f.app.DB.Callback().Query().After("gorm:query").Register(name, func(tx *gorm.DB) {
+			if tx.Statement.Table == "teen_consents" && fired.CompareAndSwap(false, true) {
+				gormMust(t, f.app.DB.Exec(`INSERT INTO teen_consents (teen_user_id, scope, status, granted_by, granter_role) VALUES (?, 'sms', 'revoked', ?, 'admin')`, f.teen.ID, adminID))
+			}
+		})})
+		revision := read.token()
+		_ = f.app.DB.Callback().Query().Remove(name)
+		if !fired.Load() {
+			t.Fatalf("%s: no change committed between its statements", read.name)
+		}
+		refusedAsChanged(t, read.grant(revision))
 	}
 }

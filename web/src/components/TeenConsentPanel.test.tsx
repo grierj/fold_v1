@@ -110,6 +110,18 @@ it("a grant and a revoke by someone else since the read are a conflict, never a 
   expect(AdminTeenConsents.change).toHaveBeenCalledOnce();
 });
 
+it("a grant refused only because the token moved (a restart) goes again under the new one and lands", async () => {
+  const refused = vi.fn();
+  vi.mocked(AdminTeenConsents.change).mockRejectedValueOnce(changed());
+  render(panel({ onRefused: refused }));
+  await userEvent.type(await screen.findByLabelText("Consent evidence"), "Signed parent form");
+  vi.mocked(AdminTeenConsents.list).mockResolvedValue(log([], "r9"));
+  await userEvent.click(screen.getByRole("button", { name: "Grant consent" }));
+  expect(await screen.findByRole("status")).toHaveTextContent("Account access consent granted.");
+  expect(vi.mocked(AdminTeenConsents.change).mock.calls.map(([, data]) => data.revision)).toEqual(["r1", "r9"]);
+  expect(refused).not.toHaveBeenCalled();
+});
+
 it("a grant whose answer was lost and is pressed again is saved, not refused", async () => {
   const refused = vi.fn();
   vi.mocked(AdminTeenConsents.change).mockRejectedValueOnce(new ApiError(502, "bad gateway", {})).mockRejectedValueOnce(changed());
