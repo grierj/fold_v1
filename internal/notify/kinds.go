@@ -44,6 +44,7 @@ const (
 	MemberNotRestored       = "membership.not_restored"
 	OccurrenceCancelled     = "event.cancelled"
 	OccurrenceRestored      = "event.restored"
+	EventDeleted            = "event.deleted"
 	RegistrationCancelled   = "registration.cancelled"
 	VisibilityOverride      = "event.visibility_override"
 	AccountRequested        = "account.requested"
@@ -167,15 +168,17 @@ type Kind struct {
 	// note (Vars.Note), which reaches only the person it is for. A guardian's
 	// copy of such a notice shows the title alone.
 	CopyTitleOnly bool
-	// CopyWithoutSubjectAccess marks the one kind written for someone who has
-	// just lost access to its subject (registration.cancelled), so the rule that
-	// a copy follows the teen's live access to the subject cannot apply to it.
-	// Grier decided (2026-11-13) its guardians are copied with the event's title
-	// and nothing else: no date, group, place or link (DEC-149). The teen's own
-	// notice can carry more than that (a date joined to its title), so the copy
-	// is rendered from the plain title the writer stored in Data under
-	// DataEventTitle (LostAccessCopyText), never from the teen's stored text.
-	// Every other copy check still applies.
+	// CopyWithoutSubjectAccess marks a kind written for someone who has just
+	// lost its subject, so the rule that a copy follows the teen's live access
+	// to the subject cannot apply to it: registration.cancelled (the teen can
+	// no longer see the event; Grier decided on 2026-11-13 that its guardians
+	// are copied with the event's title and nothing else, DEC-149) and
+	// event.deleted (the event and its dates are gone). The teen's own notice
+	// can carry more than the title (a date), so the copy is rendered from the
+	// plain title the writer stored in Data under DataEventTitle
+	// (LostAccessCopyText), never from the teen's stored text, and a writer
+	// stores it only when the teen could see the date. Every other copy check
+	// still applies.
 	CopyWithoutSubjectAccess bool
 }
 
@@ -570,6 +573,24 @@ func init() {
 		// Whoever got the cancellation on their phone hears it's back on.
 		AllowPush: true, PushSoon: true, PushRender: func(v Vars) (string, string) {
 			return "Back on: " + or(v.Event, "Church event"), v.When
+		},
+	})
+	// The whole event was deleted: one row per person, however many of its
+	// upcoming dates they were signed up for. When is their next one; the
+	// guardian's copy and the nameless row have none, so the text reads right
+	// without it. No place, and no link to the event, which is gone. Not
+	// PushSoon: its dates are deleted, so a push cannot read their clock.
+	deleted := func(v Vars) (string, string) {
+		body := "This event was deleted, so its upcoming dates are off."
+		if v.When != "" {
+			body = "This event was deleted, so its upcoming dates are off, starting " + v.When + "."
+		}
+		return "Cancelled: " + or(v.Event, "Church event"), body
+	}
+	register(Kind{
+		Key: EventDeleted, Category: CatEvents, AllowEmail: true, CopyWithoutSubjectAccess: true, Render: deleted,
+		AllowPush: true, PushRender: func(v Vars) (string, string) {
+			return "Cancelled: " + or(v.Event, "Church event"), "Its upcoming dates are off."
 		},
 	})
 	register(Kind{

@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -13,6 +14,7 @@ import (
 	"fold/internal/mail"
 	"fold/internal/notify"
 	"fold/internal/policy"
+	"fold/internal/testdb"
 	"fold/models"
 
 	"gorm.io/gorm"
@@ -582,4 +584,264 @@ func TestReenableAsMemberJudgesTheRoleItComesBackTo(t *testing.T) {
 	}
 	noSecrets(t, f.app, "the person re-enabled as a member", demoted.ID, demoted.Email, mark,
 		[]string{"ROOMYSECRET", "FULLSECRET", "HIDDENPLACE", "Supper", "Group hall", "/events/", "/groups/"})
+}
+
+// signUp puts u on date occ with status (a waitlisted row gets its time).
+func signUp(t *testing.T, app *App, u *models.User, occ uint, status string) {
+	t.Helper()
+	r := models.Registration{UserID: &u.ID, OccurrenceID: occ, Status: status, AttendanceMode: models.AttendanceInPerson, Source: "web"}
+	if status == models.RegWaitlisted {
+		at := time.Now().UTC().Add(-time.Minute)
+		r.WaitlistedAt = &at
+	}
+	gormMust(t, app.DB.Create(&r))
+}
+
+// feedItem is the recipient's own GET /notifications item with this id.
+func feedItem(t *testing.T, client *apiClient, id uint) map[string]any {
+	t.Helper()
+	var page struct {
+		Notifications []map[string]any `json:"notifications"`
+	}
+	gormMust(t, &gorm.DB{Error: json.Unmarshal([]byte(apiDo(t, client, "GET", "/api/v1/notifications?filter=all&limit=50", nil, http.StatusOK)), &page)})
+	for _, item := range page.Notifications {
+		if got, _ := item["id"].(float64); uint(got) == id {
+			return item
+		}
+	}
+	t.Fatalf("notice %d is not in its recipient's feed", id)
+	return nil
+}
+
+// wantEventDeleted checks that uid got exactly one event.deleted since mark,
+// with this title and body, that their own feed shows it and that it was
+// mailed to address with the same text. It returns the stored row.
+func wantEventDeleted(t *testing.T, app *App, who string, uid uint, client *apiClient, address string, mark noticeMark, title, body string) models.Notification {
+	t.Helper()
+	rows := noticesSince(t, app, uid, notify.EventDeleted, mark.notice)
+	if len(rows) != 1 {
+		t.Fatalf("%s got %d deletion notices, want 1: %+v", who, len(rows), rows)
+	}
+	n := rows[0]
+	if n.Title != title || n.Body != body || n.Link != "/" {
+		t.Fatalf("%s's notice: %q / %q -> %q, want %q / %q -> /", who, n.Title, n.Body, n.Link, title, body)
+	}
+	if item := feedItem(t, client, n.ID); item["title"] != title || item["kind"] != notify.EventDeleted || item["archived"] != false {
+		t.Fatalf("%s's feed item: %v", who, item)
+	}
+	mailed := false
+	for _, m := range mailSince(t, app, address, mark) {
+		mailed = mailed || (m.Subject == title && strings.Contains(m.Body, body))
+	}
+	if !mailed {
+		t.Fatalf("%s was not mailed %q: %+v", who, title, mailSince(t, app, address, mark))
+	}
+	return n
+}
+
+// Deleting an event tells everyone going or waitlisted on its upcoming dates
+// once, as a date cancel would judge them: a member on three dates gets one
+// notice naming the first, a household person's holder one notice that names
+// no household person, a guest (judged signed out) and an outsider of the
+// invite-only group the nameless text, a teen the event with a title-only
+// copy to their guardian. Nobody signed up only for a date already cancelled
+// or over is told, nor the admin who deleted it. Every notice is in its
+// recipient's feed and mailed after the event is gone.
+func TestDeletingAnEventTellsEachPersonSignedUpOnce(t *testing.T) {
+	f := newDateEditFixture(t)
+	app := f.app
+	ev := createFeedEvent(t, f.admin, f.group, "Harvest", feedStart(3), "FREQ=WEEKLY;COUNT=6")
+	var dates []models.EventOccurrence
+	gormMust(t, app.DB.Where("event_id = ?", ev.ID).Order("starts_at").Find(&dates))
+	if len(dates) != 6 {
+		t.Fatalf("fixture: %d dates", len(dates))
+	}
+	gormMust(t, app.DB.Model(&models.EventOccurrence{}).Where("id = ?", dates[4].ID).Updates(map[string]any{"status": models.OccurrenceCancelled, "cancel_source": models.CancelSourceManual}))
+	past := time.Now().UTC().Add(-48 * time.Hour)
+	gormMust(t, app.DB.Model(&models.EventOccurrence{}).Where("id = ?", dates[5].ID).Updates(map[string]any{"starts_at": past, "ends_at": past.Add(time.Hour)}))
+
+	for _, i := range []int{0, 1, 2} {
+		signUp(t, app, f.memberUser, dates[i].ID, models.RegGoing)
+	}
+	signUp(t, app, f.leaderUser, dates[1].ID, models.RegWaitlisted)
+	signUp(t, app, f.adminUser, dates[0].ID, models.RegGoing)
+	outsider, cancelledOnly := f.outsiders[0], f.outsiders[1]
+	signUp(t, app, outsider, dates[3].ID, models.RegGoing)
+	signUp(t, app, cancelledOnly, dates[4].ID, models.RegGoing)
+	pastOnly := newTestUser(t, app, "past only", "password1234", models.RoleMember)
+	signUp(t, app, pastOnly, dates[5].ID, models.RegGoing)
+
+	holder, holderClient, _, child := householdFamily(t, app, f.admin, "harvest holder")
+	gormMust(t, app.DB.Create(&models.Membership{UserID: holder.ID, GroupID: f.group, Role: models.MembershipMember, Status: models.MembershipActive}))
+	signUp(t, app, holder, dates[2].ID, models.RegGoing)
+	gormMust(t, app.DB.Create(&models.Registration{HouseholdPersonID: &child.ID, RegisteredBy: &holder.ID, OccurrenceID: dates[2].ID, Status: models.RegGoing, AttendanceMode: models.AttendanceInPerson, Source: "web"}))
+
+	guest := newTestUser(t, app, "harvest guest", "password1234", models.RoleMember)
+	gormMust(t, app.DB.Model(guest).Updates(map[string]any{"status": models.UserGuest, "password_hash": nil}))
+	signUp(t, app, guest, dates[0].ID, models.RegGoing)
+
+	teen := activeTeen(t, app, "harvest teen", f.adminUser.ID)
+	gormMust(t, app.DB.Create(&models.Membership{UserID: teen.ID, GroupID: f.group, Role: models.MembershipMember, Status: models.MembershipActive}))
+	signUp(t, app, teen, dates[1].ID, models.RegGoing)
+	guardian := newTestUser(t, app, "harvest guardian", "password1234", models.RoleMember)
+	gormMust(t, app.DB.Create(&models.GuardianLink{GuardianUserID: guardian.ID, TeenUserID: &teen.ID, Status: models.GuardianConfirmed}))
+	gormMust(t, app.DB.Create(&models.Setting{Key: settingGuardianCopies, Value: "true"}))
+
+	mark := markNotices(t, app)
+	apiDo(t, f.admin, "DELETE", "/api/v1/events/"+itoa(ev.ID), nil, http.StatusOK)
+	if err := app.DB.First(&models.Event{}, ev.ID).Error; !errors.Is(err, gorm.ErrRecordNotFound) {
+		t.Fatalf("the event is still there: %v", err)
+	}
+	drainNotices(t, app)
+	drainNotices(t, app)
+
+	zone := churchZoneOrUTC(app.DB)
+	starting := func(o models.EventOccurrence) string {
+		return "This event was deleted, so its upcoming dates are off, starting " + formatWhen(o.StartsAt, zone) + "."
+	}
+	const nameless = "This event was deleted, so its upcoming dates are off."
+	member := wantEventDeleted(t, app, "the member", f.memberUser.ID, f.member, f.memberUser.Email, mark, "Cancelled: Harvest", starting(dates[0]))
+	if member.SubjectType != "event" || member.SubjectID == nil || *member.SubjectID != ev.ID || member.ExpiresAt == nil || !member.ExpiresAt.Equal(noticeEnd(&dates[2])) {
+		t.Fatalf("the member's notice: subject %q %v expires %v", member.SubjectType, member.SubjectID, member.ExpiresAt)
+	}
+	wantEventDeleted(t, app, "the waitlisted leader", f.leaderUser.ID, f.leader, f.leaderUser.Email, mark, "Cancelled: Harvest", starting(dates[1]))
+	held := wantEventDeleted(t, app, "the holder", holder.ID, holderClient, holder.Email, mark, "Cancelled: Harvest", starting(dates[2]))
+	if strings.Contains(held.Title+held.Body+held.EmailBody+held.PushBody, "Kit") {
+		t.Fatalf("the holder's notice names the household person: %+v", held)
+	}
+	wantEventDeleted(t, app, "the teen", teen.ID, loginAPI(t, app, teen.Name, "password1234"), teen.Email, mark, "Cancelled: Harvest", starting(dates[1]))
+	if got := copiesTo(t, app, guardian.Email); len(got) != 1 || got[0] != "Copy: Cancelled: Harvest" {
+		t.Fatalf("the guardian's copies: %v", got)
+	}
+	for _, m := range mailSince(t, app, guardian.Email, mark) {
+		if strings.Contains(m.Body, formatWhen(dates[1].StartsAt, zone)) || strings.Contains(m.Body, "Supper club") || strings.Contains(m.Body, "Group hall") {
+			t.Fatalf("the guardian's copy says more than the title: %q", m.Body)
+		}
+	}
+	hidden := wantEventDeleted(t, app, "the outsider", outsider.ID, loginAPI(t, app, outsider.Name, "password1234"), outsider.Email, mark, "Cancelled: Church event", nameless)
+	if hidden.SubjectType != "" || hidden.SubjectID != nil || hidden.ExpiresAt != nil || hidden.Data != "{}" {
+		t.Fatalf("the outsider's notice follows the event: %+v", hidden)
+	}
+	guestRows := noticesSince(t, app, guest.ID, notify.EventDeleted, mark.notice)
+	if len(guestRows) != 1 || guestRows[0].Title != "Cancelled: Church event" || guestRows[0].Body != nameless || guestRows[0].SubjectID != nil {
+		t.Fatalf("the guest is told as a signed-out visitor: %+v", guestRows)
+	}
+	for _, u := range []*models.User{cancelledOnly, pastOnly, f.adminUser} {
+		if got := noticesSince(t, app, u.ID, notify.EventDeleted, mark.notice); len(got) != 0 {
+			t.Fatalf("%s was told: %+v", u.Name, got)
+		}
+	}
+}
+
+// A group's name stands in for an untitled event only for someone who may
+// see the group, as on a date cancel: an outsider signed up for the event's
+// public date is told the time with no title, group or place.
+func TestEventDeleteNamesNoHiddenGroup(t *testing.T) {
+	f := newDateEditFixture(t)
+	gormMust(t, f.app.DB.Model(&models.Event{}).Where("id = ?", f.event.ID).Update("title", ""))
+	gormMust(t, f.app.DB.Model(&models.EventOccurrence{}).Where("id = ?", f.dates[0].ID).Update("visibility_override", models.VisibilityPublic))
+	outsider := f.outsiders[0]
+	signUp(t, f.app, outsider, f.dates[0].ID, models.RegGoing)
+	signUp(t, f.app, f.memberUser, f.dates[1].ID, models.RegGoing)
+	mark := markNotices(t, f.app)
+
+	apiDo(t, f.admin, "DELETE", "/api/v1/events/"+itoa(f.event.ID), nil, http.StatusOK)
+	drainNotices(t, f.app)
+	zone := churchZoneOrUTC(f.app.DB)
+	n := wantEventDeleted(t, f.app, "the outsider", outsider.ID, loginAPI(t, f.app, outsider.Name, "password1234"), outsider.Email, mark,
+		"Cancelled: Church event", "This event was deleted, so its upcoming dates are off, starting "+formatWhen(f.dates[0].StartsAt, zone)+".")
+	noSecrets(t, f.app, "the outsider", outsider.ID, outsider.Email, mark, []string{"Supper club", "Group hall", "/groups/"})
+	if n.PushTitle != "Cancelled: Church event" {
+		t.Fatalf("the outsider's push: %q", n.PushTitle)
+	}
+	wantEventDeleted(t, f.app, "the member", f.memberUser.ID, f.member, f.memberUser.Email, mark,
+		"Cancelled: Supper club", "This event was deleted, so its upcoming dates are off, starting "+formatWhen(f.dates[1].StartsAt, zone)+".")
+}
+
+// Someone whose sign-up commits while the delete waits for the contact gate
+// is told: the delete reads who is signed up after its locks.
+func TestEventDeleteTellsASignUpCommittedWhileItWaited(t *testing.T) {
+	f := newDateEditFixture(t)
+	mark := markNotices(t, f.app)
+	gate := holdContactGate(t, f.app)
+	deletion := queueContact(func() *httptest.ResponseRecorder {
+		return f.admin.do("DELETE", "/api/v1/events/"+itoa(f.event.ID), nil, true)
+	})
+	waitContactWaiters(t, f.app, 1)
+	signUp(t, f.app, f.memberUser, f.dates[2].ID, models.RegGoing)
+	if err := gate.Commit().Error; err != nil {
+		t.Fatal(err)
+	}
+	if w := awaitContactResponse(t, deletion); w.Code != http.StatusOK {
+		t.Fatalf("delete: %d %s", w.Code, w.Body.String())
+	}
+	if got := noticesSince(t, f.app, f.memberUser.ID, notify.EventDeleted, mark.notice); len(got) != 1 {
+		t.Fatalf("the late sign-up got %d notices, want 1", len(got))
+	}
+}
+
+// For an untitled event the teen, who may see the group, is told its name, but
+// the guardian's copy carries the event's own title, and an untitled event
+// has none: the guardian, who is not in the private group, gets no copy and
+// nothing that names the group.
+func TestEventDeleteCopiesNoGroupNameToAGuardian(t *testing.T) {
+	f := newDateEditFixture(t)
+	gormMust(t, f.app.DB.Model(&models.Event{}).Where("id = ?", f.event.ID).Update("title", ""))
+	teen := activeTeen(t, f.app, "untitled teen", f.adminUser.ID)
+	gormMust(t, f.app.DB.Create(&models.Membership{UserID: teen.ID, GroupID: f.group, Role: models.MembershipMember, Status: models.MembershipActive}))
+	signUp(t, f.app, teen, f.dates[1].ID, models.RegGoing)
+	guardian := newTestUser(t, f.app, "untitled guardian", "password1234", models.RoleMember)
+	gormMust(t, f.app.DB.Create(&models.GuardianLink{GuardianUserID: guardian.ID, TeenUserID: &teen.ID, Status: models.GuardianConfirmed}))
+	gormMust(t, f.app.DB.Create(&models.Setting{Key: settingGuardianCopies, Value: "true"}))
+	mark := markNotices(t, f.app)
+
+	apiDo(t, f.admin, "DELETE", "/api/v1/events/"+itoa(f.event.ID), nil, http.StatusOK)
+	drainNotices(t, f.app)
+	drainNotices(t, f.app)
+	zone := churchZoneOrUTC(f.app.DB)
+	wantEventDeleted(t, f.app, "the teen", teen.ID, loginAPI(t, f.app, teen.Name, "password1234"), teen.Email, mark,
+		"Cancelled: Supper club", "This event was deleted, so its upcoming dates are off, starting "+formatWhen(f.dates[1].StartsAt, zone)+".")
+	if got := copiesTo(t, f.app, guardian.Email); len(got) != 0 {
+		t.Fatalf("the guardian got copies %v", got)
+	}
+	noSecrets(t, f.app, "the guardian", guardian.ID, guardian.Email, mark, []string{"Supper club", "Group hall"})
+}
+
+// The delete locks the event's dates before it reads who is signed up, so a
+// sign-up or a withdrawal still in flight when the delete reads waits for it
+// and then finds the date gone: none returns 200 after the read. The hook
+// starts a real answer at the point the notices are written, which is where
+// one that committed between the read and the rows going would be lost
+// (a sign-up removed untold) or misreported (a withdrawal told).
+func TestEventDeleteSettlesAnswersInFlight(t *testing.T) {
+	for _, answer := range []string{models.RegGoing, models.RegDeclined} {
+		t.Run(answer, func(t *testing.T) {
+			f := newDateEditFixture(t)
+			if answer == models.RegDeclined {
+				signUp(t, f.app, f.memberUser, f.dates[1].ID, models.RegGoing)
+			}
+			mark := markNotices(t, f.app)
+			var rsvp <-chan *httptest.ResponseRecorder
+			f.app.hooks.eventDeleteNoticed = func(*gorm.DB) {
+				rsvp = queueContact(func() *httptest.ResponseRecorder {
+					return f.member.do("PUT", "/api/v1/events/"+itoa(f.event.ID)+"/registrations", map[string]any{"date": f.date(1), "status": answer}, true)
+				})
+				testdb.WaitUntil(t, "the answer to wait on a lock or return", 5*time.Second, func() bool {
+					var n int64
+					gormMust(t, f.app.DB.Raw(`SELECT count(*) FROM pg_stat_activity WHERE datname = current_database() AND wait_event_type = 'Lock'`).Scan(&n))
+					return n > 0 || len(rsvp) > 0
+				})
+			}
+			apiDo(t, f.admin, "DELETE", "/api/v1/events/"+itoa(f.event.ID), nil, http.StatusOK)
+			f.app.hooks.eventDeleteNoticed = nil
+			w := awaitContactResponse(t, rsvp)
+			told := len(noticesSince(t, f.app, f.memberUser.ID, notify.EventDeleted, mark.notice)) == 1
+			if w.Code != http.StatusNotFound {
+				t.Fatalf("the %s answer returned %d after the delete read who to tell, want 404 for a date that is gone (told %v): %s", answer, w.Code, told, w.Body.String())
+			}
+			if told != (answer == models.RegDeclined) {
+				t.Fatalf("the member was told %v; they were going at the read: %v", told, answer == models.RegDeclined)
+			}
+		})
+	}
 }

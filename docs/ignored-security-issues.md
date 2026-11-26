@@ -94,3 +94,17 @@ credentials, personal data, or exploit instructions.
   intentionally not fixed.
 - Evidence: `householdPersonRevisionRows` in `edit_revision.go`; `checkHouseholdPersonRevision` in
   `apiUpdateHouseholdPerson` (`api_households.go`).
+
+## A named deletion notice can expire with a date it withheld
+
+- Date: 2026-11-25. Reviewed revision: `2ea862ab4802d4179a9abfb9b3444797322877b2` (PR #551).
+- `notifyEventDeleted` names the event from the first of the recipient's dates they may see, but sets the
+  notice's expiry from the end of the last of all their dates. When a later date was one the recipient may not
+  see, that date's end decides when the named notice is archived, and watching the `archived` flag in the feed
+  around that time shows roughly when the hidden date ended.
+- Likelihood: **2/10**. It needs sign-ups on several dates of one event, a visible one followed by a hidden one
+  (a date-only visibility change), and someone watching the feed near the hidden date's end.
+- Severity: **2/10**. It shows only the approximate end of a date the recipient was signed up for, of an event
+  that no longer exists. Product: **4**. The issue is intentionally not fixed.
+- Evidence: `notifyEventDeleted` in `notices_events.go` (`ExpiresAt`); the feed's `archived` in
+  `api_notifications.go`.

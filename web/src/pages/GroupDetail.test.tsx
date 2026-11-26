@@ -43,7 +43,7 @@ stubService(Groups, () => ({ get: vi.fn(), update: vi.fn(), visibilityImpact: vi
 
 stubService(GroupCover, () => ({ upload: vi.fn(), remove: vi.fn() }));
 
-stubService(Events, () => ({ register: vi.fn(), registerSeries: vi.fn(), undoSeriesRegistration: vi.fn(), dateVisibilityImpact: vi.fn(), managedDate: vi.fn(), removeRegistration: vi.fn(), addRegistration: vi.fn(), restoreRegistration: vi.fn(), update: vi.fn(), visibilityImpact: vi.fn(), setVisibility: vi.fn(), cancelOccurrence: vi.fn() }));
+stubService(Events, () => ({ register: vi.fn(), registerSeries: vi.fn(), undoSeriesRegistration: vi.fn(), dateVisibilityImpact: vi.fn(), managedDate: vi.fn(), removeRegistration: vi.fn(), addRegistration: vi.fn(), restoreRegistration: vi.fn(), update: vi.fn(), visibilityImpact: vi.fn(), setVisibility: vi.fn(), cancelOccurrence: vi.fn(), signedUp: vi.fn() }));
 
 stubService(Households, () => ({ mine: vi.fn() }));
 
@@ -104,6 +104,51 @@ it("drops the group while rechecking after a date's cancellation is refused", as
     expect(await screen.findByRole("heading", { name: "Family group" })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /^More for .* on 2026-12-01$/ })).not.toBeInTheDocument();
     expect(screen.getByText("Your last action could not be completed.")).toHaveFocus();
+  } finally {
+    prompt.mockRestore();
+  }
+});
+
+it.each([
+  [0, "No one else will be notified."],
+  [1, "1 other person will be notified."],
+  [5, "5 other people will be notified."],
+])("asks to cancel a date saying who is told when %s people are signed up", async (people, line) => {
+  vi.mocked(Groups.get).mockResolvedValue({ ...page, canManage: true });
+  vi.mocked(Events.signedUp).mockResolvedValue({ people });
+  vi.mocked(Events.cancelOccurrence).mockResolvedValue({});
+  const prompt = vi.spyOn(window, "confirm").mockReturnValue(true);
+
+  try {
+    open();
+    await userEvent.click(await screen.findByRole("button", { name: /^More for .* on 2026-12-01$/ }));
+    await userEvent.click(screen.getByRole("menuitem", { name: "Cancel this date" }));
+    await waitFor(() => expect(Events.cancelOccurrence).toHaveBeenCalledExactlyOnceWith(7, "2026-12-01"));
+    expect(prompt).toHaveBeenCalledExactlyOnceWith(`Cancel this date on 2026-12-01? ${line}`);
+    expect(Events.signedUp).toHaveBeenCalledExactlyOnceWith(7, "2026-12-01");
+  } finally {
+    prompt.mockRestore();
+  }
+});
+
+it("asks nothing when the count arrives after the manager moved to another group", async () => {
+  const second = { ...page, group: { ...page.group, id: 2, name: "Second group" }, canManage: true, upcomingEvents: [occurrence({ id: 9, eventId: 70 })] };
+  vi.mocked(Groups.get).mockImplementation((id) => Promise.resolve(String(id) === "2" ? second : { ...page, canManage: true }));
+  const count = deferred<{ people: number }>();
+  vi.mocked(Events.signedUp).mockReturnValue(count.promise);
+  vi.mocked(Events.cancelOccurrence).mockResolvedValue({});
+  const prompt = vi.spyOn(window, "confirm").mockReturnValue(true);
+
+  try {
+    const router = createMemoryRouter([{ path: "/groups/:id", element: <GroupDetail /> }], { initialEntries: ["/groups/1"] });
+    render(<RouterProvider router={router} />);
+    await userEvent.click(await screen.findByRole("button", { name: /^More for .* on 2026-12-01$/ }));
+    await userEvent.click(screen.getByRole("menuitem", { name: "Cancel this date" }));
+    await act(async () => { await router.navigate("/groups/2"); });
+    expect(await screen.findByRole("heading", { name: "Second group" })).toBeInTheDocument();
+    await act(async () => count.resolve({ people: 2 }));
+    expect(prompt).not.toHaveBeenCalled();
+    expect(Events.cancelOccurrence).not.toHaveBeenCalled();
   } finally {
     prompt.mockRestore();
   }
@@ -1775,7 +1820,7 @@ describe("GroupDetail: the date question in the app's dialog", () => {
     vi.mocked(window.confirm).mockReturnValue(false);
     await userEvent.click(await screen.findByRole("button", { name: /^More for .* on 2026-12-01$/ }));
     await userEvent.click(screen.getByRole("menuitem", { name: "Cancel this date" }));
-    expect(window.confirm).toHaveBeenCalledExactlyOnceWith("Cancel this date on 2026-12-01?");
+    await waitFor(() => expect(window.confirm).toHaveBeenCalledExactlyOnceWith("Cancel this date on 2026-12-01? Anyone else signed up for this date will be notified."));
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
   });
 });

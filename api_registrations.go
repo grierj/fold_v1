@@ -973,6 +973,10 @@ func (a *App) apiRegister(c *gin.Context) {
 			}
 		}
 		locked, err := lockOccurrence(tx, o.ID)
+		// The date can be deleted while this waits for its lock.
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return errOccurrenceNotFound
+		}
 		if err != nil {
 			return err
 		}

@@ -33,7 +33,7 @@ stubService(Households, () => ({ mine: vi.fn().mockResolvedValue({ household: nu
 
 stubService(Events, () => ({
   get: vi.fn(), register: vi.fn(), registerSeries: vi.fn(), undoSeriesRegistration: vi.fn(),
-  delete: vi.fn(), cancelOccurrence: vi.fn(), dateVisibilityImpact: vi.fn(), update: vi.fn(),
+  delete: vi.fn(), cancelOccurrence: vi.fn(), signedUp: vi.fn(), dateVisibilityImpact: vi.fn(), update: vi.fn(),
   removeRegistration: vi.fn(), promoteRegistration: vi.fn(), restoreRegistration: vi.fn(), addRegistration: vi.fn(), addHost: vi.fn(),
   managedDate: vi.fn(), visibilityImpact: vi.fn(), setVisibility: vi.fn(),
 }));
@@ -1232,6 +1232,7 @@ describe("EventDetail asks every question in the app's dialog", () => {
     vi.mocked(Events.get).mockResolvedValue(page);
     vi.mocked(Events.delete).mockResolvedValue({});
     vi.mocked(Events.cancelOccurrence).mockResolvedValue({});
+    vi.mocked(Events.signedUp).mockResolvedValue({ people: 0 });
     vi.mocked(Events.removeRegistration).mockResolvedValue({});
     vi.mocked(Events.restoreRegistration).mockResolvedValue({});
     vi.spyOn(Site, "get").mockResolvedValue({ name: "Fold", timezone: "UTC", selfSignup: "off", roomsEnabled: false, pushEnabled: true });
@@ -1242,8 +1243,8 @@ describe("EventDetail asks every question in the app's dialog", () => {
     const more = await screen.findByRole("button", { name: "More event actions" });
     await userEvent.click(more);
     await userEvent.click(screen.getByRole("menuitem", { name: "Delete event" }));
-    const asked = screen.getByRole("dialog", { name: "Delete “Hybrid study”?" });
-    expect(asked).toHaveAccessibleDescription("This removes every date and its registrations.");
+    const asked = await screen.findByRole("dialog", { name: "Delete “Hybrid study”?" });
+    expect(asked).toHaveAccessibleDescription("This removes every date and its registrations. No one else will be notified.");
     expect(within(asked).getByRole("button", { name: "Cancel" })).toHaveFocus();
     await userEvent.keyboard("{Escape}");
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
@@ -1252,10 +1253,41 @@ describe("EventDetail asks every question in the app's dialog", () => {
 
     await userEvent.click(more);
     await userEvent.click(screen.getByRole("menuitem", { name: "Delete event" }));
-    const yes = within(screen.getByRole("dialog")).getByRole("button", { name: "Delete event" });
+    const yes = within(await screen.findByRole("dialog")).getByRole("button", { name: "Delete event" });
     act(() => { yes.click(); yes.click(); });
     await waitFor(() => expect(Events.delete).toHaveBeenCalledWith(7));
     expect(Events.delete).toHaveBeenCalledOnce();
+  });
+
+  // The count is shown, not bound: the delete and the cancel send what they sent before.
+  const told = [
+    [0, "No one else will be notified."],
+    [1, "1 other person will be notified."],
+    [4, "4 other people will be notified."],
+  ] as const;
+
+  it.each(told)("asks to delete saying who is told when %s people are signed up", async (people, line) => {
+    vi.mocked(Events.signedUp).mockResolvedValue({ people });
+    renderPage();
+    await userEvent.click(await screen.findByRole("button", { name: "More event actions" }));
+    await userEvent.click(screen.getByRole("menuitem", { name: "Delete event" }));
+    const deleting = await screen.findByRole("dialog", { name: "Delete “Hybrid study”?" });
+    expect(deleting).toHaveAccessibleDescription(`This removes every date and its registrations. ${line}`);
+    await userEvent.click(within(deleting).getByRole("button", { name: "Delete event" }));
+    await waitFor(() => expect(Events.delete).toHaveBeenCalledExactlyOnceWith(7));
+    expect(Events.signedUp).toHaveBeenCalledExactlyOnceWith(7, undefined);
+  });
+
+  it.each(told)("asks to cancel a date saying who is told when %s people are signed up", async (people, line) => {
+    vi.mocked(Events.signedUp).mockResolvedValue({ people });
+    renderPage();
+    await userEvent.click(await screen.findByRole("button", { name: "More for 2026-12-01" }));
+    await userEvent.click(screen.getByRole("menuitem", { name: "Cancel this date" }));
+    const cancelling = await screen.findByRole("dialog", { name: "Cancel this date on 2026-12-01?" });
+    expect(cancelling).toHaveAccessibleDescription(line);
+    await userEvent.click(within(cancelling).getByRole("button", { name: "Cancel this date" }));
+    await waitFor(() => expect(Events.cancelOccurrence).toHaveBeenCalledExactlyOnceWith(7, "2026-12-01"));
+    expect(Events.signedUp).toHaveBeenCalledExactlyOnceWith(7, "2026-12-01");
   });
 
   it("cancels a date only after its dialog, and keeps it when told to", async () => {
