@@ -271,8 +271,7 @@ func groupDeleteTells(tx *gorm.DB, groupID, actor uint, now time.Time, lock bool
 			return d, err
 		}
 	}
-	if err := tx.Model(&models.Membership{}).Joins(listedUsers("memberships")).
-		Where("memberships.group_id = ? AND memberships.status = ? AND memberships.user_id <> ?", groupID, models.MembershipActive, actor).
+	if err := listedMembers(tx, groupID).Where("memberships.user_id <> ?", actor).
 		Order("memberships.user_id").Pluck("memberships.user_id", &d.members).Error; err != nil {
 		return d, err
 	}

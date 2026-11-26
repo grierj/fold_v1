@@ -7,6 +7,7 @@ import (
 	"errors"
 	"log"
 	"net/http"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -1141,9 +1142,7 @@ func (a *App) apiRequestDeletion(c *gin.Context) {
 			return err
 		}
 		var others int64
-		if err := tx.Model(&models.Membership{}).Joins(listedUsers("memberships")).
-			Where("memberships.group_id = ? AND memberships.status = ? AND memberships.user_id <> ?", g.ID, models.MembershipActive, u.ID).
-			Count(&others).Error; err != nil {
+		if err := listedMembers(tx, g.ID).Where("memberships.user_id <> ?", u.ID).Count(&others).Error; err != nil {
 			return err
 		}
 		if !fresh.Leader {
@@ -1193,6 +1192,25 @@ func (a *App) clearDeletionRequest(groupID uint, by *uint, outcome string) error
 	return a.DB.Transaction(func(tx *gorm.DB) error {
 		return clearDeletionRequestIn(tx, groupID, by, outcome)
 	})
+}
+
+// deletionRequestHolds is whether a set deletion flag still stands for the
+// lone leader who asked (DEC-177): the group's one listed member is the person
+// who asked, the actor of an open group.deletion task, or the admin pressing
+// Delete, whose own request wrote them no task and who asks again by pressing.
+// Nothing else stored names who asked, so a flag on a group with no listed
+// member, a second one, or one who did not ask (a successor after a handoff, a
+// co-leader left alone when the asker departed) does not stand.
+func deletionRequestHolds(tx *gorm.DB, groupID, presser uint) (bool, error) {
+	members, err := memberIDs(tx, groupID)
+	if err != nil || len(members) != 1 {
+		return false, err
+	}
+	if members[0] == presser {
+		return true, nil
+	}
+	askers, err := notify.OpenTaskActors(tx, notify.GroupDeletion, groupID)
+	return slices.Contains(askers, members[0]), err
 }
 
 func clearDeletionRequestIn(tx *gorm.DB, groupID uint, by *uint, outcome string) error {
@@ -1253,15 +1271,13 @@ func (a *App) deleteGroup(ctx context.Context, me *models.User, groupID uint, an
 			if !g.DeletionRequested {
 				return errAlreadyHandled
 			}
-			// The request is open only while the leader is the group's one
-			// listed member, decided here under the row lock: a member
-			// re-enabled, or a join or an older add that left the flag set,
-			// withdraws it now (that commits) and the delete is refused.
-			members, err := memberCount(tx, g.ID)
+			// A flag that no longer stands for who asked is withdrawn here,
+			// under the row lock (that commits), and the delete is refused.
+			holds, err := deletionRequestHolds(tx, g.ID, actor.ID)
 			if err != nil {
 				return err
 			}
-			if members > 1 {
+			if !holds {
 				withdrawn = true
 				return clearDeletionRequestIn(tx, g.ID, nil, "withdrawn")
 			}

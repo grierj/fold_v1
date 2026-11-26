@@ -643,6 +643,16 @@ func OpenTask(tx *gorm.DB, kind string, subjectID uint) (bool, error) {
 	return n > 0, err
 }
 
+// OpenTaskActors is who caused the open tasks of kind about subjectID (each
+// row's actor), distinct and ascending: for a deletion request, who asked.
+// A row whose actor was erased names nobody.
+func OpenTaskActors(tx *gorm.DB, kind string, subjectID uint) ([]uint, error) {
+	var ids []uint
+	err := tx.Model(&models.Notification{}).Where("kind = ? AND subject_id = ? AND actor_id IS NOT NULL AND "+sqlTask, kind, subjectID).
+		Distinct("actor_id").Order("actor_id").Pluck("actor_id", &ids).Error
+	return ids, err
+}
+
 // LastResolution is the most recent resolution of a task, for the 409 an
 // inline action gets when it loses a race.
 func LastResolution(db *gorm.DB, kind string, subjectID uint) (by *uint, resolution string, ok bool) {

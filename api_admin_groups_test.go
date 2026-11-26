@@ -278,6 +278,13 @@ func TestRequestCardRefusesARequestThatGainedAMember(t *testing.T) {
 				apiDo(t, f.admin, "DELETE", "/api/v1/admin/users/"+itoa(f.leadUser.ID), map[string]any{"successors": map[string]uint{itoa(f.gid): f.adminUser.ID}}, http.StatusOK)
 			}
 			drainNotices(t, f.app)
+			if strings.HasPrefix(path, "successor") {
+				var g models.Group
+				gormMust(t, f.app.DB.First(&g, f.gid))
+				if g.DeletionRequested {
+					t.Fatal("the handoff left the request open, so the leader's page still says deletion was requested")
+				}
+			}
 			count := groupDeleteCount(t, f.other, f.gid)
 			before := groupDeleteState(t, f.app, f.gid)
 			w := f.other.do("DELETE", f.deletePath, nil, true)
@@ -323,5 +330,115 @@ func TestDeletionRequestCountsAnAddThatLandedWhileItWaited(t *testing.T) {
 	gormMust(t, f.app.DB.First(&after, f.gid))
 	if after.DeletionRequested {
 		t.Fatal("the request was opened on a group with two members")
+	}
+}
+
+// wantRequestWithdrawnAtTheCard presses the card's Delete as c and wants the
+// refusal that withdraws the request: 409 with this resolution ("withdrawn",
+// or "" when no task row is left to resolve), the group, its members, events,
+// dates and registrations as they were, the flag clear and every task closed.
+func wantRequestWithdrawnAtTheCard(t *testing.T, f deletionRequestFixture, c *apiClient, resolution string) {
+	t.Helper()
+	drainNotices(t, f.app)
+	before := groupDeleteState(t, f.app, f.gid)
+	w := c.do("DELETE", f.deletePath, nil, true)
+	wantCode(t, "the card's delete", w, http.StatusConflict, "already_handled")
+	if !strings.Contains(w.Body.String(), `"resolution":"`+resolution+`"`) || !strings.Contains(w.Body.String(), `"resolvedBy":"Fold"`) {
+		t.Fatalf("the refusal: %s", w.Body.String())
+	}
+	want := openTasks.ReplaceAllString(strings.Replace(before, "requested=true", "requested=false", 1), "open tasks=0")
+	if after := groupDeleteState(t, f.app, f.gid); after != want {
+		t.Fatalf("after the refused delete:\n%s\nwant\n%s", after, want)
+	}
+}
+
+// The request stands only for the person who asked: the group's one listed
+// member must be the actor of an open group.deletion task (or the admin
+// pressing). A request that outlived its asker, with someone who did not ask
+// as the one listed member, is withdrawn at the card and the group stays: a
+// re-enabled member promoted to co-leader after which the asker left, and the
+// state an older handoff left for a disable and for an erasure (the erased
+// asker's task rows naming nobody, or gone).
+func TestRequestCardRefusesARequestThatOutlivedItsAsker(t *testing.T) {
+	for _, history := range []string{"promoted co-leader, asker left", "older handoff after a disable", "older handoff after an erasure", "older handoff, tasks gone", "nobody listed"} {
+		t.Run(history, func(t *testing.T) {
+			f := newDeletionRequestFixture(t)
+			other := newTestUser(t, f.app, "outlived other", "password1234", models.RoleMember)
+			if history == "promoted co-leader, asker left" {
+				apiDo(t, f.lead, "DELETE", "/api/v1/groups/"+itoa(f.gid)+"/deletion-request", nil, http.StatusOK)
+				apiDo(t, f.admin, "POST", "/api/v1/admin/groups/"+itoa(f.gid)+"/members", map[string]any{"userId": other.ID}, http.StatusOK)
+				apiDo(t, f.admin, "PUT", "/api/v1/admin/users/"+itoa(other.ID), map[string]any{"status": models.UserDisabled}, http.StatusOK)
+				apiDo(t, f.lead, "POST", "/api/v1/groups/"+itoa(f.gid)+"/deletion-request", map[string]any{}, http.StatusOK)
+				apiDo(t, f.admin, "PUT", "/api/v1/admin/users/"+itoa(other.ID), map[string]any{"status": models.UserActive}, http.StatusOK)
+				apiDo(t, f.admin, "PUT", "/api/v1/groups/"+itoa(f.gid)+"/members/"+itoa(other.ID)+"/role", map[string]any{"role": models.MembershipLeader}, http.StatusOK)
+				if w := confirmDeparture(t, f.lead, "POST", "/api/v1/groups/"+itoa(f.gid)+"/leave", "/api/v1/groups/"+itoa(f.gid)+"/departure-preview", ""); w.Code != http.StatusOK {
+					t.Fatalf("the asker's leave: %d %s", w.Code, w.Body.String())
+				}
+			} else if history == "nobody listed" {
+				// A request nobody is left to answer for: the asker's
+				// membership ended outside any writer that withdraws it.
+				gormMust(t, f.app.DB.Model(&models.Membership{}).Where("user_id = ? AND group_id = ?", f.leadUser.ID, f.gid).Update("status", models.MembershipLeft))
+			} else {
+				// What a handoff from before the card's rule left: the flag
+				// set, the asker unlisted, the successor the one listed member.
+				gormMust(t, f.app.DB.Create(&models.Membership{UserID: other.ID, GroupID: f.gid, Role: models.MembershipLeader, Status: models.MembershipActive}))
+				switch history {
+				case "older handoff after a disable":
+					gormMust(t, f.app.DB.Model(&models.User{}).Where("id = ?", f.leadUser.ID).Update("status", models.UserDisabled))
+				default:
+					gormMust(t, f.app.DB.Where("user_id = ? AND group_id = ?", f.leadUser.ID, f.gid).Delete(&models.Membership{}))
+					gormMust(t, f.app.DB.Delete(&models.User{}, f.leadUser.ID))
+					tasks := f.app.DB.Where("kind = ? AND subject_id = ?", notify.GroupDeletion, f.gid)
+					if history == "older handoff after an erasure" {
+						gormMust(t, tasks.Model(&models.Notification{}).Update("actor_id", nil))
+					} else {
+						gormMust(t, tasks.Delete(&models.Notification{}))
+					}
+				}
+			}
+			var g models.Group
+			gormMust(t, f.app.DB.First(&g, f.gid))
+			if !g.DeletionRequested {
+				t.Fatal("fixture: the request is not open")
+			}
+			if n, _ := memberCount(f.app.DB, f.gid); n != 1 && history != "nobody listed" {
+				t.Fatalf("fixture: %d listed members, want the one who did not ask", n)
+			}
+			resolution := "withdrawn"
+			if history == "older handoff, tasks gone" {
+				resolution = ""
+			}
+			wantRequestWithdrawnAtTheCard(t, f, f.other, resolution)
+		})
+	}
+}
+
+// The request still stands, and the card's Delete deletes, when the one
+// listed member is who asked: a lone admin leader's request pressed by
+// another admin (who has its task), and a lone admin leader pressing their
+// own card in a church with no other admin (no task row was written).
+func TestRequestCardDeletesAnAdminLeadersOwnRequest(t *testing.T) {
+	for _, presser := range []string{"another admin", "the asker"} {
+		t.Run(presser, func(t *testing.T) {
+			app := testApp(t)
+			asker := newTestUser(t, app, "lone admin", "password1234", models.RoleAdmin)
+			askerClient := loginAPI(t, app, asker.Name, "password1234")
+			press := askerClient
+			if presser == "another admin" {
+				newTestUser(t, app, "pressing admin", "password1234", models.RoleAdmin)
+				press = loginAPI(t, app, "pressing admin", "password1234")
+			}
+			gid := createGroupAs(t, askerClient, "Admin's own", models.VisibilityPublic)
+			apiDo(t, askerClient, "POST", "/api/v1/groups/"+itoa(gid)+"/deletion-request", map[string]any{}, http.StatusOK)
+			var tasks int64
+			gormMust(t, app.DB.Model(&models.Notification{}).Where("kind = ? AND subject_id = ?", notify.GroupDeletion, gid).Count(&tasks))
+			if (tasks > 0) != (presser == "another admin") {
+				t.Fatalf("fixture: %d task rows", tasks)
+			}
+			apiDo(t, press, "DELETE", "/api/v1/admin/groups/"+itoa(gid)+"?deletionRequest=1", nil, http.StatusOK)
+			if err := app.DB.First(&models.Group{}, gid).Error; err == nil {
+				t.Fatal("the group is still there")
+			}
+		})
 	}
 }
