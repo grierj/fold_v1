@@ -907,7 +907,7 @@ func TestGroupListCarriesNextEventAt(t *testing.T) {
 	app := testApp(t)
 	newTestUser(t, app, "admin", "password1234", models.RoleAdmin)
 	admin := loginAPI(t, app, "admin", "password1234")
-	if w := admin.do("PUT", "/api/v1/admin/timezone", map[string]any{"timezone": "America/Denver"}, true); w.Code != http.StatusOK {
+	if w := admin.do("PUT", "/api/v1/admin/timezone", adminSettingBody(admin, "/api/v1/admin/timezone", "timezone", "America/Denver"), true); w.Code != http.StatusOK {
 		t.Fatalf("set tz: %d %s", w.Code, w.Body.String())
 	}
 	w := admin.do("POST", "/api/v1/groups", map[string]any{"name": "Choir"}, true)

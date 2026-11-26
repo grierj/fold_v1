@@ -236,7 +236,9 @@ test("a moved-address link explains turn-off-only access, refuses turn-on and st
 
   // The address changes after the page loaded, so the page never saw
   // canTurnOn false. The refusal has to make sense alone.
-  await admin("PUT", `/admin/users/${userID}`, { email: email(movedLogin) });
+  const { users } = await admin("GET", "/admin/users");
+  const user = users.find((row: { id: number }) => row.id === userID);
+  await admin("PUT", `/admin/users/${userID}`, { email: email(movedLogin), revision: user.revision });
 
   // Use the keyboard: a rejected save must keep both state and focus.
   const refuseTurnOn = async () => {

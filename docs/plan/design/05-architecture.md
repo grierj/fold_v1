@@ -380,9 +380,13 @@ Built: avatars and group covers go through `storage.Store` (`storage/storage.go`
 - ICS output uses `TZID` parameters with IANA names plus a `VTIMEZONE` block per zone.
 - Each person has a profile time zone (`users.timezone`, DEC-58). The SPA fills it in from the browser the first time it is empty, and the profile page changes it. Fold uses it for that person's emails and server-written notification text, and will use it for the SMS send window (DEC-25, M3.8). A guest's zone comes from the guest form's browser (`guest_signups.timezone`). Anyone without one gets the church time zone.
 
+**Admin settings edits (#482, DEC-163).** The church time zone, church mailing address, and reply address each have their own revision. The admin read returns the value and its revision in one snapshot. The save locks the setting key, rechecks the admin, and compares the revision before writing. The digest covers the stored value and the last audit id for that key, so changing a value and putting it back still invalidates the earlier revision. Time zone saves now record `setting.timezone_changed` in the same transaction. A conflict reloads the setting and explains why the draft could not be saved.
+
 ### 5.10 Accounts, ages, and households (DEC-4, DEC-8, DEC-18 to DEC-20, DEC-23)
 
 **Signing in.** People sign in with their email and password (DEC-23). The email is unique: one email is one account. Sign-in is throttled by email and by client IP (10.1). Password reset and invitations go to that email.
+
+**Admin account edits (#482, DEC-163).** An edit of the name, display name, email, phone, or role names the account revision returned with the admin users list. The edit compares a digest of the stored user row under the existing account lock. The editor retries if its editable fields and account type still match its original read. When those values conflict with the draft, the editor closes, the list refreshes, and a focused message explains the refusal. Enable and Disable use the status and handoff rules.
 
 How a person gets in:
 

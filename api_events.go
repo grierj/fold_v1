@@ -34,26 +34,6 @@ func (a *App) apiSite(c *gin.Context) {
 	c.JSON(http.StatusOK, siteJSON{Name: a.siteName(), Timezone: churchZoneOrUTC(a.DB).String(), SelfSignup: a.selfSignupMode(), RoomsEnabled: a.roomsEnabled(), PushEnabled: a.pushEnabled()})
 }
 
-func (a *App) apiSetTimezone(c *gin.Context) {
-	var body struct {
-		Timezone string `json:"timezone"`
-	}
-	if err := c.ShouldBindJSON(&body); err != nil {
-		fail(c, errTimezoneRequired)
-		return
-	}
-	tz := strings.TrimSpace(body.Timezone)
-	if _, err := events.LoadZone(tz); err != nil {
-		fail(c, errInvalidTimezone)
-		return
-	}
-	if err := setSettingIn(a.DB, settingTimezone, tz); err != nil {
-		jsonError(c, http.StatusInternalServerError, "could not save timezone")
-		return
-	}
-	c.JSON(http.StatusOK, timezoneResponseJSON{Timezone: tz})
-}
-
 // occurrencesForEventsErr lists scheduled dates of these events and attaches
 // attendee names only where policy allows. A caller who cannot see an
 // event's group gets "Hosted by <church>" and no group id or name. A failed

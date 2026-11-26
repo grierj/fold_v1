@@ -1904,6 +1904,8 @@ func TestReasonReviewCensus(t *testing.T) {
 // signed numbers it checks before use; dateRoomRevisionIn (an unbooked date's
 // room token) filters to the room_booking.booked, .overlap and .released rows
 // of one occurrence and scans only the latest audit row's own id into a uint.
+// settingRevisionIn filters to the setting's own audit action and reads only
+// the maximum audit id as a signed integer, with no row lock.
 // pruneExpiredLinks reads invitation creation and acceptance audits with
 // EXISTS outside the contact gate. It takes no audit or request row locks.
 // Each table's delete commits before the next one starts.
@@ -1949,6 +1951,7 @@ var reasonCensusPinned = map[string][]string{
 		"api_push.go:apiPushTest",
 		"api_registrations.go:previouslyRegisteredPerson",
 		"edit_revision.go:dateRoomRevisionIn",
+		"edit_revision.go:settingRevisionIn",
 		"link_cleanup.go:pruneExpiredLinks",
 		"registration_access.go:loadAccessHistory",
 		"registration_subjects.go:appendRecoverableRegistrations",

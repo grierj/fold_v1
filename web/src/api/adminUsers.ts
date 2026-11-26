@@ -210,7 +210,7 @@ function isDeleteReason(v: JsonValue): v is JsonValue & ErasureReasonItem {
 export const AdminUsers = {
   list: () => api<UsersResponse>("/admin/users"),
   create: (data: AdminUserInput) => api<UserResponse>("/admin/users", { method: "POST", body: data }),
-  update: (id: Id, data: ProfileUpdate & { role?: string; status?: "active" | "disabled"; successors?: Record<string, number> }) =>
+  update: (id: Id, data: ProfileUpdate & { role?: string; revision?: string; status?: "active" | "disabled"; successors?: Record<string, number> }) =>
     api<UserResponse>(path`/admin/users/${id}`, { method: "PUT", body: data }),
   // Groups this person leads alone, with who may take over (DEC-36).
   soleLeaderGroups: (id: Id) => api<SoleLedGroupsResponse>(path`/admin/users/${id}/sole-leader-groups`),

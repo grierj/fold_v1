@@ -1036,13 +1036,16 @@ decisionNote, expiresAt, createdAt, decidedAt?}`.
 
 ```
 GET /api/v1/site → {name, timezone, selfSignup, roomsEnabled, pushEnabled}   (public)
-PUT /api/v1/admin/timezone → 200 {timezone}   (admin)
-    body: {timezone} — an IANA name, for example America/Denver
+GET /api/v1/admin/timezone → 200 {timezone, revision}   (admin)
+PUT /api/v1/admin/timezone → 200 {timezone, revision} | 409 setting_changed   (admin; audited setting.timezone_changed)
+    body: {timezone, revision} — an IANA name, for example America/Denver
 ```
 
 `timezone` is the church time zone. The schedule form defaults a new series
 to the browser's time zone. A create request that omits `tzid` uses the
 church time zone, or UTC when that setting is missing. An unknown name is 400.
+Send the revision from the admin read or the last successful save. A missing or stale
+revision returns 409 and changes nothing.
 
 ### Events
 
@@ -1757,7 +1760,7 @@ POST /api/v1/admin/groups/:id/members      → 200 {membership}          (admin)
      body: {selectionId | userId, role: "member"|"leader", overLimit?} — one target only; role=leader adds a (co-)leader; audited;
      a full group needs overLimit (audited as membership.added_over_limit)
 DELETE /api/v1/admin/groups/:id/members/:userId → 200 {departure} (admin; same confirmed body and transaction as the leader route)
-GET  /api/v1/admin/users                   → {users: [user]}           (admin; each may carry emailSuppression: {reason, since})
+GET  /api/v1/admin/users                   → {users: [user]}           (admin; each user includes revision and may carry emailSuppression: {reason, since})
 POST /api/v1/admin/users/:id/email-suppression/clear → 200 {cleared} (admin; audited email.suppression_cleared; M3.2c)
 GET  /api/v1/admin/users/:id/teen-consents  → {consents: [teenConsent], administrativelyDisabled} (admin)
 POST /api/v1/admin/users/:id/teen-consents → 200 {} | 400 | 403 | 409  (admin)
@@ -1768,8 +1771,11 @@ POST /api/v1/admin/users                    → 201 {user}                (admin
      body: {email, name, password? (≥10 chars), role, displayName?, phone?}
      — without a password the account is `invited` and can't sign in; 409 if the email is taken (any case)
      — rechecks the acting admin's session and authority at insertion; 401 if revoked while the request was in flight; creation and its audit commit together, with no notification or email
-PUT  /api/v1/admin/users/:id               → 200 {user}                (admin; profile fields, email, role, status)
-     body: any of {name, displayName, email, phone, role, status: "active"|"disabled", successors}
+PUT  /api/v1/admin/users/:id               → 200 {user}                (admin; user includes revision)
+     body: {name?, displayName?, email?, phone?, role?, revision?, status?: "active"|"disabled", successors?}
+     — if the request supplies name, displayName, email, phone, or role, it must name that account's revision
+     — missing or stale revisions for these fields return 409 admin_user_changed with nothing written
+     — a status-only Enable or Disable follows the existing status and successor rules
 POST /api/v1/admin/users/:id/password      → 200 {}                    (admin; also activates an invited account)
      body: {password (≥10 chars)}
 DELETE /api/v1/admin/users/:id             → 200 {erasure}             (admin; soft delete, frees the email)
@@ -2407,10 +2413,12 @@ POST /api/v1/messages/:id/retry          → 200 {message} | 403 message_retry_r
 GET  /api/v1/admin/settings/guardian-copies → 200 {on}                              (admin)
 PUT  /api/v1/admin/settings/guardian-copies → 200 {on} | 400                         (admin; audited setting.guardian_copies_changed)
      body: {on}
-GET  /api/v1/admin/settings/reply-to     → 200 {address}                              (admin)
-PUT  /api/v1/admin/settings/reply-to     → 200 {address} | 400 reply_to_invalid       (admin; audited setting.reply_to_changed)
-     body: {address} — one plain address (`validEmail`), or empty for none
+GET  /api/v1/admin/settings/reply-to     → 200 {address, revision}                              (admin)
+PUT  /api/v1/admin/settings/reply-to     → 200 {address, revision} | 409 setting_changed | 400 reply_to_invalid       (admin; audited setting.reply_to_changed)
+     body: {address, revision} — one plain address (`validEmail`), or empty for none
 ```
+
+The reply address save must name the revision from its read or the last successful save. A missing or stale revision changes nothing.
 
 `counts` is `{sent, delivered, bounced, complained, failed, skipped, queued, teens, guardianCopies, guardianCopiesMissed, guardianCopiesFailed}`: the people the message was for, by status (`skipped` is the `suppressed` rows, `queued` also covers deferred texts; someone who marked it as spam got it, so the page counts them as sent to), `teens` the teens it was for and didn't skip (DEC-20), and the guardian copies counted apart, with those that didn't go out (skipped, bounced or failed) and the failed ones Try again would send. `skippedBy` counts the skipped by reason, in the preview's words. `recipients` is the first 200 rows by name, `[{name, teen, status, reason?, copyOf?}]`; `more` says there are others. Guardian copies are in an admin's list only, each with `copyOf`, the teen's name (DEC-19); a leader or host never sees a guardian's name and reads "2 guardian copies sent" instead (DEC-132). Two queries read it all, whatever the size.
 
@@ -2598,10 +2606,12 @@ PUT  /api/v1/email-settings/:token    → 200 {emailSettings} | 400 | 403 | 404 
 GET  /api/v1/me/notification-settings → 200 {settings: {optionalEmailOff, kinds}}
 PUT  /api/v1/me/notification-settings → 200 {settings}
      body: {category, off}, or {optionalEmailOff} (DEC-97) for every kind
-GET  /api/v1/admin/settings/church-address → 200 {address}                          (admin)
-PUT  /api/v1/admin/settings/church-address → 200 {address} | 400 church_address_long (admin; audited setting.church_address_changed)
-     body: {address} — up to 6 lines and 300 characters; empty clears it
+GET  /api/v1/admin/settings/church-address → 200 {address, revision}                          (admin)
+PUT  /api/v1/admin/settings/church-address → 200 {address, revision} | 409 setting_changed | 400 church_address_long (admin; audited setting.church_address_changed)
+     body: {address, revision} — up to 6 lines and 300 characters; empty clears it
 ```
+
+The church mailing address save must name the revision from its read or the last successful save. A missing or stale revision changes nothing.
 
 `canTurnOn` says whether the link was mailed to this account's current address, independent of its email choices. Older v1 links and links mailed to another address can still view settings and turn email off. Any turn-on through those links answers 403 `email_link_turn_on` and changes nothing. Sign in or use a link from a newer email to turn email on. Authorized turn-on clears the current address's retained choice for that kind and records the new account choice.
 

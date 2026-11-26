@@ -557,7 +557,7 @@ func TestReenableAsMemberJudgesTheRoleItComesBackTo(t *testing.T) {
 	}
 
 	mark = markNotices(t, f.app)
-	apiDo(t, f.admin, "PUT", "/api/v1/admin/users/"+itoa(demoted.ID), map[string]any{"status": models.UserActive, "role": models.RoleMember}, http.StatusOK)
+	apiDo(t, f.admin, "PUT", "/api/v1/admin/users/"+itoa(demoted.ID), adminEditBody(f.admin, demoted.ID, map[string]any{"status": models.UserActive, "role": models.RoleMember}), http.StatusOK)
 	var back models.User
 	gormMust(t, f.app.DB.First(&back, demoted.ID))
 	if back.Role != models.RoleMember || back.Status != models.UserActive {

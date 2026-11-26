@@ -1320,6 +1320,9 @@ func TestAuditErasureTeenRealLifecycles(t *testing.T) {
 // After an input changes, review its attribution rule before updating its pin.
 // No files are parsed by executing them or by loading application state.
 var auditWriterCensus = map[string]string{
+	"api_admin_settings.go:saveSetting":         "f3019fc0568259dc063c1fa1b84f7fe5690ad50b20e105c073cd0e4f8502af41",
+	"api_admin_settings.go:saveRevisedSetting":  "d02540e369249031c073953cbf9291b47678b9dd6b4ba9ecf079188415922189",
+	"api_admin_settings.go:writeAuditedSetting": "10cc718888efbfe112b1f9d198a48a9a9c7e8c74ba90ec721ad35ba8d555316c",
 	// System maintenance: no actor or IP, fixed host-removal metadata and a
 	// version/count-only sweep marker. The two existing erasure writers now
 	// accept a nil system actor, preserving their nonzero admin attribution.
@@ -1334,7 +1337,6 @@ var auditWriterCensus = map[string]string{
 	"api_admin_reasons_legacy.go:legacyPageIn":                    "133083e02fdac6fc98ca70715bf597db2a87dd80bfec7b3491f18bf0b7417fd4",
 	"age_rollover.go:flagHouseholdChild13":                        "1804d1f969590562b8e2282f42635834e8f5a3841b0c9679f4b400a4efe5d866",
 	"age_rollover.go:rolloverTeen":                                "4139500705a3da764c067accd4f73fefed8e9c88aa696be6dbc26978d7dbe20b",
-	"api_account_requests.go:apiSetSelfSignup":                    "46f34cd7e73d9cf344b3e9378c76b811b88b06d10a20b7f495aadac78da63e82",
 	"api_account_requests.go:decideAccountRequest":                "18bb2e5e2f8af270aef775f8a7cdbdf8f7eaa0f5d151615576dc938bd4d21fe9",
 	"api_account_requests.go:expirePendingRequests":               "b30d60d413fdc04420d5ef85fed5141945bbad23cd3c882a19a4e160d067446f",
 	"api_account_requests.go:storeAccountRequest":                 "a2a12aeb0ea4183b87c6773c1b5ba0f75b74d9bc2296be8c6edf2c4070aef3ec",
@@ -1388,7 +1390,6 @@ var auditWriterCensus = map[string]string{
 	"api_invitations.go:writeInvitationRefusal":                   "7b02d5b25e7c2b17d5c628c82fa102075c93ba82255b0a21b4eecb4c7dae6e0f",
 	"api_message_history.go:apiRetryMessage":                      "28f49307508e5f77df4a6aaebc4c63d59a94aca0cccb26e86b207e8d4024ce19",
 	"api_message_preview.go:apiTestMessage":                       "2ad44cd111947e52717b8a4d257d3fd6c307ab0b8be1d938139a9425f62c952a",
-	"api_message_settings.go:saveSetting":                         "94b67b44538247bff4e69419b7c8e347b1a204eb0bdef8b7626194279525c245",
 	"api_messages.go:apiCancelMessage":                            "072e942199cda3fee26b59da2a7cd384b18bb75c04052b6873cd0ded6b108fd7",
 	"api_messages.go:apiScheduleMessage":                          "c3812387e4ed2d94a8099978724a83523a859e25f6edd41167d14c35be69f5ca",
 	"api_messages.go:apiUpdateMessage":                            "488f229db14d0f858b82d153bd8a76dbe2e3d4f1d46a6c57564a9e9c73df9928",
@@ -1418,7 +1419,7 @@ var auditWriterCensus = map[string]string{
 	"api_room_series.go:bookWholeSeries":                          "3635d7f6e8ba87cf7a1adce12bb01c6ba358118b565f90a4d6072ab6389b2c0d",
 	"api_rooms.go:apiAdminCreateRoom":                             "00c14cd2b3e4d506f59158cf6a676fe89be5a8183760e27310b12b9e183b8f15",
 	"api_rooms.go:apiAdminUpdateRoom":                             "408c699d62a155af44bde0954c969b70965c0c9c583ded3ffc5a0464ffa5a30d",
-	"api_rooms.go:setRoomSwitch":                                  "a09e15ddbb19ba2435d0b35ce0e05fb57c75d2ffc0b55ac150bb25c937c9bd39",
+	"api_rooms.go:setRoomSwitch":                                  "fb7994f9786dc8d2278ff5e34e116f6597e407c0e62f5cc3bbbb4158227674de",
 	"api_teen_consent.go:changeTeenConsent":                       "f7124d9ee26a3b16b8f67a5fa0fadb7867bcd7b5d9e213e83f3efa8556d9449b",
 	"api_teen_guardians.go:apiClaimTeenGuardian":                  "059457aa963c16581146d2802d7bff428783101588e5a44a0cd3041cd868f55a",
 	"api_teen_guardians.go:nominateTeenGuardian":                  "c1ef0fab390bdda6d4522037a4a396e79108b8121784f33c9ac6c20058244672",
@@ -1698,8 +1699,8 @@ func TestAuditErasureWriterCensus(t *testing.T) {
 	if p := auditCensusProblems(c); len(p) > 0 {
 		t.Fatal(strings.Join(p, "\n"))
 	}
-	if len(c.Sites) != 116 {
-		t.Fatalf("audit.Write sites = %d, expected 116; review every changed site", len(c.Sites))
+	if len(c.Sites) != 114 {
+		t.Fatalf("audit.Write sites = %d, expected 114; review every changed site", len(c.Sites))
 	}
 	for _, site := range c.Sites {
 		t.Log(site)

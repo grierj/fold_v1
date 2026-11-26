@@ -297,6 +297,7 @@ const (
 	// EmailSuppressionCleared: an admin let Fold mail a suppressed address
 	// again (M3.2c, DEC-113). Target is the user; meta has the reasons.
 	EmailSuppressionCleared = "email.suppression_cleared"
+	TimezoneChanged         = "setting.timezone_changed"
 	// ChurchAddressChanged: an admin set or cleared the church's mailing
 	// address for email footers (M3.3b, DEC-116).
 	ChurchAddressChanged = "setting.church_address_changed"

@@ -22,34 +22,50 @@ import (
 )
 
 func (a *App) apiAdminListUsers(c *gin.Context) {
-	var users []models.User
-	if err := a.DB.Order("lower(name), email").Find(&users).Error; err != nil {
-		jsonError(c, http.StatusInternalServerError, "could not list users")
-		return
-	}
-	var historyIDs []uint
-	if err := a.DB.Model(&models.TeenConsent{}).Distinct().Pluck("teen_user_id", &historyIDs).Error; err != nil {
-		jsonError(c, http.StatusInternalServerError, "could not list users")
-		return
-	}
-	history := make(map[uint]bool, len(historyIDs))
-	for _, id := range historyIDs {
-		history[id] = true
-	}
-	suppressed, err := openSuppressions(a.DB)
+	out := usersResponseJSON{Users: []userJSON{}}
+	err := a.readAdminSnapshot(c, "admin users", func(tx *gorm.DB) error {
+		var users []models.User
+		if err := tx.Order("lower(name), email").Find(&users).Error; err != nil {
+			return err
+		}
+		ids := make([]uint, len(users))
+		for i := range users {
+			ids[i] = users[i].ID
+		}
+		revisions, err := a.rowRevisionsIn(tx, adminUserRevisionRows, ids)
+		if err != nil {
+			return err
+		}
+		var historyIDs []uint
+		if err := tx.Model(&models.TeenConsent{}).Distinct().Pluck("teen_user_id", &historyIDs).Error; err != nil {
+			return err
+		}
+		history := make(map[uint]bool, len(historyIDs))
+		for _, id := range historyIDs {
+			history[id] = true
+		}
+		suppressed, err := openSuppressions(tx)
+		if err != nil {
+			return err
+		}
+		for i := range users {
+			u := &users[i]
+			row := a.toUserJSON(u)
+			row.Revision = revisions[u.ID]
+			row.HasTeenConsentHistory = history[u.ID]
+			row.EmailSuppression = suppressed[mail.AddressHash(u.Email)]
+			out.Users = append(out.Users, row)
+		}
+		return nil
+	})
 	if err != nil {
-		jsonError(c, http.StatusInternalServerError, "could not list users")
+		fail(c, err)
 		return
 	}
-	out := make([]userJSON, 0, len(users))
-	for i := range users {
-		row := a.toUserJSON(&users[i])
-		row.HasTeenConsentHistory = history[users[i].ID]
-		row.EmailSuppression = suppressed[mail.AddressHash(users[i].Email)]
-		out = append(out, row)
-	}
-	c.JSON(http.StatusOK, usersResponseJSON{Users: out})
+	c.JSON(http.StatusOK, out)
 }
+
+var errTeenAdminRole = apiErr(http.StatusBadRequest, "", "a teen account can't be an admin")
 
 // apiAdminCreateUser adds an account. Without a password it starts
 // invited and can't sign in until someone sets one (M1.2 emails the link).
@@ -94,7 +110,7 @@ func (a *App) apiAdminCreateUser(c *gin.Context) {
 		return
 	}
 	if kind == models.AccountTeen && role == models.RoleAdmin {
-		jsonError(c, http.StatusBadRequest, "a teen account can't be an admin")
+		fail(c, errTeenAdminRole)
 		return
 	}
 	u := models.User{
@@ -263,13 +279,13 @@ func keepsAnAdminIn(tx *gorm.DB, actor, target *models.User, change adminChange)
 
 var errTeenActivation = apiErr(http.StatusBadRequest, "", "a teen account waiting for consent becomes active only when consent is granted")
 
-// errAdminTargetGone: the person an admin edit names was erased while the edit
-// waited for the contact gate.
+// errAdminTargetGone is the same refusal when the account was erased while the edit waited.
 var errAdminTargetGone = apiErr(http.StatusNotFound, "", "user not found")
 
 func (a *App) apiAdminUpdateUser(c *gin.Context) {
-	u, ok := a.adminTargetUser(c)
-	if !ok {
+	id, err := strconv.Atoi(c.Param("id"))
+	if err != nil || id <= 0 {
+		fail(c, errAdminTargetGone)
 		return
 	}
 	me := apiUser(c)
@@ -279,6 +295,7 @@ func (a *App) apiAdminUpdateUser(c *gin.Context) {
 		Email       *string `json:"email"`
 		Phone       *string `json:"phone"`
 		Role        *string `json:"role"`
+		Revision    string  `json:"revision"`
 		Status      *string `json:"status"`
 		// Successors: required when disabling someone who leads a group alone
 		// (DEC-36), as for deletion.
@@ -289,7 +306,6 @@ func (a *App) apiAdminUpdateUser(c *gin.Context) {
 		return
 	}
 	updates := map[string]interface{}{}
-	bump := false
 	if body.Name != nil {
 		name, err := optionalName(*body.Name)
 		if err != nil {
@@ -312,10 +328,7 @@ func (a *App) apiAdminUpdateUser(c *gin.Context) {
 			fail(c, errValidEmailRequired)
 			return
 		}
-		if email != mail.NormalizeAddress(u.Email) {
-			updates["email"] = email
-			bump = true
-		}
+		updates["email"] = email
 	}
 	if body.Phone != nil {
 		phone, err := phoneNumber(*body.Phone)
@@ -331,19 +344,7 @@ func (a *App) apiAdminUpdateUser(c *gin.Context) {
 			jsonError(c, http.StatusBadRequest, "role must be admin or member")
 			return
 		}
-		// A teen is never an admin (#94, DEC-8): admins grant teen consent.
-		if role == models.RoleAdmin && u.AccountType == models.AccountTeen {
-			jsonError(c, http.StatusBadRequest, "a teen account can't be an admin")
-			return
-		}
-		if role != models.RoleAdmin && !policy.CanDemoteOrDelete(asPerson(me), asPerson(u), a.adminCount()) {
-			fail(c, adminRuleRefusal(adminDemote, u.ID == me.ID))
-			return
-		}
-		if role != u.Role {
-			updates["role"] = role
-			bump = true
-		}
+		updates["role"] = role
 	}
 	if body.Status != nil {
 		status := strings.TrimSpace(*body.Status)
@@ -351,135 +352,163 @@ func (a *App) apiAdminUpdateUser(c *gin.Context) {
 			jsonError(c, http.StatusBadRequest, "status must be active or disabled")
 			return
 		}
-		if status == models.UserDisabled && !policy.CanDemoteOrDelete(asPerson(me), asPerson(u), a.adminCount()) {
-			fail(c, adminRuleRefusal(adminDisable, u.ID == me.ID))
-			return
-		}
 	}
-	if len(updates) > 0 || body.Status != nil {
-		err := a.contactMutation(contactChange{UserID: u.ID}, func(tx *gorm.DB) error {
-			now := a.newTxClock()
-			actor, target, err := lockConsentUsers(tx, me.ID, u.ID)
-			if err != nil {
-				if errors.Is(err, gorm.ErrRecordNotFound) {
-					// Erased while this request waited for the contact gate: the lookup
-					// above found them, the locked read no longer does.
-					return errAdminTargetGone
-				}
+	var updated models.User
+	var revision string
+	err = a.contactMutation(contactChange{UserID: uint(id)}, func(tx *gorm.DB) error {
+		now := a.newTxClock()
+		actor, u, err := lockConsentUsers(tx, me.ID, uint(id))
+		if err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return errAdminTargetGone
+			}
+			if errors.Is(err, errConsentForbidden) {
+				return errSecuritySession
+			}
+			return err
+		}
+		if !adminCurrent(actor, me) {
+			return errSecuritySession
+		}
+		if len(updates) > 0 {
+			if err := a.checkAdminUserRevision(tx, u.ID, body.Revision); err != nil {
 				return err
 			}
-			if !adminCurrent(actor, me) {
-				return errConsentForbidden
-			}
-			u = target
-			if body.Role != nil && *body.Role == models.RoleAdmin && u.AccountType == models.AccountTeen {
-				return errConsentTeen
-			}
-			if body.Status != nil {
-				status := strings.TrimSpace(*body.Status)
-				if status == models.UserActive && u.Status == models.UserPendingConsent {
-					return errTeenActivation
-				}
-				adminDisabled := status == models.UserDisabled
-				updates["administratively_disabled"] = adminDisabled
-				if status == models.UserActive && u.AccountType == models.AccountTeen {
-					granted, err := latestTeenConsentIn(tx, u.ID, models.TeenConsentAccount)
-					if err != nil {
-						return err
-					}
-					if !granted {
-						status = models.UserPendingConsent
-					}
-				} else if status == models.UserActive && u.PasswordHash == nil {
-					status = models.UserInvited
-				}
-				if status != u.Status || adminDisabled != u.AdministrativelyDisabled {
-					updates["status"] = status
-					bump = true
-				}
-			}
-			// The locked target leaves the active-admin set when the effective
-			// update demotes it or makes it anything but active (disabled,
-			// invited, pending consent). Nothing has been written yet.
-			newRole, roleSet := updates["role"].(string)
-			newStatus, statusSet := updates["status"].(string)
-			demotes := roleSet && newRole != models.RoleAdmin
-			deactivates := statusSet && newStatus != models.UserActive
-			if demotes || deactivates {
-				change := adminDisable
-				if demotes {
-					change = adminDemote
-				}
-				if err := keepsAnAdminIn(tx, actor, u, change); err != nil {
-					return err
-				}
-			}
-			if newRole, ok := updates["role"].(string); ok && newRole != u.Role {
-				if err := audit.Write(tx, audit.Entry{Actor: &me.ID, Action: audit.UserRoleChanged, TargetType: "user", TargetID: u.ID,
-					Meta: map[string]any{"oldRole": u.Role, "newRole": newRole}, IP: c.ClientIP()}); err != nil {
-					return err
-				}
-			}
-			if newEmail, ok := updates["email"].(string); ok {
-				if err := audit.Write(tx, audit.Entry{Actor: &me.ID, Action: audit.UserEmailChanged, TargetType: "user", TargetID: u.ID,
-					Meta: map[string]any{"oldEmail": u.Email, "newEmail": newEmail}, IP: c.ClientIP()}); err != nil {
-					return err
-				}
-			}
-			if _, changed := updates["email"]; changed {
-				if err := revokeAccountTokens(tx, u.ID); err != nil {
-					return err
-				}
-			}
-			if bump {
-				updates["session_version"] = sessionVersionBump()
-			}
-			status, statusSet := updates["status"].(string)
-			if !statusSet {
-				if err := tx.Model(u).Updates(updates).Error; err != nil {
-					return err
-				}
+		}
+		bump := false
+		if email, ok := updates["email"].(string); ok {
+			if email == mail.NormalizeAddress(u.Email) {
+				delete(updates, "email")
 			} else {
-				wasDisabled := u.Status == models.UserDisabled
-				if status == models.UserDisabled && !wasDisabled {
-					// The handoff must see the account listed (leaderCount
-					// counts listed users), so it runs before the status flips.
-					if err := handOffLeadership(tx, me.ID, c.ClientIP(), u.ID, body.Successors, exitAccountDisabled); err != nil {
-						return err
-					}
-				}
-				if err := a.setAccountStatusIn(tx, u, updates, me.ID, c.ClientIP(), now); err != nil {
+				bump = true
+			}
+		}
+		if role, ok := updates["role"].(string); ok {
+			if role == models.RoleAdmin && u.AccountType == models.AccountTeen {
+				return errTeenAdminRole
+			}
+			if role == u.Role {
+				delete(updates, "role")
+			} else {
+				bump = true
+			}
+		}
+		if body.Status != nil {
+			status := strings.TrimSpace(*body.Status)
+			if status == models.UserActive && u.Status == models.UserPendingConsent {
+				return errTeenActivation
+			}
+			adminDisabled := status == models.UserDisabled
+			updates["administratively_disabled"] = adminDisabled
+			if status == models.UserActive && u.AccountType == models.AccountTeen {
+				granted, err := latestTeenConsentIn(tx, u.ID, models.TeenConsentAccount)
+				if err != nil {
 					return err
 				}
-				switch {
-				case status == models.UserDisabled:
-					return audit.Write(tx, audit.Entry{Actor: &me.ID, Action: audit.UserDisabled,
-						TargetType: "user", TargetID: u.ID, IP: c.ClientIP()})
-				case wasDisabled:
-					if err := audit.Write(tx, audit.Entry{Actor: &me.ID, Action: audit.UserEnabled,
-						TargetType: "user", TargetID: u.ID, IP: c.ClientIP()}); err != nil {
-						return err
-					}
+				if !granted {
+					status = models.UserPendingConsent
+				}
+			} else if status == models.UserActive && u.PasswordHash == nil {
+				status = models.UserInvited
+			}
+			if status != u.Status || adminDisabled != u.AdministrativelyDisabled {
+				updates["status"] = status
+				bump = true
+			}
+		}
+		// The locked target leaves the active-admin set when the effective
+		// update demotes it or makes it anything but active (disabled,
+		// invited, pending consent). Nothing has been written yet.
+		newRole, roleSet := updates["role"].(string)
+		newStatus, statusSet := updates["status"].(string)
+		demotes := roleSet && newRole != models.RoleAdmin
+		deactivates := statusSet && newStatus != models.UserActive
+		if demotes || deactivates {
+			change := adminDisable
+			if demotes {
+				change = adminDemote
+			}
+			if err := keepsAnAdminIn(tx, actor, u, change); err != nil {
+				return err
+			}
+		}
+		if newRole, ok := updates["role"].(string); ok && newRole != u.Role {
+			if err := audit.Write(tx, audit.Entry{Actor: &me.ID, Action: audit.UserRoleChanged, TargetType: "user", TargetID: u.ID,
+				Meta: map[string]any{"oldRole": u.Role, "newRole": newRole}, IP: c.ClientIP()}); err != nil {
+				return err
+			}
+		}
+		if newEmail, ok := updates["email"].(string); ok {
+			if err := audit.Write(tx, audit.Entry{Actor: &me.ID, Action: audit.UserEmailChanged, TargetType: "user", TargetID: u.ID,
+				Meta: map[string]any{"oldEmail": u.Email, "newEmail": newEmail}, IP: c.ClientIP()}); err != nil {
+				return err
+			}
+		}
+		if _, changed := updates["email"]; changed {
+			if err := revokeAccountTokens(tx, u.ID); err != nil {
+				return err
+			}
+		}
+		if bump {
+			updates["session_version"] = sessionVersionBump()
+		}
+		status, statusSet := updates["status"].(string)
+		if statusSet {
+			wasDisabled := u.Status == models.UserDisabled
+			if status == models.UserDisabled && !wasDisabled {
+				// The handoff must see the account listed (leaderCount
+				// counts listed users), so it runs before the status flips.
+				if err := handOffLeadership(tx, me.ID, c.ClientIP(), u.ID, body.Successors, exitAccountDisabled); err != nil {
+					return err
 				}
 			}
+			if err := a.setAccountStatusIn(tx, u, updates, me.ID, c.ClientIP(), now); err != nil {
+				return err
+			}
+			switch {
+			case status == models.UserDisabled:
+				if err := audit.Write(tx, audit.Entry{Actor: &me.ID, Action: audit.UserDisabled,
+					TargetType: "user", TargetID: u.ID, IP: c.ClientIP()}); err != nil {
+					return err
+				}
+			case wasDisabled:
+				if err := audit.Write(tx, audit.Entry{Actor: &me.ID, Action: audit.UserEnabled,
+					TargetType: "user", TargetID: u.ID, IP: c.ClientIP()}); err != nil {
+					return err
+				}
+			}
+		}
+		if !statusSet && len(updates) > 0 {
+			if err := tx.Model(u).Updates(updates).Error; err != nil {
+				return err
+			}
+		}
+		if status != models.UserDisabled && (len(updates) > 0 || body.Status != nil) {
 			today, err := churchClockIn(tx, now.at())
 			if err != nil {
 				return err
 			}
-			return a.completeTeenConversionIfReady(tx, u, today, c.ClientIP())
-		})
-		if err != nil {
-			if emailTaken(err) {
-				fail(c, errEmailTaken)
-				return
+			if err := a.completeTeenConversionIfReady(tx, u, today, c.ClientIP()); err != nil {
+				return err
 			}
-			fail(c, err)
-			return
 		}
+		if err := tx.First(&updated, u.ID).Error; err != nil {
+			return err
+		}
+		revision, err = a.rowRevisionIn(tx, adminUserRevisionRows, u.ID)
+		return err
+	})
+	if emailTaken(err) {
+		fail(c, errEmailTaken)
+		return
 	}
-	var updated models.User
-	a.DB.First(&updated, u.ID)
-	c.JSON(http.StatusOK, userResponseJSON{User: a.toUserJSON(&updated)})
+	if err != nil {
+		fail(c, err)
+		return
+	}
+	row := a.toUserJSON(&updated)
+	row.Revision = revision
+	c.JSON(http.StatusOK, userResponseJSON{User: row})
 }
 
 type deleteUserBody struct {

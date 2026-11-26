@@ -161,6 +161,7 @@ var auditIPAttribution = map[string][]auditIPRule{
 	audit.JobRetried:                    auditIPOrdinary,
 	audit.JobDismissed:                  auditIPOrdinary,
 	audit.EmailSuppressionCleared:       auditIPOrdinary,
+	audit.TimezoneChanged:               auditIPOrdinary,
 	audit.ChurchAddressChanged:          auditIPOrdinary,
 	audit.GuardianCopiesChanged:         auditIPOrdinary,
 	audit.ReplyToChanged:                auditIPOrdinary,

@@ -12,6 +12,7 @@ export interface TeenConsent {
 }
 
 export interface User {
+  revision?: string;
   id: number;
   name: string;
   displayName: string;
@@ -1881,6 +1882,7 @@ export interface CalendarFeedResponse {
 }
 
 export interface SettingAddressResponse {
+  revision: string;
   address: string;
 }
 
@@ -1945,6 +1947,7 @@ export interface JitsiLinkResponse {
 }
 
 export interface TimezoneResponse {
+  revision: string;
   timezone: string;
 }
 

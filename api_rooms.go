@@ -407,11 +407,9 @@ func (a *App) setRoomSwitch(c *gin.Context, key, action string) (enabled, ok boo
 		if err != nil {
 			return err
 		}
-		if err := setSettingIn(tx, key, strconv.FormatBool(*body.Enabled)); err != nil {
-			return err
-		}
-		return audit.Write(tx, audit.Entry{Actor: &me.ID, Action: action,
-			TargetType: "setting", Meta: map[string]any{"enabled": *body.Enabled}, IP: c.ClientIP()})
+		return writeAuditedSetting(tx, key, strconv.FormatBool(*body.Enabled), audit.Entry{
+			Actor: &me.ID, Action: action, Meta: map[string]any{"enabled": *body.Enabled}, IP: c.ClientIP(),
+		})
 	}, readCommitted)
 	if isAPIError(err) {
 		fail(c, err)

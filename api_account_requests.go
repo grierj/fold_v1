@@ -655,15 +655,7 @@ func (a *App) apiSetSelfSignup(c *gin.Context) {
 		jsonError(c, http.StatusBadRequest, "mode must be request or off")
 		return
 	}
-	me := apiUser(c)
-	err := a.DB.Transaction(func(tx *gorm.DB) error {
-		if err := setSettingIn(tx, settingSelfSignup, body.Mode); err != nil {
-			return err
-		}
-		return audit.Write(tx, audit.Entry{Actor: &me.ID, Action: audit.SelfSignupChanged,
-			TargetType: "setting", TargetID: 0,
-			Meta: map[string]any{"mode": body.Mode}, IP: c.ClientIP()})
-	})
+	err := a.saveSetting(c, settingSelfSignup, body.Mode, audit.SelfSignupChanged, map[string]any{"mode": body.Mode})
 	if err != nil {
 		jsonError(c, http.StatusInternalServerError, "could not save the setting")
 		return

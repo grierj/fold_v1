@@ -10,7 +10,7 @@ const setGuardianCopies = vi.fn();
 const replyTo = vi.fn();
 const setReplyTo = vi.fn();
 
-stubService(Admin, () => ({ guardianCopies: () => guardianCopies(), setGuardianCopies: (on: boolean) => setGuardianCopies(on), replyTo: () => replyTo(), setReplyTo: (a: string) => setReplyTo(a) }));
+stubService(Admin, () => ({ guardianCopies: () => guardianCopies(), setGuardianCopies: (on: boolean) => setGuardianCopies(on), replyTo: () => replyTo(), setReplyTo: (a: string, revision?: string) => setReplyTo(a, revision) }));
 
 import { ApiError } from "../../api/core";
 import { ERROR_COPY } from "../../lib/errors";
@@ -19,8 +19,8 @@ import { GuardianCopiesSetting, ReplyToSetting } from "./MessageSettings";
 beforeEach(() => {
   guardianCopies.mockReset().mockResolvedValue({ on: false });
   setGuardianCopies.mockReset().mockImplementation(async (on: boolean) => ({ on }));
-  replyTo.mockReset().mockResolvedValue({ address: "" });
-  setReplyTo.mockReset().mockImplementation(async (a: string) => ({ address: a }));
+  replyTo.mockReset().mockResolvedValue({ address: "", revision: "opened" });
+  setReplyTo.mockReset().mockImplementation(async (a: string) => ({ address: a, revision: "saved" }));
 });
 
 const copies = () => screen.findByRole("checkbox", { name: /Send guardians a copy of messages to their teens/ });
@@ -57,7 +57,7 @@ it("saves where replies go", async () => {
   expect(save).toBeDisabled();
   await userEvent.type(box, " office@grace.org ");
   await userEvent.click(save);
-  expect(setReplyTo).toHaveBeenCalledWith("office@grace.org");
+  expect(setReplyTo).toHaveBeenCalledWith("office@grace.org", "opened");
   expect(await screen.findByRole("status")).toHaveTextContent("Saved");
 });
 
@@ -79,11 +79,11 @@ it("checks the address's shape before sending it", async () => {
 });
 
 it("clears where replies go", async () => {
-  replyTo.mockResolvedValue({ address: "office@grace.org" });
+  replyTo.mockResolvedValue({ address: "office@grace.org", revision: "opened" });
   render(<MemoryRouter><ReplyToSetting /></MemoryRouter>);
   const box = await replyBox();
   expect(box).toHaveValue("office@grace.org");
   await userEvent.clear(box);
   await userEvent.click(screen.getByRole("button", { name: "Save reply address" }));
-  expect(setReplyTo).toHaveBeenCalledWith("");
+  expect(setReplyTo).toHaveBeenCalledWith("", "opened");
 });
