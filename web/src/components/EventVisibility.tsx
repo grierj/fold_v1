@@ -228,6 +228,8 @@ export function EventVisibilityControl({
       try {
         impact = await Events.visibilityImpact(eventId, value, resetOverrides);
       } catch (err) {
+        if (!home.ref.current) return false;
+
         // The preview is refused like the save would be: the page closes the panel and says so.
         if (err instanceof ApiError && lostAuthority(err)) {
           onConflict?.("gone");
@@ -239,6 +241,8 @@ export function EventVisibilityControl({
 
         return false;
       }
+
+      if (!home.ref.current) return false;
 
       if (moved(mark)) {
         stale();

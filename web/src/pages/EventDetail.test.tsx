@@ -2632,6 +2632,32 @@ describe("EventDetail when a series save meets someone else's change", () => {
     render(<main id="main" tabIndex={-1}><MemoryRouter initialEntries={["/events/7"]}><RosterWritesProvider><Routes><Route path="/events/:id" element={<EventDetail />} /></Routes></RosterWritesProvider></MemoryRouter></main>);
   }
 
+  it("leaving without saving while the visibility preview is pending sends no write", async () => {
+    vi.mocked(Events.get).mockResolvedValue(opened);
+
+    const router = createMemoryRouter([{
+      element: <><UnsavedChangesBlocker /><Outlet /></>,
+      children: [
+        { path: "/events/:id", element: <EventDetail /> },
+        { path: "/elsewhere", element: <p>Elsewhere page</p> },
+      ],
+    }], { initialEntries: ["/events/7"] });
+
+    render(<RouterProvider router={router} />);
+    await userEvent.click(await screen.findByRole("button", { name: "Edit event" }));
+    await userEvent.click(screen.getByRole("radio", { name: /^Private/ }));
+    const preview = deferred<Awaited<ReturnType<typeof Events.visibilityImpact>>>();
+    vi.mocked(Events.visibilityImpact).mockReturnValueOnce(preview.promise);
+    await userEvent.click(screen.getByRole("button", { name: "Save visibility" }));
+    await act(() => router.navigate("/elsewhere"));
+    const leave = await screen.findByRole("dialog", { name: "Leave without saving?" });
+    await userEvent.click(within(leave).getByRole("button", { name: "Leave without saving" }));
+    expect(await screen.findByText("Elsewhere page")).toBeInTheDocument();
+    expect(Events.setVisibility).not.toHaveBeenCalled();
+    await act(async () => preview.resolve({ visibility: "private", currentVisibility: "public", tightened: [], leaderOpened: [] }));
+    expect(Events.setVisibility).not.toHaveBeenCalled();
+  });
+
   async function draftBoth(button = "Edit event") {
     await userEvent.click(await screen.findByRole("button", { name: button }));
     await userEvent.type(screen.getByLabelText("Title"), " night");
