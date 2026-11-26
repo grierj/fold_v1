@@ -96,7 +96,8 @@ Full model: PLAN 5.3 and `models/models.go`. Chain: `User` → `Membership` → 
   group or one event more private previews, needs consent, cancels and tells the people it shuts
   out: `docs/agents/visibility.md`.
 - `cancel_source` is `series` (a series edit dropped the date; a later edit that includes it
-  schedules it again and tells registrants, DEC-91) or `manual` (a person).
+  schedules it again and tells registrants, DEC-91) or `manual` (a manager can bring the future date
+  back explicitly at its stored time, with eligible existing registrations).
 - Render any name with `User.PublicName()`, never the email. Sign-in needs `User.CanSignIn()`;
   login throttling is in Postgres (`login_throttles`, `throttle.go`). `Email` is the login (DEC-23).
 - Deleting an account goes through one erasure pipeline, `eraseAccountIn`. Read
