@@ -30,6 +30,25 @@ export const measure = () => {
 
     const field = { id: s.id, label, text: Math.round(ctx.measureText(label).width), room: Math.round(room) };
 
+    // The room picker paints its closed value outside the transparent native
+    // select. Check the real text and its rendered bounds.
+    if (s.tagName === "SELECT" && cs.opacity === "0" && s.parentElement.matches(".room-select")) {
+      const shown = s.parentElement.querySelector("[data-selected-option]");
+      const chosen = s.options[s.selectedIndex];
+
+      if (!shown || shown.textContent !== chosen?.textContent || !vis(shown)) return [{ ...field, room: 0 }];
+
+      const range = document.createRange();
+      range.selectNodeContents(shown);
+      const text = range.getBoundingClientRect();
+      const box = shown.getBoundingClientRect();
+
+      const fits = text.width > 0 && text.left >= box.left - 1 && text.right <= box.right + 1 &&
+        text.top >= box.top - 1 && text.bottom <= box.bottom + 1 && box.left >= 0 && box.right <= window.innerWidth;
+
+      return fits ? [] : [{ ...field, text: Math.ceil(text.width), room: Math.floor(box.width) }];
+    }
+
     return field.text > field.room ? [field] : [];
   });
 
