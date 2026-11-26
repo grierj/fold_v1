@@ -1,8 +1,9 @@
+import { deferred } from "../test/keptPanel";
 import { stubService } from "../test/service";
 import { Site } from "../api/site";
 import { act, renderHook, waitFor } from "@testing-library/react";
 import { beforeEach, expect, it, vi } from "vitest";
-import { churchName, invalidateSite, useChurchZoneLoad, usePushEnabled, useRoomsEnabled, useSite } from "./useSite";
+import { churchName, invalidateSite, recheckSite, useChurchZoneLoad, usePushEnabled, useRoomsEnabled, useSite } from "./useSite";
 
 const { get } = vi.hoisted(() => ({ get: vi.fn() }));
 
@@ -60,6 +61,27 @@ it("keeps the shown answer while a saved setting is re-read, with the saved valu
   expect(result.current.loading).toBe(false);
   await act(async () => finish({ ...site, roomsEnabled: false, timezone: "UTC" }));
   expect(result.current.site?.timezone).toBe("UTC");
+});
+
+it("starts a shared room recheck after an older site refresh already began", async () => {
+  get.mockResolvedValue(site);
+  const { result } = renderHook(useSite);
+  await waitFor(() => expect(result.current.site?.roomsEnabled).toBe(true));
+
+  const earlier = deferred<typeof site>();
+  const fresh = deferred<typeof site>();
+  get.mockReturnValueOnce(earlier.promise).mockReturnValueOnce(fresh.promise);
+  act(() => invalidateSite());
+
+  await act(async () => {
+    const check = recheckSite();
+    expect(recheckSite()).toBe(check);
+    expect(get).toHaveBeenCalledTimes(3);
+    fresh.resolve({ ...site, roomsEnabled: false });
+    await check;
+  });
+  await act(async () => earlier.resolve(site));
+  expect(result.current.site?.roomsEnabled).toBe(false);
 });
 
 it("treats the default name as no church name", () => {
