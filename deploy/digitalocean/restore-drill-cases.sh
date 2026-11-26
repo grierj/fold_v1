@@ -747,13 +747,13 @@ RELEASE
   snapshot_state "$DIR" "$SOURCE" >"$WORK/missing-tool.after"
   cmp "$WORK/missing-tool.before" "$WORK/missing-tool.after"
   mv "$WORK/saved-compose.recovery.yml" "$DIR/compose.recovery.yml"
-  # Fixture levels here; actual level-1 revision crossings are R4-6c-V.
+  # Real binary crossings use their own historical builds (R4-6c-V).
   for mode in image build; do
     drill_step "level-refusal/$mode"
     snapshot_state "$DIR" "$SOURCE" >"$WORK/level.before"
     args=(--dump "$DB_DUMP" --source-dir "$SOURCE")
     if [[ "$mode" == image ]]; then args+=(--image "$REGISTRY/fold:absent"); else args+=(--commit "$LOW_COMMIT"); fi
-    expect_fail 'restore barrier' restore "${args[@]}"
+    expect_fail "target recovery level 0 is below host level $FIXTURE_LEVEL. The host requires the restore barrier" restore "${args[@]}"
     snapshot_state "$DIR" "$SOURCE" >"$WORK/level.after"
     cmp "$WORK/level.before" "$WORK/level.after"
   done
