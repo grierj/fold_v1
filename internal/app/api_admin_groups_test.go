@@ -199,6 +199,56 @@ func TestDeletionMarkerAndKeep(t *testing.T) {
 	}
 }
 
+func TestKeepTellsTheSoleAdminWhoAskedBeforeAnotherAdminJoined(t *testing.T) {
+	app := testApp(t)
+	asker := newTestUser(t, app, "first admin", "password1234", models.RoleAdmin)
+	lead := loginAPI(t, app, asker.Name, "password1234")
+	gid := createGroupAs(t, lead, "Solo", models.VisibilityPublic)
+	apiDo(t, lead, "POST", "/api/v1/groups/"+itoa(gid)+"/deletion-request", nil, http.StatusOK)
+	if n := contactCount(t, app, &models.Notification{}, "kind = ? AND subject_id = ?", notify.GroupDeletion, gid); n != 0 {
+		t.Fatalf("the sole admin's request created %d tasks", n)
+	}
+
+	other := newTestUser(t, app, "next admin", "password1234", models.RoleAdmin)
+	admin := loginAPI(t, app, other.Name, "password1234")
+	keep := "/api/v1/admin/groups/" + itoa(gid) + "/reject-deletion"
+	apiDo(t, admin, "POST", keep, nil, http.StatusOK)
+	notice := findKind(feed(t, lead, ""), notify.GroupDeletionKept)
+	if notice == nil || notice.Title != "Solo was kept" || notice.Link != "/groups/"+itoa(gid) {
+		t.Fatalf("the sole admin's Keep notice: %+v", notice)
+	}
+	wantCode(t, "repeat Keep", admin.do("POST", keep, nil, true), http.StatusConflict, "already_handled")
+	if n := contactCount(t, app, &models.Notification{}, "kind = ? AND user_id = ?", notify.GroupDeletionKept, asker.ID); n != 1 {
+		t.Fatalf("the requester got %d Keep notices, want one", n)
+	}
+}
+
+func TestKeepUsesOnlyAnUnambiguousLegacyRequester(t *testing.T) {
+	for _, evidence := range []string{"same actor", "different actors", "missing actor", "no tasks"} {
+		t.Run(evidence, func(t *testing.T) {
+			f := newDeletionRequestFixture(t)
+			gormMust(t, f.app.DB.Model(&models.Group{}).Where("id = ?", f.gid).Update("deletion_requester_id", nil))
+			tasks := f.app.DB.Where("kind = ? AND subject_id = ?", notify.GroupDeletion, f.gid)
+			switch evidence {
+			case "different actors":
+				gormMust(t, tasks.Model(&models.Notification{}).Where("user_id = ?", f.adminUser.ID).Update("actor_id", f.outsider.ID))
+			case "missing actor":
+				gormMust(t, tasks.Model(&models.Notification{}).Where("user_id = ?", f.adminUser.ID).Update("actor_id", nil))
+			case "no tasks":
+				gormMust(t, tasks.Delete(&models.Notification{}))
+			}
+			apiDo(t, f.admin, "POST", f.keepPath, nil, http.StatusOK)
+			got := findKind(feed(t, f.lead, ""), notify.GroupDeletionKept)
+			if (got != nil) != (evidence == "same actor") {
+				t.Fatalf("requester's notice: %+v", got)
+			}
+			if n := contactCount(t, f.app, &models.Notification{}, "kind = ? AND user_id <> ?", notify.GroupDeletionKept, f.leadUser.ID); n != 0 {
+				t.Fatalf("Keep notified %d other accounts", n)
+			}
+		})
+	}
+}
+
 func TestWithdrawDeletionRefusesAnAlreadyClosedRequest(t *testing.T) {
 	f := newDeletionRequestFixture(t)
 	path := "/api/v1/groups/" + itoa(f.gid) + "/deletion-request"
@@ -226,6 +276,23 @@ func TestKeepNotifiesTheAskerWithoutRevealingAHiddenGroup(t *testing.T) {
 	}
 	if notice := findKind(feed(t, f.outsiderClient, ""), notify.GroupDeletionKept); notice != nil {
 		t.Fatalf("the replacement leader received another person's outcome: %+v", notice)
+	}
+}
+
+func TestErasingAFormerGroupDeletionRequesterClearsTheirIdentity(t *testing.T) {
+	f := newDeletionRequestFixture(t)
+	// The request outlived the leader's membership, so erasure needs no handoff.
+	gormMust(t, f.app.DB.Model(&models.Membership{}).Where("group_id = ? AND user_id = ?", f.gid, f.leadUser.ID).Update("status", models.MembershipLeft))
+	gormMust(t, f.app.DB.Create(&models.Membership{GroupID: f.gid, UserID: f.outsider.ID, Role: models.MembershipLeader, Status: models.MembershipActive}))
+	apiDo(t, f.admin, "DELETE", "/api/v1/admin/users/"+itoa(f.leadUser.ID), nil, http.StatusOK)
+	var group models.Group
+	gormMust(t, f.app.DB.First(&group, f.gid))
+	if group.DeletionRequesterID != nil {
+		t.Fatalf("group retained erased requester %d", *group.DeletionRequesterID)
+	}
+	apiDo(t, f.admin, "POST", f.keepPath, nil, http.StatusOK)
+	if n := contactCount(t, f.app, &models.Notification{}, "kind = ?", notify.GroupDeletionKept); n != 0 {
+		t.Fatalf("Keep wrote %d notices after the requester's erasure", n)
 	}
 }
 
@@ -430,8 +497,7 @@ func wantRequestWithdrawnAtTheCard(t *testing.T, f deletionRequestFixture, c *ap
 }
 
 // The request stands only for the person who asked: the group's one listed
-// member must be the actor of an open group.deletion task (or the admin
-// pressing). A request that outlived its asker, with someone who did not ask
+// member must be the requester. A request that outlived its asker, with someone who did not ask
 // as the one listed member, is withdrawn at the card and the group stays: a
 // re-enabled member promoted to co-leader after which the asker left, and the
 // state an older handoff left for a disable and for an erasure (the erased
@@ -491,12 +557,8 @@ func TestRequestCardRefusesARequestThatOutlivedItsAsker(t *testing.T) {
 	}
 }
 
-// The request still stands, and the card's Delete deletes, when the one
-// listed member is who asked: a lone admin leader's request pressed by
-// another admin (who has its task), and a lone admin leader pressing their
-// own card in a church with no other admin (no task row was written).
 func TestRequestCardDeletesAnAdminLeadersOwnRequest(t *testing.T) {
-	for _, presser := range []string{"another admin", "the asker"} {
+	for _, presser := range []string{"another admin", "newly appointed admin", "the asker"} {
 		t.Run(presser, func(t *testing.T) {
 			app := testApp(t)
 			asker := newTestUser(t, app, "lone admin", "password1234", models.RoleAdmin)
@@ -512,6 +574,10 @@ func TestRequestCardDeletesAnAdminLeadersOwnRequest(t *testing.T) {
 			gormMust(t, app.DB.Model(&models.Notification{}).Where("kind = ? AND subject_id = ?", notify.GroupDeletion, gid).Count(&tasks))
 			if (tasks > 0) != (presser == "another admin") {
 				t.Fatalf("fixture: %d task rows", tasks)
+			}
+			if presser == "newly appointed admin" {
+				newTestUser(t, app, "late admin", "password1234", models.RoleAdmin)
+				press = loginAPI(t, app, "late admin", "password1234")
 			}
 			apiDo(t, press, "DELETE", "/api/v1/admin/groups/"+itoa(gid)+"?deletionRequest=1", nil, http.StatusOK)
 			if err := app.DB.First(&models.Group{}, gid).Error; err == nil {

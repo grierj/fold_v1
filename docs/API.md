@@ -1806,8 +1806,9 @@ POST /api/v1/admin/groups/:id/reject       → 200 {}                    (admin;
      body: {message?} — optional, at most 500 characters, carried on the leaders' group.rejected notice and the
      audit row (DEC-96); 400 too_long, or message_has_contact when it holds an email address or phone number
 POST /api/v1/admin/groups/:id/reject-deletion → 200 {} | 409 already_handled | 404 (admin; keeps the group, clears the request)
-     — sends group.deletion_kept in-app to the requester recorded on the open admin task, except when the
-       requester pressed Keep themselves. The notice and the request's resolution commit together (DEC-177)
+     — sends group.deletion_kept in-app to the recorded requester, including when no admin task was created.
+       For an older request, every open task must identify the same requester. Keep skips the notice if the
+       requester is unknown or pressed Keep themselves. The notice and resolution commit together (DEC-177)
      — only ever an answer to the request: once it is no longer open (the leader withdrew it, someone else joined,
        which withdraws it, or another admin kept the group) it writes nothing and answers 409 already_handled with
        {resolvedBy, resolution}, as the other approval queues do (DEC-177). They are read from the group's most
@@ -1822,8 +1823,8 @@ DELETE /api/v1/admin/groups/:id?deletionRequest=1 → 200 {} | 409 already_handl
        holder), and every other account holding a live exact-date grant on one, the event.deleted notice an event's
        own delete writes, one per event; a member signed up gets only group.deleted (DEC-177)
      — deletionRequest=1 marks the Approvals card's delete, which answers the leader's request: with it, a request
-       no longer open deletes nothing and answers 409 already_handled as Keep does. Under the group's row lock the request is open only while the flag is set and the group's one listed member is the person who asked (the
-       actor of an open group.deletion task, or the admin pressing, whose own request wrote them no task); a flag on
+       no longer open deletes nothing and answers 409 already_handled as Keep does. Under the group's row lock the request is open only while the flag is set and the group's one listed member matches the recorded requester (or, for an older
+       request, the person identified by every open task). A flag with no identifiable requester or on
        a group with no listed member, a second one, or one who did not ask (a successor after a handoff, a co-leader
        left alone when the asker departed) is withdrawn there (the flag cleared and the admins'
        tasks resolved "withdrawn", which commits, as does the contact reconciliation this delete's transaction runs) and

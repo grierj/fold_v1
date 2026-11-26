@@ -487,7 +487,7 @@ Fold builds its notifications itself: no vendor and no new service (DEC-42, DEC-
 - **"Mark all as read" (6.13 #2):** `read-all` skips unresolved tasks on the server, and the count ignores `read_at` for a task until `resolved_at` is set, so server and UI agree.
 - **`seen_at` (6.13 #1):** the column is kept for the email escalation below. Nothing sets it yet. **Planned (M3.12):** the panel marks the rows it shows as seen again (the `seen` endpoint was removed until the escalation needs it).
 - **Task resolution:** approving, rejecting, or withdrawing the subject sets `resolved_at` on every copy in the same transaction (`notify.Resolve`). Other admins see "Done · approved by Pat" instead of a stale button, and the item leaves the count.
-- **Keep group (DEC-177).** The admin's decision closes the task and tells the requester named on it with an in-app `group.deletion_kept` notice. The notice names and links to the group only if the requester can still see it. The admin who pressed Keep receives no copy.
+- **Keep group (DEC-177).** The admin's decision closes the request and tells the person who opened it with an in-app `group.deletion_kept` notice. The notice names and links to the group only if the requester can still see it. The admin who pressed Keep receives no copy.
 - **Retention (DEC-45):** the daily `notifications.cleanup` job deletes read, archived or expired rows 90 days after their last update, and any row after 180 days. Open tasks are kept however old. Notifications are a convenience; `AuditLog` stays the record.
 
 **API** (under `/api/v1`, session auth, CSRF on writes, `Cache-Control: no-store` like every API response):

@@ -2289,10 +2289,8 @@ func TestGroupPendingNoticeSerializesWithAdminErasure(t *testing.T) {
 	})
 }
 
-// N-12 (inventory 9.2.2, a plain entry): a sole leader's deletion request asks
-// every admin to decide it, from a transaction that is a single UPDATE and then
-// the send. An admin erased meanwhile is left out in either order, and the other
-// admin is still asked.
+// N-12 (inventory 9.2.2): delivery's recipient lock excludes an admin erased
+// during a request and still sends the task to the other admin.
 func TestDeletionRequestNoticeSerializesWithAdminErasure(t *testing.T) {
 	runErasureBarriers(t, 7402006, func(t *testing.T) erasureScene {
 		app := testApp(t)

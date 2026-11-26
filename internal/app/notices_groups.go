@@ -82,28 +82,23 @@ func notifyDeletionRequested(tx *gorm.DB, g *models.Group, actor uint) error {
 }
 
 func notifyDeletionKept(tx *gorm.DB, g *models.Group, actor uint) error {
-	askers, err := notify.OpenTaskActors(tx, notify.GroupDeletion, g.ID)
-	if err != nil || len(askers) == 0 {
+	asker, err := deletionRequesterIn(tx, g)
+	if err != nil || asker == 0 || asker == actor {
 		return err
 	}
-	facts, err := loadNoticeFacts(tx, []uint{g.ID}, askers)
+	to := []uint{asker}
+	facts, err := loadNoticeFacts(tx, []uint{g.ID}, to)
 	if err != nil {
 		return err
 	}
-	return notify.WithRecipients(tx, askers, func(scope *notify.Scope) error {
-		for _, id := range askers {
-			m := notify.Msg{Kind: notify.GroupDeletionKept, To: []uint{id}, Actor: &actor, Link: "/my-groups", Scope: scope}
-			if facts.canSeeGroup(id, g) {
-				m.Vars.Group = g.Name // group-ok: only for an asker who can still see the group
-				m.Link = fmt.Sprintf("/groups/%d", g.ID)
-				m.SubjectType, m.SubjectID = "group", g.ID
-			}
-			if _, err := notify.Send(tx, m); err != nil {
-				return err
-			}
-		}
-		return nil
-	})
+	m := notify.Msg{Kind: notify.GroupDeletionKept, To: to, Actor: &actor, Link: "/my-groups"}
+	if facts.canSeeGroup(asker, g) {
+		m.Vars.Group = g.Name // group-ok: only for an asker who can still see the group
+		m.Link = fmt.Sprintf("/groups/%d", g.ID)
+		m.SubjectType, m.SubjectID = "group", g.ID
+	}
+	_, err = notify.Send(tx, m)
+	return err
 }
 
 // notifyLeadership tells the other admins about a leadership change, from

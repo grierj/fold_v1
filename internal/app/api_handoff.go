@@ -188,9 +188,7 @@ func handOffLeadership(tx *gorm.DB, actor uint, ip string, leaving uint, success
 		}).Error; err != nil {
 			return err
 		}
-		// A lone leader's deletion request was theirs: the successor did not
-		// ask, and with the leader unlisted the group's one listed member is
-		// the successor, so the request card's check could not tell (DEC-177).
+		// A successor did not ask to delete the group (DEC-177).
 		if g.DeletionRequested {
 			if err := clearDeletionRequestIn(tx, g.ID, nil, "withdrawn"); err != nil {
 				return err

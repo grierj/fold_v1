@@ -7,7 +7,6 @@ import (
 	"errors"
 	"log"
 	"net/http"
-	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -1130,15 +1129,21 @@ func (a *App) apiRequestDeletion(c *gin.Context) {
 		jsonError(c, http.StatusForbidden, "only a group leader can request deletion")
 		return
 	}
-	// Eligibility is read under the group's row lock, which every add takes
-	// before it writes a membership, so no join lands between the count and
-	// the flag.
-	err := a.DB.Transaction(func(tx *gorm.DB) error {
+	// Erasure takes the contact gate before the user and group rows. Use the same
+	// gate before recording the requester, then count members under the group lock.
+	err := a.DB.WithContext(c.Request.Context()).Transaction(func(tx *gorm.DB) error {
+		if err := lockContacts(tx); err != nil {
+			return err
+		}
 		locked, err := lockGroupIn(tx, g.ID)
 		if err != nil {
 			return err
 		}
-		fresh, err := groupRel(tx, u.ID, g.ID)
+		actor, err := lockActorIn(tx, u, actorRead)
+		if err != nil {
+			return err
+		}
+		fresh, err := groupRel(tx, actor.ID, g.ID)
 		if err != nil {
 			return err
 		}
@@ -1149,17 +1154,17 @@ func (a *App) apiRequestDeletion(c *gin.Context) {
 		if !fresh.Leader {
 			return errRoleRefused
 		}
-		if !policy.CanRequestDeletion(asPerson(u), fresh, others) {
+		if !policy.CanRequestDeletion(asPerson(actor), fresh, others) {
 			return errGroupHasMembers
 		}
 		if locked.DeletionRequested {
-			return nil // already requested: the admins already have the task
+			return nil
 		}
-		if err := tx.Model(&models.Group{}).Where("id = ?", g.ID).Update("deletion_requested", true).Error; err != nil {
+		if err := tx.Model(&models.Group{}).Where("id = ?", g.ID).Updates(map[string]any{"deletion_requested": true, "deletion_requester_id": actor.ID}).Error; err != nil {
 			return err
 		}
-		return notifyDeletionRequested(tx, g, u.ID)
-	}, readCommitted)
+		return notifyDeletionRequested(tx, locked, actor.ID)
+	}, contactGateTx)
 	if isAPIError(err) {
 		fail(c, err)
 		return
@@ -1216,26 +1221,25 @@ func withdrawDeletionAfterMemberAdded(tx *gorm.DB, g *models.Group, countBefore 
 		return err
 	}
 	g.DeletionRequested = false
+	g.DeletionRequesterID = nil
 	return nil
 }
 
-// deletionRequestHolds is whether a set deletion flag still stands for the
-// lone leader who asked (DEC-177): the group's one listed member is the person
-// who asked, the actor of an open group.deletion task, or the admin pressing
-// Delete, whose own request wrote them no task and who asks again by pressing.
-// Nothing else stored names who asked, so a flag on a group with no listed
-// member, a second one, or one who did not ask (a successor after a handoff, a
-// co-leader left alone when the asker departed) does not stand.
-func deletionRequestHolds(tx *gorm.DB, groupID, presser uint) (bool, error) {
-	members, err := memberIDs(tx, groupID)
+// Requests opened by an older binary have only their open admin tasks as evidence.
+func deletionRequesterIn(tx *gorm.DB, g *models.Group) (uint, error) {
+	if g.DeletionRequesterID != nil {
+		return *g.DeletionRequesterID, nil
+	}
+	return notify.OpenTaskActor(tx, notify.GroupDeletion, g.ID)
+}
+
+func deletionRequestHolds(tx *gorm.DB, g *models.Group) (bool, error) {
+	members, err := memberIDs(tx, g.ID)
 	if err != nil || len(members) != 1 {
 		return false, err
 	}
-	if members[0] == presser {
-		return true, nil
-	}
-	askers, err := notify.OpenTaskActors(tx, notify.GroupDeletion, groupID)
-	return slices.Contains(askers, members[0]), err
+	asker, err := deletionRequesterIn(tx, g)
+	return asker == members[0], err
 }
 
 func clearDeletionRequestIn(tx *gorm.DB, groupID uint, by *uint, outcome string) error {
@@ -1306,7 +1310,7 @@ func (a *App) deleteGroup(ctx context.Context, me *models.User, groupID uint, an
 			}
 			// A flag that no longer stands for who asked is withdrawn here,
 			// under the row lock (that commits), and the delete is refused.
-			holds, err := deletionRequestHolds(tx, g.ID, actor.ID)
+			holds, err := deletionRequestHolds(tx, g)
 			if err != nil {
 				return err
 			}
