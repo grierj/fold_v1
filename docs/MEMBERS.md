@@ -258,6 +258,12 @@ it may show **This date is not available** (an opaque 404): the notice does not
 give the guardian their teen's invitation, group access or read permission.
 Ask the organizer or church office if you need help.
 
+## Bring a cancelled date back
+
+If you lead the group, host the event, or are an admin, open the event page. Find the cancelled date and choose **Bring this date back**. You can do this before its start time. Check the day and time in the confirmation, especially if the series schedule has changed.
+
+People who can still attend keep their answers and their places on the waitlist. Fold tells the people going or waitlisted that the date is back on. Check the room afterward if you had picked one just for that date.
+
 ## Get notifications on your phone
 
 Fold can send notifications to your phone or computer, like any app: a

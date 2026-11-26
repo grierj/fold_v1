@@ -24,12 +24,13 @@ import { RefusedSaveLine, ResourceRefusal, resourceRefused, useRefusedSave, useR
 import { RsvpButtons } from "../components/RsvpButtons";
 import { GuestRegistrationForm } from "../components/GuestRegistrationForm";
 import { DateActions } from "../components/DateActions";
-import { formatDayFull, formatTime, heldIn } from "../lib/when";
+import { formatDayFull, formatEventDay, formatTime, heldIn } from "../lib/when";
 import { placeLine } from "../lib/place";
 import { dateLine, whenLine } from "../lib/repeat";
-import type { EventHostRow, EventOccurrence, HouseholdPerson } from "../types";
+import type { EventHostRow, EventOccurrence, HouseholdPerson, RestorableDate } from "../types";
 import { errorText } from "../lib/errors";
 import { useLoad } from "../lib/useLoad";
+import { useBeforeDeadline } from "../lib/useBeforeDeadline";
 import { useAction } from "../lib/useAction";
 import { ErrorNotice } from "../components/ErrorNotice";
 import { Missing } from "../components/Missing";
@@ -492,6 +493,8 @@ function EventDetailContent() {
         />
       )}
 
+      {canManage && page.restorableDates?.map((date) => <RestoreDate key={date.revision} date={date} eventId={event.id}
+        onChanged={refreshDates} onRefused={(why) => refusedSave.refused(why, "action")} />)}
       {!single && <h2 className="text-xl font-semibold mt-6 mb-4">Upcoming dates</h2>}
       {householdError && <ErrorNotice message={householdError} onRetry={retryHousehold} />}
       <ManagerSaveStatus saving={false} updated={updatedDateId !== null} updateKey={updatedDateId} />
@@ -536,6 +539,49 @@ function EventDetailContent() {
       </div>
     </div></ResourceRefusal.Provider></EventReadPin.Provider>
   );
+}
+
+function RestoreDate({ date, eventId, onChanged, onRefused }: {
+  date: RestorableDate;
+  eventId: number;
+  onChanged: () => void;
+  onRefused: (why: RevisionConflict) => void;
+}) {
+  const deadline = Date.parse(date.startsAt);
+  const future = useBeforeDeadline(deadline);
+  const begin = useConfirm(future ? date.revision : null);
+  const restore = useAction();
+
+  if (!future) return null;
+
+  const day = formatEventDay(date.startsAt);
+  const title = `Bring back ${day} at ${formatTime(date.startsAt)}?`;
+  const body = "People who can still attend keep their sign-ups. We'll tell those going or on the waitlist that the date is back on.";
+
+  function bringBack() {
+    const action = begin();
+    void restore.run(async () => {
+      if (!(await action.ask({ title, body, tone: "normal", confirmLabel: "Bring this date back", cancelLabel: "Keep cancelled", native: `${title} ${body}` })) || Date.now() >= deadline) return false;
+
+      try {
+        await Events.restoreOccurrence(eventId, date.date, date.revision);
+      } catch (cause) {
+        if (!(cause instanceof ApiError) || (cause.status !== 409 && !resourceRefused(cause))) throw cause;
+
+        if (action.here()) onRefused(cause.status === 409 ? "changed" : "gone");
+
+        return false;
+      }
+
+      if (action.here()) onChanged();
+    }, { fallback: "We couldn't bring this date back." });
+  }
+
+  return <div className="fold-list-row">
+    <p className="font-medium">{day} · {formatTime(date.startsAt)} · Cancelled</p>
+    <Button variant="secondary" layout="mt-2" disabled={restore.running || restore.state.status === "done"} onClick={bringBack}>Bring this date back</Button>
+    {restore.state.status === "failed" && <FormError>{restore.state.text}</FormError>}
+  </div>;
 }
 
 function DateRow({

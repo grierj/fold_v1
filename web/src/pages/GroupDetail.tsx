@@ -283,6 +283,7 @@ function GroupDetailContent() {
   // One run for Save group (its preview and save) and the review's confirm, so neither starts while the other runs.
   // While it runs nothing on the page that reads the page again starts: that read would take the editor away mid-save.
   const groupSaveAction = useAction();
+  const [cancelledDate, setCancelledDate] = useState<{ eventId: number; date: string } | null>(null);
   const [groupUpdated, setGroupUpdated] = useState(false);
   const [updatedDateId, setUpdatedDateId] = useState<number | null>(null);
   const managerStatus = <ManagerSaveStatus saving={groupSaveAction.running} updated={groupUpdated} />;
@@ -536,6 +537,7 @@ function GroupDetailContent() {
   }
 
   function handleCancelled(eventId: number, date: string) {
+    setCancelledDate({ eventId, date });
     setDetail((d) =>
       d
         ? {
@@ -814,6 +816,7 @@ function GroupDetailContent() {
                 {/* Above the list, never in a row a long list may hide: focus brings it into view, and it names the day. */}
                 {refusedDate && <RefusedSaveLine save={dateRefused} noun="date" about={formatDayFull(refusedDate.date)}
                   canManage={nextDates.some((d) => d.eventId === refusedDate.eventId && d.date === refusedDate.date) ? canManage : undefined} />}
+                {canManage && cancelledDate && <p role="status">You cancelled {formatDayFull(cancelledDate.date)}. <ButtonLink variant="link" to={`/events/${cancelledDate.eventId}`}>View event</ButtonLink></p>}
                 <CompactDates dates={nextDates} loadedOnly={detail.hasMore} noun="events">
                   {(m) => <EventRow
                     key={`${m.eventId}-${m.date}`}

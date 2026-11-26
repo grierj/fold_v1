@@ -33,7 +33,7 @@ stubService(Households, () => ({ mine: vi.fn().mockResolvedValue({ household: nu
 
 stubService(Events, () => ({
   get: vi.fn(), register: vi.fn(), registerSeries: vi.fn(), undoSeriesRegistration: vi.fn(),
-  delete: vi.fn(), cancelOccurrence: vi.fn(), signedUp: vi.fn(), dateVisibilityImpact: vi.fn(), update: vi.fn(),
+  delete: vi.fn(), cancelOccurrence: vi.fn(), restoreOccurrence: vi.fn(), signedUp: vi.fn(), dateVisibilityImpact: vi.fn(), update: vi.fn(),
   removeRegistration: vi.fn(), promoteRegistration: vi.fn(), restoreRegistration: vi.fn(), addRegistration: vi.fn(), addHost: vi.fn(),
   managedDate: vi.fn(), visibilityImpact: vi.fn(), setVisibility: vi.fn(),
 }));
@@ -3573,4 +3573,30 @@ describe("EventDetail when a date's save meets someone else's change", () => {
 
     expect(edits.sent.map((s) => s.changes)).toEqual([{ title: "Supper night" }, { title: "Supper night!" }]);
   });
+});
+
+it.each([false, true])("reads the event again after bringing a date back or receiving a stale refusal (%s)", async (stale) => {
+  const date = { date: "2035-12-01", startsAt: "2035-12-01T19:00:00Z", revision: "cancelled-read" };
+  vi.mocked(Events.get).mockResolvedValue({ ...page, occurrences: [], restorableDates: [date] });
+  vi.mocked(Events.restoreOccurrence).mockImplementation(async () => {
+    vi.mocked(Events.get).mockResolvedValue(page);
+
+    if (stale) throw new ApiError(409, "Changed", {code: "date_changed"});
+
+    return {};
+  });
+  renderPage();
+  const bringBack = await screen.findByRole("button", { name: "Bring this date back" });
+  await userEvent.click(bringBack);
+  const dialog = screen.getByRole("dialog");
+  expect(dialog).toHaveTextContent("People who can still attend keep their sign-ups.");
+  expect(Events.restoreOccurrence).not.toHaveBeenCalled();
+  await userEvent.click(within(dialog).getByRole("button", {name:"Keep cancelled"}));
+  await userEvent.click(bringBack);
+  await userEvent.click(within(screen.getByRole("dialog")).getByRole("button", {name:"Bring this date back"}));
+  expect(Events.restoreOccurrence).toHaveBeenCalledExactlyOnceWith(7, date.date, date.revision);
+  await waitFor(() => expect(screen.queryByRole("button", {name:"Bring this date back"})).toBeNull());
+
+  if (stale) expect(await screen.findByText("Your last action could not be completed.")).toBeInTheDocument();
+  vi.mocked(Events.restoreOccurrence).mockClear();
 });
