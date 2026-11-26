@@ -23,7 +23,7 @@
 - Tests: API tests for each step; Playwright run-through.
 - Later task (DEC-77): an admin setting `calendar_unanswered_window_days` (30, 60 or 90; default 30) for how far ahead unanswered public and church-wide dates show in Just mine, personal feeds and Everything, audited like other settings. Today the window is a fixed 30 days (`internal/policy/calendar.go`).
 - Carry-overs:
-  - Keep the wizard lazy-loaded and within the bundle budget (`npm run bundle-size`), as the admin pages already are.
+  - Keep the wizard lazy-loaded, as the admin pages already are. Check its impact on the browser journeys in CI.
   - Keep the single "powered by Fold" header attribution when adding brand settings. Logo, accent color and header style belong to **M4.2b**.
 
 **M4.2b Branding and asset customization** (draft; product DEC-137; Warden + Wright settled; `x/image` approved)
