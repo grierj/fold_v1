@@ -15,7 +15,7 @@ import { Checkbox, Field, FormError, focusFirstInvalid, Input, Select, Textarea 
 import { Form } from "../ui/Form";
 import { FormActions } from "../ui/FormActions";
 import { ErrorNotice } from "../ErrorNotice";
-import { RoomFeedPanel } from "./RoomFeedPanel";
+import { RoomFeedPanel, roomFeedUnconfirmed, type RoomFeedClosure } from "./RoomFeedPanel";
 import { Skeleton } from "../ui/Skeleton";
 import { errorCode, errorText } from "../../lib/errors";
 import { useUnsavedChanges } from "../../lib/unsavedChanges";
@@ -269,7 +269,7 @@ const activeOf = (r: Room | undefined) => (r ? { active: r.active } : null);
 // the read the row shows, and after each outcome the next press names what that outcome left (`stays`). A conflict
 // shows the room as its read found it and says so at the row. It hands the list only its own room, since every other
 // row's press names the read that row shows, and nothing once it has left the screen.
-function RoomRow({ room, locked, feedOpen, onBusy, onStart, onEdit, onFeed, onCloseFeed, onSaved, onStatus, onGone }: {
+function RoomRow({ room, locked, feedOpen, onBusy, onStart, onEdit, onFeed, onCloseFeed, onFeedGone, onSaved, onStatus, onGone }: {
   room: Room;
   // A form or panel is open, or a save is on its way: nothing here may start.
   locked: boolean;
@@ -280,6 +280,7 @@ function RoomRow({ room, locked, feedOpen, onBusy, onStart, onEdit, onFeed, onCl
   onEdit: () => void;
   onFeed: () => void;
   onCloseFeed: () => void;
+  onFeedGone: (reason: RoomFeedClosure) => void;
   onSaved: (room: Room) => void;
   onStatus: (status: string) => void;
   // This person may no longer manage rooms.
@@ -361,13 +362,19 @@ function RoomRow({ room, locked, feedOpen, onBusy, onStart, onEdit, onFeed, onCl
           { label: `${room.active ? "Deactivate" : "Reactivate"} ${room.name}`, disabled: locked, onSelect: () => void setActive(!room.active) },
         ]} /></div>
       </div>
-      {feedOpen && room.active && <div className="mt-4"><RoomFeedPanel room={room} onClose={onCloseFeed} /></div>}
+      {feedOpen && room.active && <div className="mt-4"><RoomFeedPanel room={room} onClose={onCloseFeed} onGone={onFeedGone} /></div>}
     </div>
   );
 }
 
 // The list lives in AdminPage (it also feeds the tab count), so a save hands the room back and the one list updates.
 // `load` is that list's read: a refused edit closes its form and reads it from nothing (useRefusedSave).
+const feedClosureText: Record<RoomFeedClosure, string> = {
+  unavailable: "The calendar link settings are no longer available.",
+  refused: "Your request to change the calendar link was refused.",
+  unconfirmed: roomFeedUnconfirmed,
+};
+
 export function RoomsTab({ rooms, error, reload, load, onSaved }: {
   rooms: Room[] | null;
   error: string | null;
@@ -447,6 +454,12 @@ export function RoomsTab({ rooms, error, reload, load, onSaved }: {
     refusal.refused(why);
   }
 
+  function feedGone(reason: RoomFeedClosure) {
+    setFeedOpen(null);
+    setStatus(feedClosureText[reason]);
+    void load.retry();
+  }
+
   function opening() {
     refusal.clear();
     setRefusedId(null);
@@ -474,18 +487,13 @@ export function RoomsTab({ rooms, error, reload, load, onSaved }: {
   const refusedName = refusedId ? rooms?.find((r) => r.id === refusedId.id)?.name ?? refusedId.name : undefined;
   const line = <RefusedSaveLine save={refusal} noun="room" canManage={rooms ? true : undefined} about={refusedName} />;
 
-  if (!rooms) return <>{line}{error ? <ErrorNotice message={error} onRetry={reload} /> : <Skeleton kind="lines" />}</>;
-
   function startAdding() {
     opening();
     setOpen("new");
   }
 
-  return (
-    <div ref={rootEl} className="space-y-3">
-      {line}
-      {/* Always rendered so screen readers announce the text when it arrives; empty, it takes no room. */}
-      <p ref={statusRef} role="status" tabIndex={-1} className={status ? "text-sm text-text-muted focus:outline-none" : "sr-only"}>{status}</p>
+  const list = rooms && (
+    <>
       {open === "new" ? (
         <RoomFormPanel submit={async (form) => (await AdminRooms.create(createBody(form))).room} onSaved={(r) => saved(r, "added")} onCancel={cancel} />
       ) : rooms.length > 0 && (
@@ -508,6 +516,7 @@ export function RoomsTab({ rooms, error, reload, load, onSaved }: {
             onEdit={() => { opening(); setOpen(r.id); }}
             onFeed={() => { opening(); setFeedOpen(r.id); }}
             onCloseFeed={closeFeed}
+            onFeedGone={feedGone}
             onSaved={onSaved}
             onStatus={setStatus}
             onGone={() => refused(r, "gone")} />
@@ -520,6 +529,15 @@ export function RoomsTab({ rooms, error, reload, load, onSaved }: {
           action={<Button variant="primary" data-opener="new" onClick={startAdding}>Add room</Button>}
         />
       )}
+    </>
+  );
+
+  return (
+    <div ref={rootEl} className="space-y-3">
+      {line}
+      {/* Keep the status and its focus while the rooms are refreshed. */}
+      <p ref={statusRef} role="status" tabIndex={-1} className={status ? "text-sm text-text-muted focus:outline-none" : "sr-only"}>{status}</p>
+      {list ?? (error ? <ErrorNotice message={error} onRetry={reload} /> : <Skeleton kind="lines" />)}
     </div>
   );
 }

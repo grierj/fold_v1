@@ -18,7 +18,6 @@
     "web/src/components/ProfileSecurityForms.tsx": 2,
     "web/src/components/PushDeviceCard.tsx": 1,
     "web/src/components/RsvpButtons.tsx": 2,
-    "web/src/components/SecretFeedLink.tsx": 1,
     "web/src/components/VideoField.tsx": 1,
     "web/src/components/admin/MatchLocations.tsx": 1,
     "web/src/components/admin/RejectGroupDialog.tsx": 1,
