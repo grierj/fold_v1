@@ -205,5 +205,6 @@ chosen when the row is made, or is a setting that may change to any value its ow
 
 | Rule | Enforced by |
 |------|-------------|
+| Writes of account, room booking, room request, message, recipient, and registration statuses stay at the named sites. Other updates must identify the columns they write. | `TestAccountStatusHasOneWriter`, `TestRoomStatusHasOneWriter`, `TestMessageStatusHasOneWriter`, `TestRecipientStatusHasOneWriter`, `TestRegistrationStatusHasTwoWriters` |
 | A new hand-rolled busy flag (`useState` named `busy`, `saving`, `submitting`, `sending` or the like) in `web/src` | `TestUIRatchets` (`busyFlags` in `ui-ratchet.json`), `TestUIRatchetsCatchPastMistakes` |
 | Every column whose CHECK lists its values has a row here with exactly those values, or a line under "Enumerated columns that are not lifecycles"; every Go name written with its file, every Go test and every `web/` path this map names exists | `TestLifecycleMapMatchesSchemaAndSource`, `TestLifecycleMapGuardCatchesMistakes` |
