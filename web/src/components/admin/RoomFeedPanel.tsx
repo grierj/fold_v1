@@ -12,15 +12,24 @@ function feedGone(cause: unknown): boolean {
   return cause instanceof ApiError && !cause.unreadable && [401, 403, 404].includes(cause.status);
 }
 
-export function RoomFeedPanel({ room, onClose, onGone }: { room: Room; onClose: () => void; onGone: () => void }) {
+export type RoomFeedClosure = "unavailable" | "refused" | "unconfirmed";
+
+export const roomFeedUnconfirmed = "We couldn’t confirm whether your calendar link changed.";
+
+export function RoomFeedPanel({ room, onClose, onGone }: {
+  room: Room;
+  onClose: () => void;
+  onGone: (reason: RoomFeedClosure) => void;
+}) {
   const headingRef = useRef<HTMLHeadingElement>(null);
   const uncertainRef = useRef<HTMLParagraphElement>(null);
   const refusal = useRefusedSave();
-  const [uncertain, setUncertain] = useState(false);
+  const [closeReason, setCloseReason] = useState<RoomFeedClosure>("unavailable");
+  const uncertain = closeReason === "unconfirmed";
 
   function start() {
     refusal.clear();
-    setUncertain(false);
+    setCloseReason("unavailable");
   }
 
   const feed = useSecretFeed({
@@ -45,7 +54,7 @@ export function RoomFeedPanel({ room, onClose, onGone }: { room: Room; onClose: 
     onRevoked: () => headingRef.current?.focus(),
     recover: async (cause, retry) => {
       if (feedGone(cause)) {
-        onGone();
+        onGone("refused");
 
         return true;
       }
@@ -54,7 +63,7 @@ export function RoomFeedPanel({ room, onClose, onGone }: { room: Room; onClose: 
 
       if (!changed && outcomeOf(cause) !== "unsure") return false;
 
-      if (!changed) setUncertain(true);
+      setCloseReason(changed ? "refused" : "unconfirmed");
 
       const read = await retry();
 
@@ -70,8 +79,8 @@ export function RoomFeedPanel({ room, onClose, onGone }: { room: Room; onClose: 
   const { loaded, loadError, loadCause } = feed;
   const gone = feedGone(loadCause);
   useEffect(() => {
-    if (gone) onGone();
-  }, [gone, onGone]);
+    if (gone) onGone(closeReason);
+  }, [gone, closeReason, onGone]);
   useEffect(() => {
     if (uncertain) uncertainRef.current?.focus();
   }, [uncertain, loaded, loadError]);
@@ -92,7 +101,7 @@ export function RoomFeedPanel({ room, onClose, onGone }: { room: Room; onClose: 
       <RefusedSaveLine save={refusal} noun="calendar link status" choosing="This calendar link" />
       {uncertain && (
         <p ref={uncertainRef} role="status" tabIndex={-1} className="rounded-lg border border-border bg-sunken px-4 py-3 text-sm">
-          We couldn&rsquo;t confirm whether your calendar link changed.{loaded ? " Its current status is shown below." : ""}
+          {roomFeedUnconfirmed}{loaded ? " Its current status is shown below." : ""}
         </p>
       )}
       <SecretFeedLink
