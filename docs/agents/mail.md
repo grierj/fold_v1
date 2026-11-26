@@ -66,8 +66,9 @@ suppressions. The guards named here are parse-only; each test file states its ow
   confirmation's `schedule` works that set out again under the message's lock and schedules only
   when it is the same; a change is answered with who now gets it (named) and who no longer does
   (named only while the audience still lists them, otherwise counted; never why). There is no
-  second notion of audience: a save, review and schedule check that the original author is active
-  and may message the audience, as preparation does. The session user still owns the review
+  second notion of audience: the saved composer's picker and live count check the original author's
+  current permissions in the same snapshot as the editor's access. A save, review and schedule
+  check that the original author is active and may message the audience, as preparation does. The session user still owns the review
   token and decides whether individual skip reasons are shown. The same check covers an edit that changes a scheduled message's
   audience or push switch (`PUT /messages/:id`): it writes nothing until the sender confirms who the
   proposal reaches. The check is at composition only: a scheduled message goes to the list as it
