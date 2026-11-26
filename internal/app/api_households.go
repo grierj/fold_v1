@@ -463,12 +463,14 @@ func revokeGuardianLinks(tx *gorm.DB, c *gin.Context, actor uint, person *models
 	return nil
 }
 
+var errHouseholdWriteUnconfirmed = apiErr(http.StatusConflict, "household_write_unconfirmed", "the updated household could not be shown")
+
 // The reply must still be authorized for the household the write touched.
 // GET has no target household and returns null when the viewer has no seat.
-func (a *App) readMyHousehold(c *gin.Context, householdID uint, noSeat error, project func(*gorm.DB, *models.User, models.HouseholdAccount, time.Time) error) error {
-	surface := "my household"
+func (a *App) readMyHousehold(c *gin.Context, householdID uint, project func(*gorm.DB, *models.User, models.HouseholdAccount, time.Time) error) error {
+	surface, denied := "my household", errHouseholdForbidden
 	if householdID != 0 {
-		surface = "household write reply"
+		surface, denied = "household write reply", errHouseholdWriteUnconfirmed
 	}
 	var judged sessionJudgment
 	err := decidingSnapshot(a.DB.WithContext(c.Request.Context()), func(tx *gorm.DB) error {
@@ -489,11 +491,12 @@ func (a *App) readMyHousehold(c *gin.Context, householdID uint, noSeat error, pr
 		if res.Error != nil {
 			return res.Error
 		}
-		if res.RowsAffected == 0 || (householdID != 0 && acct.HouseholdID != householdID) {
-			return noSeat
+		if res.RowsAffected == 0 && householdID == 0 {
+			return nil
 		}
-		if !policy.CanManageHousehold(asPerson(me), householdRelOf(acct, true)) {
-			return errHouseholdForbidden
+		if res.RowsAffected == 0 || (householdID != 0 && acct.HouseholdID != householdID) ||
+			!policy.CanManageHousehold(asPerson(me), householdRelOf(acct, true)) {
+			return denied
 		}
 		if a.hooks.readerAuthorized != nil {
 			a.hooks.readerAuthorized(surface)
@@ -512,8 +515,8 @@ func (a *App) readMyHousehold(c *gin.Context, householdID uint, noSeat error, pr
 	return err
 }
 
-func (a *App) myHouseholdJSON(c *gin.Context, householdID uint, noSeat error) (out *householdJSON, err error) {
-	err = a.readMyHousehold(c, householdID, noSeat, func(tx *gorm.DB, me *models.User, acct models.HouseholdAccount, now time.Time) error {
+func (a *App) myHouseholdJSON(c *gin.Context, householdID uint) (out *householdJSON, err error) {
+	err = a.readMyHousehold(c, householdID, func(tx *gorm.DB, me *models.User, acct models.HouseholdAccount, now time.Time) error {
 		h, err := a.toHouseholdJSONIn(tx, acct.HouseholdID, me, now)
 		out = &h
 		return err
@@ -522,7 +525,7 @@ func (a *App) myHouseholdJSON(c *gin.Context, householdID uint, noSeat error) (o
 }
 
 func (a *App) apiGetMyHousehold(c *gin.Context) {
-	out, err := a.myHouseholdJSON(c, 0, nil)
+	out, err := a.myHouseholdJSON(c, 0)
 	switch {
 	case err == nil:
 		c.JSON(http.StatusOK, myHouseholdResponseJSON{Household: out})
@@ -602,7 +605,7 @@ func (a *App) apiUpdateMyHousehold(c *gin.Context) {
 			return
 		}
 	}
-	out, err := a.myHouseholdJSON(c, householdID, errHouseholdForbidden)
+	out, err := a.myHouseholdJSON(c, householdID)
 	if err != nil {
 		fail(c, err)
 		return
@@ -782,16 +785,16 @@ func (a *App) apiAddHouseholdPerson(c *gin.Context) {
 		fail(c, err)
 		return
 	}
-	a.answerMyHouseholdPerson(c, person, http.StatusCreated, errHouseholdForbidden)
+	a.answerMyHouseholdPerson(c, person, http.StatusCreated)
 }
 
-func (a *App) answerMyHouseholdPerson(c *gin.Context, written models.HouseholdPerson, status int, noSeat error) {
+func (a *App) answerMyHouseholdPerson(c *gin.Context, written models.HouseholdPerson, status int) {
 	var out householdPersonJSON
-	err := a.readMyHousehold(c, written.HouseholdID, noSeat, func(tx *gorm.DB, me *models.User, acct models.HouseholdAccount, now time.Time) error {
+	err := a.readMyHousehold(c, written.HouseholdID, func(tx *gorm.DB, me *models.User, acct models.HouseholdAccount, now time.Time) error {
 		var person models.HouseholdPerson
-		err := tx.Where("household_id = ?", acct.HouseholdID).First(&person, written.ID).Error
+		err := tx.Where("household_id = ? AND converted_user_id IS NULL", acct.HouseholdID).First(&person, written.ID).Error
 		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return errHouseholdPersonGone
+			return errHouseholdWriteUnconfirmed
 		}
 		if err != nil {
 			return err
@@ -975,7 +978,7 @@ func (a *App) apiUpdateHouseholdPerson(c *gin.Context) {
 		fail(c, err)
 		return
 	}
-	a.answerMyHouseholdPerson(c, *person, http.StatusOK, errHouseholdPersonGone)
+	a.answerMyHouseholdPerson(c, *person, http.StatusOK)
 }
 
 // apiDeleteHouseholdPerson removes a person from the user's household:

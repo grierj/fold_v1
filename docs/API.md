@@ -311,8 +311,10 @@ with a note on how it was checked (DEC-32); an `adult` needs no approval.
 
 After a household or person save commits, the reply checks the session, household seat,
 and permission to see the returned fields in the same snapshot as those fields.
-If the session has ended or the adult can no longer manage that household, the reply
-refuses access. The save has already committed.
+An ended session answers 401. If the adult can no longer manage the household, or
+the person was removed or converted to their own account before the reply, the
+response is 409 `household_write_unconfirmed` without household data. This code
+means the form could not confirm the stored result. The save has already committed.
 
 The household's details and each person's edit name the read they were made from (DEC-174). The household and each
 person in every household answer (`GET /me/household`, the answers of these writes, the admin household routes) carry

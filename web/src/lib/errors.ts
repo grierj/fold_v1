@@ -48,6 +48,7 @@ export const ERROR_COPY = {
   household_required: "This account has no household yet. Create its household before adding people.",
   household_guardian: "This person needs an eligible guardian. Choose an active adult account in the same household, not your own admin account.",
   household_conversion_holder: "A responsible account isn't available. Ask your church office to check it before trying again.",
+  household_write_unconfirmed: "We couldn't confirm your changes.",
   household_person_converted: "This person has their own account now. Use their account instead.",
   household_link_pending: "Waiting for an admin to confirm. Ask your church office to check the household link before signing them up.",
   household_link_unconfirmed: "This household link isn't confirmed. Ask your church office to check it before signing them up.",

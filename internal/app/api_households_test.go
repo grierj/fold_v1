@@ -279,7 +279,7 @@ func TestMyHouseholdWriteRepliesJudgeAuthorityInTheirSnapshot(t *testing.T) {
 
 func TestMyHouseholdWriteReplyRequiresTheWritersCurrentSeatAndSession(t *testing.T) {
 	for _, erased := range []bool{false, true} {
-		name, status := "removed seat", http.StatusForbidden
+		name, status := "removed seat", http.StatusConflict
 		if erased {
 			name, status = "erased account", http.StatusUnauthorized
 		}
@@ -306,6 +306,7 @@ func TestMyHouseholdWriteReplyRequiresTheWritersCurrentSeatAndSession(t *testing
 			if erased {
 				wantNoAck(t, "the erased account's reply", w)
 			} else {
+				wantIn(t, "the unseated adult's reply", w.Body.String(), "household_write_unconfirmed")
 				wantAck(t, "the unseated adult's reply", w, reader, f.guardian)
 			}
 			gormMust(t, f.app.DB.First(&f.household, f.household.ID))
@@ -313,6 +314,30 @@ func TestMyHouseholdWriteReplyRequiresTheWritersCurrentSeatAndSession(t *testing
 				t.Fatalf("the write did not commit before the refusal: %q", f.household.Name)
 			}
 		})
+	}
+}
+
+func TestHouseholdPersonWriteReplyOmitsConvertedPerson(t *testing.T) {
+	f := newHouseholdEditFixture(t)
+	const email = "mary-own@example.com"
+	acceptConversion(t, f.app, f.invite, http.StatusOK)
+	var fired atomic.Bool
+	f.app.hooks.readerBegin = func(surface string) {
+		if surface == "household write reply" && fired.CompareAndSwap(false, true) {
+			approveConversionForEmail(t, f.app, f.admin, email)
+		}
+	}
+	path := "/api/v1/me/household/people/" + itoa(f.mary.ID)
+	w := f.c.do("PUT", path, withRevision(map[string]any{"photoConsent": true}, myPersonRevision(t, f.c, f.mary.ID)), true)
+	if !fired.Load() || w.Code != http.StatusConflict {
+		t.Fatalf("person write reply after conversion (fired %t): %d %s", fired.Load(), w.Code, w.Body.String())
+	}
+	wantIn(t, "the converted person's reply", w.Body.String(), "household_write_unconfirmed")
+	wantOut(t, "the converted person's reply", w.Body.String(), f.mary.FirstName, "birthDate", "careNotes", "accountUserId")
+	var person models.HouseholdPerson
+	gormMust(t, f.app.DB.First(&person, f.mary.ID))
+	if person.ConvertedUserID == nil || !person.PhotoConsent {
+		t.Fatal("the person did not convert after the edit committed")
 	}
 }
 

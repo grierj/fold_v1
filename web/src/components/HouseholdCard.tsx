@@ -151,6 +151,19 @@ const householdFields = (h: Household | undefined) => (h ? { name: h.name.trim()
 
 type HouseholdFields = NonNullable<ReturnType<typeof householdFields>>;
 
+type HouseholdSaveRefusal = RevisionConflict | "unconfirmed";
+
+async function confirmHouseholdWrite<T>(write: () => Promise<T>, onUnconfirmed: () => void): Promise<T | undefined> {
+  try {
+    return await write();
+  } catch (error) {
+    if (errorCode(error) !== "household_write_unconfirmed") throw error;
+    onUnconfirmed();
+
+    return undefined;
+  }
+}
+
 // The household as one read shows it, for the form whose save was refused.
 async function readHousehold(id: number) {
   const { household } = await Households.mine();
@@ -173,7 +186,7 @@ function PersonEditor({ person, level, onSaved, onConflict, onCancel }: {
   person: HouseholdPerson;
   level: "h2" | "h3";
   onSaved: (firstName: string) => Promise<void>;
-  onConflict: (why: RevisionConflict) => void;
+  onConflict: (why: HouseholdSaveRefusal) => void;
   onCancel: () => void;
 }) {
   const [opened] = useState(person);
@@ -204,7 +217,10 @@ function PersonEditor({ person, level, onSaved, onConflict, onCancel }: {
       photoConsent: input.photoConsent ?? opened.photoConsent,
     };
 
-    const sent = await save((revision) => Households.updatePerson(opened.id, input, revision), intended);
+    const sent = await confirmHouseholdWrite(
+      () => save((revision) => Households.updatePerson(opened.id, input, revision), intended),
+      () => onConflict("unconfirmed"),
+    );
 
     if (sent === "refused") throw refusedAgain("household_person_changed");
 
@@ -229,7 +245,7 @@ function PersonEditor({ person, level, onSaved, onConflict, onCancel }: {
 function HouseholdEditor({ household, onSaved, onConflict, onCancel }: {
   household: Household;
   onSaved: (household: Household) => void;
-  onConflict: (why: RevisionConflict) => void;
+  onConflict: (why: HouseholdSaveRefusal) => void;
   onCancel: () => void;
 }) {
   const [opened] = useState(household);
@@ -248,11 +264,15 @@ function HouseholdEditor({ household, onSaved, onConflict, onCancel }: {
 
   async function submit(name: string, address: string) {
     const intended = { ...opened, name, address };
-    const { sent, row } = await save((revision) => Households.update({ name, address }, revision), intended);
 
-    if (sent === "refused") throw refusedAgain("household_changed");
+    const result = await confirmHouseholdWrite(
+      () => save((revision) => Households.update({ name, address }, revision), intended),
+      () => onConflict("unconfirmed"),
+    );
 
-    if (sent === "saved") onSaved(row ?? intended);
+    if (result?.sent === "refused") throw refusedAgain("household_changed");
+
+    if (result?.sent === "saved") onSaved(result.row ?? intended);
   }
 
   return <HouseholdForm household={opened} onSave={submit} onCancel={onCancel} />;
@@ -317,14 +337,16 @@ export function HouseholdCard({ showHeading = true }: { showHeading?: boolean })
   }
 
   // A save was refused: the form closes, and the card reads the household from nothing and says so.
-  function refused(why: RevisionConflict, person?: HouseholdPerson) {
+  function refused(why: HouseholdSaveRefusal, person?: HouseholdPerson) {
     focusNext.current = null;
     setEditing(null);
     setMetadata(false);
     setConverting(null);
     setStatus("");
     setRefusedPerson(person ? { id: person.id, name: person.name } : null);
-    refusal.refused(why);
+
+    if (why === "unconfirmed") refusal.refused("gone", "unconfirmed");
+    else refusal.refused(why);
   }
 
   async function remove(p: HouseholdPerson) {
@@ -473,9 +495,12 @@ export function HouseholdCard({ showHeading = true }: { showHeading?: boolean })
           level={Sub}
           onCancel={() => { focusNext.current = "add"; setEditing(null); }}
           onSave={async (input) => {
-            const { person } = await Households.addPerson(input);
+            const answer = await confirmHouseholdWrite(() => Households.addPerson(input), () => refused("unconfirmed"));
+
+            if (!answer) return;
+
             setStatus(`Added ${input.firstName}.`);
-            focusNext.current = person.id;
+            focusNext.current = answer.person.id;
             await load.reload();
             setEditing(null);
           }}
