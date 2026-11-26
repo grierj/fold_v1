@@ -306,6 +306,23 @@ func (a *App) checkRoomRevision(tx *gorm.DB, id uint, given string) error {
 	return checkEditRevision(given, current, errRoomChanged)
 }
 
+var errRoomFeedChanged = apiErr(http.StatusConflict, "room_feed_changed", "the room calendar link changed since it was reviewed")
+
+// A revoked row has a different revision from an unused room or its live link.
+func (a *App) roomFeedRevision(roomID uint, tok models.RoomFeedToken) string {
+	m := hmac.New(sha256.New, a.processKey("room-feed-revision:v1"))
+	fmt.Fprintf(m, "%d.%d.%t", roomID, tok.ID, tok.RevokedAt != nil)
+	return a.editRevision(fmt.Sprintf("f%d", roomID), hex.EncodeToString(m.Sum(nil)[:16]))
+}
+
+func (a *App) checkRoomFeedRevision(tx *gorm.DB, roomID uint, given string) (models.RoomFeedToken, error) {
+	tok, err := latestRoomFeed(tx, roomID)
+	if err != nil {
+		return tok, err
+	}
+	return tok, checkEditRevision(given, a.roomFeedRevision(roomID, tok), errRoomFeedChanged)
+}
+
 var (
 	errSettingChanged   = apiErr(http.StatusConflict, "setting_changed", "the setting changed since this edit was based on it")
 	errAdminUserChanged = apiErr(http.StatusConflict, "admin_user_changed", "the account changed since this edit was based on it")

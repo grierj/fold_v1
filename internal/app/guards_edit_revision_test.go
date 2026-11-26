@@ -19,7 +19,7 @@ import (
 // Parse-only, package app. A check is a call named in editRevisionChecks
 // outside edit_revision.go. It is inside the transaction when
 // the nearest function literal around it is an argument of a call named
-// contactMutation or Transaction. The guard does not see a check reached
+// contactMutation, decidingTransaction or Transaction. The guard does not see a check reached
 // through a helper the handler calls, a transaction opened another way, or
 // whether the call comes after the row lock; the handlers' tests cover that.
 // A check that reads its row itself (editRevisionReaders) must get that
@@ -28,14 +28,14 @@ import (
 // ---------------------------------------------------------------------------
 
 // editRevisionCheckers is every handler that checks a save's revision, exactly.
-var editRevisionCheckers = []string{"apiAdminUpdateRoom", "apiAdminUpdateUser", "apiChangeTeenConsent", "apiGuardianChangeConsent", "apiScheduleMessage", "apiSetDateRoom", "apiSetEventVisibility", "apiSetSeriesRoom", "apiUpdateEvent", "apiUpdateGroup", "apiUpdateHouseholdPerson", "apiUpdateMessage", "apiUpdateMyHousehold", "saveRevisedSetting"}
+var editRevisionCheckers = []string{"apiAdminUpdateRoom", "apiAdminUpdateUser", "apiChangeTeenConsent", "apiGuardianChangeConsent", "apiScheduleMessage", "apiSetDateRoom", "apiSetEventVisibility", "apiSetSeriesRoom", "apiUpdateEvent", "apiUpdateGroup", "apiUpdateHouseholdPerson", "apiUpdateMessage", "apiUpdateMyHousehold", "changeRoomFeed", "saveRevisedSetting"}
 
-var editRevisionChecks = map[string]bool{"checkSettingRevision": true, "checkAdminUserRevision": true, "checkEventRevision": true, "checkGroupRevision": true, "checkDateRoomRevision": true, "checkMessageRevision": true, "checkRoomRevision": true, "checkHouseholdRevision": true, "checkHouseholdPersonRevision": true, "checkConsentRevision": true, "checkEditRevision": true}
+var editRevisionChecks = map[string]bool{"checkSettingRevision": true, "checkAdminUserRevision": true, "checkEventRevision": true, "checkGroupRevision": true, "checkDateRoomRevision": true, "checkMessageRevision": true, "checkRoomRevision": true, "checkRoomFeedRevision": true, "checkHouseholdRevision": true, "checkHouseholdPersonRevision": true, "checkConsentRevision": true, "checkEditRevision": true}
 
 // editRevisionReaders are the checks that read their row on the handle given.
-var editRevisionReaders = map[string]bool{"checkSettingRevision": true, "checkAdminUserRevision": true, "checkGroupRevision": true, "checkDateRoomRevision": true, "checkMessageRevision": true, "checkRoomRevision": true, "checkHouseholdRevision": true, "checkHouseholdPersonRevision": true, "checkConsentRevision": true}
+var editRevisionReaders = map[string]bool{"checkSettingRevision": true, "checkAdminUserRevision": true, "checkGroupRevision": true, "checkDateRoomRevision": true, "checkMessageRevision": true, "checkRoomRevision": true, "checkRoomFeedRevision": true, "checkHouseholdRevision": true, "checkHouseholdPersonRevision": true, "checkConsentRevision": true}
 
-var editRevisionTransactions = map[string]bool{"contactMutation": true, "Transaction": true}
+var editRevisionTransactions = map[string]bool{"contactMutation": true, "decidingTransaction": true, "Transaction": true}
 
 // editRevisionCensus is the sorted handlers whose checks all sit in a write
 // transaction, and a problem for each check that does not.
@@ -187,6 +187,14 @@ func (a *App) apiAdminUpdateRoom(c *gin.Context) {
 	}, readCommitted)
 }
 `
+	const roomFeed = `package app
+func (a *App) changeRoomFeed(c *gin.Context, issue bool) {
+	decidingTransaction(a.DB, readCommitted, func(tx *gorm.DB) error {
+		_, err := a.checkRoomFeedRevision(tx, roomID, body.Revision)
+		return err
+	})
+}
+`
 	const admin = `package app
 func (a *App) apiAdminUpdateUser(c *gin.Context) {
 	a.contactMutation(contactChange{}, func(tx *gorm.DB) error {
@@ -236,10 +244,15 @@ func (a *App) apiUpdateHouseholdPerson(c *gin.Context) {
 	})
 }
 `
-	sound := guardkit.Sources{"internal/app/a.go": visibility, "internal/app/b.go": series, "internal/app/c.go": group, "internal/app/d.go": rooms, "internal/app/e.go": messages, "internal/app/f.go": roomEditor, "internal/app/g.go": admin, "internal/app/h.go": households, "internal/app/i.go": consents}
+	sound := guardkit.Sources{"internal/app/a.go": visibility, "internal/app/b.go": series, "internal/app/c.go": group, "internal/app/d.go": rooms, "internal/app/e.go": messages, "internal/app/f.go": roomEditor, "internal/app/g.go": admin, "internal/app/h.go": households, "internal/app/i.go": consents, "internal/app/j.go": roomFeed}
 	if bad := editRevisionProblems(sound.Parse(0)); len(bad) > 0 {
 		t.Fatalf("the sound shape was flagged: %v", bad)
 	}
+	sound["internal/app/j.go"] = strings.Replace(roomFeed, "checkRoomFeedRevision(tx,", "checkRoomFeedRevision(a.DB,", 1)
+	if bad := editRevisionProblems(sound.Parse(0)); len(bad) == 0 {
+		t.Error("a room feed checked on the connection outside its transaction passed the guard")
+	}
+	sound["internal/app/j.go"] = roomFeed
 	sound["internal/app/g.go"] = strings.Replace(admin, "checkSettingRevision(tx,", "checkSettingRevision(a.DB,", 1)
 	if bad := editRevisionProblems(sound.Parse(0)); len(bad) == 0 {
 		t.Error("a setting checked on the connection outside its transaction passed the guard")
@@ -316,7 +329,7 @@ func (a *App) apiAdminUpdateRoom(c *gin.Context) {
 }
 `,
 	} {
-		sources := guardkit.Sources{"internal/app/a.go": visibility, "internal/app/b.go": series, "internal/app/c.go": group, "internal/app/d.go": rooms, "internal/app/e.go": messages, "internal/app/f.go": src, "internal/app/g.go": admin, "internal/app/h.go": households, "internal/app/i.go": consents}
+		sources := guardkit.Sources{"internal/app/a.go": visibility, "internal/app/b.go": series, "internal/app/c.go": group, "internal/app/d.go": rooms, "internal/app/e.go": messages, "internal/app/f.go": src, "internal/app/g.go": admin, "internal/app/h.go": households, "internal/app/i.go": consents, "internal/app/j.go": roomFeed}
 		if bad := editRevisionProblems(sources.Parse(0)); len(bad) == 0 {
 			t.Errorf("%s passed the guard", name)
 		}
@@ -361,7 +374,7 @@ func bookWholeSeries(tx *gorm.DB, ev *models.Event, body seriesBody) error {
 }
 `,
 	} {
-		sources := guardkit.Sources{"internal/app/a.go": visibility, "internal/app/b.go": series, "internal/app/c.go": group, "internal/app/d.go": src, "internal/app/e.go": messages, "internal/app/f.go": roomEditor, "internal/app/g.go": admin, "internal/app/h.go": households, "internal/app/i.go": consents}
+		sources := guardkit.Sources{"internal/app/a.go": visibility, "internal/app/b.go": series, "internal/app/c.go": group, "internal/app/d.go": src, "internal/app/e.go": messages, "internal/app/f.go": roomEditor, "internal/app/g.go": admin, "internal/app/h.go": households, "internal/app/i.go": consents, "internal/app/j.go": roomFeed}
 		if bad := editRevisionProblems(sources.Parse(0)); len(bad) == 0 {
 			t.Errorf("%s passed the guard", name)
 		}
@@ -395,7 +408,7 @@ func (a *App) apiScheduleMessage(c *gin.Context) {
 }
 `,
 	} {
-		sources := guardkit.Sources{"internal/app/a.go": visibility, "internal/app/b.go": series, "internal/app/c.go": group, "internal/app/d.go": rooms, "internal/app/e.go": src, "internal/app/f.go": roomEditor, "internal/app/g.go": admin, "internal/app/h.go": households, "internal/app/i.go": consents}
+		sources := guardkit.Sources{"internal/app/a.go": visibility, "internal/app/b.go": series, "internal/app/c.go": group, "internal/app/d.go": rooms, "internal/app/e.go": src, "internal/app/f.go": roomEditor, "internal/app/g.go": admin, "internal/app/h.go": households, "internal/app/i.go": consents, "internal/app/j.go": roomFeed}
 		if bad := editRevisionProblems(sources.Parse(0)); len(bad) == 0 {
 			t.Errorf("%s passed the guard", name)
 		}
@@ -456,7 +469,7 @@ func (a *App) apiSetGroup(c *gin.Context) {
 }
 `,
 	} {
-		sources := guardkit.Sources{"internal/app/a.go": src, "internal/app/b.go": series, "internal/app/d.go": rooms, "internal/app/e.go": messages, "internal/app/f.go": roomEditor, "internal/app/g.go": admin, "internal/app/h.go": households, "internal/app/i.go": consents}
+		sources := guardkit.Sources{"internal/app/a.go": src, "internal/app/b.go": series, "internal/app/d.go": rooms, "internal/app/e.go": messages, "internal/app/f.go": roomEditor, "internal/app/g.go": admin, "internal/app/h.go": households, "internal/app/i.go": consents, "internal/app/j.go": roomFeed}
 		if !strings.Contains(src, "apiUpdateGroup") {
 			sources["internal/app/c.go"] = group
 		}
