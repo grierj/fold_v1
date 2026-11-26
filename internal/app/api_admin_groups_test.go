@@ -296,6 +296,16 @@ func TestErasingAFormerGroupDeletionRequesterClearsTheirIdentity(t *testing.T) {
 	}
 }
 
+func TestGroupSaveRefusesRevisionFromBeforeRequesterScrub(t *testing.T) {
+	f := newDeletionRequestFixture(t)
+	path := "/api/v1/groups/" + itoa(f.gid)
+	revision := storedGroupRevision(t, f.app, f.gid)
+	opened := withRevision(map[string]any{"name": "Edited before erasure"}, revision)
+	// An older binary can soft-delete this requester. No other write touches the group.
+	gormMust(t, f.app.DB.Exec("UPDATE users SET deleted_at = clock_timestamp() WHERE id = ?", f.leadUser.ID))
+	wantCode(t, "the group save after requester scrub", f.admin.do("PUT", path, opened, true), http.StatusConflict, "group_changed")
+}
+
 func TestJoinReplyWhenTheGroupWasJustDeleted(t *testing.T) {
 	f := newDeletionRequestFixture(t)
 	deleted := false

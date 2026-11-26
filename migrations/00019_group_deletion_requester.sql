@@ -23,7 +23,7 @@ CREATE TRIGGER groups_clear_closed_requester BEFORE INSERT OR UPDATE ON groups
 -- +goose StatementBegin
 CREATE FUNCTION erase_group_requester() RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
-    UPDATE groups SET deletion_requester_id = NULL WHERE deletion_requester_id = NEW.id;
+    UPDATE groups SET deletion_requester_id = NULL, updated_at = clock_timestamp() WHERE deletion_requester_id = NEW.id;
     RETURN NEW;
 END $$;
 -- +goose StatementEnd

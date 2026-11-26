@@ -688,9 +688,10 @@ tightening, cancellation, notice, audit row or job. It comes before any field is
 applied and before the consent work. The 200 answer's `group.revision` is the
 token after the save, read again once the write is done.
 
-The token is a digest of the group row (it omits `created_at` and includes
-`updated_at` as the instant the row was last written), not a counter, so it adds no column, and any write of the row moves
-it: a save that put the group back as it was still does. The read gives it from
+The token is a digest of the group row. It leaves out `created_at` and the
+private deletion requester ID. It includes `updated_at`, which erasure stamps
+when it clears the requester ID. Every write moves the token, including a save
+that puts the group back as it was. The read gives it from
 the same snapshot as the fields beside it. When the token moved and nothing the
 form writes changed, the form sends again by itself, as above; after a send
 that got no answer it does not, so a save that was stored and then undone by
