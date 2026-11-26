@@ -69,10 +69,8 @@ func (a *App) roomPickerOn() gin.HandlerFunc {
 	}
 }
 
-// roomsOnIn reads the rooms switch on tx: the room controls' gate
-// (roomPickerOn), and again in a control's snapshot, so what the read shows
-// comes from a state the switch was on in. A failed read is its error, never
-// errRoomsOff.
+// roomsOnIn reads the rooms switch for the room picker gate and the room
+// snapshots. A failed read returns its own error.
 func roomsOnIn(tx *gorm.DB) error {
 	on, err := boolSettingErrIn(tx, settingRoomsEnabled, false)
 	if err == nil && !on {
@@ -102,6 +100,26 @@ func lockRoomManagerIn(tx *gorm.DB, session *models.User, mode actorLock) (*mode
 		return nil, errSecuritySession
 	}
 	return actor, nil
+}
+
+func readRoomAdminIn(tx *gorm.DB, session *models.User) (*models.User, error) {
+	if err := roomsOnIn(tx); err != nil {
+		return nil, err
+	}
+	return lockRoomManagerIn(tx, session, actorRead)
+}
+
+func (a *App) readAdminRoomList(c *gin.Context, surface string, read func(*gorm.DB) error) bool {
+	err := a.readAdminSnapshot(c, surface, readRoomAdminIn, read)
+	if errors.Is(err, errRoomsOff) {
+		jsonError(c, http.StatusNotFound, "not found")
+		return false
+	}
+	if err != nil {
+		fail(c, err)
+		return false
+	}
+	return true
 }
 
 type roomJSON struct {
@@ -239,12 +257,9 @@ func roomNameTaken(err error) bool {
 	return pgConstraint(err, pgUniqueViolation, "idx_rooms_building_name")
 }
 
-// apiAdminListRooms reads the rooms, their revisions and the approval switch
-// in one snapshot, so a revision never belongs to newer fields than the ones
-// beside it.
 func (a *App) apiAdminListRooms(c *gin.Context) {
 	out := adminRoomsJSON{Rooms: []roomJSON{}}
-	err := a.DB.Transaction(func(tx *gorm.DB) error {
+	if a.readAdminRoomList(c, "admin room catalog", func(tx *gorm.DB) error {
 		var rooms []models.Room
 		if err := tx.Order("active DESC, lower(building), lower(name)").Find(&rooms).Error; err != nil {
 			return err
@@ -266,12 +281,9 @@ func (a *App) apiAdminListRooms(c *gin.Context) {
 		}
 		out.NeedApproval, err = boolSettingErrIn(tx, settingRoomApproval, false)
 		return err
-	}, readSnapshot)
-	if err != nil {
-		jsonError(c, http.StatusInternalServerError, "could not list rooms")
-		return
+	}) {
+		c.JSON(http.StatusOK, out)
 	}
-	c.JSON(http.StatusOK, out)
 }
 
 func (a *App) apiAdminCreateRoom(c *gin.Context) {

@@ -7,6 +7,7 @@ import (
 
 	"fold/internal/audit"
 	"fold/internal/events"
+	"fold/models"
 
 	"github.com/gin-gonic/gin"
 	"gorm.io/gorm"
@@ -23,10 +24,20 @@ var (
 	replyToSetting        = revisedSetting{settingReplyTo, audit.ReplyToChanged}
 )
 
-func (a *App) readAdminSnapshot(c *gin.Context, surface string, read func(*gorm.DB) error) error {
+func readAdminIn(tx *gorm.DB, session *models.User) (*models.User, error) {
+	return lockAdminIn(tx, session, actorRead)
+}
+
+func (a *App) readAdminSnapshot(c *gin.Context, surface string,
+	authorize func(*gorm.DB, *models.User) (*models.User, error),
+	read func(*gorm.DB) error,
+) error {
 	var judged sessionJudgment
 	err := decidingSnapshot(a.DB.WithContext(c.Request.Context()), func(tx *gorm.DB) error {
-		admin, err := lockAdminIn(tx, apiUser(c), actorRead)
+		if a.hooks.readerBegin != nil {
+			a.hooks.readerBegin(surface)
+		}
+		admin, err := authorize(tx, apiUser(c))
 		if err != nil {
 			return err
 		}
@@ -43,7 +54,7 @@ func (a *App) readAdminSnapshot(c *gin.Context, surface string, read func(*gorm.
 }
 
 func (a *App) readRevisedSetting(c *gin.Context, setting revisedSetting) (value, revision string, err error) {
-	err = a.readAdminSnapshot(c, setting.key, func(tx *gorm.DB) error {
+	err = a.readAdminSnapshot(c, setting.key, readAdminIn, func(tx *gorm.DB) error {
 		value, revision, err = a.settingRevisionIn(tx, setting)
 		return err
 	})

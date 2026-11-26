@@ -403,6 +403,76 @@ func TestRoomRevisionCoversTheWholeRow(t *testing.T) {
 	}
 }
 
+func TestAdminRoomCatalogReadsOneSnapshot(t *testing.T) {
+	const path = "/api/v1/admin/rooms"
+	const surface = "admin room catalog"
+	t.Run("catalog and acknowledgment", func(t *testing.T) {
+		app := testApp(t)
+		user := newTestUser(t, app, "admin", "password1234", models.RoleAdmin)
+		admin := loginAPI(t, app, user.Name, "password1234")
+		apiDo(t, admin, "PUT", "/api/v1/admin/settings/rooms", map[string]any{"enabled": true}, http.StatusOK)
+		var created roomResponseJSON
+		decodeJSON(t, admin.do("POST", path, map[string]any{"name": "Chapel", "notes": "Original note"}, true), &created)
+		before := apiDo(t, admin, "GET", path, nil, http.StatusOK)
+		wantIn(t, "original catalog", before, "Original note", `"needApproval":false`, `"revision":"`+created.Room.Revision+`"`)
+		writer := app.DB
+		fired := atReaderSeam(app, "authorized", surface, func() {
+			if err := writer.Transaction(func(tx *gorm.DB) error {
+				if err := tx.Model(user).Update("role", models.RoleMember).Error; err != nil {
+					return err
+				}
+				if err := tx.Model(&models.Room{}).Where("id = ?", created.Room.ID).Update("notes", "Updated note").Error; err != nil {
+					return err
+				}
+				return setSettingIn(tx, settingRoomApproval, "true")
+			}); err != nil {
+				t.Fatal(err)
+			}
+		})
+		pinned := pinnedAs(t, admin)
+		pinned.ctx = oneConnection(t, app, oneConnectionPool(t, app))
+		w := pinned.do("GET", path, nil, false)
+		if !fired.Load() || w.Code != http.StatusOK || w.Body.String() != before {
+			t.Fatalf("catalog after concurrent edit: %d %s, want %s (edit committed: %t)", w.Code, w.Body, before, fired.Load())
+		}
+		wantAck(t, "catalog", w, pinned, user)
+	})
+
+	for _, change := range []struct {
+		name   string
+		apply  func(*gorm.DB, *models.User) error
+		status int
+		code   string
+	}{
+		{"rooms turned off", func(db *gorm.DB, _ *models.User) error {
+			return setSettingIn(db, settingRoomsEnabled, "false")
+		}, http.StatusNotFound, "not_found"},
+		{"admin demoted", func(db *gorm.DB, u *models.User) error {
+			return db.Model(u).Update("role", models.RoleMember).Error
+		}, http.StatusUnauthorized, "signed_out"},
+		{"session ended", func(db *gorm.DB, u *models.User) error {
+			return db.Model(u).Update("session_version", sessionVersionBump()).Error
+		}, http.StatusUnauthorized, "signed_out"},
+	} {
+		t.Run(change.name, func(t *testing.T) {
+			app := testApp(t)
+			user := newTestUser(t, app, "admin", "password1234", models.RoleAdmin)
+			admin := pinnedAs(t, loginAPI(t, app, user.Name, "password1234"))
+			apiDo(t, admin, "PUT", "/api/v1/admin/settings/rooms", map[string]any{"enabled": true}, http.StatusOK)
+			app.hooks.readerBegin = func(s string) {
+				if s == surface {
+					if err := change.apply(app.DB, user); err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
+			w := admin.do("GET", path, nil, false)
+			wantCode(t, change.name, w, change.status, change.code)
+			wantNoAck(t, change.name, w)
+		})
+	}
+}
+
 // The list reads each room's fields and revision in one snapshot: a rename
 // committed right after the rooms were read leaves the answer with the old
 // name and the old revision, so an edit made from it is refused instead of
