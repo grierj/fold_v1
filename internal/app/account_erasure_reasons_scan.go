@@ -51,8 +51,7 @@ import (
 var (
 	reasonScanBatchFirst  = 256
 	reasonScanBatchGrowth = 2
-	// reasonScanHooks are test seams, zero in production: Before runs before a
-	// batch statement is sent, After when it has finished.
+	// reasonScanHooks are zero in production.
 	reasonScanHooks reasonscan.Hooks
 )
 
