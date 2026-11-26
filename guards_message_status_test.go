@@ -14,35 +14,7 @@ import (
 // policy.MessageMove; three creators insert a move's first status
 // (docs/agents/lifecycles.md).
 //
-// Parse-only, every production package. A message value is a name a function
-// binds to models.Message (or a pointer or slice of it): a parameter, a var
-// of that type, an assignment from a models.Message literal, from another
-// message value or from a declared function whose first result is one, or a
-// range over a slice of them. A messages chain is a gorm call chain with
-// Model(<message value>) or Table("messages"), or a name assigned one. On a
-// messages chain the guard reports Update or UpdateColumn of "status" or of a
-// column it cannot read, and every Updates or UpdateColumns except of a map
-// it can read whole: a map literal, or a local map the function makes and
-// only sets, keys and passes to Updates (no other call, no second name for
-// it), whose keys are all plain column names in string literals, none of
-// them status. A name counts once per function, whatever scope binds it, so
-// a name ever bound to something the guard did not see made is unreadable
-// everywhere in that function. So a message struct, any
-// other struct, a parameter's map, a map with a computed key and a map built
-// elsewhere are all reported, whatever Select precedes them. "Status", the
-// field's name, counts as the column, as gorm resolves it. Anywhere it reports a
-// Create, CreateInBatches, FirstOrCreate or Save of a message value (an
-// insert writes the status, the column's default included), and raw SQL that
-// inserts into messages, or updates messages and sets status, or whose SET
-// list runs to the end of its literal (the rest is built at run time).
-//
-// It does not see a message reached through a struct field, an interface or
-// a result of a function the scanned tree does not declare; a package that
-// imports models under another name; an upsert's DoUpdates; gorm calls in a
-// function literal at package level (there it reads only raw SQL); or SQL
-// assembled without the "UPDATE messages SET" or "INSERT INTO messages"
-// literal. It does not judge which status a creator inserts or which move a
-// caller passes: the policy table and moveMessage's refusals decide those.
+// The shared tableStatusGuard describes the source forms in the census.
 // ---------------------------------------------------------------------------
 
 // messageStatusWriterCensus is every write of messages.status the guard sees.
@@ -76,6 +48,10 @@ func TestMessageStatusGuardCatchesBypasses(t *testing.T) {
 func loadOwn(tx *gorm.DB, id uint) (*models.Message, bool) { return nil, false }
 `
 	for _, c := range []struct{ name, src, want string }{
+		{"a schema-qualified table", `package main
+func retry(tx *gorm.DB) error {
+	return tx.Table("public.messages").Update("status", "scheduled").Error
+}`, `retry: Update("status")`},
 		{"a cancel as it was written", `package main
 func (a *App) cancel(tx *gorm.DB, m *models.Message) error {
 	return tx.Model(&models.Message{}).Where("id = ? AND status IN ?", m.ID, []string{"draft", "scheduled"}).

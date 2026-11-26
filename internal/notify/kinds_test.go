@@ -94,6 +94,29 @@ func TestHouseholdRegistrationWordsNameTheAttendee(t *testing.T) {
 	}
 }
 
+func TestKindsThatEmailPersonalNamesHaveFallbacks(t *testing.T) {
+	const actor, person = "ACTOR-NAME-SENTINEL", "PERSON-NAME-SENTINEL"
+	containsName := func(title, body string) bool {
+		return strings.Contains(title+body, actor) || strings.Contains(title+body, person)
+	}
+	for _, k := range Kinds() {
+		if !k.AllowEmail {
+			continue
+		}
+		v := Vars{Actor: actor, Person: person}
+		named := containsName(k.RenderForEmail(v))
+		if !k.Required && !k.CopyWithoutSubjectAccess {
+			named = named || containsName(k.CopyText(k.Render(v)))
+		}
+		if named != (k.namedEmail.source != 0) {
+			t.Errorf("%s sends named text = %v, has a fallback = %v", k.Key, named, k.namedEmail.source != 0)
+		}
+		if named && (k.namedEmail.title == "" || containsName(k.namedEmail.title, k.namedEmail.body)) {
+			t.Errorf("%s has an invalid name-free fallback: %+v", k.Key, k.namedEmail)
+		}
+	}
+}
+
 func TestTeenGuardianTaskExplainsConsent(t *testing.T) {
 	kind, ok := Lookup(HouseholdLinkPending)
 	if !ok {

@@ -138,7 +138,7 @@ func TestRoomSeriesGuards(t *testing.T) {
 	if code, body := f.book(t, f.leader, f.eventA, map[string]any{"roomId": f.hall.ID}); code != http.StatusOK {
 		t.Fatalf("book A: %d %s", code, body)
 	}
-	code, out := f.seriesRoom(t, f.admin, series, map[string]any{"roomId": f.hall.ID, "overlapReason": "Shared with A"})
+	code, out := f.seriesRoom(t, f.admin, series, map[string]any{"roomId": f.hall.ID, "overlapReason": "Shared with A", "reviewedBusyDates": []string{feedDate(f.startOn)}})
 	if code != http.StatusOK || out.Booked != 3 || len(out.Lost) != 0 {
 		t.Fatalf("admin double-booking the series: %d %+v", code, out)
 	}
@@ -816,7 +816,7 @@ func TestSeriesPickOfItsOwnRoomBooksBareDatesAndCountsOverlaps(t *testing.T) {
 	if code, out := f.seriesRoom(t, f.admin, series, map[string]any{"roomId": f.hall.ID}); code != http.StatusOK || out.Booked != 3 || len(out.Lost) != 1 || out.DoubleBooked != 0 {
 		t.Fatalf("book the series: %d %+v", code, out)
 	}
-	if code, out := f.seriesRoom(t, f.admin, series, map[string]any{"roomId": f.hall.ID, "overlapReason": "Choir moved"}); code != http.StatusOK ||
+	if code, out := f.seriesRoom(t, f.admin, series, map[string]any{"roomId": f.hall.ID, "overlapReason": "Choir moved", "reviewedBusyDates": []string{feedDate(f.startOn)}}); code != http.StatusOK ||
 		out.Booked != 1 || out.DoubleBooked != 1 || len(out.Lost) != 0 {
 		t.Fatalf("book the busy date anyway: %d %+v", code, out)
 	}
@@ -923,6 +923,67 @@ func TestSeriesPickKeepsARequestOnlyAnAdminCanChange(t *testing.T) {
 	noOrphanRequests(t, f.app)
 }
 
+func TestSeriesBookAnywayRequiresTheSameBusyDates(t *testing.T) {
+	f := newBookingFixture(t)
+	first, second := feedDate(f.startOn), feedDate(f.startOn.AddDate(0, 0, 7))
+	other := createFeedEvent(t, f.leader, f.group, "Second holder", f.startOn.AddDate(0, 0, 7), "")
+	series := createFeedEvent(t, f.leader, f.group, "Weekly", f.startOn, "FREQ=WEEKLY;COUNT=3")
+	roomPickOK(t, f.leader, f.path(f.eventA, "/room"), map[string]any{"roomId": f.hall.ID})
+	pick := seriesPickFrom(t, f.admin, series, seriesRoomsRead(t, f.admin, series), map[string]any{"roomId": f.hall.ID})
+	if !reflect.DeepEqual(pick.Lost, []string{first}) {
+		t.Fatalf("first pick reported busy dates %v, want %s", pick.Lost, first)
+	}
+
+	roomPath := "/api/v1/events/" + itoa(series.ID) + "/room"
+	confirm := func(reviewed []string) map[string]any {
+		return withRevision(map[string]any{"roomId": f.hall.ID, "overlapReason": "Shared night", "reviewedBusyDates": reviewed}, pick.Event.Revision)
+	}
+	refused := func(reviewed, want []string) {
+		t.Helper()
+		w := f.admin.do("PUT", roomPath, confirm(reviewed), true)
+		wantCode(t, "confirm series busy dates", w, http.StatusConflict, "series_busy_dates_changed")
+		var res struct {
+			BusyDates []string `json:"busyDates"`
+		}
+		decodeJSON(t, w, &res)
+		if !reflect.DeepEqual(res.BusyDates, want) {
+			t.Fatalf("busy dates %v, want %v", res.BusyDates, want)
+		}
+	}
+	audits := func() int64 {
+		return contactCount(t, f.app, &models.AuditLog{}, "action = ? AND target_id = ?", audit.RoomBookingSeries, series.ID)
+	}
+	refused(nil, []string{first})
+	roomPickOK(t, f.leader, "/api/v1/events/"+itoa(series.ID)+"/dates/"+second+"/room", map[string]any{"roomId": nil})
+	roomPickOK(t, f.leader, "/api/v1/events/"+itoa(other.ID)+"/dates/"+second+"/room", map[string]any{"roomId": f.hall.ID})
+	refused(pick.Lost, []string{first, second})
+	if count := seriesBookings(t, f.app, series.ID, models.BookingConfirmed); count != 1 || audits() != 1 {
+		t.Fatalf("refused confirmation left %d confirmed bookings and %d series audits, want 1 of each", count, audits())
+	}
+
+	chapel := newRoom(t, f, "Chapel")
+	roomPickOK(t, f.admin, "/api/v1/events/"+itoa(series.ID)+"/dates/"+first+"/room", map[string]any{"roomId": chapel.ID})
+	refused([]string{first, second}, []string{second})
+	refused(pick.Lost, []string{second})
+	if room, _, _, _ := dateBookingOf(t, f.app, series, first); room != chapel.ID || audits() != 1 {
+		t.Fatalf("the refused confirmation changed the date's own room (%d) or the series audit count (%d)", room, audits())
+	}
+
+	w := f.admin.do("PUT", roomPath, confirm([]string{second}), true)
+	if w.Code != http.StatusOK {
+		t.Fatalf("confirming the fresh list: %d %s", w.Code, w.Body.String())
+	}
+	var booked seriesBookingJSON
+	decodeJSON(t, w, &booked)
+	if booked.DoubleBooked != 1 || booked.Booked != 1 || audits() != 2 {
+		t.Fatalf("fresh confirmation: %+v, %d audits", booked, audits())
+	}
+	refused([]string{second}, []string{})
+	if audits() != 2 {
+		t.Fatalf("the replay added a series audit: %d", audits())
+	}
+}
+
 // "Book anyway" books over others only where the pick left a date with no
 // room, which is what its prompt counted: a date that waits for the room keeps
 // its request for an admin to decide.
@@ -942,7 +1003,7 @@ func TestSeriesBookAnywayLeavesAWaitingDateToItsRequest(t *testing.T) {
 	if out.Kept != 1 || out.KeptWaiting != 1 || len(out.Lost) != 1 || out.Booked != 0 {
 		t.Fatalf("the pick: %+v, want the waiting date kept and one date with no room", out)
 	}
-	out = seriesPickFrom(t, f.admin, series, seriesRoomsRead(t, f.admin, series), map[string]any{"roomId": f.hall.ID, "overlapReason": "Choir moved"})
+	out = seriesPickFrom(t, f.admin, series, seriesRoomsRead(t, f.admin, series), map[string]any{"roomId": f.hall.ID, "overlapReason": "Choir moved", "reviewedBusyDates": out.Lost})
 	if out.Booked != 1 || out.DoubleBooked != 1 {
 		t.Fatalf("book anyway: %+v, want the one date its prompt counted", out)
 	}

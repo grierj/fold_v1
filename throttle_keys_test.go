@@ -709,6 +709,8 @@ func TestThrottleKeyStringsAreUnchanged(t *testing.T) {
 		{"guardian ip", guardianClaimIPKey(ip), "guardian:ip:203.0.113.9"},
 		{"guardian-email addr", guardianEmailAddrKey(addr), "guardian-email:addr:a@x.test"},
 		{"people-search user", peopleSearchUserKey(7), "people-search:user:7"},
+		{"group member email user", groupMemberEmailUserKey(7), "group-member-email:user:7"},
+		{"group member email ip", groupMemberEmailIPKey(ip), "group-member-email:ip:203.0.113.9"},
 		{"manager-date-add", managerDateAddKey(7), "manager-date-add:7"},
 	} {
 		if string(tt.got) != tt.want {
@@ -738,6 +740,7 @@ func TestOwnedThrottleKeysAreExactlyThePersonsKeys(t *testing.T) {
 		"guardian:addr:a@x.test:h", "guardian:addr:a@x.test:d",
 		"guardian-email:addr:a@x.test:h", "guardian-email:addr:a@x.test:d",
 		"people-search:user:7",
+		"group-member-email:user:7",
 		"manager-date-add:7",
 	}
 	sort.Strings(want)
@@ -747,7 +750,7 @@ func TestOwnedThrottleKeysAreExactlyThePersonsKeys(t *testing.T) {
 	if got := ownedThrottleKeys(7, heldAddress{value: "  A@X.test ", ok: true}); !reflect.DeepEqual(got, want) {
 		t.Fatalf("the address must be normalized, got %v", got)
 	}
-	idOnly := []string{"emailchange:user:7:d", "emailchange:user:7:h", "manager-date-add:7", "people-search:user:7", "user:7"}
+	idOnly := []string{"emailchange:user:7:d", "emailchange:user:7:h", "group-member-email:user:7", "manager-date-add:7", "people-search:user:7", "user:7"}
 	for _, held := range []heldAddress{{}, {value: "a@x.test"}, {value: "deleted-7@deleted.invalid"}} {
 		if got := ownedThrottleKeys(7, held); !reflect.DeepEqual(got, idOnly) {
 			t.Fatalf("unavailable address selected %v, want only %v", got, idOnly)

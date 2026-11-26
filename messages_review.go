@@ -168,13 +168,12 @@ func (a *App) checkReview(token string, me *models.User, m *models.Message, revi
 	return nil
 }
 
-// messageReachIn is who m reaches for me now, read on tx: its audience as me
-// may message it (resolveAudienceIn) and the rows preparation would write for
-// it (audienceReachIn). The errors are resolveAudienceIn's.
+// messageReachIn counts the audience the author may message. The viewer's
+// role decides who sees the individual skip reasons.
 func (a *App) messageReachIn(tx *gorm.DB, me *models.User, m *models.Message) (audienceJSON, audienceSummaryJSON, audienceReach, error) {
 	var au audienceJSON
 	_ = json.Unmarshal([]byte(m.Audience), &au)
-	ids, err := a.resolveAudienceIn(tx, me, &au, a.now())
+	ids, err := a.resolveAuthorAudienceIn(tx, me, m, &au)
 	if err != nil {
 		return au, audienceSummaryJSON{}, audienceReach{}, err
 	}

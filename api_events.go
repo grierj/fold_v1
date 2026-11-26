@@ -467,15 +467,12 @@ func occurrenceToJSON(ev *models.Event, o *models.EventOccurrence, groupLoc stri
 		TZID: ev.TZID, DurationMinutes: dur, Location: location, Title: title,
 		Description:    ev.Description,
 		RecurrenceRule: ev.RRule, RRuleUntil: until, SeriesStartsLocal: ev.StartsLocal,
-		Overridden:  o.Customized(),
-		SeriesTitle: ev.Title, SeriesLocation: ev.Location, SeriesDurationMinutes: ev.DurationMinutes,
-		Registrations:        registrationCounts(nil, false),
-		Capacity:             events.EffectiveCapacity(ev.Capacity, o.CapacityOverride),
-		WaitlistEnabled:      ev.WaitlistEnabled,
-		GuestsAllowed:        ev.GuestsAllowed,
-		ReminderEmailMinutes: ev.ReminderEmailMinutes,
-		ReminderPush:         ev.ReminderPush,
-		ChildcareAvailable:   ev.ChildcareAvailable, ChildcareNotes: ev.ChildcareNotes,
+		Overridden:         o.Customized(),
+		Registrations:      registrationCounts(nil, false),
+		Capacity:           events.EffectiveCapacity(ev.Capacity, o.CapacityOverride),
+		WaitlistEnabled:    ev.WaitlistEnabled,
+		GuestsAllowed:      ev.GuestsAllowed,
+		ChildcareAvailable: ev.ChildcareAvailable, ChildcareNotes: ev.ChildcareNotes,
 		ChildcareCapacity: ev.ChildcareCapacity, ChildcareAges: ev.ChildcareAges,
 		RemoteAvailable: ev.RemoteAvailable,
 		RemoteCapacity:  events.EffectiveCapacity(ev.RemoteCapacity, o.RemoteCapacityOverride),
@@ -1754,39 +1751,36 @@ type occurrenceJSON struct {
 	// the guarded date edit names it. Own and Cancelled are set only on the
 	// manager's edit base (GET /events/:id/occurrences/:date, and the edit's
 	// answer), which also answers a cancelled date.
-	Revision              string           `json:"revision,omitempty"`
-	Own                   *dateOwnJSON     `json:"own,omitempty"`
-	Cancelled             bool             `json:"cancelled,omitempty"`
-	EventID               uint             `json:"eventId"`
-	Date                  string           `json:"date"`
-	DateURL               string           `json:"dateUrl,omitempty"`
-	VisibilityOverride    *string          `json:"visibilityOverride,omitempty"`
-	SeriesVisibility      string           `json:"seriesVisibility,omitempty" series:"omit"`
-	GroupVisibility       string           `json:"groupVisibility,omitempty"`
-	StartsAt              time.Time        `json:"startsAt"`
-	EndsAt                time.Time        `json:"endsAt"`
-	StartsLocal           string           `json:"startsLocal"`
-	EndsLocal             string           `json:"endsLocal"`
-	TZID                  string           `json:"tzid"`
-	DurationMinutes       int              `json:"durationMinutes"`
-	Location              string           `json:"location"`
-	Title                 string           `json:"title"`
-	Description           string           `json:"description" series:"blank"`
-	RecurrenceRule        string           `json:"recurrenceRule" series:"omit"`
-	RRuleUntil            string           `json:"rruleUntil,omitempty" series:"omit"`
-	SeriesStartsLocal     string           `json:"seriesStartsLocal" series:"omit"`
-	SeriesTitle           string           `json:"seriesTitle" series:"omit"`
-	SeriesLocation        string           `json:"seriesLocation" series:"omit"`
-	SeriesDurationMinutes int              `json:"seriesDurationMinutes" series:"omit"`
-	Overridden            bool             `json:"overridden"`
-	Registrations         map[string]int64 `json:"registrations"`
-	MyRegistration        *string          `json:"myRegistration"`
-	Visibility            string           `json:"visibility"`
-	LeaderOpened          bool             `json:"leaderOpened"`
-	ChurchWide            bool             `json:"churchWide"`
-	GroupID               *uint            `json:"groupId,omitempty"`
-	GroupName             string           `json:"groupName,omitempty"`
-	HostedBy              string           `json:"hostedBy,omitempty"`
+	Revision           string           `json:"revision,omitempty"`
+	Own                *dateOwnJSON     `json:"own,omitempty"`
+	Cancelled          bool             `json:"cancelled,omitempty"`
+	EventID            uint             `json:"eventId"`
+	Date               string           `json:"date"`
+	DateURL            string           `json:"dateUrl,omitempty"`
+	VisibilityOverride *string          `json:"visibilityOverride,omitempty"`
+	SeriesVisibility   string           `json:"seriesVisibility,omitempty" series:"omit"`
+	GroupVisibility    string           `json:"groupVisibility,omitempty"`
+	StartsAt           time.Time        `json:"startsAt"`
+	EndsAt             time.Time        `json:"endsAt"`
+	StartsLocal        string           `json:"startsLocal"`
+	EndsLocal          string           `json:"endsLocal"`
+	TZID               string           `json:"tzid"`
+	DurationMinutes    int              `json:"durationMinutes"`
+	Location           string           `json:"location"`
+	Title              string           `json:"title"`
+	Description        string           `json:"description" series:"blank"`
+	RecurrenceRule     string           `json:"recurrenceRule" series:"omit"`
+	RRuleUntil         string           `json:"rruleUntil,omitempty" series:"omit"`
+	SeriesStartsLocal  string           `json:"seriesStartsLocal" series:"omit"`
+	Overridden         bool             `json:"overridden"`
+	Registrations      map[string]int64 `json:"registrations"`
+	MyRegistration     *string          `json:"myRegistration"`
+	Visibility         string           `json:"visibility"`
+	LeaderOpened       bool             `json:"leaderOpened"`
+	ChurchWide         bool             `json:"churchWide"`
+	GroupID            *uint            `json:"groupId,omitempty"`
+	GroupName          string           `json:"groupName,omitempty"`
+	HostedBy           string           `json:"hostedBy,omitempty"`
 	// Room is the date's confirmed room, shown as its place (9.2, M2.1b).
 	Room *occurrenceRoomJSON `json:"room,omitempty"`
 	// AttendeesVisible is false when the caller gets a count only. An empty
@@ -1809,11 +1803,6 @@ type occurrenceJSON struct {
 	SpotsLeft       *int `json:"spotsLeft"`
 	WaitlistEnabled bool `json:"waitlistEnabled"`
 	GuestsAllowed   int  `json:"guestsAllowed"`
-	// ReminderEmailMinutes is the series' reminder time (M3.6), for its
-	// Edit series form; 0 is off. ReminderPush is its 2-hour push
-	// reminder switch (M3.13d3).
-	ReminderEmailMinutes int  `json:"reminderEmailMinutes"`
-	ReminderPush         bool `json:"reminderPush"`
 	// Remote attendance (M1.8 slice 2): a second seat pool. The remote
 	// fields mirror the in-person ones; remoteCapacity is the effective
 	// cap for this date (per-date override wins), null is unlimited.
@@ -1842,10 +1831,8 @@ type occurrenceJSON struct {
 	// may see it for this date (policy.CanSeeVideoLink); VideoHidden says
 	// a link exists but is being withheld, so the UI can say "Register
 	// to get the link".
-	VideoProvider string `json:"videoProvider"`
-	VideoURL      string `json:"videoUrl,omitempty"`
-	VideoReveal   string `json:"videoReveal"`
-	VideoHidden   bool   `json:"videoHidden,omitempty"`
+	VideoURL    string `json:"videoUrl,omitempty"`
+	VideoHidden bool   `json:"videoHidden,omitempty"`
 }
 
 // hideSeriesDetails withdraws the series from a viewer who may see only this

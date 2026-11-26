@@ -185,7 +185,8 @@ it.each([["Can't go", "decline"], ["Don't add me again", "block"]] as const)("co
 });
 
 it.each([403, 404])("clears all prior date/video data on mutation %s without an ordinary RSVP retry", async (status) => {
-  vi.mocked(Dates.register).mockRejectedValue(new ApiError(status, "SECRET"));
+  vi.mocked(Dates.get).mockResolvedValueOnce({ occurrence: occurrence() }).mockRejectedValue(new ApiError(404, "missing", { code: "not_found" }));
+  vi.mocked(Dates.register).mockRejectedValue(new ApiError(status, "SECRET", { code: status === 403 ? "not_allowed" : "not_found" }));
   mount(); await userEvent.click(await screen.findByRole("button", { name: "Going" }));
   await screen.findByText("This date is not available"); expect(screen.queryByText("One invited date")).not.toBeInTheDocument();
   expect(screen.queryByRole("link", { name: /Join video call/ })).not.toBeInTheDocument(); expect(Dates.register).toHaveBeenCalledTimes(1);
@@ -276,7 +277,11 @@ it("a late authority refusal clears a newer read without exposing server text", 
   vi.mocked(Dates.register).mockImplementation(() => new Promise((_resolve, reject) => { fail = reject; }));
   mount(); await userEvent.click(await screen.findByRole("button", { name: "Maybe" }));
   fireEvent(window, new Event("focus")); await screen.findByText("One invited date");
-  await act(async () => fail(new ApiError(404, "SECRET"))); await screen.findByText("This date is not available");
+  vi.mocked(Dates.get).mockRejectedValueOnce(new ApiError(404, "missing", { code: "not_found" }));
+  await act(async () => fail(new ApiError(404, "SECRET", { code: "not_found" })));
+  await screen.findByText("This date is not available");
+  expect(screen.getByText("Your last action could not be completed.")).toHaveFocus();
+  expect(Dates.get).toHaveBeenCalledTimes(3);
   expect(screen.queryByText(/SECRET/)).not.toBeInTheDocument();
 });
 

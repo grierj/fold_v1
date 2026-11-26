@@ -140,6 +140,25 @@ func (a *App) audienceTargets(db *gorm.DB, me *models.User, au audienceJSON) ([]
 	return audienceTargetsFrom(a.dbDates(db), me, au)
 }
 
+func activeMessageAuthorIn(tx *gorm.DB, m *models.Message, viewer *models.User) (*models.User, error) {
+	if m.AuthorID == nil {
+		return nil, nil
+	}
+	author := viewer
+	if author == nil || author.ID != *m.AuthorID {
+		author = &models.User{}
+		if err := tx.First(author, *m.AuthorID).Error; errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, nil
+		} else if err != nil {
+			return nil, err
+		}
+	}
+	if author.Status != models.UserActive {
+		return nil, nil
+	}
+	return author, nil
+}
+
 // audienceTargetsFrom is audienceTargets on any fact source (dateFactSource).
 func audienceTargetsFrom(src dateFactSource, me *models.User, au audienceJSON) ([]policy.MessageTarget, error) {
 	if au.Type == policy.AudienceGroup {
@@ -429,7 +448,8 @@ type audienceSummaryJSON struct {
 	// an active account with push on for messages from leaders and a
 	// device, whether or not the email reaches them (DEC-122). Having no
 	// device isn't a skip. 0 when the church turned push off.
-	Push int `json:"push"`
+	Push     int `json:"push"`
+	PushOnly int `json:"pushOnly"`
 	// Recipients are the first 100 by name.
 	Recipients []audienceRecipientJSON `json:"recipients"`
 	More       bool                    `json:"more"`
@@ -494,6 +514,9 @@ func (a *App) audienceReachIn(db *gorm.DB, ids []uint, reasons, pushAlert bool) 
 		if pushOn[f.User.ID] {
 			r.Push = true
 			out.Push++
+			if r.Skipped != "" {
+				out.PushOnly++
+			}
 		}
 		if r.Skipped == "" {
 			out.Eligible++

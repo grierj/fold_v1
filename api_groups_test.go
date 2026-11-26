@@ -993,14 +993,93 @@ func TestSelectionGroupAddsCapacityAuditAndTeenGate(t *testing.T) {
 	birth := time.Now().AddDate(-15, 0, 0)
 	app.DB.Model(teen).Updates(map[string]any{"account_type": models.AccountTeen, "birth_date": birth})
 	teenToken, _ := app.newPeopleSelection(actor.ID, teen.ID, time.Now())
-	for _, body := range []map[string]any{{"selectionId": teenToken, "overLimit": true}, {"email": teen.Email, "overLimit": true}} {
-		w := client.do("POST", path, body, true)
-		if w.Code != 409 || !strings.Contains(w.Body.String(), "teen_add_approval_required") {
-			t.Fatal(w.Code, w.Body.String())
-		}
+	w := client.do("POST", path, map[string]any{"selectionId": teenToken, "overLimit": true}, true)
+	if w.Code != 409 || !strings.Contains(w.Body.String(), "teen_add_approval_required") {
+		t.Fatal(w.Code, w.Body.String())
 	}
 	if membershipStatus(app, teen, g) != "none" {
 		t.Fatal("teen bypassed approval")
+	}
+}
+
+func TestGroupEmailAddRespectsContactPrivacy(t *testing.T) {
+	app, _, admin := peopleTestApp(t)
+	leader := newTestUser(t, app, "leader", "pw", models.RoleMember)
+	client := loginAPI(t, app, "leader", "pw")
+	g := newTestGroup(t, app, leader, "Choir", models.GroupActive)
+	groupPath := "/api/v1/groups/" + itoa(g.ID) + "/members"
+	addEmail := func(c *apiClient, email string, want int) string {
+		t.Helper()
+		return apiDo(t, c, "POST", groupPath, map[string]any{"email": email}, want)
+	}
+	missing := addEmail(client, "unlisted@example.com", http.StatusBadRequest)
+	if !strings.Contains(missing, `"code":"group_member_email_unavailable"`) {
+		t.Fatal(missing)
+	}
+	hidden := newTestUser(t, app, "Private Adult", "pw", models.RoleMember)
+	if err := app.DB.Model(hidden).Update("hide_contact_from_leaders", true).Error; err != nil {
+		t.Fatal(err)
+	}
+	if got := addEmail(client, hidden.Email, http.StatusBadRequest); got != missing || membershipStatus(app, hidden, g) != "none" {
+		t.Fatalf("hidden adult email add: %s", got)
+	}
+	teen := newTestUser(t, app, "Youth Singer", "pw", models.RoleMember)
+	if err := app.DB.Model(teen).Updates(map[string]any{"account_type": models.AccountTeen, "birth_date": time.Now().AddDate(-15, 0, 0)}).Error; err != nil {
+		t.Fatal(err)
+	}
+	if got := addEmail(client, teen.Email, http.StatusBadRequest); got != missing || membershipStatus(app, teen, g) != "none" {
+		t.Fatalf("teen email add: %s", got)
+	}
+	if got := addEmail(admin, teen.Email, http.StatusBadRequest); got != missing || membershipStatus(app, teen, g) != "none" {
+		t.Fatalf("admin teen email add: %s", got)
+	}
+	if n := contactCount(t, app, &models.AuditLog{}, "action = ?", audit.MemberAdded); n != 0 {
+		t.Fatalf("unavailable email wrote %d add audits", n)
+	}
+	person := searchPeople(t, client, hidden.Name)
+	if len(person.People) != 1 {
+		t.Fatalf("hidden adult name search: %+v", person)
+	}
+	apiDo(t, client, "POST", groupPath, map[string]any{"selectionId": person.People[0].SelectionID}, http.StatusOK)
+	if membershipStatus(app, hidden, g) != models.MembershipActive {
+		t.Fatal("adding the contact-hidden adult by name did not join them")
+	}
+	if got := addEmail(client, hidden.Email, http.StatusBadRequest); got != missing {
+		t.Fatalf("hidden adult already on roster: %s", got)
+	}
+	other := newTestGroup(t, app, leader, "Second choir", models.GroupActive)
+	apiDo(t, admin, "POST", "/api/v1/groups/"+itoa(other.ID)+"/members", map[string]any{"email": hidden.Email}, http.StatusOK)
+	if membershipStatus(app, hidden, other) != models.MembershipActive {
+		t.Fatal("admin email add did not join the visible adult")
+	}
+}
+
+func TestGroupEmailAddHonorsThrottle(t *testing.T) {
+	for _, budget := range []string{"actor", "ip"} {
+		t.Run(budget, func(t *testing.T) {
+			app, actor, client := peopleTestApp(t)
+			client.ip = "192.0.2.41"
+			g := newTestGroup(t, app, actor, "Choir", models.GroupActive)
+			target := newTestUser(t, app, "New Singer", "pw", models.RoleMember)
+			path := "/api/v1/groups/" + itoa(g.ID) + "/members"
+			want := apiDo(t, client, "POST", path, map[string]any{"email": "unlisted@example.com"}, http.StatusBadRequest)
+			key, limit := groupMemberEmailUserKey(actor.ID), groupMemberEmailUserLimit
+			if budget == "ip" {
+				key, limit = groupMemberEmailIPKey(client.ip), groupMemberEmailIPLimit
+			}
+			res := app.DB.Model(&models.LoginThrottle{}).Where("key = ?", string(key)).Update("failures", limit)
+			if res.Error != nil || res.RowsAffected != 1 {
+				t.Fatalf("set %s budget to its limit: %d rows, %v", budget, res.RowsAffected, res.Error)
+			}
+			if got := apiDo(t, client, "POST", path, map[string]any{"email": target.Email}, http.StatusBadRequest); got != want || membershipStatus(app, target, g) != "none" {
+				t.Fatalf("throttled answer: %s, want %s", got, want)
+			}
+			person := searchPeople(t, client, target.Name)
+			if len(person.People) != 1 {
+				t.Fatalf("name search: %+v", person)
+			}
+			apiDo(t, client, "POST", path, map[string]any{"selectionId": person.People[0].SelectionID}, http.StatusOK)
+		})
 	}
 }
 
@@ -1089,7 +1168,11 @@ func TestGroupManagerAddRefreshesActorAfterContactGate(t *testing.T) {
 					t.Fatal(err)
 				}
 				w := awaitContactResponse(t, response)
-				if w.Code != 403 || strings.Contains(w.Body.String(), target.Email) {
+				wantStatus := http.StatusForbidden
+				if targetKind == "email" {
+					wantStatus = http.StatusBadRequest
+				}
+				if w.Code != wantStatus || strings.Contains(w.Body.String(), target.Email) {
 					t.Fatalf("%s: %d %s", revocation.name, w.Code, w.Body.String())
 				}
 				if membershipStatus(app, target, g) != "none" || contactCount(t, app, &models.AuditLog{}, "action IN ?", []string{audit.MemberAdded, audit.AddedOverLimit, audit.RoleChanged}) != 0 {
@@ -1172,7 +1255,11 @@ func TestGroupManagerAddExistingLeaderKeepsRoleUnderContactGate(t *testing.T) {
 				t.Fatal(err)
 			}
 			w := awaitContactResponse(t, response)
-			if w.Code != 403 || strings.Contains(w.Body.String(), leader.Email) {
+			wantStatus := http.StatusForbidden
+			if targetKind == "email" {
+				wantStatus = http.StatusBadRequest
+			}
+			if w.Code != wantStatus || strings.Contains(w.Body.String(), leader.Email) {
 				t.Fatal(w.Code, w.Body.String())
 			}
 			if !relIn(app.DB, leader.ID, g.ID).Leader || contactCount(t, app, &models.AuditLog{}, "action IN ?", []string{audit.MemberAdded, audit.RoleChanged, audit.AddedOverLimit}) != 0 {

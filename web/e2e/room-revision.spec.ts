@@ -22,8 +22,7 @@ test("two leaders pick rooms for the same date: the second is told, sees the fir
   }
 
   const rooms = [];
-  // Short room names: the Room select at 390px has no room for a long name beside "Used by this event once" (#484).
-  const tag = suffix.slice(-4);
+  const tag = `in the West Wing ${suffix.slice(-4)}`;
 
   for (const name of [`Loft ${tag}`, `Parlor ${tag}`]) {
     rooms.push(schema.parse(schema.looseObject({ room: idOf }), await grier("POST", "/admin/rooms", { name })).room);
@@ -57,7 +56,9 @@ test("two leaders pick rooms for the same date: the second is told, sees the fir
   const line = second.getByText(LINE);
   await expect(line).toBeVisible();
   await expect(line).toBeFocused();
-  await expect(second.getByRole("combobox", { name: /^Room/ })).toHaveValue(String(rooms[0].id));
+  const roomField = second.getByRole("combobox", { name: /^Room/ });
+  await expect(roomField).toHaveValue(String(rooms[0].id));
+  await expect(roomField).toHaveAccessibleDescription(/Used by this event once/);
   await expect(second.getByRole("textbox", { name: /^Title/ })).toHaveValue("Typed while choosing");
   await expect(second.getByRole("button", { name: /^Save/ })).toBeVisible();
   // The page around the editor reads again: the date's place names the first leader's room, and the draft stays.
@@ -106,8 +107,11 @@ test("a series pick of the room someone else already set books the date they rel
   await pickDateRoom(other, event.id, date, { roomId: null });
 
   await field.selectOption(String(loft.id));
-  await page.getByRole("button", { name: "Book for every date" }).click();
+  const book = page.getByRole("button", { name: "Book for every date" });
+  await book.focus();
+  await page.keyboard.press("Enter");
   await expect(page.getByRole("status").filter({ hasText: "Booked for 1 date." })).toBeVisible();
+  await expect(book).toBeFocused();
   await expect(page.getByText(/is saved|changed while you were choosing/)).toHaveCount(0);
   // The page behind reads again: the first date's card names the room.
   await expect(page.getByRole("article").first()).toContainText(`Loft ${suffix}`);

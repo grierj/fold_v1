@@ -13,7 +13,7 @@ import { UnsavedChangesBlocker } from "../lib/unsavedChanges";
 import { ERROR_COPY } from "../lib/errors";
 import { polyfillEditorLayout } from "../test/editor";
 import { adminRecipients, composeOptions, message, recipients, reminderMessage, summary } from "../test/compose";
-import { wallClock, wallToInstant } from "../lib/when";
+import { formatEventDay, wallClock, wallToInstant } from "../lib/when";
 import type { AudienceChange, MessageReview } from "../types";
 import { MessageComposerPage } from "./MessageComposer";
 
@@ -653,17 +653,19 @@ describe("a sent message's history", () => {
 describe("push notification too", () => {
   const pushSummary = summary({
     push: 2,
+    pushOnly: 1,
     recipients: [{ name: "Ann Adult", teen: false, push: true }, { name: "Opal Opted", teen: false, skipped: "won't get this", push: true }, { name: "Tia Teen", teen: true }],
   });
 
-  it("is on by default, counts who also gets a push and marks them in words", async () => {
+  it("is on by default and names push-only recipients in the count and list", async () => {
     const user = userEvent.setup();
     vi.mocked(Messages.audiencePreview).mockResolvedValue({ summary: pushSummary });
     open("/messages/new?group=7");
     const box = await screen.findByRole("checkbox", { name: /Push notification too/ });
     expect(box).toBeChecked();
     expect(box).toHaveAccessibleName(expect.stringContaining("the subject and the start of the message"));
-    expect(await screen.findByText("2 also get a push notification.")).toBeInTheDocument();
+    const count = "2 people get a push notification. 1 of them gets only the push.";
+    expect(await screen.findByText(count)).toBeInTheDocument();
     await user.click(screen.getByText("See who's on the list"));
     const rows = within(screen.getByRole("list")).getAllByRole("listitem");
     // The phone glyph is decorative; the words carry it (never the glyph alone).
@@ -674,7 +676,7 @@ describe("push notification too", () => {
     expect(rows[2]).not.toHaveTextContent("Push");
     // Off: no count, no marks, and the draft says so.
     await user.click(box);
-    expect(screen.queryByText("2 also get a push notification.")).toBeNull();
+    expect(screen.queryByText(count)).toBeNull();
     expect(screen.queryByText(/^Push (too|only)$/)).toBeNull();
     expect(rows[1]).toHaveTextContent("Opal Opted· Won't get this");
     await editorReady();
@@ -692,7 +694,7 @@ describe("push notification too", () => {
     await editorReady();
     expect(await screen.findByText(/^3 people;/)).toBeInTheDocument();
     expect(screen.queryByRole("checkbox", { name: /Push notification too/ })).toBeNull();
-    expect(screen.queryByText(/also gets? a push notification/)).toBeNull();
+    expect(screen.queryByText(/gets? a push notification/)).toBeNull();
     await user.click(screen.getByRole("button", { name: "Save draft" }));
     await waitFor(() => expect(Messages.update).toHaveBeenCalledWith(5, expect.objectContaining({ pushAlert: false }), "1.r0", undefined));
   });
@@ -704,18 +706,19 @@ describe("push notification too", () => {
     open("/messages/5");
     await editorReady();
     await user.click(screen.getByRole("button", { name: "Send now" }));
-    expect(await screen.findByText("2 people get a push notification too.")).toBeInTheDocument();
+    const ask = await screen.findByRole("group", { name: /^Send to / });
+    expect(within(ask).getByText("2 people get a push notification too.")).toBeInTheDocument();
   });
 
   it("asks about everyone the message reaches, someone who gets only the push included", async () => {
     const user = userEvent.setup();
-    vi.mocked(Messages.review).mockResolvedValue({ review: { summary: summary({ eligible: 2, push: 3 }), reached: 3, token: "review-1" } });
+    vi.mocked(Messages.review).mockResolvedValue({ review: { summary: summary({ eligible: 2, push: 3, pushOnly: 1 }), reached: 3, token: "review-1" } });
     vi.mocked(Messages.get).mockResolvedValue({ message: message({ subject: "Snacks", bodyHtml: "<p>Bring some</p>" }) });
     open("/messages/5");
     await editorReady();
     await user.click(screen.getByRole("button", { name: "Send now" }));
-    expect(await screen.findByText("Send to 3 people now?")).toBeInTheDocument();
-    expect(screen.getByText("3 of them get a push notification; 1 gets only the push.")).toBeInTheDocument();
+    const ask = await screen.findByRole("group", { name: "Send to 3 people now?" });
+    expect(within(ask).getByText("3 people get a push notification. 1 of them gets only the push.")).toBeInTheDocument();
   });
 
   it("drops the list it showed and counts again when the people chosen are refused", async () => {
@@ -896,6 +899,18 @@ describe("the message names what was saved and reviewed", () => {
     expect(Messages.review).toHaveBeenCalledWith(5);
     expect(Messages.schedule).toHaveBeenCalledWith(5, { revision: "1.r1", review: "review-1", scheduledAt: undefined });
     expect(await screen.findByText(/^Waiting to send|^Scheduled for|^Sending/)).toBeInTheDocument();
+  });
+
+  it("says today's limit when Send now is refused", async () => {
+    const user = userEvent.setup();
+    vi.mocked(Messages.schedule).mockRejectedValueOnce(new ApiError(400, "limit", { code: "message_daily_limit" }));
+    open("/messages/5");
+    await editorReady();
+    await user.click(screen.getByRole("button", { name: "Send now" }));
+    const ask = await screen.findByRole("group", { name: "Send to 2 people now?" });
+    await user.click(within(ask).getByRole("button", { name: "Send now" }));
+    expect(await screen.findByText(/^You've already sent 5 messages to these people today,/)).toBeInTheDocument();
+    expect(ask).not.toBeInTheDocument();
   });
 
   it("shows how the list changed, and sends to it as it is now; a second change shows again", async () => {
@@ -1103,7 +1118,7 @@ describe("every name and count on screen is the review's", () => {
 
   it("counts the people the changed list reaches, as many as it names, a push-only joiner included", async () => {
     const user = userEvent.setup();
-    vi.mocked(Messages.schedule).mockRejectedValueOnce(changed({ review: { summary: summary({ eligible: 2, push: 1 }), reached: 3, token: "review-2" }, change: { added: ["Pat Lee"], addedMore: 0, dropped: [], droppedUnnamed: 0 } }));
+    vi.mocked(Messages.schedule).mockRejectedValueOnce(changed({ review: { summary: summary({ eligible: 2, push: 1, pushOnly: 1 }), reached: 3, token: "review-2" }, change: { added: ["Pat Lee"], addedMore: 0, dropped: [], droppedUnnamed: 0 } }));
     open("/messages/5");
     await editorReady();
     await user.click(screen.getByRole("button", { name: "Send now" }));
@@ -1201,7 +1216,7 @@ describe("a scheduled message's new list is the sender's to confirm", () => {
   it("counts everyone the new list reaches in its question", async () => {
     const user = userEvent.setup();
     await editLeadersOnly(user);
-    vi.mocked(Messages.update).mockRejectedValue(needed({ summary: summary({ eligible: 2, push: 1 }), reached: 3, token: "proposal-2" }));
+    vi.mocked(Messages.update).mockRejectedValue(needed({ summary: summary({ eligible: 2, push: 1, pushOnly: 1 }), reached: 3, token: "proposal-2" }));
     await user.click(screen.getByRole("button", { name: "Preview" }));
     expect(await screen.findByRole("group", { name: "Change who gets this to 3 people?" })).toBeInTheDocument();
   });
@@ -1246,7 +1261,9 @@ describe("a scheduled message's new list is the sender's to confirm", () => {
     vi.mocked(Messages.schedule).mockRejectedValueOnce(new ApiError(409, "limit", { code: "message_daily_limit" }));
     await saveListBySchedule(user, "10:30");
     await user.click(within(await screen.findByRole("group", { name: /^Send to 1 person on / })).getByRole("button", { name: "Schedule" }));
-    expect(await screen.findByText("You've already sent 5 messages to these people for that day, counting scheduled ones. Choose another day, or ask an admin to send it.")).toBeInTheDocument();
+    const [send] = vi.mocked(Messages.schedule).mock.calls;
+    const pickedDay = formatEventDay(send[1].scheduledAt ?? "", "America/Boise");
+    expect(await screen.findByText(`You've already sent 5 messages to these people on ${pickedDay}, counting scheduled ones. Choose another day, or ask an admin to send it.`)).toBeInTheDocument();
     expect(screen.getByText(/^It is still scheduled on /)).toBeInTheDocument();
     expect(Messages.update).toHaveBeenCalledTimes(2);
     expect(Messages.schedule).toHaveBeenCalledTimes(1);
