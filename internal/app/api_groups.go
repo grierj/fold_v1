@@ -358,7 +358,7 @@ func (a *App) rosterIn(db *gorm.DB, groupID uint, viewer *models.User, manager b
 	var members []models.Membership
 	if err := db.Preload("User").Joins(listedUsers("memberships")).
 		Where("memberships.group_id = ? AND memberships.status = ?", groupID, models.MembershipActive).
-		Order("memberships.joined_at").Find(&members).Error; err != nil {
+		Order("memberships.joined_at, memberships.id").Find(&members).Error; err != nil {
 		return nil, err
 	}
 	users := make(map[uint]*models.User, len(members))
