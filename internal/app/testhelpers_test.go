@@ -923,20 +923,13 @@ func setVisibility(t *testing.T, c *apiClient, eventID uint, visibility, reason 
 	}), want)
 }
 
-type eventPage struct {
-	Event            eventJSON        `json:"event"`
-	Occurrences      []occurrenceJSON `json:"occurrences"`
-	CanManage        bool             `json:"canManage"`
-	CanSetVisibility bool             `json:"canSetVisibility"`
-}
-
-func getEvent(t *testing.T, c *apiClient, id uint, want int) (eventPage, string) {
+func getEvent(t *testing.T, c *apiClient, id uint, want int) (eventDetailResponseJSON, string) {
 	t.Helper()
 	w := c.do("GET", fmt.Sprintf("/api/v1/events/%d", id), nil, false)
 	if w.Code != want {
 		t.Fatalf("get event: %d %s, want %d", w.Code, w.Body.String(), want)
 	}
-	var page eventPage
+	var page eventDetailResponseJSON
 	if want == http.StatusOK {
 		decodeJSON(t, w, &page)
 	}

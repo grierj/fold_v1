@@ -55,6 +55,7 @@ const (
 	// A group, event or date became more private and the registrant can no
 	// longer see it (registration.cancelled, reason event_more_private).
 	RegMorePrivate RegistrationMove = "event made more private"
+	RegRestoreDate RegistrationMove = "date brought back"
 	// A household person was changed so they no longer qualify, or deleted.
 	RegHouseholdPersonChanged RegistrationMove = "household person changed or deleted"
 )
@@ -97,6 +98,7 @@ var registrationRules = map[RegistrationMove]registrationRule{
 	RegRemoveByManager: {from: []string{RegGoing, RegMaybe, RegDeclined, RegWaitlisted}, to: []string{RegRemoved}},
 	RegLeaveGroup:      {from: CurrentRegStatuses, to: []string{RegCancelled}, releasesSeat: true},
 	RegRemoveFromGroup: {from: CurrentRegStatuses, to: []string{RegRemoved}, releasesSeat: true},
+	RegRestoreDate:     {from: CurrentRegStatuses, to: []string{RegCancelled}, keeps: true},
 	RegMorePrivate:     {from: CurrentRegStatuses, to: []string{RegCancelled}},
 	RegHouseholdPersonChanged: {
 		from:  CurrentRegStatuses,
