@@ -90,12 +90,13 @@ Before the release is written it also checks both images pull with no login.
 
 ## Upgrade notes
 
-- **Account links after a managed database restore.** Install deploy tools version 7 or later
-  before restoring or rolling back. Setup, password-reset and email-change links from the backup
-  expire before the site opens. See [Upgrades and rollback](docs/DEPLOY-DIGITALOCEAN.md#6-upgrades-and-rollback).
 - **Browser sessions after a database restore.** The first upgrade with this
   change asks everyone to sign in again. On DigitalOcean, update and verify
   the restore tools when you upgrade. See [Upgrades and rollback](docs/DEPLOY-DIGITALOCEAN.md#6-upgrades-and-rollback).
+
+- **Account links after a managed database restore.** Install deploy tools version 7 or later
+  before restoring or rolling back. Setup, password-reset and email-change links from the backup
+  expire before the site opens. See [Upgrades and rollback](docs/DEPLOY-DIGITALOCEAN.md#6-upgrades-and-rollback).
 
 - **Nov 2026 (M8.1): exact visibility consent (DEC-158).** From this release on,
   an earlier release refuses to start on the upgraded database, even after
