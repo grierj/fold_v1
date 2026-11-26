@@ -122,20 +122,6 @@ type revisionRows struct {
 	omit []string
 	// also is an expression over the row (alias r) the token covers besides it.
 	also string
-	// seal is the purpose of a process key the digest goes through, for a row
-	// with a column some holders of its token may not read: the plain md5 of
-	// a row whose other columns they see would let them test a guess at it.
-	seal string
-}
-
-// sealed is digest under t's process key, when t has one.
-func (a *App) sealed(t revisionRows, digest string) string {
-	if t.seal == "" {
-		return digest
-	}
-	m := hmac.New(sha256.New, a.processKey(t.seal))
-	m.Write([]byte(digest))
-	return hex.EncodeToString(m.Sum(nil)[:16])
 }
 
 // groupRevisionRows: created_at never changes.
@@ -173,7 +159,7 @@ func (a *App) rowRevisionIn(tx *gorm.DB, t revisionRows, key uint) (string, erro
 	}
 	switch len(digests) {
 	case 1:
-		return a.editRevision(fmt.Sprintf("%s%d", t.kind, key), a.sealed(t, digests[0])), nil
+		return a.editRevision(fmt.Sprintf("%s%d", t.kind, key), digests[0]), nil
 	case 0:
 		return "", gorm.ErrRecordNotFound
 	}
@@ -303,7 +289,7 @@ func (a *App) rowRevisionsIn(tx *gorm.DB, t revisionRows, keys []uint) (map[uint
 			return err
 		}
 		for _, r := range rows {
-			out[r.Key] = a.editRevision(fmt.Sprintf("%s%d", t.kind, r.Key), a.sealed(t, r.Digest))
+			out[r.Key] = a.editRevision(fmt.Sprintf("%s%d", t.kind, r.Key), r.Digest)
 		}
 		return nil
 	})
@@ -374,11 +360,13 @@ var (
 // lock (lockHousehold), which both saves take before they compare. created_at
 // never changes. A person's removal is a soft delete, so deleted_at moves the
 // token too. An adult of the household who is not the person's confirmed
-// guardian holds the person's token but may not read their care notes, so
-// that digest is sealed.
+// guardian holds the person's token but may not read their care notes, so the
+// notes stay out of the digest, as a password hash stays out of an account's:
+// every write of them stamps updated_at (the edit) or deleted_at (the
+// erasure's scrub).
 var (
 	householdRevisionRows       = revisionRows{table: "households", kind: "h", key: "id", instants: []string{"updated_at"}, omit: []string{"created_at"}}
-	householdPersonRevisionRows = revisionRows{table: "household_people", kind: "p", key: "id", instants: []string{"updated_at", "deleted_at"}, omit: []string{"created_at"}, seal: "household-person-revision:v1"}
+	householdPersonRevisionRows = revisionRows{table: "household_people", kind: "p", key: "id", instants: []string{"updated_at", "deleted_at"}, omit: []string{"created_at", "care_notes"}}
 )
 
 func (a *App) checkHouseholdRevision(tx *gorm.DB, id uint, given string) error {

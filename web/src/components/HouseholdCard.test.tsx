@@ -113,7 +113,7 @@ describe("household name and address", () => {
     await userEvent.click(screen.getByRole("button", { name: "Save household" }));
     expect(Households.update).toHaveBeenCalledWith({ name: "New household", address: "New address" }, "h-1");
     expect(screen.getByText("New household")).toBeInTheDocument(); expect(screen.getByText("New address")).toBeInTheDocument();
-    expect(screen.getByRole("status")).toHaveTextContent("Saved your household name and address.");
+    expect(screen.getByRole("status")).toHaveTextContent("Household updated.");
     await vi.waitFor(() => expect(rename).toHaveFocus());
   });
 
@@ -262,7 +262,7 @@ describe("a household save someone else's change refused", () => {
     vi.mocked(Households.updatePerson).mockResolvedValue(answered({ ...kid, firstName: "Kit", revision: "p-5b" }));
     render(<HouseholdCard />);
     await editFirstName("Kid Smith", "Kit");
-    expect(await screen.findByRole("status")).toHaveTextContent("Saved Kit.");
+    expect(await screen.findByRole("status")).toHaveTextContent("Kit updated.");
     expect(Households.updatePerson).toHaveBeenCalledWith(5, expect.objectContaining({ firstName: "Kit" }), "p-5");
     expect(Households.updatePerson).toHaveBeenCalledTimes(1);
   });
@@ -313,7 +313,7 @@ describe("a household save someone else's change refused", () => {
     vi.mocked(Households.updatePerson).mockRejectedValueOnce(personChanged()).mockResolvedValueOnce(answered({ ...kid, firstName: "Kit", revision: "p-5c" }));
     render(<HouseholdCard />);
     await editFirstName("Kid Smith", "Kit");
-    expect(await screen.findByRole("status")).toHaveTextContent("Saved Kit.");
+    expect(await screen.findByRole("status")).toHaveTextContent("Kit updated.");
     expect(Households.updatePerson).toHaveBeenNthCalledWith(1, 5, expect.objectContaining({ firstName: "Kit" }), "p-5");
     expect(Households.updatePerson).toHaveBeenNthCalledWith(2, 5, expect.objectContaining({ firstName: "Kit" }), "p-5b");
     expect(screen.queryByText(/could not be saved/)).not.toBeInTheDocument();
@@ -327,7 +327,7 @@ describe("a household save someone else's change refused", () => {
     await editFirstName("Kid Smith", "Kit");
     expect(await screen.findByRole("alert")).toBeInTheDocument();
     await userEvent.click(screen.getByRole("button", { name: "Save" }));
-    expect(await screen.findByRole("status")).toHaveTextContent("Saved Kit.");
+    expect(await screen.findByRole("status")).toHaveTextContent("Kit updated.");
     expect(Households.updatePerson).toHaveBeenCalledTimes(2);
     expect(screen.queryByRole("form")).not.toBeInTheDocument();
   });
@@ -364,7 +364,7 @@ describe("a household save someone else's change refused", () => {
     vi.mocked(Households.updatePerson).mockRejectedValueOnce(personChanged()).mockResolvedValueOnce(answered({ ...hidden, firstName: "Kit", revision: "p-5c" }));
     render(<HouseholdCard />);
     await editFirstName("Kid Smith", "Kit");
-    expect(await screen.findByRole("status")).toHaveTextContent("Saved Kit.");
+    expect(await screen.findByRole("status")).toHaveTextContent("Kit updated.");
     expect(Households.updatePerson).toHaveBeenNthCalledWith(2, 5, expect.objectContaining({ firstName: "Kit", careNotes: undefined }), "p-5b");
   });
 
@@ -443,7 +443,7 @@ describe("a household save someone else's change refused", () => {
     await userEvent.click(screen.getByRole("button", { name: "Save household" }));
     await screen.findByRole("alert");
     await userEvent.click(screen.getByRole("button", { name: "Save household" }));
-    expect(await screen.findByText("Saved your household name and address.")).toBeInTheDocument();
+    expect(await screen.findByText("Household updated.")).toBeInTheDocument();
     expect(screen.getByText("1 Oak St")).toBeInTheDocument();
     expect(Households.update).toHaveBeenCalledTimes(2);
   });
@@ -500,5 +500,47 @@ describe("household actions on their way", () => {
     await new Promise((resolve) => setTimeout(resolve, 0));
     expect(screen.queryByText("Smith household home")).not.toBeInTheDocument();
     expect(screen.getByRole("status")).toHaveTextContent("");
+  });
+});
+
+describe("household edits after a person became their own account, and invitations on their way", () => {
+  beforeEach(() => vi.resetAllMocks());
+
+  it("closes the form and says so when the person now has their own account", async () => {
+    const { Households } = await import("../api/households");
+    const mary = { ...household.people[0], id: 6, firstName: "Mary", name: "Mary Smith", kind: "adult" as const, birthDate: "1990-01-01", linkStatus: "none" as const, revision: "p-6" };
+
+    mine.mockResolvedValueOnce({ household: { ...household, people: [household.people[0], mary] } })
+      .mockResolvedValue({ household: { ...household, people: [household.people[0]] } });
+    vi.mocked(Households.updatePerson).mockRejectedValue(new ApiError(409, "has an account", { code: "household_person_converted" }));
+    render(<HouseholdCard />);
+    await userEvent.click(await screen.findByRole("button", { name: "Edit Mary Smith" }));
+    await userEvent.clear(screen.getByLabelText("First name"));
+    await userEvent.type(screen.getByLabelText("First name"), "Maria");
+    await userEvent.click(screen.getByRole("button", { name: "Save" }));
+    const line = await screen.findByText("Mary Smith. Your changes could not be saved. This is the household as it is now.");
+    await vi.waitFor(() => expect(line).toHaveFocus());
+    expect(screen.queryByRole("form")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Edit Mary Smith" })).not.toBeInTheDocument();
+    expect(Households.updatePerson).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps the card locked after an invitation is sent until the card shows it", async () => {
+    const mary: HouseholdPerson = { ...household.people[0], id: 6, firstName: "Mary", name: "Mary Smith", kind: "adult", birthDate: "1990-01-01", linkStatus: "none", canConvert: true, registrationEligibility: "eligible", revision: "p-6" };
+    let refreshed: (answer: { household: Household }) => void = () => {};
+    const pending = { ...mary, conversion: { email: "mary@example.com", expiresAt: "2026-12-01T12:00:00Z", state: "pending" as const } };
+
+    mine.mockResolvedValueOnce({ household: { ...household, people: [mary] } })
+      .mockReturnValueOnce(new Promise((resolve) => { refreshed = resolve; }));
+    convert.mockResolvedValue({});
+    render(<HouseholdCard />);
+    await userEvent.click(await screen.findByRole("button", { name: "Create their own account" }));
+    await userEvent.type(screen.getByLabelText("Their email address"), "mary@example.com");
+    await userEvent.click(screen.getByRole("button", { name: "Send account invitation" }));
+    await vi.waitFor(() => expect(mine).toHaveBeenCalledTimes(2));
+    expect(screen.getByRole("button", { name: "Edit Mary Smith" })).toBeDisabled();
+    refreshed({ household: { ...household, people: [pending] } });
+    expect(await screen.findByText(/Invitation pending: mary@example.com/)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Edit Mary Smith" })).toBeEnabled();
   });
 });

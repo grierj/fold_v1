@@ -202,10 +202,8 @@ func (a *App) saveRevisedSetting() {
 	const households = `package main
 func (a *App) apiUpdateMyHousehold(c *gin.Context) {
 	a.DB.Transaction(func(tx *gorm.DB) error {
-		if !created {
-			if err := a.checkHouseholdRevision(tx, householdID, body.Revision); err != nil {
-				return err
-			}
+		if err := a.checkHouseholdRevision(tx, householdID, given); err != nil {
+			return err
 		}
 		return nil
 	})
@@ -226,7 +224,7 @@ func (a *App) apiUpdateHouseholdPerson(c *gin.Context) {
 	}
 	sound["g.go"] = admin
 	for name, src := range map[string]string{
-		"a household save that skips the check":                                strings.Replace(households, "a.checkHouseholdRevision(tx, householdID, body.Revision)", "error(nil)", 1),
+		"a household save that skips the check":                                strings.Replace(households, "a.checkHouseholdRevision(tx, householdID, given)", "error(nil)", 1),
 		"a person save that skips the check":                                   strings.Replace(households, "return a.checkHouseholdPersonRevision(tx, person.ID, input.Revision)", "return nil", 1),
 		"a household save that reads its row outside its transaction's handle": strings.Replace(households, "checkHouseholdRevision(tx,", "checkHouseholdRevision(a.DB,", 1),
 		"a person save that reads its row outside its transaction's handle":    strings.Replace(households, "checkHouseholdPersonRevision(tx,", "checkHouseholdPersonRevision(a.DB,", 1),

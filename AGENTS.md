@@ -236,7 +236,7 @@ section or decision; check it still exists.
   `roomRevisionIn`/`checkRoomRevision`, `checkHouseholdRevision`/`checkHouseholdPersonRevision`, inside the write
   transaction under the row lock). A token of a row with
   no counter column is `rowRevisionIn` over a `revisionRows` (the table's kind letter, its timestamptz columns as
-  epochs, and a `seal` when some holders of the token may not read a column, as a person's care notes), read in the
+  epochs; a column some holders of the token may not read, as a person's care notes, is left out), read in the
   snapshot that read the fields beside it; a new table adds a `revisionRows`, never a column. The
   single-date edit names its read too, with its own token (`dateToken`, `api_date_edits.go`, DEC-164). Every form sends
   it through `web/src/lib/useRevisionSave.ts`, which owns the read-and-compare after a refusal; a control that stays on

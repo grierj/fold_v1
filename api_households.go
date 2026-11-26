@@ -125,20 +125,21 @@ func lockHouseholdSeat(tx *gorm.DB, me *models.User, noSeat error) (*models.User
 }
 
 // ensureHousehold loads the user's household, creating it on first use
-// (audited household.created); created says this request made it. It answers
-// and reports false on failure.
-func (a *App) ensureHousehold(c *gin.Context, u *models.User) (_ *models.Household, _ models.HouseholdAccount, created, ok bool) {
+// (audited household.created). made is the revision of the household as this
+// request created it, read in the creating transaction, and empty when it
+// already existed. It answers and reports false on failure.
+func (a *App) ensureHousehold(c *gin.Context, u *models.User) (_ *models.Household, _ models.HouseholdAccount, made string, ok bool) {
 	if acct, found := householdAccountIn(a.DB, u.ID); found {
 		var household models.Household
 		if err := a.DB.First(&household, acct.HouseholdID).Error; err != nil {
 			jsonError(c, http.StatusInternalServerError, "could not load household")
-			return nil, acct, false, false
+			return nil, acct, "", false
 		}
-		return &household, acct, false, true
+		return &household, acct, "", true
 	}
 	if !policy.CanCreateHousehold(asPerson(u)) {
 		jsonError(c, http.StatusForbidden, "forbidden")
-		return nil, models.HouseholdAccount{}, false, false
+		return nil, models.HouseholdAccount{}, "", false
 	}
 	var household models.Household
 	var acct models.HouseholdAccount
@@ -151,7 +152,7 @@ func (a *App) ensureHousehold(c *gin.Context, u *models.User) (_ *models.Househo
 			return err
 		}
 		if seat, found := householdAccountIn(tx, fresh.ID); found {
-			acct, household, created = seat, models.Household{}, false
+			acct, household, made = seat, models.Household{}, ""
 			return tx.First(&household, seat.HouseholdID).Error
 		}
 		if !policy.CanCreateHousehold(asPerson(fresh)) {
@@ -161,8 +162,11 @@ func (a *App) ensureHousehold(c *gin.Context, u *models.User) (_ *models.Househo
 		if err := tx.Create(&household).Error; err != nil {
 			return err
 		}
-		acct, created = models.HouseholdAccount{HouseholdID: household.ID, UserID: fresh.ID, Relation: models.HouseholdRelationGuardian}, true
+		acct = models.HouseholdAccount{HouseholdID: household.ID, UserID: fresh.ID, Relation: models.HouseholdRelationGuardian}
 		if err := tx.Create(&acct).Error; err != nil {
+			return err
+		}
+		if made, err = a.rowRevisionIn(tx, householdRevisionRows, household.ID); err != nil {
 			return err
 		}
 		return audit.Write(tx, audit.Entry{Actor: &fresh.ID, Action: audit.HouseholdCreated,
@@ -170,36 +174,36 @@ func (a *App) ensureHousehold(c *gin.Context, u *models.User) (_ *models.Househo
 	})
 	if isAPIError(err) {
 		fail(c, err)
-		return nil, models.HouseholdAccount{}, false, false
+		return nil, models.HouseholdAccount{}, "", false
 	}
 	if err != nil {
 		// A concurrent first use may have won the unique user row.
 		if acct, found := householdAccountIn(a.DB, u.ID); found {
 			var household models.Household
 			if ferr := a.DB.First(&household, acct.HouseholdID).Error; ferr == nil {
-				return &household, acct, false, true
+				return &household, acct, "", true
 			}
 		}
 		jsonError(c, http.StatusInternalServerError, "could not create household")
-		return nil, acct, false, false
+		return nil, acct, "", false
 	}
-	return &household, acct, created, true
+	return &household, acct, made, true
 }
 
 // manageMyHousehold is ensureHousehold plus policy.CanManageHousehold:
 // a teen household account sees the household exists but manages none of
 // it (403, section 6).
-func (a *App) manageMyHousehold(c *gin.Context) (_ *models.Household, created, ok bool) {
+func (a *App) manageMyHousehold(c *gin.Context) (_ *models.Household, made string, ok bool) {
 	u := apiUser(c)
-	household, acct, created, ok := a.ensureHousehold(c, u)
+	household, acct, made, ok := a.ensureHousehold(c, u)
 	if !ok {
-		return nil, false, false
+		return nil, "", false
 	}
 	if !policy.CanManageHousehold(asPerson(u), householdRelOf(acct, true)) {
 		jsonError(c, http.StatusForbidden, "forbidden")
-		return nil, false, false
+		return nil, "", false
 	}
-	return household, created, true
+	return household, made, true
 }
 
 // loadGuardianLinks reads the guardian links of personIDs by person; a partial
@@ -519,10 +523,11 @@ func (a *App) apiGetMyHousehold(c *gin.Context) {
 }
 
 // apiUpdateMyHousehold saves the household's name and address. A save that
-// names a field names the read it was made from (revision), unless this
-// request made the household: there was no read to name.
+// names a field names the read it was made from (revision); when this request
+// made the household, that read is the creation's, so a save another device
+// made from the new household meanwhile is not overwritten.
 func (a *App) apiUpdateMyHousehold(c *gin.Context) {
-	household, created, ok := a.manageMyHousehold(c)
+	household, made, ok := a.manageMyHousehold(c)
 	if !ok {
 		return
 	}
@@ -565,10 +570,12 @@ func (a *App) apiUpdateMyHousehold(c *gin.Context) {
 			if err := lockHousehold(tx, householdID); err != nil {
 				return err
 			}
-			if !created || householdID != household.ID {
-				if err := a.checkHouseholdRevision(tx, householdID, body.Revision); err != nil {
-					return err
-				}
+			given := body.Revision
+			if made != "" && householdID == household.ID {
+				given = made
+			}
+			if err := a.checkHouseholdRevision(tx, householdID, given); err != nil {
+				return err
 			}
 			if err := tx.Model(&models.Household{}).Where("id = ?", householdID).Updates(updates).Error; err != nil {
 				return err
@@ -849,7 +856,7 @@ func (a *App) apiUpdateHouseholdPerson(c *gin.Context) {
 			return errHouseholdPersonGone
 		}
 		if person.ConvertedUserID != nil {
-			return errConversionUnavailable
+			return errPersonHasAccount
 		}
 		if err := a.checkHouseholdPersonRevision(tx, person.ID, input.Revision); err != nil {
 			return err

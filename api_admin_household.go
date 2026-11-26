@@ -81,16 +81,11 @@ func (a *App) apiAdminGetHousehold(c *gin.Context) {
 		a.adminHouseholdError(c, err)
 		return
 	}
-	var household models.Household
-	if err := a.DB.First(&household, account.HouseholdID).Error; err != nil {
-		a.adminHouseholdError(c, err)
-		return
-	}
-	a.adminHouseholdResponse(c, &household, http.StatusOK)
+	a.adminHouseholdResponse(c, account.HouseholdID, http.StatusOK)
 }
 
-func (a *App) adminHouseholdResponse(c *gin.Context, household *models.Household, status int) {
-	out, err := a.toHouseholdJSON(household.ID, apiUser(c))
+func (a *App) adminHouseholdResponse(c *gin.Context, householdID uint, status int) {
+	out, err := a.toHouseholdJSON(householdID, apiUser(c))
 	if err != nil {
 		jsonError(c, http.StatusInternalServerError, "could not load household")
 		return
@@ -159,7 +154,7 @@ func (a *App) apiAdminCreateHousehold(c *gin.Context) {
 		a.adminHouseholdError(c, err)
 		return
 	}
-	a.adminHouseholdResponse(c, &household, http.StatusCreated)
+	a.adminHouseholdResponse(c, household.ID, http.StatusCreated)
 }
 
 func (a *App) apiAdminAddHouseholdPerson(c *gin.Context) {

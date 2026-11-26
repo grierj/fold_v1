@@ -3,10 +3,10 @@ import { Form } from "./ui/Form";
 import { useEffect, useRef, useState } from "react";
 import { Households, type HouseholdPersonInput } from "../api/households";
 import type { Household, HouseholdAccount, HouseholdPerson, HouseholdResponse } from "../types";
-import { errorText } from "../lib/errors";
+import { errorCode, errorText } from "../lib/errors";
 import { RefusedSaveLine, useRefusedSave } from "../lib/refusedSave";
 import { useLoad } from "../lib/useLoad";
-import { answerNames, refusedAgain, useManagedSave, useRevisionSave, type RevisionConflict } from "../lib/useRevisionSave";
+import { answerNames, lostAuthority, refusedAgain, useManagedSave, useRevisionSave, type RevisionConflict } from "../lib/useRevisionSave";
 import { formatBirthDate, formatWhen } from "../lib/when";
 import { Button } from "./ui/Button";
 import { Checkbox, Choices, Field, FormError, Input, Radio, showFieldErrors, Textarea } from "./ui/Field";
@@ -166,18 +166,6 @@ async function readPerson(id: number) {
   return { allowed: person !== undefined, revision: person?.revision, value: person };
 }
 
-function useMounted() {
-  const mounted = useRef(true);
-
-  useEffect(() => {
-    mounted.current = true;
-
-    return () => { mounted.current = false; };
-  }, []);
-
-  return mounted;
-}
-
 // PersonEditor is one opening of a person's edit form. It mounts once per opening, so its save names the read the form
 // opened with (DEC-174), and a refusal is the shared protocol's (useRevisionSave). On a conflict the form closes and
 // the card reads the household from nothing (`onConflict`).
@@ -190,7 +178,6 @@ function PersonEditor({ person, level, onSaved, onConflict, onCancel }: {
 }) {
   const [opened] = useState(person);
   const writesHiddenCare = useRef(false);
-  const mounted = useMounted();
 
   const save = useRevisionSave<HouseholdPerson | undefined, PersonFields>({
     opened,
@@ -199,7 +186,9 @@ function PersonEditor({ person, level, onSaved, onConflict, onCancel }: {
     fields: (p) => personFields(p, writesHiddenCare.current),
     answers: answerNames("person", opened.id),
     changedCode: "household_person_changed",
-    onConflict: (why) => { if (mounted.current) onConflict(why); },
+    // A person who became their own account is no longer in the card to edit.
+    gone: (err) => lostAuthority(err) || errorCode(err) === "household_person_converted",
+    onConflict,
   });
 
   async function submit(input: HouseholdPersonInput) {
@@ -219,8 +208,7 @@ function PersonEditor({ person, level, onSaved, onConflict, onCancel }: {
 
     if (sent === "refused") throw refusedAgain("household_person_changed");
 
-    // A save that lands after its form went hands nothing on.
-    if (sent === "saved" && mounted.current) await onSaved(input.firstName);
+    if (sent === "saved") await onSaved(input.firstName);
   }
 
   return (
@@ -245,7 +233,6 @@ function HouseholdEditor({ household, onSaved, onConflict, onCancel }: {
   onCancel: () => void;
 }) {
   const [opened] = useState(household);
-  const mounted = useMounted();
 
   const save = useManagedSave<Household | undefined, Household | undefined, HouseholdFields, HouseholdResponse>({
     opened,
@@ -256,7 +243,7 @@ function HouseholdEditor({ household, onSaved, onConflict, onCancel }: {
     fields: householdFields,
     answers: answerNames("household", opened.id),
     changedCode: "household_changed",
-    onConflict: (why) => { if (mounted.current) onConflict(why); },
+    onConflict,
   });
 
   async function submit(name: string, address: string) {
@@ -265,7 +252,7 @@ function HouseholdEditor({ household, onSaved, onConflict, onCancel }: {
 
     if (sent === "refused") throw refusedAgain("household_changed");
 
-    if (sent === "saved" && mounted.current) onSaved(row ?? intended);
+    if (sent === "saved") onSaved(row ?? intended);
   }
 
   return <HouseholdForm household={opened} onSave={submit} onCancel={onCancel} />;
@@ -416,7 +403,7 @@ export function HouseholdCard({ showHeading = true }: { showHeading?: boolean })
               if (load.epoch() === openedEpoch.current) load.setData({ household: saved });
               else void load.reload();
               setMetadata(false);
-              setStatus("Saved your household name and address.");
+              setStatus("Household updated.");
               requestAnimationFrame(() => metadataInvoker.current?.focus());
             }}
           />}
@@ -439,7 +426,7 @@ export function HouseholdCard({ showHeading = true }: { showHeading?: boolean })
                     onCancel={() => { focusNext.current = p.id; setEditing(null); }}
                     onConflict={(why) => refused(why, p)}
                     onSaved={async (firstName) => {
-                      setStatus(`Saved ${firstName}.`);
+                      setStatus(`${firstName} updated.`);
                       focusNext.current = p.id;
                       await load.reload();
                       setEditing(null);
@@ -472,7 +459,7 @@ export function HouseholdCard({ showHeading = true }: { showHeading?: boolean })
                   <ConversionActions person={p} disabled={locked} onBusy={(busy) => { if (busy) opening(); setActing(busy); }} onChanged={async (message) => { setStatus(message); focusNext.current = p.id; await load.reload(); }} />
                 </div>}
                 {!p.conversion && p.canConvert && converting !== p.id && <Button variant="secondary" layout="mt-3" disabled={locked} onClick={() => { opening(); setConverting(p.id); }}>Create their own account</Button>}
-                {!p.conversion && converting === p.id && <ConversionForm person={p} onCancel={() => { focusNext.current = p.id; setConverting(null); }} onSent={async () => { focusNext.current = p.id; setConverting(null); setStatus(`Invitation sent for ${p.name}. Their sign-ups will move after approval and any required consent and guardian checks.`); await load.reload(); }} />}
+                {!p.conversion && converting === p.id && <ConversionForm person={p} onCancel={() => { focusNext.current = p.id; setConverting(null); }} onSent={async () => { focusNext.current = p.id; setStatus(`Invitation sent for ${p.name}. Their sign-ups will move after approval and any required consent and guardian checks.`); await load.reload(); setConverting(null); }} />}
               </li>
             ))}
           </ul>
