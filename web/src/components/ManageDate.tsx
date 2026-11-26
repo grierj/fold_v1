@@ -6,6 +6,7 @@ import { Events } from "../api/events";
 import { editBaseOf, editReadRefused } from "../lib/editBase";
 import { useFocusHome, useKeepFocusHome } from "../lib/focusHome";
 import type { ManageAuthority } from "../lib/manageAuthority";
+import { useBeforeDeadline } from "../lib/useBeforeDeadline";
 import { useAction } from "../lib/useAction";
 import { useKeptDraft } from "../lib/unsavedChanges";
 import { useLoad } from "../lib/useLoad";
@@ -61,27 +62,10 @@ function ManageDateTools({ eventId, date, occurrenceId, startsAt, endsAt, author
   const home = useFocusHome<HTMLElement>();
   const location = useLocation();
   const deadline = endsAt === undefined ? NaN : Date.parse(endsAt);
-  const [expiredDeadline, setExpiredDeadline] = useState<number | null>(null);
-  const canCancel = startsAt !== undefined && deadline > Date.now() && expiredDeadline !== deadline;
+  const beforeEnd = useBeforeDeadline(deadline);
+  const canCancel = startsAt !== undefined && beforeEnd;
   const beginCancel = useConfirm(canCancel ? startsAt : null);
   const cancellation = useAction();
-
-  useEffect(() => {
-    if (!canCancel) return;
-    let timer: number;
-
-    const check = () => {
-      const left = deadline - Date.now();
-
-      if (left <= 0) setExpiredDeadline(deadline);
-      // A date can be farther out than the browser's 32-bit timer delay.
-      else timer = window.setTimeout(check, Math.min(left, 2_147_483_647));
-    };
-
-    check();
-
-    return () => window.clearTimeout(timer);
-  }, [canCancel, deadline]);
 
   // The toggle and the editor's endings, as on the event and group pages: while the date's save is on its way (also
   // with the editor off the screen for an authority check) the toggle is off and an editor shown again stays as it was.
