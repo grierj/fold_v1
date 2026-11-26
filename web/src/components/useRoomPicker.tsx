@@ -10,7 +10,7 @@ import { Skeleton } from "./ui/Skeleton";
 
 // A room read can stop at the public rooms switch before checking the viewer. Only /site can tell us the switch
 // is off in that case. Keep the pinned refusal as an error until the public setting answers.
-export async function readRooms<T>(answer: Promise<T>, pinned?: Credential): Promise<T> {
+export async function readRooms<T>(answer: Promise<T>, pinned?: Credential | null): Promise<T> {
   try {
     return await answer;
   } catch (cause) {

@@ -16,7 +16,7 @@ import { AdminAccountRequests } from "../api/accountRequests";
 import { AdminGuardianLinks } from "../api/guardians";
 import { AdminRooms, RoomRequests } from "../api/rooms";
 import { AdminUsers } from "../api/adminUsers";
-import { ApiError } from "../api/core";
+import { ApiError, currentCredential } from "../api/core";
 import { Groups } from "../api/groups";
 import { Invitations } from "../api/invitations";
 import { RejectGroupDialog } from "../components/admin/RejectGroupDialog";
@@ -25,6 +25,7 @@ import { EmailSuppressionNote } from "../components/admin/EmailSuppressionNote";
 import { SavedStatus, SettingSwitch, useSavedSetting } from "../components/admin/SettingSwitch";
 import { NewPasswordField } from "../components/NewPasswordField";
 import { RoomRequestsList } from "../components/admin/RoomRequestsList";
+import { readRooms } from "../components/useRoomPicker";
 import { MatchLocations } from "../components/admin/MatchLocations";
 import { SystemTab } from "../components/admin/SystemTab";
 import { ChurchTimezoneSetting } from "../components/admin/ChurchTimezoneSetting";
@@ -1604,7 +1605,8 @@ export function AdminPage() {
   // Loaded once here like the groups: the Rooms chip counts the list the tab shows.
   // Whether bookings wait for an admin comes with it (M2.1d).
   const roomsLoad = useLoad(async () => {
-    const { rooms, needApproval } = await AdminRooms.list();
+    const pinned = currentCredential();
+    const { rooms, needApproval } = await readRooms(AdminRooms.list(), pinned);
 
     return { rooms, needApproval: needApproval === true };
   }, [], { enabled: adminReady && roomsEnabled === true });
