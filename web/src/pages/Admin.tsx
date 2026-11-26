@@ -1594,7 +1594,8 @@ export function AdminPage() {
   // Loaded once here like the groups: the Rooms chip counts the list the tab shows.
   // Whether bookings wait for an admin comes with it (M2.1d).
   const roomsLoad = useLoad(async () => {
-    const { rooms, needApproval } = await AdminRooms.list();
+    const pinned = currentCredential();
+    const { rooms, needApproval } = await readRooms(AdminRooms.list(), pinned);
 
     return { rooms, needApproval: needApproval === true };
   }, [], { enabled: adminReady && roomsEnabled === true });
