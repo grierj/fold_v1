@@ -2975,6 +2975,11 @@ func startFold(t *testing.T, bin, name string) *foldProc {
 	if err != nil {
 		t.Fatal(err)
 	}
+	return startFoldURL(t, bin, dsn)
+}
+
+func startFoldURL(t *testing.T, bin, dsn string) *foldProc {
+	t.Helper()
 	p := &foldProc{port: freePort(t), out: &syncBuffer{}, exited: make(chan error, 1)}
 	p.cmd = exec.Command(bin, "serve")
 	p.cmd.Env = append(os.Environ(), "APP_ENV=dev", "DATABASE_URL="+dsn, "SESSION_SECRET=real-binary-secret-real-binary-secret", "UPLOAD_DIR="+t.TempDir(), "PORT="+p.port)
@@ -3375,12 +3380,7 @@ func TestPriorProcessRunningAcrossTheUpgrade(t *testing.T) {
 		t.Fatalf("v0.1.0 migrate up: %v %s", err, out)
 	}
 	seedUsers(t, db)
-	// 00008-00014 change columns v0.1.0 reads with SELECT *, and a process
-	// that prepared those statements before they changed fails them with
-	// 0A000 (cached plan must not change result type) before it reaches any
-	// audit row. So v0.1.0 starts on the schema at 14, and only 00015, which
-	// changes no column, lands while it serves: every refusal below is the
-	// audit fence's.
+	// Start v0.1.0 on the schema just before the audit fence.
 	sqlDB, err := db.DB()
 	if err != nil {
 		t.Fatal(err)
@@ -3392,7 +3392,20 @@ func TestPriorProcessRunningAcrossTheUpgrade(t *testing.T) {
 	if _, err := provider.UpTo(context.Background(), 14); err != nil {
 		t.Fatal(err)
 	}
-	old := startFold(t, prior, name)
+	// 00018 changes the result shape of SELECT * on event_occurrences.
+	// Describe each query so it reaches the audit fence after the schema changes.
+	dsn, err := testdb.URL(name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	priorURL, err := neturl.Parse(dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	query := priorURL.Query()
+	query.Set("default_query_exec_mode", "describe_exec")
+	priorURL.RawQuery = query.Encode()
+	old := startFoldURL(t, prior, priorURL.String())
 	if !old.healthy() {
 		t.Fatalf("v0.1.0 did not start:\n%s", old.out.String())
 	}
@@ -3464,13 +3477,13 @@ func TestPriorProcessRunningAcrossTheUpgrade(t *testing.T) {
 			t.Errorf("v0.1.0 %s: %d %s, want 500", r.label, code, body)
 		}
 		// Each refusal is the audit fence's own, in v0.1.0's log.
-		testdb.WaitUntil(t, "v0.1.0 to log the refusal", 5*time.Second, func() bool {
+		testdb.WaitUntil(t, "v0.1.0 to log the refusal for "+r.label, 5*time.Second, func() bool {
 			logged := old.out.String()[mark:]
+			if strings.Contains(logged, "SQLSTATE 0A000") {
+				t.Fatalf("v0.1.0 %s failed on a stale plan before reaching the fence:\n%s", r.label, logged)
+			}
 			return strings.Contains(logged, "checks visibility consent (DEC-158)") && strings.Contains(logged, "SQLSTATE 23514")
 		})
-		if logged := old.out.String()[mark:]; strings.Contains(logged, "0A000") {
-			t.Errorf("v0.1.0 %s failed on a stale plan, not the fence:\n%s", r.label, logged)
-		}
 		if after := snapshot(); after != before {
 			t.Fatalf("v0.1.0 %s changed rows:\n%s\nwant\n%s", r.label, after, before)
 		}
