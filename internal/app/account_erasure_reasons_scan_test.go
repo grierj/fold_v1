@@ -518,32 +518,23 @@ func TestReasonPageRefusalSequenceAndSeal(t *testing.T) {
 	}
 }
 
-// One dense page through the fault proxy: the server's own command tag says how
-// many rows the first batch sent (256), the scanner took 100, and 156 were drained.
-// Then the same page with the stream cut while those rows are being drained: the
-// page fails with 503 and no committed audit, the proxy saw 150 DataRow frames and no
-// command tag, so the statement's total is unknown (it is not zero and not 150),
-// and the same request made again succeeds.
 func TestReasonPageDenseDrainAndCutStreamThroughTheProxy(t *testing.T) {
 	setScanBounds(t, reasonUnitRows, reasonScanBatchFirst, reasonPageRequests)
 	s := newProxiedAttemptScene(t)
 	target, other := s.target("drain-target"), s.target("drain-other")
 	first := erasureMakeRequest(t, s.direct, policy.RequestGroupAdd, policy.ContactWithdrawn, other.ID, target.ID, 1, 0, 0, 1, "")
 	bulkRequests(t, s.direct, first.ID, 299) // 300 rows, all the target's: the 100th request is row 100 of a 256-row batch
-	var mu sync.Mutex
 	var events []reasonscan.BatchEvent
 	reasonScanHooks = reasonscan.Hooks{After: func(e reasonscan.BatchEvent) {
-		mu.Lock()
 		events = append(events, e)
-		mu.Unlock()
 	}}
 	proxy := s.rig.proxy
 	initial := "FROM contact_requests ORDER BY id LIMIT"
-	scanTags := func() []scanTag {
-		var out []scanTag
+	scanTags := func() []testdb.TagEvent {
+		var out []testdb.TagEvent
 		for _, tg := range proxy.Tags() {
 			if strings.Contains(tg.SQL, initial) {
-				out = append(out, scanTag{tg.Tag, tg.Rows, tg.Cut})
+				out = append(out, tg)
 			}
 		}
 		return out
@@ -554,21 +545,30 @@ func TestReasonPageDenseDrainAndCutStreamThroughTheProxy(t *testing.T) {
 		t.Fatalf("dense page: %d %s", code, body)
 	}
 	tags := scanTags()
-	if len(tags) != 1 || tags[0].tag != "SELECT 256" || tags[0].rows != 256 || tags[0].cut {
+	if len(tags) != 1 || tags[0].Tag != "SELECT 256" || tags[0].Rows != 256 || tags[0].Cut {
 		t.Fatalf("scanner statement results seen by the proxy: %+v, want one 'SELECT 256' with 256 DataRow frames", tags)
 	}
-	mu.Lock()
 	if len(events) != 1 || events[0].Consumed != 100 || !events[0].Stopped || events[0].Limit != 256 || events[0].Err != nil {
 		t.Fatalf("batch events %+v", events)
 	}
-	mu.Unlock()
 	t.Logf("exact for a completed statement: the server sent 256 rows, the scanner took 100, 156 were drained")
 
-	// The cut stream.
 	events = nil
 	viewsBefore := countAudit(t, s.direct, audit.UserErasureReasonsViewed)
-	proxy.Arm(testdb.Faults{Match: initial, CutAfterDataRows: 150})
+	draining := make(chan struct{})
+	reasonScanHooks.BeforeDrain = sync.OnceFunc(func() { close(draining) })
+	proxy.Arm(testdb.Faults{Match: initial, CutResultOn: draining})
 	code, _, body = pageOf(t, s.c, target.ID, nil)
+	reasonScanHooks.BeforeDrain = nil
+	if len(events) != 1 {
+		t.Errorf("interrupted stream batch events %+v, want one batch", events)
+	} else {
+		batch := events[0]
+		t.Logf("interrupted stream: scanner consumed %d rows (page filled: %t, error: %v)", batch.Consumed, batch.Stopped, batch.Err)
+		if batch.Err == nil || batch.Consumed != 100 || !batch.Stopped {
+			t.Errorf("failed batch event %+v: want 100 consumed, the 100th request found, and the drain error", batch)
+		}
+	}
 	if code != http.StatusServiceUnavailable || !strings.Contains(body, `"code":"reason_review_busy"`) || strings.Contains(body, `"items"`) || strings.Contains(body, "identifying reason") {
 		t.Fatalf("a stream cut during the drain: %d %s, want 503 reason_review_busy", code, body)
 	}
@@ -576,29 +576,14 @@ func TestReasonPageDenseDrainAndCutStreamThroughTheProxy(t *testing.T) {
 		t.Errorf("a failed page committed %d view audits", n-viewsBefore)
 	}
 	tags = scanTags()
-	if len(tags) != 2 || !tags[1].cut || tags[1].tag != "" || tags[1].rows != 150 {
-		t.Fatalf("after the cut the proxy log is %+v; want the cut statement with no tag and 150 frames observed", tags)
+	if len(tags) != 2 || !tags[1].Cut || tags[1].Tag != "" {
+		t.Errorf("after the cut the proxy log is %+v; want the cut statement with no command tag", tags)
 	}
-	mu.Lock()
-	failedBatch := events[len(events)-1]
-	mu.Unlock()
-	if failedBatch.Err == nil || failedBatch.Consumed != 100 || !failedBatch.Stopped {
-		t.Errorf("failed batch event %+v: want 100 consumed, the 100th request found, and the drain error", failedBatch)
-	}
-	t.Logf("a failed stream: 150 frames observed by the proxy, 100 consumed, no command tag: the total is unknown")
 
-	// The retry returns the page.
 	code, page, body = pageOf(t, s.c, target.ID, nil)
 	if code != http.StatusOK || len(page.Items) != 100 {
 		t.Fatalf("retry: %d %s", code, body)
 	}
-}
-
-// scanTag is a scanner statement's result as the proxy saw it.
-type scanTag struct {
-	tag  string
-	rows int
-	cut  bool
 }
 
 // scanReasonItems reads one unit: at most reasonUnitRows rows by primary key,
