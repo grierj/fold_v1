@@ -132,8 +132,7 @@ const (
 	// Target is the event. Meta: occurrenceIds and source.
 	EventDatesCancelled = "event.dates_cancelled"
 
-	// EventDatesRestored: a series edit whose rule includes dates an earlier
-	// series edit had cancelled brought them back on (cancel_source series).
+	// EventDatesRestored records the dates brought back by a series edit or a manager.
 	// Target is the event. Meta: dates (original dates), occurrenceIds.
 	EventDatesRestored = "event.dates_restored"
 
