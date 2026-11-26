@@ -84,11 +84,41 @@ describe("MessageComposerPage", () => {
 
     if (status === "scheduled") await userEvent.click(await screen.findByRole("button", { name: "Edit" }));
     await editorReady();
+
+    if (status === "scheduled") expect(screen.getByRole("heading", { name: "Edit message" })).toHaveFocus();
     expect(Messages.editOptions).toHaveBeenCalledWith(5);
     expect(screen.getByRole("combobox", { name: "Send to" })).toHaveAccessibleDescription("Choose an audience the author can message.");
     expect(screen.getByRole("combobox", { name: "Send to" })).toHaveValue("group:7");
     expect(screen.queryByRole("option", { name: "Everyone at church" })).toBeNull();
     await waitFor(() => expect(Messages.audiencePreview).toHaveBeenCalledWith(message().audience, 5));
+  });
+
+  it("explains an unavailable author's audience in the count and at the field", async () => {
+    viewer.isAdmin = true;
+    const unavailable = new ApiError(403, "forbidden", { code: "message_not_yours" });
+    vi.mocked(Messages.editOptions).mockResolvedValue(composeOptions({ groups: [], events: [], canCompose: false }));
+    vi.mocked(Messages.audiencePreview).mockRejectedValue(unavailable);
+    vi.mocked(Messages.update).mockRejectedValue(unavailable);
+    open("/messages/5");
+
+    const to = await screen.findByRole("combobox", { name: "Send to" });
+    expect(to).toHaveAccessibleDescription("No audiences are available for this message.");
+    expect(within(to).getAllByRole("option").map((o) => o.textContent)).toEqual(["Previously selected group"]);
+    const explanation = "This audience isn't available for this message.";
+    expect(await screen.findByText(explanation)).toBeVisible();
+    await userEvent.click(screen.getByRole("button", { name: "Save draft" }));
+    await waitFor(() => expect(to).toHaveAccessibleDescription(expect.stringContaining(explanation)));
+  });
+
+  it("moves focus to the load error after Edit and to the editor after retry", async () => {
+    vi.mocked(Messages.get).mockResolvedValue({ message: message({ status: "scheduled", scheduledAt: "2030-11-05T16:30:00Z" }) });
+    vi.mocked(Messages.editOptions).mockRejectedValueOnce(new ApiError(500, "error", { code: "server_error" }));
+    open("/messages/5");
+
+    await userEvent.click(await screen.findByRole("button", { name: "Edit" }));
+    expect(await screen.findByRole("heading", { name: "Message" })).toHaveFocus();
+    await userEvent.click(screen.getByRole("button", { name: "Try again" }));
+    expect(await screen.findByRole("heading", { name: "Edit message" })).toHaveFocus();
   });
 
   it("says what is missing under each field and focuses the first", async () => {

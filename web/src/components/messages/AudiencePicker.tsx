@@ -87,9 +87,9 @@ export function AudiencePicker({ options, choice, onChange, error, id, messageId
   // The chosen label in full, for the select's title, and its shortened form
   // as an option shows it. The full name also goes on a line under the select
   // when the option had to be cut.
-  const earlier = kind === "group" ? "The group you chose earlier" : kind === "event" ? "The event you chose earlier" : "The date you chose earlier";
+  const earlier = kind === "group" ? "Previously selected group" : kind === "event" ? "Previously selected event" : "Previously selected date";
   const named = kind === "group" ? options.groups.find((g) => g.id === Number(raw))?.name : event?.title;
-  const chosenLabel = choice.target === "" ? undefined : !listed(choice.target) ? earlier : choice.target === "all" ? "Everyone at church" : named;
+  const chosenLabel = choice.target === "all" ? "Everyone at church" : listed(choice.target) ? named : earlier;
   const fullNameId = `${id}-full-name`;
   const showFullName = named !== undefined && shortLabel(named, AUDIENCE_LABEL_MAX).shortened;
   // One pass over groups then events, so two names alike at both ends are told apart across the whole select.
@@ -101,6 +101,11 @@ export function AudiencePicker({ options, choice, onChange, error, id, messageId
   const pushCopy = current && push ? pushLine(current) : "";
   const failed = reviewed ? "" : countError?.key === counted ? countError.text : "";
   const isGroup = kind === "group";
+  const hasOptions = options.canMessageEveryone || options.groups.length > 0 || options.events.length > 0;
+
+  const hint = !hasOptions ? "No audiences are available for this message."
+    : messageId === undefined ? "Your groups and the events you lead or host." : "Choose an audience the author can message.";
+
   const chips = isGroup ? ROLE_CHOICES : STATUS_CHOICES;
   const picked: string[] = isGroup ? choice.roles : choice.statuses;
 
@@ -122,15 +127,15 @@ export function AudiencePicker({ options, choice, onChange, error, id, messageId
 
   return (
     <div className="space-y-4">
-      <Field id={id} label="Send to" hint={messageId === undefined ? "Your groups and the events you lead or host." : "Choose an audience the author can message."} error={error}>
+      <Field id={id} label="Send to" hint={hint} error={error}>
         <Select
           value={choice.target}
           title={chosenLabel}
           aria-describedby={showFullName ? fullNameId : undefined}
           onChange={(e) => onChange({ ...choice, target: e.target.value, dates: "all" })}
         >
-          <option value="">Choose a group or event</option>
-          {!listed(choice.target) && <option value={choice.target}>{earlier}</option>}
+          {hasOptions && <option value="">Choose a group or event</option>}
+          {!listed(choice.target) && <option value={choice.target}>{chosenLabel}</option>}
           {options.groups.length > 0 && (
             <optgroup label="Groups">
               {options.groups.map((g, i) => <option key={g.id} value={`group:${g.id}`}>{groupLabel(i)}</option>)}
@@ -153,7 +158,7 @@ export function AudiencePicker({ options, choice, onChange, error, id, messageId
         ].filter(Boolean).join(" ") || undefined}>
           <Select value={choice.dates} onChange={(e) => onChange({ ...choice, dates: e.target.value })}>
             <option value="all">All upcoming dates</option>
-            {!datesListed && <option value={choice.dates}>The date you chose earlier</option>}
+            {!datesListed && <option value={choice.dates}>Previously selected date</option>}
             {event.dates.map((d) => <option key={d.occurrenceId} value={String(d.occurrenceId)}>{formatWhen(d.startsAt)}</option>)}
           </Select>
         </Field>

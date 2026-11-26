@@ -151,6 +151,7 @@ export function MessageComposerPage() {
   const [opening, setOpening] = useState<{ message: Message | null; options: ComposeOptions; n: number; edit: boolean } | null>(null);
   // The message the composer shows, a new draft once its first save lands included, so that address is not read again.
   const shown = useRef<number | null | undefined>(undefined);
+  const pageRef = useRef<HTMLDivElement>(null);
   const editRequested = useRef<number | null>(null);
   const [loadError, setLoadError] = useState<{ text: string; missing: boolean } | null>(null);
   const [reload, setReload] = useState(0);
@@ -159,6 +160,8 @@ export function MessageComposerPage() {
   useEffect(() => {
     if (id && Number(id) === shown.current) return;
     shown.current = undefined;
+
+    if (editRequested.current !== Number(id)) editRequested.current = null;
     setLoadError(null);
     let alive = true;
 
@@ -170,7 +173,6 @@ export function MessageComposerPage() {
       const options = edit ? await Messages.editOptions(m.id) : await Messages.options();
 
       if (!alive) return;
-      editRequested.current = null;
       shown.current = m?.id ?? null;
       refusal.clear();
       setOpening((o) => ({ message: m, options, edit, n: (o?.n ?? 0) + 1 }));
@@ -183,8 +185,19 @@ export function MessageComposerPage() {
     return () => { alive = false; };
   }, [id, reload]);
 
+  useEffect(() => {
+    if (editRequested.current !== Number(id)) return;
+    const result = pageRef.current?.querySelector("h1");
+
+    if (!result) return;
+    result.tabIndex = -1;
+    result.focus();
+
+    if (!loadError) editRequested.current = null;
+  }, [id, opening, loadError, church.done]);
+
   const back = <ButtonLink variant="link" to="/messages"><ChevronLeftIcon className="h-4 w-4 shrink-0" /><span aria-hidden="true">Messages</span><span className="sr-only">Back to messages</span></ButtonLink>;
-  const page = (children: React.ReactNode) => <div className="fold-page fold-page-narrow space-y-6 wrap-anywhere">{children}</div>;
+  const page = (children: React.ReactNode) => <div ref={pageRef} className="fold-page fold-page-narrow space-y-6 wrap-anywhere">{children}</div>;
 
   if (loadError) {
     return page(<>

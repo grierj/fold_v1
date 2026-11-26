@@ -151,7 +151,7 @@ describe("AudiencePicker", () => {
     expect(screen.getAllByText("Book club")).toHaveLength(1);
     unmount();
 
-    for (const [target, title] of [["all", "Everyone at church"], ["occurrence:99", "The date you chose earlier"], ["group:99", "The group you chose earlier"], ["event:99", "The event you chose earlier"]]) {
+    for (const [target, title] of [["all", "Everyone at church"], ["occurrence:99", "Previously selected date"], ["group:99", "Previously selected group"], ["event:99", "Previously selected event"]]) {
       const view = render(<LongHarness target={target} everyone />);
       select = screen.getByRole("combobox", { name: "Send to" });
       expect(select).toHaveAttribute("title", title);
