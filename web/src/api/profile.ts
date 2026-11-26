@@ -16,7 +16,7 @@ export interface ProfileUpdate {
   currentPassword?: string;
   phone?: string;
   timezone?: string;
-  avatarFocal?: { x: number; y: number };
+  avatarFocal?: { x: number; y: number; avatarUrl: string };
 }
 
 export const Profile = {

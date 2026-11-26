@@ -9,7 +9,7 @@ import { Button, ButtonLink } from "../components/ui/Button";
 import { Chip } from "../components/ui/Chip";
 import { Form } from "../components/ui/Form";
 import { AdminIcon, ChevronRightIcon, MailIcon } from "../components/icons";
-import { ImageUpload } from "../components/ImageUpload";
+import { ProfilePicture } from "../components/ProfilePicture";
 import { AccountRequestForm } from "../components/AccountRequestForm";
 import { CalendarFeedCard } from "../components/CalendarFeedCard";
 import { NotificationSettingsCard } from "../components/NotificationSettingsCard";
@@ -159,9 +159,6 @@ function ProfileDetails() {
   const [name, setName] = useState<string | null>(null);
   const [phone, setPhone] = useState<string | null>(null);
   const [zone, setZone] = useState<string | null>(null);
-  const [pictureBusy, setPictureBusy] = useState(false);
-  const [pictureStatus, setPictureStatus] = useState<string | null>(null);
-  const [pictureError, setPictureError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -173,8 +170,6 @@ function ProfileDetails() {
   const { guard } = useUnsavedChanges(!!user && (dn.trim() !== user.displayName || fullName.trim() !== user.name || ph.trim() !== user.phone || tz.trim() !== user.timezone));
 
   if (!user) return null;
-  const focalX = user.avatarFocalX;
-  const focalY = user.avatarFocalY;
 
   async function save(e: React.FormEvent) {
     e.preventDefault();
@@ -188,44 +183,8 @@ function ProfileDetails() {
     finally { setSaving(false); }
   }
 
-  async function savePictureFile(file: File | null) {
-    if (!file) return;
-    setPictureBusy(true); setPictureError(null); setPictureStatus("Saving picture…");
-
-    try {
-      await ProfileApi.uploadAvatar(file); await refresh(); setPictureStatus("Picture saved.");
-    } catch (err) { setPictureStatus(null); setPictureError(errorText(err, "We couldn't save your picture.")); }
-    finally { setPictureBusy(false); }
-  }
-
-  async function saveFocal(next: { x: number; y: number }) {
-    if (next.x === focalX && next.y === focalY) return;
-    setPictureBusy(true); setPictureError(null); setPictureStatus("Saving picture…");
-
-    try {
-      await ProfileApi.update({ avatarFocal: next }); await refresh(); setPictureStatus("Picture saved.");
-    } catch (err) { setPictureStatus(null); setPictureError(errorText(err, "We couldn't save your picture.")); }
-    finally { setPictureBusy(false); }
-  }
-
-  async function removeAvatar() {
-    if (!confirm("Remove your profile picture?")) return;
-    setPictureBusy(true); setPictureError(null); setPictureStatus(null);
-
-    try {
-      await ProfileApi.deleteAvatar(); await refresh(); setPictureStatus("Picture removed.");
-    } catch (err) { setPictureError(errorText(err, "We couldn't remove that.")); }
-    finally { setPictureBusy(false); }
-  }
-
   return <div className="space-y-6">
-    {user.accountType !== "teen" && <div className="space-y-4">
-      <ImageUpload key={user.avatarUrl || "none"} label="Profile picture" initialUrl={user.avatarUrl || undefined} initialFocal={{ x: focalX, y: focalY }} maxDim={512} aspectClass="aspect-square max-w-48!" placeholderName={publicName(user)} onFile={savePictureFile} onFocal={saveFocal} previewSelection={false} saving={pictureBusy} />
-      <p className="text-xs text-text-muted mt-3">A new picture is saved as soon as you choose it.</p>
-      {pictureStatus && <p role="status" className="text-success text-sm mt-3">{pictureStatus}</p>}
-      {pictureError && <FormError layout="mt-3">{pictureError}</FormError>}
-      {user.avatarUrl && <Button variant="danger-outline" layout="mt-3" onClick={removeAvatar} disabled={pictureBusy}>Remove picture</Button>}
-    </div>}
+    {user.accountType !== "teen" && <ProfilePicture key={user.id} user={user} refresh={refresh} />}
     <Form noValidate onSubmit={save} className="fold-section fold-form space-y-5">
       {guard}
       {error && <FormError>{error}</FormError>}

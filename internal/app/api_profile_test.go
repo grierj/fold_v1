@@ -410,6 +410,54 @@ func TestAvatarUploadAndDelete(t *testing.T) {
 	}
 }
 
+func TestAvatarFocalUpdateNamesItsPicture(t *testing.T) {
+	app := testApp(t)
+	newTestUser(t, app, "pat", "password1234", "member")
+	newTestUser(t, app, "sam", "password1234", "member")
+	pat := loginAPI(t, app, "pat", "password1234")
+	sam := loginAPI(t, app, "sam", "password1234")
+	const me, avatar = "/api/v1/me", "/api/v1/me/avatar"
+	upload := func(c *apiClient) string {
+		t.Helper()
+		w := c.doMultipart("POST", avatar, "avatar", "me.png", tinyPNG(t))
+		if w.Code != http.StatusOK {
+			t.Fatalf("upload avatar: %d %s", w.Code, w.Body.String())
+		}
+		var answer avatarUploadResponseJSON
+		decodeJSON(t, w, &answer)
+		return answer.AvatarURL
+	}
+	first := upload(pat)
+	w := pat.do("PUT", me, map[string]any{"avatarFocal": map[string]any{"avatarUrl": first, "x": 31, "y": 72}}, true)
+	if w.Code != http.StatusOK {
+		t.Fatalf("adjust the current picture: %d %s", w.Code, w.Body.String())
+	}
+	var saved profileUpdateJSON
+	decodeJSON(t, w, &saved)
+	if saved.User.AvatarFocalX != 31 || saved.User.AvatarFocalY != 72 {
+		t.Fatalf("update returned %v, %v; want 31, 72", saved.User.AvatarFocalX, saved.User.AvatarFocalY)
+	}
+
+	checkRefused := func(c *apiClient, url string, x, y float64) {
+		t.Helper()
+		w := c.do("PUT", me, map[string]any{"avatarFocal": map[string]any{"avatarUrl": first, "x": 99, "y": 1}}, true)
+		if w.Code != http.StatusConflict || !strings.Contains(w.Body.String(), `"code":"avatar_changed"`) {
+			t.Fatalf("adjust the stale picture: %d %s", w.Code, w.Body.String())
+		}
+		var current userResponseJSON
+		decodeJSON(t, c.do("GET", "/api/v1/auth/me", nil, false), &current)
+		if got := current.User; got.AvatarURL != url || got.AvatarFocalX != x || got.AvatarFocalY != y {
+			t.Fatalf("stored %q at %v, %v; want %q at %v, %v", got.AvatarURL, got.AvatarFocalX, got.AvatarFocalY, url, x, y)
+		}
+	}
+	checkRefused(sam, upload(sam), 50, 50)
+	checkRefused(pat, upload(pat), 31, 72)
+	if w := pat.do("DELETE", avatar, nil, true); w.Code != http.StatusOK {
+		t.Fatalf("remove avatar: %d %s", w.Code, w.Body.String())
+	}
+	checkRefused(pat, "", 31, 72)
+}
+
 func TestAvatarUploadRejectsNonImage(t *testing.T) {
 	app := testApp(t)
 	newTestUser(t, app, "grier", "password1234", "member")

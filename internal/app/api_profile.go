@@ -20,8 +20,9 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/sessions"
 	"gorm.io/gorm"
-	"gorm.io/gorm/clause"
 )
+
+var errAvatarChanged = apiErr(http.StatusConflict, "avatar_changed", "the profile picture changed")
 
 func (a *App) apiUpdateMe(c *gin.Context) {
 	u := apiUser(c)
@@ -34,8 +35,9 @@ func (a *App) apiUpdateMe(c *gin.Context) {
 		Timezone               *string `json:"timezone"`
 		HideContactFromLeaders *bool   `json:"hideContactFromLeaders"`
 		AvatarFocal            *struct {
-			X float64 `json:"x"`
-			Y float64 `json:"y"`
+			X         float64 `json:"x"`
+			Y         float64 `json:"y"`
+			AvatarURL *string `json:"avatarUrl"`
 		} `json:"avatarFocal"`
 	}
 	if err := c.ShouldBindJSON(&body); err != nil {
@@ -106,18 +108,22 @@ func (a *App) apiUpdateMe(c *gin.Context) {
 	}
 	updated := *u
 	if len(updates) > 0 {
-		err := a.DB.Transaction(func(tx *gorm.DB) error {
-			var locked models.User
-			if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&locked, u.ID).Error; err != nil {
+		err := a.DB.WithContext(c.Request.Context()).Transaction(func(tx *gorm.DB) error {
+			locked, err := lockActorIn(tx, u, actorNoKeyUpdate)
+			if err != nil {
 				return err
+			}
+			if f := body.AvatarFocal; f != nil && f.AvatarURL != nil &&
+				(locked.AvatarKey == "" || a.Uploads.URL(locked.AvatarKey) != *f.AvatarURL) {
+				return errAvatarChanged
 			}
 			// Recheck the account type under the lock. A teen's stored value
 			// never changes through this profile preference.
-			if !policy.CanEditOwnContactPrivacy(asPerson(&locked)) {
+			if !policy.CanEditOwnContactPrivacy(asPerson(locked)) {
 				delete(updates, "hide_contact_from_leaders")
 			}
 			oldHidden := locked.HideContactFromLeaders
-			if err := tx.Model(&locked).Updates(updates).Error; err != nil {
+			if err := tx.Model(locked).Updates(updates).Error; err != nil {
 				return err
 			}
 			if value, supplied := updates["hide_contact_from_leaders"]; supplied && value != oldHidden {
@@ -130,7 +136,7 @@ func (a *App) apiUpdateMe(c *gin.Context) {
 			return tx.First(&updated, u.ID).Error
 		})
 		if err != nil {
-			jsonError(c, http.StatusInternalServerError, "could not save profile")
+			fail(c, err)
 			return
 		}
 	}

@@ -234,7 +234,7 @@ it("lists Full name first, then an optional Preferred name with its hint, and sh
   expect(screen.queryByLabelText(/^Display name/)).not.toBeInTheDocument();
   expect(screen.getByRole("button", { name: "Choose photo" })).toBeInTheDocument();
   expect(screen.getByText("P")).toBeInTheDocument();
-  expect(screen.queryByText("Tap or click the image to move the focal point — faces stay centered when cropped.")).not.toBeInTheDocument();
+  expect(screen.queryByRole("slider")).not.toBeInTheDocument();
   expect(screen.queryByRole("link", { name: "Change your sign-in email" })).not.toBeInTheDocument();
 });
 

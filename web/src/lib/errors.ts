@@ -32,6 +32,7 @@ export const ERROR_COPY = {
   consent_invalid: "Choose account, SMS or photos, then choose grant or revoke.",
   consent_evidence_long: "Keep the consent evidence to 1,000 characters or fewer.",
   teen_avatar: "Teen accounts do not have a public profile picture. You can still update your name and other profile details.",
+  avatar_changed: "Your profile picture changed before its position could be saved.",
   consent_required: "Your account is waiting for a parent or guardian's consent. Your church office can help. You can browse public groups and events without logging in.",
   household_conversion_details: "This person's details changed after they accepted. Reject this request and ask the household to send a new invitation.",
   household_conversion_adult: "This person no longer meets the account age and guardian rules. Check their birth date, account type, and guardian link. Reject this request before asking for a new invitation.",

@@ -144,7 +144,7 @@ successful sign-in clears the email's counter but not the IP's.
 ### Profile
 
 ```
-PUT    /api/v1/me           → 200 {user, verificationSent?}  (auth; partial update)
+PUT    /api/v1/me           → 200 {user, verificationSent?} | 409 avatar_changed  (auth; partial update)
 POST   /api/v1/me/password  → 200 {}  (auth)
 POST   /api/v1/me/avatar    → 200 {avatarUrl} | 401 | 403 teen_avatar | 503 upload_busy  (auth; multipart, field "avatar")
 DELETE /api/v1/me/avatar    → 200 {} | 401  (auth)
@@ -192,7 +192,9 @@ is the safest cleanup if a client retains stale rows. Representative external
 calendar clients still need manual interoperability checks. Revoking a link that is already off still
 answers 200.
 
-Profile update body: any of `{name, displayName, phone, email, currentPassword, timezone, hideContactFromLeaders, avatarFocal: {x, y}}`.
+Profile update body: any of `{name, displayName, phone, email, currentPassword, timezone, hideContactFromLeaders, avatarFocal: {x, y, avatarUrl?}}`.
+The profile editor sends the picture's `avatarUrl` with the focal point.
+If the picture was replaced or removed, the update returns `409 avatar_changed` and saves nothing.
 `hideContactFromLeaders` is a boolean preference for the signed-in adult only,
 off by default. A teen's submitted preference is ignored: their contact is
 always hidden from leaders and hosts. Changing the adult preference writes
