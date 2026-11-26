@@ -193,7 +193,7 @@ an optional notice email sent to their teen. Plan section 7.4 has the rules; the
   body can carry a leader's note. The copy has no link and uses the guardian's own unsubscribe.
 - **Live access follows the subject** (`teenSeesNoticeSubject`: occurrence, event or group; any other
   subject type is not copied). `Kind.CopyWithoutSubjectAccess` skips only that check and is set on
-  `registration.cancelled` (DEC-149) and `event.deleted` (DEC-173: the event and its dates are gone, so
+  `registration.cancelled` (DEC-149) and `event.deleted` (DEC-175: the event and its dates are gone, so
   no live access is left to judge; `notifyEventDeleted` stores the title only for a teen who could see
   one of their dates). That copy is **not** `CopyText` of the stored notice: the
   teen's title can carry the date (the single-date path), and a title can hold any separator, so the

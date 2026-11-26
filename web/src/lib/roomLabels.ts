@@ -168,9 +168,11 @@ export function seriesBookingMessage(res: SeriesBooking): string {
 
   if (res.kept > 0) parts.push(keptLine(res.kept, res.keptWaiting));
 
-  // A series room with nothing to book, wait for, lose, change or keep: every upcoming date already holds it, or there is
-  // none.
-  if (parts.length === 0) parts.push("The series room is saved.");
+  // A series room with nothing to book, send, lose, change or keep: every upcoming date already holds it or waits for it
+  // on the request a re-pick keeps (which sends none of them again), or there is none.
+  if (parts.length === 0) {
+    parts.push(res.after.pending > 0 ? `Still waiting for an admin's approval: ${dates(res.after.pending)}.` : "The series room is saved.");
+  }
 
   return parts.join(" ");
 }
@@ -180,7 +182,9 @@ export function seriesBookingMessage(res: SeriesBooking): string {
 export function seriesStoredMessage(read: SeriesRoomsResponse): string {
   if (read.defaultRoom === null) return "Series room released.";
 
-  const parts = waitingAndNeeding(read.pending, read.needsRoom.length);
+  // "Still waiting", not "sent": the read shows every date that waits, and this pick may have sent only some of them.
+  const parts = read.pending > 0 ? [`Still waiting for an admin's approval: ${dates(read.pending)}.`] : [];
+  parts.push(...waitingAndNeeding(0, read.needsRoom.length));
 
   return parts.length > 0 ? parts.join(" ") : "The series room is saved.";
 }
