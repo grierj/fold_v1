@@ -21,6 +21,7 @@ test is `internal/rooms/busy.go` and the suggestion engine `internal/rooms/sugge
 - Cancelling a date or deleting an event releases its booking.
 - Only events of an active group, or church-wide events, can be booked (DEC-147). For a group that is not active (pending, archived or deleted), single-date and series bookings, new series dates (the daily extender, series edits and restores), an admin confirming a waiting request and location matching book nothing. Existing bookings stay, keep holding the room and can be released, and the series room can be stopped.
 - Capacity gives a warning, not a block ("may be too small"), when the date's seat cap or current going count (the event's seat cap on the series picker) is larger than `room.capacity`.
+- On the date and series editors and both scheduling forms, the chosen room's full label wraps inside the closed picker. The browser's room list keeps the full option labels, including buildings and booking notes.
 
 ### 9.3 Room suggestions: the exact rule
 
