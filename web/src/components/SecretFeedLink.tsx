@@ -1,15 +1,13 @@
 import { useEffect, useRef, useState, type DependencyList, type ReactNode } from "react";
 import { errorText } from "../lib/errors";
 import { formatEventDay } from "../lib/when";
-import { useLoad } from "../lib/useLoad";
+import { useLoad, type Load } from "../lib/useLoad";
+import { useAction } from "../lib/useAction";
 import { Button } from "./ui/Button";
 import { Field, FormError, Input } from "./ui/Field";
 import { Skeleton } from "./ui/Skeleton";
 import { ErrorNotice } from "./ErrorNotice";
 
-// A secret calendar link (the personal feed and a room's feed): the link shows
-// once, a new link stops the old one, and a failed load never looks like "no
-// link yet" (Create would then replace a link that works).
 export interface FeedInfo {
   hasToken: boolean;
   createdAt?: string | null;
@@ -17,82 +15,87 @@ export interface FeedInfo {
   url?: string | null;
 }
 
-export function useSecretFeed<T extends FeedInfo>({ load, deps, create, revoke, failed, onInfo, onRevoked }: {
+export function useSecretFeed<T extends FeedInfo>({ load, deps, create, revoke, failed, onInfo, onRevoked, recover }: {
   load: () => Promise<T>;
   deps: DependencyList;
-  create: () => Promise<T>;
-  revoke: () => Promise<void>;
+  create: (current: T) => Promise<T>;
+  revoke: (current: T) => Promise<T>;
   failed: { load: string; create: string; revoke: string };
-  // Called with each answer that carries the feed's state (a load or a new link).
+  // The personal feed takes its scope from the read or the link it just made.
   onInfo?: (info: T) => void;
   onRevoked?: () => void;
+  recover?: (cause: unknown, retry: Load<T>["retry"]) => Promise<boolean>;
 }) {
   const feed = useLoad(load, deps);
-  const [hasToken, setHasToken] = useState(false);
-  const [createdAt, setCreatedAt] = useState<string | null>(null);
-  const [link, setLink] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const action = useAction();
   const [status, setStatus] = useState("");
   const linkRef = useRef<HTMLInputElement>(null);
-
-  // Each answer fills the state in the render that first sees it.
   const [applied, setApplied] = useState(feed.data);
 
-  if (feed.data && feed.data !== applied) {
+  if (onInfo && feed.data && feed.data !== applied) {
     setApplied(feed.data);
-    setHasToken(feed.data.hasToken);
-    setCreatedAt(feed.data.createdAt ?? null);
-    onInfo?.(feed.data);
+    onInfo(feed.data);
   }
 
-  // Runs one change with the busy flag, the error line and the status line.
-  async function act(run: () => Promise<void>, failure: string) {
-    setBusy(true);
-    setError(null);
+  const current = feed.data;
+  const link = current?.url ?? null;
+
+  const act = (run: () => Promise<void>, fallback: string) => action.run(async () => {
     setStatus("");
+    await run();
+  }, { fallback });
 
-    try {
-      await run();
-    } catch (err) {
-      setError(errorText(err, failure));
-    } finally {
-      setBusy(false);
-    }
+  function change(write: (current: T) => Promise<T>, fallback: string, onSaved?: (info: T) => void) {
+    if (!current) return Promise.resolve();
+
+    return act(async () => {
+      const epoch = feed.epoch();
+      let info: T;
+
+      try {
+        info = await write(current);
+      } catch (cause) {
+        if (feed.epoch() !== epoch || await recover?.(cause, feed.retry)) return;
+
+        throw cause;
+      }
+
+      if (feed.epoch() !== epoch) return;
+
+      if (onInfo) setApplied(info);
+
+      feed.setData(info);
+      onSaved?.(info);
+    }, fallback);
   }
 
-  const make = () => act(async () => {
-    const info = await create();
-    setHasToken(true);
-    setCreatedAt(info.createdAt ?? null);
-    setLink(info.url ?? null);
-    onInfo?.(info);
-  }, failed.create);
+  const make = () => change(create, failed.create, onInfo);
 
-  // A new link appears in the box: put focus there so it can be copied.
   useEffect(() => {
     if (link) linkRef.current?.focus();
   }, [link]);
 
   return {
-    loaded: feed.data !== undefined,
+    loaded: current !== undefined,
+    loadCause: feed.error,
     loadError: feed.error ? errorText(feed.error, failed.load) : null,
     retry: feed.retry,
-    hasToken, createdAt, link, busy, error, status, linkRef,
-    act, setError, setStatus,
+    hasToken: current?.hasToken ?? false,
+    createdAt: current?.createdAt ?? null,
+    link,
+    busy: action.running,
+    error: action.state.status === "failed" ? action.state.text : null,
+    status, linkRef, act, setStatus,
     create: make,
     remake: (confirmText: string) => confirm(confirmText) ? make() : Promise.resolve(),
-    turnOff: (confirmText: string) => confirm(confirmText) ? act(async () => {
-      await revoke();
-      setHasToken(false);
-      setCreatedAt(null);
-      setLink(null);
+    turnOff: (confirmText: string) => confirm(confirmText) ? change(revoke, failed.revoke, () => {
       setStatus("Calendar link turned off.");
       onRevoked?.();
-    }, failed.revoke) : Promise.resolve(),
+    }) : Promise.resolve(),
     async copyLink() {
       if (!link) return;
-      setError(null);
+
+      if (action.state.status === "failed") action.reset();
 
       if (navigator.clipboard) {
         try {
@@ -130,13 +133,13 @@ export function SecretFeedLink({ feed, id, loadingLabel, linkLabel, linkHint, se
   after?: ReactNode;
 }) {
   return <>
+    {feed.error && <FormError>{feed.error}</FormError>}
     {feed.loadError ? (
       <ErrorNotice message={feed.loadError} onRetry={feed.retry} />
     ) : !feed.loaded ? (
       <Skeleton kind="lines" count={2} label={loadingLabel} />
     ) : (
       <>
-        {feed.error && <FormError>{feed.error}</FormError>}
         {extras}
         {feed.link ? (
           <Field id={id} label={linkLabel} hint={linkHint}>
