@@ -398,9 +398,9 @@ expand-then-contract (`docs/agents/migrations.md`).
 
 Grier's rule. An agent may merge a fold PR, as a normal merge commit, when all of these hold:
 
-1. Every CI check is green (`test`, `web`; branch protection requires them) on a head
-   that contains master's tip. GitHub refuses a PR that is behind master (DEC-146); merge master
-   into it (never rebase), wait for CI again, and then merge.
+1. Every CI check is green on a head that contains master's tip. GitHub requires `test`, `web`,
+   `e2e (1)`, `e2e (2)`, and `e2e (3)`. If the PR falls behind master, merge master into the
+   branch (never rebase) and wait for CI to pass again before merging the PR (DEC-146).
 2. All five review concerns were reviewed by a separate agent from the one that implemented the
    change, preferably running a different model:
    - **UI, UX, accessibility and copy**: familiar patterns and the shared components, the axe and
@@ -474,7 +474,7 @@ table), and a new area gets a new file there and a row in that table, not a row 
 | Tests sit next to their code | `TestTestFilesSitNextToTheirSource` |
 | Source guards read the whole production tree, not a directory glob | `internal/guardkit` tests, `TestContactRequestTextGuardReadsTheRealTree` |
 | Schema changes are new goose files; models match them | `migrations/migrations_test.go`, `TestBaselineFileShape` (see `docs/agents/migrations.md`) |
-| Work reaches master only through a PR with `test` and `web` green on a head containing master's tip | GitHub ruleset on `master` (no bypass actors); `scripts/merge-rules-check.sh` in CI (`TestCIRunsTheMergeRulesCheck`, `TestMergeRulesCheckScript`) |
+| Work reaches master only through an up-to-date PR that passes the checks listed under [Merging pull requests](#merging-pull-requests) | GitHub's `Master Protections` ruleset has no bypass actors. In CI, `scripts/merge-rules-check.sh` verifies the PR rule, the force-push block, strict status checks, and the `test` and `web` requirements (`TestCIRunsTheMergeRulesCheck`, `TestMergeRulesCheckScript`). |
 | `go vet`, `gofmt` and staticcheck are clean | `make lint` in CI |
 | No Python in the serving stack (DEC-151) | `TestNoPythonInServingStack`, `TestPythonGuardScopesToServingStack` |
 | Docs say "recommended", never "supported" | `TestDocsSayRecommendedNotSupported` |
