@@ -260,15 +260,16 @@ cannot reach the database, fails everywhere.
 
 The wrapper (Bash 3.2 compatible; a test reads it for what that Bash lacks) checks each stage and
 names the one that failed, without printing the connection arguments. Its exit codes: 70 no
-runtime on `PATH`, 71 daemon silent or stopped, 72 image unusable (pull failed or timed out, tool
-missing), 73 database unreachable from the container, 74 arguments it cannot run (a colon in a
-mounted path, a connection with no host, a socket directory that is missing).
+runtime on `PATH`, 71 daemon silent or stopped, 72 client container failed (image pull failed,
+container failed to start, or a check timed out), 73 database unreachable from the container,
+74 arguments it cannot run (a colon in a mounted path, a connection with no host, a socket
+directory that is missing).
 
 - **Image.** The test process resolves the image once (`scripts/pg-client.sh --resolve <major>`),
   logs its local ID, and runs every tool by that ID (`FOLD_PG_IMAGE_ID`). A pull is bounded
   (`FOLD_PG_PULL_TIMEOUT`, 180s), as are the daemon check (`FOLD_PG_INFO_TIMEOUT`, 20s) and
-  `<tool> --version` (`FOLD_PG_DISCOVERY_TIMEOUT`, 60s). `FOLD_PG_IMAGE` picks another image; a
-  `name@sha256:...` digest is kept as given. The wrapper never invents a digest for a tag.
+  each `pg_isready` or `<tool> --version` container run (`FOLD_PG_DISCOVERY_TIMEOUT`, 60s).
+  `FOLD_PG_IMAGE` picks another image. The wrapper keeps a `name@sha256:...` digest as given.
 - **Deadlines and cleanup.** Each command the wrapper starts (docker, and the tool in its
   container) is the leader of its own process group, and its container has a name the wrapper made.
   At a deadline, or when the wrapper gets TERM, INT or HUP, the whole group gets TERM, then KILL
@@ -296,8 +297,11 @@ mounted path, a connection with no host, a socket directory that is missing).
   works on native Linux Docker. A Unix-socket directory (`host=/dir`, `?host=/dir`, `-h /dir`) is
   mounted at the same path with no network. The container runs as the caller's uid, which the
   image has no passwd entry for, so the probe passes `-U probe` (a `pg_isready` with no user exits 3,
-  "no attempt", before it connects; the probe does not authenticate). When the probe gets no answer
-  the error says to use a native client (`FOLD_PG_BIN`) or a connection the container can reach.
+  "no attempt", before it connects; the probe does not authenticate). If PostgreSQL gives no
+  answer within the probe's 10-second connection timeout, the wrapper waits a second and tries
+  once more. After two unanswered probes, use a native client (`FOLD_PG_BIN`) or a connection the
+  container can reach. Docker startup failures and a deadline on the entire probe container run
+  have separate diagnostics. The wrapper makes one attempt at the dump or restore itself.
   A `host=` connection string is read only in its plain form (`key=value` words, no quotes, no
   backslashes, no blanks around `=`); libpq's other forms can hide `host=` or `port=` inside a
   password, so they are refused (74) with a message that says nothing of the string, and the
@@ -311,7 +315,8 @@ mounted path, a connection with no host, a socket directory that is missing).
 - **Tests.** The argument-level tests (`TestPGClientWrapper*`, in `restore_fence_test.go` beside
   `pgClients`) run the real script against a fake `docker`: paths with spaces, each directory
   mounted once, a stopped daemon, a bounded pull, a failed pull, an unreachable database, image-ID
-  use, a mismatched major, and each connection form; the fake `pg_isready` exits 3 without `-U`
+  use, a mismatched major, each connection form, and a transient probe failure followed by a
+  single restore attempt whose exit status is preserved. The fake `pg_isready` exits 3 without `-U`
   like the real one. The refusal tests put `host=` and `port=` inside quoted and escaped
   passwords and check that neither routes the run nor appears in the output. The deadline tests
   (`...DeadlinesHoldAgainstStubbornCommands`, `...CleansUpWhenToldToStop`, `TestPGRunStopsTheWholeGroup`)
