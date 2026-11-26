@@ -141,7 +141,7 @@ describe("dateFields and intendedDateFields", () => {
   // someone else.
   it.each<[string, Partial<EventOccurrence>, boolean]>([
     ["only the revision", { revision: "r9" }, true],
-    ["the event's own title, which the date falls back to", { title: "Potluck", seriesTitle: "Potluck" }, true],
+    ["the event's own title, which the date falls back to", { title: "Potluck" }, true],
     ["a clock a rule gives the date", { startsLocal: "2026-12-01T20:00" }, true],
     ["the room, the roster or the counts (not written by the save)", { seatsUsed: 9, room: { id: 1, name: "Hall", building: "Main" } }, true],
     ["an own start", { own: { startsLocal: "2026-12-01T18:00" } }, false],

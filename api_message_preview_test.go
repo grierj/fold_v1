@@ -220,7 +220,7 @@ func TestTestSendRejectsAddressChangeAfterAuthentication(t *testing.T) {
 	result := bgDo(f.leader, "POST", path+"/test", nil)
 	awaitDBSignal(t, reached)
 	// Authentication has completed; the real admin change commits before the lock.
-	if w := f.admin.do("PUT", "/api/v1/admin/users/"+itoa(f.leaderUser.ID), map[string]any{"email": "new-author@example.com"}, true); w.Code != http.StatusOK {
+	if w := f.admin.do("PUT", "/api/v1/admin/users/"+itoa(f.leaderUser.ID), adminEditBody(f.admin, f.leaderUser.ID, map[string]any{"email": "new-author@example.com"}), true); w.Code != http.StatusOK {
 		t.Fatalf("email change: %d %s", w.Code, w.Body.String())
 	}
 	release()

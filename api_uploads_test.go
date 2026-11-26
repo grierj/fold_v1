@@ -35,7 +35,7 @@ func occupyAllSlots(t *testing.T) (freeOne func()) {
 	t.Helper()
 	var releases []func()
 	for i := 0; i < images.MaxConcurrentProcessing; i++ {
-		release, err := images.Admit()
+		release, err := images.Admit(1_000_000 + uint(i))
 		if err != nil {
 			t.Fatalf("slot %d was already taken: %v", i, err)
 		}
@@ -61,7 +61,7 @@ func requireFreeSlots(t *testing.T) {
 		}
 	}()
 	for i := 0; i < images.MaxConcurrentProcessing; i++ {
-		release, err := images.Admit()
+		release, err := images.Admit(1_000_000 + uint(i))
 		if err != nil {
 			t.Fatalf("slot %d of %d is still held: an upload leaked it", i+1, images.MaxConcurrentProcessing)
 		}
@@ -621,6 +621,26 @@ func newMessageImageFixture(t *testing.T) messageImageFixture {
 
 func (f messageImageFixture) imagesPath(id uint) string {
 	return "/api/v1/messages/" + itoa(id) + "/images"
+}
+
+func TestUploadRoutesShareTheAccountsSlot(t *testing.T) {
+	f := newMessageImageFixture(t)
+	otherSession := loginAPI(t, f.app, "leader", "password1234")
+	release, err := images.Admit(f.leaderUser.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer release()
+	pic := tinyPNG(t)
+	avatar := "/api/v1/me/avatar"
+	cover := "/api/v1/groups/" + itoa(f.group.ID) + "/cover"
+	message := f.imagesPath(f.draft)
+	wantCode(t, "avatar", postUpload(t, otherSession, avatar, "avatar", pic, uploadOptions{}), http.StatusServiceUnavailable, "upload_busy")
+	wantCode(t, "cover", postUpload(t, otherSession, cover, "cover", pic, uploadOptions{}), http.StatusServiceUnavailable, "upload_busy")
+	wantCode(t, "announcement", postUpload(t, otherSession, message, "image", pic, uploadOptions{}), http.StatusServiceUnavailable, "upload_busy")
+	f.upload(t, f.admin, f.draft, pic)
+	release()
+	f.upload(t, otherSession, f.draft, pic)
 }
 
 func (f messageImageFixture) upload(t *testing.T, c *apiClient, id uint, data []byte) messageImageResponseJSON {

@@ -16,9 +16,6 @@ export function occurrence(over: Partial<EventOccurrence>): EventOccurrence {
     description: "",
     recurrenceRule: "",
     seriesStartsLocal: "2026-12-01T19:00",
-    seriesTitle: "Supper",
-    seriesLocation: "Hall",
-    seriesDurationMinutes: 60,
     overridden: false,
     churchWide: false,
     visibility: "public",
@@ -36,8 +33,6 @@ export function occurrence(over: Partial<EventOccurrence>): EventOccurrence {
     remoteCapacity: null,
     remoteSeatsUsed: 0,
     remoteSpotsLeft: null,
-    videoProvider: "none",
-    videoReveal: "registered_only",
     ...over,
     // A manager's read carries the date's own values; an own visibility is the override.
     own: over.own ?? (over.visibilityOverride ? { visibility: over.visibilityOverride } : {}),

@@ -311,7 +311,7 @@ func TestRoomChangedSeriesBookAnywayApprovalAndCreate(t *testing.T) {
 		t.Fatalf("book A: %d %s", code, body)
 	}
 	series := createFeedEvent(t, f.leader, f.group, "Weekly", f.startOn.Add(30*time.Minute), "FREQ=WEEKLY;COUNT=3")
-	if code, out := f.seriesRoom(t, f.admin, series, map[string]any{"roomId": f.hall.ID, "overlapReason": "Shared with the youth"}); code != http.StatusOK || out.Booked != 3 || out.DoubleBooked != 1 {
+	if code, out := f.seriesRoom(t, f.admin, series, map[string]any{"roomId": f.hall.ID, "overlapReason": "Shared with the youth", "reviewedBusyDates": []string{feedDate(f.startOn)}}); code != http.StatusOK || out.Booked != 3 || out.DoubleBooked != 1 {
 		t.Fatalf("book anyway: %d %+v", code, out)
 	}
 	for _, uid := range []uint{f.leaderUser.ID, coUser.ID} {
@@ -332,7 +332,7 @@ func TestRoomChangedSeriesBookAnywayApprovalAndCreate(t *testing.T) {
 		t.Fatalf("a waiting series pick: %d %+v", code, out)
 	}
 	all := roomChangedOf(t, f.app, f.leaderUser.ID)
-	if n := all[len(all)-1]; n.Body != "coleader changed the series room. 1 date is waiting for an admin's approval. 1 date was left as it is. 1 date still needs a room because the room is in use then. The event page lists it." ||
+	if n := all[len(all)-1]; n.Body != "coleader changed the series room. Requested approval for 1 date. 1 date was left as it is. 1 date still needs a room because the room is in use then. The event page lists it." ||
 		n.PushTitle != "Room needed: Weekly" {
 		t.Fatalf("the waiting pick's notice: %+v", n)
 	}

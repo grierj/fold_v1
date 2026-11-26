@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { composeOptions, recipients, summary } from "../test/compose";
 import { ApiError } from "../api/core";
-import { AUDIENCE_LABEL_MAX, AUDIENCE_LABEL_WIDTH_EM, audienceLabel, audienceLabels, changeLines, confirmLine, confirmPushLine, emptyChoice, failedLine, fromAudience, guardianLine, historyLine, historyTeenLine, isOneEvent, prefillChoice, pushBadge, pushHistoryLine, pushLine, labelWidthEm, listLimitLine, notMovedLine, retryQuestion, reviewRefusal, shortLabel, statusLabel, stillScheduledLine, summaryLine, teenLine, toAudience } from "./messages";
+import { AUDIENCE_LABEL_MAX, AUDIENCE_LABEL_WIDTH_EM, audienceLabel, audienceLabels, changeLines, confirmLine, emptyChoice, failedLine, fromAudience, guardianLine, historyLine, historyTeenLine, isOneEvent, prefillChoice, pushBadge, pushHistoryLine, pushLine, labelWidthEm, listLimitLine, notMovedLine, retryQuestion, reviewRefusal, shortLabel, statusLabel, stillScheduledLine, summaryLine, teenLine, toAudience } from "./messages";
 
 describe("audiences", () => {
   it("turns the picker's choice into the API's audience and back", () => {
@@ -64,13 +64,6 @@ describe("counts", () => {
     } finally {
       vi.useRealTimers();
     }
-  });
-
-  it("says who gets the push under a question that counts everyone reached", () => {
-    expect(confirmPushLine({ summary: summary({ eligible: 2, push: 2 }), reached: 2 })).toBe("2 people get a push notification too.");
-    expect(confirmPushLine({ summary: summary({ eligible: 2, push: 1 }), reached: 2 })).toBe("1 person gets a push notification too.");
-    expect(confirmPushLine({ summary: summary({ eligible: 2, push: 1 }), reached: 3 })).toBe("1 of them gets only the push notification.");
-    expect(confirmPushLine({ summary: summary({ eligible: 2, push: 3 }), reached: 3 })).toBe("3 of them get a push notification; 1 gets only the push.");
   });
 
   it("says saving a scheduled message's list leaves its time alone, and that a due one goes out", () => {
@@ -181,8 +174,10 @@ describe("history", () => {
 // pushes counted apart from its email.
 describe("push words", () => {
   it("counts who also gets a push, and says nothing for none", () => {
-    expect(pushLine(summary({ push: 38 }))).toBe("38 also get a push notification.");
-    expect(pushLine(summary({ push: 1 }))).toBe("1 also gets a push notification.");
+    expect(pushLine(summary({ push: 38 }))).toBe("38 people get a push notification too.");
+    expect(pushLine(summary({ push: 1 }))).toBe("1 person gets a push notification too.");
+    expect(pushLine(summary({ push: 1, pushOnly: 1 }))).toBe("1 person gets only the push notification.");
+    expect(pushLine(summary({ push: 3, pushOnly: 1 }))).toBe("3 people get a push notification. 1 of them gets only the push.");
     expect(pushLine(summary({ push: 0 }))).toBe("");
   });
 
@@ -193,6 +188,8 @@ describe("push words", () => {
       .toBe("Push notifications: 3 waiting · 2 devices gone · 2 over the hourly limit");
     expect(pushHistoryLine({ sent: 0, waiting: [], missed: {} })).toBe("");
     expect(pushHistoryLine(undefined)).toBe("");
+    expect(pushHistoryLine({ sent: 0, waiting: [], missed: { "delivery could not be confirmed": 2 } }))
+      .toBe("Push notifications: 2 unconfirmed");
   });
 
   it("words one person's push on their history row", () => {
@@ -200,6 +197,7 @@ describe("push words", () => {
     expect(pushBadge({ status: "waiting", until: "8:00 AM" })).toBe("Push waiting until 8:00 AM");
     expect(pushBadge({ status: "waiting" })).toBe("Push waiting");
     expect(pushBadge({ status: "missed" })).toBe("Push didn't go out");
+    expect(pushBadge({ status: "missed", reason: "delivery could not be confirmed" })).toBe("Push delivery unconfirmed");
     expect(pushBadge({ status: "missed", reason: "push turned off by the church" })).toBe("Push didn't go out: notifications turned off by the church");
   });
 });

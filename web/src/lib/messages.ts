@@ -463,11 +463,14 @@ export function guardianLine(c: Pick<MessageRecipientCounts, "guardianCopies" | 
 export const failedLine = (failed: number, copies: number) =>
   failed > 0 || copies === 0 ? `${people(failed)} didn't get this` : `${guardianCopies(copies)} didn't go out`;
 
+const UNCONFIRMED_PUSH_LABEL = "Push delivery unconfirmed";
+
 export const HISTORY_WORDS: Record<HistoryStatus, string> = {
   sent: "Sent",
   delivered: "Delivered",
   missed: "Didn't get it",
   waiting: "Waiting",
+  unconfirmed: UNCONFIRMED_PUSH_LABEL,
 };
 
 // retryQuestion is the confirm before "Try again" (DEC-131), in the
@@ -496,13 +499,16 @@ export function teenLine(s: AudienceSummary): string {
   return s.teens === 1 ? "1 of them is a teen." : `${s.teens} of them are teens.`;
 }
 
-// pushLine is the composer's "38 also get a push notification." (PLAN
-// 7.3), or "" when nobody would. People with no device aren't skipped:
-// they still get the email.
 export function pushLine(s: AudienceSummary): string {
-  if (!s.push) return "";
+  const { push, pushOnly } = s;
 
-  return `${s.push} also ${s.push === 1 ? "gets" : "get"} a push notification.`;
+  if (!push) return "";
+
+  if (!pushOnly) return `${push} ${push === 1 ? "person gets" : "people get"} a push notification too.`;
+
+  return pushOnly === push
+    ? `${pushOnly} ${pushOnly === 1 ? "person gets" : "people get"} only the push notification.`
+    : `${push} people get a push notification. ${pushOnly} of them ${pushOnly === 1 ? "gets" : "get"} only the push.`;
 }
 
 // A push row's reason (the pipeline's words) as the history says it.
@@ -517,7 +523,7 @@ const PUSH_REASONS = new Map<string, [one: string, many: string]>([
   ["the push service refused it", ["refused by the push service", "refused by the push service"]],
   ["the push service couldn't be reached", ["the push service couldn't be reached", "the push service couldn't be reached"]],
   ["the notification was too large to push", ["too large to push", "too large to push"]],
-  ["didn't go out", ["didn't go out", "didn't go out"]],
+  ["delivery could not be confirmed", ["unconfirmed", "unconfirmed"]],
   ["push turned off for event updates", ["turned notifications off for event updates", "turned notifications off for event updates"]],
   ["outside quiet hours", ["skipped: it would have come during quiet hours", "skipped: it would have come during quiet hours"]],
   ["date cancelled or moved", ["not sent: the date was cancelled or moved", "not sent: the date was cancelled or moved"]],
@@ -537,6 +543,8 @@ export function pushBadge(p: MessageHistoryPush): string {
     case "waiting":
       return p.until ? `Push waiting until ${p.until}` : "Push waiting";
   }
+
+  if (p.reason === "delivery could not be confirmed") return UNCONFIRMED_PUSH_LABEL;
 
   return p.reason ? `Push didn't go out: ${PUSH_REASONS.get(p.reason)?.[0] ?? p.reason}` : "Push didn't go out";
 }
@@ -575,20 +583,6 @@ function whenPhrase(at: string, zone: string): string {
   const when = formatWhenIn(at, zone);
 
   return /^(Today|Tomorrow) /.test(when) ? when[0].toLowerCase() + when.slice(1) : `on ${when}`;
-}
-
-// confirmPushLine says who gets the push, under a question that counts everyone the message reaches: the people it
-// reaches beyond those who get the email get only the push.
-export function confirmPushLine(review: Pick<MessageReview, "summary" | "reached">): string {
-  const { push, eligible } = review.summary;
-  const only = review.reached - eligible;
-  const all = `${push} ${push === 1 ? "person gets" : "people get"} a push notification too.`;
-
-  if (only <= 0) return all;
-
-  return only === push
-    ? `${only} of them ${only === 1 ? "gets" : "get"} only the push notification.`
-    : `${push} of them get a push notification; ${only} ${only === 1 ? "gets" : "get"} only the push.`;
 }
 
 // saveListLine is the question before an edit changes who a scheduled message goes to (DEC-169): "Change who gets this
@@ -671,6 +665,7 @@ const wireReview = object({
     teens: number(),
     skipped: record(string(), number()),
     push: number(),
+    pushOnly: number(),
     recipients: array(object({ name: string(), teen: boolean(), skipped: optional(string()), push: optional(boolean()) })),
     more: boolean(),
   }),

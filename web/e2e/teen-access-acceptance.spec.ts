@@ -75,7 +75,9 @@ test("a consented teen joins general events with restricted roles, private ident
   await refused({ client: page.request, method: "GET", path: "/admin/users", status: 403 });
   await refused({ client: request, method: "PUT", path: `/groups/${group.id}/members/${teen.id}/role`, data: { role: "leader" }, status: 400 });
   await refused({ client: request, method: "POST", path: `/events/${churchEvent.id}/hosts`, data: { email: teenEmail }, status: 400 });
-  await refused({ client: request, method: "PUT", path: `/admin/users/${teen.id}`, data: { role: "admin" }, status: 400 });
+  const { users } = await admin("GET", "/admin/users");
+  const teenRead = users.find((row: { id: number }) => row.id === teen.id);
+  await refused({ client: request, method: "PUT", path: `/admin/users/${teen.id}`, data: { role: "admin", revision: teenRead.revision }, status: 400 });
 
   const contexts = [];
 

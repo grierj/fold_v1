@@ -37,7 +37,7 @@ stubService(Groups, () => ({ list: vi.fn(), members: vi.fn().mockResolvedValue({
 
 stubService(AdminGroups, () => ({ list: vi.fn(), addMember: vi.fn() }));
 
-stubService(Admin, () => ({ pending: vi.fn().mockResolvedValue({ groups: [] }), deletions: vi.fn().mockResolvedValue({ groups: [] }), approve: vi.fn(), reject: vi.fn(), deleteGroup: vi.fn(), churchAddress: vi.fn().mockResolvedValue({ address: "Grace Church" }), setChurchAddress: vi.fn(), guardianCopies: vi.fn().mockResolvedValue({ on: false }), setGuardianCopies: vi.fn(), replyTo: vi.fn().mockResolvedValue({ address: "" }), setReplyTo: vi.fn(), pushEnabled: vi.fn().mockResolvedValue({ on: true }), setPushEnabled: vi.fn() }));
+stubService(Admin, () => ({ pending: vi.fn().mockResolvedValue({ groups: [] }), deletions: vi.fn().mockResolvedValue({ groups: [] }), approve: vi.fn(), reject: vi.fn(), deleteGroup: vi.fn(), timezone: vi.fn().mockResolvedValue({ timezone: "America/Denver", revision: "site-zone" }), setTimezone: vi.fn(), churchAddress: vi.fn().mockResolvedValue({ address: "Grace Church", revision: "address" }), setChurchAddress: vi.fn(), guardianCopies: vi.fn().mockResolvedValue({ on: false }), setGuardianCopies: vi.fn(), replyTo: vi.fn().mockResolvedValue({ address: "", revision: "reply" }), setReplyTo: vi.fn(), pushEnabled: vi.fn().mockResolvedValue({ on: true }), setPushEnabled: vi.fn() }));
 
 stubService(AdminJobs, () => ({ list: vi.fn(), retry: vi.fn(), dismiss: vi.fn() }));
 
@@ -135,11 +135,12 @@ it("says the users couldn't load, with a retry, instead of an empty list", async
   expect(await screen.findByText("Ann")).toBeInTheDocument();
 });
 
-it("says the church settings couldn't load, rather than showing On, a blank zone or an empty rooms switch", async () => {
+it("explains a failed settings read and offers to retry the time zone", async () => {
   vi.mocked(Site.get).mockRejectedValueOnce(new ApiError(500, "private server text"));
+  vi.mocked(Admin.timezone).mockRejectedValueOnce(new ApiError(500, "private server text"));
   render(<MemoryRouter initialEntries={["/admin?tab=settings"]}><AdminPage /></MemoryRouter>);
   expect(await screen.findByRole("heading", { name: "Church settings" })).toBeInTheDocument();
-  expect(await screen.findByText("We couldn't load the church time zone. Please try again in a minute.")).toBeInTheDocument();
+  expect(await screen.findByText("We couldn't load the church time zone.")).toBeInTheDocument();
   expect(screen.getByText("We couldn't load the self-signup setting. Please try again in a minute.")).toBeInTheDocument();
   expect(screen.queryByRole("group", { name: "Self-signup" })).not.toBeInTheDocument();
   expect(screen.getByRole("checkbox", { name: /Use rooms/ })).toBeDisabled();

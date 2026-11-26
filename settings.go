@@ -32,6 +32,10 @@ const (
 // writes it (TestConsentEpochHasOneWriter). setSettingIn refuses it.
 const consentEpochKey = "visibility_consent_epoch"
 
+// sessionSigningEpochKey is created at boot and cleared on the staging database
+// by the managed restore before that database can serve.
+const sessionSigningEpochKey = "session_signing_epoch"
+
 const defaultSiteName = "Fold"
 
 // settingIn reads one setting on the caller's connection. found is false when

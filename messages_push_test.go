@@ -431,8 +431,50 @@ func TestReaperStopsAPushWithNoJob(t *testing.T) {
 	var got, kept models.MessageRecipient
 	f.app.DB.First(&got, row.ID)
 	f.app.DB.First(&kept, waiting.ID)
-	if got.Status != models.RecipientSuppressed || got.Reason != pushWhyStopped || kept.Status != models.RecipientQueued {
+	if got.Status != models.RecipientSuppressed || got.Reason != pushWhyUnconfirmed || kept.Status != models.RecipientQueued {
 		t.Fatalf("reaped %+v, kept %+v", got, kept)
+	}
+}
+
+func TestReapReportsAnUnconfirmedPushWithoutResending(t *testing.T) {
+	f := newComposeFixture(t)
+	fp := useFakePush(t, f.app)
+	pushConsentRow(t, f.app, f.teen, "all", models.ConsentOptedIn)
+	phone := newPushDevice(t, f.app, f.teen, "phone")
+	id := f.scheduleNow(t, f.leader, "Once", "<p>Hi</p>", groupAudience(f))
+	var writeFailed bool
+	stop := failStatements(t, f.app.DB, func(sql string) bool {
+		if strings.HasPrefix(sql, "UPDATE message_recipients") && strings.Contains(sql, "'push'") && strings.Contains(sql, "sent_at =") {
+			writeFailed = true
+			return true
+		}
+		return false
+	})
+	runMessageJobs(t, f.app)
+	stop()
+	got := pushRowsOf(t, f.app, id)[f.teen.Email]
+	if !writeFailed || got.Status != models.RecipientQueued || fp.count(phone.path) != 1 {
+		t.Fatalf("expected one provider acceptance with its record still queued: %+v (%v, %d sends)", got, writeFailed, fp.count(phone.path))
+	}
+
+	if err := f.app.reapMessages(t.Context(), time.Now().Add(2*time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	runMessageJobs(t, f.app)
+	var history messageRecipientsJSON
+	w := f.leader.do("GET", "/api/v1/messages/"+itoa(id)+"/recipients", nil, false)
+	if w.Code != http.StatusOK {
+		t.Fatalf("history: %d %s", w.Code, w.Body.String())
+	}
+	decodeJSON(t, w, &history)
+	unconfirmedShown := false
+	for _, row := range history.Recipients {
+		if row.Name == f.teen.PublicName() && row.Push != nil && row.Push.Status == historyMissed && row.Push.Reason == "delivery could not be confirmed" {
+			unconfirmedShown = true
+		}
+	}
+	if fp.count(phone.path) != 1 || history.CanRetry || !unconfirmedShown || history.Counts.Push.Missed["delivery could not be confirmed"] != 1 {
+		t.Fatalf("expected one unconfirmed push with no retry: sends %d, history %+v", fp.count(phone.path), history)
 	}
 }
 

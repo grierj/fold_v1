@@ -52,12 +52,10 @@ func captureErasureSubject(u *models.User) erasureSubject {
 }
 
 // captureErasureSetsIn fills REQ, PERS and INV (inventory 3.1) with plain reads,
-// no locks, inside the erasure transaction and before the first scrub. The
-// selectors read only columns the erasure keeps (ids, status, source,
-// audit meta userId), and an exact id link beats an address match: a row that
-// names another account is never selected by address. Soft-deleted household
-// people count (raw SQL, no soft-delete scope). Empty sets skip their IN
-// queries. The sets stay in memory and are never logged or returned.
+// no locks, inside the erasure transaction and before the first scrub. An
+// exact id link beats an address match: a row that names another account is
+// never selected by address. Soft-deleted household people count. The sets
+// are never logged or returned.
 func captureErasureSetsIn(tx *gorm.DB, s *erasureSubject) error {
 	var req []uint
 	reqSQL := "SELECT id FROM account_requests WHERE approved_user_id = ?"
@@ -105,10 +103,20 @@ func captureErasureSetsIn(tx *gorm.DB, s *erasureSubject) error {
 		}
 		add(ids)
 	}
-	// (d) an invitation to the held address that nobody accepted.
+	// (d) an invitation to the held address that nobody accepted. The creation
+	// audit still carries the address after the expired invitation is pruned.
 	if s.Address.ok {
 		ids = nil
-		if err := tx.Raw(`SELECT id FROM invitations WHERE email = ? AND accepted_at IS NULL`, s.Address.value).Scan(&ids).Error; err != nil {
+		if err := tx.Raw(`SELECT id FROM invitations WHERE email = ? AND accepted_at IS NULL
+			UNION ALL
+			SELECT a.target_id FROM audit_logs a
+			WHERE a.action = 'invitation.created' AND a.target_type = 'invitation'
+			  AND a.target_id > 0
+			  AND (a.meta_json->>'email')::citext = ?
+			  AND NOT EXISTS (SELECT 1 FROM invitations i WHERE i.id = a.target_id)
+			  AND NOT EXISTS (SELECT 1 FROM audit_logs accepted
+				WHERE accepted.target_type = 'invitation' AND accepted.target_id = a.target_id
+				  AND accepted.action = 'invitation.accepted')`, s.Address.value, s.Address.value).Scan(&ids).Error; err != nil {
 			return err
 		}
 		add(ids)

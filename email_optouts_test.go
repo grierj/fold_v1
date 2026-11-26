@@ -581,7 +581,7 @@ func TestReusedAddressKeepsErasedChoicesUntilHolderTurnsOn(t *testing.T) {
 	}
 	kept := retainedEmailChoices(t, f.app)
 	for _, next := range []string{moved, address} {
-		wantEmailSettingsStatus(t, f.admin.do("PUT", "/api/v1/admin/users/"+itoa(y.ID), map[string]string{"email": next}, true), http.StatusOK)
+		wantEmailSettingsStatus(t, f.admin.do("PUT", "/api/v1/admin/users/"+itoa(y.ID), adminEditBody(f.admin, y.ID, map[string]string{"email": next}), true), http.StatusOK)
 		if !reflect.DeepEqual(kept, retainedEmailChoices(t, f.app)) {
 			t.Fatal("address change moved or cleared a retained choice")
 		}

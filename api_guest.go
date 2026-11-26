@@ -185,7 +185,11 @@ func (a *App) apiCreateGuestRegistration(c *gin.Context) {
 	// Every in-budget submission pays the same bcrypt cost before account
 	// lookup or either address limit, even when that address is exhausted.
 	// IP/site limits and the honeypot above shed CPU without inspecting it.
-	(&models.User{}).CheckPassword("not a real password")
+	checkPassword := (&models.User{}).CheckPassword
+	if wrap := a.hooks.wrapGuestPasswordCheck; wrap != nil {
+		checkPassword = wrap(checkPassword)
+	}
+	checkPassword("not a real password")
 	var existing models.User
 	lookup := a.DB.Where("email = ?", email).Limit(1).Find(&existing)
 	if lookup.Error != nil {
@@ -546,7 +550,10 @@ func liveTokenManage(db *gorm.DB, raw string) (tokenRegistration, error) {
 		Where("registrations.manage_token_hash = ? AND registrations.manage_token_hash <> ?", hashToken(raw), "").
 		Where("registrations.status <> ? AND (registrations.household_person_id IS NULL OR registrations.status <> ?)", models.RegRemoved, models.RegCancelled).
 		First(&reg).Error; err != nil {
-		return tokenRegistration{}, errTokenInvalid
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return tokenRegistration{}, errTokenInvalid
+		}
+		return tokenRegistration{}, err
 	}
 	occ := reg.Occurrence
 	if occ.ID == 0 || time.Now().UTC().After(occ.EndsAt) || occ.Status != models.OccurrenceScheduled {
@@ -760,7 +767,7 @@ func guestWithLine(d guestRegistrationJSON) string {
 func (a *App) sendGuestConfirmationEmail(to, manageRaw string,
 	d guestRegistrationJSON, loc *time.Location, askedAccount bool) error {
 	when := formatWhen(d.StartsAt, loc)
-	link := a.emailBaseURL() + "/guest/manage/" + manageRaw
+	link := a.guestManageURL(manageRaw)
 	extra := ""
 	if askedAccount {
 		extra = "\n\nYou also asked for an account. An admin will review that request, and we will email you the decision."

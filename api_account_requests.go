@@ -19,7 +19,6 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"gorm.io/gorm"
-	"gorm.io/gorm/clause"
 )
 
 // Account requests (M1.3, 5.10, DEC-4, DEC-8): self-signup and member
@@ -442,14 +441,7 @@ func (a *App) decideAccountRequest(c *gin.Context, req *models.AccountRequest, a
 		fail(c, errNoteTooLong500)
 		return
 	}
-	me := apiUser(c)
-	if req.Status == models.RequestPending && !req.ExpiresAt.After(time.Now().UTC()) {
-		if _, err := a.expirePendingRequests(); err != nil {
-			log.Printf("account requests: expire: %v", err)
-		}
-		fail(c, errRequestExpired)
-		return
-	}
+	session := apiUser(c)
 	outcome, auditAction := "rejected", audit.AccountRejected
 	if approve {
 		outcome, auditAction = "approved", audit.AccountApproved
@@ -457,7 +449,8 @@ func (a *App) decideAccountRequest(c *gin.Context, req *models.AccountRequest, a
 	var userID uint
 	var created, upgraded bool
 	err := a.contactMutation(contactChange{}, func(tx *gorm.DB) error {
-		var consentActor *models.User
+		var me, consentTarget *models.User
+		recordConsent := consentEvidence != nil && req.AccountType == models.AccountTeen
 		var conversionLocked map[uint]*models.User
 		if approve && req.Source == models.RequestHouseholdConversion && req.HouseholdPersonID != nil && req.InvitationID != nil {
 			var person models.HouseholdPerson
@@ -469,45 +462,44 @@ func (a *App) decideAccountRequest(c *gin.Context, req *models.AccountRequest, a
 				return errConversionUnavailable
 			}
 			var err error
-			conversionLocked, _, err = lockConversionParticipants(tx, &inv, &person, nil, me.ID)
+			conversionLocked, _, err = lockConversionParticipants(tx, &inv, &person, nil, session.ID)
 			if err != nil {
 				return err
 			}
-			actor := conversionLocked[me.ID]
-			if !adminCurrent(actor, me) {
+			me = conversionLocked[session.ID]
+			if !adminCurrent(me, session) {
 				return errConsentForbidden
 			}
 		}
-		if consentEvidence != nil && req.AccountType != models.AccountTeen {
-			return errConsentTeen
-		}
-		if consentEvidence != nil && conversionLocked != nil {
-			consentActor = conversionLocked[me.ID]
-		} else if consentEvidence != nil {
+		if recordConsent && conversionLocked == nil {
 			// An existing guest can be upgraded on the same row. No other
 			// existing account receives consent as a side effect of approval.
 			var existing models.User
 			if err := tx.Where("email = ?", req.Email).Limit(1).Find(&existing).Error; err != nil {
 				return err
 			}
-			var target *models.User
-			var err error
 			if existing.ID != 0 {
-				consentActor, target, err = lockConsentUsers(tx, me.ID, existing.ID)
+				locked, err := lockTeenLifecycleUsers(tx, existing.ID, session.ID)
 				if err != nil {
 					return err
 				}
-				if target.Status != models.UserGuest || foldmail.NormalizeAddress(target.Email) != foldmail.NormalizeAddress(req.Email) {
-					return errConsentExistingAccount
+				me = locked[session.ID]
+				if !adminCurrent(me, session) {
+					return errConsentForbidden
 				}
-			} else {
-				consentActor = &models.User{}
-				if err := tx.Clauses(clause.Locking{Strength: "NO KEY UPDATE"}).First(consentActor, me.ID).Error; err != nil {
-					return err
+				consentTarget = locked[existing.ID]
+				if consentTarget == nil {
+					return gorm.ErrRecordNotFound
 				}
 			}
-			if !adminCurrent(consentActor, me) {
-				return errConsentForbidden
+		}
+		if me == nil {
+			var err error
+			if me, err = lockAdminIn(tx, session, actorShare); err != nil {
+				if recordConsent && errors.Is(err, errSecuritySession) {
+					return errConsentForbidden
+				}
+				return err
 			}
 		}
 		now := time.Now().UTC()
@@ -519,6 +511,12 @@ func (a *App) decideAccountRequest(c *gin.Context, req *models.AccountRequest, a
 			"status": status, "decided_by": me.ID, "decided_at": now, "decision_note": note, "password_hash": nil,
 		}, stillLive{cond: "expires_at > clock_timestamp()", refused: errRequestExpired}); err != nil {
 			return err
+		}
+		if consentEvidence != nil && !recordConsent {
+			return errConsentTeen
+		}
+		if consentTarget != nil && (consentTarget.Status != models.UserGuest || foldmail.NormalizeAddress(consentTarget.Email) != foldmail.NormalizeAddress(req.Email)) {
+			return errConsentExistingAccount
 		}
 		meta := map[string]any{"accountType": req.AccountType}
 		if approve && req.Source == models.RequestHouseholdConversion {
@@ -578,7 +576,7 @@ func (a *App) decideAccountRequest(c *gin.Context, req *models.AccountRequest, a
 			if err := tx.First(&teen, userID).Error; err != nil {
 				return err
 			}
-			if err := a.changeTeenConsent(tx, c, &teen, consentActor, teenConsentChange{
+			if err := a.changeTeenConsent(tx, c, &teen, me, teenConsentChange{
 				Scope: models.TeenConsentAccount, Status: models.ConsentGranted, EvidenceText: *consentEvidence,
 			}); err != nil {
 				return err
@@ -607,7 +605,6 @@ func (a *App) decideAccountRequest(c *gin.Context, req *models.AccountRequest, a
 			TargetType: "account_request", TargetID: req.ID, Meta: meta, IP: c.ClientIP()})
 	})
 	if errors.Is(err, errRequestExpired) {
-		// It lapsed between the early check and the write: stamp it, as that check does.
 		if _, serr := a.expirePendingRequests(); serr != nil {
 			log.Printf("account requests: expire: %v", serr)
 		}
@@ -658,15 +655,7 @@ func (a *App) apiSetSelfSignup(c *gin.Context) {
 		jsonError(c, http.StatusBadRequest, "mode must be request or off")
 		return
 	}
-	me := apiUser(c)
-	err := a.DB.Transaction(func(tx *gorm.DB) error {
-		if err := setSettingIn(tx, settingSelfSignup, body.Mode); err != nil {
-			return err
-		}
-		return audit.Write(tx, audit.Entry{Actor: &me.ID, Action: audit.SelfSignupChanged,
-			TargetType: "setting", TargetID: 0,
-			Meta: map[string]any{"mode": body.Mode}, IP: c.ClientIP()})
-	})
+	err := a.saveSetting(c, settingSelfSignup, body.Mode, audit.SelfSignupChanged, map[string]any{"mode": body.Mode})
 	if err != nil {
 		jsonError(c, http.StatusInternalServerError, "could not save the setting")
 		return

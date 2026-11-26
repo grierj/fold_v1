@@ -1651,3 +1651,38 @@ func seriesBody(t *testing.T, c *apiClient, path string, body map[string]any) ma
 	}
 	return out
 }
+
+func adminUserRevision(t *testing.T, c *apiClient, id uint) string {
+	t.Helper()
+	var list usersResponseJSON
+	decodeJSON(t, c.do("GET", "/api/v1/admin/users", nil, false), &list)
+	for _, user := range list.Users {
+		if user.ID == id && user.Revision != "" {
+			return user.Revision
+		}
+	}
+	t.Fatalf("admin user list did not include a revision for user %d", id)
+	return ""
+}
+
+func adminEditBody[V any](c *apiClient, id uint, fields map[string]V) map[string]any {
+	c.t.Helper()
+	body := make(map[string]any, len(fields)+1)
+	for key, value := range fields {
+		body[key] = value
+	}
+	body["revision"] = adminUserRevision(c.t, c, id)
+	return body
+}
+
+func adminSettingBody(c *apiClient, path, field, value string) map[string]any {
+	c.t.Helper()
+	var answer struct {
+		Revision string `json:"revision"`
+	}
+	decodeJSON(c.t, c.do("GET", path, nil, false), &answer)
+	if answer.Revision == "" {
+		c.t.Fatalf("%s did not include a revision", path)
+	}
+	return map[string]any{field: value, "revision": answer.Revision}
+}

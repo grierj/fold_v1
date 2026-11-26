@@ -179,8 +179,26 @@ func handOffLeadership(tx *gorm.DB, actor uint, ip string, leaving uint, success
 		if m.JoinedAt.IsZero() {
 			m.JoinedAt = time.Now().UTC()
 		}
-		if err := tx.Save(&m).Error; err != nil {
+		if m.ID == 0 {
+			if err := tx.Create(&m).Error; err != nil {
+				return err
+			}
+		} else if err := tx.Model(&m).Updates(map[string]any{
+			"role": m.Role, "status": m.Status, "joined_at": m.JoinedAt,
+		}).Error; err != nil {
 			return err
+		}
+		if g.MemberLimit != nil && oldRole == roleNone {
+			count, err := memberCount(tx.Where("memberships.user_id <> ?", leaving), g.ID)
+			if err != nil {
+				return err
+			}
+			if count > *g.MemberLimit {
+				if err := audit.Write(tx, audit.Entry{Actor: &actor, Action: audit.AddedOverLimit, TargetType: "group", TargetID: g.ID,
+					Meta: map[string]any{"userId": sid, "count": count - 1, "limit": *g.MemberLimit, "role": m.Role}, IP: ip}); err != nil {
+					return err
+				}
+			}
 		}
 		if err := tx.Model(&models.Group{}).Where("id = ?", g.ID).Update("leader_id", sid).Error; err != nil {
 			return err

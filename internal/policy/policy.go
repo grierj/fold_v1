@@ -448,11 +448,21 @@ func CanSeeContact(p *Person, self bool, c Contact) bool {
 		return true
 	case c.Teen && c.ConfirmedGuardian && !p.Teen:
 		return true
-	case p.Teen, c.Teen, c.HideFromLeaders:
+	case !c.visibleToLeader(p):
 		return false
 	default:
 		return (c.GroupLeader && c.GroupMember) || (c.EventManager && c.EventRegistrant)
 	}
+}
+
+func (c Contact) visibleToLeader(p *Person) bool {
+	return !p.Teen && !c.Teen && !c.HideFromLeaders
+}
+
+// CanAddGroupMemberByEmail applies the contact preference to the legacy email
+// fallback (DEC-99). Group authority and selectable account status are separate.
+func CanAddGroupMemberByEmail(actor *Person, self bool, c Contact) bool {
+	return actor != nil && !actor.Teen && !c.Teen && (actor.Admin || self || c.visibleToLeader(actor))
 }
 
 // CanEditOwnContactPrivacy: adults choose their own preference; teens are

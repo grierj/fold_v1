@@ -39,8 +39,9 @@
     "lint:anti-slop": "oxlint",
     "test": "TZ=America/Boise NODE_OPTIONS=--no-experimental-webstorage vitest run",
     "e2e": "playwright test",
+    "journeys": "E2E_SHARD=${E2E_SHARD:-journeys} E2E_PORT=${E2E_PORT:-18419} playwright test -c playwright.journeys.config.ts",
     "contrast": "node --test scripts/token-contrast.test.mjs && node scripts/token-contrast.mjs",
-    "bundle-size": "node --test scripts/bundle-size.test.mjs && node scripts/bundle-size.mjs",
+    "bundle-size": "node --test scripts/bundle-size.test.mjs scripts/journey-report.test.mjs && node scripts/bundle-size.mjs",
     "icons": "node scripts/icons.mjs"
   },
   "type": "module",

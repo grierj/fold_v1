@@ -27,10 +27,12 @@ import { NewPasswordField } from "../components/NewPasswordField";
 import { RoomRequestsList } from "../components/admin/RoomRequestsList";
 import { MatchLocations } from "../components/admin/MatchLocations";
 import { SystemTab } from "../components/admin/SystemTab";
+import { ChurchTimezoneSetting } from "../components/admin/ChurchTimezoneSetting";
 import { ChurchAddressSetting } from "../components/admin/ChurchAddressSetting";
 import { GuardianCopiesSetting, ReplyToSetting } from "../components/admin/MessageSettings";
 import { PushEnabledSetting } from "../components/admin/PushEnabledSetting";
-import { ZonePicker } from "../components/ui/ZonePicker";
+import { RefusedSaveLine, useRefusedSave } from "../lib/refusedSave";
+import { answerNames, refusedAgain, useRevisionSave, type RevisionConflict } from "../lib/useRevisionSave";
 import { FormActions } from "../components/ui/FormActions";
 import { AccountAgeFields } from "../components/AccountAgeFields";
 import type { AgeBand, AccountRequest, DepartureConfirmation, GuardianLink, GuardianNomination, GroupSummary, Member, Room, User } from "../types";
@@ -48,14 +50,13 @@ import { EmptyState } from "../components/ui/EmptyState";
 import { Chip } from "../components/ui/Chip";
 import { usePage } from "../lib/usePage";
 import { LEGACY_REVIEW_PATH, LEGACY_REVIEW_TITLE } from "../lib/legacyReview";
-import { useLoad } from "../lib/useLoad";
+import { useLoad, type Load } from "../lib/useLoad";
 import { invalidateSite, useSite } from "../lib/useSite";
 import { PageCount, Pagination } from "../components/ui/Pagination";
 import { SearchBox } from "../components/ui/SearchBox";
 import { Illustration } from "../components/ui/Illustration";
 import { Skeleton } from "../components/ui/Skeleton";
 import { ContactHistory } from "../api/contactHistory";
-import { useUnsavedChanges } from "../lib/unsavedChanges";
 import { formatShortDay } from "../lib/when";
 
 type AdminTab = "approvals" | "groups" | "rooms" | "users" | "invite" | "settings" | "system";
@@ -773,21 +774,30 @@ function UserForm({
   creating,
   onSaved,
   onCancel,
-}: {
-  initial?: User;
-  creating: boolean;
+  onRefused,
+}: ({
+  creating: true;
+  initial?: never;
+  onRefused?: never;
+} | {
+  creating: false;
+  initial: User;
+  onRefused: (why: RevisionConflict) => void;
+}) & {
   onSaved: () => void;
   onCancel: () => void;
 }) {
+  const [opened] = useState(initial);
+
   const [form, setForm] = useState<Omit<typeof EMPTY_USER_FORM, "role"> & { role: "admin" | "member" }>(
-    initial
+    opened
       ? {
           password: "",
-          role: initial.role === "admin" ? "admin" : "member",
-          name: initial.name,
-          displayName: initial.displayName,
-          email: initial.email,
-          phone: initial.phone,
+          role: opened.role === "admin" ? "admin" : "member",
+          name: opened.name,
+          displayName: opened.displayName,
+          email: opened.email,
+          phone: opened.phone,
         }
       : { ...EMPTY_USER_FORM }
   );
@@ -797,11 +807,39 @@ function UserForm({
   const [ageBand, setAgeBand] = useState<AgeBand>("adult");
   const [birthDate, setBirthDate] = useState("");
 
+  const alive = useRef(false);
+  useEffect(() => {
+    alive.current = true;
+
+    return () => { alive.current = false; };
+  }, []);
+
+  const saveDetails = useRevisionSave({
+    opened,
+    revision: opened?.revision,
+    read: async () => {
+      const { users } = await AdminUsers.list();
+      const value = users.find((user) => user.id === opened?.id);
+
+      return { value, allowed: !!value, revision: value?.revision };
+    },
+    fields: (user) => user ? {
+      name: user.name, displayName: user.displayName, email: user.email, phone: user.phone,
+      role: user.role, accountType: user.accountType,
+    } : null,
+    answers: answerNames("user", opened?.id ?? 0),
+    changedCode: "admin_user_changed",
+    onConflict: (why) => { if (alive.current) onRefused?.(why); },
+  });
+
   const set = (k: keyof typeof form) => (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement>) =>
     setForm((f) => ({ ...f, [k]: e.target.value }));
 
   async function save(e: React.FormEvent) {
     e.preventDefault();
+
+    if (busy) return;
+
     setBusy(true);
     setError(null);
 
@@ -809,12 +847,23 @@ function UserForm({
       if (creating) {
         if (ageBand === "under13") return;
         await AdminUsers.create({ ...form, ageBand, birthDate: ageBand === "teen" ? birthDate : undefined, password: form.password || undefined });
-      } else if (initial) {
-        const { password: _password, ...rest } = form;
-        await AdminUsers.update(initial.id, rest);
+      } else if (opened) {
+        const details = {
+          name: form.name.trim(), displayName: form.displayName.trim(), phone: form.phone.trim(),
+          email: form.email.trim().toLowerCase(), role: form.role,
+        };
+
+        const sent = await saveDetails(
+          (revision) => AdminUsers.update(opened.id, { ...details, revision }),
+          { ...opened, ...details },
+        );
+
+        if (sent === "refused") throw refusedAgain("admin_user_changed");
+
+        if (sent !== "saved") return;
       }
 
-      onSaved();
+      if (alive.current) onSaved();
     } catch (err) {
       setError(errorText(err, "We couldn't save your changes."));
     } finally {
@@ -825,7 +874,7 @@ function UserForm({
   return (
     <Form noValidate onSubmit={save} className="fold-section fold-form space-y-5 mt-4">
       {error && <FormError>{error}</FormError>}
-      <div className="grid sm:grid-cols-2 gap-4">
+      <fieldset disabled={busy} className="grid sm:grid-cols-2 gap-4">
         <Field id="admin-email" label="Email (signs in with it)">
           <Input
             type="email"
@@ -837,7 +886,7 @@ function UserForm({
         </Field>
         <Choices legend="Role">
           <Radio name="admin-user-role" label="Member" value="member" checked={form.role === "member"} onChange={set("role")} />
-          <Radio name="admin-user-role" label="Admin" value="admin" checked={form.role === "admin"} onChange={set("role")} disabled={initial?.accountType === "teen" || (creating && ageBand === "teen")} />
+          <Radio name="admin-user-role" label="Admin" value="admin" checked={form.role === "admin"} onChange={set("role")} disabled={opened?.accountType === "teen" || (creating && ageBand === "teen")} />
         </Choices>
         {creating && (
           <div className="sm:col-span-2">
@@ -860,7 +909,7 @@ function UserForm({
         <Field id="admin-phone" label="Phone" optional>
           <Input type="tel" value={form.phone} onChange={set("phone")} maxLength={30} />
         </Field>
-      </div>
+      </fieldset>
       {creating && <AccountAgeFields id="admin-user" label="Their age" ageBand={ageBand} birthDate={birthDate} onAgeBand={(band) => {
         setAgeBand(band);
 
@@ -870,7 +919,7 @@ function UserForm({
         <Button variant="primary" layout="w-full sm:w-auto" type="submit" disabled={busy || (creating && ageBand === "under13")}>
           {busy ? "Saving…" : creating ? "Create user" : "Save user"}
         </Button>
-        <Button variant="secondary" layout="w-full sm:w-auto" onClick={onCancel}>
+        <Button variant="secondary" layout="w-full sm:w-auto" onClick={onCancel} disabled={busy}>
           Cancel
         </Button>
       </FormActions>
@@ -943,7 +992,10 @@ function matchesUserFilter(u: User, filter: UserFilter): boolean {
   return filter === "all" || (filter === "admin" ? u.role === "admin" : u.status === filter);
 }
 
-function UsersTab({ users, reload }: { users: User[]; reload: () => void }) {
+function UsersTab({ load }: { load: Load<User[]> }) {
+  const users = load.data ?? [];
+  const reload = load.reload;
+  const refusal = useRefusedSave(load);
   const navigate = useNavigate();
   const [query, setQuery] = useState("");
   const [filter, setFilter] = useState<UserFilter>("all");
@@ -1097,15 +1149,29 @@ function UsersTab({ users, reload }: { users: User[]; reload: () => void }) {
   const paging = usePage(shown, query + filter);
   const editingRow = creating || editingId !== null || resetId !== null || consentId !== null || leaving !== null;
 
+  const refusalLine = <RefusedSaveLine save={refusal} noun="account"
+    about={refusal.why === "changed" ? "The account changed while you were editing" : undefined} />;
+
+  if (load.loading) return <Skeleton kind="lines" />;
+
+  if (!load.data) return (
+    <>
+      {refusalLine}
+      <ErrorNotice message={errorText(load.error, "We couldn't load the users.")} onRetry={load.retry} />
+    </>
+  );
+
   return (
     <div>
+      {refusalLine}
+      {load.error != null && editingId === null && <ErrorNotice message={errorText(load.error, "We couldn't refresh the users.")} onRetry={load.retry} />}
       <div className="flex flex-wrap justify-end gap-2 mb-4">
         <ButtonLink variant="secondary" to="/admin/contact-history">Find contact access history</ButtonLink>
         <ButtonLink variant="secondary" to={LEGACY_REVIEW_PATH} layout="text-center">
           <span>{LEGACY_REVIEW_TITLE}</span>
           {legacyProbe.data?.found === true && <>{" "}<Badge>Needs review</Badge></>}
         </ButtonLink>
-        <Button variant="primary" onClick={() => { setCreating(true); setEditingId(null); }}>
+        <Button variant="primary" disabled={editingId !== null} onClick={() => { setCreating(true); setEditingId(null); }}>
           New user
         </Button>
       </div>
@@ -1172,6 +1238,7 @@ function UsersTab({ users, reload }: { users: User[]; reload: () => void }) {
                     <UserForm
                       initial={u}
                       creating={false}
+                      onRefused={(why) => { setEditingId(null); refusal.refused(why); }}
                       onSaved={() => { setEditingId(null); reload(); }}
                       onCancel={() => setEditingId(null)}
                     />
@@ -1220,8 +1287,9 @@ function UsersTab({ users, reload }: { users: User[]; reload: () => void }) {
                   <Menu
                     tone="quiet"
                     label={`More for ${publicName(u)}`}
+                    disabled={editingId !== null}
                     items={[
-                      { label: "Edit", onSelect: () => { setEditingId(u.id); setResetId(null); setCreating(false); } },
+                      { label: "Edit", onSelect: () => { refusal.clear(); setEditingId(u.id); setResetId(null); setCreating(false); } },
                       { label: "Contact access history", onSelect: () => void openContactHistory(u), disabled: busy },
                       { label: "Copy person ID", onSelect: () => void copyPersonId(u), disabled: busy },
                       ...(u.accountType === "teen" || u.hasTeenConsentHistory ? [{ label: u.accountType === "teen" ? "Manage consent" : "Consent history", disabled: consentAction.running, onSelect: () => { consentAction.reset(); setConsentId(u.id); setEditingId(null); setResetId(null); setCreating(false); } }] : []),
@@ -1255,64 +1323,6 @@ function UsersTab({ users, reload }: { users: User[]; reload: () => void }) {
   );
 }
 
-
-function ChurchTimezone() {
-  const { site, error: siteError, loading, retry } = useSite();
-  // What the admin typed, or null to show the saved zone.
-  const [edited, setEdited] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [ok, setOk] = useState(false);
-  const saved = site?.timezone ?? "";
-  const tz = edited ?? saved;
-  // Leaving with an unsaved zone asks first (DEC-98).
-  const { guard } = useUnsavedChanges(saved !== "" && tz.trim() !== saved);
-
-  async function save(e: React.FormEvent) {
-    e.preventDefault();
-    setBusy(true);
-    setError(null);
-    setOk(false);
-
-    try {
-      const r = await Admin.setTimezone(tz.trim());
-      invalidateSite({ timezone: r.timezone });
-      setEdited(null);
-      setOk(true);
-    } catch (err) {
-      setError(errorText(err, "We couldn't save the time zone."));
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  if (siteError) return <div className="mb-6 max-w-xl"><ErrorNotice message={errorText(siteError, "We couldn't load the church time zone.")} onRetry={retry} /></div>;
-
-  if (loading) return <div className="mb-6 max-w-xl"><Skeleton kind="lines" count={1} /></div>;
-
-  return (
-    <Form noValidate onSubmit={save} className="mb-6 max-w-xl space-y-4">
-      {guard}
-      <Field id="church-tz" label="Church time zone" hint="New events start in this time zone; leaders can pick another when they schedule.">
-        <ZonePicker
-          forChurchSetting
-          value={tz}
-          onChange={(v) => {
-            setEdited(v);
-            setOk(false);
-          }}
-        />
-      </Field>
-      <FormActions>
-        <Button variant="secondary" layout="w-full sm:w-auto" type="submit" disabled={busy || tz.trim() === saved}>
-          {busy ? "Saving…" : "Save time zone"}
-        </Button>
-        {ok && <span role="status" className="text-sm text-success">Saved</span>}
-      </FormActions>
-      {error && <FormError>{error}</FormError>}
-    </Form>
-  );
-}
 
 // Invite someone to Fold (M1.2, 5.10): admins invite into any group or
 // none. The person sets a password on acceptance; no approval step.
@@ -1596,7 +1606,7 @@ export function AdminPage() {
         <div className="fold-section"><ReplyToSetting /></div>
         <div className="fold-section"><GuardianCopiesSetting /></div>
         <div className="fold-section"><PushEnabledSetting /></div>
-        <div className="fold-section"><ChurchTimezone /></div>
+        <div className="fold-section"><ChurchTimezoneSetting /></div>
         <div className="fold-section"><SelfSignupSetting /></div>
         <div className="fold-section"><RoomsSetting enabled={roomsEnabled} /></div>
         {roomsEnabled === true && <div className="fold-section"><RoomApprovalSetting enabled={needApproval} onChanged={setNeedApproval} /></div>}
@@ -1616,14 +1626,7 @@ export function AdminPage() {
         <RoomsTab rooms={rooms} error={roomsEnabled === null ? siteError : roomsError}
           reload={roomsEnabled === null ? retrySite : roomsLoad.reload} load={roomsLoad} onSaved={roomSaved} />
       ))}
-      {tab === "users" && (
-        usersLoad.loading ? <Skeleton kind="lines" /> : usersLoad.data ? (
-          <>
-            {usersLoad.error != null && <ErrorNotice message={errorText(usersLoad.error, "We couldn't refresh the users.")} onRetry={usersLoad.reload} />}
-            <UsersTab users={usersLoad.data} reload={usersLoad.reload} />
-          </>
-        ) : <ErrorNotice message={errorText(usersLoad.error, "We couldn't load the users.")} onRetry={usersLoad.retry} />
-      )}
+      {tab === "users" && <UsersTab load={usersLoad} />}
       {tab === "invite" && <InviteTab />}
       {tab === "system" && <SystemTab jobs={deadJobs} more={moreJobs} error={jobsError} reload={loadJobs} onRemoved={jobRemoved} deliveries={deliveries} lineJobs={snapshotJobs} />}
       </Tabs>

@@ -130,13 +130,13 @@ export function GroupForm({
       <fieldset disabled={frozen} className="min-w-0 space-y-8 disabled:pointer-events-none">
         <section className="space-y-4">
           <h2 className="text-xl font-semibold">About the group</h2>
-          <Field id="group-name" label="Group name">
+          <Field id="group-name" label="Group name" hint="Up to 200 characters.">
             <Input value={name} onChange={(e) => setName(e.target.value)} required />
           </Field>
-          <Field id="group-description" label="Description" optional>
+          <Field id="group-description" label="Description" optional hint="Up to 5,000 characters.">
             <Textarea rows={4} value={description} onChange={(e) => setDescription(e.target.value)} />
           </Field>
-          <Field id="group-location" label="Location" optional hint="Where it usually meets, for example Room 201, Main Campus.">
+          <Field id="group-location" label="Location" optional hint="Where it usually meets, for example Room 201, Main Campus. Up to 300 characters.">
             <Input value={location} onChange={(e) => setLocation(e.target.value)} />
           </Field>
         </section>
@@ -173,11 +173,11 @@ export function GroupForm({
           {!moreOpen && <p id={summaryId} className="text-sm text-text-muted">{moreSummary}</p>}
           {/* Hidden, not unmounted: what's typed or picked here survives closing it. */}
           <div id={moreId} hidden={!moreOpen} className="mt-4 space-y-6">
-            <Field id="group-tags" label="Tags" optional hint="Separate tags with commas, for example young-adults, bible-study.">
+            <Field id="group-tags" label="Tags" optional hint="Separate tags with commas, for example young-adults, bible-study. Use up to 500 characters total.">
               <Input value={tags} onChange={(e) => setTags(e.target.value)} />
             </Field>
-            <Field id="member-limit" label="Member limit" optional hint="For a room with a fixed capacity. When it's full, people can't join on their own; leaders can still add someone. Leave it blank for no limit.">
-              <Input ref={limitRef} type="number" min={1} step={1} value={memberLimit} onChange={(e) => setMemberLimit(e.target.value)} layout="sm:w-44" />
+            <Field id="member-limit" label="Member limit" optional hint="Enter a whole number from 1 to 100,000, or leave it blank for no limit. When the group is full, people can’t join on their own. Leaders can still add someone.">
+              <Input ref={limitRef} type="number" min={1} max={100000} step={1} value={memberLimit} onChange={(e) => setMemberLimit(e.target.value)} layout="sm:w-44" />
             </Field>
             <div>
               <ImageUpload
@@ -187,6 +187,7 @@ export function GroupForm({
                 initialFocal={{ x: initial.coverFocalX, y: initial.coverFocalY }}
                 maxDim={1600}
                 aspectClass="aspect-video"
+                keyboardFocal
                 onFile={setCoverFile}
                 onFocal={setCoverFocal}
               />

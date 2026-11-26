@@ -44,6 +44,7 @@ func (a *App) dailyKinds() []jobs.Kind {
 		// Contact requests expire and grants end (5.11).
 		daily("contact.sweep", "Closing expired contact requests and grants", a.sweepContacts),
 		daily("cleanup.login_throttles", "Clearing old sign-in limits", func(ctx context.Context, _ time.Time) error { return a.pruneLoginThrottles(ctx) }),
+		daily("cleanup.expired_links", "Clearing old guest signups, account links and invitations", a.pruneExpiredLinks),
 		// Announcements that stopped where no job will pick them up (M3.5).
 		daily("messages.reap", "Settling announcements and reminders that stopped sending", a.reapMessages),
 		// Notification retention (DEC-45), and push devices that keep

@@ -17,31 +17,7 @@ import (
 // scrubs rows outside the move's from-set, on every channel, in the one
 // statement its timeout bounds (docs/agents/lifecycles.md).
 //
-// Parse-only, every production package, with the machinery of
-// TestMessageStatusHasOneWriter (tableStatusGuard). A recipient value is a
-// name a function binds to models.MessageRecipient (or a pointer or slice of
-// it): a parameter, a var of that type, an assignment from a literal, from
-// new or make, from another recipient value or from a declared function
-// whose first result is one, or a range over a slice of them. A recipient
-// chain is a gorm call chain with Model(<recipient value>) or
-// Table("message_recipients"), or a name assigned one. On a recipient chain
-// the guard reports Update or UpdateColumn of "status" (or "Status") or of a
-// column it cannot read, and every Updates or UpdateColumns except of a map
-// it can read whole: a map literal, or a local map the function makes and
-// only sets, keys and passes to Updates, whose keys are all plain column
-// names in string literals, none of them status. Anywhere it reports a
-// Create, CreateInBatches, FirstOrCreate or Save of a recipient value, and
-// raw SQL that inserts into message_recipients, or updates it and sets status,
-// or whose SET list runs to the end of its literal.
-//
-// It does not see a recipient reached through a struct field, an interface or
-// a result of a function the scanned tree does not declare; a package that
-// imports models under another name; an upsert's DoUpdates; gorm calls in a
-// function literal at package level (there it reads only raw SQL); or SQL
-// assembled without the "UPDATE message_recipients ... SET" or "INSERT INTO
-// message_recipients" literal. It does not judge which status a creator
-// inserts, which move a caller passes, or a caller's extra condition: the
-// policy table and moveRecipientsWhere's refusals decide those.
+// The shared tableStatusGuard describes the source forms in the census.
 // ---------------------------------------------------------------------------
 
 // recipientStatusWriterCensus is every write of message_recipients.status the

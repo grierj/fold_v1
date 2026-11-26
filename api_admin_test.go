@@ -147,22 +147,22 @@ func TestAdminUserCRUD(t *testing.T) {
 	}
 
 	uid := created.User.ID
-	w = admin.do("PUT", "/api/v1/admin/users/"+itoa(uid), map[string]string{
+	w = admin.do("PUT", "/api/v1/admin/users/"+itoa(uid), adminEditBody(admin, uid, map[string]string{
 		"displayName": "Newbie Renamed", "role": "admin", "email": "n@example.org",
-	}, true)
+	}), true)
 	if w.Code != http.StatusOK {
 		t.Fatalf("update user: %d %s", w.Code, w.Body.String())
 	}
 
 	// Cannot demote the last admin... (there are 2 admins now, so demote newbie back)
-	w = admin.do("PUT", "/api/v1/admin/users/"+itoa(uid), map[string]string{"role": "member"}, true)
+	w = admin.do("PUT", "/api/v1/admin/users/"+itoa(uid), adminEditBody(admin, uid, map[string]string{"role": "member"}), true)
 	if w.Code != http.StatusOK {
 		t.Fatalf("demote second admin: %d %s", w.Code, w.Body.String())
 	}
 	// Now only "admin" is admin: demoting them fails.
 	var adminUser models.User
 	app.DB.Where("email = ?", testEmail("admin")).First(&adminUser)
-	w = admin.do("PUT", "/api/v1/admin/users/"+itoa(adminUser.ID), map[string]string{"role": "member"}, true)
+	w = admin.do("PUT", "/api/v1/admin/users/"+itoa(adminUser.ID), adminEditBody(admin, adminUser.ID, map[string]string{"role": "member"}), true)
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("demote last admin: got %d, want 400", w.Code)
 	}
@@ -754,7 +754,7 @@ func TestAdminEditCannotBypassTeenConsent(t *testing.T) {
 	}
 
 	apiDo(t, admin, "PUT", path, map[string]string{"status": models.UserActive}, http.StatusBadRequest)
-	apiDo(t, admin, "PUT", path, map[string]string{"role": models.RoleAdmin}, http.StatusBadRequest)
+	apiDo(t, admin, "PUT", path, adminEditBody(admin, teen.ID, map[string]string{"role": models.RoleAdmin}), http.StatusBadRequest)
 	if u := reload(); u.Status != models.UserPendingConsent || u.Role != models.RoleMember {
 		t.Fatalf("teen changed: %s %s", u.Status, u.Role)
 	}
@@ -775,7 +775,7 @@ func TestAdminEditCannotBypassTeenConsent(t *testing.T) {
 
 	// An adult member can still be promoted and re-enabled as before.
 	adult := newTestUser(t, app, "adult94", "password1234", models.RoleMember)
-	apiDo(t, admin, "PUT", "/api/v1/admin/users/"+itoa(adult.ID), map[string]string{"role": models.RoleAdmin}, http.StatusOK)
+	apiDo(t, admin, "PUT", "/api/v1/admin/users/"+itoa(adult.ID), adminEditBody(admin, adult.ID, map[string]string{"role": models.RoleAdmin}), http.StatusOK)
 }
 
 // Guardian links (M1.9 slice 1, DEC-32): a child or teen added to a
@@ -1281,22 +1281,22 @@ func TestAdminRoleAndEmailChangesAreAudited(t *testing.T) {
 	u := newTestUser(t, app, "plain", "password1234", models.RoleMember)
 	path := "/api/v1/admin/users/" + itoa(u.ID)
 
-	apiDo(t, c, "PUT", path, map[string]any{"role": models.RoleAdmin}, http.StatusOK)
-	apiDo(t, c, "PUT", path, map[string]any{"role": models.RoleAdmin}, http.StatusOK) // no change, no row
+	apiDo(t, c, "PUT", path, adminEditBody(c, u.ID, map[string]any{"role": models.RoleAdmin}), http.StatusOK)
+	apiDo(t, c, "PUT", path, adminEditBody(c, u.ID, map[string]any{"role": models.RoleAdmin}), http.StatusOK) // no change, no row
 	rows, metas := auditRows(t, app, audit.UserRoleChanged)
 	if len(rows) != 1 || rows[0].TargetID != u.ID || rows[0].TargetType != "user" || rows[0].ActorID == nil || *rows[0].ActorID != admin.ID ||
 		metas[0].OldRole != models.RoleMember || metas[0].NewRole != models.RoleAdmin {
 		t.Fatalf("role audit: %+v %+v", rows, metas)
 	}
 
-	apiDo(t, c, "PUT", path, map[string]any{"email": "changed@example.com"}, http.StatusOK)
+	apiDo(t, c, "PUT", path, adminEditBody(c, u.ID, map[string]any{"email": "changed@example.com"}), http.StatusOK)
 	rows, _ = auditRows(t, app, audit.UserEmailChanged)
 	if len(rows) != 1 || rows[0].TargetID != u.ID || !strings.Contains(rows[0].MetaJSON, "changed@example.com") || !strings.Contains(rows[0].MetaJSON, u.Email) {
 		t.Fatalf("email audit: %+v", rows)
 	}
 
 	// A name-only edit writes neither.
-	apiDo(t, c, "PUT", path, map[string]any{"name": "Renamed"}, http.StatusOK)
+	apiDo(t, c, "PUT", path, adminEditBody(c, u.ID, map[string]any{"name": "Renamed"}), http.StatusOK)
 	if auditCount(t, app, audit.UserRoleChanged) != 1 || auditCount(t, app, audit.UserEmailChanged) != 1 {
 		t.Fatal("name-only edit wrote an audit row")
 	}
@@ -2144,9 +2144,8 @@ func TestDeleteOfAdminDisabledWhileWaiting(t *testing.T) {
 }
 
 // PUT judges the effective change on the locked target. A target that is no
-// longer an active admin when the gate opens is edited as before, and the
-// effective status (invited, from a missing password) is seen by the check
-// without changing today's answer.
+// longer an active admin when the gate opens can still be demoted from a fresh
+// read. A status-only action still uses the locked account facts.
 func TestUpdateOfAdminDisabledWhileWaiting(t *testing.T) {
 	cases := []struct {
 		name     string
@@ -2191,7 +2190,11 @@ func TestUpdateOfAdminDisabledWhileWaiting(t *testing.T) {
 			s := newHostScene(t)
 			db := s.app.DB
 			gate := holdContactGate(t, s.app)
-			put := bgDo(s.a, "PUT", "/api/v1/admin/users/"+itoa(s.adminB.ID), tc.body)
+			body := tc.body
+			if _, editsRole := body["role"]; editsRole {
+				body = adminEditBody(s.a, s.adminB.ID, body)
+			}
+			put := bgDo(s.a, "PUT", "/api/v1/admin/users/"+itoa(s.adminB.ID), body)
 			waitContactWaiters(t, s.app, 1)
 			if err := db.Exec(tc.prepare, s.adminB.ID).Error; err != nil {
 				t.Fatal(err)
@@ -2199,7 +2202,13 @@ func TestUpdateOfAdminDisabledWhileWaiting(t *testing.T) {
 			if err := gate.Rollback().Error; err != nil {
 				t.Fatal(err)
 			}
-			if r := awaitResult(t, put); r.code != http.StatusOK {
+			r := awaitResult(t, put)
+			if tc.name == "demote" {
+				if r.code != http.StatusConflict || !strings.Contains(r.body, `"code":"admin_user_changed"`) {
+					t.Fatalf("stale demotion: %d %s", r.code, r.body)
+				}
+				apiDo(t, s.a, "PUT", "/api/v1/admin/users/"+itoa(s.adminB.ID), adminEditBody(s.a, s.adminB.ID, tc.body), http.StatusOK)
+			} else if r.code != http.StatusOK {
 				t.Fatalf("update: %d %s", r.code, r.body)
 			}
 			var b models.User
@@ -2674,5 +2683,38 @@ func TestAdminDecisionBodiesAreNotSilentlyEmpty(t *testing.T) {
 	w = admin.do("POST", "/api/v1/admin/groups/999/approve", nil, true)
 	if w.Code != http.StatusNotFound {
 		t.Fatalf("empty body: %d %s, want 404 (no such group)", w.Code, w.Body.String())
+	}
+}
+
+func TestAdminAccountSavesNameTheirRead(t *testing.T) {
+	s := newHostScene(t)
+	path := "/api/v1/admin/users/" + itoa(s.target.ID)
+	before := adminUserRevision(t, s.a, s.target.ID)
+	if before != adminUserRevision(t, s.b, s.target.ID) {
+		t.Fatal("the two admins read different revisions")
+	}
+	data := map[string]any{"name": "Updated", "email": "updated@example.com", "role": models.RoleMember}
+	apiDo(t, s.a, "PUT", path, data, http.StatusConflict)
+	data["revision"] = before
+	other := map[string]any{"name": "Other", "email": "other@example.com", "role": models.RoleAdmin, "revision": before}
+	chA, chB := bgDo(s.a, "PUT", path, data), bgDo(s.b, "PUT", path, other)
+	a, b := awaitResult(t, chA), awaitResult(t, chB)
+	if a.code == http.StatusConflict {
+		a, b = b, a
+		data = other
+	}
+	if a.code != http.StatusOK || b.code != http.StatusConflict || !strings.Contains(b.body, `"code":"admin_user_changed"`) {
+		t.Fatalf("expected one winner: %+v %+v", a, b)
+	}
+	var saved userResponseJSON
+	if err := json.Unmarshal([]byte(a.body), &saved); err != nil {
+		t.Fatal(err)
+	}
+	if u := saved.User; u.Name != data["name"] || u.Email != data["email"] || u.Role != data["role"] ||
+		u.Revision == before || u.Revision != adminUserRevision(t, s.a, s.target.ID) {
+		t.Fatalf("winner's details or revision differ from the stored row: %+v", u)
+	}
+	if n := countRows(t, s.app.DB, "audit_logs", "action = ? AND target_id = ?", audit.UserEmailChanged, s.target.ID); n != 1 {
+		t.Fatalf("got %d email audits, want only the winner's", n)
 	}
 }
