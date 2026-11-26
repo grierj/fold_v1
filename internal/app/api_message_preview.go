@@ -219,7 +219,7 @@ func (a *App) renderedForViewer(c *gin.Context, baseURL string) (*models.Message
 	case errors.Is(err, errMessageReminder):
 		fail(c, err)
 	case errors.Is(err, errAudienceInvalid), errors.Is(err, errAudienceGone), errors.Is(err, errAudienceRefused):
-		answerAudience(c, me, err)
+		fail(c, audienceError(me, err))
 	case err != nil:
 		jsonError(c, http.StatusInternalServerError, "could not show the preview")
 	default:
