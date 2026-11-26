@@ -355,6 +355,7 @@ same snapshot that returns the fields. A GET for an eligible holder with no link
 `{"household":null}`. If the admin session ended, the reply is 401. If the holder lost their link
 to the household a POST changed, its reply is `409 household_required`. The add-person reply is
 404 if the person is gone from that household. A refusal at this point leaves the write committed.
+After regaining access, fetch the household again to check the outcome before retrying a POST.
 A participating request receives the session acknowledgment for the admin judged in the reply
 snapshot on success or an actionable refusal.
 
