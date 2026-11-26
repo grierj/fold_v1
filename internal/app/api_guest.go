@@ -185,11 +185,7 @@ func (a *App) apiCreateGuestRegistration(c *gin.Context) {
 	// Every in-budget submission pays the same bcrypt cost before account
 	// lookup or either address limit, even when that address is exhausted.
 	// IP/site limits and the honeypot above shed CPU without inspecting it.
-	checkPassword := (&models.User{}).CheckPassword
-	if wrap := a.hooks.wrapGuestPasswordCheck; wrap != nil {
-		checkPassword = wrap(checkPassword)
-	}
-	checkPassword("not a real password")
+	a.checkDummyPassword()
 	var existing models.User
 	lookup := a.DB.Where("email = ?", email).Limit(1).Find(&existing)
 	if lookup.Error != nil {

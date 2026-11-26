@@ -8,6 +8,7 @@ import (
 	"fold/models"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -766,10 +767,10 @@ func TestReauthenticationReservationHoldsUnderParallelRequests(t *testing.T) {
 }
 
 func TestPasswordResetBudgetGatesAccountWork(t *testing.T) {
-	realPasswordCost(t)
-	start := time.Now()
-	(&models.User{}).CheckPassword("not a real password")
-	minimumWork := time.Since(start) / 3
+	const (
+		userLookup  = "user lookup"
+		bcryptCheck = "bcrypt check"
+	)
 	for _, status := range []string{models.UserActive, models.UserGuest, models.UserDisabled, "unknown"} {
 		for _, budget := range []string{"available", "ip", "address hour", "address day"} {
 			t.Run(status+"/"+budget, func(t *testing.T) {
@@ -800,44 +801,49 @@ func TestPasswordResetBudgetGatesAccountWork(t *testing.T) {
 						t.Fatal(err)
 					}
 				}
-				lookups := 0
+				anon := anonClient(t, app, ip)
+				anon.holdNotices = true
+				var work []string
+				app.hooks.wrapDummyPasswordCheck = func(check func(string) bool) func(string) bool {
+					return func(password string) bool {
+						result := check(password)
+						work = append(work, bcryptCheck)
+						return result
+					}
+				}
 				const callback = "reset:observe-account-lookup"
 				if err := app.DB.Callback().Query().Before("gorm:query").Register(callback, func(db *gorm.DB) {
 					if db.Statement.Table == "users" {
-						lookups++
+						work = append(work, userLookup)
 					}
 				}); err != nil {
 					t.Fatal(err)
 				}
-				t.Cleanup(func() { app.DB.Callback().Query().Remove(callback) })
-				anon := anonClient(t, app, ip)
-				anon.holdNotices = true
-				lookups = 0 // Ignore the first-request setup gate during CSRF.
-				started := time.Now()
+				t.Cleanup(func() { _ = app.DB.Callback().Query().Remove(callback) })
 				answer := apiDo(t, anon, "POST", "/api/v1/auth/password-reset", map[string]string{"email": email}, http.StatusOK)
-				elapsed := time.Since(started)
 				if answer != "{\"message\":\""+resetRequestMessage+"\"}" {
 					t.Fatalf("nonuniform answer: %s", answer)
 				}
-				var tokens, audits, jobs int64
-				app.DB.Model(&models.AccountToken{}).Count(&tokens)
-				app.DB.Model(&models.AuditLog{}).Where("action = ?", audit.PasswordResetRequested).Count(&audits)
-				app.DB.Model(&models.Job{}).Where("kind = ?", kindPasswordResetMail).Count(&jobs)
-				if budget != "available" {
-					if lookups != 0 || tokens != 0 || audits != 0 || jobs != 0 {
-						t.Fatalf("throttled account work: lookups=%d tokens=%d audits=%d mail=%d", lookups, tokens, audits, jobs)
+				var wantWork []string
+				wantWrites := 0
+				if budget == "available" {
+					wantWork = []string{userLookup, bcryptCheck}
+					if status == models.UserActive {
+						wantWork = append(wantWork, userLookup)
+						wantWrites = 1
 					}
-					return
 				}
-				if lookups == 0 || elapsed < minimumWork {
-					t.Fatalf("in-budget lookup/bcrypt missing: lookups=%d elapsed=%v minimum=%v", lookups, elapsed, minimumWork)
+				if !slices.Equal(work, wantWork) {
+					t.Fatalf("reset work in order = %q, want %q", work, wantWork)
 				}
-				want := int64(0)
-				if status == models.UserActive {
-					want = 1
+				var tokens int64
+				if err := app.DB.Model(&models.AccountToken{}).Count(&tokens).Error; err != nil {
+					t.Fatal(err)
 				}
-				if tokens != 0 || audits != want || jobs != want {
-					t.Fatalf("in-budget reset: tokens=%d audits=%d mail=%d, want %d", tokens, audits, jobs, want)
+				audits := auditCount(t, app, audit.PasswordResetRequested)
+				jobs := len(mailJobsOfKind(t, app, kindPasswordResetMail))
+				if tokens != 0 || audits != int64(wantWrites) || jobs != wantWrites {
+					t.Fatalf("reset wrote %d tokens, %d audits, %d mail jobs, want 0 tokens and %d of each audit and job", tokens, audits, jobs, wantWrites)
 				}
 			})
 		}
