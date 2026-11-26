@@ -816,8 +816,9 @@ without it; none is written before then.
   `BroadcastChannel` reaches every thread of the process. `src/test/setup.ts` scopes every channel
   name to its file, so a file's "other tab" channel still reaches core but never a tab in another
   file (`src/test/setup.test.ts`).
-- `make lint-web` runs TypeScript, Knip, and Oxlint with the vendored rules. To run Oxlint on its
-  own, use `cd web && npm run lint:anti-slop`.
+- `make lint-web` type-checks the browser app on its own, the app with unit tests, and the Playwright
+  specs, helpers, and both configs. It also runs Knip and Oxlint. To run Oxlint on its own, use
+  `cd web && npm run lint:anti-slop`.
 - `make e2e` runs Playwright against the real binary (first run:
   `cd web && npx playwright install chromium`). `web/e2e/run.sh` splits specs across shards
   (`E2E_SHARDS`), each with its own server, database and seed; never rely on another spec having
