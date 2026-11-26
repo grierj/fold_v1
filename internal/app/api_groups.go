@@ -7,7 +7,6 @@ import (
 	"errors"
 	"log"
 	"net/http"
-	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -697,6 +696,14 @@ func (a *App) apiJoinGroup(c *gin.Context) {
 func (a *App) membershipAdded(c *gin.Context, g *models.Group, userID uint) {
 	var m models.Membership
 	if err := a.DB.Where("user_id = ? AND group_id = ?", userID, g.ID).First(&m).Error; err != nil {
+		// A group delete can commit after the add and remove its memberships.
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			if groupErr := a.DB.Select("id").First(&models.Group{}, g.ID).Error; errors.Is(groupErr, gorm.ErrRecordNotFound) {
+				err = errGroupNotFound
+			} else if groupErr != nil {
+				err = groupErr
+			}
+		}
 		fail(c, err)
 		return
 	}
@@ -966,14 +973,10 @@ func (a *App) changeRoleIn(tx *gorm.DB, actor *models.User, ip string, g *models
 			return err
 		}
 	}
-	// A lone leader's deletion request holds only while nobody else is in the
-	// group, so the add that brings someone else in withdraws it, under the
-	// group lock a delete answering the request takes too (DEC-177).
-	if adding && g.DeletionRequested && count > 0 {
-		if err := clearDeletionRequestIn(tx, g.ID, nil, "withdrawn"); err != nil {
+	if adding {
+		if err := withdrawDeletionAfterMemberAdded(tx, g, count); err != nil {
 			return err
 		}
-		g.DeletionRequested = false
 	}
 	if oldRole == models.MembershipLeader || newRole == models.MembershipLeader {
 		if err := fixPrimaryContact(tx, g); err != nil {
@@ -1126,18 +1129,21 @@ func (a *App) apiRequestDeletion(c *gin.Context) {
 		jsonError(c, http.StatusForbidden, "only a group leader can request deletion")
 		return
 	}
-	// Eligibility is read under the group's row lock, which every add takes
-	// before it writes a membership, so no join lands between the count and
-	// the flag.
-	err := a.DB.Transaction(func(tx *gorm.DB) error {
-		var locked models.Group
-		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&locked, g.ID).Error; err != nil {
-			if errors.Is(err, gorm.ErrRecordNotFound) {
-				return errGroupNotFound
-			}
+	// Erasure takes the contact gate before the user and group rows. Use the same
+	// gate before recording the requester, then count members under the group lock.
+	err := a.DB.WithContext(c.Request.Context()).Transaction(func(tx *gorm.DB) error {
+		if err := lockContacts(tx); err != nil {
 			return err
 		}
-		fresh, err := groupRel(tx, u.ID, g.ID)
+		locked, err := lockGroupIn(tx, g.ID)
+		if err != nil {
+			return err
+		}
+		actor, err := lockActorIn(tx, u, actorRead)
+		if err != nil {
+			return err
+		}
+		fresh, err := groupRel(tx, actor.ID, g.ID)
 		if err != nil {
 			return err
 		}
@@ -1148,17 +1154,17 @@ func (a *App) apiRequestDeletion(c *gin.Context) {
 		if !fresh.Leader {
 			return errRoleRefused
 		}
-		if !policy.CanRequestDeletion(asPerson(u), fresh, others) {
+		if !policy.CanRequestDeletion(asPerson(actor), fresh, others) {
 			return errGroupHasMembers
 		}
 		if locked.DeletionRequested {
-			return nil // already requested: the admins already have the task
+			return nil
 		}
-		if err := tx.Model(&models.Group{}).Where("id = ?", g.ID).Update("deletion_requested", true).Error; err != nil {
+		if err := tx.Model(&models.Group{}).Where("id = ?", g.ID).Updates(map[string]any{"deletion_requested": true, "deletion_requester_id": actor.ID}).Error; err != nil {
 			return err
 		}
-		return notifyDeletionRequested(tx, g, u.ID)
-	}, readCommitted)
+		return notifyDeletionRequested(tx, locked, actor.ID)
+	}, contactGateTx)
 	if isAPIError(err) {
 		fail(c, err)
 		return
@@ -1173,44 +1179,75 @@ func (a *App) apiRequestDeletion(c *gin.Context) {
 
 func (a *App) apiCancelDeletion(c *gin.Context) {
 	id, _ := strconv.Atoi(c.Param("id"))
-	g, rel, ok := a.loadGroupFor(c, uint(id))
-	if !ok {
-		return
-	}
-	if !policy.CanCancelDeletion(asPerson(apiUser(c)), rel) {
-		jsonError(c, http.StatusForbidden, "forbidden")
-		return
-	}
-	if err := a.clearDeletionRequest(g.ID, &apiUser(c).ID, "withdrawn"); err != nil {
-		jsonError(c, http.StatusInternalServerError, "could not cancel deletion")
+	err := a.DB.WithContext(c.Request.Context()).Transaction(func(tx *gorm.DB) error {
+		g, err := lockGroupIn(tx, uint(id))
+		if err != nil {
+			return err
+		}
+		actor, err := lockActorIn(tx, apiUser(c), actorRead)
+		if err != nil {
+			return err
+		}
+		rel, err := groupRel(tx, actor.ID, g.ID)
+		if err != nil {
+			return err
+		}
+		person := asPerson(actor)
+		if !policy.CanSeeGroup(person, asGroup(g), rel) {
+			return errGroupNotFound
+		}
+		if !policy.CanCancelDeletion(person, rel) {
+			return errRoleRefused
+		}
+		if !g.DeletionRequested {
+			return errAlreadyHandled
+		}
+		return clearDeletionRequestIn(tx, g.ID, &actor.ID, "withdrawn")
+	}, readCommitted)
+	if err != nil {
+		fail(c, err)
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{})
 }
 
-func (a *App) clearDeletionRequest(groupID uint, by *uint, outcome string) error {
-	return a.DB.Transaction(func(tx *gorm.DB) error {
-		return clearDeletionRequestIn(tx, groupID, by, outcome)
-	})
+// The caller holds the group row lock, and counted listed members before
+// adding or restoring one. A second member ends a lone leader's request.
+func withdrawDeletionAfterMemberAdded(tx *gorm.DB, g *models.Group, countBefore int) error {
+	if !g.DeletionRequested || countBefore == 0 {
+		return nil
+	}
+	if err := clearDeletionRequestIn(tx, g.ID, nil, "withdrawn"); err != nil {
+		return err
+	}
+	g.DeletionRequested = false
+	g.DeletionRequesterID = nil
+	return nil
 }
 
-// deletionRequestHolds is whether a set deletion flag still stands for the
-// lone leader who asked (DEC-177): the group's one listed member is the person
-// who asked, the actor of an open group.deletion task, or the admin pressing
-// Delete, whose own request wrote them no task and who asks again by pressing.
-// Nothing else stored names who asked, so a flag on a group with no listed
-// member, a second one, or one who did not ask (a successor after a handoff, a
-// co-leader left alone when the asker departed) does not stand.
-func deletionRequestHolds(tx *gorm.DB, groupID, presser uint) (bool, error) {
-	members, err := memberIDs(tx, groupID)
+// Requests opened by an older binary have only their open admin tasks as evidence.
+func deletionRequesterIn(tx *gorm.DB, g *models.Group) (uint, error) {
+	if g.DeletionRequesterID != nil {
+		return *g.DeletionRequesterID, nil
+	}
+	return notify.OpenTaskActor(tx, notify.GroupDeletion, g.ID)
+}
+
+func deletionRequestHolds(tx *gorm.DB, g *models.Group, presser uint) (bool, error) {
+	members, err := memberIDs(tx, g.ID)
 	if err != nil || len(members) != 1 {
 		return false, err
 	}
-	if members[0] == presser {
-		return true, nil
+	asker, err := deletionRequesterIn(tx, g)
+	if err != nil || asker != 0 {
+		return asker == members[0], err
 	}
-	askers, err := notify.OpenTaskActors(tx, notify.GroupDeletion, groupID)
-	return slices.Contains(askers, members[0]), err
+	if members[0] != presser {
+		return false, nil
+	}
+	// DEC-177 lets the lone admin renew their own older request that wrote no task.
+	open, err := notify.OpenTask(tx, notify.GroupDeletion, g.ID)
+	return !open, err
 }
 
 func clearDeletionRequestIn(tx *gorm.DB, groupID uint, by *uint, outcome string) error {
@@ -1237,18 +1274,26 @@ func auditAndNotifyLeadership(tx *gorm.DB, e audit.Entry) error {
 // errGroupNotFound. tx must be Read Committed, so the actor read after a wait
 // sees what committed during it.
 func lockAdminGroupIn(tx *gorm.DB, me *models.User, groupID uint) (*models.Group, *models.User, error) {
-	var g models.Group
-	if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&g, groupID).Error; err != nil {
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return nil, nil, errGroupNotFound
-		}
+	g, err := lockGroupIn(tx, groupID)
+	if err != nil {
 		return nil, nil, err
 	}
 	actor, err := lockAdminIn(tx, me, actorRead)
 	if err != nil {
 		return nil, nil, err
 	}
-	return &g, actor, nil
+	return g, actor, nil
+}
+
+func lockGroupIn(tx *gorm.DB, groupID uint) (*models.Group, error) {
+	var g models.Group
+	if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&g, groupID).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, errGroupNotFound
+		}
+		return nil, err
+	}
+	return &g, nil
 }
 
 // deleteGroup removes the group and the rows that belong to it, and tells the
@@ -1273,7 +1318,7 @@ func (a *App) deleteGroup(ctx context.Context, me *models.User, groupID uint, an
 			}
 			// A flag that no longer stands for who asked is withdrawn here,
 			// under the row lock (that commits), and the delete is refused.
-			holds, err := deletionRequestHolds(tx, g.ID, actor.ID)
+			holds, err := deletionRequestHolds(tx, g, actor.ID)
 			if err != nil {
 				return err
 			}

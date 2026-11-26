@@ -67,10 +67,13 @@ type AdminTab = "approvals" | "groups" | "rooms" | "users" | "invite" | "setting
 const TeenConsentPanel = lazy(() => import("../components/TeenConsentPanel"));
 
 
-// What the admin just decided on a new group, or a deletion request that someone else ended first.
-type Decision = { kind: "approved" | "rejected"; id: number; name: string; leaderName: string } | { kind: "no_longer_open"; name: string; gone: boolean };
+type DeletionOutcome = "deleted" | "kept";
 
-function PendingCard({ group, onDone }: { group: GroupSummary; onDone: (decision: Decision) => void }) {
+type DeletionDecision = { kind: DeletionOutcome; name: string } | { kind: "no_longer_open"; name: string; gone: boolean };
+
+type ApprovalDecision = { kind: "approved" | "rejected"; id: number; name: string; leaderName: string };
+
+function PendingCard({ group, onDone }: { group: GroupSummary; onDone: (decision: ApprovalDecision) => void }) {
   const [tags, setTags] = useState(group.tags.join(", "));
   // The leader's tags show as plain text; the field opens only on "Edit tags",
   // and only edited tags are sent (DEC-99).
@@ -155,14 +158,9 @@ function PendingCard({ group, onDone }: { group: GroupSummary; onDone: (decision
   );
 }
 
-// The card's Delete and Keep group answer the leader's request. When the request is no longer open (the leader
-// withdrew it, someone joined, another admin kept or deleted the group) the server refuses and changes nothing, and the
-// card goes away while the queue reads again (onStale).
-// What the card is waiting on, said in its status line: the count before the prompt, then the answer.
 const DELETION_WAIT = { counting: "Checking who will be notified…", deleting: "Deleting the group…", keeping: "Keeping the group…" } as const;
 
-// onStale(gone): the request is no longer open (gone: the group itself was already deleted).
-function DeletionCard({ group, onDone, onStale }: { group: GroupSummary; onDone: () => void; onStale: (gone: boolean) => void }) {
+function DeletionCard({ group, onDecision }: { group: GroupSummary; onDecision: (decision: DeletionDecision) => void }) {
   const [waiting, setWaiting] = useState<keyof typeof DELETION_WAIT | null>(null);
   const busy = waiting !== null;
   const [error, setError] = useState<string | null>(null);
@@ -179,37 +177,29 @@ function DeletionCard({ group, onDone, onStale }: { group: GroupSummary; onDone:
     return () => { live.current = false; };
   }, []);
 
-  async function approve() {
+  async function decide(outcome: DeletionOutcome) {
     if (busy) return;
-    setWaiting("counting");
+    setWaiting(outcome === "deleted" ? "counting" : "keeping");
     setError(null);
 
     try {
-      const told = await groupDeleteNotice(group.id);
+      if (outcome === "deleted") {
+        const told = await groupDeleteNotice(group.id);
 
-      if (!live.current || !confirm(`Delete “${group.name}”? This removes the group, its members, and its events. ${told}`)) return;
-      setWaiting("deleting");
-      await Admin.deleteGroup(group.id, true);
-      onDone();
+        if (!live.current || !confirm(`Delete “${group.name}”? This removes the group, its members, and its events. ${told}`)) return;
+        setWaiting("deleting");
+        await Admin.deleteGroup(group.id, true);
+      } else {
+        await Admin.rejectDeletion(group.id);
+      }
+
+      onDecision({ kind: outcome, name: group.name });
     } catch (e) {
-      if (e instanceof ApiError && (e.code === "already_handled" || e.status === 404)) onStale(e.status === 404);
-      else setError(errorText(e, "We couldn't delete that."));
-    } finally {
-      setWaiting(null);
-    }
-  }
-
-  async function keep() {
-    if (busy) return;
-    setWaiting("keeping");
-    setError(null);
-
-    try {
-      await Admin.rejectDeletion(group.id);
-      onDone();
-    } catch (e) {
-      if (e instanceof ApiError && (e.code === "already_handled" || e.status === 404)) onStale(e.status === 404);
-      else setError(errorText(e, "We couldn't keep the group."));
+      if (e instanceof ApiError && (e.code === "already_handled" || e.status === 404)) {
+        onDecision({ kind: "no_longer_open", name: group.name, gone: e.status === 404 });
+      } else {
+        setError(errorText(e, outcome === "deleted" ? "We couldn't delete that." : "We couldn't keep the group."));
+      }
     } finally {
       setWaiting(null);
     }
@@ -228,10 +218,10 @@ function DeletionCard({ group, onDone, onStale }: { group: GroupSummary; onDone:
       {error && <FormError layout="mt-2">{error}</FormError>}
       <p role="status" className="sr-only">{waiting ? DELETION_WAIT[waiting] : ""}</p>
       <div className="flex gap-3 mt-4">
-        <Button variant="danger-outline" onClick={approve} disabled={busy}>
+        <Button variant="danger-outline" onClick={() => decide("deleted")} disabled={busy}>
           Delete group
         </Button>
-        <Button variant="primary" onClick={keep} disabled={busy}>
+        <Button variant="primary" onClick={() => decide("kept")} disabled={busy}>
           Keep group
         </Button>
       </div>
@@ -342,9 +332,8 @@ function ApprovalsTab({ onCount, onGroupDecided }: { onCount: (n: number) => voi
   const [links, setLinks] = useState<GuardianLink[]>([]);
   const [nominations, setNominations] = useState<GuardianNomination[]>([]);
   const [announce, setAnnounce] = useState("");
-  // What the admin just decided on a new group; stays until the next action or
-  // a change of tab (the tab unmounts), so the outcome is never a flash.
-  const [decision, setDecision] = useState<Decision | null>(null);
+  // Keep the outcome visible while the queue reloads.
+  const [decision, setDecision] = useState<ApprovalDecision | DeletionDecision | null>(null);
   const decisionRef = useRef<HTMLParagraphElement>(null);
   const focusLinks = useRef(false);
   const [loading, setLoading] = useState(true);
@@ -412,14 +401,14 @@ function ApprovalsTab({ onCount, onGroupDecided }: { onCount: (n: number) => voi
         <p ref={decisionRef} role="status" tabIndex={-1} className="mb-4 rounded-lg border border-border bg-sunken px-4 py-3 text-sm focus:outline-none">
           {decision.kind === "no_longer_open" ? (
             decision.gone ? `“${decision.name}” was already deleted.` : `The request to delete “${decision.name}” is no longer open. The group is still there.`
-          ) : (
+          ) : "leaderName" in decision ? (
             <>
               “{decision.name}” {decision.kind}. {decision.leaderName ? `${decision.leaderName} was told.` : "Its leaders were told."}
               {decision.kind === "approved" && (
                 <>{" "}<Link to={`/groups/${decision.id}`} className="text-link">View group</Link></>
               )}
             </>
-          )}
+          ) : `“${decision.name}” was ${decision.kind}.`}
         </p>
       )}
       {loading && <Skeleton kind="lines" />}
@@ -487,11 +476,11 @@ function ApprovalsTab({ onCount, onGroupDecided }: { onCount: (n: number) => voi
             <DeletionCard
               key={g.id}
               group={g}
-              onDone={loadAfterOther}
-              onStale={(gone) => {
-                // The card goes at once, not when the queue's read comes back (or never, if it fails).
+              onDecision={(d) => {
                 setDeletions((shown) => shown.filter((d) => d.id !== g.id));
-                setDecision({ kind: "no_longer_open", name: g.name, gone });
+                setDecision(d);
+
+                if (d.kind === "deleted") onGroupDecided();
                 void load();
               }}
             />
