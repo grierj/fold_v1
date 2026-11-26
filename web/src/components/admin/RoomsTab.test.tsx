@@ -537,7 +537,7 @@ describe("a deactivation someone else's change refused", () => {
 
 describe("room calendar feed (M2.2b)", () => {
   it("active rooms get a Calendar feed panel; Done gives focus back", async () => {
-    vi.mocked(AdminRooms.getFeed).mockResolvedValue({ feed: { hasToken: false, createdAt: null } });
+    vi.mocked(AdminRooms.getFeed).mockResolvedValue({ feed: { hasToken: false, createdAt: null, revision: "feed-off" } });
     render(<Harness initial={[hall, room(3, "Old Annex", { active: false })]} />);
     await userEvent.click(screen.getByRole("button", { name: "More for Old Annex" }));
     expect(screen.queryByRole("menuitem", { name: "Calendar feed for Old Annex" })).toBeNull();

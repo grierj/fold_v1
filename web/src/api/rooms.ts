@@ -46,8 +46,10 @@ export const AdminRooms = {
   // A room's calendar-feed link (M2.2b): makeFeed returns the link once and
   // turns any old one off.
   getFeed: (id: Id) => api<RoomFeedResponse>(path`/admin/rooms/${id}/feed`),
-  makeFeed: (id: Id) => api<RoomFeedResponse>(path`/admin/rooms/${id}/feed`, { method: "POST" }),
-  revokeFeed: (id: Id) => api<RoomFeedResponse>(path`/admin/rooms/${id}/feed`, { method: "DELETE" }),
+  makeFeed: (id: Id, revision: string) =>
+    api<RoomFeedResponse>(path`/admin/rooms/${id}/feed`, { method: "POST", body: { revision } }),
+  revokeFeed: (id: Id, revision: string) =>
+    api<RoomFeedResponse>(path`/admin/rooms/${id}/feed`, { method: "DELETE", body: { revision } }),
 };
 
 // Open room requests (M2.1d, DEC-106): one per booking action, a date or a whole

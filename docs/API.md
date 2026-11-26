@@ -2327,12 +2327,16 @@ Admins only, and 404 while rooms are off (9.1). The list counts the scheduled up
 ### Room feeds (M2.2b)
 
 ```
-GET    /api/v1/admin/rooms/:id/feed → 200 {feed: {hasToken, createdAt}}
-POST   /api/v1/admin/rooms/:id/feed → 200 {feed: {hasToken: true, createdAt, url}}   (audited room_feed.created)
-DELETE /api/v1/admin/rooms/:id/feed → 200 {feed: {hasToken: false, createdAt: null}}  (audited room_feed.revoked)
+GET    /api/v1/admin/rooms/:id/feed            → 200 {feed: {hasToken, createdAt, revision}}
+POST   /api/v1/admin/rooms/:id/feed {revision} → 200 {feed: {hasToken: true, createdAt, revision, url}} | 409
+DELETE /api/v1/admin/rooms/:id/feed {revision} → 200 {feed: {hasToken: false, createdAt: null, revision}} | 409
 ```
 
-Admins only, and 404 while rooms are off or for a room that doesn't exist; POST is also 404 for a deactivated room. A room has at most one working link. `POST` makes it, or a new one, which turns the old one off at once; the raw link is in that response only (32 random bytes, base64url; only the SHA-256 is stored, as for personal feeds). Turned-off links stay in `room_feed_tokens` as history. The feed itself is `GET /cal/rooms/<roomId>/<token>.ics` (ICS feeds below).
+Admins only. These routes return 404 while rooms are off or the room is missing. POST also returns 404 for a deactivated room. GET reads the link status and revision in the same snapshot as the admin and rooms switch. `createdAt` is null when the link is off.
+
+POST creates or replaces the one working link and records `room_feed.created`. DELETE turns off the reviewed link and records `room_feed.revoked` if a live link was revoked. Both require the `revision` from the last read or write, even when the link is off. A missing or stale revision returns 409 `room_feed_changed` with no change or audit row. Read the endpoint again to review the current status before making another choice.
+
+The raw URL appears only in the successful POST response. Fold stores the SHA-256 hash of the 32-byte random token and retains revoked rows as history. The feed itself is `GET /cal/rooms/<roomId>/<token>.ics` (ICS feeds below).
 
 ### By-room view (M2.2a)
 

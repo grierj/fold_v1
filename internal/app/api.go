@@ -272,9 +272,9 @@ func (a *App) registerAPIRoutes(r *gin.Engine) {
 	v1.POST("/admin/jobs/:id/retry", a.apiAuth(), a.jobManager(), a.apiAdminRetryJob)
 	v1.POST("/admin/jobs/:id/dismiss", a.apiAuth(), a.jobManager(), a.apiAdminDismissJob)
 	// Room feeds (M2.2b): an admin makes, replaces or turns off a room's link.
-	v1.GET("/admin/rooms/:id/feed", a.roomsOn(), a.apiAuth(), a.roomManager(), a.apiAdminGetRoomFeed)
-	v1.POST("/admin/rooms/:id/feed", a.roomsOn(), a.apiAuth(), a.roomManager(), a.apiAdminCreateRoomFeed)
-	v1.DELETE("/admin/rooms/:id/feed", a.roomsOn(), a.apiAuth(), a.roomManager(), a.apiAdminRevokeRoomFeed)
+	v1.GET("/admin/rooms/:id/feed", a.roomPickerOn(), a.apiAuth(), a.roomManager(), a.apiAdminGetRoomFeed)
+	v1.POST("/admin/rooms/:id/feed", a.roomPickerOn(), a.apiAuth(), a.roomManager(), a.apiAdminCreateRoomFeed)
+	v1.DELETE("/admin/rooms/:id/feed", a.roomPickerOn(), a.apiAuth(), a.roomManager(), a.apiAdminRevokeRoomFeed)
 	// The home list: events the viewer can see without seeing their group.
 	v1.GET("/events", a.optionalUser(), a.apiListOpenEvents)
 	// The calendar (M1.6): every occurrence the viewer may see over a

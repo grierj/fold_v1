@@ -361,7 +361,7 @@ function RoomRow({ room, locked, feedOpen, onBusy, onStart, onEdit, onFeed, onCl
           { label: `${room.active ? "Deactivate" : "Reactivate"} ${room.name}`, disabled: locked, onSelect: () => void setActive(!room.active) },
         ]} /></div>
       </div>
-      {feedOpen && room.active && <div className="mt-4"><RoomFeedPanel room={room} onClose={onCloseFeed} /></div>}
+      {feedOpen && room.active && <div className="mt-4"><RoomFeedPanel room={room} onClose={onCloseFeed} onGone={onGone} /></div>}
     </div>
   );
 }

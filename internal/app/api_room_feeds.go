@@ -2,6 +2,7 @@ package app
 
 import (
 	"errors"
+	"io"
 	"net/http"
 	"strconv"
 	"strings"
@@ -14,7 +15,6 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"gorm.io/gorm"
-	"gorm.io/gorm/clause"
 )
 
 // Room feeds (M2.2b, 8.2): an admin-issued secret link per room that
@@ -29,6 +29,7 @@ const roomFeedTitle = "Reserved"
 type roomFeedJSON struct {
 	HasToken  bool       `json:"hasToken"`
 	CreatedAt *time.Time `json:"createdAt"`
+	Revision  string     `json:"revision"`
 	// URL is the raw link, only in the response that made it.
 	URL string `json:"url,omitempty"`
 }
@@ -37,129 +38,164 @@ func (a *App) roomFeedURL(roomID uint, raw string) string {
 	return a.emailBaseURL() + "/cal/rooms/" + strconv.FormatUint(uint64(roomID), 10) + "/" + raw + ".ics"
 }
 
-func (a *App) adminRoom(c *gin.Context) (*models.Room, bool) {
-	id, err := strconv.ParseUint(c.Param("id"), 10, 63)
-	if err != nil {
-		jsonError(c, http.StatusNotFound, "room not found")
-		return nil, false
-	}
-	var room models.Room
-	if err := a.DB.First(&room, id).Error; err != nil {
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			jsonError(c, http.StatusNotFound, "room not found")
-		} else {
-			jsonError(c, http.StatusInternalServerError, "could not load the room")
-		}
-		return nil, false
-	}
-	return &room, true
-}
-
-func activeRoomFeed(db *gorm.DB, roomID uint) (*models.RoomFeedToken, error) {
+// The latest row still names the state after the link has been turned off.
+func latestRoomFeed(tx *gorm.DB, roomID uint) (models.RoomFeedToken, error) {
 	var tok models.RoomFeedToken
-	err := db.Where("room_id = ? AND revoked_at IS NULL", roomID).First(&tok).Error
-	if errors.Is(err, gorm.ErrRecordNotFound) {
-		return nil, nil
-	}
-	return &tok, err
+	err := tx.Select("id", "created_at", "revoked_at").Where("room_id = ?", roomID).
+		Order("id DESC").Limit(1).Find(&tok).Error
+	return tok, err
 }
 
-func roomFeedOf(tok *models.RoomFeedToken) roomFeedJSON {
-	if tok == nil {
-		return roomFeedJSON{}
+func (a *App) roomFeedOf(roomID uint, tok models.RoomFeedToken) roomFeedJSON {
+	out := roomFeedJSON{Revision: a.roomFeedRevision(roomID, tok)}
+	if tok.ID != 0 && tok.RevokedAt == nil {
+		out.HasToken = true
+		out.CreatedAt = &tok.CreatedAt
 	}
-	at := tok.CreatedAt
-	return roomFeedJSON{HasToken: true, CreatedAt: &at}
+	return out
+}
+
+func roomFeedRoomID(c *gin.Context) (uint, error) {
+	id, err := strconv.ParseUint(c.Param("id"), 10, 63)
+	if err != nil || id == 0 {
+		return 0, errRoomGone
+	}
+	return uint(id), nil
 }
 
 func (a *App) apiAdminGetRoomFeed(c *gin.Context) {
-	room, ok := a.adminRoom(c)
-	if !ok {
-		return
-	}
-	tok, err := activeRoomFeed(a.DB, room.ID)
+	id, err := roomFeedRoomID(c)
 	if err != nil {
-		jsonError(c, http.StatusInternalServerError, "could not load the room's calendar link")
+		fail(c, err)
 		return
 	}
-	c.JSON(http.StatusOK, roomFeedResponseJSON{Feed: roomFeedOf(tok)})
-}
-
-// apiAdminCreateRoomFeed makes the room's link, or a new one, which turns
-// the old one off. The raw token is in this response only.
-func (a *App) apiAdminCreateRoomFeed(c *gin.Context) {
-	room, ok := a.adminRoom(c)
-	if !ok {
-		return
-	}
-	if !room.Active {
-		jsonError(c, http.StatusNotFound, "room not found")
-		return
-	}
-	raw, err := newRawToken()
-	if err != nil {
-		jsonError(c, http.StatusInternalServerError, "could not make the calendar link")
-		return
-	}
-	tok := models.RoomFeedToken{RoomID: room.ID, TokenHash: hashToken(raw)}
-	err = a.DB.Transaction(func(tx *gorm.DB) error {
-		// The room row serializes two admins making a link at once.
-		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&models.Room{}, room.ID).Error; err != nil {
+	var out roomFeedJSON
+	var judged sessionJudgment
+	err = decidingSnapshot(a.DB.WithContext(c.Request.Context()), func(tx *gorm.DB) error {
+		if err := roomsOnIn(tx); err != nil {
 			return err
 		}
 		me, err := lockRoomManagerIn(tx, apiUser(c), actorRead)
 		if err != nil {
 			return err
 		}
-		tok.CreatedBy = &me.ID
-		res := tx.Model(&models.RoomFeedToken{}).Where("room_id = ? AND revoked_at IS NULL", room.ID).Update("revoked_at", time.Now().UTC())
-		if res.Error != nil {
-			return res.Error
+		judged.judge(me)
+		if a.hooks.readerAuthorized != nil {
+			a.hooks.readerAuthorized("admin room feed")
 		}
-		if err := tx.Create(&tok).Error; err != nil {
+		if err := tx.Select("id").First(&models.Room{}, id).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return errRoomGone
+			}
 			return err
 		}
-		return audit.Write(tx, audit.Entry{Actor: &me.ID, Action: audit.RoomFeedCreated, TargetType: "room", TargetID: room.ID,
-			Meta: map[string]any{"replaced": res.RowsAffected > 0}, IP: c.ClientIP()})
-	}, readCommitted)
-	if isAPIError(err) {
-		fail(c, err)
-		return
-	}
-	if err != nil {
-		jsonError(c, http.StatusInternalServerError, "could not make the calendar link")
-		return
-	}
-	out := roomFeedOf(&tok)
-	out.URL = a.roomFeedURL(room.ID, raw)
-	c.JSON(http.StatusOK, roomFeedResponseJSON{Feed: out})
-}
-
-func (a *App) apiAdminRevokeRoomFeed(c *gin.Context) {
-	room, ok := a.adminRoom(c)
-	if !ok {
-		return
-	}
-	err := a.DB.Transaction(func(tx *gorm.DB) error {
-		me, err := lockRoomManagerIn(tx, apiUser(c), actorShare)
+		tok, err := latestRoomFeed(tx, id)
 		if err != nil {
 			return err
 		}
-		res := tx.Model(&models.RoomFeedToken{}).Where("room_id = ? AND revoked_at IS NULL", room.ID).Update("revoked_at", time.Now().UTC())
-		if res.Error != nil || res.RowsAffected == 0 {
-			return res.Error
-		}
-		return audit.Write(tx, audit.Entry{Actor: &me.ID, Action: audit.RoomFeedRevoked, TargetType: "room", TargetID: room.ID, IP: c.ClientIP()})
-	}, readCommitted)
-	if isAPIError(err) {
+		out = a.roomFeedOf(id, tok)
+		return nil
+	})
+	if ackErr := a.acknowledgeDecision(c, judged, err == nil || decidedRefusal(err)); ackErr != nil {
+		err = ackErr
+	}
+	if err != nil {
 		fail(c, err)
 		return
 	}
+	c.JSON(http.StatusOK, roomFeedResponseJSON{Feed: out})
+}
+
+func (a *App) apiAdminCreateRoomFeed(c *gin.Context) {
+	a.changeRoomFeed(c, true)
+}
+
+func (a *App) apiAdminRevokeRoomFeed(c *gin.Context) {
+	a.changeRoomFeed(c, false)
+}
+
+func (a *App) changeRoomFeed(c *gin.Context, issue bool) {
+	id, err := roomFeedRoomID(c)
 	if err != nil {
-		jsonError(c, http.StatusInternalServerError, "could not turn off the calendar link")
+		fail(c, err)
 		return
 	}
-	c.JSON(http.StatusOK, roomFeedResponseJSON{Feed: roomFeedJSON{}})
+	var body struct {
+		Revision string `json:"revision"`
+	}
+	if err := c.ShouldBindJSON(&body); err != nil && !errors.Is(err, io.EOF) {
+		jsonError(c, http.StatusBadRequest, "invalid request")
+		return
+	}
+
+	var out roomFeedJSON
+	var raw string
+	var judged sessionJudgment
+	err = decidingTransaction(a.DB.WithContext(c.Request.Context()), readCommitted, func(tx *gorm.DB) error {
+		room, err := lockRoom(tx, id)
+		if err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return errRoomGone
+			}
+			return err
+		}
+		me, err := lockRoomManagerIn(tx, apiUser(c), actorRead)
+		if err != nil {
+			return err
+		}
+		judged.judge(me)
+		if err := roomsOnIn(tx); err != nil {
+			return err
+		}
+		if issue && !room.Active {
+			return errRoomGone
+		}
+		tok, err := a.checkRoomFeedRevision(tx, id, body.Revision)
+		if err != nil {
+			return err
+		}
+
+		hadLink := tok.ID != 0 && tok.RevokedAt == nil
+		if hadLink {
+			now := time.Now().UTC()
+			if err := tx.Model(&models.RoomFeedToken{}).Where("id = ? AND revoked_at IS NULL", tok.ID).
+				Update("revoked_at", now).Error; err != nil {
+				return err
+			}
+			tok.RevokedAt = &now
+		}
+		entry := audit.Entry{Actor: &me.ID, Action: audit.RoomFeedRevoked, TargetType: "room", TargetID: id, IP: c.ClientIP()}
+		if issue {
+			raw, err = newRawToken()
+			if err != nil {
+				return err
+			}
+			tok = models.RoomFeedToken{RoomID: id, TokenHash: hashToken(raw), CreatedBy: &me.ID}
+			if err := tx.Create(&tok).Error; err != nil {
+				return err
+			}
+			entry.Action = audit.RoomFeedCreated
+			entry.Meta = map[string]any{"replaced": hadLink}
+		}
+		if issue || hadLink {
+			if err := audit.Write(tx, entry); err != nil {
+				return err
+			}
+		}
+		out = a.roomFeedOf(id, tok)
+		return nil
+	})
+	if ackErr := a.acknowledgeDecision(c, judged, err == nil || decidedRefusal(err)); ackErr != nil {
+		err = ackErr
+	}
+	if err != nil {
+		fail(c, err)
+		return
+	}
+	if raw != "" {
+		out.URL = a.roomFeedURL(id, raw)
+	}
+	c.JSON(http.StatusOK, roomFeedResponseJSON{Feed: out})
 }
 
 // feedRoom serves /cal/rooms/<roomId>/<token>.ics. Every failure that

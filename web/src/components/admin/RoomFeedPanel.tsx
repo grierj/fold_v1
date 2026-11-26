@@ -1,20 +1,37 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
+import { ApiError } from "../../api/core";
 import { AdminRooms } from "../../api/rooms";
+import { errorCode } from "../../lib/errors";
+import { RefusedSaveLine, useRefusedSave } from "../../lib/refusedSave";
+import { outcomeOf } from "../../lib/rosterWrites";
 import type { Room } from "../../types";
 import { Button } from "../ui/Button";
+import { FormError } from "../ui/Field";
 import { SecretFeedLink, useSecretFeed } from "../SecretFeedLink";
 
-// A room's calendar feed (M2.2b, 8.2): an admin makes a secret link the
-// office or a calendar app can subscribe to. It behaves like the personal
-// CalendarFeedCard (both are SecretFeedLink).
-export function RoomFeedPanel({ room, onClose }: { room: Room; onClose: () => void }) {
+export function RoomFeedPanel({ room, onClose, onGone }: { room: Room; onClose: () => void; onGone: () => void }) {
   const headingRef = useRef<HTMLHeadingElement>(null);
+  const refusal = useRefusedSave();
+  const [uncertain, setUncertain] = useState(false);
+
+  function start() {
+    refusal.clear();
+    setUncertain(false);
+  }
 
   const feed = useSecretFeed({
     load: async () => (await AdminRooms.getFeed(room.id)).feed,
     deps: [room.id],
-    create: async () => (await AdminRooms.makeFeed(room.id)).feed,
-    revoke: () => AdminRooms.revokeFeed(room.id).then(() => undefined),
+    create: async ({ revision }) => {
+      start();
+
+      return (await AdminRooms.makeFeed(room.id, revision)).feed;
+    },
+    revoke: async ({ revision }) => {
+      start();
+
+      return (await AdminRooms.revokeFeed(room.id, revision)).feed;
+    },
     failed: {
       load: "We couldn't load this room's calendar link.",
       create: "We couldn't make the calendar link.",
@@ -22,6 +39,25 @@ export function RoomFeedPanel({ room, onClose }: { room: Room; onClose: () => vo
     },
     // The button that was pressed is gone; keep keyboard users in the panel.
     onRevoked: () => headingRef.current?.focus(),
+    recover: async (cause, retry) => {
+      if (cause instanceof ApiError && [401, 403, 404].includes(cause.status)) {
+        onGone();
+
+        return true;
+      }
+
+      const changed = errorCode(cause) === "room_feed_changed";
+
+      if (!changed && outcomeOf(cause) !== "unsure") return false;
+
+      if (!changed) setUncertain(true);
+
+      const read = await retry();
+
+      if (read === "loaded" && changed) refusal.refused("changed");
+
+      return !changed || read !== "failed";
+    },
   });
 
   // The button that opened the panel is gone, so focus starts on its heading.
@@ -37,6 +73,8 @@ export function RoomFeedPanel({ room, onClose }: { room: Room; onClose: () => vo
         with the link sees each booking&rsquo;s title, time and link; invite-only dates show only as
         Reserved. In a calendar app, choose Add calendar &rarr; From URL (or Subscribe) and paste the link.
       </p>
+      <RefusedSaveLine save={refusal} noun="calendar link status" choosing="This calendar link" />
+      {uncertain && <FormError>We couldn&rsquo;t confirm whether your calendar link changed. Check its current status before trying again.</FormError>}
       <SecretFeedLink
         feed={feed}
         id={`room-feed-link-${room.id}`}
