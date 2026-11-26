@@ -5583,12 +5583,12 @@ func TestVisibilityConsentFenceMigration(t *testing.T) {
 
 func TestInvitationRecoveryFloorSurvivesLevelThreeReplay(t *testing.T) {
 	t.Parallel()
-	_, db, p := freshAt(t, 18)
+	_, db, p := freshAt(t, 19)
 	three, four := "3", "4"
 	if err := v010Boot(db, &three); err != nil {
 		t.Fatal(err)
 	}
-	upTo(t, p, 19)
+	upTo(t, p, 20)
 	check := func() {
 		t.Helper()
 		before := fenceCounter(t, db)
@@ -5606,7 +5606,7 @@ func TestInvitationRecoveryFloorSurvivesLevelThreeReplay(t *testing.T) {
 	check()
 	upTo(t, p, 15)
 	check()
-	upTo(t, p, 19)
+	upTo(t, p, 20)
 	check()
 }
 
