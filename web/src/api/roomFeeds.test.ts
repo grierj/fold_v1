@@ -24,12 +24,15 @@ it.each([
   let viewer = oldViewer;
   const reply = deferred<Response>();
   const dispatched = deferred<void>();
+
   const fetcher = vi.fn<typeof fetch>(async (url) => {
     if (String(url).endsWith("/auth/bootstrap")) return bootstrapAnswer(viewer);
     expect(url).toBe(endpoint);
     dispatched.resolve();
+
     return reply.promise;
   });
+
   vi.stubGlobal("fetch", fetcher);
   const { credential } = await bootstrapCredential(true);
 
@@ -52,16 +55,21 @@ it.each([
   let viewer = oldViewer;
   const site = deferred<Response>();
   const siteStarted = deferred<void>();
+
   const fetcher = vi.fn<typeof fetch>(async (url) => {
     if (String(url).endsWith("/auth/bootstrap")) return bootstrapAnswer(viewer);
+
     if (url === "/api/v1/site") {
       siteStarted.resolve();
+
       return site.promise;
     }
 
     expect(url).toBe(endpoint);
+
     return Response.json({ error: "not found", code: "not_found" }, { status: 404 });
   });
+
   vi.stubGlobal("fetch", fetcher);
   const { credential } = await bootstrapCredential(true);
 

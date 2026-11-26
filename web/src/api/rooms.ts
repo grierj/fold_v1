@@ -60,6 +60,7 @@ async function getRoomFeed(id: Id, pinned: Credential | null): Promise<RoomFeedR
     // The pre-authentication switch returns an unacknowledged 404. Only a fresh public
     // settings read can confirm that the feed settings are unavailable on this credential.
     const site = await Site.get().catch(() => null);
+
     if (site?.roomsEnabled !== false || !credentialCurrent(pinned)) throw cause;
 
     throw new ApiError(404, "room booking is turned off", { code: "rooms_off" });

@@ -154,6 +154,7 @@ afterEach(() => {
 it.each([200, 404])("recovers an unreadable %i write and status read through the room API", async (status) => {
   const viewer = { token: "feed-test", user: { id: 7 } };
   const headers = { "Fold-Session-Checked": "v2 m-feed-test 7" };
+
   const replies = [
     Response.json({ feed: { hasToken: false, createdAt: null, revision: "off" } }, { headers }),
     new Response("<html>Unavailable</html>", { status }),
@@ -164,6 +165,7 @@ it.each([200, 404])("recovers an unreadable %i write and status read through the
   const requests: string[] = [];
   vi.stubGlobal("fetch", vi.fn<typeof fetch>(async (url, init) => {
     if (String(url).endsWith("/auth/bootstrap")) return bootstrapAnswer(viewer);
+
     if (String(url).endsWith("/site")) return Response.json({ roomsEnabled: true });
 
     expect(String(url)).toBe("/api/v1/admin/rooms/7/feed");
