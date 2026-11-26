@@ -3337,11 +3337,6 @@ func TestAccountErasureRecipientWaitIsBounded(t *testing.T) {
 	})
 
 	t.Run("staggered rows outlast the whole statement", func(t *testing.T) {
-		// The schedule is a fraction of the statement timeout, and the timeout is
-		// long enough that a slow machine still releases R1 well inside it:
-		// R1 is released at 0.4T, so a whole-statement bound answers about 0.6T
-		// after R2's wait is first seen and a per-row bound a full T after it;
-		// the 0.8T line sits 0.2T from each.
 		const wait = 2500 * time.Millisecond
 		setWait(t, wait)
 		r := newErasureWaitRun(t)
@@ -3390,6 +3385,24 @@ func TestAccountErasureRecipientWaitIsBounded(t *testing.T) {
 		if !inOrder {
 			t.Fatalf("the scrub uses a plan whose row order is not known to reach R1 first:\n%s", planText)
 		}
+		var scrubPID int
+		var scrubTimeoutMS int64
+		var probeErr error
+		const probe = "test:erasure_scrub_timeout"
+		// Read the timeout on the UPDATE's connection before it runs. An
+		// error reply can lag while PostgreSQL aborts the transaction.
+		if err := db.Callback().Raw().Before("gorm:raw").Register(probe, func(tx *gorm.DB) {
+			if tx.Error != nil || !strings.HasPrefix(tx.Statement.SQL.String(), erasureRecipientScrubPrefix) {
+				return
+			}
+			probeErr = tx.Statement.ConnPool.QueryRowContext(tx.Statement.Context,
+				"SELECT pg_backend_pid(), setting::bigint FROM pg_settings WHERE name = 'statement_timeout'").
+				Scan(&scrubPID, &scrubTimeoutMS)
+		}); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = db.Callback().Raw().Remove(probe) })
+
 		w1pid := erasureTestWorkerPID(t, db, r.seed.r1.ID)
 		w2pid := erasureTestWorkerPID(t, db, r.seed.r2.ID)
 		w1 := r.worker(r.seed.m1, r.seed.r1.ID)
@@ -3403,10 +3416,11 @@ func TestAccountErasureRecipientWaitIsBounded(t *testing.T) {
 		time.Sleep(time.Until(t1.Add(wait * 2 / 5)))
 		r.sender.Release(r.seed.key1())
 		r.awaitStatus(r.seed.r1.ID, models.RecipientSent)
-		t2 := erasureTestWaitBlockedOnlyBy(t, r.app, epid, qs, int(w2pid.Load()))
+		erasureTestWaitBlockedOnlyBy(t, r.app, epid, qs, int(w2pid.Load()))
 		res := awaitResult(t, del)
-		if since := time.Since(t2); since >= wait*4/5 {
-			t.Errorf("the erasure answered %v after the second wait, want under %v", since, wait*4/5)
+		if probeErr != nil || scrubPID != epid || scrubTimeoutMS != wait.Milliseconds() {
+			t.Errorf("scrub backend %d has statement_timeout %dms (probe error %v), want backend %d with %dms",
+				scrubPID, scrubTimeoutMS, probeErr, epid, wait.Milliseconds())
 		}
 		select {
 		case <-w2:
