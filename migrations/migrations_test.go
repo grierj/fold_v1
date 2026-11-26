@@ -5916,3 +5916,57 @@ func TestContactFinalityMigration(t *testing.T) {
 	sameRows(t, "grants after Down", snapshotRows[int64](t, db, grants), grantsBefore)
 	upTo(t, provider, version)
 }
+
+func TestGroupDeletionRequesterMigration(t *testing.T) {
+	t.Parallel()
+	const version = 19
+	_, db, p := freshAt(t, version-1)
+	exec := func(query string) {
+		t.Helper()
+		if _, err := db.Exec(query); err != nil {
+			t.Fatal(err)
+		}
+	}
+	exec("INSERT INTO users(id,email) VALUES (1,'original@example.org'),(2,'successor@example.org')")
+	exec("INSERT INTO groups(id,name,leader_id,deletion_requested) VALUES (1,'Solo',1,true)")
+	upTo(t, p, version)
+	wantRequester := func(want int) {
+		t.Helper()
+		var got int
+		if err := db.QueryRow("SELECT coalesce(deletion_requester_id,0) FROM groups WHERE id = 1").Scan(&got); err != nil || got != want {
+			t.Fatalf("requester = %d, %v; want %d", got, err, want)
+		}
+	}
+	wantRequester(0)
+	exec("UPDATE groups SET deletion_requested = true, deletion_requester_id = 1")
+	tx, err := db.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec("UPDATE groups SET deletion_requested = false"); err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.Rollback(); err != nil {
+		t.Fatal(err)
+	}
+	wantRequester(1)
+
+	// A previous binary names only the flag when it withdraws and opens a request.
+	exec("UPDATE groups SET deletion_requested = false")
+	exec("UPDATE groups SET deletion_requested = true")
+	wantRequester(0)
+	exec("UPDATE groups SET deletion_requester_id = 2")
+	exec("UPDATE users SET deleted_at = now() WHERE id = 1")
+	wantRequester(2)
+	exec("UPDATE users SET deleted_at = now() WHERE id = 2")
+	wantRequester(0)
+
+	exec("INSERT INTO users(id,email) VALUES (3,'new@example.org')")
+	exec("UPDATE groups SET deletion_requester_id = 3")
+	exec("UPDATE groups SET deleted_at = now()")
+	wantRequester(0)
+	downTo(t, p, version-1)
+	upTo(t, p, version)
+	wantRequester(0)
+}

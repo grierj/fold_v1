@@ -1009,7 +1009,7 @@ and the level of the image its current Compose pin names. There is no override.
 The floor file is recorded only after smoke passes and never decreases.
 
 This tree reports level 4. Release 0.1.1 shipped the erasure lookup at level 3, which it shares
-with older source builds that need the invitation row. After applying migration `00019`, every
+with older source builds that need the invitation row. After applying migration `00020`, every
 level-3 build, including 0.1.1, exits at startup on this database. Running `fold migrate down-one`
 keeps this protection. The recorded pre-upgrade dump still contains the invitations it held
 at backup time. On an upgraded host, restore that dump with the level-4 release and its
@@ -1220,7 +1220,7 @@ The release that holds migration `00015` saves a visibility change that
 cancels anyone, and every reset of an event's dates, only with the consent of
 the exact change its reviewer was shown. The database refuses startup for
 releases below level 3 (DEC-158). That release raised the host floor to 3 after smoke passed.
-Migration `00019` raises it again as described under Recovery refusal and interrupted operations.
+Migration `00020` raises it again as described under Recovery refusal and interrupted operations.
 
 - **Earlier published releases cannot start on this database.** After this
   release has started once, changing the pin by hand and starting an earlier

@@ -247,7 +247,7 @@ Today, on the DigitalOcean path (details in
   database this release ran: `00015`'s start fence refuses its boot, after any number of
   `fold migrate down-one` steps too, and `upgrade.sh --rollback` to an earlier release is
   refused. After a failed upgrade, keep this release and restore with its `restore.sh --dump`.
-- At recovery level 4 (invitation audit erasure, 10.1), `00019` refuses a level-3 boot even
+- At recovery level 4 (invitation audit erasure, 10.1), `00020` refuses a level-3 boot even
   after a Down and replay of `00015`. Managed restore also checks the staged archive's startup
   fence against the target before changing the pin or swapping databases.
 - Rollback is `upgrade.sh --rollback`. It hands off to `restore.sh`, which restores the recorded

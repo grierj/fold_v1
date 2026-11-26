@@ -201,7 +201,14 @@ it is for.
     [App attestation](https://github.com/grierj/fold/attestations/72465978)
   - Backup digest `sha256:03bf5a4e96a0dee17aacf9ec6be7a3806a45bc64566feeaf00915d0086a3a4f5`.
     [Backup attestation](https://github.com/grierj/fold/attestations/72466014)
-- `00019` adds a second startup trigger on `settings`. Level 3 includes source builds that
+- `00019` adds nullable `groups.deletion_requester_id` (DEC-177). Up leaves existing requests
+  unassigned. Fold can identify a legacy requester when all open tasks name the same person.
+  Triggers clear the id on withdrawal, Keep, group deletion, and account erasure even if a previous
+  binary writes only the flag or soft-delete timestamp. Down drops the triggers and the column.
+  A later Up can recover a requester only from open tasks. `TestGroupDeletionRequesterMigration`
+  covers an older writer closing and reopening a request, a rolled-back close, both soft deletes,
+  and Down followed by Up.
+- `00020` adds a second startup trigger on `settings`. Level 3 includes source builds that
   need the invitation row to erase its creation audit email. The daily cleanup can delete that
   row once the level-4 binary finishes migrations and boots. The DELETE checks for the enabled
   trigger in its own statement so a worker that outlives a restore to level 3 keeps the hold.
