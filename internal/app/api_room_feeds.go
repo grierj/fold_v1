@@ -167,7 +167,6 @@ func (a *App) changeRoomFeed(c *gin.Context, issue bool) {
 			}
 			tok.RevokedAt = &now
 		}
-		entry := audit.Entry{Actor: &me.ID, Action: audit.RoomFeedRevoked, TargetType: "room", TargetID: id, IP: c.ClientIP()}
 		if issue {
 			raw, err = newRawToken()
 			if err != nil {
@@ -177,11 +176,11 @@ func (a *App) changeRoomFeed(c *gin.Context, issue bool) {
 			if err := tx.Create(&tok).Error; err != nil {
 				return err
 			}
-			entry.Action = audit.RoomFeedCreated
-			entry.Meta = map[string]any{"replaced": hadLink}
-		}
-		if issue || hadLink {
-			if err := audit.Write(tx, entry); err != nil {
+			if err := audit.Write(tx, audit.Entry{Actor: &me.ID, Action: audit.RoomFeedCreated, TargetType: "room", TargetID: id, IP: c.ClientIP(), Meta: map[string]any{"replaced": hadLink}}); err != nil {
+				return err
+			}
+		} else if hadLink {
+			if err := audit.Write(tx, audit.Entry{Actor: &me.ID, Action: audit.RoomFeedRevoked, TargetType: "room", TargetID: id, IP: c.ClientIP()}); err != nil {
 				return err
 			}
 		}
