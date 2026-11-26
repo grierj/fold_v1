@@ -1160,8 +1160,10 @@ POST /api/v1/events/:id/restore             → 200 {} | 409 date_changed   (lea
      body: {date: "YYYY-MM-DD", revision}
      The event page gives managers restorableDates [{date, startsAt, revision}] for future dates
      a person cancelled. The restore schedules that occurrence at its stored time even if the
-     series rule has changed. A stale revision, a started date, or a different cancellation source
-     answers 409. A repeat after success also answers 409. Read the event again before acting.
+     series rule has changed. If the rule omits the stored date or time, later series edits keep
+     the restored date at its stored start and end. A stale revision, a started date, or a different
+     cancellation source answers 409. A repeat after success also answers 409. Read the event
+     again before acting.
      Eligible Going, Maybe and Waitlisted answers keep their places. Lowering capacity preserves
      existing parties. Ended grants stay ended. People still going or waitlisted receive the
      usual event.restored notice, excluding the manager pressing Restore.

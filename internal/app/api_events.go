@@ -1699,7 +1699,16 @@ func (a *App) restoreDateIn(tx *gorm.DB, ev *models.Event, occ *models.EventOccu
 	if occ.Status != models.OccurrenceCancelled || occ.CancelSource != models.CancelSourceManual || !occ.StartsAt.After(now) || revision != a.dateToken(ev, occ, shown) {
 		return errDateChanged
 	}
-	if err := tx.Model(occ).Updates(map[string]any{"status": models.OccurrenceScheduled, "cancel_source": ""}).Error; err != nil {
+	set := map[string]any{"status": models.OccurrenceScheduled, "cancel_source": ""}
+	follows, err := eventdates.FollowsSeries(ev, occ, now)
+	if err != nil {
+		return err
+	}
+	if !follows {
+		set["starts_at_override"] = occ.StartsAt
+		set["duration_override"] = int(occ.EndsAt.Sub(occ.StartsAt) / time.Minute)
+	}
+	if err := tx.Model(occ).Updates(set).Error; err != nil {
 		return err
 	}
 	if err := a.recheckRestoredSignups(tx, ev, occ, actor.ID, ip, now); err != nil {

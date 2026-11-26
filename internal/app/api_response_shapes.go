@@ -368,11 +368,12 @@ type restorableDateJSON struct {
 	StartsAt time.Time `json:"startsAt"`
 	Revision string    `json:"revision"`
 }
+
 type eventDetailResponseJSON struct {
-	Event            eventJSON            `json:"event"`
-	Occurrences      []occurrenceJSON     `json:"occurrences"`
 	CanManage        bool                 `json:"canManage"`
 	CanSetVisibility bool                 `json:"canSetVisibility"`
+	Event            eventJSON            `json:"event"`
+	Occurrences      []occurrenceJSON     `json:"occurrences"`
 	RestorableDates  []restorableDateJSON `json:"restorableDates,omitempty"`
 }
 

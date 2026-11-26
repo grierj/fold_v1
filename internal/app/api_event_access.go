@@ -257,7 +257,7 @@ func (a *App) apiGetEvent(c *gin.Context) {
 			}
 			shown := a.groupShownTo(me, f.group, f.rel)
 			for _, o := range cancelled {
-				out.RestorableDates = append(out.RestorableDates, restorableDateJSON{Date: models.FormatCalendarDate(o.OriginalDate), StartsAt: o.StartsAt, Revision: a.dateToken(&ev, &o, shown)})
+				out.RestorableDates = append(out.RestorableDates, restorableDateJSON{Date: models.FormatCalendarDate(o.OriginalDate), StartsAt: o.StartsAt.UTC(), Revision: a.dateToken(&ev, &o, shown)})
 			}
 		}
 		if a.hooks.readerEnd != nil {

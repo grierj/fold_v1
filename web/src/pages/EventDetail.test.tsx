@@ -3579,7 +3579,7 @@ it.each([false, true])("reads the event again after bringing a date back or rece
   const date = { date: "2035-12-01", startsAt: "2035-12-01T19:00:00Z", revision: "cancelled-read" };
   vi.mocked(Events.get).mockResolvedValue({ ...page, occurrences: [], restorableDates: [date] });
   vi.mocked(Events.restoreOccurrence).mockImplementation(async () => {
-    vi.mocked(Events.get).mockResolvedValue(page);
+    vi.mocked(Events.get).mockResolvedValue({ ...page, occurrences: [] });
 
     if (stale) throw new ApiError(409, "Changed", {code: "date_changed"});
 
@@ -3597,6 +3597,15 @@ it.each([false, true])("reads the event again after bringing a date back or rece
   expect(Events.restoreOccurrence).toHaveBeenCalledExactlyOnceWith(7, date.date, date.revision);
   await waitFor(() => expect(screen.queryByRole("button", {name:"Bring this date back"})).toBeNull());
 
-  if (stale) expect(await screen.findByText("Your last action could not be completed.")).toBeInTheDocument();
+  if (stale) {
+    expect(await screen.findByText("Your last action could not be completed.")).toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: "View date" })).toBeNull();
+  } else {
+    const link = screen.getByRole("link", { name: "View date" });
+    expect(link).toHaveAttribute("href", "/events/7/dates/2035-12-01");
+    expect(link.closest('[role="status"]')).toHaveTextContent(/You brought back .*2035 at/);
+    expect(screen.getByText("There are no dates to show in the next 90 days.")).toBeVisible();
+  }
+
   vi.mocked(Events.restoreOccurrence).mockClear();
 });
