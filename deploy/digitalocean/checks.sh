@@ -478,10 +478,22 @@ require_recovery_level() {
     if (( target < 1 && floor >= 1 )); then missing="the restore barrier (level 1)"; fi
     if (( target < 2 && floor >= 2 )); then missing="${missing:+$missing and }reason review (level 2)"; fi
     if (( target < 3 && floor >= 3 )); then missing="${missing:+$missing and }exact visibility consent (level 3)"; fi
-    if (( floor > 3 )); then missing="${missing:+$missing and }the protection required by level $floor"; fi
+    if (( target < 4 && floor >= 4 )); then missing="${missing:+$missing and }invitation audit erasure (level 4)"; fi
+    if (( floor > 4 )); then missing="${missing:+$missing and }the protection required by level $floor"; fi
     check_fail "target recovery level ${target} is below host level ${floor}. The older release lacks ${missing}. Restore data with the current release; use restore.sh --dump once installed."
     return 1
   fi
+}
+
+# A fresh host can have a lower floor than its archive. Exercise the staged
+# database's boot trigger even for a target that predates the restore barrier.
+check_archive_recovery_level() {
+  pg "$1" -q -v target_level="$2" <<'SQL'
+BEGIN;
+SELECT set_config('fold.recovery_level', :'target_level', true);
+INSERT INTO settings (key, value) VALUES ('restore_fence', '0') ON CONFLICT (key) DO NOTHING;
+ROLLBACK;
+SQL
 }
 
 write_recovery_floor() {

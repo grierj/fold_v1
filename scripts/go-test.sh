@@ -33,10 +33,13 @@ trap 'rm -rf "$tmp"' EXIT
 # and skips locally.
 CGO_ENABLED=0 go build -o "$tmp/fold-current" .
 export FOLD_TEST_BUILD_CURRENT="$tmp/fold-current"
-if mkdir "$tmp/v0.1.0" && git archive v0.1.0 2>/dev/null | tar -x -C "$tmp/v0.1.0" &&
-	(cd "$tmp/v0.1.0" && CGO_ENABLED=0 go build -o "$tmp/fold-v0.1.0" .); then
-	export FOLD_TEST_BUILD_V0_1_0="$tmp/fold-v0.1.0"
-fi
+for tag in v0.1.0 v0.1.1; do
+	if mkdir "$tmp/$tag" && git archive "$tag" 2>/dev/null | tar -x -C "$tmp/$tag" &&
+		(cd "$tmp/$tag" && CGO_ENABLED=0 go build -o "$tmp/fold-$tag" .); then
+		key="${tag^^}"
+		export "FOLD_TEST_BUILD_${key//./_}=$tmp/fold-$tag"
+	fi
+done
 
 # Every package but the app one, as usual (packages already run in parallel).
 mapfile -t others < <(go list ./... | grep -vx fold/internal/app)

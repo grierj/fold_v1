@@ -53,10 +53,11 @@ that changes how an operator upgrades, rolls back or restores. The operator-faci
 - The level is integer `recoveryPolicy` from `/fold version --json` in an image, or the one-line
   `deploy/recovery-policy` at a source commit (it equals `recoveryPolicyLevel` in
   `restore_fence.go`). Absent metadata means 0; malformed metadata refuses. Levels: 1 = the restore
-  barrier, 2 = reason review, 3 = exact visibility consent (DEC-158); from level 3 the database also
-  refuses an earlier release's start (`00015`'s start fence), so a refused script is not the only
-  stop.
-- A restored database's first start migrates it, declares level 3 and rotates the visibility
+  barrier, 2 = reason review, 3 = exact visibility consent (DEC-158), 4 = invitation audit erasure
+  after cleanup (PLAN 10.1). Migrations `00015` and `00019` fence writes to the boot counter.
+  Managed restore tests the staged database's fence before pin or swap, including on a fresh
+  host and for targets that predate the counter.
+- A restored database's first start migrates it, declares its recovery level and rotates the visibility
   consent epoch, so every review open before the restore asks once more.
 - A starting instance's boot waits for a visibility confirmation already in flight on another
   instance, and a confirmation that meets a boot's rotation waits for that boot to commit (both

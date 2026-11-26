@@ -2096,14 +2096,18 @@ func TestDatabaseRecoveryFloorIsNotAboveTheBinary(t *testing.T) {
 		t.Fatalf("the migrations' recovery floor is %d, the binary's level %d", floor, recoveryPolicyLevel)
 	}
 	app := testApp(t)
-	var def string
-	gormMust(t, app.DB.Raw("SELECT pg_get_functiondef('settings_recovery_floor'::regproc)").Scan(&def))
-	m := floorRe.FindStringSubmatch(def)
-	if m == nil {
-		t.Fatalf("the installed floor function has no floor: %s", def)
+	var defs []string
+	gormMust(t, app.DB.Raw(`SELECT pg_get_functiondef(tgfoid) FROM pg_trigger
+		WHERE tgrelid = 'settings'::regclass AND NOT tgisinternal`).Scan(&defs))
+	installed := 0
+	for _, def := range defs {
+		if m := floorRe.FindStringSubmatch(def); m != nil {
+			n, _ := strconv.Atoi(m[1])
+			installed = max(installed, n)
+		}
 	}
-	if n, _ := strconv.Atoi(m[1]); n > recoveryPolicyLevel {
-		t.Fatalf("the database's floor %d is above the binary's level %d", n, recoveryPolicyLevel)
+	if installed != floor {
+		t.Fatalf("the installed startup triggers enforce floor %d, migrations declare %d", installed, floor)
 	}
 }
 

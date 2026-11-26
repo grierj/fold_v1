@@ -639,9 +639,10 @@ In order, `restore.sh`:
    `fold` (it waits up to 120 seconds for a running `backup.sh` dump to finish,
    otherwise it stops with the services still stopped).
 3. Restores the dump into a new database, `fold_restore_<id>`, in one
-   transaction. Clears the restored browser-session signing epoch before the
-   swap, so everyone signs in again when the restored site opens with a release
-   that uses the epoch. If either step fails, `fold` has not been touched. The failed database
+   transaction. Checks the target's recovery level against the staged database's
+   boot fence, then clears the restored browser-session signing epoch. Everyone
+   signs in again when the restored site opens with a release that uses the epoch.
+   If any step fails, `fold` has not been touched. The failed database
    is dropped and the phase is `collect-failed`; run `--abort` to reopen the
    original, or `--resume` to try again.
 4. Counts the accounts the dump would bring back: the accounts that are deleted
@@ -787,7 +788,7 @@ shows who. Never delete, rename or replace `ops.lock`, `backup.lock` or
 **A lower recovery level is refused on every scripted path.** `provision.sh`,
 a forward `upgrade.sh --image` or `--commit`, `upgrade.sh --rollback` and
 `restore.sh --image` or `--commit` refuse a target below the host's recovery
-level, before any backup, checkout or pin, and name the restore barrier. There
+level before any backup, checkout or pin, and report the required level. There
 is no override. Restore the data with the current release instead (run
 `restore.sh --dump` with no lower `--image` or `--commit`).
 
@@ -972,26 +973,39 @@ choosing recovery. Rollback is subject to the recovery floor even after failed
 smoke.
 
 The daily job **Clearing old guest signups, account links and invitations** runs through Fold's
-workers. Find failures in Admin → System. The first release of this job keeps expired, unaccepted
-invitations whose creation audit still contains an email so older binaries can find that email
-during account erasure. Before enabling deletion of those invitations, publish the compatible
-lookup and verify that every release allowed to restore or reuse a database after that deletion
-has the lookup. A scripted rollback restores the pre-upgrade dump.
+workers. Find failures in Admin → System. Starting at recovery level 4, the job removes
+unaccepted invitations 30 days after expiry even when their creation audit contains an email.
+Account erasure finds that email through the audit. An invitation stays if an account request
+references it, a household can still resend it, or its row is the only evidence that someone
+accepted an invitation whose creation audit still has an email.
 
 ### Recovery refusal and interrupted operations
 
-Every scripted deploy, forward upgrade and rollback refuses a target below
-the host's recovery level. Level 1 requires the restore barrier; level 2 also
-requires reason review; level 3 also requires exact visibility consent
-(DEC-158), and a refused rollback names "exact visibility consent (level 3)". The scripts read integer `recoveryPolicy` from an
-image's `/fold version --json` output, or read the one-line
+Every scripted deploy, forward upgrade, restore and rollback checks the host's recovery level.
+Level 1 requires the restore barrier, level 2 adds reason review, and level 3 adds exact visibility
+consent (DEC-158). Level 4 requires invitation audit erasure after cleanup. The scripts read
+integer `recoveryPolicy` from an image's `/fold version --json` output, or read the one-line
 `deploy/recovery-policy` file at a source commit. Missing release metadata means level 0;
 malformed metadata refuses. The host floor is the greater of `recovery-policy-floor`
 and the level of the image its current Compose pin names. There is no override.
 The floor file is recorded only after smoke passes and never decreases.
 
-This tree reports level 3 (`deploy/recovery-policy`). Release 0.1.0 reports level 2 and is
-published, and the next release does not wait for the remaining real-droplet restore checks
+This tree reports level 4. Release 0.1.1 shipped the erasure lookup at level 3, which it shares
+with older source builds that need the invitation row. After applying migration `00019`, every
+level-3 build, including 0.1.1, exits at startup on this database. Running `fold migrate down-one`
+keeps this protection. The recorded pre-upgrade dump still contains the invitations it held
+at backup time. On an upgraded host, restore that dump with the level-4 release and its
+`restore.sh --dump`. The host floor still applies even to a rollback that would use the older dump.
+
+Install this release's deploy tools (version 7) from its trusted checkout before upgrading,
+and install them on a replacement host as well. After importing the archive
+into staging, they check the archive's own startup fence with the selected target's level.
+If it refuses, the original database and pin are intact, and the site stays closed. Run
+`restore.sh --abort`, then retry with a release that meets the archive's floor.
+A source build from before the restore barrier skips the boot counter if started by hand.
+Use the managed restore for a full dump, including on a fresh host.
+
+The next release does not wait for the remaining real-droplet restore checks
 in [FIRST-CHURCH-CHECKS.md](FIRST-CHURCH-CHECKS.md#live-install-m51-m53) (Grier, 2026-11-24; DEC-165).
 The current-release restore tooling was run on a real droplet on 2026-11-24, with what each
 check still owes recorded there; the local refusal drills do not verify that restore procedure.
@@ -1187,8 +1201,8 @@ make it longer, while someone who left the group still holds that date
 The release that holds migration `00015` saves a visibility change that
 cancels anyone, and every reset of an event's dates, only with the consent of
 the exact change its reviewer was shown. The database refuses startup for
-earlier published releases (DEC-158). Upgrading needs no new step. The
-host's floor becomes 3 once smoke passes.
+releases below level 3 (DEC-158). That release raised the host floor to 3 after smoke passed.
+Migration `00019` raises it again as described under Recovery refusal and interrupted operations.
 
 - **Earlier published releases cannot start on this database.** After this
   release has started once, changing the pin by hand and starting an earlier

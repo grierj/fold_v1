@@ -201,6 +201,13 @@ it is for.
     [App attestation](https://github.com/grierj/fold/attestations/72465978)
   - Backup digest `sha256:03bf5a4e96a0dee17aacf9ec6be7a3806a45bc64566feeaf00915d0086a3a4f5`.
     [Backup attestation](https://github.com/grierj/fold/attestations/72466014)
+- `00019` adds a second startup trigger on `settings`. Level 3 includes source builds that
+  need the invitation row to erase its creation audit email. The daily cleanup can delete that
+  row once the level-4 binary finishes migrations and boots. The DELETE checks for the enabled
+  trigger in its own statement so a worker that outlives a restore to level 3 keeps the hold.
+  Up changes no data. Down keeps the trigger because it cannot restore a deleted invitation.
+  Replaying the tagged `00015` only replaces its own trigger. Its hold on `settings` protects both triggers through the
+  baseline Down. The schema expands without dropping an object a previous release uses (DEC-138).
 - A development database migrated by the pre-squash chain must be recreated before a new binary
   runs on it; there is no converter.
 - `scripts/baseline-proof.sh proof` re-proves a tree against the frozen pre-squash chain with a

@@ -31,9 +31,9 @@ promises.
   entries follow the existing audit and erasure rules. Erasure can use the creation audit email
   to find a missing invitation if there is no acceptance audit. An accepted invitation without
   an acceptance audit stays if its creation audit has an email because the row proves acceptance.
-  During the first rollout stage, the job also keeps unaccepted invitations whose creation audit
-  contains an email. A later release can prune those once a published release has the lookup and
-  every recovery target for data cleaned by the later release can use it.
+  Recovery level 4 fences older builds before the job can remove an unaccepted invitation
+  with an email-bearing creation audit. Version 0.1.1 shipped the lookup at level 3, which
+  it shares with earlier source builds that require the invitation row.
 - No account enumeration (final review, finding 4; DEC-52): sign-up, guest registration, password
   reset and login give the same answer, at about the same cost (a dummy bcrypt check), whether or
   not the email has an account. The email itself carries the hint ("you already have an account;

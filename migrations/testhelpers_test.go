@@ -301,6 +301,8 @@ func releaseRecoveryFloor(t *testing.T, name string, db *sql.DB) {
 	defer tx.Rollback()
 	for _, stmt := range []string{
 		"DROP VIEW recovery_floor_hold",
+		"DROP TRIGGER settings_recovery_floor_invitations ON settings",
+		"DROP FUNCTION settings_recovery_floor_invitations()",
 		"DROP TRIGGER settings_recovery_floor ON settings",
 		"DROP TRIGGER audit_logs_visibility_consent ON audit_logs",
 		"DROP FUNCTION settings_recovery_floor()",

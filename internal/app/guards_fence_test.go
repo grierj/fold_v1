@@ -615,8 +615,8 @@ func TestFencedTransactionsGuardCatchesBypasses(t *testing.T) {
 // (L5); neither fence proves what a consent check compared.
 
 var (
-	floorDropRe    = regexp.MustCompile(`(?i)\bDROP\s+(VIEW|TRIGGER|FUNCTION)\s+(IF\s+EXISTS\s+)?(recovery_floor_hold|settings_recovery_floor|audit_logs_visibility_consent)\b`)
-	floorDisableRe = regexp.MustCompile(`(?i)\bDISABLE\s+TRIGGER\s+(settings_recovery_floor|audit_logs_visibility_consent|ALL)\b`)
+	floorDropRe    = regexp.MustCompile(`(?i)\bDROP\s+(VIEW|TRIGGER|FUNCTION)\s+(IF\s+EXISTS\s+)?(recovery_floor_hold|settings_recovery_floor(_invitations)?|audit_logs_visibility_consent)\b`)
+	floorDisableRe = regexp.MustCompile(`(?i)\bDISABLE\s+TRIGGER\s+(settings_recovery_floor(_invitations)?|audit_logs_visibility_consent|ALL)\b`)
 )
 
 // floorAllowed is each file allowed to match, and what it must hold.

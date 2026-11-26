@@ -784,13 +784,18 @@ func checkPGClient(argv []string, major int, fromWrapper bool) (note string, ok,
 // pulled or run, always fails, with what to do.
 func fenceTools(t *testing.T) {
 	t.Helper()
+	findPGClients(t, "pg_dump", "pg_restore")
+}
+
+func findPGClients(t *testing.T, tools ...string) {
+	t.Helper()
 	var num int
 	if err := testdb.Shared(t).Raw("SHOW server_version_num").Scan(&num).Error; err != nil {
 		t.Fatal(err)
 	}
 	major := num / 10000
 	wrapper := pgWrapperPath()
-	for _, tool := range []string{"pg_dump", "pg_restore"} {
+	for _, tool := range tools {
 		if pgClients[tool] != nil {
 			continue // found by an earlier test of this process
 		}
@@ -891,15 +896,15 @@ func fenceRestore(t *testing.T, db *gorm.DB, dump string, dataOnly bool, others 
 		t.Fatal(err)
 	}
 	// The data-only COPY writes the restore_fence row with no declared
-	// recovery level, which 00015's start fence refuses. The test owns the
+	// recovery level, which the startup triggers refuse. The test owns the
 	// table, so it turns the fence off around the COPY: it stands in for an
 	// operator who bypasses the fence, and the barrier must still detect the
 	// restore.
-	if err := db.Exec("ALTER TABLE settings DISABLE TRIGGER settings_recovery_floor").Error; err != nil {
+	if err := db.Exec("ALTER TABLE settings DISABLE TRIGGER settings_recovery_floor, DISABLE TRIGGER settings_recovery_floor_invitations").Error; err != nil {
 		t.Fatal(err)
 	}
 	fenceRun(t, "pg_restore", "--data-only", "--no-owner", "-t", "settings", "-t", "admin_operation_attempts", "-d", url, dump)
-	if err := db.Exec("ALTER TABLE settings ENABLE TRIGGER settings_recovery_floor").Error; err != nil {
+	if err := db.Exec("ALTER TABLE settings ENABLE TRIGGER settings_recovery_floor, ENABLE TRIGGER settings_recovery_floor_invitations").Error; err != nil {
 		t.Fatal(err)
 	}
 }
@@ -2869,8 +2874,8 @@ func removeFoldBuilds() {
 // buildFold builds the current tree (ref "") or a tagged release from git
 // (git archive, web/dist holding only its README), CGO off, once per process.
 // A missing tag or toolchain fails under CI and skips locally. scripts/go-test.sh
-// builds both before its shards start and names them in FOLD_TEST_BUILD_CURRENT
-// and FOLD_TEST_BUILD_V0_1_0, so no shard compiles beside the timing tests.
+// builds them before its shards start and names them in FOLD_TEST_BUILD_CURRENT
+// and the versioned FOLD_TEST_BUILD variables, so shards need no compiler.
 func buildFold(t *testing.T, ref string) string {
 	t.Helper()
 	foldBuildsMu.Lock()
