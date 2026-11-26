@@ -59,6 +59,7 @@ import { Skeleton } from "../components/ui/Skeleton";
 import { ContactHistory } from "../api/contactHistory";
 import { formatShortDay } from "../lib/when";
 import { groupDeleteNotice } from "../lib/signedUp";
+import { useFocusHome, useLockedFocus } from "../lib/focusHome";
 
 type AdminTab = "approvals" | "groups" | "rooms" | "users" | "invite" | "settings" | "system";
 
@@ -156,9 +157,17 @@ function PendingCard({ group, onDone }: { group: GroupSummary; onDone: (decision
 // The card's Delete and Keep group answer the leader's request. When the request is no longer open (the leader
 // withdrew it, someone joined, another admin kept or deleted the group) the server refuses and changes nothing, and the
 // card goes away while the queue reads again (onStale).
+// What the card is waiting on, said in its status line: the count before the prompt, then the answer.
+const DELETION_WAIT = { counting: "Checking who will be notified…", deleting: "Deleting the group…", keeping: "Keeping the group…" } as const;
+
 function DeletionCard({ group, onDone, onStale }: { group: GroupSummary; onDone: () => void; onStale: () => void }) {
-  const [busy, setBusy] = useState(false);
+  const [waiting, setWaiting] = useState<keyof typeof DELETION_WAIT | null>(null);
+  const busy = waiting !== null;
   const [error, setError] = useState<string | null>(null);
+  // A press disables both buttons while the count and the answer are read: focus waits on the card, never the page,
+  // and goes back to the button pressed when the prompt is dismissed.
+  const home = useFocusHome<HTMLDivElement>();
+  useLockedFocus(home, busy);
   // The browser's prompt opens only after the count arrives: by then the card may be gone (the queue read again, or
   // the admin left the tab), and then the press asks nothing.
   const live = useRef(false);
@@ -170,25 +179,27 @@ function DeletionCard({ group, onDone, onStale }: { group: GroupSummary; onDone:
 
   async function approve() {
     if (busy) return;
-    setBusy(true);
+    setWaiting("counting");
     setError(null);
 
     try {
       const told = await groupDeleteNotice(group.id);
 
       if (!live.current || !confirm(`Delete “${group.name}”? This removes the group, its members, and its events. ${told}`)) return;
+      setWaiting("deleting");
       await Admin.deleteGroup(group.id, true);
       onDone();
     } catch (e) {
       if (e instanceof ApiError && (e.code === "already_handled" || e.status === 404)) onStale();
       else setError(errorText(e, "We couldn't delete that."));
     } finally {
-      setBusy(false);
+      setWaiting(null);
     }
   }
 
   async function keep() {
-    setBusy(true);
+    if (busy) return;
+    setWaiting("keeping");
     setError(null);
 
     try {
@@ -198,12 +209,12 @@ function DeletionCard({ group, onDone, onStale }: { group: GroupSummary; onDone:
       if (e instanceof ApiError && (e.code === "already_handled" || e.status === 404)) onStale();
       else setError(errorText(e, "We couldn't keep the group."));
     } finally {
-      setBusy(false);
+      setWaiting(null);
     }
   }
 
   return (
-    <div className="fold-list-row bg-surface border-b border-border px-4">
+    <div ref={home.ref} tabIndex={-1} role="group" aria-label={`Deletion request for ${group.name}`} className="fold-list-row bg-surface border-b border-border px-4 focus:outline-none">
       <Link to={`/groups/${group.id}`} className="text-xl font-bold hover:text-primary">
         {group.name}
       </Link>
@@ -213,9 +224,10 @@ function DeletionCard({ group, onDone, onStale }: { group: GroupSummary; onDone:
       </div>
       <p className="text-text-muted mt-3">The leader asked for this group to be deleted.</p>
       {error && <FormError layout="mt-2">{error}</FormError>}
+      <p role="status" className="sr-only">{waiting ? DELETION_WAIT[waiting] : ""}</p>
       <div className="flex gap-3 mt-4">
         <Button variant="danger-outline" onClick={approve} disabled={busy}>
-          {busy ? "…" : "Delete group"}
+          Delete group
         </Button>
         <Button variant="primary" onClick={keep} disabled={busy}>
           Keep group
@@ -683,6 +695,8 @@ function GroupsTab({ users, groups, error, reload, onDeleted }: {
   const [deletingId, setDeletingId] = useState<number | null>(null);
   const [deleteError, setDeleteError] = useState<string | null>(null);
   const [deleted, setDeleted] = useState("");
+  // The wait for the count before the prompt, announced without moving focus (it stays on the row's More button).
+  const [checking, setChecking] = useState("");
   const deletedRef = useRef<HTMLParagraphElement>(null);
   const manageMemberButtons = useRef(new Map<number, HTMLButtonElement>());
 
@@ -698,9 +712,12 @@ function GroupsTab({ users, groups, error, reload, onDeleted }: {
 
   async function deleteGroup(g: GroupSummary) {
     setDeletingId(g.id);
+    setChecking(`Checking who deleting “${g.name}” will notify…`);
 
     try {
       const told = await groupDeleteNotice(g.id);
+
+      setChecking("");
 
       // The prompt opens after the count arrives: by then the row may be off screen (another page or search, or the
       // tab left), and then the press asks nothing.
@@ -714,6 +731,7 @@ function GroupsTab({ users, groups, error, reload, onDeleted }: {
     } catch (e) {
       setDeleteError(errorText(e, "We couldn't delete that."));
     } finally {
+      setChecking("");
       setDeletingId(null);
     }
   }
@@ -739,6 +757,7 @@ function GroupsTab({ users, groups, error, reload, onDeleted }: {
       <PageCount paging={paging} noun="groups" />
       {deleteError && <FormError>{deleteError}</FormError>}
       {/* Always rendered so screen readers announce the text when it arrives; empty, it takes no room. */}
+      <p role="status" className="sr-only">{checking}</p>
       <p ref={deletedRef} role="status" tabIndex={-1} className={deleted ? "text-sm text-text-muted focus:outline-none" : "sr-only"}>{deleted}</p>
       {paging.rows.map((g) => (
         <div key={g.id} className="fold-list-row bg-surface border-b border-border px-4">

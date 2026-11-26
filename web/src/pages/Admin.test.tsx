@@ -358,6 +358,52 @@ describe("a group delete's prompt says who will be notified", () => {
   });
 });
 
+describe("focus while a delete's count is read", () => {
+  function heldCount() {
+    let answer: (v: { people: number }) => void = () => {};
+
+    vi.mocked(Admin.deleteCount).mockReturnValue(new Promise((resolve) => { answer = resolve; }));
+
+    return (people: number) => act(async () => { answer({ people }); });
+  }
+
+  it("keeps it on the request's card, says what it waits for, and gives it back to Delete when the prompt is dismissed", async () => {
+    vi.mocked(AdminAccountRequests.list).mockResolvedValue({ requests: [] });
+    vi.mocked(Admin.deletions).mockResolvedValue({ groups: [group(5, "Solo", { deletionRequested: true })] });
+    const release = heldCount();
+    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(false);
+    render(<MemoryRouter initialEntries={["/admin"]}><AdminPage /></MemoryRouter>);
+    const del = await screen.findByRole("button", { name: "Delete group" });
+    del.focus();
+    await userEvent.keyboard("{Enter}");
+    await waitFor(() => expect(del).toBeDisabled());
+    expect(document.activeElement).not.toBe(document.body);
+    expect(screen.getByRole("group", { name: "Deletion request for Solo" })).toHaveFocus();
+    expect(screen.getByText("Checking who will be notified…")).toHaveAttribute("role", "status");
+    await release(3);
+    expect(confirmSpy).toHaveBeenCalled();
+    await waitFor(() => expect(del).toHaveFocus());
+    expect(Admin.deleteGroup).not.toHaveBeenCalled();
+    expect(screen.queryByText("Checking who will be notified…")).not.toBeInTheDocument();
+  });
+
+  it("keeps it on the Groups tab's row, says what it waits for, and keeps it there when the prompt is dismissed", async () => {
+    vi.mocked(AdminGroups.list).mockResolvedValue({ groups: [group(3, "Choir")] });
+    const release = heldCount();
+    vi.spyOn(window, "confirm").mockReturnValue(false);
+    render(<MemoryRouter initialEntries={["/admin?tab=groups"]}><AdminPage /></MemoryRouter>);
+    const more = await screen.findByRole("button", { name: "More for Choir" });
+    await userEvent.click(more);
+    await userEvent.keyboard("{ArrowDown}");
+    await userEvent.click(screen.getByRole("menuitem", { name: "Delete" }));
+    expect(await screen.findByText("Checking who deleting “Choir” will notify…")).toHaveAttribute("role", "status");
+    expect(document.activeElement).not.toBe(document.body);
+    await release(1);
+    await waitFor(() => expect(more).toHaveFocus());
+    expect(screen.queryByText("Checking who deleting “Choir” will notify…")).not.toBeInTheDocument();
+  });
+});
+
 describe("a deletion request that is no longer open", () => {
   const handled = new ApiError(409, "This was already handled", { code: "already_handled", resolution: "withdrawn", resolvedBy: "" });
 
