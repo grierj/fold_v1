@@ -4,7 +4,7 @@ import { stubService } from "../test/service";
 import { act, cleanup, fireEvent, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter, Outlet, Route, RouterProvider, Routes, createMemoryRouter } from "react-router-dom";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { ApiError } from "../api/core";
 import { Dates, Events } from "../api/events";
 import { Site } from "../api/site";
@@ -35,6 +35,11 @@ const registration: RegistrationResponse = { registrationId: 8, userId: 2, event
 const page = () => <MemoryRouter initialEntries={["/events/7/dates/2026-12-01"]}><Routes><Route path="/events/:id/dates/:date" element={<EventDatePage />} /><Route path="/login" element={<p>Sign in first</p>} /></Routes></MemoryRouter>;
 
 function mount() { return render(page()); }
+
+// Load the lazy manager module before the first cancellation case starts its DOM query timeout.
+beforeAll(async () => {
+  await import("../components/ManageDate");
+});
 
 beforeEach(() => { vi.resetAllMocks(); actor.user = { id: 2 }; actor.canCompose = false; vi.mocked(Dates.get).mockResolvedValue({ occurrence: occurrence() }); vi.mocked(Dates.register).mockResolvedValue({ registration }); vi.mocked(Dates.end).mockResolvedValue({}); nativePromptsFail(); });
 
