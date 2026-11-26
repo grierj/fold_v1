@@ -162,6 +162,69 @@ func (f *subjectFacts) eligible(a *App, tx *gorm.DB, r models.Registration, ev *
 	return !r.ChildcareRequested || (person.Kind == models.HouseholdChild && r.AttendanceMode != models.AttendanceRemote), nil
 }
 
+// recheckAnswer cancels a standing answer whose holder or subject no longer
+// qualifies. A child who became a teen or adult can keep an otherwise valid
+// seat after their childcare request is cleared.
+func (f *subjectFacts) recheckAnswer(a *App, tx *gorm.DB, r *models.Registration, ev *models.Event, access map[uint]bool, now time.Time) error {
+	eligible, err := f.eligible(a, tx, *r, ev, access, now)
+	if err != nil || eligible {
+		return err
+	}
+	if r.ChildcareRequested {
+		candidate := *r
+		candidate.ChildcareRequested = false
+		eligible, err = f.eligible(a, tx, candidate, ev, access, now)
+		if err != nil {
+			return err
+		}
+		if eligible {
+			r.ChildcareRequested = false
+			return nil
+		}
+	}
+	r.Status = models.RegCancelled
+	return nil
+}
+
+// The occurrence lock serializes sign-ups while the contact gate holds
+// relationship revocations. Household edits recheck under the same date lock.
+// Existing parties hold their seats even when the capacity has been lowered.
+func (a *App) recheckRestoredSignups(tx *gorm.DB, ev *models.Event, o *models.EventOccurrence, actor uint, ip string, now time.Time) error {
+	var regs []models.Registration
+	if err := tx.Where("occurrence_id = ?", o.ID).Where(registrationStartsFrom(policy.RegRestoreDate)).Order("id").Find(&regs).Error; err != nil || len(regs) == 0 {
+		return err
+	}
+	facts, err := a.loadEligibilityFacts(tx, regs, now, nil)
+	if err != nil {
+		return err
+	}
+	access := map[uint]bool{}
+	for _, old := range regs {
+		r := old
+		holder := facts.users[registrationHolder(r)]
+		if holder == nil || holder.Status == models.UserDisabled {
+			// Erased rows are history. DEC-38 leaves a disabled holder's
+			// answer dormant until the re-enable path checks it.
+			continue
+		}
+		if !holder.CanSignIn() && holder.Status != models.UserGuest {
+			r.Status = models.RegCancelled
+		} else if err := facts.recheckAnswer(a, tx, &r, ev, access, now); err != nil {
+			return err
+		}
+		if r.Status == old.Status && r.ChildcareRequested == old.ChildcareRequested {
+			continue
+		}
+		if err := saveRegistration(tx, policy.RegRestoreDate, old.Status, &r); err != nil {
+			return err
+		}
+		if err := auditRegistration(tx, &actor, audit.RegistrationChanged, ev.ID, old, r, ip); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // householdHolderOf is the responsible adult of a household registration as
 // policy reads it. found says whether acct is the holder's household account;
 // it only counts when it belongs to the person's household. access is whether
@@ -196,16 +259,14 @@ func householdPersonName(tx *gorm.DB, id uint) (string, error) {
 }
 
 // reconcileHouseholdPerson runs while the household is locked, and locks
-// affected dates in ID order before cancelling or clearing invalid requests.
-// A date is selected unlocked, so each is judged again under its lock: one
-// cancelled or started since is skipped, as if it had been so at the
-// selection. A cancelled date's details may have changed after its holder
-// lost sight of it, and only its tombstone rule may name it.
+// affected dates in ID order. Select cancelled dates too: a restore waiting
+// to commit has already judged the old household facts. Under the date lock
+// either this edit sees the scheduled date or the restore sees the edit.
 func (a *App) reconcileHouseholdPerson(tx *gorm.DB, person *models.HouseholdPerson, deleting bool, actor *uint, ip string) error {
 	var regs []models.Registration
 	now := time.Now().UTC()
 	if err := tx.Joins("JOIN event_occurrences ON event_occurrences.id = registrations.occurrence_id").
-		Where("registrations.household_person_id = ? AND event_occurrences.starts_at > ? AND event_occurrences.status = ?", person.ID, now, models.OccurrenceScheduled).
+		Where("registrations.household_person_id = ? AND event_occurrences.starts_at > ?", person.ID, now).
 		Where(registrationStartsFrom(policy.RegHouseholdPersonChanged)).Order("registrations.occurrence_id, registrations.id").Find(&regs).Error; err != nil {
 		return err
 	}
@@ -228,29 +289,15 @@ func (a *App) reconcileHouseholdPerson(tx *gorm.DB, person *models.HouseholdPers
 			return err
 		}
 		old := r
-		eligible := false
-		if !deleting {
-			var err error
-			if eligible, err = a.eligibleRegistration(tx, r, &ev, now); err != nil {
+		if deleting {
+			r.Status = models.RegCancelled
+		} else {
+			facts, err := a.loadEligibilityFacts(tx, []models.Registration{r}, now, nil)
+			if err != nil {
 				return err
 			}
-		}
-		if !eligible {
-			// Changing away from child clears care without cancelling an otherwise
-			// eligible confirmed teen or verified adult's seat.
-			candidate := r
-			candidate.ChildcareRequested = false
-			careOK := false
-			if !deleting {
-				var err error
-				if careOK, err = a.eligibleRegistration(tx, candidate, &ev, now); err != nil {
-					return err
-				}
-			}
-			if careOK {
-				r.ChildcareRequested = false
-			} else {
-				r.Status = models.RegCancelled
+			if err := facts.recheckAnswer(a, tx, &r, &ev, map[uint]bool{}, now); err != nil {
+				return err
 			}
 		}
 		if r.Status == old.Status && r.ChildcareRequested == old.ChildcareRequested {
