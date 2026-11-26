@@ -150,9 +150,9 @@ func (a *App) apiCreateGroup(c *gin.Context) {
 		fail(c, err)
 		return
 	}
-	visibility, msg := normalizeVisibility(body.Visibility)
-	if msg != "" {
-		jsonError(c, http.StatusBadRequest, msg)
+	visibility, err := normalizeVisibility(body.Visibility)
+	if err != nil {
+		fail(c, err)
 		return
 	}
 	limit, _, msg := parseMemberLimit(body.MemberLimit)
@@ -170,7 +170,7 @@ func (a *App) apiCreateGroup(c *gin.Context) {
 		Visibility:  visibility,
 		MemberLimit: limit,
 	}
-	err := a.DB.Transaction(func(tx *gorm.DB) error {
+	err = a.DB.Transaction(func(tx *gorm.DB) error {
 		if err := tx.Create(&g).Error; err != nil {
 			return err
 		}
@@ -473,9 +473,9 @@ func (a *App) apiUpdateGroup(c *gin.Context) {
 		columns = append(columns, "status")
 	}
 	if body.Visibility != nil {
-		visibility, msg := normalizeVisibility(*body.Visibility)
-		if msg != "" {
-			jsonError(c, http.StatusBadRequest, msg)
+		visibility, err := normalizeVisibility(*body.Visibility)
+		if err != nil {
+			fail(c, err)
 			return
 		}
 		patch.Visibility = visibility
@@ -756,15 +756,17 @@ func (a *App) directoryQuery(u *models.User) *gorm.DB {
 			Where("user_id = ? AND status = ?", u.ID, models.MembershipActive))
 }
 
-func normalizeVisibility(visibility string) (string, string) {
+var errInvalidVisibility = apiErr(http.StatusBadRequest, "", "visibility must be public, private, or invite_only")
+
+func normalizeVisibility(visibility string) (string, error) {
 	visibility = strings.TrimSpace(visibility)
 	if visibility == "" {
 		visibility = models.VisibilityPublic
 	}
 	if !policy.ValidVisibility(visibility) {
-		return "", "visibility must be public, private, or invite_only"
+		return "", errInvalidVisibility
 	}
-	return visibility, ""
+	return visibility, nil
 }
 
 func (a *App) loadManagedGroup(c *gin.Context) (*models.Group, bool) {

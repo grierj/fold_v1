@@ -1,11 +1,11 @@
+import { useEventReadPin } from "../lib/eventReadPin";
 import { Form } from "./ui/Form";
 import { childcareBody, childcareFrom } from "./ChildcareField";
-import { useLayoutEffect, useRef, useState } from "react";
+import { useLayoutEffect, useRef, useState, type RefObject } from "react";
 import { Events } from "../api/events";
 import { bydays, isSimpleWeekly, isWeekly, weekdayCode, weeklyRule } from "../lib/rrule";
-import { useDirty } from "../lib/useDirty";
 import { useUnsavedChanges } from "../lib/unsavedChanges";
-import { useWhenState } from "../lib/useWhenState";
+import { useWhenState, type WhenInit } from "../lib/useWhenState";
 import { Field, FormError, Input, Textarea, focusFirstInvalid, showFieldErrors } from "./ui/Field";
 import { FormActions } from "./ui/FormActions";
 import { Button } from "./ui/Button";
@@ -19,10 +19,11 @@ import { videoBody } from "./VideoField";
 import { remoteBody, remoteFrom } from "./RemoteField";
 import { errorText, keptDatesOf } from "../lib/errors";
 import { useAction, type Action } from "../lib/useAction";
-import { answerNames, useRevisionSave, type RevisionConflict } from "../lib/useRevisionSave";
+import { answerNames, useRevisionSave, type LostSend, type RevisionConflict } from "../lib/useRevisionSave";
 import { useFocusHome, useLockedFocus } from "../lib/focusHome";
 import { KeptDates } from "./KeptDates";
 import { useKeptRefusal } from "./keptRefusal";
+import type { ResourceReadOutcome } from "../lib/refusedSave";
 import { optionFieldOfError, validateEventOptions, type EventOptionValues, type OptionErrors } from "./eventOptionValues";
 import type { EventInput, VideoProvider, VideoReveal } from "../types";
 
@@ -88,15 +89,64 @@ export function savedFields(s: Omit<SeriesFields, "eventId" | "revision">) {
   };
 }
 
+interface SeriesDraft extends WhenInit {
+  tzid: string;
+  title: string;
+  description: string;
+  location: string;
+  rule: string;
+  until: string;
+  options: EventOptionValues;
+}
+
+export interface SeriesDraftHold {
+  opened: SeriesFields;
+  draft: SeriesDraft;
+  lost: LostSend;
+}
+
+function draftOf(series: SeriesFields): SeriesDraft {
+  const date = series.startsLocal.slice(0, 10);
+  const days = bydays(series.recurrenceRule);
+
+  return {
+    date,
+    time: series.startsLocal.slice(11, 16) || "19:00",
+    duration: series.durationMinutes,
+    recurring: series.recurrenceRule !== "",
+    days: days.length === 0 && isWeekly(series.recurrenceRule) ? [weekdayCode(date)] : days,
+    tzid: series.tzid,
+    title: series.title,
+    description: series.description,
+    location: series.location,
+    rule: series.recurrenceRule,
+    until: series.rruleUntil ?? "",
+    options: {
+      seats: seatsFrom(series.capacity, series.waitlistEnabled, series.guestsAllowed),
+      video: {
+        provider: series.videoProvider ?? "none",
+        url: series.videoUrl ?? "",
+        reveal: series.videoReveal ?? "registered_only",
+      },
+      childcare: childcareFrom(series.childcareAvailable, series.childcareCapacity, series.childcareAges, series.childcareNotes),
+      remote: remoteFrom(series.remoteAvailable, series.remoteCapacity),
+      reminder: series.reminderEmailMinutes ?? DEFAULT_REMINDER_MINUTES,
+      reminderPush: series.reminderPush ?? true,
+    },
+  };
+}
+
 // SeriesEditor is the one "Edit series" / "Edit event" form, on the event page (DEC-161).
 export function SeriesEditor({
   series,
   idPrefix,
+  hold,
   locationHint,
   roomDate,
   onSaved,
   onClose,
   onRoomChanged,
+  onRoomRead,
   onAuthorityLost,
   onConflict,
   action: shared,
@@ -104,6 +154,7 @@ export function SeriesEditor({
 }: {
   series: SeriesFields;
   idPrefix: string;
+  hold?: RefObject<SeriesDraftHold | null>;
   locationHint?: string;
   // The original date of a single-date event's one occurrence. It turns on the
   // one-date Room control (M2.1b); a series gets the whole-series one (M2.1c).
@@ -112,6 +163,7 @@ export function SeriesEditor({
   onClose?: () => void;
   // The room was booked or released (its own action, not part of Save).
   onRoomChanged?: () => void;
+  onRoomRead?: (outcome: ResourceReadOutcome) => void;
   // The kept-dates panel's read was refused: this person may no longer manage the event.
   onAuthorityLost?: () => void;
   // The save was refused and not sent again: the page shows the event as it is now (DEC-161, DEC-162).
@@ -121,51 +173,28 @@ export function SeriesEditor({
   // Another run in the same panel is on its way.
   locked?: boolean;
 }) {
-  // The save sends the difference from what the editor opened with, so that stays its baseline through any reload:
-  // one save per mount (a second one would diff against values it did not show), and a locked editor never changes.
-  const [instance] = useState(series);
-  // Like `series`: a read that lands while this editor is open never adds or removes a field.
+  // The sibling's save can remount this form. The draft still names the read it was made from (DEC-162).
+  const pin = useEventReadPin();
+  const [held] = useState(() => hold?.current);
+  const [instance] = useState(() => held?.opened ?? series);
+  const [original] = useState(() => draftOf(instance));
+  const first = held?.draft ?? original;
   const [openedRoomDate] = useState(roomDate);
+  const [seriesRoom] = useState(series.recurrenceRule !== "");
   const simple = isSimpleWeekly(instance.recurrenceRule);
 
-  const when = useWhenState({
-    date: instance.startsLocal.slice(0, 10),
-    time: instance.startsLocal.slice(11, 16) || "19:00",
-    duration: instance.durationMinutes,
-    recurring: instance.recurrenceRule !== "",
-    days: (() => {
-      const picked = bydays(instance.recurrenceRule);
-
-      if (picked.length > 0) return picked;
-
-      if (isWeekly(instance.recurrenceRule)) return [weekdayCode(instance.startsLocal.slice(0, 10))];
-
-      return [];
-    })(),
-  });
-
+  const when = useWhenState(first);
   const { date, time, duration, recurring, days } = when;
-  const [tzid, setTzid] = useState(instance.tzid);
-  const [title, setTitle] = useState(instance.title);
-  const [description, setDescription] = useState(instance.description);
-  const [location, setLocation] = useState(instance.location);
-  const [rule, setRule] = useState(instance.recurrenceRule);
-  const [until, setUntil] = useState(instance.rruleUntil ?? "");
+  const [tzid, setTzid] = useState(first.tzid);
+  const [title, setTitle] = useState(first.title);
+  const [description, setDescription] = useState(first.description);
+  const [location, setLocation] = useState(first.location);
+  const [rule, setRule] = useState(first.rule);
+  const [until, setUntil] = useState(first.until);
+  const initial = original.options;
+  const [options, setOptions] = useState(first.options);
+  const [lost] = useState<LostSend>(() => held?.lost ?? { current: false });
 
-  const initial: EventOptionValues = {
-    seats: seatsFrom(instance.capacity, instance.waitlistEnabled, instance.guestsAllowed),
-    video: {
-      provider: instance.videoProvider ?? "none",
-      url: instance.videoUrl ?? "",
-      reveal: instance.videoReveal ?? "registered_only",
-    },
-    childcare: childcareFrom(instance.childcareAvailable, instance.childcareCapacity, instance.childcareAges, instance.childcareNotes),
-    remote: remoteFrom(instance.remoteAvailable, instance.remoteCapacity),
-    reminder: instance.reminderEmailMinutes ?? DEFAULT_REMINDER_MINUTES,
-    reminderPush: instance.reminderPush ?? true,
-  };
-
-  const [options, setOptions] = useState(initial);
   // Open on edit, so what is already set is in view (DEC-95).
   const [moreOpen, setMoreOpen] = useState(true);
   const own = useAction();
@@ -177,12 +206,13 @@ export function SeriesEditor({
     opened: instance,
     revision: instance.revision,
     read: async () => {
-      const stored = await Events.get(instance.eventId);
+      const stored = await Events.get(instance.eventId, ...pin);
 
       return { allowed: stored.canManage, revision: stored.event.revision, value: stored.event };
     },
     fields: savedFields,
     answers: answerNames("event", instance.eventId),
+    lost,
     onConflict,
   });
 
@@ -203,8 +233,13 @@ export function SeriesEditor({
   const submit = useRef<HTMLButtonElement>(null);
   const kept = useKeptRefusal({ initial: null, submit, onRefused: setError, onAuthorityLost });
 
-  const dirty = useDirty({ date, time, duration, recurring, days, tzid, title, description, location, rule, until, options });
-  const { guard, markSaved } = useUnsavedChanges(dirty);
+  const draft = { date, time, duration, recurring, days, tzid, title, description, location, rule, until, options };
+  const dirty = JSON.stringify(draft) !== JSON.stringify(original);
+  const { guard, markSaved } = useUnsavedChanges(dirty && !hold);
+
+  useLayoutEffect(() => {
+    if (hold) hold.current = !saved && (dirty || lost.current) ? { opened: instance, draft, lost } : null;
+  });
 
   useLayoutEffect(() => {
     if (frozen || !focusInvalid.current) return;
@@ -296,6 +331,8 @@ export function SeriesEditor({
         if (sent !== "saved") return false;
 
         markSaved();
+
+        if (hold) hold.current = null;
         setSaved(true);
         kept.close();
       } catch (err) {
@@ -322,7 +359,7 @@ export function SeriesEditor({
   }
 
   return (<>
-    <Form ref={root} tabIndex={-1} noValidate onSubmit={save} className="mt-3 space-y-4 border-t border-border pt-3">
+    <Form ref={root} tabIndex={-1} aria-label={instance.recurrenceRule ? "Edit series" : "Edit event"} noValidate onSubmit={save} className="mt-3 space-y-4 border-t border-border pt-3">
       <p className="text-sm text-text-muted">
         This changes every future date that has not been edited on its own. Customized dates stay as they are. Dates
         the new schedule drops are cancelled, and people who were going or maybe are told.
@@ -354,9 +391,9 @@ export function SeriesEditor({
         <Field id={`s-loc-${idPrefix}`} label="Location" optional hint={locationHint}>
           <Input value={location} onChange={(e) => setLocation(e.target.value)} />
         </Field>
-        {instance.recurrenceRule !== "" && <SeriesRoomField eventId={instance.eventId} idPrefix={idPrefix} onChanged={onRoomChanged} onGone={() => onConflict?.("gone")} />}
-        {openedRoomDate && instance.recurrenceRule === "" && (
-          <RoomField eventId={instance.eventId} date={openedRoomDate} idPrefix={idPrefix} onChanged={onRoomChanged} onGone={() => onConflict?.("gone")} />
+        {seriesRoom && <SeriesRoomField eventId={instance.eventId} idPrefix={idPrefix} onChanged={onRoomChanged} onRead={onRoomRead} onGone={() => onConflict?.("gone")} />}
+        {openedRoomDate && !seriesRoom && (
+          <RoomField eventId={instance.eventId} date={openedRoomDate} idPrefix={idPrefix} onChanged={onRoomChanged} onRead={onRoomRead} onGone={() => onConflict?.("gone")} />
         )}
         <EventOptions
           idPrefix={idPrefix}

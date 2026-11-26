@@ -1,24 +1,42 @@
 import { useEffect, useEffectEvent } from "react";
-import { resourceRefused } from "../lib/refusedSave";
+import { credentialCurrent, type Credential } from "../api/core";
+import { resourceRefused, type ResourceReadOutcome } from "../lib/refusedSave";
 import { errorCode, errorText } from "../lib/errors";
 import { useLoad } from "../lib/useLoad";
-import { useRoomsEnabled } from "../lib/useSite";
+import { recheckSite, useRoomsEnabled } from "../lib/useSite";
 import { Button } from "./ui/Button";
 import { FormError } from "./ui/Field";
 import { Skeleton } from "./ui/Skeleton";
 
+// A room read can stop at the public rooms switch before checking the viewer. Only /site can tell us the switch
+// is off in that case. Keep the pinned refusal as an error until the public setting answers.
+export async function readRooms<T>(answer: Promise<T>, pinned?: Credential): Promise<T> {
+  try {
+    return await answer;
+  } catch (cause) {
+    if (pinned && credentialCurrent(pinned) && errorCode(cause) === "session_expired") recheckSite();
+    throw cause;
+  }
+}
+
 // What the room pickers share: a church with rooms off, or a site we can't
 // read, shows no rooms control at all; and the rooms load only while it is on.
 // `off`: room booking was turned off after the page read the site settings (the route's rooms_off).
-export function useRoomPicker<T>(fetch: () => Promise<T>, deps: readonly unknown[], onGone: () => void) {
+export function useRoomPicker<T>(fetch: () => Promise<T>, deps: readonly unknown[], onGone: () => void, onRead?: (outcome: ResourceReadOutcome) => void) {
   const roomsOn = useRoomsEnabled();
   const enabled = roomsOn === true;
   const list = useLoad(fetch, deps, { enabled });
   const off = roomsTurnedOff(list.error);
-  const reportGone = useEffectEvent(onGone);
+
+  const reportRead = useEffectEvent((outcome: ResourceReadOutcome) => {
+    if (onRead) onRead(outcome);
+    else if (outcome === "refused") onGone();
+  });
+
   useEffect(() => {
-    if (resourceRefused(list.error)) reportGone();
-  }, [list.error]);
+    if (resourceRefused(list.error)) reportRead("refused");
+    else if (list.data !== undefined && !list.error) reportRead("loaded");
+  }, [list.error, list.data]);
 
   return {
     enabled,

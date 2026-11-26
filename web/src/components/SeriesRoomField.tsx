@@ -1,10 +1,11 @@
+import { useEventReadPin } from "../lib/eventReadPin";
 import { useEffect, useRef, useState } from "react";
 import { ApiError } from "../api/core";
 import { SeriesRooms } from "../api/rooms";
 import { useAuth } from "../auth";
 import { errorText } from "../lib/errors";
 import { roomName } from "../lib/place";
-import { RefusedSaveLine, useRefusedSave } from "../lib/refusedSave";
+import { RefusedSaveLine, useRefusedSave, type ResourceReadOutcome } from "../lib/refusedSave";
 import {
   busyDatesNote, includeLabel, NO_ROOM, ownRoomNote, ownRoomsFor, ownRoomsLead, seriesBookingMessage, seriesRoomLabel, seriesStoredMessage,
 } from "../lib/roomLabels";
@@ -18,7 +19,7 @@ import { Checkbox, Field, FormError, Select } from "./ui/Field";
 import { Button } from "./ui/Button";
 import { DoubleBookPrompt, useOverlapReason } from "./DoubleBookPrompt";
 import { RoomOptions } from "./RoomOptions";
-import { pickGone, RoomLoadStatus, RoomsOffLine, roomsTurnedOff, useRoomPicker } from "./useRoomPicker";
+import { pickGone, readRooms, RoomLoadStatus, RoomsOffLine, roomsTurnedOff, useRoomPicker } from "./useRoomPicker";
 import { useShowAll } from "./useShowAll";
 import { AlertCircleIcon } from "./icons";
 
@@ -54,7 +55,7 @@ const compared = (value: SeriesRoomFields, overBusy: boolean): Partial<SeriesRoo
 // Unlike RoomField it does not book when the select changes, but on its own
 // button: arrow keys on a closed select fire change, and one keypress must
 // never book or release dozens of dates.
-export function SeriesRoomField({ eventId, idPrefix, onChanged, onGone }: {
+export function SeriesRoomField({ eventId, idPrefix, onChanged, onGone, onRead }: {
   eventId: number;
   idPrefix: string;
   // The series room may have changed (a pick landed, or someone else's change refused it): the page behind reads again
@@ -62,9 +63,11 @@ export function SeriesRoomField({ eventId, idPrefix, onChanged, onGone }: {
   onChanged?: () => void;
   // This person may no longer manage the event: the host does what it does then.
   onGone: () => void;
+  onRead?: (outcome: ResourceReadOutcome) => void;
 }) {
+  const pin = useEventReadPin();
   // A church with rooms off, or a site we can't read, sees no rooms control at all.
-  const { enabled, off, list, loading, loadError } = useRoomPicker(() => SeriesRooms.list(eventId), [eventId], onGone);
+  const { enabled, off, list, loading, loadError } = useRoomPicker(() => readRooms(SeriesRooms.list(eventId, ...pin), pin[0]), [eventId], onGone, onRead);
 
   if (off) return <RoomsOffLine />;
 
@@ -90,6 +93,7 @@ function SeriesRoomControl({ eventId, id, read, show, onChanged, onGone }: {
   onChanged?: () => void;
   onGone: () => void;
 }) {
+  const pin = useEventReadPin();
   const { isAdmin } = useAuth();
   const reasonId = `${id}-reason`;
   const action = useAction();
@@ -126,7 +130,7 @@ function SeriesRoomControl({ eventId, id, read, show, onChanged, onGone }: {
     opened: read,
     revision: read.revision,
     read: async () => {
-      const now = await SeriesRooms.list(eventId);
+      const now = await readRooms(SeriesRooms.list(eventId, ...pin), pin[0]);
 
       return { allowed: true, revision: now.revision, row: now };
     },

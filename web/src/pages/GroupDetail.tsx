@@ -330,6 +330,7 @@ function GroupDetailContent() {
   const returnToGroup = useRef(false);
   const groupMenu = useRef<HTMLDivElement>(null);
   const eventsHeading = useRef<HTMLHeadingElement>(null);
+  const groupHeading = useRef<HTMLHeadingElement>(null);
   useLayoutEffect(() => {
     if (!returnToGroup.current || load.loading) return;
     returnToGroup.current = false;
@@ -337,7 +338,7 @@ function GroupDetailContent() {
 
     if (active && active !== document.body && active.id !== "main") return;
 
-    (groupMenu.current?.querySelector("button") ?? eventsHeading.current)?.focus();
+    (groupMenu.current?.querySelector("button") ?? eventsHeading.current ?? groupHeading.current)?.focus();
   }, [detail, load.loading]);
 
   const loading = load.loading;
@@ -417,10 +418,14 @@ function GroupDetailContent() {
     return (
       <div className="fold-page-narrow">
         {managerStatus}
-        <h1 className="text-3xl font-bold mb-6">Group unavailable</h1>
+        <h1 ref={groupHeading} tabIndex={-1} className="text-3xl font-bold mb-6">Group unavailable</h1>
         <RefusedSaveLine save={groupRefused} noun="group" />
         {refusedDate && <RefusedSaveLine save={dateRefused} noun="date" about={formatDayFull(refusedDate.date)} />}
-        <ErrorNotice message={error ?? "We couldn't load this group."} onRetry={() => void load.retry()} />
+        <ErrorNotice message={error ?? "We couldn't load this group."} onRetry={() => {
+          returnToGroup.current = true;
+          document.getElementById("main")?.focus({ preventScroll: true });
+          void load.retry();
+        }} />
       </div>
     );
   }
@@ -664,7 +669,7 @@ function GroupDetailContent() {
                   )}
                 </div>
               )}
-              <h1 className="text-3xl font-bold text-inverse-foreground wrap-anywhere">{group.name}</h1>
+              <h1 ref={groupHeading} tabIndex={-1} className="text-3xl font-bold text-inverse-foreground wrap-anywhere">{group.name}</h1>
               <div className="mt-3 flex flex-wrap gap-x-6 gap-y-1 text-sm text-inverse-foreground">
                 <span>{canManage && group.memberLimit
                   ? `${group.memberCount} of ${group.memberLimit} members`

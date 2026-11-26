@@ -23,6 +23,7 @@ export const LEAVE = {
   cancelLabel: "Keep editing",
   tone: "normal",
   native: "Leave without saving? Your changes will be lost.",
+  interruption: "leave",
 } satisfies ConfirmRequest;
 
 const anyUnsaved = () => !leavingOnPurpose && [...openForms].some((unsaved) => unsaved());

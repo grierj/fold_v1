@@ -31,6 +31,7 @@ export function GroupForm({
   onCancel,
   saveRef,
   action: shared,
+  locked = false,
 }: {
   initial: {
     name: string; description: string; location: string; tags: string[];
@@ -50,6 +51,7 @@ export function GroupForm({
   saveRef?: Ref<HTMLButtonElement>;
   // A run the page shares with another step of the same save (the review's confirm), so only one goes at a time.
   action?: Action;
+  locked?: boolean;
 }) {
   const [name, setName] = useState(initial.name);
   const [description, setDescription] = useState(initial.description);
@@ -67,11 +69,12 @@ export function GroupForm({
   const summaryId = useId();
   const own = useAction();
   const action = shared ?? own;
+  const frozen = action.running || locked;
   const error = action.state.status === "failed" ? action.state.text : null;
   // Nothing changes while a save is on its way: it sends what was there when it began, and a success closes the
   // form, so a later edit would be lost without a word.
   const home = useFocusHome<HTMLFormElement>();
-  useLockedFocus(home, action.running);
+  useLockedFocus(home, frozen);
 
   const dirty = name !== initial.name || description !== initial.description || location !== initial.location
     || tags !== initial.tags.join(", ") || visibility !== (initial.visibility ?? "public") || memberLimit !== initialLimit
@@ -98,6 +101,8 @@ export function GroupForm({
       }}
       onSubmit={(e) => {
         e.preventDefault();
+
+        if (frozen) return;
         void action.run(async () => {
           const saved = await onSaved({
             name,
@@ -122,7 +127,7 @@ export function GroupForm({
       {guard}
       {error && <FormError>{error}</FormError>}
       {/* pointer-events: the cover's focal point is set by a click on the image, which `disabled` doesn't stop. */}
-      <fieldset disabled={action.running} className="min-w-0 space-y-8 disabled:pointer-events-none">
+      <fieldset disabled={frozen} className="min-w-0 space-y-8 disabled:pointer-events-none">
         <section className="space-y-4">
           <h2 className="text-xl font-semibold">About the group</h2>
           <Field id="group-name" label="Group name" hint="Up to 200 characters.">
@@ -196,10 +201,10 @@ export function GroupForm({
         </section>
       </fieldset>
       <FormActions>
-        <Button ref={saveRef} variant="primary" layout="w-full sm:w-auto" type="submit" disabled={action.running}>
+        <Button ref={saveRef} variant="primary" layout="w-full sm:w-auto" type="submit" disabled={frozen}>
           {action.running ? "Saving…" : saveLabel}
         </Button>
-        <Button variant="secondary" layout="w-full sm:w-auto" disabled={action.running} onClick={onCancel}>
+        <Button variant="secondary" layout="w-full sm:w-auto" disabled={frozen} onClick={onCancel}>
           Cancel
         </Button>
       </FormActions>

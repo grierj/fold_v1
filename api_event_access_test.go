@@ -57,6 +57,129 @@ func TestEventMorePrivateCancelsShutOutRegistrants(t *testing.T) {
 	}
 }
 
+func TestEventVisibilityPreviewAcknowledgesItsSnapshot(t *testing.T) {
+	f := newGroupReadFixture(t, models.VisibilityPublic)
+	leader := pinnedAs(t, f.leader)
+	member := pinnedAs(t, f.member)
+	anon := newAPIClient(t, f.app)
+	anon.fetchCSRF()
+	anon = pinnedAs(t, anon)
+	path := "/api/v1/events/" + itoa(f.event.ID) + "/visibility-impact"
+	preview := path + "?visibility=invite_only&resetOverrides=1"
+	invalid := path + "?visibility=unknown"
+
+	t.Run("answers", func(t *testing.T) {
+		plain := f.leader.do("GET", preview, nil, false)
+		wantNoAck(t, "plain preview", plain)
+		w := leader.do("GET", preview, nil, false)
+		if w.Code != http.StatusOK || w.Body.String() != plain.Body.String() {
+			t.Fatalf("pinned preview: %d %s, plain %d %s", w.Code, w.Body.String(), plain.Code, plain.Body.String())
+		}
+		var impact visibilityImpactJSON
+		decodeJSON(t, w, &impact)
+		if len(impact.Tightened) != 1 || impact.Tightened[0].ID != f.event.ID || impact.Consent == "" {
+			t.Fatalf("preview impact: %+v", impact)
+		}
+		wantAck(t, "manager's preview", w, leader, f.leaderUser)
+
+		w = leader.do("GET", invalid, nil, false)
+		const invalidBody = `{"code":"invalid","error":"visibility must be public, private, or invite_only"}`
+		if w.Code != http.StatusBadRequest || w.Body.String() != invalidBody {
+			t.Fatalf("invalid visibility: %d %s", w.Code, w.Body.String())
+		}
+		wantAck(t, "manager's invalid preview", w, leader, f.leaderUser)
+
+		w = member.do("GET", invalid, nil, false)
+		wantCode(t, "member's preview", w, http.StatusForbidden, "not_allowed")
+		wantAck(t, "member's preview", w, member, f.memberUser)
+
+		w = anon.do("GET", preview, nil, false)
+		wantCode(t, "signed-out preview", w, http.StatusUnauthorized, "signed_out")
+		wantNoAck(t, "signed-out preview", w)
+	})
+
+	t.Run("a session ended before the snapshot", func(t *testing.T) {
+		var fired bool
+		f.app.hooks.readerBegin = func(surface string) {
+			if surface == "event visibility preview" {
+				fired = true
+				apiDo(t, f.admin, "POST", "/api/v1/admin/users/"+itoa(f.memberUser.ID)+"/password",
+					map[string]string{"password": "replacement password"}, http.StatusOK)
+			}
+		}
+		defer func() { f.app.hooks.readerBegin = nil }()
+		w := member.do("GET", preview, nil, false)
+		if !fired {
+			t.Fatal("the snapshot never started")
+		}
+		wantCode(t, "ended session", w, http.StatusUnauthorized, "signed_out")
+		wantNoAck(t, "ended session", w)
+	})
+
+	t.Run("one connection", func(t *testing.T) {
+		oneConnection(t, f.app, oneConnectionPool(t, f.app))
+		w := leader.do("GET", preview, nil, false)
+		if w.Code != http.StatusOK {
+			t.Fatalf("preview on one connection: %d %s", w.Code, w.Body.String())
+		}
+		wantAck(t, "preview on one connection", w, leader, f.leaderUser)
+	})
+
+	t.Run("a failed read", func(t *testing.T) {
+		n := failStatement(t, f.app, func(tx *gorm.DB) bool { return tx.Statement.Table == "event_occurrences" })
+		w := leader.do("GET", preview, nil, false)
+		if n.Load() == 0 || w.Code != http.StatusInternalServerError || w.Body.String() != serverErrorBody {
+			t.Fatalf("failed preview read (failed %d): %d %s", n.Load(), w.Code, w.Body.String())
+		}
+		wantNoAck(t, "failed preview read", w)
+	})
+
+	t.Run("a failed commit", func(t *testing.T) {
+		var fired bool
+		f.app.hooks.readerEnd = func(surface string, tx *gorm.DB) {
+			if surface == "event visibility preview" {
+				fired = true
+				endBackend(t, f.app, tx)
+			}
+		}
+		defer func() { f.app.hooks.readerEnd = nil }()
+		w := leader.do("GET", preview, nil, false)
+		if !fired || w.Code != http.StatusInternalServerError || w.Body.String() != serverErrorBody {
+			t.Fatalf("failed preview commit (fired %t): %d %s", fired, w.Code, w.Body.String())
+		}
+		wantNoAck(t, "failed preview commit", w)
+	})
+
+	t.Run("a committed change after authorization", func(t *testing.T) {
+		before := apiDo(t, f.leader, "GET", preview, nil, http.StatusOK)
+		fired := atReaderSeam(f.app, "authorized", "event visibility preview", func() {
+			err := f.app.DB.Transaction(func(tx *gorm.DB) error {
+				if err := tx.Model(&models.Membership{}).Where("user_id = ? AND group_id = ?", f.leaderUser.ID, f.group).
+					Update("role", models.MembershipMember).Error; err != nil {
+					return err
+				}
+				return tx.Model(&models.EventOccurrence{}).Where("id = ?", f.dates[0].ID).
+					Update("visibility_override", models.VisibilityPublic).Error
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+		})
+		defer func() { f.app.hooks.readerAuthorized = nil }()
+		w := leader.do("GET", preview, nil, false)
+		if !fired.Load() || w.Code != http.StatusOK || w.Body.String() != before {
+			t.Fatalf("preview after authority changed (fired %t): %d %s, before %s", fired.Load(), w.Code, w.Body.String(), before)
+		}
+		wantAck(t, "preview from before the change", w, leader, f.leaderUser)
+
+		w = leader.do("GET", preview, nil, false)
+		wantCode(t, "demoted leader's next preview", w, http.StatusForbidden, "not_allowed")
+		wantAck(t, "demoted leader's next preview", w, leader, f.leaderUser)
+		after := apiDo(t, f.admin, "GET", preview, nil, http.StatusOK)
+		wantIn(t, "the next authorized preview", after, `"futureOverrides":1`)
+	})
+}
+
 // An opened invite-only group's event must not reveal the group's meeting
 // place (the default event location) or, in a cancellation notice, the
 // group's name, place, or page to someone outside the group.

@@ -18,6 +18,7 @@ export interface ConfirmRequest {
   tone: "danger" | "normal";
   // The whole question as the browser's own prompt words it, for routes that do not supply the dialog.
   native: string;
+  interruption?: "leave" | "before-leaving";
 }
 
 // One action that may ask a question before it writes, captured when it starts
@@ -101,7 +102,7 @@ function ConfirmDialog({ request, returnFocus, onAnswer }: { request: ConfirmReq
 }
 
 // The routes that ask in the app's own dialog wrap their page in this. One
-// question is open at a time: a second ask while one is open is answered no.
+// question is open at a time. A leave question can take the place of one marked for interruption.
 // An open question closes as no as soon as its action goes stale.
 export function ConfirmProvider({ children }: { children: ReactNode }) {
   const [open, setOpen] = useState<Asked | null>(null);
@@ -124,7 +125,13 @@ export function ConfirmProvider({ children }: { children: ReactNode }) {
 
   const scope = useMemo<Scope>(() => ({
     ask: (request, returnFocus, stale) => {
-      if (current.current) return Promise.resolve(false);
+      const previous = current.current;
+
+      if (previous) {
+        if (request.interruption !== "leave" || previous.request.interruption !== "before-leaving") return Promise.resolve(false);
+        returnFocus = previous.returnFocus;
+        finish(previous, false);
+      }
 
       return new Promise<boolean>((resolve) => {
         const asked = { id: ++nextId.current, request, returnFocus, resolve, stale };

@@ -1,3 +1,4 @@
+import { useEventReadPin } from "../lib/eventReadPin";
 import { useRosterActivity } from "../lib/rosterWrites";
 import { Form } from "./ui/Form";
 import { useEffect, useLayoutEffect, useRef, useState, type MutableRefObject } from "react";
@@ -17,7 +18,7 @@ import { dateFields, intendedDateFields, readDateFields, type DateFields, type D
 import { KeptDates } from "./KeptDates";
 import { useKeptRefusal } from "./keptRefusal";
 import { useFocusHome, useKeepFocusHome } from "../lib/focusHome";
-import { useUnsavedChanges } from "../lib/unsavedChanges";
+import { useKeptDraft, useUnsavedChanges } from "../lib/unsavedChanges";
 import { changeSentence } from "../lib/visibilityChange";
 import { count as plural } from "../lib/plural";
 import { dateDecision, reviewOutdated } from "../lib/visibilityConsent";
@@ -132,6 +133,7 @@ const WITHDRAWN = Symbol("withdrawn");
 // draft opened with, and a refusal reads the date once and either is done, sends again or closes the editor.
 export function DateEditor({ opener, base, hold, onSaved, onSaving, pending = false, onConflict, onClose, onRoomChanged, focusRoom, onAuthorityLost }: DateEditorProps) {
   // The read this draft opened from: its values and its revision, for as long as the draft lives.
+  const [pinned] = useEventReadPin();
   const [opened] = useState(() => hold?.current?.opened ?? base);
   const [draft, setDraft] = useState(() => hold?.current?.draft ?? fieldsOf(opened));
   const [reason, setReason] = useState(() => hold?.current?.reason ?? "");
@@ -219,7 +221,7 @@ export function DateEditor({ opener, base, hold, onSaved, onSaving, pending = fa
   const send = useRevisionSave<DateFields | null, DateFields>({
     opened: openedFields,
     revision: opened.revision,
-    read: () => readDateFields(opener),
+    read: () => readDateFields(opener, pinned),
     fields: (value) => value,
     answers: answerNames("occurrence", opened.id),
     lost,
@@ -260,7 +262,7 @@ export function DateEditor({ opener, base, hold, onSaved, onSaving, pending = fa
     // nothing it was judged under moved: this editor is on screen, no roster write on the date began or ended, and
     // this tab signs in as it did.
     const at = roster.changes();
-    const credential = currentCredential();
+    const credential = pinned ?? currentCredential();
     const live = () => mounted.current && roster.changes() === at && sameSignIn(credential);
     const reasonSent = changes.visibility !== undefined ? reason.trim() || undefined : undefined;
 
@@ -294,7 +296,7 @@ export function DateEditor({ opener, base, hold, onSaved, onSaving, pending = fa
           let yes = false;
 
           try {
-            yes = await action.ask({ title: "Save this date?", body: question, confirmLabel: "Save and notify", tone: "normal", native: `${question} Save this date?` });
+            yes = await action.ask({ title: "Save this date?", body: question, confirmLabel: "Save and notify", tone: "normal", native: `${question} Save this date?`, interruption: "before-leaving" });
           } finally {
             asking.current = null;
           }
@@ -362,6 +364,7 @@ export function DateEditor({ opener, base, hold, onSaved, onSaving, pending = fa
 
   // Leaving the page with a change typed and not sent asks first (DEC-98), as the series editor does.
   useUnsavedChanges(unsent);
+  useKeptDraft(() => asking.current !== null, true);
 
   return (<>
     <Form ref={root} tabIndex={-1} noValidate onSubmit={save} className="mt-3 space-y-3 border-t border-border pt-3">

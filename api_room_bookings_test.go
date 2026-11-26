@@ -965,18 +965,24 @@ func TestRoomPickerReadsJudgeAuthorityInTheirSnapshot(t *testing.T) {
 					t.Error(err)
 				}
 			})
-			got := apiDo(t, co, "GET", path, nil, http.StatusOK)
+			pinned := pinnedAs(t, co)
+			w := pinned.do("GET", path, nil, false)
 			if !fired.Load() {
 				t.Fatal("the read never reached its seam")
 			}
-			if got != before {
-				t.Fatalf("the read straddled the commit:\nbefore %s\ngot    %s", before, got)
+			if w.Code != http.StatusOK || w.Body.String() != before {
+				t.Fatalf("room read after the commit: %d %s\nbefore %s", w.Code, w.Body.String(), before)
 			}
-			wantCode(t, "the next read, rooms off", co.do("GET", path, nil, false), http.StatusNotFound, "rooms_off")
+			wantAck(t, "the snapshot's room read", w, pinned, coUser)
+			w = pinned.do("GET", path, nil, false)
+			wantCode(t, "the next read, rooms off", w, http.StatusNotFound, "rooms_off")
+			wantNoAck(t, "rooms-off middleware refusal", w)
 			if err := setSettingIn(f.app.DB, settingRoomsEnabled, "true"); err != nil {
 				t.Fatal(err)
 			}
-			wantCode(t, "the next read, demoted", co.do("GET", path, nil, false), http.StatusForbidden, "")
+			w = pinned.do("GET", path, nil, false)
+			wantCode(t, "the next read, demoted", w, http.StatusForbidden, "")
+			wantAck(t, "demoted manager's room read", w, pinned, coUser)
 		})
 	}
 }

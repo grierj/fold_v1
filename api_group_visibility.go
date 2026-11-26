@@ -190,13 +190,13 @@ func (a *App) apiGroupVisibilityImpact(c *gin.Context) {
 	if !ok {
 		return
 	}
-	vis, msg := normalizeVisibility(c.Query("visibility"))
-	if msg != "" {
-		jsonError(c, http.StatusBadRequest, msg)
+	vis, err := normalizeVisibility(c.Query("visibility"))
+	if err != nil {
+		fail(c, err)
 		return
 	}
 	var impact visibilityImpactJSON
-	err := a.DB.Transaction(func(tx *gorm.DB) error {
+	err = a.DB.Transaction(func(tx *gorm.DB) error {
 		me, err := snapshotViewerIn(tx, apiUser(c))
 		if err != nil {
 			return err
@@ -601,67 +601,50 @@ func (a *App) knewDateTitles(tx *gorm.DB, ev *models.Event, sel dateLosers) (map
 	return knew, nil
 }
 
-// apiEventVisibilityImpact previews a single-event visibility change, like
-// apiGroupVisibilityImpact does for a group. Managers only.
-// GET /events/:id/visibility-impact?visibility=...[&resetOverrides=1]. The
-// viewer, their authority, the impact (with the reset dates when asked) and
-// the consent token are read in one snapshot, on one clock.
+// apiEventVisibilityImpact reads the manager's authority, impact and consent
+// token in one snapshot. A participating request gets an acknowledgment
+// for that viewer after the snapshot's commit or a decided refusal's rollback.
 func (a *App) apiEventVisibilityImpact(c *gin.Context) {
-	ev, f, ok := a.loadVisibleEvent(c)
-	if !ok {
-		return
-	}
-	if !f.canManage(apiUser(c)) {
-		fail(c, errCannotChangeEvent)
-		return
-	}
-	vis, msg := normalizeVisibility(c.Query("visibility"))
-	if msg != "" {
-		jsonError(c, http.StatusBadRequest, msg)
-		return
-	}
-	reset := c.Query("resetOverrides") == "1"
+	id, _ := strconv.Atoi(c.Param("id"))
 	var impact visibilityImpactJSON
-	err := a.DB.Transaction(func(tx *gorm.DB) error {
-		me, err := snapshotViewerIn(tx, apiUser(c))
+	var judged sessionJudgment
+	err := decidingSnapshot(a.DB.WithContext(c.Request.Context()), func(tx *gorm.DB) error {
+		if a.hooks.readerBegin != nil {
+			a.hooks.readerBegin("event visibility preview")
+		}
+		t, err := a.managedEventTargetIn(tx, apiUser(c), id, &judged)
 		if err != nil {
 			return err
 		}
-		if me == nil {
-			return errSecuritySession
-		}
-		var current models.Event
-		if err := tx.First(&current, ev.ID).Error; err != nil {
-			if errors.Is(err, gorm.ErrRecordNotFound) {
-				return errEventNotFound
-			}
-			return err
-		}
-		f, err := eventFactsIn(tx, me, &current)
+		vis, err := normalizeVisibility(c.Query("visibility"))
 		if err != nil {
 			return err
 		}
-		if !f.canSee(me) {
-			return errEventNotFound
-		}
-		if !f.canManage(me) {
-			return errCannotChangeEvent
+		if a.hooks.readerAuthorized != nil {
+			a.hooks.readerAuthorized("event visibility preview")
 		}
 		now := a.now().UTC()
-		b, h, _, err := eventImpactIn(tx, previewSelector(tx, now), now, me.ID, &current, vis, reset, false)
+		reset := c.Query("resetOverrides") == "1"
+		b, h, _, err := eventImpactIn(tx, previewSelector(tx, now), now, t.me.ID, &t.ev, vis, reset, false)
 		if err != nil {
 			return err
 		}
 		impact = b.impact
 		impact.Consent, err = a.consentTokenIn(tx, h, b.entries)
-		return err
-	}, readSnapshot)
-	switch {
-	case isAPIError(err):
-		fail(c, err)
-	case err != nil:
-		jsonError(c, http.StatusInternalServerError, "could not preview visibility")
-	default:
-		c.JSON(http.StatusOK, impact)
+		if err != nil {
+			return err
+		}
+		if a.hooks.readerEnd != nil {
+			a.hooks.readerEnd("event visibility preview", tx)
+		}
+		return nil
+	})
+	if ackErr := a.acknowledgeDecision(c, judged, err == nil || decidedRefusal(err)); ackErr != nil {
+		err = ackErr
 	}
+	if err != nil {
+		fail(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, impact)
 }

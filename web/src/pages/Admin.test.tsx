@@ -10,7 +10,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { Admin, AdminGroups, AdminJobs } from "../api/admin";
 import { AdminAccountRequests } from "../api/accountRequests";
 import { AdminRooms, RoomRequests } from "../api/rooms";
-import { AdminUsers } from "../api/adminUsers";
+import { AdminTeenConsents, AdminUsers } from "../api/adminUsers";
 import { Groups } from "../api/groups";
 import { Invitations } from "../api/invitations";
 import { People } from "../api/people";
@@ -40,6 +40,8 @@ stubService(AdminGroups, () => ({ list: vi.fn(), addMember: vi.fn() }));
 stubService(Admin, () => ({ pending: vi.fn().mockResolvedValue({ groups: [] }), deletions: vi.fn().mockResolvedValue({ groups: [] }), approve: vi.fn(), reject: vi.fn(), deleteGroup: vi.fn(), timezone: vi.fn().mockResolvedValue({ timezone: "America/Denver", revision: "site-zone" }), setTimezone: vi.fn(), churchAddress: vi.fn().mockResolvedValue({ address: "Grace Church", revision: "address" }), setChurchAddress: vi.fn(), guardianCopies: vi.fn().mockResolvedValue({ on: false }), setGuardianCopies: vi.fn(), replyTo: vi.fn().mockResolvedValue({ address: "", revision: "reply" }), setReplyTo: vi.fn(), pushEnabled: vi.fn().mockResolvedValue({ on: true }), setPushEnabled: vi.fn() }));
 
 stubService(AdminJobs, () => ({ list: vi.fn(), retry: vi.fn(), dismiss: vi.fn() }));
+
+stubService(AdminTeenConsents, () => ({ list: vi.fn(), change: vi.fn() }));
 
 stubService(AdminUsers, () => ({ list: vi.fn().mockResolvedValue({ users: [] }), clearEmailSuppression: vi.fn(), legacyReasonsProbe: vi.fn() }));
 
@@ -176,6 +178,31 @@ it("shows plain account badges rather than stored status and role codes", async 
   expect(screen.getByText("Member", { exact: true })).toBeInTheDocument();
   expect(screen.getByText("Teen", { exact: true })).toBeInTheDocument();
   expect(screen.queryByText("pending_consent")).not.toBeInTheDocument();
+});
+
+it("keeps the current consent panel in place while a change is in flight", async () => {
+  let finish!: (value: Awaited<ReturnType<typeof AdminTeenConsents.change>>) => void;
+  const answer = new Promise<Awaited<ReturnType<typeof AdminTeenConsents.change>>>((resolve) => { finish = resolve; });
+  const first = user(42, "Tess Teen", { accountType: "teen", status: "pending_consent" });
+  const second = user(43, "Lou Teen", { accountType: "teen", status: "pending_consent" });
+  vi.mocked(AdminUsers.list).mockResolvedValue({ users: [first, second] });
+  vi.mocked(AdminTeenConsents.list).mockResolvedValue({ consents: [], administrativelyDisabled: false });
+  vi.mocked(AdminTeenConsents.change).mockReturnValueOnce(answer);
+  render(<MemoryRouter initialEntries={["/admin?tab=users"]}><AdminPage /></MemoryRouter>);
+  await userEvent.click(await screen.findByRole("button", { name: "More for Tess Teen" }));
+  await userEvent.click(screen.getByRole("menuitem", { name: "Manage consent" }));
+  await userEvent.type(await screen.findByLabelText(/Consent evidence/), "Signed form");
+  await userEvent.click(screen.getByRole("button", { name: "Grant consent" }));
+  await userEvent.click(screen.getByRole("button", { name: "More for Lou Teen" }));
+  const manage = screen.getByRole("menuitem", { name: "Manage consent" });
+
+  expect(manage).toBeDisabled();
+  await userEvent.click(manage);
+  expect(screen.getByLabelText("Consent for Tess Teen")).toBeInTheDocument();
+  expect(AdminTeenConsents.list).toHaveBeenCalledExactlyOnceWith(42);
+  await act(async () => finish({}));
+  expect(await screen.findByText("Account access consent granted.")).toBeInTheDocument();
+  expect(screen.getByRole("menuitem", { name: "Manage consent" })).toBeEnabled();
 });
 
 it("labels only the groups that need attention and keeps one action beside More", async () => {

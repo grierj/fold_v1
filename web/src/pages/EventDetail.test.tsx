@@ -6,7 +6,7 @@ import { act, cleanup, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter, Outlet, Route, RouterProvider, Routes, createMemoryRouter } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { ApiError, type Credential } from "../api/core";
+import { ApiError, bootstrapCredential, type Credential } from "../api/core";
 import { DateRooms, SeriesRooms } from "../api/rooms";
 import { Events } from "../api/events";
 import { Households } from "../api/households";
@@ -22,12 +22,12 @@ import { endsFor, removedRow, ROSTER_ENDS, ROSTER_OPS, startHeld } from "../test
 import { EventDetail } from "./EventDetail";
 import { ERROR_COPY } from "../lib/errors";
 import { storedEdit, stubEditSends, verifiedCredential, type EditSends } from "../test/guardedEdits";
-import { clearMarkerCookie, setMarkerCookie } from "../test/credential";
+import { bootstrapAnswer, clearMarkerCookie, setMarkerCookie } from "../test/credential";
 import { erasureCases, SignedInSession } from "../test/session";
 
 const composer = vi.hoisted(() => ({ on: false, admin: false }));
 
-const render = renderWithAuth(() => ({ user: { id: 2 }, loading: false, isAdmin: composer.admin, canCompose: composer.on }));
+const render = renderWithAuth(() => ({ user: { id: 2 }, credential, loading: false, isAdmin: composer.admin, canCompose: composer.on }));
 
 stubService(Households, () => ({ mine: vi.fn().mockResolvedValue({ household: null }) }));
 
@@ -88,7 +88,7 @@ function guarded() {
 }
 
 beforeEach(async () => {
-  credential = await verifiedCredential();
+  credential = await verifiedCredential(2);
   guarded();
 });
 
@@ -106,6 +106,27 @@ function deferred<T>() {
 
   return { promise, resolve, reject };
 }
+
+it("waits for a verified anonymous credential before loading a public event", async () => {
+  let sessionCredential: Credential | null = null;
+  const renderGuest = renderWithAuth(() => ({ user: null, credential: sessionCredential }));
+  const tree = () => <MemoryRouter initialEntries={["/events/7"]}><Routes><Route path="/events/:id" element={<EventDetail />} /></Routes></MemoryRouter>;
+  vi.mocked(Events.get).mockClear().mockResolvedValue({ ...page, canManage: false });
+  const view = renderGuest(tree());
+  expect(Events.get).not.toHaveBeenCalled();
+
+  vi.stubGlobal("fetch", vi.fn(async () => bootstrapAnswer({ token: "anonymous", ack: false })));
+  sessionCredential = (await bootstrapCredential(true)).credential;
+  view.rerender(tree());
+  expect(Events.get).not.toHaveBeenCalled();
+
+  vi.stubGlobal("fetch", vi.fn(async () => bootstrapAnswer({ token: "anonymous" })));
+  sessionCredential = (await bootstrapCredential(true)).credential;
+  view.rerender(tree());
+  expect(await screen.findByRole("heading", { name: "Hybrid study", level: 1 })).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Log in to register" })).toBeInTheDocument();
+  expect(Events.get).toHaveBeenCalledExactlyOnceWith("7", sessionCredential);
+});
 
 // A series date has no whole-series buttons (DEC-92): its answer opens the
 // scope dialog, and "All future dates" answers every date.
@@ -1027,12 +1048,12 @@ describe("EventDetail dates that need a room", () => {
     needs({ date: "2026-12-08", roomName: "Fellowship Hall", status: "requested" });
     renderPage();
     expect(await screen.findByRole("heading", { name: /Dates that need a room/ })).toBeInTheDocument();
-    expect(SeriesRooms.list).toHaveBeenCalledWith(7);
+    expect(SeriesRooms.list).toHaveBeenCalledWith(7, credential);
     expect(screen.getByText("Fellowship Hall isn't free then.")).toBeInTheDocument();
     await userEvent.click(screen.getByRole("button", { name: /^Pick a room for / }));
     // The second date's own editor, with its own Room control.
-    await waitFor(() => expect(DateRooms.list).toHaveBeenCalledWith(7, "2026-12-08"));
-    expect(DateRooms.list).not.toHaveBeenCalledWith(7, "2026-12-01");
+    await waitFor(() => expect(DateRooms.list).toHaveBeenCalledWith(7, "2026-12-08", credential));
+    expect(DateRooms.list).not.toHaveBeenCalledWith(7, "2026-12-01", credential);
     const room = await screen.findByRole("combobox", { name: /^Room/ });
     expect(room).toBeInTheDocument();
     // The cursor goes to the Room control, not the date field.
@@ -1409,6 +1430,32 @@ describe("EventDetail asks every question in the app's dialog", () => {
     expect(await screen.findByText("Elsewhere page")).toBeInTheDocument();
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
   });
+  it("asks before leaving a date draft while its visibility question is open", async () => {
+    const router = createMemoryRouter([{
+      element: <><UnsavedChangesBlocker /><Outlet /></>,
+      children: [
+        { path: "/events/:id", element: <EventDetail /> },
+        { path: "/elsewhere", element: <p>Elsewhere page</p> },
+      ],
+    }], { initialEntries: ["/events/7"] });
+
+    render(<RouterProvider router={router} />);
+    await userEvent.click(await screen.findByRole("button", { name: "More for 2026-12-01" }));
+    await userEvent.click(screen.getByRole("menuitem", { name: "Edit this date" }));
+    const selected = await screen.findByRole("radio", { name: /^Private/ });
+    await userEvent.click(selected);
+    edits.answer(challenge(2));
+    await userEvent.click(screen.getByRole("button", { name: "Save this date" }));
+    await screen.findByRole("dialog", { name: "Save this date?" });
+    await act(() => router.navigate("/elsewhere"));
+    const leave = await screen.findByRole("dialog", { name: "Leave without saving?" });
+    expect(screen.queryByRole("dialog", { name: "Save this date?" })).not.toBeInTheDocument();
+    await userEvent.click(within(leave).getByRole("button", { name: "Keep editing" }));
+    expect(selected).toBeChecked();
+    expect(edits.sent).toHaveLength(1);
+    expect(router.state.location.pathname).toBe("/events/7");
+  });
+
   it("holds Delete from the first ask until the DELETE answers, and a late success never moves someone who went elsewhere", async () => {
     const held = deferred<unknown>();
     vi.mocked(Events.delete).mockReturnValue(held.promise);
@@ -2051,7 +2098,7 @@ describe("EventDetail and the kept-dates panel (DEC-156)", () => {
     await openAndSave();
     await screen.findByText("Old Name");
     // After the Remove, the panel's reads (its own retry, and the one its remount makes once the page answers) find nobody kept.
-    vi.mocked(Events.managedDate).mockImplementation((_id, date, pinned) => Promise.resolve(pinned ? keptRead(date) : keptRead(date, { keptCount: 0, attendees: [] })));
+    vi.mocked(Events.managedDate).mockImplementation((_id, date) => Promise.resolve(keptRead(date, { keptCount: 0, attendees: [] })));
     await userEvent.click(screen.getByRole("button", { name: "More for Old Name" }));
     await userEvent.click(screen.getByRole("menuitem", { name: "Remove Old Name" }));
     await userEvent.click(within(await screen.findByRole("dialog")).getByRole("button", { name: "Remove" }));
@@ -2086,7 +2133,7 @@ describe("EventDetail and the kept-dates panel (DEC-156)", () => {
     await userEvent.click(screen.getByRole("button", { name: "More for Sam" }));
     expect(screen.getByRole("menuitem", { name: "Remove Sam" })).toBeDisabled();
     await userEvent.keyboard("{Escape}");
-    const panelReads = () => vi.mocked(Events.managedDate).mock.calls.filter((call) => call[2] === undefined).length;
+    const panelReads = () => vi.mocked(Events.managedDate).mock.calls.length;
     const reads = panelReads();
     await act(async () => { write.resolve({}); await write.promise; });
     await waitFor(() => expect(within(rowRoster()).getByRole("textbox", { name: /^Add someone/ })).toBeEnabled());
@@ -2515,7 +2562,7 @@ describe("EventDetail: the date question is bound to what asked it", () => {
       vi.mocked(Events.get).mockResolvedValue({ ...twoDates, canManage: false });
       await act(async () => store.begin("7:2026-12-08")("stored"));
     }],
-    ["another credential", async ({ rerender }) => { await verifiedCredential(); act(() => rerender()); }],
+    ["another credential", async ({ rerender }) => { credential = await verifiedCredential(2); act(() => rerender()); }],
     ["signing out in another tab", ({ rerender }) => { clearMarkerCookie(); act(() => rerender()); }],
   ];
 
@@ -2533,15 +2580,16 @@ describe("EventDetail: the date question is bound to what asked it", () => {
     });
   }
 
-  it("a Yes after this tab's marker changed sends nothing, and says the changes weren't saved", async () => {
-    host();
+  it("a Yes after this tab's marker changed sends nothing and the event no longer exposes the draft", async () => {
+    const { rerender } = host();
     const yes = await ask();
     setMarkerCookie("m-another-tab");
     await userEvent.click(yes);
+    act(() => rerender());
     expect(asked()).not.toBeInTheDocument();
-    expect(await screen.findByText("The page changed while we were asking, so your changes could not be saved. You can save again.")).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "Hybrid study", level: 1 })).not.toBeInTheDocument();
     expect(edits.sent).toHaveLength(1);
-    expect(screen.getByRole("radio", { name: /^Private/ })).toBeChecked();
+    expect(screen.queryByRole("radio", { name: /^Private/ })).not.toBeInTheDocument();
   });
 
   // An administrator erasing this manager from their own browser (not a sign-out in another tab), in App's session.
@@ -2606,6 +2654,38 @@ describe("EventDetail when a series save meets someone else's change", () => {
     render(<main id="main" tabIndex={-1}><MemoryRouter initialEntries={["/events/7"]}><RosterWritesProvider><Routes><Route path="/events/:id" element={<EventDetail />} /></Routes></RosterWritesProvider></MemoryRouter></main>);
   }
 
+  it("leaving without saving while the visibility preview is pending sends no write", async () => {
+    vi.mocked(Events.get).mockResolvedValue(opened);
+
+    const router = createMemoryRouter([{
+      element: <><UnsavedChangesBlocker /><Outlet /></>,
+      children: [
+        { path: "/events/:id", element: <EventDetail /> },
+        { path: "/elsewhere", element: <p>Elsewhere page</p> },
+      ],
+    }], { initialEntries: ["/events/7"] });
+
+    render(<RouterProvider router={router} />);
+    await userEvent.click(await screen.findByRole("button", { name: "Edit event" }));
+    await userEvent.click(screen.getByRole("radio", { name: /^Private/ }));
+    const preview = deferred<Awaited<ReturnType<typeof Events.visibilityImpact>>>();
+    vi.mocked(Events.visibilityImpact).mockReturnValueOnce(preview.promise);
+    await userEvent.click(screen.getByRole("button", { name: "Save visibility" }));
+    await act(() => router.navigate("/elsewhere"));
+    const leave = await screen.findByRole("dialog", { name: "Leave without saving?" });
+    await userEvent.click(within(leave).getByRole("button", { name: "Leave without saving" }));
+    expect(await screen.findByText("Elsewhere page")).toBeInTheDocument();
+    expect(Events.setVisibility).not.toHaveBeenCalled();
+    await act(async () => preview.resolve({ visibility: "private", currentVisibility: "public", tightened: [], leaderOpened: [] }));
+    expect(Events.setVisibility).not.toHaveBeenCalled();
+  });
+
+  async function draftBoth(button = "Edit event") {
+    await userEvent.click(await screen.findByRole("button", { name: button }));
+    await userEvent.type(screen.getByLabelText("Title"), " night");
+    await userEvent.click(screen.getByRole("radio", { name: /^Private/ }));
+  }
+
   // Opens the editor, types, and saves into a refusal whose read shows `editorRead`; the page's read after it is held.
   async function saveIntoRefusal(editorRead: () => Promise<EventDetailResponse>) {
     vi.mocked(Events.get).mockResolvedValueOnce(opened).mockImplementationOnce(editorRead);
@@ -2631,6 +2711,445 @@ describe("EventDetail when a series save meets someone else's change", () => {
     expect(screen.queryByRole("button", { name: "Save visibility" })).not.toBeInTheDocument();
     expect(screen.queryByRole("textbox", { name: "Title" })).not.toBeInTheDocument();
   }
+
+  it.each(["series", "visibility"] as const)("reports a %s save and restores the sibling draft after a fresh authorized read", async (first) => {
+    const fresh = deferred<EventDetailResponse>();
+    const afterSeries = first === "series";
+
+    const stored: EventDetailResponse = {
+      ...opened,
+      event: { ...opened.event, title: afterSeries ? "Hybrid study night" : opened.event.title, visibility: afterSeries ? "public" : "private", revision: "r2" },
+    };
+
+    vi.mocked(Events.get).mockResolvedValueOnce(opened).mockReturnValueOnce(fresh.promise).mockResolvedValue(stored);
+    vi.mocked(Events.update).mockResolvedValue({ event: stored.event });
+    vi.mocked(Events.setVisibility).mockResolvedValue({ event: stored.event });
+    renderInMain();
+    await userEvent.click(await screen.findByRole("button", { name: "Edit event" }));
+    expect(screen.getByRole("form", { name: "Edit event" })).toContainElement(screen.getByLabelText("Title"));
+    await userEvent.type(screen.getByLabelText("Title"), " night");
+    await userEvent.click(screen.getByRole("radio", { name: /^Private/ }));
+    await userEvent.click(screen.getByRole("button", { name: afterSeries ? "Save series" : "Save visibility" }));
+    await waitFor(() => expect(Events.get).toHaveBeenCalledTimes(2));
+    showsNothingOfTheEvent();
+
+    await act(async () => fresh.resolve(stored));
+    expect(await screen.findByText("Updated")).toHaveAttribute("aria-live", "polite");
+    expect(await screen.findByLabelText("Title")).toHaveValue("Hybrid study night");
+    expect(screen.getByRole("radio", { name: /^Private/ })).toBeChecked();
+
+    // A draft still names its original read, while the sibling's new form opens from the fresh read.
+    await userEvent.click(screen.getByRole("button", { name: afterSeries ? "Save visibility" : "Save series" }));
+
+    if (afterSeries) expect(Events.setVisibility).toHaveBeenCalledExactlyOnceWith(7, expect.objectContaining({ visibility: "private", revision: "r1" }));
+    else expect(Events.update).toHaveBeenCalledExactlyOnceWith(7, expect.objectContaining({ title: "Hybrid study night", revision: "r1" }));
+  });
+
+  it.each(["room list", "visibility count"])("withdraws the event when only the %s finishes after the session changes", async (reader) => {
+    const rooms = deferred<SeriesRoomsResponse>();
+    const count = deferred<Awaited<ReturnType<typeof Events.visibilityImpact>>>();
+    const site = vi.spyOn(Site, "get").mockResolvedValue({ name: "Fold", timezone: "UTC", selfSignup: "off", roomsEnabled: true, pushEnabled: true });
+    const list = vi.spyOn(SeriesRooms, "list").mockReturnValue(rooms.promise);
+    const date = vi.spyOn(DateRooms, "list").mockResolvedValue({ rooms: [], booking: null, dateRoom: { id: 1, revision: "r1" } });
+    vi.mocked(Events.visibilityImpact).mockReturnValue(count.promise);
+    vi.mocked(Events.get).mockResolvedValue(opened);
+
+    try {
+      renderInMain();
+      await draftBoth();
+      expect(list).toHaveBeenCalledWith(7, credential);
+      expect(Events.visibilityImpact).toHaveBeenCalledWith(7, "public", false, credential);
+      expect(screen.getByLabelText("Title")).toHaveValue("Hybrid study night");
+      setMarkerCookie("replacement-marker");
+
+      await act(async () => {
+        if (reader === "room list") rooms.resolve({ revision: "r2", rooms: [], dates: 1, defaultRoom: null, ownRooms: [], pending: 0, needsRoom: [{ date: "2026-12-01", roomName: "Late room", status: "requested" }] });
+        else count.resolve({ visibility: "public", currentVisibility: "public", futureOverrides: 2, tightened: [], leaderOpened: [] });
+      });
+      showsNothingOfTheEvent();
+      expect(screen.queryByText(/Late room/)).not.toBeInTheDocument();
+      expect(Events.get).toHaveBeenCalledTimes(1);
+      expect(Events.setVisibility).not.toHaveBeenCalled();
+    } finally {
+      site.mockRestore();
+      list.mockRestore();
+      date.mockRestore();
+    }
+  });
+
+  it("drops another viewer's draft and ignores pending event, room and visibility reads", async () => {
+    const quiet = deferred<EventDetailResponse>();
+    const replacement = deferred<EventDetailResponse>();
+    const room = deferred<Awaited<ReturnType<typeof DateRooms.list>>>();
+    const preview = deferred<Awaited<ReturnType<typeof Events.visibilityImpact>>>();
+    const site = vi.spyOn(Site, "get").mockResolvedValue({ name: "Fold", timezone: "UTC", selfSignup: "off", roomsEnabled: true, pushEnabled: true });
+    const roomRead = vi.spyOn(DateRooms, "list").mockReturnValueOnce(room.promise).mockResolvedValue({ rooms: [], booking: null, dateRoom: { id: 1, revision: "r2" } });
+    const blankRoomList: SeriesRoomsResponse = { revision: "r2", rooms: [], dates: 1, defaultRoom: null, ownRooms: [], pending: 0, needsRoom: [] };
+
+    const listRead = vi.spyOn(SeriesRooms, "list").mockResolvedValueOnce({
+      ...blankRoomList, needsRoom: [{ date: "2026-12-01", roomName: "First account room", status: "requested" }],
+    }).mockResolvedValue(blankRoomList);
+
+    vi.mocked(Events.get).mockResolvedValueOnce(opened).mockReturnValueOnce(quiet.promise).mockReturnValueOnce(replacement.promise);
+    vi.mocked(Events.register).mockResolvedValue({ registration: {
+      registrationId: 32, userId: 2, eventId: 7, occurrenceId: 1, date: "2026-12-01", status: "maybe",
+      guestCount: 0, childcareCount: 0, childcareAgesNote: "", waitlistPosition: null, attendanceMode: "in_person",
+    }, people: [] });
+    let sessionCredential: Credential | null = credential;
+    const renderSession = renderWithAuth(() => ({ user: { id: sessionCredential?.viewer ?? 2 }, credential: sessionCredential }));
+    const tree = () => <MemoryRouter initialEntries={["/events/7"]}><RosterWritesProvider><Routes><Route path="/events/:id" element={<EventDetail />} /></Routes></RosterWritesProvider></MemoryRouter>;
+
+    try {
+      const view = renderSession(tree());
+      await screen.findByText("First account room isn't free then.");
+      await draftBoth("Edit event");
+      await userEvent.click(screen.getByRole("button", { name: "Maybe" }));
+      await waitFor(() => expect(Events.get).toHaveBeenCalledTimes(2));
+      expect(screen.getByLabelText("Title")).toHaveValue("Hybrid study night");
+      vi.mocked(Events.visibilityImpact).mockReturnValueOnce(preview.promise);
+      await userEvent.click(screen.getByRole("button", { name: "Save visibility" }));
+      expect(Events.visibilityImpact).toHaveBeenLastCalledWith(7, "private", false, credential);
+      expect(roomRead).toHaveBeenCalledExactlyOnceWith(7, "2026-12-01", credential);
+      expect(listRead).toHaveBeenCalledExactlyOnceWith(7, credential);
+
+      // Another tab has replaced the cookie. AuthProvider still reports the first viewer.
+      setMarkerCookie("replacement-marker");
+      await act(async () => quiet.resolve({ ...opened, event: { ...opened.event, title: "Late event read" } }));
+      showsNothingOfTheEvent();
+      expect(screen.queryByText("Late event read")).not.toBeInTheDocument();
+      expect(screen.queryByText("First account room isn't free then.")).not.toBeInTheDocument();
+
+      sessionCredential = null;
+      view.rerender(tree());
+      showsNothingOfTheEvent();
+      expect(screen.queryByText("First account room isn't free then.")).not.toBeInTheDocument();
+      sessionCredential = await verifiedCredential(3);
+      view.rerender(tree());
+      await waitFor(() => expect(Events.get).toHaveBeenCalledTimes(3));
+      expect(Events.get).toHaveBeenLastCalledWith("7", sessionCredential);
+
+      await act(async () => {
+        room.resolve({ rooms: [{ id: 2, name: "Late room read", building: "", capacity: 10, features: "", restricted: false, busy: false, tooSmall: false }], booking: null, dateRoom: { id: 1, revision: "r1" } });
+        preview.resolve({ visibility: "private", currentVisibility: "public", tightened: [], leaderOpened: [] });
+      });
+      showsNothingOfTheEvent();
+      expect(screen.queryByText("Late event read")).not.toBeInTheDocument();
+      expect(screen.queryByRole("option", { name: /Late room read/ })).not.toBeInTheDocument();
+      expect(Events.setVisibility).not.toHaveBeenCalled();
+
+      await act(async () => replacement.resolve(theirs));
+      const edit = await screen.findByRole("button", { name: "Edit event" });
+      expect(edit).toHaveAttribute("aria-expanded", "false");
+      await userEvent.click(edit);
+      expect(screen.getByLabelText("Title")).toHaveValue("Bible study");
+      expect(screen.getByRole("radio", { name: /^Public/ })).toBeChecked();
+      expect(roomRead).toHaveBeenLastCalledWith(7, "2026-12-01", sessionCredential);
+    } finally {
+      site.mockRestore();
+      roomRead.mockRestore();
+      listRead.mockRestore();
+    }
+  });
+
+  it("restores a visibility draft when its override count is refused after a series save", async () => {
+    const stored = { ...opened, event: { ...opened.event, title: "Hybrid study night", revision: "r2" } };
+    const count = deferred<Awaited<ReturnType<typeof Events.visibilityImpact>>>();
+    const recheck = deferred<EventDetailResponse>();
+    vi.mocked(Events.get).mockResolvedValueOnce(opened).mockResolvedValueOnce(stored).mockReturnValueOnce(recheck.promise);
+    vi.mocked(Events.update).mockResolvedValue({ event: stored.event });
+    vi.mocked(Events.visibilityImpact).mockResolvedValueOnce({ visibility: "public", currentVisibility: "public", tightened: [], leaderOpened: [] })
+      .mockReturnValueOnce(count.promise);
+    renderInMain();
+    await userEvent.click(await screen.findByRole("button", { name: "Edit event" }));
+    await userEvent.click(screen.getByRole("radio", { name: /^Private/ }));
+    await userEvent.type(screen.getByLabelText("Title"), " night{Enter}");
+    expect(await screen.findByRole("heading", { name: "Hybrid study night", level: 1 })).toBeInTheDocument();
+    expect(screen.getByText("Updated")).toHaveAttribute("aria-live", "polite");
+    const choice = screen.getByRole("radio", { name: /^Private/ });
+    expect(choice).toBeChecked();
+    choice.focus();
+
+    await act(async () => count.reject(new ApiError(403, "refused", { code: "not_allowed" })));
+    await waitFor(() => expect(Events.get).toHaveBeenCalledTimes(3));
+    showsNothingOfTheEvent();
+    expect(screen.queryByRole("heading", { name: "Hybrid study night" })).not.toBeInTheDocument();
+    expect(screen.queryByText("Hall", { exact: true })).not.toBeInTheDocument();
+    expect(screen.getByRole("main")).toHaveFocus();
+
+    await act(async () => recheck.resolve(stored));
+    const edit = await screen.findByRole("button", { name: "Edit event" });
+    expect(edit).toHaveAttribute("aria-expanded", "true");
+    expect(await screen.findByLabelText("Title")).toHaveValue("Hybrid study night");
+    const restored = screen.getByRole("radio", { name: /^Private/ });
+    expect(restored).toBeChecked();
+    expect(restored).toHaveFocus();
+    expect(Events.setVisibility).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { canManage: true, canSetVisibility: true },
+    { canManage: true, canSetVisibility: false },
+    { canManage: false, canSetVisibility: false },
+  ])("restores only drafts the event read authorizes ($canManage, $canSetVisibility)", async (rights) => {
+    const count = deferred<Awaited<ReturnType<typeof Events.visibilityImpact>>>();
+    const fresh = deferred<EventDetailResponse>();
+    const current = { ...opened, ...rights, event: { ...opened.event, revision: "r2" } };
+    vi.mocked(Events.get).mockResolvedValueOnce(opened).mockReturnValueOnce(fresh.promise).mockResolvedValue(current);
+    vi.mocked(Events.visibilityImpact).mockReturnValueOnce(count.promise);
+    vi.mocked(Events.update).mockResolvedValue({ event: { ...current.event, title: "Hybrid study night", revision: "r3" } });
+    vi.mocked(Events.setVisibility).mockResolvedValue({ event: { ...current.event, visibility: "private", revision: "r4" } });
+    renderInMain();
+    await draftBoth();
+
+    await act(async () => count.reject(new ApiError(404, "missing", { code: "not_found" })));
+    await waitFor(() => expect(Events.get).toHaveBeenCalledTimes(2));
+    showsNothingOfTheEvent();
+
+    await act(async () => fresh.resolve(current));
+    await screen.findByRole("heading", { name: "Hybrid study", level: 1 });
+
+    if (!rights.canManage) {
+      expect(screen.getByRole("main")).toHaveFocus();
+      expect(screen.queryByRole("button", { name: "Edit event" })).not.toBeInTheDocument();
+      expect(screen.queryByLabelText("Title")).not.toBeInTheDocument();
+    } else {
+      expect(screen.getByLabelText("Title")).toHaveValue("Hybrid study night");
+      const focused = rights.canSetVisibility ? screen.getByRole("radio", { name: /^Private/ }) : screen.getByRole("button", { name: "Edit event" });
+      expect(focused).toHaveFocus();
+      await userEvent.click(screen.getByRole("button", { name: "Save series" }));
+      expect(Events.update).toHaveBeenCalledExactlyOnceWith(7, expect.objectContaining({ title: "Hybrid study night", revision: "r1" }));
+    }
+
+    if (rights.canSetVisibility) {
+      expect(await screen.findByRole("radio", { name: /^Private/ })).toBeChecked();
+      await userEvent.click(screen.getByRole("button", { name: "Save visibility" }));
+      expect(Events.setVisibility).toHaveBeenCalledExactlyOnceWith(7, expect.objectContaining({ visibility: "private", revision: "r1" }));
+    } else {
+      expect(screen.queryByRole("radio", { name: /^Private/ })).not.toBeInTheDocument();
+      expect(Events.setVisibility).not.toHaveBeenCalled();
+    }
+  });
+
+  it("stops automatic rechecks after a second refusal and keeps the page hidden until Try again", async () => {
+    const count = deferred<Awaited<ReturnType<typeof Events.visibilityImpact>>>();
+    const unavailable = new ApiError(403, "refused", { code: "not_allowed" });
+    vi.mocked(Events.get).mockResolvedValue(opened);
+    vi.mocked(Events.visibilityImpact).mockReturnValueOnce(count.promise).mockRejectedValue(unavailable);
+    renderInMain();
+    await draftBoth();
+
+    await act(async () => count.reject(unavailable));
+    expect(await screen.findByRole("heading", { name: "Event unavailable" })).toBeInTheDocument();
+    showsNothingOfTheEvent();
+    expect(screen.queryByText("Hall", { exact: true })).not.toBeInTheDocument();
+    expect(screen.getByRole("main")).toHaveFocus();
+    expect(Events.get).toHaveBeenCalledTimes(2);
+    expect(Events.visibilityImpact).toHaveBeenCalledTimes(2);
+
+    vi.mocked(Events.visibilityImpact).mockResolvedValue({ visibility: "public", currentVisibility: "public", tightened: [], leaderOpened: [] });
+    await userEvent.click(screen.getByRole("button", { name: "Try again" }));
+    expect(await screen.findByLabelText("Title")).toHaveValue("Hybrid study night");
+    const restored = screen.getByRole("radio", { name: /^Private/ });
+    expect(restored).toBeChecked();
+    expect(restored).toHaveFocus();
+    expect(Events.get).toHaveBeenCalledTimes(3);
+    expect(Events.visibilityImpact).toHaveBeenCalledTimes(3);
+    expect(Events.update).not.toHaveBeenCalled();
+    expect(Events.setVisibility).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { status: 403, code: "not_allowed", heading: "Event unavailable" },
+    { status: 404, code: "not_found", heading: "Event not found" },
+    { status: 500, code: "server_error", heading: "Event unavailable" },
+  ])("stays closed when the event access check answers $status", async ({ status, code, heading }) => {
+    const count = deferred<Awaited<ReturnType<typeof Events.visibilityImpact>>>();
+    const fresh = deferred<EventDetailResponse>();
+    vi.mocked(Events.get).mockResolvedValueOnce(opened).mockReturnValueOnce(fresh.promise).mockResolvedValue(theirs);
+    vi.mocked(Events.visibilityImpact).mockReturnValueOnce(count.promise);
+    renderInMain();
+    await draftBoth();
+    await act(async () => count.reject(new ApiError(403, "refused", { code: "not_allowed" })));
+    await waitFor(() => expect(Events.get).toHaveBeenCalledTimes(2));
+    await act(async () => fresh.reject(new ApiError(status, "event check failed", { code })));
+    expect(await screen.findByRole("heading", { name: heading })).toBeInTheDocument();
+    showsNothingOfTheEvent();
+    expect(screen.queryByText("Hall", { exact: true })).not.toBeInTheDocument();
+
+    if (status === 404) return;
+
+    await userEvent.click(screen.getByRole("button", { name: "Try again" }));
+    const edit = await screen.findByRole("button", { name: "Edit event" });
+
+    if (status === 403) {
+      expect(edit).toHaveAttribute("aria-expanded", "false");
+      await userEvent.click(edit);
+      expect(screen.getByLabelText("Title")).toHaveValue("Bible study");
+      expect(screen.getByRole("radio", { name: /^Public/ })).toBeChecked();
+    } else {
+      expect(edit).toHaveAttribute("aria-expanded", "true");
+      expect(screen.getByLabelText("Title")).toHaveValue("Hybrid study night");
+      expect(screen.getByRole("radio", { name: /^Private/ })).toBeChecked();
+    }
+  });
+
+  it.each([
+    { inline: false, button: "Edit event", recurrenceRule: "" },
+    { inline: true, button: "Edit series", recurrenceRule: "FREQ=WEEKLY;COUNT=3" },
+  ])("restores both drafts when the event read still authorizes them after a room read is refused (inline: $inline)", async ({ inline, button, recurrenceRule }) => {
+    const room = deferred<Awaited<ReturnType<typeof DateRooms.list>>>();
+    const fresh = deferred<EventDetailResponse>();
+    vi.mocked(Events.get).mockResolvedValueOnce({ ...opened, event: { ...opened.event, recurrenceRule } }).mockReturnValueOnce(fresh.promise);
+    const site = vi.spyOn(Site, "get").mockResolvedValue({ name: "Fold", timezone: "UTC", selfSignup: "off", roomsEnabled: true, pushEnabled: true });
+    const roomRead = vi.spyOn(DateRooms, "list").mockReturnValueOnce(room.promise).mockResolvedValue({ rooms: [], booking: null, dateRoom: { id: 1, revision: "r2" } });
+
+    const listRead = vi.spyOn(SeriesRooms, "list").mockResolvedValue({
+      revision: "r2", rooms: [], dates: 1, defaultRoom: null, ownRooms: [], pending: 0,
+      needsRoom: inline ? [{ date: "2026-12-15", roomName: "Fellowship Hall", status: "requested" }] : [],
+    });
+
+    try {
+      renderInMain();
+      await draftBoth(button);
+
+      if (inline) await userEvent.click(await screen.findByRole("button", { name: /^Pick a room for / }));
+      await waitFor(() => expect(roomRead).toHaveBeenCalledOnce());
+
+      await act(async () => room.reject(new ApiError(403, "refused", { code: "not_allowed" })));
+      await waitFor(() => expect(Events.get).toHaveBeenCalledTimes(2));
+      showsNothingOfTheEvent();
+
+      await act(async () => fresh.resolve({ ...theirs, event: { ...theirs.event, recurrenceRule } }));
+      expect(await screen.findByRole("combobox", { name: inline ? /^Room for every date/ : /^Room/ })).toBeInTheDocument();
+      expect(screen.getByLabelText("Title")).toHaveValue("Hybrid study night");
+      expect(screen.getByRole("radio", { name: /^Private/ })).toBeChecked();
+      expect(screen.queryByText(UNSAVED)).not.toBeInTheDocument();
+    } finally {
+      site.mockRestore();
+      roomRead.mockRestore();
+      listRead.mockRestore();
+    }
+  });
+
+  it("keeps the opening visibility revision across a quiet reread and a series save", async () => {
+    const quiet: EventDetailResponse = {
+      ...opened,
+      event: { ...opened.event, revision: "r2" },
+      occurrences: [occurrence({ title: "Fresh date title" })],
+    };
+
+    const stored: EventDetailResponse = { ...quiet, event: { ...quiet.event, title: "Hybrid study night", revision: "r3" } };
+    vi.mocked(Events.get).mockResolvedValueOnce(opened).mockResolvedValueOnce(quiet).mockResolvedValue(stored);
+    vi.mocked(Events.update).mockResolvedValue({ event: stored.event });
+    vi.mocked(Events.setVisibility).mockResolvedValue({ event: { ...stored.event, visibility: "private", revision: "r4" } });
+    vi.mocked(Events.register).mockResolvedValue({ registration: {
+      registrationId: 32, userId: 2, eventId: 7, occurrenceId: 1, date: "2026-12-01", status: "maybe",
+      guestCount: 0, childcareCount: 0, childcareAgesNote: "", waitlistPosition: null, attendanceMode: "in_person",
+    }, people: [] });
+    renderInMain();
+    await userEvent.click(await screen.findByRole("button", { name: "Edit event" }));
+    await userEvent.click(screen.getByRole("radio", { name: /^Private/ }));
+    await userEvent.click(screen.getByRole("button", { name: "Maybe" }));
+    await screen.findByRole("heading", { name: "Fresh date title" });
+    expect(screen.getByRole("radio", { name: /^Private/ })).toBeChecked();
+
+    await userEvent.type(screen.getByLabelText("Title"), " night");
+    await userEvent.click(screen.getByRole("button", { name: "Save series" }));
+    await screen.findByRole("heading", { name: "Hybrid study night", level: 1 });
+    expect(screen.getByRole("radio", { name: /^Private/ })).toBeChecked();
+    await userEvent.click(screen.getByRole("button", { name: "Save visibility" }));
+
+    expect(Events.setVisibility).toHaveBeenCalledExactlyOnceWith(7, expect.objectContaining({ visibility: "private", revision: "r1" }));
+  });
+
+  it.each(["allowed", "checkbox", "button", "moved focus", "revoked"])("hides both drafts until a renewed session's read settles as %s", async (result) => {
+    const fresh = deferred<EventDetailResponse>();
+    vi.mocked(Events.get).mockResolvedValueOnce(opened).mockReturnValueOnce(fresh.promise);
+    let sessionCredential: Credential | null = credential;
+
+    const renderSession = renderWithAuth(() => ({ user: { id: 2 }, credential: sessionCredential }));
+    const tree = () => <><button>Outside the editor</button><main id="main" tabIndex={-1}><MemoryRouter initialEntries={["/events/7"]}><Routes><Route path="/events/:id" element={<EventDetail />} /></Routes></MemoryRouter></main></>;
+    const view = renderSession(tree());
+    await userEvent.click(await screen.findByRole("button", { name: "Edit event" }));
+    await userEvent.type(screen.getByLabelText("Title"), " night");
+    await userEvent.click(screen.getByRole("radio", { name: /^Private/ }));
+
+    const focusedControl = () => {
+      if (result === "checkbox") return screen.getByRole("checkbox", { name: /^Remote attendance/ });
+
+      if (result === "button") return screen.getByRole("button", { name: "Save series" });
+
+      return screen.getByRole("radio", { name: /^Private/ });
+    };
+
+    focusedControl().focus();
+    expect(focusedControl()).toHaveFocus();
+    sessionCredential = null;
+    view.rerender(tree());
+    showsNothingOfTheEvent();
+
+    expect(screen.getByRole("main")).toHaveFocus();
+
+    if (result === "moved focus") await userEvent.click(screen.getByRole("button", { name: "Outside the editor" }));
+    sessionCredential = await verifiedCredential(2);
+    view.rerender(tree());
+    await waitFor(() => expect(Events.get).toHaveBeenCalledTimes(2));
+    showsNothingOfTheEvent();
+
+    expect(vi.mocked(Events.get).mock.calls).toEqual([["7", credential], ["7", sessionCredential]]);
+    const allowed = result !== "revoked";
+    await act(async () => fresh.resolve({
+      ...opened, canManage: allowed, canSetVisibility: allowed, event: { ...opened.event, revision: "r2" },
+    }));
+    await screen.findByRole("heading", { name: "Hybrid study", level: 1 });
+
+    if (allowed) {
+      const destination = result === "moved focus" ? screen.getByRole("button", { name: "Outside the editor" }) : focusedControl();
+      expect(destination).toHaveFocus();
+      expect(screen.getByLabelText("Title")).toHaveValue("Hybrid study night");
+      expect(screen.getByRole("radio", { name: /^Private/ })).toBeChecked();
+    } else {
+      expect(screen.getByRole("main")).toHaveFocus();
+      expect(screen.queryByLabelText("Title")).not.toBeInTheDocument();
+      expect(screen.queryByRole("button", { name: "Edit event" })).not.toBeInTheDocument();
+    }
+  });
+
+  it("keeps a lost series answer across a visibility save so the old draft is never sent under a newer revision", async () => {
+    const stored: EventDetailResponse = {
+      ...opened, event: { ...opened.event, visibility: "private", revision: "r2" },
+    };
+
+    vi.mocked(Events.get).mockResolvedValueOnce(opened).mockResolvedValue(stored);
+    vi.mocked(Events.update).mockRejectedValueOnce(new TypeError("Failed to fetch")).mockRejectedValueOnce(changed());
+    vi.mocked(Events.setVisibility).mockResolvedValueOnce({ event: stored.event });
+    renderInMain();
+    await userEvent.click(await screen.findByRole("button", { name: "Edit event" }));
+    await userEvent.type(screen.getByLabelText("Title"), " night{Enter}");
+    await screen.findByRole("alert");
+    await userEvent.click(screen.getByRole("radio", { name: /^Private/ }));
+    await userEvent.click(screen.getByRole("button", { name: "Save visibility" }));
+    await waitFor(() => expect(Events.get).toHaveBeenCalledTimes(2));
+    await userEvent.click(await screen.findByRole("button", { name: "Save series" }));
+    expect(await screen.findByText(NOTICE)).toBeInTheDocument();
+    expect(Events.update).toHaveBeenCalledTimes(2);
+    expect(screen.queryByLabelText("Title")).not.toBeInTheDocument();
+  });
+
+  it("drops held drafts if the read after saving visibility takes away management", async () => {
+    const stored: EventDetailResponse = { ...opened, canManage: false, canSetVisibility: false };
+    vi.mocked(Events.get).mockResolvedValueOnce(opened).mockResolvedValueOnce(stored);
+    vi.mocked(Events.setVisibility).mockResolvedValueOnce({ event: { ...opened.event, visibility: "private", revision: "r2" } });
+    renderInMain();
+    await userEvent.click(await screen.findByRole("button", { name: "Edit event" }));
+    await userEvent.type(screen.getByLabelText("Title"), " night");
+    await userEvent.click(screen.getByRole("radio", { name: /^Private/ }));
+    await userEvent.click(screen.getByRole("button", { name: "Save visibility" }));
+    await waitFor(() => expect(screen.queryByRole("button", { name: "Edit event" })).not.toBeInTheDocument());
+    expect(await screen.findByRole("heading", { name: "Hybrid study" })).toBeInTheDocument();
+    expect(screen.queryByLabelText("Title")).not.toBeInTheDocument();
+    expect(Events.update).not.toHaveBeenCalled();
+  });
 
   it("closes the editor, reads the page from nothing, says so once it is shown and gives focus to Edit; opening the editor clears it", async () => {
     const after = await saveIntoRefusal(async () => theirs);

@@ -4,7 +4,7 @@ import { AdminTeenConsents } from "../api/adminUsers";
 import type { TeenConsent, User } from "../types";
 import { errorText } from "../lib/errors";
 import { formatWhen } from "../lib/when";
-import { useAction } from "../lib/useAction";
+import { useAction, type Action } from "../lib/useAction";
 import { useNewestRead } from "../lib/newestRead";
 import { useFocusHome, useLockedFocus } from "../lib/focusHome";
 import { Button } from "./ui/Button";
@@ -16,7 +16,12 @@ const scopes = [
   { value: "photos", label: "Photos" },
 ] satisfies { value: TeenConsent["scope"]; label: string }[];
 
-export default function TeenConsentPanel({ user, onUpdated, onClose }: { user: User; onUpdated: () => void; onClose: () => void }) {
+export default function TeenConsentPanel({ user, onUpdated, onClose, action: shared }: {
+  user: User;
+  onUpdated: () => void;
+  onClose: () => void;
+  action?: Action;
+}) {
   const [history, setHistory] = useState<TeenConsent[]>([]);
   const [suspended, setSuspended] = useState(false);
   const [loaded, setLoaded] = useState(false);
@@ -24,7 +29,8 @@ export default function TeenConsentPanel({ user, onUpdated, onClose }: { user: U
   const [evidence, setEvidence] = useState("");
   const [evidenceError, setEvidenceError] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const action = useAction();
+  const own = useAction();
+  const action = shared ?? own;
   const busy = action.running;
   // A change disables what was pressed and, when its refresh fails, removes every action: focus waits on the
   // panel and goes to Refresh consent (or back to what was pressed), never the page.

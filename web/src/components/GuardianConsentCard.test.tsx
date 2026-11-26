@@ -204,3 +204,17 @@ test("moves focus from the pressed button to Refresh consent when the refresh af
   const refresh = await screen.findByRole("button", { name: "Refresh consent" });
   await waitFor(() => expect(refresh).toHaveFocus());
 });
+
+
+test("moves focus from the consent selector to Refresh consent when a pending read fails", async () => {
+  let failRead!: (cause: unknown) => void;
+  const read = new Promise<{ teens: typeof teen[] }>((_, fail) => { failRead = fail; });
+  vi.mocked(Guardians.teens).mockResolvedValueOnce({ teens: [teen] }).mockReturnValueOnce(read);
+  vi.mocked(Guardians.change).mockResolvedValue({});
+  render(<MemoryRouter><GuardianConsentCard /></MemoryRouter>);
+  await userEvent.click(await screen.findByRole("button", { name: "Revoke consent" }));
+  await waitFor(() => expect(Guardians.teens).toHaveBeenCalledTimes(2));
+  screen.getByRole("combobox", { name: "Consent" }).focus();
+  await act(async () => failRead(new Error("offline")));
+  expect(await screen.findByRole("button", { name: "Refresh consent" })).toHaveFocus();
+});

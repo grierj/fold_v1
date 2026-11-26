@@ -1,7 +1,8 @@
+import { useEventReadPin } from "../lib/eventReadPin";
 import { useRosterActivityOf } from "../lib/rosterWrites";
 import { Form } from "./ui/Form";
-import { useEffect, useId, useLayoutEffect, useRef, useState } from "react";
-import { ApiError } from "../api/core";
+import { useEffect, useEffectEvent, useId, useLayoutEffect, useRef, useState, type RefObject } from "react";
+import { ApiError, credentialCurrent } from "../api/core";
 import { Events } from "../api/events";
 import type { Visibility, VisibilityImpact } from "../types";
 import { GroupVisibilityReview } from "./GroupVisibilityReview";
@@ -11,8 +12,8 @@ import { decisionImpact, reviewOutdated } from "../lib/visibilityConsent";
 import { ROSTER_STALE, ROSTER_WAITING, visibilityRank } from "../lib/visibilityChange";
 import { useFocusHome, useKeepFocusHome, useLockedFocus } from "../lib/focusHome";
 import { useAction, type Action } from "../lib/useAction";
-import { useResourceRefusal } from "../lib/refusedSave";
-import { answerNames, lostAuthority, useRevisionSave, type RevisionConflict } from "../lib/useRevisionSave";
+import { resourceRefused, type ResourceReadOutcome } from "../lib/refusedSave";
+import { answerNames, lostAuthority, useRevisionSave, type LostSend, type RevisionConflict } from "../lib/useRevisionSave";
 import { Checkbox, Choices, Field, FormError, Input, Radio } from "./ui/Field";
 import { Button } from "./ui/Button";
 
@@ -21,6 +22,16 @@ interface Audience {
   leaderOpened?: boolean;
   groupVisibility?: Visibility;
 }
+
+export interface VisibilityDraftHold {
+  base: { audience: Audience; revision?: string };
+  value: Visibility;
+  reason: string;
+  reset: boolean;
+  lost: LostSend;
+}
+
+const choiceFor = (value: Visibility, churchWide?: boolean) => value === "invite_only" && churchWide ? "public" : value;
 
 // A group event wider than its group is leader-opened, as the server decides it on save (`leaderOpens`, DEC-17/28).
 const opensWider = (value: Visibility, groupVisibility?: Visibility, churchWide?: boolean) =>
@@ -50,7 +61,9 @@ export function EventVisibilityControl({
   churchWide,
   revision,
   onSaved,
+  onRead,
   onConflict,
+  hold,
   action: shared,
   locked = false,
 }: {
@@ -63,6 +76,8 @@ export function EventVisibilityControl({
   // The event page's revision when this control opened.
   revision?: string;
   onSaved: () => void;
+  onRead?: (outcome: ResourceReadOutcome) => void;
+  hold?: RefObject<VisibilityDraftHold | null>;
   // The save was refused and not sent again: the page shows the event as it is now.
   onConflict?: (why: RevisionConflict) => void;
   // The page's run for this control, so it can lock what shares the panel (the series editor) while it runs.
@@ -70,8 +85,21 @@ export function EventVisibilityControl({
   // Another run in the same panel is on its way.
   locked?: boolean;
 }) {
-  const [value, setValue] = useState<Visibility>(visibility === "invite_only" && churchWide ? "public" : visibility);
-  const [reason, setReason] = useState("");
+  const pin = useEventReadPin();
+
+  const [opening] = useState<VisibilityDraftHold>(() => hold?.current ?? {
+    base: { audience: { visibility, leaderOpened, groupVisibility }, revision },
+    value: choiceFor(visibility, churchWide),
+    reason: "",
+    reset: false,
+    lost: { current: false },
+  });
+
+  const { base, lost } = opening;
+  const initialChoice = choiceFor(base.audience.visibility, churchWide);
+  const [value, setValue] = useState(opening.value);
+  const [reason, setReason] = useState(opening.reason);
+  const saved = useRef(false);
   // One run covers the preview and the commit, from Save or from the review's confirm.
   const own = useAction();
   const action = shared ?? own;
@@ -80,7 +108,7 @@ export function EventVisibilityControl({
   // replaces this control, so a later choice would be lost without a word.
   const frozen = busy || locked;
   const [error, setError] = useState<string | null>(null);
-  const [resetOverrides, setResetOverrides] = useState(false);
+  const [resetOverrides, setResetOverrides] = useState(opening.reset);
   const [futureOverrides, setFutureOverrides] = useState(0);
   const saveButton = useRef<HTMLButtonElement>(null);
   // Keeps keyboard focus when a stale answer or a sign-up update closes the review, or disables Save under it.
@@ -97,33 +125,45 @@ export function EventVisibilityControl({
     if (waiting && document.activeElement === saveButton.current) home.moveHere();
   }, [waiting, home]);
   const lockFocus = useLockedFocus(home, frozen);
-  const refreshRefusal = useResourceRefusal();
+  const reportRead = useEffectEvent((outcome: ResourceReadOutcome) => onRead?.(outcome));
   useEffect(() => {
     let live = true;
-    Promise.resolve(Events.visibilityImpact(eventId, visibility)).then((impact) => { if (live) setFutureOverrides(impact?.futureOverrides ?? 0); }).catch((cause: unknown) => {
-      if (live) refreshRefusal(cause, "read");
-    });
+    Promise.resolve(Events.visibilityImpact(eventId, visibility, false, ...pin)).then(
+      (impact) => {
+        if (!live) return;
+        setFutureOverrides(impact?.futureOverrides ?? 0);
+        reportRead("loaded");
+      },
+      (cause: unknown) => {
+        if (live && resourceRefused(cause)) reportRead("refused");
+      },
+    );
 
     return () => { live = false; };
-  }, [eventId, visibility, refreshRefusal]);
+  }, [eventId, visibility, pin[0]]);
 
   // What this save can write: the audience and whether it is leader-opened, which follows the group's. The page's
   // read lists 90 days of dates and a reset reaches every later one, so a refused reset is always a conflict, also
   // when an earlier press stored it and its answer was lost (a reset that leaves both the visibility and the
   // leader-opened mark as they were leaves the revision, so only one that changed either is refused).
-  const opened: Audience = { visibility, leaderOpened, groupVisibility };
-
   const send = useRevisionSave<Audience, { visibility: Visibility; leaderOpened: boolean; groupVisibility: Visibility | null }>({
-    opened,
-    revision,
+    opened: base.audience,
+    revision: base.revision,
     read: async () => {
-      const stored = await Events.get(eventId);
+      const stored = await Events.get(eventId, ...pin);
 
       return { allowed: stored.canSetVisibility, revision: stored.event.revision, value: stored.event };
     },
     fields: (a) => (resetOverrides ? null : { visibility: a.visibility, leaderOpened: a.leaderOpened ?? false, groupVisibility: a.groupVisibility ?? null }),
     answers: answerNames("event", eventId),
+    lost,
     onConflict,
+  });
+
+  useLayoutEffect(() => {
+    if (!hold) return;
+    const keep = !saved.current && (value !== initialChoice || reason !== "" || resetOverrides || lost.current);
+    hold.current = keep ? { base, value, reason, reset: resetOverrides, lost } : null;
   });
 
   // `mark` is the session roster sequence the request behind the review was sent at.
@@ -181,6 +221,8 @@ export function EventVisibilityControl({
     void action.run(preview);
   }
 
+  const live = () => home.ref.current && (!pin[0] || credentialCurrent(pin[0]));
+
   async function preview(): Promise<false | void> {
     setError(null);
 
@@ -189,10 +231,12 @@ export function EventVisibilityControl({
       const mark = activity.mark();
 
       try {
-        impact = await Events.visibilityImpact(eventId, value, resetOverrides);
+        impact = await Events.visibilityImpact(eventId, value, resetOverrides, ...pin);
       } catch (err) {
+        if (!live()) return false;
+
         // The preview is refused like the save would be: the page closes the panel and says so.
-        if (err instanceof ApiError && lostAuthority(err)) {
+        if (err instanceof ApiError && lostAuthority(err) && !(pin[0] && err.code === "session_expired")) {
           onConflict?.("gone");
 
           return false;
@@ -202,6 +246,8 @@ export function EventVisibilityControl({
 
         return false;
       }
+
+      if (!live()) return false;
 
       if (moved(mark)) {
         stale();
@@ -225,7 +271,7 @@ export function EventVisibilityControl({
   }
 
   async function commit(consent: string): Promise<false | void> {
-    if (committing.current || activity.pendingFor([eventId]) > 0) return false;
+    if (!live() || committing.current || activity.pendingFor([eventId]) > 0) return false;
     committing.current = true;
     const mark = activity.mark();
     setError(null);
@@ -247,6 +293,9 @@ export function EventVisibilityControl({
       }
 
       if (sent !== "saved") return false;
+      saved.current = true;
+
+      if (hold) hold.current = null;
       setReview(null);
       onSaved();
     } catch (err) {
@@ -291,7 +340,7 @@ export function EventVisibilityControl({
           reason={reason}
           onReason={setReason}
         />
-        {futureOverrides > 0 && <div className="space-y-2"><p className="text-sm text-text-muted">{futureOverrides} {futureOverrides === 1 ? "date has its" : "dates have their"} own visibility and won't change.</p><Checkbox label="Also reset those dates to the series setting" checked={resetOverrides} onChange={(e) => setResetOverrides(e.target.checked)} /></div>}
+        {(resetOverrides || futureOverrides > 0) && <div className="space-y-2">{futureOverrides > 0 && <p className="text-sm text-text-muted">{futureOverrides} {futureOverrides === 1 ? "date has its" : "dates have their"} own visibility and won't change.</p>}<Checkbox label="Also reset those dates to the series setting" checked={resetOverrides} onChange={(e) => setResetOverrides(e.target.checked)} /></div>}
         {review && !reviewMoved && (
           <GroupVisibilityReview
             key={JSON.stringify(review.impact)}

@@ -25,7 +25,7 @@ import { api, path, query, type Credential, type Id } from "./core";
 export const Events = {
   listOpen: () => api<OpenEventsResponse>("/events"),
   // pinned (M8.1): a participating read, answered only for this credential (api/core.ts).
-  get: (id: Id, pinned?: Credential) => api<EventDetailResponse>(path`/events/${id}`, { pinned }),
+  get: (id: Id, pinned?: Credential) => api<EventDetailResponse>(path`/events/${id}`, { pinned, anonymousOK: pinned?.viewer === null }),
   createChurch: (data: NewEventInput & { title: string }) => api<EventSeriesResponse>("/events", { method: "POST", body: data }),
   setVisibility: (
     id: Id,
@@ -33,8 +33,8 @@ export const Events = {
     // control opened with (DEC-163).
     data: { visibility: Visibility; reason?: string; consent: string; resetOverrides?: boolean; revision?: string }
   ) => api<EventSeriesResponse>(path`/events/${id}/visibility`, { method: "PUT", body: data }),
-  visibilityImpact: (id: Id, visibility: Visibility, resetOverrides = false) =>
-    api<VisibilityImpact>(`${path`/events/${id}/visibility-impact`}${query({ visibility, resetOverrides: resetOverrides ? "1" : "0" })}`),
+  visibilityImpact: (id: Id, visibility: Visibility, resetOverrides = false, pinned?: Credential) =>
+    api<VisibilityImpact>(`${path`/events/${id}/visibility-impact`}${query({ visibility, resetOverrides: resetOverrides ? "1" : "0" })}`, { pinned }),
   addHost: (id: Id, email: string) => api<EventHostsResponse>(path`/events/${id}/hosts`, { method: "POST", body: { email } }),
   removeHost: (id: Id, userId: Id) => api<EventHostsResponse>(path`/events/${id}/hosts/${userId}`, { method: "DELETE" }),
   update: (id: Id, data: EventInput) => api<EventSeriesResponse>(path`/events/${id}`, { method: "PUT", body: data }),

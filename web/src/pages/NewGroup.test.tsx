@@ -104,7 +104,7 @@ it("sends tags and member limit entered under More options", async () => {
 it("shows a calm thank-you, not a warning, once a group is waiting for approval", async () => {
   vi.mocked(Groups.create).mockResolvedValue(made("pending"));
   open(); await submit();
-  expect(await screen.findByRole("heading", { level: 1, name: "Thanks! An admin will review “Sam's study”." })).toBeInTheDocument();
+  expect(await screen.findByRole("heading", { level: 1, name: "Thanks! An admin will review “Sam's study”." })).toHaveFocus();
   expect(screen.getByText("We'll let you know in Alerts when it's approved.")).toBeInTheDocument();
   expect(screen.getByRole("link", { name: "Back to Home" })).toHaveAttribute("href", "/");
   expect(screen.queryByText("Pending approval")).not.toBeInTheDocument();
@@ -115,7 +115,7 @@ it("offers an admin the first meeting once the group is live", async () => {
   auth.isAdmin = true;
   vi.mocked(Groups.create).mockResolvedValue(made("active"));
   open(); await submit();
-  expect(await screen.findByRole("heading", { level: 1, name: "Group created" })).toBeInTheDocument();
+  expect(await screen.findByRole("heading", { level: 1, name: "Group created" })).toHaveFocus();
   expect(screen.getByText("“Sam's study” is live.")).toBeInTheDocument();
   const first = screen.getByRole("link", { name: "Schedule the first meeting" });
   expect(first).toHaveAttribute("href", "/groups/9/events/new");

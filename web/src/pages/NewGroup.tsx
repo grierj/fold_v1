@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useCallback, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { GroupCover, Groups } from "../api/groups";
 import type { GroupSummary } from "../types";
@@ -12,6 +12,7 @@ export function NewGroup() {
   const { isAdmin } = useAuth();
   const navigate = useNavigate();
   const [created, setCreated] = useState<GroupSummary | null>(null);
+  const focusResult = useCallback((heading: HTMLElement | null) => heading?.focus(), []);
 
   async function create(data: GroupFormData) {
     const { group } = await Groups.create({
@@ -37,6 +38,7 @@ export function NewGroup() {
         // Admins' groups (and anyone else's the server activates) are live now.
         <EmptyState
           level={1}
+          titleRef={focusResult}
           title="Group created"
           body={<>“{created.name}” is live.</>}
           action={
@@ -50,6 +52,7 @@ export function NewGroup() {
         // Calm, not a warning: nothing is wrong, an admin just has to look (DEC-96).
         <EmptyState
           level={1}
+          titleRef={focusResult}
           illustration={<Illustration name="request-sent" />}
           title={`Thanks! An admin will review “${created.name}”.`}
           body="We'll let you know in Alerts when it's approved."

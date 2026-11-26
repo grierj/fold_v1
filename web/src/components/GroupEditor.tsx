@@ -67,6 +67,7 @@ export function GroupEditor({ group, action, onSaved, onConflict, onCancel }: {
   const [review, setReview] = useState<{ data: GroupFormData; impact: VisibilityImpact; mark: number } | null>(null);
   const [reviewError, setReviewError] = useState<string | null>(null);
   const groupSave = useRef<HTMLButtonElement>(null);
+  const returnToForm = useRef(false);
   // Holds the review and its lines; keeps keyboard focus when a sign-up update withdraws a review.
   const reviewHome = useFocusHome<HTMLDivElement>();
   useKeepFocusHome(reviewHome);
@@ -121,6 +122,12 @@ export function GroupEditor({ group, action, onSaved, onConflict, onCancel }: {
   // one of its events withdraws it. A commit on its way decides from its own answer.
   const reviewIds = review ? impactEventIds(review.impact) : null;
   const reviewMoved = review !== null && !reviewCommitting.current && moved(review.mark, reviewIds ?? []);
+  useLayoutEffect(() => {
+    if (review || !returnToForm.current) return;
+    returnToForm.current = false;
+    groupSave.current?.focus();
+  }, [review]);
+
   useLayoutEffect(() => {
     if (!review) return;
     const ids = impactEventIds(review.impact);
@@ -289,6 +296,7 @@ export function GroupEditor({ group, action, onSaved, onConflict, onCancel }: {
           waiting={activity.pendingFor(reviewIds ?? []) > 0}
           onConfirm={(d) => void action.run(() => confirmReview(d))}
           onCancel={() => {
+            returnToForm.current = true;
             setReview(null);
             setReviewError(null);
           }}
@@ -311,6 +319,7 @@ export function GroupEditor({ group, action, onSaved, onConflict, onCancel }: {
         }}
         saveLabel="Save group"
         saveRef={groupSave}
+        locked={review !== null && !reviewMoved}
         action={action}
         onSaved={saveEdit}
         onCancel={() => {

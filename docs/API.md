@@ -59,7 +59,9 @@ refusal alike. `/auth/bootstrap` names the viewer the sign-in middleware's
 fresh read judged. The reader routes that take part are the group page with each later page (`GET /groups/:id`,
 `GET /groups/:id/events`), the group's date summaries (`GET /groups/:id/date-cards?section=summary`), the
 roster (`GET /groups/:id/members` and a role change's roster reply), the event
-page (`GET /events/:id`), the date page (`GET /events/:id/dates/:date`), the
+page (`GET /events/:id`), the event visibility preview (`GET /events/:id/visibility-impact`),
+the date page (`GET /events/:id/dates/:date`), the room pickers
+(`GET /events/:id/rooms` and `GET /events/:id/dates/:date/rooms`), the
 manager's exact date (`GET /events/:id/occurrences/:date`) with the retired
 date PUT beside it (refusals only), the guarded edit
 (`POST /events/:id/occurrences/:date/edits`) and `GET /me/household`. Each of
@@ -74,12 +76,13 @@ exactly like a hidden one) once its rollback was confirmed. A 401, a 5xx, a
 failed COMMIT and an unconfirmed rollback carry none; a reader's refusal whose
 rollback was not confirmed is the generic 500. The date page names the viewer of the read
 whose answer it is (the scheduled date, the tombstone, or for the 404 the last
-read that ran). The guarded edit acknowledges only its writer's outcomes, for
-the actor that writer locked: the refusals made before it (the preflight's
+read that ran). The room pickers check the rooms switch before they judge
+the viewer. A `rooms_off` refusal carries no acknowledgment. The guarded edit
+acknowledges only its writer's outcomes, for the actor that writer locked.
+The refusals made before it (the preflight's
 404/403, a malformed body, a detected restore) carry none, so a participating
 client treats them as unknown. An acknowledgment says nothing about any other
-snapshot, earlier pages of the group list included. The SPA's pages send these
-reads plainly for now. The SPA uses a
+snapshot, earlier pages of the group list included. The SPA uses a
 participating answer only once its body is read: it must carry the
 acknowledgment for the pinned credential, be a JSON object, and arrive while
 that credential is still the tab's. Otherwise a read is closed and a write's

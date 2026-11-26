@@ -1,5 +1,6 @@
 import { useEffect, useRef } from "react";
 import { ApiError, credentialCurrent, currentCredential } from "../api/core";
+import { useEventReadPin } from "./eventReadPin";
 import type { RevisionRef } from "../types";
 import { errorCode } from "./errors";
 import { outcomeOf } from "./rosterWrites";
@@ -171,6 +172,7 @@ export function useRevisionSave<T, F>({
   const own = useRef<LostSend>({ current: false });
   const lost = kept ?? own.current;
   const mounted = useRef(true);
+  const [pinned] = useEventReadPin();
 
   useEffect(() => {
     mounted.current = true;
@@ -188,7 +190,7 @@ export function useRevisionSave<T, F>({
     const same = (a: F | null, b: F | null) => a !== null && b !== null && JSON.stringify(a) === JSON.stringify(b);
     const was = fields(base.current.opened);
     const goal = fields(intended);
-    const credential = currentCredential();
+    const credential = pinned ?? currentCredential();
     const sameSignIn = () => (credential === null ? currentCredential() === null : credentialCurrent(credential));
     let current = base.current.revision;
 
@@ -207,13 +209,22 @@ export function useRevisionSave<T, F>({
     };
 
     for (let sends = 1; ; sends++) {
+      if (pinned && !credentialCurrent(pinned)) return "left";
       let answer: R | undefined;
       let refused = false;
 
       try {
         answer = await write(current);
+
+        if (pinned && !credentialCurrent(pinned)) {
+          noAnswer();
+
+          return "left";
+        }
       } catch (err) {
         if (unanswered(err)) noAnswer();
+
+        if (pinned && !credentialCurrent(pinned)) return "left";
 
         if (err instanceof ApiError && gone(err)) return stays && !mounted.current ? "left" : conflict("gone");
 
@@ -245,12 +256,16 @@ export function useRevisionSave<T, F>({
       try {
         stored = await read();
       } catch (err) {
+        if (pinned && (!credentialCurrent(pinned) || !mounted.current)) return "left";
+
+        if (pinned && errorCode(err) === "session_expired") throw err;
+
         if (err instanceof ApiError && gone(err)) return stays && !mounted.current ? "left" : conflict("gone");
 
         throw err;
       }
 
-      if (!mounted.current) return "left";
+      if (!mounted.current || (pinned && !credentialCurrent(pinned))) return "left";
 
       if (!sameSignIn() || !stored.allowed || !stored.revision) return conflict("gone");
 

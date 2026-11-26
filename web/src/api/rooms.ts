@@ -14,7 +14,7 @@ import type {
   SeriesBooking,
   SeriesRoomsResponse,
 } from "../types";
-import { api, path, type Id } from "./core";
+import { api, path, type Credential, type Id } from "./core";
 
 // Rooms (M2.1a). Everything answers 404 while rooms are off. On update, absent
 // fields keep their value and a null capacity clears the limit.
@@ -74,7 +74,7 @@ export interface DateRoomInput {
 }
 
 export const DateRooms = {
-  list: (eventId: Id, date: string) => api<DateRoomsResponse>(path`/events/${eventId}/dates/${date}/rooms`),
+  list: (eventId: Id, date: string, pinned?: Credential) => api<DateRoomsResponse>(path`/events/${eventId}/dates/${date}/rooms`, { pinned }),
   set: (eventId: Id, date: string, body: DateRoomInput, revision: string | undefined) =>
     api<RoomBookingResponse>(path`/events/${eventId}/dates/${date}/room`, { method: "PUT", body: { ...body, revision } }),
 };
@@ -96,7 +96,7 @@ interface RoomAvailabilityInput {
 }
 
 export const SeriesRooms = {
-  list: (eventId: Id) => api<SeriesRoomsResponse>(path`/events/${eventId}/rooms`),
+  list: (eventId: Id, pinned?: Credential) => api<SeriesRoomsResponse>(path`/events/${eventId}/rooms`, { pinned }),
   // `includeDates`: the dates with a room of their own the control showed, to change too (DEC-168).
   set: (eventId: Id, body: { roomId: number | null; overlapReason?: string; includeDates?: string[]; reviewedBusyDates?: string[] }, revision: string | undefined) =>
     api<SeriesBooking>(path`/events/${eventId}/room`, { method: "PUT", body: { ...body, revision } }),
