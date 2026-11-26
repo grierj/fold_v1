@@ -70,10 +70,11 @@ type pushWaitJSON struct {
 // Each person's status as the history lists it. A leader or host can't tell
 // a bounce, a complaint, a failure or a skip apart: all are "missed".
 const (
-	historySent      = "sent"
-	historyDelivered = "delivered"
-	historyMissed    = "missed"
-	historyWaiting   = "waiting"
+	historySent        = "sent"
+	historyDelivered   = "delivered"
+	historyMissed      = "missed"
+	historyWaiting     = "waiting"
+	historyUnconfirmed = "unconfirmed"
 )
 
 // historyRecipientJSON is one row: a name and a Teen badge, the status,
@@ -151,7 +152,7 @@ func recipientCountsIn(db *gorm.DB, id uint) (recipientCountsJSON, map[string]in
 			case models.RecipientQueued:
 				waiting[pushWaitUntil(g.Reason)] += g.N
 			default:
-				c.Push.Missed[g.Reason] += g.N
+				c.Push.Missed[pushMissReason(g.Reason)] += g.N
 			}
 			continue
 		}
@@ -215,8 +216,16 @@ func historyStatus(status, reason, errText string, admin bool) (string, string) 
 	return historyMissed, whyFor(status, reason, errText)
 }
 
+func pushMissReason(reason string) string {
+	if reason == "didn't go out" {
+		return pushWhyUnconfirmed
+	}
+	return reason
+}
+
 // pushHistoryStatus is a person's push in the history's terms: sent,
-// waiting (until when), or missed with its reason (admins only).
+// waiting (until when), or missed. Any manager can see uncertainty about
+// delivery. Other individual reasons are visible to admins.
 func pushHistoryStatus(status, reason string, admin bool) *historyPushJSON {
 	switch status {
 	case models.RecipientSent:
@@ -226,7 +235,8 @@ func pushHistoryStatus(status, reason string, admin bool) *historyPushJSON {
 		return &historyPushJSON{Status: historyWaiting, Until: pushWaitUntil(reason)}
 	}
 	h := &historyPushJSON{Status: historyMissed}
-	if admin {
+	reason = pushMissReason(reason)
+	if admin || reason == pushWhyUnconfirmed {
 		h.Reason = reason
 	}
 	return h
@@ -237,6 +247,7 @@ func pushHistoryStatus(status, reason string, admin bool) *historyPushJSON {
 // with its teen; a leader or host never sees a guardian's name (DEC-132).
 func historyRecipientsIn(db *gorm.DB, id uint, admin bool) ([]historyRecipientJSON, bool, error) {
 	var rows []struct {
+		Channel         string
 		Status          string
 		Reason          string
 		Error           string
@@ -253,7 +264,7 @@ func historyRecipientsIn(db *gorm.DB, id uint, admin bool) ([]historyRecipientJS
 	// person's push row joined on (never a copy's). A push row with no
 	// email row beside it (a push reminder's, M3.13d3) is the person's row
 	// itself.
-	err := db.Raw(`SELECT r.status, r.reason, r.error, r.copy_of_user_id IS NOT NULL AS copy,
+	err := db.Raw(`SELECT r.channel, r.status, r.reason, r.error, r.copy_of_user_id IS NOT NULL AS copy,
 		u.name, u.display_name, u.account_type, COALESCE(t.name, '') AS teen_name, COALESCE(t.display_name, '') AS teen_display_name,
 		p.status AS push_status, p.reason AS push_reason
 		FROM message_recipients r JOIN users u ON u.id = r.user_id LEFT JOIN users t ON t.id = r.copy_of_user_id
@@ -272,6 +283,9 @@ func historyRecipientsIn(db *gorm.DB, id uint, admin bool) ([]historyRecipientJS
 		u := models.User{Name: r.Name, DisplayName: r.DisplayName}
 		h := historyRecipientJSON{Name: u.PublicName(), Teen: r.AccountType == models.AccountTeen && !r.Copy}
 		h.Status, h.Reason = historyStatus(r.Status, r.Reason, r.Error, admin)
+		if r.Channel == models.DeliveryPush && h.Status == historyMissed && pushMissReason(r.Reason) == pushWhyUnconfirmed {
+			h.Status, h.Reason = historyUnconfirmed, ""
+		}
 		if r.PushStatus != nil {
 			reason := ""
 			if r.PushReason != nil {
@@ -314,21 +328,13 @@ func goingOut(m *models.Message) bool { return policy.MessageGoingOut(m.Status) 
 // (decideRetryIn), where each failed person is checked against today's
 // audience too.
 func (a *App) authorMayResend(db *gorm.DB, m *models.Message) (bool, error) {
-	if m.AuthorID == nil {
-		return false, nil
-	}
-	var author models.User
-	if err := db.First(&author, *m.AuthorID).Error; errors.Is(err, gorm.ErrRecordNotFound) {
-		return false, nil
-	} else if err != nil {
+	author, err := activeMessageAuthorIn(db, m, nil)
+	if err != nil || author == nil {
 		return false, err
-	}
-	if author.Status != models.UserActive {
-		return false, nil
 	}
 	var au audienceJSON
 	_ = json.Unmarshal([]byte(m.Audience), &au)
-	_, err := a.resolveAudienceIn(db, &author, &au, time.Now())
+	_, err = a.resolveAudienceIn(db, author, &au, time.Now())
 	switch {
 	case err == nil:
 		return true, nil

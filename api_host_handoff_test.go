@@ -380,7 +380,7 @@ func TestHostWritesSerializeWithAccountChanges(t *testing.T) {
 					}
 				}},
 				{"demote the acting admin", func(s hostScene) (string, string, any) {
-					return "PUT", "/api/v1/admin/users/" + itoa(s.adminA.ID), map[string]any{"role": models.RoleMember}
+					return "PUT", "/api/v1/admin/users/" + itoa(s.adminA.ID), adminEditBody(s.b, s.adminA.ID, map[string]any{"role": models.RoleMember})
 				}, func(t *testing.T, s hostScene, r httpResult) {
 					if r.code != http.StatusOK {
 						t.Fatalf("demote: %d %s", r.code, r.body)
@@ -446,7 +446,7 @@ func TestHostWritesSerializeWithAccountChanges(t *testing.T) {
 					return "PUT", "/api/v1/admin/users/" + itoa(s.target.ID), map[string]any{"status": "disabled"}
 				}, http.StatusBadRequest, `"code":"cannot_host"`},
 				{"demote the acting admin", "audit_logs", "AFTER INSERT", func(s hostScene) (string, string, any) {
-					return "PUT", "/api/v1/admin/users/" + itoa(s.adminA.ID), map[string]any{"role": models.RoleMember}
+					return "PUT", "/api/v1/admin/users/" + itoa(s.adminA.ID), adminEditBody(s.b, s.adminA.ID, map[string]any{"role": models.RoleMember})
 				}, http.StatusUnauthorized, `"code":"signed_out"`},
 				{"delete the target", "notifications", "BEFORE DELETE", func(s hostScene) (string, string, any) {
 					return "DELETE", "/api/v1/admin/users/" + itoa(s.target.ID), nil

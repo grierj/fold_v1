@@ -128,6 +128,10 @@ const (
 	// event. Meta: title, groupId (absent when church-wide).
 	EventDeleted = "event.deleted"
 
+	// EventDatesCancelled records a manager's manual or series cancellation.
+	// Target is the event. Meta: occurrenceIds and source.
+	EventDatesCancelled = "event.dates_cancelled"
+
 	// EventDatesRestored: a series edit whose rule includes dates an earlier
 	// series edit had cancelled brought them back on (cancel_source series).
 	// Target is the event. Meta: dates (original dates), occurrenceIds.
@@ -293,6 +297,7 @@ const (
 	// EmailSuppressionCleared: an admin let Fold mail a suppressed address
 	// again (M3.2c, DEC-113). Target is the user; meta has the reasons.
 	EmailSuppressionCleared = "email.suppression_cleared"
+	TimezoneChanged         = "setting.timezone_changed"
 	// ChurchAddressChanged: an admin set or cleared the church's mailing
 	// address for email footers (M3.3b, DEC-116).
 	ChurchAddressChanged = "setting.church_address_changed"

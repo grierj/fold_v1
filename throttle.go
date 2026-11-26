@@ -176,28 +176,61 @@ func (a *App) throttleHit(ctx context.Context, key throttleKey, window time.Dura
 	return failures, err
 }
 
-// inviteSendAllowed is the invitation send limit: ordinary invitations and
-// household-conversion mail (resends included) share it. Audits are
-// durable counters; refused ordinary invitations spend only the actor budget.
-// The actor advisory lock serializes different households and invite targets.
-func inviteSendAllowed(tx *gorm.DB, actor uint, email string) (bool, error) {
+const (
+	groupMemberEmailUserLimit = 30
+	groupMemberEmailIPLimit   = 100
+)
+
+func (a *App) groupMemberEmailAllowed(ctx context.Context, actor *models.User, ip string) (bool, error) {
+	allowed := false
+	err := a.DB.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		// Keep the owned key's write ordered with account erasure.
+		if _, err := lockActorIn(tx, actor, actorShare); err != nil {
+			return err
+		}
+		hits, _, err := countThrottleHit(tx, groupMemberEmailUserKey(actor.ID), time.Minute)
+		if err != nil || hits > groupMemberEmailUserLimit {
+			return err
+		}
+		hits, _, err = countThrottleHit(tx, groupMemberEmailIPKey(ip), time.Minute)
+		allowed = hits <= groupMemberEmailIPLimit
+		return err
+	})
+	return allowed, err
+}
+
+type invitationLimit uint8
+
+const (
+	invitationWithinLimits invitationLimit = iota
+	invitationActorLimit
+	invitationDestinationLimit
+)
+
+// inviteSendAllowed is shared by ordinary invitations and household conversion.
+// Refusals spend only the actor's budget. The actor lock serializes requests
+// to different addresses.
+func inviteSendAllowed(tx *gorm.DB, actor uint, email string) (invitationLimit, error) {
 	if err := tx.Exec("SELECT pg_advisory_xact_lock(?, ?)", inviteSendLockClass, actor).Error; err != nil {
-		return false, err
+		return invitationWithinLimits, err
 	}
 	var byActor, byEmail int64
 	mailKinds := []string{audit.InvitationCreated, audit.InvitationResent}
 	actorKinds := []string{audit.InvitationCreated, audit.InvitationResent, audit.InvitationRefused}
 	if err := tx.Model(&models.AuditLog{}).Where("actor_id = ? AND action IN ? AND at > now() - interval '24 hours'", actor, actorKinds).Count(&byActor).Error; err != nil {
-		return false, err
+		return invitationWithinLimits, err
 	}
 	if byActor >= leaderInviteDailyLimit {
-		return false, nil
+		return invitationActorLimit, nil
 	}
 	// Join the invitation instead of putting destination email in conversion audits.
 	if err := tx.Model(&models.AuditLog{}).Joins("JOIN invitations ON invitations.id = audit_logs.target_id AND audit_logs.target_type = 'invitation'").Where("invitations.email = ? AND audit_logs.action IN ? AND audit_logs.at > now() - interval '24 hours'", email, mailKinds).Count(&byEmail).Error; err != nil {
-		return false, err
+		return invitationWithinLimits, err
 	}
-	return byEmail < leaderInviteDailyLimit, nil
+	if byEmail >= leaderInviteDailyLimit {
+		return invitationDestinationLimit, nil
+	}
+	return invitationWithinLimits, nil
 }
 
 // lockGuestVerifyAddress takes the transaction-scoped lock that serializes one

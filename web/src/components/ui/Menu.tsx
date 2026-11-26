@@ -14,12 +14,13 @@ export interface MenuItem {
   disabled?: boolean;
 }
 
-export function Menu({ items, label = "More", text = "More", align = "end", tone = "secondary" }: {
+export function Menu({ items, label = "More", text = "More", align = "end", tone = "secondary", disabled }: {
   items: MenuItem[];
   label?: string;
   text?: string;
   align?: "start" | "end";
   tone?: "secondary" | "quiet";
+  disabled?: boolean;
 }) {
   const [open, setOpen] = useState(false);
   // Which edge the menu lines up with; flips when the preferred one would
@@ -87,6 +88,7 @@ export function Menu({ items, label = "More", text = "More", align = "end", tone
       <button
         ref={trigger}
         type="button"
+        disabled={disabled}
         className={look}
         aria-haspopup="menu"
         aria-expanded={open}

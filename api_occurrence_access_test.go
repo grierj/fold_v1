@@ -1254,18 +1254,14 @@ func TestCancelledDateTombstoneClockBoundary(t *testing.T) {
 	}
 	f.wantTombstone(t, earlyClient, before, tombstoneTitle)
 
-	// At the end the manual cancel is not refused: its first reconcile, with
-	// the date still scheduled, ends the departure grant as expired, and the
-	// cancel then commits with no grant of its own to stamp.
 	f.app.clock = func() time.Time { return at.EndsAt }
-	f.cancel(t, at)
-	if got := loadAccessRow(t, f.app.DB, late.ID); got.EndReason != policy.OccurrenceEnded || got.EndedAt == nil {
-		t.Fatalf("a cancel at the end: %+v", got)
+	apiDo(t, f.admin, "POST", "/api/v1/events/"+itoa(f.event.ID)+"/cancel",
+		map[string]any{"date": tombstoneDate(at)}, http.StatusConflict)
+	if got := loadAccessRow(t, f.app.DB, late.ID); got.EndedAt != nil {
+		t.Fatalf("the refused cancellation wrote an access outcome: %+v", got)
 	}
-	var cancelled models.EventOccurrence
-	gormMust(t, f.app.DB.First(&cancelled, at.ID))
-	if cancelled.Status != models.OccurrenceCancelled {
-		t.Fatalf("the cancel at the end did not commit: %+v", cancelled)
+	if got := occurrenceRow(t, f.app, at.ID); got.Status != models.OccurrenceScheduled {
+		t.Fatalf("the date was cancelled at its end: %+v", got)
 	}
 	f.wantUnavailable(t, lateClient, tombstoneDate(at))
 }

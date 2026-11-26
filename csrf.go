@@ -45,15 +45,16 @@ func (a *App) csrfMiddleware() gin.HandlerFunc {
 			}
 			c.Set(sessionPinnedKey, true)
 		}
-		if err != nil {
-			a.csrfFail(c, errCSRFSession)
+		safe := isSafeMethod(c.Request.Method)
+		if err != nil && !safe {
+			a.csrfFail(c, errSessionExpired)
 			return
 		}
 
 		token, _ := session.Values[csrfSessionKey].(string)
-		if token == "" {
+		if err != nil || token == "" {
 			// Persist the new token so the cookie is set before any POST.
-			if token, err = a.issueAnonymousCredential(c, session); err != nil {
+			if token, err = a.issueAnonymousCredential(c, session, err != nil); err != nil {
 				if errors.Is(err, errCredentialEntropy) {
 					a.csrfFail(c, errCSRFGenerate)
 				} else {
@@ -64,7 +65,7 @@ func (a *App) csrfMiddleware() gin.HandlerFunc {
 		}
 		c.Set(csrfContextKey, token)
 
-		if !isSafeMethod(c.Request.Method) {
+		if !safe {
 			submitted := c.PostForm(csrfFormField)
 			if submitted == "" {
 				submitted = c.GetHeader(csrfHeader)

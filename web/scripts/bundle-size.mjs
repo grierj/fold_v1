@@ -1,40 +1,42 @@
-// Fails when the entry and its eager modulepreloads exceed the budget (#152).
-// Run after `vite build`.
-import { readFileSync, readdirSync } from "node:fs";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { gzipSync } from "node:zlib";
 
-// Temporary milestone headroom; replace this size gate with performance checks (#419).
 const BUDGET_GZIP_KB = 145;
-const html = readFileSync("dist/index.html", "utf8");
-const entry = html.match(/<script[^>]+src="\/assets\/([^"]+\.js)"/)?.[1];
 
-if (!entry || !readdirSync("dist/assets").includes(entry)) {
-  console.error("bundle-size: no entry chunk found in dist/index.html");
-  process.exit(1);
+export function gzipBytes(file) {
+  return gzipSync(readFileSync(file)).length;
 }
 
-const chunks = new Set([entry]);
+export function eagerGzipBytes(dist) {
+  const html = readFileSync(join(dist, "index.html"), "utf8");
+  const entry = html.match(/<script[^>]+src="\/assets\/([^"]+\.js)"/)?.[1];
 
-for (const tag of html.matchAll(/<link\b[^>]*>/g)) {
-  if (!/\brel="modulepreload"/.test(tag[0])) continue;
-  const chunk = tag[0].match(/\bhref="\/assets\/([^"/]+\.js)"/)?.[1];
+  if (!entry) throw new Error("bundle-size: no entry chunk found in dist/index.html");
+  const chunks = new Set([entry]);
 
-  if (chunk) chunks.add(chunk);
+  for (const [tag] of html.matchAll(/<link\b[^>]*>/g)) {
+    if (!/\brel="modulepreload"/.test(tag)) continue;
+    const chunk = tag.match(/\bhref="\/assets\/([^"/]+\.js)"/)?.[1];
+
+    if (chunk) chunks.add(chunk);
+  }
+
+  const sizes = new Map();
+
+  for (const chunk of chunks) sizes.set(chunk, gzipBytes(join(dist, "assets", chunk)));
+
+  return { sizes, bytes: [...sizes.values()].reduce((sum, size) => sum + size, 0) };
 }
 
-let bytes = 0;
+if (import.meta.main) {
+  const { sizes, bytes } = eagerGzipBytes("dist");
 
-for (const chunk of chunks) {
-  const size = gzipSync(readFileSync(`dist/assets/${chunk}`)).length;
-  bytes += size;
-  console.log(`bundle-size: ${chunk}: ${(size / 1024).toFixed(1)} kB gzip`);
-}
+  for (const [chunk, size] of sizes) console.log(`bundle-size: ${chunk}: ${(size / 1024).toFixed(1)} KiB gzip`);
+  console.log(`bundle-size: ${sizes.size} eager chunks total ${(bytes / 1024).toFixed(1)} KiB gzip (budget ${BUDGET_GZIP_KB} KiB)`);
 
-const kb = bytes / 1024;
-
-console.log(`bundle-size: ${chunks.size} eager chunks total ${kb.toFixed(1)} kB gzip (budget ${BUDGET_GZIP_KB} kB)`);
-
-if (kb > BUDGET_GZIP_KB) {
-  console.error("bundle-size: over budget. Lazy-load what most pages don't need, or raise the budget on purpose.");
-  process.exit(1);
+  if (bytes > BUDGET_GZIP_KB * 1024) {
+    console.error("bundle-size: over budget. Lazy-load what most pages don't need, or raise the budget on purpose.");
+    process.exitCode = 1;
+  }
 }

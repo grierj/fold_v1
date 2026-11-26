@@ -8,15 +8,20 @@ import (
 	"strings"
 
 	"fold/internal/guardkit"
+
+	"gorm.io/gorm/schema"
 )
 
-// tableStatusGuard finds the writes of one table's status column: the
-// machinery behind TestMessageStatusHasOneWriter and
-// TestRecipientStatusHasOneWriter. Each guard's header states its rule and
-// what it cannot see.
+// tableStatusGuard finds status writes. Updates must identify the columns
+// they write with literal names or a local map whose keys the guard can read.
+// It parses declarations and GORM calls without running a type checker.
+// Dynamic SQL, conflict clauses, pre-scoped database handles and model
+// values returned by undeclared functions are outside its coverage.
 type tableStatusGuard struct {
 	model, table, noun string
 	updateRe, insertRe *regexp.Regexp
+	updateHelper       string
+	skipInserts        bool
 }
 
 // newTableStatusGuard: model is the models type's name, table its table, and
@@ -30,133 +35,147 @@ func newTableStatusGuard(model, table, noun string) tableStatusGuard {
 }
 
 var (
-	tableStatusPlainColumnRe = regexp.MustCompile(`^[a-z_][a-z0-9_]*$`)
+	tableStatusPlainColumnRe = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 	tableStatusSetsStatusRe  = regexp.MustCompile(`(?i)(?:^|[\s,."])status"?\s*=`)
 )
 
 type tableStatusWrite struct{ at, fn, shape string }
 
-// typeExpr: models.<model>, a pointer to it, or a slice of either.
-func (g tableStatusGuard) typeExpr(e ast.Expr) bool {
-	switch v := guardkit.Unparen(e).(type) {
-	case *ast.StarExpr:
-		return g.typeExpr(v.X)
-	case *ast.ArrayType:
-		return g.typeExpr(v.Elt)
-	case *ast.SelectorExpr:
-		x, ok := v.X.(*ast.Ident)
-		return ok && x.Name == "models" && v.Sel.Name == g.model
-	}
-	return false
+func (g tableStatusGuard) value(e ast.Expr, bindings modelBindings, fields tableStatusFields) bool {
+	e = tableStatusIndirect(e)
+	return exprKind(e, g.model, bindings, nil) != notModel ||
+		(len(fields) > 0 && typeKind(tableStatusExprType(e, fields), g.model) != notModel)
 }
 
-// value: e is a literal of the model or a name bound to one, or the address
-// or an element of one, or made by new or make.
-func (g tableStatusGuard) value(e ast.Expr, names map[string]bool) bool {
-	switch v := guardkit.Unparen(e).(type) {
-	case *ast.CompositeLit:
-		return g.typeExpr(v.Type)
-	case *ast.UnaryExpr:
-		return v.Op == token.AND && g.value(v.X, names)
-	case *ast.StarExpr:
-		return g.value(v.X, names)
-	case *ast.IndexExpr:
-		return g.value(v.X, names)
-	case *ast.Ident:
-		return names[v.Name]
-	case *ast.CallExpr:
-		fn, ok := v.Fun.(*ast.Ident)
-		return ok && (fn.Name == "new" || fn.Name == "make") && len(v.Args) >= 1 && g.typeExpr(v.Args[0])
-	}
-	return false
-}
-
-// funcs is every declared function whose first result is a value of the
-// model.
-func (g tableStatusGuard) funcs(p *guardkit.Parsed) map[string]bool {
-	out := map[string]bool{}
-	for _, f := range p.Files {
-		for _, d := range f.AST.Decls {
-			if fd, ok := d.(*ast.FuncDecl); ok && fd.Type.Results != nil && len(fd.Type.Results.List) > 0 && g.typeExpr(fd.Type.Results.List[0].Type) {
-				out[fd.Name.Name] = true
+func tableStatusIndirect(e ast.Expr) ast.Expr {
+	for {
+		switch v := guardkit.Unparen(e).(type) {
+		case *ast.StarExpr:
+			e = v.X
+		case *ast.UnaryExpr:
+			if v.Op != token.AND {
+				return v
 			}
+			e = v.X
+		default:
+			return v
 		}
 	}
-	return out
 }
 
-// names is every name fd binds to a value of the model, and every name it
-// assigns a chain over the table.
-func (g tableStatusGuard) names(fd *ast.FuncDecl, funcs map[string]bool) (vals, chains map[string]bool) {
-	vals, chains = map[string]bool{}, map[string]bool{}
-	params := func(ft *ast.FuncType) {
-		for _, fl := range []*ast.FieldList{ft.Params, ft.Results} {
-			if fl == nil {
+// tableStatusExprType follows declarations, indexing into typed collections,
+// and direct model fields of named structs.
+func tableStatusExprType(e ast.Expr, fields tableStatusFields) ast.Expr {
+	switch v := tableStatusIndirect(e).(type) {
+	case *ast.CompositeLit:
+		return v.Type
+	case *ast.IndexExpr:
+		switch t := tableStatusIndirect(tableStatusExprType(v.X, fields)).(type) {
+		case *ast.ArrayType:
+			return t.Elt
+		case *ast.MapType:
+			return t.Value
+		}
+	case *ast.SelectorExpr:
+		if owner, ok := tableStatusIndirect(tableStatusExprType(v.X, fields)).(*ast.Ident); ok {
+			return fields[owner.Name][v.Sel.Name]
+		}
+	case *ast.Ident:
+		if v.Obj == nil {
+			return nil
+		}
+		switch d := v.Obj.Decl.(type) {
+		case *ast.Field:
+			return d.Type
+		case *ast.AssignStmt:
+			if len(d.Lhs) == len(d.Rhs) {
+				for i, lhs := range d.Lhs {
+					if id, ok := lhs.(*ast.Ident); ok && id.Obj == v.Obj {
+						return tableStatusExprType(d.Rhs[i], fields)
+					}
+				}
+			}
+		case *ast.ValueSpec:
+			return d.Type
+		}
+	}
+	return nil
+}
+
+type tableStatusPackage struct{ dir, name string }
+
+type tableStatusFields map[string]map[string]ast.Expr
+
+func (g tableStatusGuard) structFields(p *guardkit.Parsed) map[tableStatusPackage]tableStatusFields {
+	packages := map[tableStatusPackage]tableStatusFields{}
+	for _, f := range p.Files {
+		key := tableStatusPackage{f.Dir(), f.AST.Name.Name}
+		for _, d := range f.AST.Decls {
+			decl, ok := d.(*ast.GenDecl)
+			if !ok || decl.Tok != token.TYPE {
 				continue
 			}
-			for _, f := range fl.List {
-				if g.typeExpr(f.Type) {
-					for _, n := range f.Names {
-						vals[n.Name] = true
+			for _, spec := range decl.Specs {
+				typ := spec.(*ast.TypeSpec)
+				st, ok := typ.Type.(*ast.StructType)
+				if !ok {
+					continue
+				}
+				for _, field := range st.Fields.List {
+					if typeKind(field.Type, g.model) == notModel {
+						continue
+					}
+					if packages[key] == nil {
+						packages[key] = tableStatusFields{}
+					}
+					if packages[key][typ.Name.Name] == nil {
+						packages[key][typ.Name.Name] = map[string]ast.Expr{}
+					}
+					for _, name := range field.Names {
+						packages[key][typ.Name.Name][name.Name] = field.Type
 					}
 				}
 			}
 		}
 	}
-	params(fd.Type)
-	if fd.Recv != nil {
-		params(&ast.FuncType{Params: fd.Recv})
-	}
-	// Twice, so a name bound from one bound later in the source still counts.
-	for range 2 {
-		ast.Inspect(fd, func(n ast.Node) bool {
+	return packages
+}
+
+func tableStatusChains(fd *ast.FuncDecl, find func(ast.Expr, map[string]bool) bool) map[string]bool {
+	chains := map[string]bool{}
+	for changed := true; changed; {
+		changed = false
+		bind := func(name string, e ast.Expr) {
+			if name != "_" && !chains[name] && find(e, chains) {
+				chains[name] = true
+				changed = true
+			}
+		}
+		ast.Inspect(fd.Body, func(n ast.Node) bool {
 			switch v := n.(type) {
-			case *ast.FuncLit:
-				params(v.Type)
 			case *ast.ValueSpec:
-				for i, name := range v.Names {
-					if (v.Type != nil && g.typeExpr(v.Type)) || (i < len(v.Values) && g.value(v.Values[i], vals)) {
-						vals[name.Name] = true
+				if len(v.Values) == len(v.Names) {
+					for i, name := range v.Names {
+						bind(name.Name, v.Values[i])
 					}
 				}
 			case *ast.AssignStmt:
-				for i, l := range v.Lhs {
-					id, ok := l.(*ast.Ident)
-					if !ok {
-						continue
-					}
-					var rhs ast.Expr
-					if len(v.Rhs) == len(v.Lhs) {
-						rhs = v.Rhs[i]
-					} else if len(v.Rhs) == 1 && i == 0 {
-						rhs = v.Rhs[0]
-					}
-					if rhs == nil {
-						continue
-					}
-					if g.value(rhs, vals) {
-						vals[id.Name] = true
-					} else if call, ok := guardkit.Unparen(rhs).(*ast.CallExpr); ok && funcs[guardkit.Callee(call)] {
-						vals[id.Name] = true
-					} else if g.chain(rhs, vals, chains) {
-						chains[id.Name] = true
-					}
-				}
-			case *ast.RangeStmt:
-				if g.value(v.X, vals) {
-					if id, ok := v.Value.(*ast.Ident); ok {
-						vals[id.Name] = true
+				if len(v.Lhs) == len(v.Rhs) {
+					for i, lhs := range v.Lhs {
+						if id, ok := lhs.(*ast.Ident); ok {
+							bind(id.Name, v.Rhs[i])
+						}
 					}
 				}
 			}
 			return true
 		})
 	}
-	return vals, chains
+	return chains
 }
 
 // chain reports whether a gorm call chain names the table.
-func (g tableStatusGuard) chain(x ast.Expr, vals, chains map[string]bool) bool {
+func (g tableStatusGuard) chain(x ast.Expr, value func(ast.Expr) bool, chains map[string]bool) bool {
 	for {
 		switch v := guardkit.Unparen(x).(type) {
 		case *ast.Ident:
@@ -168,13 +187,16 @@ func (g tableStatusGuard) chain(x ast.Expr, vals, chains map[string]bool) bool {
 			}
 			switch sel.Sel.Name {
 			case "Model":
-				if len(v.Args) == 1 && g.value(v.Args[0], vals) {
+				if len(v.Args) == 1 && value(v.Args[0]) {
 					return true
 				}
 			case "Table":
 				if len(v.Args) > 0 {
-					if s, ok := stringLit(v.Args[0]); ok && len(strings.Fields(s)) > 0 && strings.Fields(s)[0] == g.table {
-						return true
+					if s, ok := stringLit(v.Args[0]); ok {
+						parts := strings.Fields(s)
+						if len(parts) > 0 && strings.TrimPrefix(strings.ReplaceAll(parts[0], `"`, ""), "public.") == g.table {
+							return true
+						}
 					}
 				}
 			}
@@ -187,12 +209,12 @@ func (g tableStatusGuard) chain(x ast.Expr, vals, chains map[string]bool) bool {
 
 // tableStatusKey: gorm resolves a column by its name or by the field's, so
 // "Status" names the status column too.
-func tableStatusKey(s string) bool { return strings.EqualFold(s, "status") }
+func tableStatusKey(s string) bool { return (schema.NamingStrategy{}).ColumnName("", s) == "status" }
 
 // tableStatusMapLit reads a map literal: whether it holds a status key, and
 // whether it holds a key that is not a string literal.
 func tableStatusMapLit(e ast.Expr) (status, computed bool) {
-	lit, ok := guardkit.Unparen(e).(*ast.CompositeLit)
+	lit, ok := tableStatusIndirect(e).(*ast.CompositeLit)
 	if !ok {
 		return false, false
 	}
@@ -218,7 +240,7 @@ func tableStatusMapLit(e ast.Expr) (status, computed bool) {
 
 // tableStatusMapMade: e makes a map the guard can read, a map literal or make.
 func tableStatusMapMade(e ast.Expr) bool {
-	switch v := guardkit.Unparen(e).(type) {
+	switch v := tableStatusIndirect(e).(type) {
 	case *ast.CompositeLit:
 		_, ok := v.Type.(*ast.MapType)
 		return ok
@@ -237,7 +259,7 @@ func tableStatusMapMade(e ast.Expr) bool {
 // key (in its literal or by assignment), or given a computed key; every name
 // it binds to a map it makes itself; and every parameter name of fd and its
 // function literals.
-func tableStatusLocalMaps(fd *ast.FuncDecl) (status, computed, made, params map[string]bool) {
+func (g tableStatusGuard) localMaps(fd *ast.FuncDecl) (status, computed, made, params map[string]bool) {
 	status, computed, made, params = map[string]bool{}, map[string]bool{}, map[string]bool{}, map[string]bool{}
 	addParams := func(fl *ast.FieldList) {
 		if fl == nil {
@@ -306,16 +328,18 @@ func tableStatusLocalMaps(fd *ast.FuncDecl) (status, computed, made, params map[
 		}
 		return true
 	})
-	// A made map stays readable only while its name is used in three ways: set
-	// (it is declared or assigned), given a key (m[k] = v) and passed to
-	// Updates. Any other use (another call such as maps.Copy, a second name
-	// for it, a range, a return) may add keys the guard does not see.
+	// A local map stays readable while it is assigned, indexed, measured
+	// with len, pruned with delete, or passed directly to an update.
 	guardkit.InspectStack(fd.Body, func(n ast.Node, stack []ast.Node) bool {
 		id, ok := n.(*ast.Ident)
 		if !ok || !made[id.Name] || len(stack) < 2 {
 			return true
 		}
-		switch parent := stack[len(stack)-2].(type) {
+		parentIndex := len(stack) - 2
+		if u, ok := stack[parentIndex].(*ast.UnaryExpr); ok && u.Op == token.AND && parentIndex > 0 {
+			parentIndex--
+		}
+		switch parent := stack[parentIndex].(type) {
 		case *ast.ValueSpec:
 			for _, name := range parent.Names {
 				if name == id {
@@ -329,17 +353,16 @@ func tableStatusLocalMaps(fd *ast.FuncDecl) (status, computed, made, params map[
 				}
 			}
 		case *ast.IndexExpr:
-			if parent.X == ast.Expr(id) && len(stack) >= 3 {
-				if as, ok := stack[len(stack)-3].(*ast.AssignStmt); ok {
-					for _, l := range as.Lhs {
-						if l == ast.Expr(parent) {
-							return true
-						}
-					}
-				}
+			if parent.X == ast.Expr(id) {
+				return true
 			}
 		case *ast.CallExpr:
-			if sel, ok := guardkit.Unparen(parent.Fun).(*ast.SelectorExpr); ok && (sel.Sel.Name == "Updates" || sel.Sel.Name == "UpdateColumns") {
+			if fn, ok := guardkit.Unparen(parent.Fun).(*ast.Ident); ok && fn.Obj == nil &&
+				((fn.Name == "delete" && len(parent.Args) == 2) || (fn.Name == "len" && len(parent.Args) == 1)) &&
+				parent.Args[0] == ast.Expr(id) {
+				return true
+			}
+			if method := guardkit.Callee(parent); method == "Updates" || method == "UpdateColumns" || (g.updateHelper != "" && method == g.updateHelper) {
 				return true
 			}
 		}
@@ -360,7 +383,7 @@ func tableStatusMapShape(e ast.Expr, status, computed, made, params map[string]b
 	} else if tableStatusMapMade(e) {
 		return ""
 	}
-	id, ok := guardkit.Unparen(e).(*ast.Ident)
+	id, ok := tableStatusIndirect(e).(*ast.Ident)
 	if !ok {
 		return "a value it cannot read"
 	}
@@ -380,7 +403,8 @@ func tableStatusMapShape(e ast.Expr, status, computed, made, params map[string]b
 // writes finds every write of the table's status in p.
 func (g tableStatusGuard) writes(p *guardkit.Parsed) []tableStatusWrite {
 	var out []tableStatusWrite
-	funcs := g.funcs(p)
+	funcs := modelFuncs(p, g.model)
+	fields := g.structFields(p)
 	add := func(n ast.Node, fn, shape string) {
 		out = append(out, tableStatusWrite{p.Fset.Position(n.Pos()).String(), fn, shape})
 	}
@@ -391,7 +415,7 @@ func (g tableStatusGuard) writes(p *guardkit.Parsed) []tableStatusWrite {
 				return true
 			}
 			s, _ := stringLit(lit)
-			if g.insertRe.MatchString(s) {
+			if !g.skipInserts && g.insertRe.MatchString(s) {
 				add(n, fn, "raw INSERT INTO "+g.table)
 			}
 			for _, m := range g.updateRe.FindAllStringSubmatch(s, -1) {
@@ -419,11 +443,25 @@ func (g tableStatusGuard) writes(p *guardkit.Parsed) []tableStatusWrite {
 			}
 			name := fd.Name.Name
 			rawSQL(fd.Body, name)
-			vals, chains := g.names(fd, funcs)
-			status, computed, made, params := tableStatusLocalMaps(fd)
+			bindings := modelNames(fd, g.model, funcs)
+			fieldTypes := fields[tableStatusPackage{f.Dir(), f.AST.Name.Name}]
+			value := func(e ast.Expr) bool { return g.value(e, bindings, fieldTypes) }
+			chains := tableStatusChains(fd, func(e ast.Expr, chains map[string]bool) bool {
+				return g.chain(e, value, chains)
+			})
+			status, computed, made, params := g.localMaps(fd)
 			ast.Inspect(fd.Body, func(n ast.Node) bool {
 				call, ok := n.(*ast.CallExpr)
 				if !ok {
+					return true
+				}
+				if g.updateHelper != "" && guardkit.Callee(call) == g.updateHelper && len(call.Args) == 3 {
+					columns := call.Args[2]
+					if id, ok := columns.(*ast.Ident); !ok || id.Name != "nil" {
+						if shape := tableStatusMapShape(columns, status, computed, made, params); shape != "" {
+							add(call, name, g.updateHelper+" with "+shape)
+						}
+					}
 					return true
 				}
 				sel, ok := guardkit.Unparen(call.Fun).(*ast.SelectorExpr)
@@ -433,7 +471,7 @@ func (g tableStatusGuard) writes(p *guardkit.Parsed) []tableStatusWrite {
 				method, arg := sel.Sel.Name, call.Args[0]
 				switch method {
 				case "Create", "CreateInBatches", "FirstOrCreate", "Save":
-					if g.value(arg, vals) {
+					if (method == "Save" || !g.skipInserts) && value(arg) {
 						verb := method
 						if method != "Save" {
 							verb = "Create"
@@ -441,8 +479,13 @@ func (g tableStatusGuard) writes(p *guardkit.Parsed) []tableStatusWrite {
 						add(call, name, verb+" of "+g.noun)
 					}
 					return true
+				case "Updates", "UpdateColumns":
+					if value(arg) {
+						add(call, name, method+" of "+g.noun+" struct")
+						return true
+					}
 				}
-				if !g.chain(sel.X, vals, chains) {
+				if !g.chain(sel.X, value, chains) {
 					return true
 				}
 				switch method {
@@ -453,9 +496,7 @@ func (g tableStatusGuard) writes(p *guardkit.Parsed) []tableStatusWrite {
 						add(call, name, method+" of a computed column")
 					}
 				case "Updates", "UpdateColumns":
-					if g.value(arg, vals) {
-						add(call, name, method+" of "+g.noun+" struct")
-					} else if shape := tableStatusMapShape(arg, status, computed, made, params); shape != "" {
+					if shape := tableStatusMapShape(arg, status, computed, made, params); shape != "" {
 						add(call, name, method+" of "+shape)
 					}
 				}

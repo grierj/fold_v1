@@ -1170,6 +1170,48 @@ func TestChildcareCapacityAndStoredRequests(t *testing.T) {
 	}
 }
 
+func TestManagerAddDistinguishesMissingPersonFromMissingDate(t *testing.T) {
+	app := testApp(t)
+	admin, gid := openGroup(t, app, "Add by email")
+	id, date := seedChildcareEvent(t, app, admin, gid, nil, nil, false)
+	parent := newTestUser(t, app, "added parent", "password1234", models.RoleMember)
+	path := "/api/v1/events/" + itoa(id) + "/registrations/add"
+	wantCode(t, "unknown email", admin.do("POST", path, map[string]any{"date": date, "email": "typo@example.com"}, true), http.StatusNotFound, "date_add_person_not_found")
+	wantCode(t, "missing date", admin.do("POST", path, map[string]any{"date": "2001-01-01", "email": parent.Email}, true), http.StatusNotFound, "not_found")
+	apiDo(t, admin, "POST", path, map[string]any{"date": date, "email": parent.Email}, http.StatusOK)
+}
+
+func TestManagerAddFailedTargetReadAnswersServerError(t *testing.T) {
+	app := testApp(t)
+	admin, gid := openGroup(t, app, "Add after lookup failure")
+	id, date := seedChildcareEvent(t, app, admin, gid, nil, nil, false)
+	person := newTestUser(t, app, "existing person", "password1234", models.RoleMember)
+	path := "/api/v1/events/" + itoa(id) + "/registrations/add"
+	for _, target := range []struct {
+		field string
+		value any
+		match string
+	}{
+		{"email", person.Email, "email = ? AND status IN ?"},
+		{"userId", person.ID, "id = ? AND status IN ?"},
+	} {
+		t.Run(target.field, func(t *testing.T) {
+			before := auditCount(t, app, audit.OccurrenceRefused)
+			failed := failStatement(t, app, func(tx *gorm.DB) bool {
+				return tx.Statement.Table == "users" && strings.Contains(fmt.Sprint(tx.Statement.Clauses["WHERE"].Expression), target.match)
+			})
+			w := admin.do("POST", path, map[string]any{"date": date, target.field: target.value}, true)
+			if failed.Load() != 1 || w.Code != http.StatusInternalServerError || w.Body.String() != serverErrorBody {
+				t.Fatalf("failed target reads %d, response %d %s", failed.Load(), w.Code, w.Body.String())
+			}
+			after := auditCount(t, app, audit.OccurrenceRefused)
+			if after != before+1 {
+				t.Fatalf("refusal audits %d before, %d after", before, after)
+			}
+		})
+	}
+}
+
 func TestChildcareRegistrationValidationAndManagerAdd(t *testing.T) {
 	app := testApp(t)
 	admin, gid := openGroup(t, app, "ChildcareAdd")

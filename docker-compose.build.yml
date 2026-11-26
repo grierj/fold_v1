@@ -12,3 +12,4 @@ services:
   backup:
     build:
       context: deploy/backup
+    image: ghcr.io/grierj/fold-backup:${FOLD_BACKUP_VERSION:-${FOLD_VERSION}}

@@ -15,7 +15,7 @@ export function composeOptions(over: Partial<ComposeOptions> = {}): ComposeOptio
 
 export function summary(over: Partial<AudienceSummary> = {}): AudienceSummary {
   return {
-    people: 3, eligible: 2, teens: 1, push: 0, skipped: { "turned off messages from leaders": 1 },
+    people: 3, eligible: 2, teens: 1, push: 0, pushOnly: 0, skipped: { "turned off messages from leaders": 1 },
     recipients: [{ name: "Ann Adult", teen: false }, { name: "Opal Opted", teen: false, skipped: "won't get this" }, { name: "Tia Teen", teen: true }],
     more: false, ...over,
   };

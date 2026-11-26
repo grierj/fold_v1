@@ -64,7 +64,7 @@ export function RoomField({ eventId, date, idPrefix, onChanged, onGone, focusOnL
 }) {
   const id = `${idPrefix}-room`;
   // A church with rooms off, or a site we can't read, sees no rooms control at all.
-  const { enabled, off, list, loading, loadError } = useRoomPicker(() => DateRooms.list(eventId, date), [eventId, date]);
+  const { enabled, off, list, loading, loadError } = useRoomPicker(() => DateRooms.list(eventId, date), [eventId, date], onGone);
 
   const focused = useRef(false);
   useEffect(() => {
@@ -260,6 +260,8 @@ function DateRoomControl({ eventId, date, id, read, show, onChanged, onGone }: {
   const rejected = booking?.status === "rejected";
   const requested = booking?.status === "requested" && !waiting;
   const value = booking && (booking.status === "confirmed" || waiting) ? String(booking.roomId) : requested ? "" : NO_ROOM;
+  const selectedSuggestion = suggestions?.rooms.find((suggestion) => String(suggestion.roomId) === value);
+  const suggestionId = selectedSuggestion ? `${id}-suggestion` : undefined;
   const anyBusy = rooms.some((r) => r.busy);
   // A room the date holds that this person can't book (a restricted room or a room turned off) still shows, by the
   // name the date's place gives it.
@@ -276,12 +278,13 @@ function DateRoomControl({ eventId, date, id, read, show, onChanged, onGone }: {
   return (
     <>
       <Field id={id} label="Room" optional hint="Saved as soon as you choose it, so you don't need to press Save. If bookings need an admin's approval, it waits for one.">
-        <Select value={value} aria-busy={busy || undefined} onChange={(e) => choose(e.target.value)}>
+        <Select value={value} aria-describedby={suggestionId} aria-busy={busy || undefined} onChange={(e) => choose(e.target.value)}>
           {requested && <option value="">Pick a room</option>}
           <option value={NO_ROOM}>No room</option>
           {held && <option value={String(held.roomId)}>{roomName({ name: held.roomName, building: held.building })}</option>}
-          <RoomOptions rooms={rooms} suggestions={suggestions} label={roomOptionLabel} disabled={(r) => r.busy && !isAdmin} />
+          <RoomOptions rooms={rooms} suggestions={suggestions} label={roomOptionLabel} reasonBeside={selectedSuggestion?.roomId} disabled={(r) => r.busy && !isAdmin} />
         </Select>
+        {selectedSuggestion && <p id={suggestionId} className="mt-1 text-sm text-text-muted wrap-anywhere">{selectedSuggestion.reason}</p>}
       </Field>
       <RefusedSaveLine save={refusal} noun="room" choosing="This date's room" />
       {!isAdmin && anyBusy && (
@@ -326,7 +329,7 @@ function DateRoomControl({ eventId, date, id, read, show, onChanged, onGone }: {
                     <Input ref={teardownRef} type="number" inputMode="numeric" min={0} max={240} value={teardown} onChange={(e) => setTeardown(e.target.value)} onKeyDown={onPaddingEnter} />
                   </Field>
                 </div>
-                <Button variant="secondary" disabled={busy} onClick={savePadding}>Save times</Button>
+                <Button variant="secondary" aria-disabled={busy} onClick={savePadding}>Save times</Button>
               </>
             )}
           </div>

@@ -643,12 +643,12 @@ func TestReasonReviewDeleteExactSet(t *testing.T) {
 			return reviewOf(p.items, keepAll)
 		}},
 		{"a hashed timestamp column differs", http.StatusConflict, "reason_review_changed", func(t *testing.T, p setup) any {
-			// A contact request: terminal add requests cannot be edited while their
-			// parties live.
-			if err := p.s.app.DB.Exec("UPDATE contact_requests SET expires_at = expires_at + interval '1 day' WHERE id = ?", p.reqs[2].ID).Error; err != nil {
+			req := erasureMakeRequest(t, p.s.app.DB, policy.RequestContact, policy.ContactPending, p.s.target.ID, p.s.other.ID, 1, 0, 0, 4, "")
+			items := allPages(t, p.s.ac, p.s.target.ID)
+			if err := p.s.app.DB.Exec("UPDATE contact_requests SET expires_at = expires_at + interval '1 day' WHERE id = ?", req.ID).Error; err != nil {
 				t.Fatal(err)
 			}
-			return reviewOf(p.items, keepAll)
+			return reviewOf(items, keepAll)
 		}},
 		{"another admin's hash", http.StatusConflict, "reason_review_changed", func(t *testing.T, p setup) any {
 			second := loginAPI(t, p.s.app, "erase-second", erasurePW)
@@ -1904,6 +1904,11 @@ func TestReasonReviewCensus(t *testing.T) {
 // signed numbers it checks before use; dateRoomRevisionIn (an unbooked date's
 // room token) filters to the room_booking.booked, .overlap and .released rows
 // of one occurrence and scans only the latest audit row's own id into a uint.
+// settingRevisionIn filters to the setting's own audit action and reads only
+// the maximum audit id as a signed integer, with no row lock.
+// pruneExpiredLinks reads invitation creation and acceptance audits with
+// EXISTS outside the contact gate. It takes no audit or request row locks.
+// Each table's delete commits before the next one starts.
 //
 // legacySavePlanIn (T-301) is the deleted-accounts save's one row locker: inside
 // apiAdminLegacyReasonSave's fenced callback, under the exclusive gate, it locks
@@ -1946,6 +1951,8 @@ var reasonCensusPinned = map[string][]string{
 		"api_push.go:apiPushTest",
 		"api_registrations.go:previouslyRegisteredPerson",
 		"edit_revision.go:dateRoomRevisionIn",
+		"edit_revision.go:settingRevisionIn",
+		"link_cleanup.go:pruneExpiredLinks",
 		"registration_access.go:loadAccessHistory",
 		"registration_subjects.go:appendRecoverableRegistrations",
 		"throttle.go:inviteSendAllowed",

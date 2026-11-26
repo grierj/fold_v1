@@ -102,7 +102,7 @@ function RequestRow({ request: r, onDone, onStale }: {
     try {
       onDone(r.id, await action());
     } catch (e) {
-      if (e instanceof ApiError && e.status === 409) {
+      if (e instanceof ApiError && e.code === "already_handled") {
         // Lost the race: not an error, someone else handled it.
         const raw = isString(e.data.resolution) ? e.data.resolution : "";
         const outcome = OUTCOME.get(raw) ?? (raw || "handled");

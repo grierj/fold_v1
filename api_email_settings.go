@@ -8,7 +8,6 @@ import (
 	"unicode"
 	"unicode/utf8"
 
-	"fold/internal/audit"
 	"fold/internal/notify"
 	"fold/models"
 
@@ -186,20 +185,13 @@ const (
 )
 
 func (a *App) apiAdminGetChurchAddress(c *gin.Context) {
-	address, err := settingValueIn(a.DB, settingChurchAddress)
-	if err != nil {
-		jsonError(c, http.StatusInternalServerError, "could not load the address")
-		return
-	}
-	c.JSON(http.StatusOK, settingAddressResponseJSON{Address: address})
+	a.getSettingAddress(c, churchAddressSetting)
 }
 
 // apiAdminSetChurchAddress saves the church's postal address for email
 // footers (DEC-116), audited. Empty clears it.
 func (a *App) apiAdminSetChurchAddress(c *gin.Context) {
-	var body struct {
-		Address *string `json:"address"`
-	}
+	var body settingAddressBody
 	if err := c.ShouldBindJSON(&body); err != nil || body.Address == nil {
 		jsonError(c, http.StatusBadRequest, "invalid request")
 		return
@@ -218,11 +210,7 @@ func (a *App) apiAdminSetChurchAddress(c *gin.Context) {
 		fail(c, errChurchAddressLong)
 		return
 	}
-	if err := a.saveSetting(c, settingChurchAddress, addr, audit.ChurchAddressChanged, map[string]any{"set": addr != ""}); err != nil {
-		jsonError(c, http.StatusInternalServerError, "could not save the address")
-		return
-	}
-	c.JSON(http.StatusOK, settingAddressResponseJSON{Address: addr})
+	a.saveSettingAddress(c, churchAddressSetting, addr, body.Revision)
 }
 
 // churchAddressLines is the one normalization of a postal address: no carriage

@@ -8,7 +8,7 @@ import { beforeEach, expect, it, vi } from "vitest";
 const churchAddress = vi.fn();
 const setChurchAddress = vi.fn();
 
-stubService(Admin, () => ({ churchAddress: () => churchAddress(), setChurchAddress: (a: string) => setChurchAddress(a) }));
+stubService(Admin, () => ({ churchAddress: () => churchAddress(), setChurchAddress: (a: string, revision?: string) => setChurchAddress(a, revision) }));
 
 import { ApiError } from "../../api/core";
 import { ChurchAddressSetting } from "./ChurchAddressSetting";
@@ -16,8 +16,8 @@ import { ChurchAddressSetting } from "./ChurchAddressSetting";
 const view = () => render(<MemoryRouter><ChurchAddressSetting /></MemoryRouter>);
 
 beforeEach(() => {
-  churchAddress.mockReset().mockResolvedValue({ address: "" });
-  setChurchAddress.mockReset().mockImplementation(async (a: string) => ({ address: a.trim() }));
+  churchAddress.mockReset().mockResolvedValue({ address: "", revision: "opened" });
+  setChurchAddress.mockReset().mockImplementation(async (a: string) => ({ address: a.trim(), revision: "saved" }));
 });
 
 it("reminds the admin while the address is empty, and saves it", async () => {
@@ -28,13 +28,13 @@ it("reminds the admin while the address is empty, and saves it", async () => {
   expect(save).toBeDisabled();
   await userEvent.type(box, "Grace Church{enter}12 Main St");
   await userEvent.click(save);
-  expect(setChurchAddress).toHaveBeenCalledWith("Grace Church\n12 Main St");
+  expect(setChurchAddress).toHaveBeenCalledWith("Grace Church\n12 Main St", "opened");
   expect(await screen.findByRole("status")).toHaveTextContent("Saved");
   expect(screen.queryByText(/Add your church's mailing address/)).not.toBeInTheDocument();
 });
 
 it("shows the saved address with no reminder", async () => {
-  churchAddress.mockResolvedValue({ address: "Grace Church\nBoise" });
+  churchAddress.mockResolvedValue({ address: "Grace Church\nBoise", revision: "opened" });
   view();
   expect(await screen.findByRole("textbox", { name: /Church mailing address/ })).toHaveValue("Grace Church\nBoise");
   expect(screen.queryByText(/Add your church's mailing address/)).not.toBeInTheDocument();
