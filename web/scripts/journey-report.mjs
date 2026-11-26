@@ -101,13 +101,40 @@ function comparableEnvironment(before, after, failures) {
   }
 }
 
+function comparableRevisions(before, after, expectedBase, expectedHead, failures) {
+  if (!before || !after) return false;
+  const sha = /^[0-9a-f]{40}$/;
+
+  try {
+    const expected = expectedBase !== undefined || expectedHead !== undefined;
+
+    for (const [label, report, revision] of [["Base", before, expectedBase], ["Head", after, expectedHead]]) {
+      assert.match(report.revision, sha, `${label}: missing or invalid revision SHA.`);
+
+      if (expected) {
+        assert.match(revision, sha, `${label}: missing or invalid expected revision SHA.`);
+        assert.equal(report.revision, revision, `${label}: report revision ${report.revision} does not match expected ${revision}.`);
+      }
+    }
+
+    assert.notEqual(before.revision, after.revision, "Base and head reports must measure different revisions.");
+
+    return true;
+  } catch (error) {
+    failures.push(error.message);
+
+    return false;
+  }
+}
+
 if (import.meta.main) {
-  const [beforeFile, afterFile] = process.argv.slice(2);
+  const [beforeFile, afterFile, expectedBase, expectedHead] = process.argv.slice(2);
   const failures = [];
   const before = loadSide("Base", beforeFile, failures);
   const after = loadSide("Head", afterFile, failures);
 
-  const comparable = comparableEnvironment(before, after, failures);
+  const revisionsMatch = comparableRevisions(before, after, expectedBase, expectedHead, failures);
+  const comparable = comparableEnvironment(before, after, failures) && revisionsMatch;
 
   if (nonnegative(before?.eagerGzipBytes) && nonnegative(after?.eagerGzipBytes)) {
     console.log(`\nEager JavaScript change: ${delta(after.eagerGzipBytes - before.eagerGzipBytes)} gzip bytes.`);

@@ -157,13 +157,15 @@ compares journeys with all five samples on each side, and gives sample counts fo
 incomplete journeys. An interrupted run, missing file or invalid sample fails the check. Each side must supply
 one finite, nonnegative timing for each of runs 1–5 per journey. The CPU and Chromium
 version must match across revisions and both must use the configured browser profile.
+CI checks each report's revision against the commit it built for that side.
 
 From `web/`, use `npx playwright show-trace PATH.zip` to inspect requests, DOM snapshots and screenshots. To reproduce, set `DATABASE_URL` to
 a disposable developer database, then run `npm ci`, `npx playwright install chromium`,
-`npm run build` and `npm run journeys`.
+`npm run build` and `JOURNEY_REVISION=$(git rev-parse HEAD) npm run journeys` on a clean checkout.
 The server creates a database with the suffix `_e2e_journeys` and uses port 18419.
 Set unique `E2E_SHARD`, `E2E_PORT` and `E2E_OUTPUT_DIR` when running concurrent copies.
-To compare two saved samples files, run `node scripts/journey-report.mjs BASE.json HEAD.json`.
+To compare two saved samples files, run `node scripts/journey-report.mjs BASE.json HEAD.json`. The files must
+name distinct commit SHAs. To also check the expected commits, append their full base and head SHAs in that order.
 
 The head median must meet both limits. Equality passes. Only an increase over the base
 median counts toward the change limit. Eager and route gzip sizes remain diagnostic.

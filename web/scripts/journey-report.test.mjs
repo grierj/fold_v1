@@ -7,6 +7,8 @@ import { test } from "node:test";
 import { journeyProfile } from "./journey-report.mjs";
 
 const journeys = ["directory", "date", "more-dates", "editor"];
+const baseSHA = "b".repeat(40);
+const headSHA = "a".repeat(40);
 
 function report(dateMs, bytes) {
   return {
@@ -21,9 +23,9 @@ function comparison(t) {
   t.after(() => rmSync(dir, { recursive: true, force: true }));
 
   return {
-    save: (file, value) => writeFileSync(join(dir, file), JSON.stringify(value)),
-    run: () => spawnSync(process.execPath, [new URL("./journey-report.mjs", import.meta.url).pathname,
-      "base", "head"], { cwd: dir, encoding: "utf8" }),
+    save: (file, value) => writeFileSync(join(dir, file), JSON.stringify({ revision: file === "base" ? baseSHA : headSHA, ...value })),
+    run: (...expected) => spawnSync(process.execPath, [new URL("./journey-report.mjs", import.meta.url).pathname,
+      "base", "head", ...expected], { cwd: dir, encoding: "utf8" }),
   };
 }
 
@@ -116,6 +118,27 @@ test("timing deltas require evidence of a common CPU, browser and profile", (t) 
   }
 });
 
+test("reports must name distinct revisions and match the expected CI pair", (t) => {
+  const { save, run } = comparison(t);
+  save("base", report(100, 100_000));
+  save("head", report(100, 100_000));
+  assert.equal(run(baseSHA, headSHA).status, 0);
+
+  for (const [revision, expected, error] of [
+    [undefined, [baseSHA, headSHA], /Head: missing or invalid revision/],
+    ["not a SHA", [baseSHA, headSHA], /Head: missing or invalid revision/],
+    [baseSHA, [], /must measure different revisions/],
+    [baseSHA, [baseSHA, headSHA], /Head: report revision .* does not match expected/],
+    ["c".repeat(40), [baseSHA, headSHA], /Head: report revision .* does not match expected/],
+  ]) {
+    save("head", { ...report(100, 100_000), revision });
+    const result = run(...expected);
+    assert.equal(result.status, 1, result.stdout);
+    assert.match(result.stdout, error);
+    assert.match(result.stdout, /date \| 100 \[100, 100\] \| 100 \[100, 100\] \| — \|/);
+  }
+});
+
 test("a timeout preserves comparisons for finished journeys and reports the missing samples", (t) => {
   const { save, run } = comparison(t);
   const base = report(100, 100_000);
@@ -158,8 +181,13 @@ for (const missingBase of [true, false]) {
     git("commit", "-m", "Base");
     git("commit", "--allow-empty", "-m", "Head");
 
-    if (!missingBase) writeFileSync(join(repo, "work/journey_base.json"), JSON.stringify(report(3900, 100_000)));
-    writeFileSync(join(repo, "work/journey_head.json"), JSON.stringify(report(missingBase ? 100 : 7900, 100_000)));
+    const writeSamples = (side, ref, dateMs) => {
+      const revision = String(git("rev-parse", ref)).trim();
+      writeFileSync(join(repo, `work/journey_${side}.json`), JSON.stringify({ revision, ...report(dateMs, 100_000) }));
+    };
+
+    if (!missingBase) writeSamples("base", "HEAD^", 3900);
+    writeSamples("head", "HEAD", missingBase ? 100 : 7900);
     writeFileSync(join(repo, "bin/go"), '#!/bin/sh\ntest "$CGO_ENABLED" = 0\n', { mode: 0o755 });
     writeFileSync(join(repo, "bin/npm"), `#!/bin/sh
 if [ "$*" = "run journeys" ]; then
