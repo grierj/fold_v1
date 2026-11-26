@@ -8,7 +8,7 @@
 # Every image is built from `git archive <sha>` of a commit and must report the
 # FOLD_VERSION it was built with, so a binary is tied to its commit. The
 # candidate is the committed head (the runner refuses a dirty tree) and must be
-# recovery level 3 (exact visibility consent, DEC-158).
+# recovery level 4 (invitation audit erasure).
 #
 # Roles (each proved from git before any image is built):
 #   candidate  the committed head, level 4.
