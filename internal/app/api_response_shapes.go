@@ -363,6 +363,20 @@ type eventSeriesResponseJSON struct {
 	Event eventJSON `json:"event"`
 }
 
+type restorableDateJSON struct {
+	Date     string    `json:"date"`
+	StartsAt time.Time `json:"startsAt"`
+	Revision string    `json:"revision"`
+}
+
+type eventDetailResponseJSON struct {
+	CanManage        bool                 `json:"canManage"`
+	CanSetVisibility bool                 `json:"canSetVisibility"`
+	Event            eventJSON            `json:"event"`
+	Occurrences      []occurrenceJSON     `json:"occurrences"`
+	RestorableDates  []restorableDateJSON `json:"restorableDates,omitempty"`
+}
+
 type openEventsResponseJSON struct {
 	Events []occurrenceJSON `json:"events"`
 }

@@ -1265,7 +1265,7 @@ func (a *App) apiUpdateEvent(c *gin.Context) {
 		if err != nil {
 			return err
 		}
-		err = restoreSeriesDates(tx, me.ID, c.ClientIP(), &locked, restored)
+		err = recordDatesRestored(tx, me.ID, c.ClientIP(), &locked, restored)
 		if err != nil {
 			return err
 		}
@@ -1628,13 +1628,17 @@ func deleteEventRows(tx *gorm.DB, eventIDs []uint) error {
 
 var errDateCancelEnded = apiErr(http.StatusConflict, "date_cancel_ended", "This date has already ended.")
 
-func (a *App) apiCancelOccurrence(c *gin.Context) {
+func (a *App) apiCancelOccurrence(c *gin.Context)  { a.changeDateCancellation(c, false) }
+func (a *App) apiRestoreOccurrence(c *gin.Context) { a.changeDateCancellation(c, true) }
+
+func (a *App) changeDateCancellation(c *gin.Context, restore bool) {
 	ev, ok := a.loadManagedEvent(c)
 	if !ok {
 		return
 	}
 	var body struct {
-		Date string `json:"date"`
+		Date     string `json:"date"`
+		Revision string `json:"revision"`
 	}
 	if err := c.ShouldBindJSON(&body); err != nil {
 		jsonError(c, http.StatusBadRequest, "date is required (YYYY-MM-DD)")
@@ -1645,7 +1649,7 @@ func (a *App) apiCancelOccurrence(c *gin.Context) {
 		return
 	}
 	err := a.contactMutation(contactChange{EventID: ev.ID}, func(tx *gorm.DB) error {
-		actor, _, _, err := lockManagedEventIn(tx, apiUser(c), ev.ID)
+		actor, ev, facts, err := lockManagedEventIn(tx, apiUser(c), ev.ID)
 		if err != nil {
 			return err
 		}
@@ -1656,6 +1660,9 @@ func (a *App) apiCancelOccurrence(c *gin.Context) {
 				return errOccurrenceNotFound
 			}
 			return err
+		}
+		if restore {
+			return a.restoreDateIn(tx, ev, &occ, actor, facts, body.Revision, c.ClientIP())
 		}
 		alreadyCancelled := occ.Status == models.OccurrenceCancelled
 		if alreadyCancelled && occ.CancelSource != models.CancelSourceSeries {
@@ -1680,10 +1687,52 @@ func (a *App) apiCancelOccurrence(c *gin.Context) {
 		return releaseRoomBookings(tx, ids)
 	})
 	if err != nil {
-		answerEventWrite(c, err, "could not cancel")
+		answerEventWrite(c, err, "could not update this date")
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{})
+}
+
+func (a *App) restoreDateIn(tx *gorm.DB, ev *models.Event, occ *models.EventOccurrence, actor *models.User, facts eventFacts, revision, ip string) error {
+	shown := a.groupShownTo(actor, facts.group, facts.rel)
+	now := a.now()
+	if occ.Status != models.OccurrenceCancelled || occ.CancelSource != models.CancelSourceManual || !occ.StartsAt.After(now) || revision != a.dateToken(ev, occ, shown) {
+		return errDateChanged
+	}
+	set := map[string]any{"status": models.OccurrenceScheduled, "cancel_source": ""}
+	follows, err := eventdates.FollowsSeries(ev, occ, now)
+	if err != nil {
+		return err
+	}
+	if !follows {
+		set["starts_at_override"] = occ.StartsAt
+		set["duration_override"] = int(occ.EndsAt.Sub(occ.StartsAt) / time.Minute)
+	}
+	if err := tx.Model(occ).Updates(set).Error; err != nil {
+		return err
+	}
+	if err := a.recheckRestoredSignups(tx, ev, occ, actor.ID, ip, now); err != nil {
+		return err
+	}
+	ids := []uint{occ.ID}
+	if ev.DefaultRoomID != nil {
+		switch err := roomsOnIn(tx); {
+		case err == nil:
+			if err := settleDateRooms(tx, ev, nil, ids, &actor.ID); err != nil {
+				return err
+			}
+		case !errors.Is(err, errRoomsOff):
+			return err
+		}
+	}
+	if err := recordDatesRestored(tx, actor.ID, ip, ev, ids); err != nil {
+		return err
+	}
+	// A room booking or a notice may have waited past the start.
+	if !occ.StartsAt.After(a.now()) {
+		return errDateChanged
+	}
+	return nil
 }
 
 // previewDateTimes is the start and end the date preview counts on for o:
@@ -1754,11 +1803,7 @@ func auditDateCancellation(tx *gorm.DB, actor uint, ip string, eventID uint, sou
 		Meta: map[string]any{"occurrenceIds": ids, "source": source}, IP: ip})
 }
 
-// restoreSeriesDates records dates a series edit just brought back and tells
-// the people signed up for them. It runs in the series edit's transaction,
-// after the rows are scheduled again, so the audit row, the notices and the
-// change commit together. Nothing here touches registrations.
-func restoreSeriesDates(tx *gorm.DB, actor uint, ip string, ev *models.Event, occIDs []uint) error {
+func recordDatesRestored(tx *gorm.DB, actor uint, ip string, ev *models.Event, occIDs []uint) error {
 	if len(occIDs) == 0 {
 		return nil
 	}
