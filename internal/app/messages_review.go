@@ -182,7 +182,7 @@ func (a *App) messageReachIn(tx *gorm.DB, me *models.User, m *models.Message) (a
 }
 
 // audienceError is the answer to a resolveAudienceIn error for me
-// (answerAudience): only an admin learns a target is gone, and anyone else
+// (only an admin learns a target is gone). Anyone else
 // hears what a target that isn't theirs answers, so ids can't be probed. Any
 // other error is returned as it is.
 func audienceError(me *models.User, err error) error {
@@ -224,6 +224,16 @@ func ownMessageIn(db *gorm.DB, me *models.User, m *models.Message, move policy.M
 	return nil
 }
 
+func readOwnMessageIn(tx *gorm.DB, viewer *models.User, id uint, move policy.MessageMove) (*models.Message, error) {
+	var m models.Message
+	if err := tx.First(&m, id).Error; errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, errMessageNotFound
+	} else if err != nil {
+		return nil, err
+	}
+	return &m, ownMessageIn(tx, viewer, &m, move)
+}
+
 // listProposal is the audience and push switch an edit of a scheduled message
 // would save, as applyMessageBodyIn stores them; a review of nil is of the
 // message as stored.
@@ -244,17 +254,12 @@ func (a *App) messageReviewIn(tx *gorm.DB, session *models.User, id uint, propos
 	if me == nil {
 		return messageReviewJSON{}, audienceReach{}, errSecuritySession
 	}
-	var m models.Message
-	if err := tx.First(&m, id).Error; errors.Is(err, gorm.ErrRecordNotFound) {
-		return messageReviewJSON{}, audienceReach{}, errMessageNotFound
-	} else if err != nil {
-		return messageReviewJSON{}, audienceReach{}, err
-	}
 	move := policy.MessageSchedule
 	if proposal != nil {
 		move = policy.MessageEdit
 	}
-	if err := ownMessageIn(tx, me, &m, move); err != nil {
+	m, err := readOwnMessageIn(tx, me, id, move)
+	if err != nil {
 		return messageReviewJSON{}, audienceReach{}, err
 	}
 	revision, err := a.messageRevisionIn(tx, m.ID)
@@ -264,11 +269,11 @@ func (a *App) messageReviewIn(tx *gorm.DB, session *models.User, id uint, propos
 	if proposal != nil {
 		m.Audience, m.PushAlert = proposal.audience, proposal.push
 	}
-	_, s, reach, err := a.messageReachIn(tx, me, &m)
+	_, s, reach, err := a.messageReachIn(tx, me, m)
 	if err != nil {
 		return messageReviewJSON{}, audienceReach{}, audienceError(me, err)
 	}
-	token, err := a.sealMessageReview(reach.reached, me.ID, &m, revision)
+	token, err := a.sealMessageReview(reach.reached, me.ID, m, revision)
 	return messageReviewJSON{Summary: s, Reached: len(reach.reached), Token: token}, reach, err
 }
 
