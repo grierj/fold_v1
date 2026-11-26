@@ -228,26 +228,31 @@ section or decision; check it still exists.
   moves are tables in `internal/policy/room_lifecycle.go`; a status changes only through
   `changeBookings` or `moveRoomRequest`/`moveRoomRequestsWhere` (`room_status.go`). Every writer of a date's booking
   holds its event's row lock first; a pick of a date's room or of the series room names its read (DEC-167).
-- An event's series and visibility saves, the group form's save, the two room picks, a message's edit and send and the
-  admin room editor name their read (DEC-162, DEC-163, DEC-166, DEC-167, DEC-169, DEC-171): the token is built and
+- An event's series and visibility saves, the group form's save, the two room picks, a message's edit and send, the
+  admin room editor and the household's details and person forms name their read (DEC-162, DEC-163, DEC-166, DEC-167,
+  DEC-169, DEC-171, DEC-174): the token is built and
   compared only in `edit_revision.go` (`eventRevision`/`checkEventRevision`, `groupRevisionIn`/`checkGroupRevision`,
   `dateRoomRevisionIn`/`checkDateRoomRevision`, `messageRevisionIn`/`checkMessageRevision`,
-  `roomRevisionIn`/`checkRoomRevision`, inside the write transaction under the row lock). A token of a row with
+  `roomRevisionIn`/`checkRoomRevision`, `checkHouseholdRevision`/`checkHouseholdPersonRevision`, inside the write
+  transaction under the row lock). A token of a row with
   no counter column is `rowRevisionIn` over a `revisionRows` (the table's kind letter, its timestamptz columns as
-  epochs), read in the snapshot that read the fields beside it; a new table adds a `revisionRows`, never a column. The
+  epochs; a column some holders of the token may not read, as a person's care notes, is left out), read in the
+  snapshot that read the fields beside it; a new table adds a `revisionRows`, never a column. The
   single-date edit names its read too, with its own token (`dateToken`, `api_date_edits.go`, DEC-164). Every form sends
   it through `web/src/lib/useRevisionSave.ts`, which owns the read-and-compare after a refusal; a control that stays on
   screen after a save (the room controls, a room's Deactivate and Reactivate) passes `stays`, so the next save names
   what the last outcome left. A form or control that shows the stored row after an outcome saves through its
   `useManagedSave`, which hands back that row from the write's answer or from the read after a refusal (no
-  `lastAnswer`/`lastRead` beside it; the room editor and its Deactivate and Reactivate, the two room controls). A form
-  that needs no row back (the series editor, an event's visibility, the group form) uses the plain hook, and so do the
+  `lastAnswer`/`lastRead` beside it; the room editor and its Deactivate and Reactivate, the two room controls, the
+  household's details form). A form that needs no row back (the series editor, an event's visibility, the group form,
+  a household person's form, after which the card reads the household again) uses the plain hook, and so do the
   composer (its first save creates the draft) and the date editor (it keeps its draft while off screen). A form that throws when
   every send was refused with nothing changed throws `refusedAgain(code)`. The date
   editor's comparison is `dateFields` (`web/src/lib/editBase.ts`), the group form's `groupFields`
   (`web/src/components/GroupEditor.tsx`, which mounts once per opening and changes the cover only after the details
   are saved), the composer's `messageFields` (`web/src/pages/MessageComposer.tsx`, whose editor mounts once per opened
-  message), the admin room editor's `roomFields` (`web/src/components/admin/RoomsTab.tsx`, `RoomEditor`). A message's send also names the review its confirmation showed: a sealed set of who it reaches
+  message), the admin room editor's `roomFields` (`web/src/components/admin/RoomsTab.tsx`, `RoomEditor`), the household forms'
+  `householdFields` and `personFields` (`web/src/components/HouseholdCard.tsx`, `HouseholdEditor` and `PersonEditor`). A message's send also names the review its confirmation showed: a sealed set of who it reaches
   (`messages_review.go`), compared under the message's lock (`checkReview`), a changed set answered with the change
   (`message_list_changed`); so does an edit that changes a scheduled message's audience or push switch. An editor a refusal closes hands it to `useRefusedSave` (`web/src/lib/refusedSave.tsx`), which reads the
   page from nothing and says the changes could not be saved with `RefusedSaveLine`; a control that stays open (the
@@ -460,7 +465,7 @@ table), and a new area gets a new file there and a row in that table, not a row 
 | Token contrast: text 4.5:1, control edges 3:1 | `npm run contrast` (in CI) |
 | The entry JS chunk stays under its gzip budget; rarely needed libraries load with `import()` | `npm run bundle-size` (in CI) |
 | Seat counts never overrun under concurrent registration | `TestConcurrentGoingRespectsCapacity` |
-| A save that takes a revision (a series, an event's visibility, the group form, a date's room, the series room, a message's edit and send, an admin's room edit) checks it with the one shared check inside its write transaction, and a check that reads its row reads it through that transaction (DEC-163, DEC-166, DEC-167, DEC-169, DEC-171) | `TestSavesCheckTheirRevisionInTheirTransaction`, `TestEditRevisionGuardCatchesABypass` |
+| A save that takes a revision (a series, an event's visibility, the group form, a date's room, the series room, a message's edit and send, an admin's room edit, a household's details, a household person) checks it with the one shared check inside its write transaction, and a check that reads its row reads it through that transaction (DEC-163, DEC-166, DEC-167, DEC-169, DEC-171, DEC-174) | `TestSavesCheckTheirRevisionInTheirTransaction`, `TestEditRevisionGuardCatchesABypass` |
 | Secrets in URLs never reach the access log | `TestAccessLogKeepsSecretsOut` |
 | Tests sit next to their code | `TestTestFilesSitNextToTheirSource` |
 | Source guards read the whole production tree, not a directory glob | `internal/guardkit` tests, `TestContactRequestTextGuardReadsTheRealTree` |

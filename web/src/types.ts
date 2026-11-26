@@ -639,6 +639,8 @@ export interface HouseholdPerson {
   guardianLinkId?: number;
   convertedUserId?: number;
   createdBy: number;
+  // The person's revision, which an edit of them names (PUT /me/household/people/:id).
+  revision: string;
 }
 
 export interface HouseholdAccount {
@@ -653,6 +655,8 @@ export interface Household {
   name: string;
   address: string;
   createdBy: number;
+  // The household's revision, which a save of its name or address names (PUT /me/household).
+  revision: string;
   people: HouseholdPerson[];
   accounts: HouseholdAccount[];
 }

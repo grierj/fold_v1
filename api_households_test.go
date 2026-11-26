@@ -1,7 +1,12 @@
 package main
 
 import (
+	"fmt"
 	"net/http"
+	"net/http/httptest"
+	"regexp"
+	"slices"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -192,4 +197,487 @@ func TestMyHouseholdReadsOneSnapshotAndAcknowledgesIt(t *testing.T) {
 		}
 		wantAck(t, "no household any more", w, reader, f.guardian)
 	})
+}
+
+// householdEditFixture is a household whose holder and a second adult both
+// manage it: Mary, an adult with an open account invitation and an upcoming
+// sign-up, and Kit, a child with care notes and a confirmed guardian link.
+type householdEditFixture struct {
+	app          *App
+	admin        *apiClient
+	holder       *models.User
+	c, other     *apiClient
+	otherUser    *models.User
+	mary, kit    householdPersonJSON
+	householdID  uint
+	eventID      uint
+	gid          string
+	date, invite string
+}
+
+func newHouseholdEditFixture(t *testing.T) householdEditFixture {
+	t.Helper()
+	app := testApp(t)
+	admin, gid := openGroup(t, app, "HouseholdEdits")
+	f := householdEditFixture{app: app, admin: admin, gid: gid}
+	f.holder, f.c, f.mary, f.kit = householdFamily(t, app, admin, "editholder")
+	f.householdID = f.mary.HouseholdID
+	f.otherUser = newTestUser(t, app, "editsecond", "password1234", models.RoleMember)
+	gormMust(t, app.DB.Create(&models.HouseholdAccount{HouseholdID: f.householdID, UserID: f.otherUser.ID, Relation: models.HouseholdRelationAdult}))
+	f.other = loginAPI(t, app, "editsecond", "password1234")
+	f.eventID, f.date = seedCappedEvent(t, app, admin, gid, intPtr(10), true)
+	batchAnswer(t, f.c, f.eventID, f.date, map[string]any{"people": []map[string]any{{"personId": f.mary.ID, "status": "going"}, {"personId": f.kit.ID, "status": "going"}}}, http.StatusOK)
+	f.invite = inviteHouseholdPerson(t, app, f.c, f.mary.ID, "mary-own@example.com")
+	return f
+}
+
+// householdEditState is every row a household save, or a refusal of one,
+// could add or change, as one string.
+func householdEditState(t *testing.T, db *gorm.DB, skip ...string) string {
+	t.Helper()
+	var parts []string
+	for _, table := range []string{"households", "household_accounts", "household_people", "guardian_links", "invitations", "account_requests", "registrations", "notifications", "audit_logs", "jobs"} {
+		if !slices.Contains(skip, table) {
+			parts = append(parts, table+": "+dumpRows(t, db, table, "id", "true"))
+		}
+	}
+	return strings.Join(parts, "\n")
+}
+
+func householdPersonAnswer(t *testing.T, w *httptest.ResponseRecorder) householdPersonJSON {
+	t.Helper()
+	var out householdPersonResponseJSON
+	decodeJSON(t, w, &out)
+	return out.Person
+}
+
+// A person's edit names the read it was made from (DEC-174). Another adult's
+// edit moves Mary's revision; a save from the older read, even one that would
+// make her a child (revoking her invitation and cancelling her sign-up), is
+// 409 with nothing written: no field, invitation, registration, link, notice,
+// job or audit row. So is a save naming no revision, or another row's. The
+// same change from the current read goes ahead and does all of that, and
+// answers the revision the next read gives; a second save naming that answer
+// saves too.
+func TestHouseholdPersonEditNamesItsRead(t *testing.T) {
+	f := newHouseholdEditFixture(t)
+	path := "/api/v1/me/household/people/" + itoa(f.mary.ID)
+	read := myPersonRevision(t, f.c, f.mary.ID)
+	if read != f.mary.Revision || myPersonRevision(t, f.other, f.mary.ID) != read {
+		t.Fatalf("the add answered %q, the reads give %q and %q", f.mary.Revision, read, myPersonRevision(t, f.other, f.mary.ID))
+	}
+	editMyPerson(t, f.other, f.mary.ID, map[string]any{"careNotes": "Needs the ramp"}, http.StatusOK)
+	if myPersonRevision(t, f.c, f.mary.ID) == read {
+		t.Fatal("another adult's edit left Mary's revision as it was")
+	}
+	child := map[string]any{"firstName": "Mary", "kind": "child", "birthDate": "2018-01-01"}
+	before := householdEditState(t, f.app.DB)
+	for name, body := range map[string]map[string]any{
+		"a stale kind change":       withRevision(child, read),
+		"a stale birth date change": withRevision(map[string]any{"birthDate": "1985-02-02"}, read),
+		"stale care notes":          withRevision(map[string]any{"careNotes": "Older notes"}, read),
+		"no revision":               child,
+		"an empty revision":         withRevision(child, ""),
+		"Kit's revision":            withRevision(child, myPersonRevision(t, f.c, f.kit.ID)),
+		"the household's revision":  withRevision(child, getMyHousehold(t, f.c).Revision),
+	} {
+		wantCode(t, name, f.c.do("PUT", path, body, true), http.StatusConflict, "household_person_changed")
+		if after := householdEditState(t, f.app.DB); after != before {
+			t.Fatalf("%s wrote:\n%s\nwant\n%s", name, after, before)
+		}
+	}
+
+	w := f.c.do("PUT", path, withRevision(child, myPersonRevision(t, f.c, f.mary.ID)), true)
+	if w.Code != http.StatusOK {
+		t.Fatalf("the current read's save: %d %s", w.Code, w.Body.String())
+	}
+	saved := householdPersonAnswer(t, w)
+	if saved.Kind != models.HouseholdChild || saved.Revision == "" || saved.Revision != myPersonRevision(t, f.c, f.mary.ID) {
+		t.Fatalf("the answer %+v, the next read's revision %q", saved, myPersonRevision(t, f.c, f.mary.ID))
+	}
+	if n := countRows(t, f.app.DB, "invitations", "household_person_id = ? AND revoked_at IS NOT NULL", f.mary.ID); n != 1 {
+		t.Fatalf("%d revoked invitations, want the save to revoke Mary's", n)
+	}
+	if n := countRows(t, f.app.DB, "registrations", "household_person_id = ? AND status = ?", f.mary.ID, models.RegCancelled); n != 1 {
+		t.Fatalf("%d cancelled sign-ups, want the save to cancel Mary's", n)
+	}
+	w = f.c.do("PUT", path, withRevision(map[string]any{"careNotes": "Ramp and a quiet room"}, saved.Revision), true)
+	if w.Code != http.StatusOK {
+		t.Fatalf("a save naming the last answer: %d %s", w.Code, w.Body.String())
+	}
+	if again := householdPersonAnswer(t, w); again.Revision == saved.Revision || again.Revision != myPersonRevision(t, f.c, f.mary.ID) {
+		t.Fatalf("the second answer's revision %q, the first's %q, the next read's %q", again.Revision, saved.Revision, myPersonRevision(t, f.c, f.mary.ID))
+	}
+}
+
+// The household's name and address save names its read too (DEC-174). An
+// empty body names no field and needs none; the request that makes the
+// household on first use had no read to name, so its fields save without one.
+func TestHouseholdDetailsSaveNamesItsRead(t *testing.T) {
+	f := newHouseholdEditFixture(t)
+	read := getMyHousehold(t, f.c).Revision
+	if read == "" || getMyHousehold(t, f.other).Revision != read {
+		t.Fatalf("the reads give %q and %q", read, getMyHousehold(t, f.other).Revision)
+	}
+	editMyHousehold(t, f.other, map[string]any{"name": "Editholder family", "address": "2 Elm St"}, http.StatusOK)
+	if getMyHousehold(t, f.c).Revision == read {
+		t.Fatal("another adult's save left the household's revision as it was")
+	}
+	before := householdEditState(t, f.app.DB)
+	for name, body := range map[string]map[string]any{
+		"a stale rename":           withRevision(map[string]any{"name": "Older name"}, read),
+		"a stale address":          withRevision(map[string]any{"address": "1 Oak St"}, read),
+		"no revision":              {"name": "Older name"},
+		"an empty revision":        withRevision(map[string]any{"name": "Older name"}, ""),
+		"Mary's revision":          withRevision(map[string]any{"name": "Older name"}, myPersonRevision(t, f.c, f.mary.ID)),
+		"another household's":      withRevision(map[string]any{"name": "Older name"}, f.app.editRevision(fmt.Sprintf("h%d", f.householdID+1), "0")),
+		"an empty body is no save": {},
+	} {
+		w := f.c.do("PUT", "/api/v1/me/household", body, true)
+		if len(body) == 0 {
+			wantCode(t, name, w, http.StatusOK, "")
+		} else {
+			wantCode(t, name, w, http.StatusConflict, "household_changed")
+		}
+		if after := householdEditState(t, f.app.DB); after != before {
+			t.Fatalf("%s wrote:\n%s\nwant\n%s", name, after, before)
+		}
+	}
+	w := f.c.do("PUT", "/api/v1/me/household", withRevision(map[string]any{"name": "The Editholders"}, getMyHousehold(t, f.c).Revision), true)
+	if w.Code != http.StatusOK {
+		t.Fatalf("the current read's save: %d %s", w.Code, w.Body.String())
+	}
+	var saved householdResponseJSON
+	decodeJSON(t, w, &saved)
+	if saved.Household.Name != "The Editholders" || saved.Household.Address != "2 Elm St" || saved.Household.Revision != getMyHousehold(t, f.c).Revision {
+		t.Fatalf("the answer %+v, the next read's revision %q", saved.Household, getMyHousehold(t, f.c).Revision)
+	}
+	apiDo(t, f.c, "PUT", "/api/v1/me/household", withRevision(map[string]any{"address": ""}, saved.Household.Revision), http.StatusOK)
+
+	newTestUser(t, f.app, "editfirstuse", "password1234", models.RoleMember)
+	first := loginAPI(t, f.app, "editfirstuse", "password1234")
+	apiDo(t, first, "PUT", "/api/v1/me/household", map[string]any{"name": "Fresh start"}, http.StatusOK)
+	if h := getMyHousehold(t, first); h.Name != "Fresh start" {
+		t.Fatalf("first use saved %+v", h)
+	}
+	wantCode(t, "a second save naming no read", first.do("PUT", "/api/v1/me/household", map[string]any{"name": "Again"}, true), http.StatusConflict, "household_changed")
+}
+
+// An adult whose session ends, or who leaves the household, while their save
+// waits on their own user row (the erasure's lock) is refused when the lock is
+// let go, and nothing is written. Each save names the current read.
+func TestHouseholdSavesByAnAdultRevokedWhileTheyWaitWriteNothing(t *testing.T) {
+	for _, save := range []struct {
+		name, gone string
+		path       func(f householdEditFixture) string
+		body       func(t *testing.T, f householdEditFixture) map[string]any
+		removed    int
+	}{
+		{name: "household", path: func(householdEditFixture) string { return "/api/v1/me/household" }, removed: http.StatusForbidden,
+			body: func(t *testing.T, f householdEditFixture) map[string]any {
+				return withRevision(map[string]any{"name": "Late"}, getMyHousehold(t, f.other).Revision)
+			}},
+		{name: "person", path: func(f householdEditFixture) string { return "/api/v1/me/household/people/" + itoa(f.mary.ID) }, removed: http.StatusNotFound,
+			body: func(t *testing.T, f householdEditFixture) map[string]any {
+				return withRevision(map[string]any{"kind": "child", "birthDate": "2018-01-01"}, myPersonRevision(t, f.other, f.mary.ID))
+			}},
+	} {
+		for change, want := range map[string]int{"session ended": http.StatusUnauthorized, "left the household": save.removed} {
+			t.Run(save.name+", "+change, func(t *testing.T) {
+				f := newHouseholdEditFixture(t)
+				body := save.body(t, f)
+				before := householdEditState(t, f.app.DB, "household_accounts")
+				holder := f.app.DB.Begin()
+				t.Cleanup(func() { _ = holder.Rollback() })
+				gormMust(t, holder.Exec("SELECT 1 FROM users WHERE id = ? FOR UPDATE", f.otherUser.ID))
+				if change == "session ended" {
+					gormMust(t, holder.Exec("UPDATE users SET session_version = session_version + 1 WHERE id = ?", f.otherUser.ID))
+				} else {
+					gormMust(t, holder.Exec("DELETE FROM household_accounts WHERE user_id = ?", f.otherUser.ID))
+				}
+				res := bgDo(f.other, "PUT", save.path(f), body)
+				hwWaiters(t, f.app, 1)
+				gormMust(t, holder.Commit())
+				if got := awaitResult(t, res); got.code != want {
+					t.Fatalf("the waiting save: %d %s, want %d", got.code, got.body, want)
+				}
+				if after := householdEditState(t, f.app.DB, "household_accounts"); after != before {
+					t.Fatalf("the waiting save wrote:\n%s\nwant\n%s", after, before)
+				}
+			})
+		}
+	}
+}
+
+// A save that waits on the household's lock compares after the wait: the
+// holder of the lock changes the row and commits, and the waiting save, named
+// from the read before, is refused with nothing more written.
+func TestHouseholdSavesCompareAfterTheLockWait(t *testing.T) {
+	for _, save := range []struct {
+		name, code, table, change, kept string
+		path                            func(f householdEditFixture) string
+		body                            func(t *testing.T, f householdEditFixture) map[string]any
+	}{
+		{name: "household", code: "household_changed", table: "households", change: "UPDATE households SET address = 'Changed meanwhile', updated_at = now() WHERE id = ?", kept: "address = 'Changed meanwhile'",
+			path: func(householdEditFixture) string { return "/api/v1/me/household" },
+			body: func(t *testing.T, f householdEditFixture) map[string]any {
+				return withRevision(map[string]any{"name": "Late"}, getMyHousehold(t, f.c).Revision)
+			}},
+		{name: "person", code: "household_person_changed", table: "household_people", change: "UPDATE household_people SET care_notes = 'Changed meanwhile', updated_at = now() WHERE household_id = ?", kept: "care_notes = 'Changed meanwhile' AND kind = 'adult'",
+			path: func(f householdEditFixture) string { return "/api/v1/me/household/people/" + itoa(f.mary.ID) },
+			body: func(t *testing.T, f householdEditFixture) map[string]any {
+				return withRevision(map[string]any{"kind": "child", "birthDate": "2018-01-01"}, myPersonRevision(t, f.c, f.mary.ID))
+			}},
+	} {
+		t.Run(save.name, func(t *testing.T) {
+			f := newHouseholdEditFixture(t)
+			body := save.body(t, f)
+			before := householdEditState(t, f.app.DB, save.table)
+			holder := f.app.DB.Begin()
+			t.Cleanup(func() { _ = holder.Rollback() })
+			gormMust(t, holder.Exec("SELECT 1 FROM households WHERE id = ? FOR UPDATE", f.householdID))
+			res := bgDo(f.c, "PUT", save.path(f), body)
+			waitForLockedUsersQuery(t, f.app, `%"households"%FOR UPDATE%`)
+			gormMust(t, holder.Exec(save.change, f.householdID))
+			gormMust(t, holder.Commit())
+			got := awaitResult(t, res)
+			if got.code != http.StatusConflict || !strings.Contains(got.body, save.code) {
+				t.Fatalf("the save that waited: %d %s, want 409 %s", got.code, got.body, save.code)
+			}
+			if after := householdEditState(t, f.app.DB, save.table); after != before {
+				t.Fatalf("the save that waited wrote:\n%s\nwant\n%s", after, before)
+			}
+			if n := countRows(t, f.app.DB, save.table, save.kept); n == 0 {
+				t.Fatalf("no %s row is as the lock's holder left it (%s)", save.table, save.kept)
+			}
+		})
+	}
+}
+
+// The household read gives each revision in the snapshot that read the fields
+// beside it: an edit committed right after the people were read leaves the
+// answer with Mary's older care notes and her older revision, so a save made
+// from it is refused instead of overwriting the edit.
+func TestMyHouseholdReadsFieldsAndRevisionsInOneSnapshot(t *testing.T) {
+	f := newHouseholdEditFixture(t)
+	var fired atomic.Bool
+	name := "test:household_people_seam"
+	gormMust(t, &gorm.DB{Error: f.app.DB.Callback().Query().After("gorm:query").Register(name, func(tx *gorm.DB) {
+		if tx.Statement.Table == "household_people" && strings.Contains(tx.Statement.SQL.String(), "converted_user_id IS NULL") && fired.CompareAndSwap(false, true) {
+			if err := f.app.DB.Exec("UPDATE household_people SET care_notes = 'Committed meanwhile', updated_at = now() WHERE id = ?", f.kit.ID).Error; err != nil {
+				t.Error(err)
+			}
+		}
+	})})
+	t.Cleanup(func() { _ = f.app.DB.Callback().Query().Remove(name) })
+	var shown householdPersonJSON
+	for _, p := range getMyHousehold(t, f.c).People {
+		if p.ID == f.kit.ID {
+			shown = p
+		}
+	}
+	if !fired.Load() {
+		t.Fatal("the read never reached its seam")
+	}
+	if shown.CareNotes == nil || *shown.CareNotes != "Private allergy note" {
+		t.Fatalf("the read showed %+v, want the care notes its snapshot read", shown)
+	}
+	before := householdEditState(t, f.app.DB)
+	wantCode(t, "a save made from the read", f.c.do("PUT", "/api/v1/me/household/people/"+itoa(f.kit.ID),
+		withRevision(map[string]any{"firstName": "Kitty", "careNotes": "Private allergy note"}, shown.Revision), true), http.StatusConflict, "household_person_changed")
+	if after := householdEditState(t, f.app.DB); after != before {
+		t.Fatalf("the refused save wrote:\n%s\nwant\n%s", after, before)
+	}
+}
+
+// What moves a person's revision: every column of the row (another adult's
+// edit, the conversion of the person to their own account, the age rollover,
+// a removal or an erasure each write one), and a write that only stamps
+// updated_at. A sign-up for the person, a guardian link's decision and an
+// admin adding someone else leave it, and the household's, alone; the token is
+// the row's, whoever reads it.
+func TestHouseholdRevisionsFollowTheirRows(t *testing.T) {
+	f := newHouseholdEditFixture(t)
+	token := func(rows revisionRows, id uint) string {
+		t.Helper()
+		got, err := f.app.rowRevisionIn(f.app.DB, rows, id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return got
+	}
+	kit := token(householdPersonRevisionRows, f.kit.ID)
+	if !regexp.MustCompile(`^1\.[0-9a-f]{16}\.p`+itoa(f.kit.ID)+`\.[0-9a-f]{32}$`).MatchString(kit) || kit != myPersonRevision(t, f.c, f.kit.ID) {
+		t.Fatalf("Kit's token %q, the read's %q", kit, myPersonRevision(t, f.c, f.kit.ID))
+	}
+	household := token(householdRevisionRows, f.householdID)
+	if !regexp.MustCompile(`^1\.[0-9a-f]{16}\.h` + itoa(f.householdID) + `\.[0-9a-f]{32}$`).MatchString(household) {
+		t.Fatalf("the household's token %q", household)
+	}
+
+	eventID, date := seedCappedEvent(t, f.app, f.admin, f.gid, intPtr(5), true)
+	batchAnswer(t, f.c, eventID, date, map[string]any{"people": []map[string]any{{"personId": f.kit.ID, "status": "going"}}}, http.StatusOK)
+	var link models.GuardianLink
+	gormMust(t, f.app.DB.Where("person_id = ?", f.kit.ID).First(&link))
+	gormMust(t, f.app.DB.Model(&link).Update("check_note", "Checked again"))
+	var adminRow householdPersonResponseJSON
+	decodeJSON(t, f.admin.do("POST", "/api/v1/admin/users/"+itoa(f.holder.ID)+"/household/people",
+		map[string]any{"firstName": "Lou", "kind": "adult", "birthDate": "1980-03-03"}, true), &adminRow)
+	if adminRow.Person.Revision == "" || adminRow.Person.Revision != myPersonRevision(t, f.c, adminRow.Person.ID) {
+		t.Fatalf("the admin's answer gave Lou %q, the household's read %q", adminRow.Person.Revision, myPersonRevision(t, f.c, adminRow.Person.ID))
+	}
+	if now := token(householdPersonRevisionRows, f.kit.ID); now != kit {
+		t.Fatalf("a sign-up, a link's note or another person's add moved Kit's token to %q", now)
+	}
+	if now := token(householdRevisionRows, f.householdID); now != household {
+		t.Fatalf("a person's add or a sign-up moved the household's token to %q", now)
+	}
+
+	for _, change := range []string{
+		"updated_at = updated_at + interval '1 second'", "first_name = 'Kitt'", "last_name = 'Lee'", "kind = 'teen'",
+		"birth_date = birth_date - 1", "photo_consent = NOT photo_consent",
+		"created_by = " + itoa(f.otherUser.ID), "converted_user_id = " + itoa(f.otherUser.ID), "converted_user_id = NULL",
+		"deleted_at = now()", "deleted_at = NULL",
+	} {
+		before := token(householdPersonRevisionRows, f.kit.ID)
+		gormMust(t, f.app.DB.Exec("UPDATE household_people SET "+change+" WHERE id = ?", f.kit.ID))
+		if now := token(householdPersonRevisionRows, f.kit.ID); now == before {
+			t.Errorf("%s left Kit's token at %q", change, now)
+		}
+	}
+	// The care notes are no part of the digest, so an adult who can't read them
+	// can't test a guess at them; every write of them moves the token anyway,
+	// by updated_at (a care-notes-only edit, TestHouseholdPersonEditNamesItsRead)
+	// or deleted_at (an erasure).
+	before := token(householdPersonRevisionRows, f.kit.ID)
+	gormMust(t, f.app.DB.Exec("UPDATE household_people SET care_notes = 'Unseen guess' WHERE id = ?", f.kit.ID))
+	if now := token(householdPersonRevisionRows, f.kit.ID); now != before {
+		t.Fatalf("the care notes alone moved Kit's token to %q: they are in the digest", now)
+	}
+	editMyPerson(t, f.c, f.kit.ID, map[string]any{"careNotes": "Edited notes"}, http.StatusOK)
+	if now := token(householdPersonRevisionRows, f.kit.ID); now == before {
+		t.Fatal("a care-notes-only edit left Kit's token as it was")
+	}
+	for _, change := range []string{"updated_at = updated_at + interval '1 second'", "name = 'Renamed'", "address = 'Somewhere'", "created_by = " + itoa(f.otherUser.ID)} {
+		before := token(householdRevisionRows, f.householdID)
+		gormMust(t, f.app.DB.Exec("UPDATE households SET "+change+" WHERE id = ?", f.householdID))
+		if now := token(householdRevisionRows, f.householdID); now == before {
+			t.Errorf("%s left the household's token at %q", change, now)
+		}
+	}
+
+	mary := token(householdPersonRevisionRows, f.mary.ID)
+	acceptConversion(t, f.app, f.invite, http.StatusOK)
+	if now := token(householdPersonRevisionRows, f.mary.ID); now != mary {
+		t.Fatalf("accepting the invitation, which writes no person row, moved Mary's token to %q", now)
+	}
+	approveConversionForEmail(t, f.app, f.admin, "mary-own@example.com")
+	if now := token(householdPersonRevisionRows, f.mary.ID); now == mary {
+		t.Fatal("the conversion left Mary's token as it was")
+	}
+}
+
+// The answers of the household writes read each revision in the snapshot that
+// read the fields beside it (toHouseholdJSON, householdPersonRow): an edit
+// committed right after the row was read leaves the answer with the older
+// fields and the older revision, never the older fields with the newer one.
+func TestHouseholdAnswersReadFieldsAndRevisionsInOneSnapshot(t *testing.T) {
+	f := newHouseholdEditFixture(t)
+	seam := func(t *testing.T, table, change string, id uint) *atomic.Bool {
+		var fired atomic.Bool
+		name := "test:household_answer_seam_" + table
+		gormMust(t, &gorm.DB{Error: f.app.DB.Callback().Query().After("gorm:query").Register(name, func(tx *gorm.DB) {
+			if tx.Statement.Table == table && fired.CompareAndSwap(false, true) {
+				if err := f.app.DB.Exec(change, id).Error; err != nil {
+					t.Error(err)
+				}
+			}
+		})})
+		t.Cleanup(func() { _ = f.app.DB.Callback().Query().Remove(name) })
+		return &fired
+	}
+	token := func(rows revisionRows, id uint) string {
+		got, err := f.app.rowRevisionIn(f.app.DB, rows, id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return got
+	}
+	t.Run("the household", func(t *testing.T) {
+		before := token(householdRevisionRows, f.householdID)
+		fired := seam(t, "households", "UPDATE households SET name = 'Committed meanwhile', updated_at = now() WHERE id = ?", f.householdID)
+		out, err := f.app.toHouseholdJSON(f.householdID, f.holder)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !fired.Load() || out.Name == "Committed meanwhile" || out.Revision != before || token(householdRevisionRows, f.householdID) == before {
+			t.Fatalf("fired %t: the answer %q with %q, the token before %q", fired.Load(), out.Name, out.Revision, before)
+		}
+	})
+	t.Run("a person", func(t *testing.T) {
+		before := token(householdPersonRevisionRows, f.kit.ID)
+		fired := seam(t, "household_people", "UPDATE household_people SET care_notes = 'Committed meanwhile', updated_at = now() WHERE id = ?", f.kit.ID)
+		row, err := f.app.householdPersonRow(f.kit.ID, f.holder)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !fired.Load() || row.CareNotes == nil || *row.CareNotes != "Private allergy note" || row.Revision != before || token(householdPersonRevisionRows, f.kit.ID) == before {
+			t.Fatalf("fired %t: the answer %+v, the token before %q", fired.Load(), row, before)
+		}
+	})
+}
+
+// A first use's save is compared with the household as its own creation left
+// it (DEC-174): the household is committed before the body is read, so a second
+// device can read it and save first. That save stands, and the first use's
+// fields are refused with nothing written, not stored over it.
+func TestHouseholdFirstUseComparesWithItsCreation(t *testing.T) {
+	app := testApp(t)
+	newTestUser(t, app, "firstuse", "password1234", models.RoleMember)
+	first := loginAPI(t, app, "firstuse", "password1234")
+	second := loginAPI(t, app, "firstuse", "password1234")
+	held := first.doHeld("PUT", "/api/v1/me/household", map[string]any{"name": "First draft"})
+	editMyHousehold(t, second, map[string]any{"name": "Second device"}, http.StatusOK)
+	before := householdEditState(t, app.DB)
+	held.release()
+	wantCode(t, "the first use's save", held.wait(t), http.StatusConflict, "household_changed")
+	if after := householdEditState(t, app.DB); after != before {
+		t.Fatalf("the refused first use wrote:\n%s\nwant\n%s", after, before)
+	}
+	if h := getMyHousehold(t, second); h.Name != "Second device" {
+		t.Fatalf("the household is named %q, want the second device's save", h.Name)
+	}
+
+	// With nothing in between, the first use's fields save.
+	newTestUser(t, app, "firstuse2", "password1234", models.RoleMember)
+	alone := loginAPI(t, app, "firstuse2", "password1234")
+	apiDo(t, alone, "PUT", "/api/v1/me/household", map[string]any{"name": "Fresh start"}, http.StatusOK)
+	if h := getMyHousehold(t, alone); h.Name != "Fresh start" {
+		t.Fatalf("first use saved %+v", h)
+	}
+}
+
+// A person who became their own account can no longer be edited here, and the
+// answer says so the same way whether the conversion came before the edit or
+// while it waited for the household's lock: 409 household_person_converted,
+// which the open form takes as the person gone from the card.
+func TestHouseholdPersonEditOfAConvertedPersonSaysSo(t *testing.T) {
+	f := newHouseholdEditFixture(t)
+	path := "/api/v1/me/household/people/" + itoa(f.mary.ID)
+	body := withRevision(map[string]any{"firstName": "Maria"}, myPersonRevision(t, f.c, f.mary.ID))
+	holder := f.app.DB.Begin()
+	t.Cleanup(func() { _ = holder.Rollback() })
+	gormMust(t, holder.Exec("SELECT 1 FROM households WHERE id = ? FOR UPDATE", f.householdID))
+	res := bgDo(f.c, "PUT", path, body)
+	waitForLockedUsersQuery(t, f.app, `%"households"%FOR UPDATE%`)
+	gormMust(t, holder.Exec("UPDATE household_people SET converted_user_id = ?, updated_at = now() WHERE id = ?", f.otherUser.ID, f.mary.ID))
+	gormMust(t, holder.Commit())
+	before := householdEditState(t, f.app.DB)
+	if got := awaitResult(t, res); got.code != http.StatusConflict || !strings.Contains(got.body, "household_person_converted") {
+		t.Fatalf("an edit that waited on the conversion: %d %s, want 409 household_person_converted", got.code, got.body)
+	}
+	wantCode(t, "an edit after the conversion", f.c.do("PUT", path, body, true), http.StatusConflict, "household_person_converted")
+	if after := householdEditState(t, f.app.DB); after != before {
+		t.Fatalf("the refused edits wrote:\n%s\nwant\n%s", after, before)
+	}
 }

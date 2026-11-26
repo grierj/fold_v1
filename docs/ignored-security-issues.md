@@ -80,6 +80,21 @@ credentials, personal data, or exploit instructions.
   and the date. Product: **2**. The issue is intentionally not fixed.
 - Evidence: `roomChangedTo` in `notices_rooms.go`.
 
+## A household adult can tell that an unseen part of a person's row changed
+
+- Date: 2026-11-25. Reviewed revisions: `597decf654aa0cde98f305de00123ef99aa03d7b` and
+  `e0925bc0137d8032ded0521d7c4caff2fbcc06f4` (PR #552, DEC-174).
+- A household adult who is neither an admin nor a person's confirmed guardian cannot read the person's care notes
+  but holds the person's revision. If the revision moves, or a save is refused with `household_person_changed`, while
+  every field they can see is unchanged, they learn that something they cannot see changed. It reveals no content. It
+  cannot tell a care-note change from any other write of the row, since the notes stay out of the digest and a notes
+  edit, like any other edit, stamps `updated_at`.
+- Likelihood: **2/10**. It needs a second adult watching the revision or saving while a guardian edits the notes.
+- Severity: **2/10**. The adult learns only that the row was written, not what changed. Product: **4**. The issue is
+  intentionally not fixed.
+- Evidence: `householdPersonRevisionRows` in `edit_revision.go`; `checkHouseholdPersonRevision` in
+  `apiUpdateHouseholdPerson` (`api_households.go`).
+
 ## A named deletion notice can expire with a date it withheld
 
 - Date: 2026-11-25. Reviewed revision: `2ea862ab4802d4179a9abfb9b3444797322877b2` (PR #551).

@@ -1198,7 +1198,7 @@ func TestHouseholdAttendeesArePrivateToHouseholdAndManagers(t *testing.T) {
 	admin, gid := openGroup(t, app, "HouseholdPrivacy")
 	eventID, date := seedChildcareEvent(t, app, admin, gid, nil, intPtr(1), true)
 	_, c, spouse, child := householdFamily(t, app, admin, "privacyholder")
-	apiDo(t, c, "PUT", "/api/v1/me/household", map[string]any{"address": "Private household address"}, http.StatusOK)
+	editMyHousehold(t, c, map[string]any{"address": "Private household address"}, http.StatusOK)
 	batchAnswer(t, c, eventID, date, map[string]any{"people": []map[string]any{{"personId": child.ID, "status": "going", "childcareRequested": true}, {"personId": spouse.ID, "status": "going"}}}, http.StatusOK)
 	newTestUser(t, app, "unrelated", "password1234", models.RoleMember)
 	ordinary := loginAPI(t, app, "unrelated", "password1234")
