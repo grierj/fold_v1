@@ -27,12 +27,13 @@ const LISTED_DATES = 10;
 // shown in place of the picker's own count, so every name and count on
 // screen is the one the sender confirms. reviewing: bumped when the sender
 // asks to review the whole list, which opens it.
-export function AudiencePicker({ options, choice, onChange, error, id, push = false, reviewed = null, reviewing = 0, recount = 0 }: {
+export function AudiencePicker({ options, choice, onChange, error, id, messageId, push = false, reviewed = null, reviewing = 0, recount = 0 }: {
   options: ComposeOptions;
   choice: AudienceChoice;
   onChange: (c: AudienceChoice) => void;
   error?: string;
   id: string;
+  messageId?: number;
   push?: boolean;
   reviewed?: AudienceSummary | null;
   reviewing?: number;
@@ -44,7 +45,7 @@ export function AudiencePicker({ options, choice, onChange, error, id, push = fa
   const event = kind === "event" ? options.events.find((e) => e.id === Number(raw)) : undefined;
   const audience = toAudience(choice);
   const key = audienceKey(audience);
-  const counted = `${key}#${recount}`;
+  const counted = `${messageId ?? "new"}#${key}#${recount}`;
   const [summary, setSummary] = useState<{ key: string; summary: AudienceSummary } | null>(null);
   const [countError, setCountError] = useState<{ key: string; text: string } | null>(null);
   const latest = useRef("");
@@ -56,7 +57,7 @@ export function AudiencePicker({ options, choice, onChange, error, id, push = fa
     if (!audience) return;
 
     const timer = setTimeout(() => {
-      Messages.audiencePreview(audience)
+      Messages.audiencePreview(audience, messageId)
         .then(({ summary: s }) => { if (latest.current === counted) setSummary({ key: counted, summary: s }); })
         .catch((e) => { if (latest.current === counted) setCountError({ key: counted, text: errorText(e, "We couldn't count who gets this.") }); });
     }, COUNT_DELAY_MS);
@@ -121,7 +122,7 @@ export function AudiencePicker({ options, choice, onChange, error, id, push = fa
 
   return (
     <div className="space-y-4">
-      <Field id={id} label="Send to" hint="Your groups and the events you lead or host." error={error}>
+      <Field id={id} label="Send to" hint={messageId === undefined ? "Your groups and the events you lead or host." : "Choose an audience the author can message."} error={error}>
         <Select
           value={choice.target}
           title={chosenLabel}

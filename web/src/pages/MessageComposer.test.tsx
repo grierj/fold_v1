@@ -26,7 +26,7 @@ const render = renderWithAuth(() => ({ user: { id: 2, name: "Lee Leader", displa
 
 stubService(Site, () => ({ get: vi.fn().mockResolvedValue({ name: "Grace", timezone: "America/Boise" }) }));
 
-stubService(Messages, () => ({ options: vi.fn(), audiencePreview: vi.fn(), get: vi.fn(), create: vi.fn(), update: vi.fn(), review: vi.fn(), schedule: vi.fn(), cancel: vi.fn(), preview: vi.fn(), test: vi.fn(), recipients: vi.fn(), retry: vi.fn(), uploadImage: vi.fn() }));
+stubService(Messages, () => ({ options: vi.fn(), editOptions: vi.fn(), audiencePreview: vi.fn(), get: vi.fn(), create: vi.fn(), update: vi.fn(), review: vi.fn(), schedule: vi.fn(), cancel: vi.fn(), preview: vi.fn(), test: vi.fn(), recipients: vi.fn(), retry: vi.fn(), uploadImage: vi.fn() }));
 
 beforeAll(polyfillEditorLayout);
 
@@ -47,6 +47,7 @@ function open(path: string) {
 
 beforeEach(() => {
   vi.mocked(Messages.options).mockResolvedValue(composeOptions());
+  vi.mocked(Messages.editOptions).mockResolvedValue(composeOptions());
   vi.mocked(Messages.audiencePreview).mockResolvedValue({ summary: summary() });
   vi.mocked(Messages.get).mockResolvedValue({ message: message() });
   let saves = 0;
@@ -68,11 +69,26 @@ describe("MessageComposerPage", () => {
     expect(await screen.findByRole("heading", { name: "New message", level: 1 })).toBeInTheDocument();
     expect(screen.getByRole("combobox", { name: "Send to" })).toHaveValue("group:7");
     expect(await screen.findByText("3 people; 1 won't get the email: 1 turned off messages from leaders")).toBeInTheDocument();
-    expect(Messages.audiencePreview).toHaveBeenCalledWith({ type: "group", groupId: 7, roles: ["member", "leader"] });
+    expect(Messages.audiencePreview).toHaveBeenCalledWith({ type: "group", groupId: 7, roles: ["member", "leader"] }, undefined);
     // One primary action.
     await editorReady();
     expect(screen.getByRole("button", { name: "Send now" })).toHaveClass("btn-primary");
     expect(document.querySelectorAll(".btn-primary")).toHaveLength(1);
+  });
+
+  it.each(["draft", "scheduled"] as const)("uses the saved %s for both the audience picker and the live count", async (status) => {
+    viewer.isAdmin = true;
+    vi.mocked(Messages.options).mockResolvedValue(composeOptions({ canMessageEveryone: true }));
+    vi.mocked(Messages.get).mockResolvedValue({ message: message({ status, scheduledAt: status === "scheduled" ? "2030-11-05T16:30:00Z" : null }) });
+    open("/messages/5");
+
+    if (status === "scheduled") await userEvent.click(await screen.findByRole("button", { name: "Edit" }));
+    await editorReady();
+    expect(Messages.editOptions).toHaveBeenCalledWith(5);
+    expect(screen.getByRole("combobox", { name: "Send to" })).toHaveAccessibleDescription("Choose an audience the author can message.");
+    expect(screen.getByRole("combobox", { name: "Send to" })).toHaveValue("group:7");
+    expect(screen.queryByRole("option", { name: "Everyone at church" })).toBeNull();
+    await waitFor(() => expect(Messages.audiencePreview).toHaveBeenCalledWith(message().audience, 5));
   });
 
   it("says what is missing under each field and focuses the first", async () => {
@@ -687,7 +703,7 @@ describe("push notification too", () => {
 
   it("is hidden when the church turned notifications off, and keeps the saved value", async () => {
     const user = userEvent.setup();
-    vi.mocked(Messages.options).mockResolvedValue(composeOptions({ pushEnabled: false }));
+    vi.mocked(Messages.editOptions).mockResolvedValue(composeOptions({ pushEnabled: false }));
     vi.mocked(Messages.audiencePreview).mockResolvedValue({ summary: pushSummary });
     vi.mocked(Messages.get).mockResolvedValue({ message: message({ pushAlert: false }) });
     open("/messages/5");

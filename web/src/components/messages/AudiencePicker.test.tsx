@@ -185,10 +185,10 @@ describe("AudiencePicker", () => {
     const calls = pending();
     render(<Harness start={{ ...emptyChoice(), target: "group:7" }} />);
     await wait();
-    expect(Messages.audiencePreview).toHaveBeenLastCalledWith({ type: "group", groupId: 7, roles: ["member", "leader"] });
+    expect(Messages.audiencePreview).toHaveBeenLastCalledWith({ type: "group", groupId: 7, roles: ["member", "leader"] }, undefined);
     fireEvent.click(screen.getByRole("button", { name: "Leaders" }));
     await wait();
-    expect(Messages.audiencePreview).toHaveBeenLastCalledWith({ type: "group", groupId: 7, roles: ["member"] });
+    expect(Messages.audiencePreview).toHaveBeenLastCalledWith({ type: "group", groupId: 7, roles: ["member"] }, undefined);
     expect(calls).toHaveLength(2);
     // The newer answer lands first; the older one must not replace it.
     await act(async () => { calls[1](summary({ people: 2, eligible: 2, teens: 0, skipped: {} })); });
