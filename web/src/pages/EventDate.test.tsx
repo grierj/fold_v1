@@ -4,7 +4,7 @@ import { stubService } from "../test/service";
 import { act, cleanup, fireEvent, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter, Outlet, Route, RouterProvider, Routes, createMemoryRouter } from "react-router-dom";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { ApiError } from "../api/core";
 import { Dates, Events } from "../api/events";
 import { Site } from "../api/site";
@@ -43,6 +43,11 @@ function deferred<T>() {
 
   return { promise, resolve, reject };
 }
+
+// Load the lazy manager module before the first cancellation case starts its DOM query timeout.
+beforeAll(async () => {
+  await import("../components/ManageDate");
+});
 
 beforeEach(() => { vi.resetAllMocks(); actor.user = { id: 2 }; actor.canCompose = false; vi.mocked(Dates.get).mockResolvedValue({ occurrence: occurrence() }); vi.mocked(Dates.register).mockResolvedValue({ registration }); vi.mocked(Dates.end).mockResolvedValue({}); nativePromptsFail(); });
 
