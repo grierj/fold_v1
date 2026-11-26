@@ -2271,6 +2271,7 @@ the approval setting, room notes and revisions. It lists active rooms first, the
 building and name. A switch turned off before that snapshot gives the usual 404
 `not_found`. A session that ended or lost admin access after middleware gives 401
 `signed_out`. Only a successful participating read acknowledges the admin.
+A failed rooms-switch read returns 500 without acknowledging the request.
 
 An edit names the read it was made from (DEC-171): `revision` is the room's token from `GET /admin/rooms` (each room carries one, read in the same snapshot as its fields) or from the last answer, and it is required on every `PUT`, whatever the body changes. The server locks the room, reads the admin again, then compares: an older, missing or other room's token is 409 `room_changed` and nothing is written (no room change, no audit row). A save that changes nothing writes nothing and answers the revision it named. The answer's `room.revision` is the room after the save; `POST`'s answer carries the new room's. An admin page loaded before this release sends no revision, so each of its room saves is refused with 409 `room_changed`, writing nothing, until the page is loaded again.
 
