@@ -145,57 +145,59 @@ export function MessageComposerPage() {
   // never read on the browser's clock first.
   const church = useChurchZoneLoad();
   const zone = church.zone ?? browserTimeZone();
-  const [options, setOptions] = useState<ComposeOptions | null>(null);
   // The message one opening of the composer starts from (null for a new one), the opening's number, and whether it opens
   // in the editor: each read of another message, and each Edit press, mounts a new Composer, whose saves name the read
   // it opened with.
-  const [opening, setOpening] = useState<{ message: Message | null; n: number; edit?: boolean } | null>(null);
+  const [opening, setOpening] = useState<{ message: Message | null; options: ComposeOptions; n: number; edit: boolean } | null>(null);
   // The message the composer shows, a new draft once its first save lands included, so that address is not read again.
-  const shown = useRef<number | null>(null);
+  const shown = useRef<number | null | undefined>(undefined);
+  const pageRef = useRef<HTMLDivElement>(null);
+  const editRequested = useRef<number | null>(null);
   const [loadError, setLoadError] = useState<{ text: string; missing: boolean } | null>(null);
   const [reload, setReload] = useState(0);
   const refusal = useRefusedSave();
 
   useEffect(() => {
+    if (id && Number(id) === shown.current) return;
+    shown.current = undefined;
+
+    if (editRequested.current !== Number(id)) editRequested.current = null;
+    setLoadError(null);
     let alive = true;
-    Messages.options()
-      .then((o) => { if (alive) setOptions(o); })
-      .catch((e) => { if (alive) setLoadError({ text: errorText(e, "We couldn't open the composer."), missing: false }); });
 
-    return () => { alive = false; };
-  }, [reload]);
+    async function open() {
+      const m = id ? (await Messages.get(Number(id))).message : null;
 
-  useEffect(() => {
-    if (!id) {
-      if (opening === null || opening.message !== null || shown.current !== null) {
-        shown.current = null;
-        refusal.clear();
-        setOpening((o) => ({ message: null, n: (o?.n ?? 0) + 1 }));
-      }
+      if (!alive) return;
+      const edit = !!m?.editable && (m.status === "draft" || m.id === editRequested.current);
+      const options = edit ? await Messages.editOptions(m.id) : await Messages.options();
 
-      return;
+      if (!alive) return;
+      shown.current = m?.id ?? null;
+      refusal.clear();
+      setOpening((o) => ({ message: m, options, edit, n: (o?.n ?? 0) + 1 }));
     }
 
-    if (Number(id) === shown.current) return;
-    // The address moved on: what was shown is read again if the person comes back to it (a new draft saved here opened
-    // from nothing, and would open blank).
-    shown.current = null;
-    let alive = true;
-    Messages.get(Number(id))
-      .then(({ message: m }) => {
-        if (!alive) return;
-        shown.current = m.id;
-        refusal.clear();
-        setOpening((o) => ({ message: m, n: (o?.n ?? 0) + 1 }));
-      })
-      .catch((e) => { if (alive) setLoadError({ text: errorText(e, "We couldn't open this message."), missing: errorCode(e) === "not_found" }); });
+    open().catch((e) => {
+      if (alive) setLoadError({ text: errorText(e, id ? "We couldn't open this message." : "We couldn't open the composer."), missing: !!id && errorCode(e) === "not_found" });
+    });
 
     return () => { alive = false; };
-    // opening is read only to tell a first visit to /messages/new.
   }, [id, reload]);
 
+  useEffect(() => {
+    if (editRequested.current !== Number(id)) return;
+    const result = pageRef.current?.querySelector("h1");
+
+    if (!result) return;
+    result.tabIndex = -1;
+    result.focus();
+
+    if (!loadError) editRequested.current = null;
+  }, [id, opening, loadError, church.done]);
+
   const back = <ButtonLink variant="link" to="/messages"><ChevronLeftIcon className="h-4 w-4 shrink-0" /><span aria-hidden="true">Messages</span><span className="sr-only">Back to messages</span></ButtonLink>;
-  const page = (children: React.ReactNode) => <div className="fold-page fold-page-narrow space-y-6 wrap-anywhere">{children}</div>;
+  const page = (children: React.ReactNode) => <div ref={pageRef} className="fold-page fold-page-narrow space-y-6 wrap-anywhere">{children}</div>;
 
   if (loadError) {
     return page(<>
@@ -209,9 +211,11 @@ export function MessageComposerPage() {
 
   // The editor on screen is the address's: while another message loads, the one the person left is not shown, so nothing
   // on it can act on a message they moved away from. A new draft's first save names its address before moving to it.
-  const current = opening && (id ? shown.current === Number(id) : opening.message === null);
+  const current = opening && shown.current === (id ? Number(id) : null);
 
-  if (!options || !church.done || !opening || !current) return page(<Skeleton kind="page" label="Loading the composer…" />);
+  if (!church.done || !opening || !current) return page(<Skeleton kind="page" label="Loading the composer…" />);
+
+  const { options } = opening;
 
   if (!options.canCompose && !opening.message) {
     return page(<>
@@ -224,8 +228,9 @@ export function MessageComposerPage() {
     <Composer key={opening.n} options={options} zone={zone} opened={opening.message} edit={opening.edit} params={params} refusal={refusal} back={back}
       onShown={(m) => { shown.current = m; }}
       onEdit={(m) => {
-        refusal.clear();
-        setOpening((o) => ({ message: m, n: (o?.n ?? 0) + 1, edit: true }));
+        editRequested.current = m.id;
+        shown.current = undefined;
+        setReload((n) => n + 1);
       }}
       onGone={() => setLoadError({ text: "", missing: true })} />,
   );
@@ -233,12 +238,11 @@ export function MessageComposerPage() {
 
 // Composer is one opening of a message, from the read the page made (or a new one). It stays open after its saves and
 // sends, so each save names what the last outcome left (useRevisionSave's `stays`).
-function Composer({ options, zone, opened, edit = false, params, refusal, back, onShown, onEdit, onGone }: {
+function Composer({ options, zone, opened, edit, params, refusal, back, onShown, onEdit, onGone }: {
   options: ComposeOptions;
   zone: string;
   opened: Message | null;
-  // Opens in the editor (the Edit press), whatever the message's status.
-  edit?: boolean;
+  edit: boolean;
   params: URLSearchParams;
   refusal: ReturnType<typeof useRefusedSave>;
   back: React.ReactNode;
@@ -270,7 +274,7 @@ function Composer({ options, zone, opened, edit = false, params, refusal, back, 
   const start = opened ? formTime(opened, zone) : null;
   const firstChoice = opened ? fromAudience(opened.audience, options) : prefillChoice(params, options);
   const [message, setMessage] = useState<Message | null>(opened);
-  const [editing, setEditing] = useState(opened ? edit || (opened.status === "draft" && opened.editable) : true);
+  const [editing, setEditing] = useState(!opened || edit);
 
   const [choice, setChoice] = useState<AudienceChoice>(firstChoice);
   const [subject, setSubject] = useState(opened?.subject ?? "");
@@ -957,7 +961,7 @@ function Composer({ options, zone, opened, edit = false, params, refusal, back, 
     <Form ref={form} aria-label={title} onSubmit={submit} className="space-y-8">
       <section aria-labelledby={`${ids.audience}-h`} className="space-y-4">
         <h2 id={`${ids.audience}-h`} className="text-xl font-semibold">Who gets it</h2>
-        <AudiencePicker id={ids.audience} options={options} choice={choice} error={errors.audience} push={pushOn}
+        <AudiencePicker id={ids.audience} messageId={message?.id} options={options} choice={choice} error={errors.audience} push={pushOn}
           reviewed={reviewed?.key === key ? reviewed.summary : null} reviewing={reviewing} recount={recount}
           onChange={(c) => { setChoice(c); setReviewed(null); setErrors((e) => ({ ...e, audience: undefined })); }} />
         {/* A companion to the email, never instead of it (DEC-123). */}

@@ -2405,6 +2405,8 @@ Exit 0 means no erased or unowned folder remains and the avatar folder holds not
 ```
 GET  /api/v1/messages/compose[?event=<id>] → 200 {canCompose, canMessageEveryone, pushEnabled, groups: [{id, name}], events: [{id, title, groupName?, churchWide, dates: [{occurrenceId, date, startsAt}]}]}
 POST /api/v1/messages/audience-preview   → 200 {summary} | 400 | 403 | 404   body: {audience}
+GET  /api/v1/messages/:id/compose        → 200 {canCompose, canMessageEveryone, pushEnabled, groups, events} | 401 | 404 | 409
+POST /api/v1/messages/:id/audience-preview → 200 {summary} | 400 | 401 | 403 | 404 | 409   body: {audience}
 GET  /api/v1/messages[?category=announcement|reminder] → 200 {messages: [message]} | 400   (yours; an admin's has everyone's; M3.6b)
 POST /api/v1/messages                    → 201 {message} | 400 | 403 | 404   body: {channel?, subject, bodyHtml, audience, pushAlert?}
 GET  /api/v1/messages/:id                → 200 {message} | 401 | 404         (its author or an admin; a reminder also its event's managers, M3.6b)
@@ -2428,6 +2430,8 @@ Leaders, hosts and admins write announcements (`policy.CanComposeMessages`): adm
 #### An edit and a send name what the sender saw (DEC-169)
 
 `message.revision` is the message's token, a digest of its row (every column but `created_at`, with `scheduled_at`, `sent_at` and `updated_at` as instants, through the same row-token helper as the group form's: no column, no migration), read in the same snapshot as the fields beside it. Only a viewer who may edit the message gets it (`editable`); a reminder, or a message that is sending, sent, failed or cancelled, has none. Every write that answers `{message}` (create, edit, schedule) builds the answer in its own transaction under its locks, so the revision is the one that write left.
+
+When editing a saved announcement, use `GET /messages/:id/compose` for choices and `POST /messages/:id/audience-preview` for a proposed audience. Each reads the session, the right to edit the message, and the original author's current permissions in one snapshot. An inactive or missing author has no choices and the count answers 403 `message_not_yours`. An admin editing a leader's announcement sees individual skip reasons for people in a permitted audience. A leader sees only "won't get this" beside a skipped person. The routes without a message id use the signed-in person's audiences for a new draft.
 
 `PUT /messages/:id` requires `revision`. In one Read Committed transaction it locks the person (`lockActorIn`), then the message `FOR UPDATE`, then decides who may change it and whether its status still allows it (404 for a message that isn't theirs, 409 `message_reminder`, 409 `message_locked`, as before), then compares the token: a missing, malformed or older one is 409 `message_changed` with nothing written. Any write moves the token, one that puts the message back as it was included, so a save whose answer was lost is never applied again over a change that undid it. The audience must be one the active author may message, even when an admin edits or schedules the message. The admin stays the actor in the audit log, and the original author stays on the message.
 
