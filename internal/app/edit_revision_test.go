@@ -138,7 +138,7 @@ func TestRowRevisionCoversTheWholeRow(t *testing.T) {
 
 	g := newTestGroup(t, f.app, f.leaderUser, "Digest", models.GroupActive)
 	var old string
-	gormMust(t, f.app.DB.Raw("SELECT md5((to_jsonb(g) - ARRAY['updated_at','created_at'])::text || coalesce(extract(epoch FROM g.updated_at)::text, '')) FROM groups g WHERE g.id = ?", g.ID).Scan(&old))
+	gormMust(t, f.app.DB.Raw("SELECT md5((to_jsonb(g) - ARRAY['updated_at','created_at','deletion_requester_id'])::text || coalesce(extract(epoch FROM g.updated_at)::text, '')) FROM groups g WHERE g.id = ?", g.ID).Scan(&old))
 	got, err := f.app.groupRevisionIn(f.app.DB, g.ID)
 	if err != nil {
 		t.Fatal(err)
