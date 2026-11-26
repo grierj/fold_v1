@@ -94,7 +94,7 @@ UI_PAGES=schedule-event,admin UI_WIDTHS=390 node .cursor/skills/verify-ui/drive-
 | Check | Fails when | Why |
 |---|---|---|
 | Overflow | `documentElement.scrollWidth > innerWidth` | Sideways scroll on phones |
-| Clipped select | The selected option's text is wider than the select's inner width (canvas measure) | The PR #51 "Church time zone: America/Los…" bug |
+| Clipped select | The selected label exceeds its space. Native single-line labels use canvas measurement. The room picker's wrapping label uses its rendered bounds. | The PR #51 "Church time zone: America/Los…" bug |
 | Cut off | A visible control runs past an ancestor that hides or scrolls overflow, or past either edge of the screen | The PR #65 Admin Users actions hidden in an `overflow-hidden` card |
 | Target under 24px | Any visible control (link, button, input, select, textarea, tab) is under 24×24 CSS px, counting its `<label for>`. Inline links inside running text are exempt. | WCAG 2.2 SC 2.5.8 (AA) |
 | axe | Any moderate, serious or critical violation (WCAG 2.0–2.2 A/AA tags, which include `target-size`, `label` and `color-contrast`) | Same bar as `web/e2e/a11y.spec.ts` |
