@@ -442,6 +442,28 @@ describe("a deletion request that is no longer open", () => {
     expect(screen.queryByText(/couldn't/)).not.toBeInTheDocument();
   });
 
+  // Another admin (or another tab) already deleted the group: both buttons answer 404, and the line must not say the
+  // group is still there.
+  const gone = new ApiError(404, "group not found");
+
+  it.each([
+    ["Delete group", () => vi.mocked(Admin.deleteGroup).mockRejectedValue(gone)],
+    ["Keep group", () => vi.mocked(Admin.rejectDeletion).mockRejectedValue(gone)],
+  ])("%s on a group already deleted takes the card away and says it was deleted", async (button, refuse) => {
+    refuse();
+    vi.mocked(AdminAccountRequests.list).mockResolvedValue({ requests: [] });
+    vi.mocked(Admin.deletions).mockResolvedValueOnce({ groups: [group(5, "Solo", { deletionRequested: true })] }).mockResolvedValue({ groups: [] });
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+    render(<MemoryRouter initialEntries={["/admin"]}><AdminPage /></MemoryRouter>);
+    await userEvent.click(await screen.findByRole("button", { name: button }));
+    const status = await screen.findByText("“Solo” was already deleted.");
+    expect(status).toHaveAttribute("role", "status");
+    await waitFor(() => expect(status).toHaveFocus());
+    expect(screen.queryByText(/still there/)).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Delete group" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Keep group" })).not.toBeInTheDocument();
+  });
+
   // With no task to resolve (the only admin withdrew their own request) the answer has no resolution and names Fold;
   // the line does not use either, so it still reads as a sentence.
   const unresolved = new ApiError(409, "This was already handled", { code: "already_handled", resolution: "", resolvedBy: "Fold" });

@@ -1808,10 +1808,12 @@ POST /api/v1/admin/groups/:id/reject       → 200 {}                    (admin;
 POST /api/v1/admin/groups/:id/reject-deletion → 200 {} | 409 already_handled | 404 (admin; keeps the group, clears the request)
      — only ever an answer to the request: once it is no longer open (the leader withdrew it, someone else joined,
        which withdraws it, or another admin kept the group) it writes nothing and answers 409 already_handled with
-       {resolvedBy, resolution}, as the other approval queues do (DEC-177). resolution is "withdrawn" or "kept", or ""
-       when no admin task was left to resolve (the church's only admin asked about their own group, so none was
-       written, or the rows are gone). resolvedBy is the person who ended it, and "Fold" for every withdrawal Fold
-       made itself (someone joined; the card found the request no longer the asker's) and whenever resolution is ""
+       {resolvedBy, resolution}, as the other approval queues do (DEC-177). They are read from the group's most
+       recently resolved deletion task: resolution is "withdrawn" or "kept", and resolvedBy the person who ended
+       it, or "Fold" for every withdrawal Fold made itself (someone joined; the card found the request no longer
+       the asker's). A request that left no task (the church's only admin asked about their own group, so none
+       was written) answers the task of an earlier request for the group when there is one, and "" with "Fold"
+       when there is none. A group already deleted answers 404, and the card says it was already deleted
 DELETE /api/v1/admin/groups/:id?deletionRequest=1 → 200 {} | 409 already_handled | 400 | 404 (admin; deletes the group)
      — tells, in the delete's transaction, every other active member one group.deleted notice (named when they may
        see the group) and everyone else going or waitlisted on an upcoming date of its events (a household person's
@@ -1822,7 +1824,7 @@ DELETE /api/v1/admin/groups/:id?deletionRequest=1 → 200 {} | 409 already_handl
        actor of an open group.deletion task, or the admin pressing, whose own request wrote them no task); a flag on
        a group with no listed member, a second one, or one who did not ask (a successor after a handoff, a co-leader
        left alone when the asker departed) is withdrawn there (the flag cleared and the admins'
-       tasks resolved "withdrawn", which commits, as does the contact reconciliation every group write runs) and
+       tasks resolved "withdrawn", which commits, as does the contact reconciliation this delete's transaction runs) and
        the delete is refused the same way. Without the marker (the Groups tab) the
        delete is never refused for the request's state. Any other value of deletionRequest is 400.
      — the group's row is locked and the admin read again under it (401 signed_out when their session ended or they
