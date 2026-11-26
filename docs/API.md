@@ -890,6 +890,9 @@ PUT  /api/v1/groups/:id/members/:userId/role → 200 {members: [...]}  (auth; le
      snapshot): a caller who lost access since gets that read's 401, 403 or 404, and the change stays made
 POST /api/v1/groups/:id/deletion-request → 200 {group}  (auth; a leader)
 DELETE /api/v1/groups/:id/deletion-request → 200 {}    (auth; leader or admin)
+     — the request holds only while the leader is the group's one member: an add that brings someone else in (a join,
+       a leader's or an admin's add, an accepted invitation, an approved ask to add) withdraws it in the add's own
+       transaction, under the group's row lock (DEC-177)
 GET  /api/v1/groups/:id/members → {members: [...]}  (auth; members and admins; 404 if you cannot see the group, 403 if you are not in it)
 ```
 
@@ -898,7 +901,10 @@ invite-only and the caller is not already a member. A full group answers 409
 "This group is full" (no waitlist). A disabled account re-enabled into a full
 group is left out and told to ask a leader; there is no pending-return state. A deletion request is
 accepted only from a leader who is the group's only active member. Adding
-a member clears a pending request.
+a member clears a pending request. A join, a role change or an add that waited behind an admin's
+delete of the group finds it gone and answers 404 (an add by email answers its usual 400
+`group_member_email_unavailable`), and a sign-up or withdrawal that waited on one of its dates answers the
+404 of a date not on the event; one that committed first is told (DEC-177).
 
 Role changes: only adults can be made leaders (teen accounts arrive in
 M1.10 and are refused), and a group never loses its last leader. Demoting
@@ -1789,8 +1795,24 @@ POST /api/v1/admin/groups/:id/approve      → 200 {group}               (admin)
 POST /api/v1/admin/groups/:id/reject       → 200 {}                    (admin; archives the group)
      body: {message?} — optional, at most 500 characters, carried on the leaders' group.rejected notice and the
      audit row (DEC-96); 400 too_long, or message_has_contact when it holds an email address or phone number
-POST /api/v1/admin/groups/:id/reject-deletion → 200 {}               (admin; clears the request)
-DELETE /api/v1/admin/groups/:id            → 200 {}                    (admin; deletes the group)
+POST /api/v1/admin/groups/:id/reject-deletion → 200 {} | 409 already_handled | 404 (admin; keeps the group, clears the request)
+     — only ever an answer to the request: once it is no longer open (the leader withdrew it, someone else joined,
+       which withdraws it, or another admin kept the group) it writes nothing and answers 409 already_handled with
+       {resolvedBy, resolution} ("withdrawn" or "kept"), as the other approval queues do (DEC-177)
+DELETE /api/v1/admin/groups/:id?deletionRequest=1 → 200 {} | 409 already_handled | 400 | 404 (admin; deletes the group)
+     — tells, in the delete's transaction, every other active member one group.deleted notice (named when they may
+       see the group) and everyone else going or waitlisted on an upcoming date of its events (a household person's
+       holder), and every other account holding a live exact-date grant on one, the event.deleted notice an event's
+       own delete writes, one per event; a member signed up gets only group.deleted (DEC-177)
+     — deletionRequest=1 marks the Approvals card's delete, which answers the leader's request: with it, a request
+       no longer open writes nothing and answers 409 already_handled as Keep does. Without it (the Groups tab) the
+       delete is never refused for the request's state. Any other value of deletionRequest is 400.
+     — the group's row is locked and the admin read again under it (401 signed_out when their session ended or they
+       are no longer an admin); a group gone while the request waited is 404
+GET  /api/v1/admin/groups/:id/delete-count  → 200 {people} | 404     (admin; one snapshot)
+     — how many other accounts the delete would tell (members and people signed up, each once; the admin's own
+       membership and sign-ups, and ones they made for their household, are not counted), for the confirmation to
+       show; never sent back and never checked by the delete
 GET  /api/v1/admin/groups                  → {groups: [groupSummary]}  (admin; all statuses)
 POST /api/v1/admin/groups/:id/members      → 200 {membership}          (admin)
      body: {selectionId | userId, role: "member"|"leader", overLimit?} — one target only; role=leader adds a (co-)leader; audited;
@@ -2696,6 +2718,7 @@ All but logout need a signed-in, active account and the CSRF token as usual (`cs
 | `registration.removed` | Registration removed: *event* | A leader or host removed your registration. |
 | `group.approved` | *group* was approved | It's live now. |
 | `group.rejected` | *group* wasn't approved | Open Fold to see more. |
+| `group.deleted` (to each other member; *group* only when they may see it, else "One of your groups") | *group* was deleted | Its events are off. |
 | `group.pending` | A new group is waiting for approval | |
 | `group.deletion` | A request to delete a group is waiting | |
 | `account.requested` | A new account request is waiting | |
