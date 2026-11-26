@@ -334,6 +334,54 @@ func TestBatching(t *testing.T) {
 
 func itoa(n int) string { return strconv.Itoa(n) }
 
+// Restate renders an open task's text again in place: the same rows, in
+// the same place in the feed, as read as they were, and nothing new sent. A
+// closed copy keeps the text it was closed with.
+func TestRestateRewritesOnlyOpenTaskText(t *testing.T) {
+	db := testdb.Shared(t)
+	a, b := user(t, db, "admin"), user(t, db, "other")
+	if _, err := Send(db, Msg{Kind: RoomRequested, To: []uint{a, b}, SubjectID: 9, Link: "/admin", Vars: Vars{Actor: "Lee", Event: "Choir", Change: "Hall for 3 dates"}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Model(&models.Notification{}).Where("user_id = ?", a).UpdateColumn("seen_at", time.Now().UTC()).Error; err != nil {
+		t.Fatal(err)
+	}
+	var jobsBefore int64
+	db.Model(&models.Job{}).Count(&jobsBefore)
+	before := append(rows(t, db, a), rows(t, db, b)...)
+	if n, err := Restate(db, RoomRequested, 9, Vars{Actor: "Lee", Event: "Choir", Change: "Hall for 4 dates"}); err != nil || n != 2 {
+		t.Fatalf("restate: %d %v", n, err)
+	}
+	after := append(rows(t, db, a), rows(t, db, b)...)
+	for i := range after {
+		got, was := after[i], before[i]
+		if got.Body != "Hall for 4 dates. Needs an admin's approval." || !strings.Contains(got.EmailBody, "4 dates") {
+			t.Fatalf("restated text: %q, email %q", got.Body, got.EmailBody)
+		}
+		got.Title, got.Body, got.EmailTitle, got.EmailBody, got.PushTitle, got.PushBody = was.Title, was.Body, was.EmailTitle, was.EmailBody, was.PushTitle, was.PushBody
+		if !reflect.DeepEqual(got, was) {
+			t.Fatalf("restate changed more than the text:\n%+v\nwas\n%+v", got, was)
+		}
+	}
+	var jobsAfter int64
+	db.Model(&models.Job{}).Count(&jobsAfter)
+	if jobsAfter != jobsBefore {
+		t.Fatalf("restate queued %d delivery jobs", jobsAfter-jobsBefore)
+	}
+	if _, err := Resolve(db, RoomRequested, 9, &a, "confirmed"); err != nil {
+		t.Fatal(err)
+	}
+	if n, err := Restate(db, RoomRequested, 9, Vars{Change: "Hall for 5 dates"}); err != nil || n != 0 {
+		t.Fatalf("restating a closed task: %d %v", n, err)
+	}
+	if got := rows(t, db, a)[0].Body; got != "Hall for 4 dates. Needs an admin's approval." {
+		t.Fatalf("a closed task's text became %q", got)
+	}
+	if _, err := Restate(db, RoomChanged, 9, Vars{}); err == nil {
+		t.Fatal("restate of a kind that is not a task")
+	}
+}
+
 func TestStatesBadgeAndReadAll(t *testing.T) {
 	db := testdb.Shared(t)
 	uid, other := user(t, db, "admin"), user(t, db, "other")

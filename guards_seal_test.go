@@ -27,7 +27,7 @@ var sealForRe = regexp.MustCompile(`\bFOR\b`)
 // decides, it writes nothing and sends nothing.
 var sealForbiddenCalls = map[string]bool{
 	"Exec": true, "Create": true, "Save": true, "Update": true, "Updates": true, "Delete": true,
-	"Send": true, "Write": true, "WriteAll": true, "Resolve": true, "Clauses": true, "Locking": true,
+	"Send": true, "Write": true, "WriteAll": true, "Resolve": true, "Restate": true, "Clauses": true, "Locking": true,
 }
 
 // sealAfterTransition are the only names that may follow the ledger

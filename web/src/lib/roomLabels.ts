@@ -168,9 +168,11 @@ export function seriesBookingMessage(res: SeriesBooking): string {
 
   if (res.kept > 0) parts.push(keptLine(res.kept, res.keptWaiting));
 
-  // A series room with nothing to book, wait for, lose, change or keep: every upcoming date already holds it, or there is
-  // none.
-  if (parts.length === 0) parts.push("The series room is saved.");
+  // A series room with nothing to book, send, lose, change or keep: every upcoming date already holds it or waits for it
+  // on the request a re-pick keeps (which sends none of them again), or there is none.
+  if (parts.length === 0) {
+    parts.push(res.after.pending > 0 ? `Still waiting for an admin's approval: ${dates(res.after.pending)}.` : "The series room is saved.");
+  }
 
   return parts.join(" ");
 }

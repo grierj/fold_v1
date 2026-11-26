@@ -118,7 +118,8 @@ type seriesBookingJSON struct {
 	// Changed: dates the request named whose own room this pick released
 	// (policy.SeriesIncluded); where they ended is in the counts beside it.
 	Changed int `json:"changed"`
-	// Pending: dates waiting on an admin's approval (M2.1d).
+	// Pending: dates this pick sent for an admin's approval (M2.1d); dates
+	// already waiting on the request it keeps are not sent again.
 	Pending int `json:"pending"`
 	// DoubleBooked: of the dates booked, those an admin's reason booked over
 	// another booking.
@@ -378,8 +379,11 @@ type seriesPick struct {
 //
 // With approval on (DEC-102), a leader's or host's free dates wait on one
 // request for the whole series (DEC-106); busy ones are lost as above. The
-// event has one series request, so while a date this pick keeps still waits
-// on it the pick is refused (errSeriesRequestKept).
+// event has one series request. A pick of the room it is for keeps it: its
+// dates stay waiting, the pick's new ones join it, and its admin task is
+// brought up to date without being sent again. Any other pick replaces it,
+// so while a date this pick keeps still waits on it the pick is refused
+// (errSeriesRequestKept).
 //
 // A group that isn't active books no room (DEC-147); stopping the series room
 // (roomID nil) is always allowed.
@@ -449,10 +453,28 @@ func bookWholeSeries(tx *gorm.DB, ev *models.Event, pick seriesPick, user *model
 	for i := range occs {
 		occByID[occs[i].ID] = &occs[i]
 	}
+	// Re-booking the series room an admin already approved (to retry lost
+	// dates) needs no new approval.
+	approved := oldRoom != nil && room != nil && *oldRoom == room.ID && !ev.DefaultRoomPending
+	needsApproval := room != nil && !approved && policy.BookingNeedsApproval(me, roomApprovalOn(tx))
+	// A pick of the room the event's series request is for keeps it: its
+	// dates stay waiting and new ones join it.
+	var keptRequest *models.RoomRequest
+	if needsApproval {
+		var open []models.RoomRequest
+		if err := tx.Where("event_id = ? AND series AND status IN ?", ev.ID, policy.RoomRequestConfirm.From()).
+			Limit(1).Find(&open).Error; err != nil {
+			return out, err
+		}
+		if len(open) == 1 && open[0].RoomID == room.ID {
+			keptRequest = &open[0]
+		}
+	}
 	keepsSeriesRequest := false
 	for _, b := range current {
 		j := b.judged()
 		j.BooksOver = reason != ""
+		j.OnKeptRequest = keptRequest != nil && b.SeriesWaiting
 		if room != nil && reason == "" && named[b.Date] {
 			o := occByID[b.OccurrenceID]
 			busy, err := rooms.BusyCounts(tx, []uint{room.ID}, []rooms.Window{{Start: o.StartsAt, End: o.EndsAt, OccurrenceID: o.ID}}, 0)
@@ -467,14 +489,9 @@ func bookWholeSeries(tx *gorm.DB, ev *models.Event, pick seriesPick, user *model
 		}
 		byDate[b.OccurrenceID] = judgedDate{row: b, outcome: outcome}
 	}
-	var req *models.RoomRequest
-	var requestID *uint
+	req := keptRequest
 	var withdrawn []uint
-	// Re-booking the series room an admin already approved (to retry lost
-	// dates) needs no new approval.
-	approved := oldRoom != nil && room != nil && *oldRoom == room.ID && !ev.DefaultRoomPending
-	needsApproval := room != nil && !approved && policy.BookingNeedsApproval(me, roomApprovalOn(tx))
-	if needsApproval {
+	if needsApproval && keptRequest == nil {
 		// The event has one series request: a date this pick keeps still waits
 		// on it, so this pick cannot open its own.
 		if keepsSeriesRequest {
@@ -487,6 +504,9 @@ func bookWholeSeries(tx *gorm.DB, ev *models.Event, pick seriesPick, user *model
 		if req, err = openRoomRequest(tx, ev.ID, room.ID, &user.ID, true); err != nil {
 			return out, err
 		}
+	}
+	var requestID *uint
+	if req != nil {
 		requestID = &req.ID
 	}
 	kept, inUse, changed := []string{}, []string{}, []string{}
@@ -555,15 +575,15 @@ func bookWholeSeries(tx *gorm.DB, ev *models.Event, pick seriesPick, user *model
 	}
 	out.DoubleBooked = len(busyDates)
 	out.Kept, out.KeptInUse, out.Changed = len(kept), len(inUse), len(changed)
-	if req != nil && out.Pending == 0 {
+	opened := req != nil && keptRequest == nil
+	if opened && out.Pending == 0 {
 		if err := tx.Delete(req).Error; err != nil {
 			return out, err
 		}
-		req = nil
+		req, opened = nil, false
 	}
-	if req != nil {
-		var err error
-		if err = notifyRoomRequested(tx, req, ev, room, out.Pending, &user.ID); err != nil {
+	if opened {
+		if err := notifyRoomRequested(tx, req, ev, room, out.Pending, &user.ID); err != nil {
 			return out, err
 		}
 	}
@@ -583,6 +603,11 @@ func bookWholeSeries(tx *gorm.DB, ev *models.Event, pick seriesPick, user *model
 	// closed.
 	if err := resolveWithdrawn(tx, withdrawn); err != nil {
 		return out, err
+	}
+	if keptRequest != nil && out.Pending > 0 {
+		if err := restateRoomRequested(tx, keptRequest, ev, room); err != nil {
+			return out, err
+		}
 	}
 	if err := closeEmptyRoomRequests(tx); err != nil {
 		return out, err

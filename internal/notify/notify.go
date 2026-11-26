@@ -4,7 +4,8 @@
 // Domain code calls Send inside the same transaction as its AuditLog row.
 // The kind registry (kinds.go) decides the category, whether the row is a
 // task waiting on someone, batching, inline actions, and the wording. Text
-// is rendered once, when the row is written. Callers pass only names and
+// is rendered when the row is written, and again only by a merge or by
+// Restate of an open task. Callers pass only names and
 // places the recipient may see: the registry never looks anything up, so a
 // hidden group's name, place or link can only reach a row if the caller put
 // it there (PR #41, #43, #44 privacy rules).
@@ -632,6 +633,27 @@ func Resolve(tx *gorm.DB, kind string, subjectID uint, by *uint, resolution stri
 	res := tx.Model(&models.Notification{}).
 		Where("kind = ? AND subject_id = ? AND "+sqlTask, kind, subjectID).
 		UpdateColumns(map[string]any{"resolved_at": time.Now().UTC(), "resolved_by_id": by, "resolution": resolution})
+	return res.RowsAffected, res.Error
+}
+
+// Restate renders the text of every open copy of a task (kind, subjectID)
+// again from v, in place, when what the task is about grew. Nothing is sent:
+// each row keeps its place in the feed (updated_at), its read and seen state
+// and its delivery. It locks no recipient, so a caller that also sends
+// notices calls it after them, as it would Resolve.
+func Restate(tx *gorm.DB, kind string, subjectID uint, v Vars) (int64, error) {
+	k, ok := Lookup(kind)
+	if !ok || !k.Waiting {
+		return 0, fmt.Errorf("notify: %q is not a task kind", kind)
+	}
+	first := withCount(v, max(v.Count, 1))
+	title, body := k.Render(first)
+	emailTitle, emailBody := k.RenderForEmail(first)
+	pushTitle, pushBody, _ := k.RenderForPush(first)
+	res := tx.Model(&models.Notification{}).
+		Where("kind = ? AND subject_id = ? AND "+sqlTask, kind, subjectID).
+		UpdateColumns(map[string]any{"title": title, "body": body, "email_title": emailTitle, "email_body": emailBody,
+			"push_title": pushTitle, "push_body": pushBody})
 	return res.RowsAffected, res.Error
 }
 

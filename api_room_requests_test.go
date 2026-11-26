@@ -264,7 +264,8 @@ func TestRoomApprovalSeriesRoomStaysUnapproved(t *testing.T) {
 }
 
 // Re-picking the series room while its request waits replaces the request:
-// one pending series request per event, for the room picked last.
+// one pending series request per event, for the room picked last. Picking
+// the room it is for again keeps it.
 func TestRoomApprovalSeriesRepickWhilePending(t *testing.T) {
 	f := newBookingFixture(t)
 	approvalOn(t, f)
@@ -308,12 +309,12 @@ func TestRoomApprovalSeriesRepickWhilePending(t *testing.T) {
 		t.Fatalf("confirming the withdrawn request: %d %s", w.Code, w.Body.String())
 	}
 
-	// The same room again (to retry dates) also replaces the waiting request.
-	if code, out := f.seriesRoom(t, f.leader, series, map[string]any{"roomId": chapel.Room.ID}); code != http.StatusOK || out.Pending != 3 {
+	// The same room again keeps the waiting request: nothing is sent again.
+	if code, out := f.seriesRoom(t, f.leader, series, map[string]any{"roomId": chapel.Room.ID}); code != http.StatusOK || out.Pending != 0 || out.After.Pending != 3 {
 		t.Fatalf("same room while pending: %d %+v", code, out)
 	}
-	if again := listRequests(t, f.admin); len(again) != 1 || again[0].RoomID != chapel.Room.ID || again[0].Dates != 3 || again[0].ID == reqs[0].ID {
-		t.Fatalf("one new request for the same room: %+v", again)
+	if again := listRequests(t, f.admin); len(again) != 1 || again[0].RoomID != chapel.Room.ID || again[0].Dates != 3 || again[0].ID != reqs[0].ID {
+		t.Fatalf("the same request for the same room: %+v", again)
 	}
 }
 
