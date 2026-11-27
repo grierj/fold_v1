@@ -423,7 +423,7 @@ IMAGE_ID="$(docker image inspect --format '{{.Id}}' "$IMAGE")"
 IMAGE_LABEL="$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$IMAGE_ID")"
 [[ "$IMAGE_LABEL" == "$REVISION" ]] || { echo "qc1: $IMAGE is labelled revision '${IMAGE_LABEL}', not HEAD $REVISION" >&2; exit 1; }
 LEVEL="$(docker run --rm --network none --pull never --entrypoint /fold "$IMAGE_ID" version --json | jq -er '.recoveryPolicy // 0')"
-[[ "$LEVEL" == 3 ]] || { echo "qc1: the image reports recovery level $LEVEL; exact visibility consent is level 3" >&2; exit 1; }
+[[ "$LEVEL" == "$(commit_recovery_level "$ROOT" "$REVISION")" ]] || { echo "qc1: the image reports recovery level $LEVEL; expected the level at $REVISION" >&2; exit 1; }
 PG_IMAGE=postgres:16-alpine
 docker image inspect "$PG_IMAGE" >/dev/null 2>&1 || docker pull "$PG_IMAGE" >/dev/null
 PG_IMAGE_ID="$(docker image inspect --format '{{.Id}}' "$PG_IMAGE")"

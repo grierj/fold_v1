@@ -5368,12 +5368,12 @@ func fenceCounter(t *testing.T, db *sql.DB) string {
 	return v.String
 }
 
-// floorObjects is every object 00015 keeps, with its definition.
+// floorObjects includes the permanent boot and audit fences installed at this version.
 func floorObjects(t *testing.T, db *sql.DB) string {
 	t.Helper()
 	return queryLines(t, db, `
-SELECT 'trigger ' || tgname || ' ' || pg_get_triggerdef(oid) FROM pg_trigger WHERE tgname IN ('settings_recovery_floor', 'audit_logs_visibility_consent')
-UNION ALL SELECT 'function ' || proname || ' ' || md5(pg_get_functiondef(oid)) FROM pg_proc WHERE proname IN ('settings_recovery_floor', 'audit_logs_visibility_consent')
+SELECT 'trigger ' || tgname || ' ' || pg_get_triggerdef(oid) FROM pg_trigger WHERE tgname IN ('settings_recovery_floor', 'settings_recovery_floor_invitations', 'audit_logs_visibility_consent')
+UNION ALL SELECT 'function ' || proname || ' ' || md5(pg_get_functiondef(oid)) FROM pg_proc WHERE proname IN ('settings_recovery_floor', 'settings_recovery_floor_invitations', 'audit_logs_visibility_consent')
 UNION ALL SELECT 'view ' || pg_get_viewdef('recovery_floor_hold'::regclass) || ' ' || coalesce(obj_description('recovery_floor_hold'::regclass, 'pg_class'), '')
 UNION ALL SELECT 'epoch ' || value FROM settings WHERE key = 'visibility_consent_epoch'
 ORDER BY 1`)
@@ -5396,7 +5396,7 @@ func visibilityFixtureRows(t *testing.T, db *sql.DB) (eventID int64) {
 
 func TestVisibilityConsentFenceMigration(t *testing.T) {
 	t.Parallel()
-	_, db, p := freshAt(t, latestVersion(t))
+	_, db, p := freshAt(t, 15)
 	ptr := func(s string) *string { return &s }
 
 	t.Run("start fence", func(t *testing.T) {
@@ -5573,12 +5573,41 @@ func TestVisibilityConsentFenceMigration(t *testing.T) {
 			}
 			wantPgError(t, "an earlier boot at 14", v010Boot(db, nil), "55000", startFenceRefusal)
 			wantPgError(t, "an undeclared reset row at 14", inTx(db, audit("event.visibility_changed", "event", `{}`)), "23514", auditFenceRefusal)
-			upTo(t, p, latestVersion(t))
+			upTo(t, p, 15)
 			if got := floorObjects(t, db); got != kept {
 				t.Fatalf("the Up over the kept fences changed them:\n%s\nwant\n%s", got, kept)
 			}
 		}
 	})
+}
+
+func TestInvitationRecoveryFloorSurvivesLevelThreeReplay(t *testing.T) {
+	t.Parallel()
+	_, db, p := freshAt(t, 19)
+	three, four := "3", "4"
+	if err := v010Boot(db, &three); err != nil {
+		t.Fatal(err)
+	}
+	upTo(t, p, 20)
+	check := func() {
+		t.Helper()
+		before := fenceCounter(t, db)
+		wantPgError(t, "level 3 boot", v010Boot(db, &three), "55000",
+			"this database needs Fold at recovery level 4 or later (invitation audit erasure); restore with the current release and its restore.sh --dump")
+		if got := fenceCounter(t, db); got != before {
+			t.Fatalf("refused boot moved the counter from %s to %s", before, got)
+		}
+		if err := v010Boot(db, &four); err != nil {
+			t.Fatalf("level 4 boot: %v", err)
+		}
+	}
+	check()
+	downTo(t, p, 14)
+	check()
+	upTo(t, p, 15)
+	check()
+	upTo(t, p, 20)
+	check()
 }
 
 // TestRecoveryFloorSurvivesTheWholeChainDown: on a database with no user, the
@@ -5649,7 +5678,7 @@ func TestRecoveryFloorCleanupRefusesForeignDatabases(t *testing.T) {
 		}
 	}
 	kept := floorObjects(t, db)
-	if strings.Count(kept, "trigger ") != 2 {
+	if strings.Count(kept, "trigger ") != 3 {
 		t.Fatalf("the refusals touched the fences: %s", kept)
 	}
 	// A Fresh database whose test has ended (its name dropped from the set) is refused too.

@@ -44,7 +44,7 @@ while (( $# )); do
       echo 'the level-2 release before the candidate, the lineage origin whose way back is refused (default 52e60ff), and the'
       echo 'archive base (default 8989979): the first parent of the reason-review schema landing, whose migrations'
       echo 'lack the reason-review file. LANE_BASE is also dumped as the older table-set archive. The candidate'
-      echo 'binary is built from git archive of the committed HEAD, which must be recovery level 3; an uncommitted'
+      echo 'binary is built from git archive of the committed HEAD, which must be recovery level 4; an uncommitted'
       echo 'tree is refused. --image serves only the fixture stack.'
       exit 0 ;;
     *) echo "unknown option $1" >&2; exit 1 ;;
@@ -133,6 +133,7 @@ SOURCE="$(jq -er .source "$MANIFEST")"
 PROJECT="$(jq -er .project "$MANIFEST")"
 REGISTRY="$(jq -er .registry "$MANIFEST")"
 BASE_REGISTRY_IMAGE="$(jq -er .image "$MANIFEST")"
+FIXTURE_LEVEL="$(jq -er .fixtureLevel "$MANIFEST")"
 LOW_COMMIT="$(jq -er .lowCommit "$MANIFEST")"
 HIGH_COMMIT="$(jq -er .highCommit "$MANIFEST")"
 ALT_IMAGE="$REGISTRY/fold:restore-target"

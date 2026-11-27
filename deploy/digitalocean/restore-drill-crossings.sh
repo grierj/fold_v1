@@ -8,10 +8,10 @@
 # Every image is built from `git archive <sha>` of a commit and must report the
 # FOLD_VERSION it was built with, so a binary is tied to its commit. The
 # candidate is the committed head (the runner refuses a dirty tree) and must be
-# recovery level 3 (exact visibility consent, DEC-158).
+# recovery level 4 (invitation audit erasure).
 #
 # Roles (each proved from git before any image is built):
-#   candidate  the committed head, level 3.
+#   candidate  the committed head, level 4.
 #   landing    T07B-1-V's landing commit, level 1 (the restore barrier without
 #              reason review), before restore.sh existed.
 #   lane       LANE_BASE, the recorded level-0 preflight base.
@@ -26,13 +26,13 @@
 #              (the older table-set archive, kept from R4-6c-V).
 #
 # Cases, each failing the runner on any deviation:
-#   real_binary_refusals        The main site (floor 3) runs the real candidate
+#   real_binary_refusals        The main site (floor 4) runs the real candidate
 #                               image. upgrade.sh --commit/--image and
 #                               restore.sh --commit/--image toward LANE_BASE
 #                               (level 0) and toward the landing (level 1), each
 #                               from the installed copy and from the candidate
-#                               tool copy, must exit 1 naming what the older
-#                               release lacks (the restore barrier for level 0,
+#                               tool copy, must exit 1 naming what the host
+#                               requires (the restore barrier for level 0,
 #                               reason review for both), reach no backup/record/
 #                               checkout/pin/stop/swap step in an xtrace, and
 #                               leave snapshot_state byte-identical.
@@ -43,7 +43,7 @@
 #                               that commit's image (image mode) or source
 #                               (build mode, compiled on the box). The candidate's
 #                               tools then upgrade it for real. Smoke passes, the
-#                               floor reads 3 and release.prev names the origin
+#                               floor reads 4 and release.prev names the origin
 #                               naturally. Then upgrade.sh --rollback, from the
 #                               installed copy and from the candidate tool copy,
 #                               must be refused as above (R-rollback-genuine).
@@ -53,7 +53,7 @@
 #   real_lower_level_rollback_refused  A fresh site provisioned by the prior's
 #                               own tools with the prior image (level 2, no
 #                               fence), upgraded for real by the candidate's
-#                               tools (smoke passes, floor 3, release.prev names
+#                               tools (smoke passes, floor 4, release.prev names
 #                               the prior). upgrade.sh --rollback, from the
 #                               installed copy and from the candidate tool copy,
 #                               exits 1 naming exact visibility consent (level 3),
@@ -96,7 +96,7 @@
 #                               nothing, its log naming the audit fence; a title
 #                               edit answers 200; the prior cannot start again.
 #   real_current_release_restore  restore.sh --dump of a current dump with the
-#                               candidate (level 3) completes into private
+#                               candidate (level 4) completes into private
 #                               recovery, and a reason-review panel meets the
 #                               restore four ways. An OPEN panel holds no attempt
 #                               id (the Delete press mints it): (1) after the
@@ -152,7 +152,7 @@ CROSSING_PRIOR_DEFAULT=52e60ff0fd1a90f39d8ae4a887ed555b8efd7dfa
 # ARCH_SHA: the first parent of T07B-2a-V's landing merge a1198e6 (level 0,
 # migrations 00001-00006, no reason-review file).
 CROSSING_ARCHIVE_DEFAULT=89899794046c4f2cd8a59f0fe6d0184a1d825afd
-CROSSING_CANDIDATE_LEVEL=3
+CROSSING_CANDIDATE_LEVEL=4
 # The file name (after its number) of the migration that refuses earlier
 # releases (DEC-158): the candidate has it and the prior lacks it.
 CROSSING_CONSENT_MIGRATION=visibility_consent
@@ -302,21 +302,21 @@ crossing_validate_revisions() {
   (( bad == 0 ))
 }
 
-# What require_recovery_level says an older release lacks, for a target and a
-# host floor (checks.sh words it; this restates the words the acceptance needs).
-crossing_missing_text() { # target floor
-  local target="$1" floor="$2" missing=""
-  if (( target < 1 && floor >= 1 )); then missing="the restore barrier (level 1)"; fi
-  if (( target < 2 && floor >= 2 )); then missing="${missing:+$missing and }reason review (level 2)"; fi
-  if (( target < 3 && floor >= 3 )); then missing="${missing:+$missing and }exact visibility consent (level 3)"; fi
-  printf '%s' "$missing"
+# The protections require_recovery_level names for a target and a host floor.
+crossing_required_text() { # target floor
+  local target="$1" floor="$2" required=""
+  if (( target < 1 && floor >= 1 )); then required="the restore barrier (level 1)"; fi
+  if (( target < 2 && floor >= 2 )); then required="${required:+$required and }reason review (level 2)"; fi
+  if (( target < 3 && floor >= 3 )); then required="${required:+$required and }exact visibility consent (level 3)"; fi
+  if (( target < 4 && floor >= 4 )); then required="${required:+$required and }invitation audit erasure (level 4)"; fi
+  printf '%s' "$required"
 }
 
 # The ERE the first `check:` line of a refusal must match.
 crossing_refusal_re() { # target floor
   local text
-  text="$(crossing_missing_text "$1" "$2" | sed 's/[][\.*^$()+?{|]/\\&/g')"
-  printf '^check: target recovery level %s is below host level %s\\. The older release lacks %s\\.' "$1" "$2" "$text"
+  text="$(crossing_required_text "$1" "$2" | sed 's/[][\.*^$()+?{|]/\\&/g')"
+  printf '^check: target recovery level %s is below host level %s\\. The host requires %s\\.' "$1" "$2" "$text"
 }
 
 # public tables named by a pg_restore -l listing ("TABLE DATA" entries excluded).
@@ -355,13 +355,13 @@ crossing_owner_migration() {
 # kind: forward-commit, forward-image, rollback-commit, rollback-image,
 # restore-commit or restore-image. target and floor are the recovery levels of
 # the release asked for and of the host: the refusal must come from
-# require_recovery_level <target> <floor> and name what the target lacks.
+# require_recovery_level <target> <floor> and name what the host requires.
 # Extra arguments name provisioner paths that must never appear in the trace
 # (a checkout's provision.sh is data, never a tool).
 crossing_problems() {
   local kind="$1" target="$2" floor="$3" rc="$4" trace="$5" before="$6" after="$7" path; shift 7
   if [[ "$rc" != 1 ]]; then echo "exit code $rc, want 1"; fi
-  if ! grep -Eq "$(crossing_refusal_re "$target" "$floor")" "$trace"; then echo "refusal message naming $(crossing_missing_text "$target" "$floor") is missing"; fi
+  if ! grep -Eq "$(crossing_refusal_re "$target" "$floor")" "$trace"; then echo "refusal message naming $(crossing_required_text "$target" "$floor") is missing"; fi
   if ! cmp -s "$before" "$after"; then echo 'snapshot_state changed'; fi
   if ! grep -Eq "^\\++ require_recovery_level $target $floor( |\$)" "$trace"; then echo "refusal did not come from require_recovery_level $target $floor"; fi
   case "$kind" in
@@ -445,7 +445,7 @@ crossing_recovery_tools_problems() {
 crossing_evidence_complete() {
   local cases="$1" images="$2"
   [[ -s "$cases" && -s "$images" ]] || { echo 'crossing: evidence files are missing or empty' >&2; return 1; }
-  jq -s -e '
+  jq -s -e --argjson level "$CROSSING_CANDIDATE_LEVEL" '
     def count($a): [.[] | select(.acceptance == $a)] | length;
     def passed($a): [.[] | select(.acceptance == $a and .pass == true)] | length;
     def matrix($a): [.[] | select(.acceptance == $a)] | group_by([.site, .target]) | map(length) | all(. == 2);
@@ -477,9 +477,9 @@ crossing_evidence_complete() {
     and ([.[] | select(.acceptance == "M-level0-started-by-hand") | (.requests | all(.[]; .unchanged))] | all)
     and matrix("R-forward-commit") and matrix("R-forward-image") and matrix("R-restore-commit") and matrix("R-restore-image")
     and ([.[] | select(.acceptance == "A-lineage-upgrade") | [.mode, .origin]] | sort) == [["build",0], ["build",1], ["image",0], ["image",1]]
-    and ([.[] | select(.acceptance == "A-lineage-upgrade" or .acceptance == "A-prior-origin-upgrade") | .floor] | all(. == "3"))
+    and ([.[] | select(.acceptance == "A-lineage-upgrade" or .acceptance == "A-prior-origin-upgrade") | .floor] | all(. == ($level | tostring)))
     and ([.[] | select(.acceptance == "A-older-archive") | .archive.id] | sort) == ["lane-base", "reason-review"]
-    and ([.[] | select(.acceptance == "A-current-release-restore") | .level] | all(. == 3))
+    and ([.[] | select(.acceptance == "A-current-release-restore") | .level] | all(. == $level))
     and ([.[] | select(.acceptance == "A-current-release-restore") | .scenarios] | all(
           .noAttempt == {unchanged:"applied", changed:"reason_review_changed", reloadedPress:"applied"}
           and .retainedLive == {answer:"restore_detected", replay:"attempt_expired", settle:"history_unavailable", reloadShowsAccount:true, freshPress:"applied"}
@@ -487,9 +487,9 @@ crossing_evidence_complete() {
     and ([.[] | select(.acceptance == "A-current-release-restore") | (.restartsAfter > .restartsBefore)] | all(. == true))
     and ([.[] | select(.acceptance == "A-current-release-restore") | (.proof | startswith("protocol:") and contains("not by this case"))] | all(. == true))
   ' "$cases" >/dev/null || { echo 'crossing: refusal/positive cases are incomplete or failed' >&2; return 1; }
-  jq -s -e '
+  jq -s -e --argjson level "$CROSSING_CANDIDATE_LEVEL" '
     ([.[] | .role] | sort) == ["archive", "candidate", "landing", "lane", "prior"]
-    and (map(select(.role == "candidate")) | all(.level == 3))
+    and (map(select(.role == "candidate")) | all(.level == $level))
     and (map(select(.role == "prior")) | all(.level == 2))
     and (map(select(.role == "landing")) | all(.level == 1))
     and (map(select(.role == "lane")) | all(.level == 0))
@@ -918,7 +918,7 @@ real_binary_refusals() {
   drill_step refusals/main-image
   crossing_deploy_main
   crossing_forward_restore_matrix image
-  # The host floor is 3 for the rest of the run: an earlier image would be
+  # The host floor is 4 for the rest of the run: an earlier image would be
   # refused, so every reset names the candidate.
   reset_case "$CROSSING_CAND_IMG"
 }
@@ -926,7 +926,7 @@ real_binary_refusals() {
 # ---------------------------------------------------------------------------
 # Genuine lineage on fresh sites (production Compose and Caddy per commit, the
 # same method as the T07B-1-V drill): origin level 0 (LANE_BASE) and origin
-# level 1 (the landing), each upgraded for real to the level-3 candidate.
+# level 1 (the landing), each upgraded for real to the level-4 candidate.
 # ---------------------------------------------------------------------------
 
 # A repository whose objects come from ROOT by alternates, clean at one commit.

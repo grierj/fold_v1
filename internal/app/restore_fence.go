@@ -50,17 +50,9 @@ import (
 // Only bootRestoreFence and takeRestoreTicket write the row
 // (TestRestoreFenceHasTwoWriters parses the source for writers).
 
-// recoveryPolicyLevel is the recovery level this release reports (R4-RP):
-// 0 = no restore barrier, 1 = the restore barrier (T07B-1b), 2 = reason review
-// (T07B-2b), 3 = exact visibility consent (DEC-158). deploy/recovery-policy
-// holds the same integer and TestRecoveryPolicyFileMatchesConstant keeps them
-// equal. R4-RP's tooling refuses a scripted rollback, forward upgrade or deploy
-// to a lower level, and from level 3 the database refuses an earlier release's
-// start too: 00015's settings_recovery_floor refuses a restore_fence write
-// whose transaction did not declare level 3 or more (declareRecoveryLevelIn).
-// Never publish a release at level 1 or above before R4-6c-R's current-release
-// restore tooling and operator procedure land and are verified.
-const recoveryPolicyLevel = 3
+// deploy/recovery-policy advertises the same level for source builds. Level 4
+// requires erasure to find the audit email after invitation cleanup (PLAN 10.1).
+const recoveryPolicyLevel = 4
 
 // restoreUploadsLevel says this binary has `fold restore settle-uploads`
 // (restore_settle_uploads.go). The restore tooling refuses to bring uploads
@@ -94,7 +86,7 @@ const consentEpochRotateSQL = "INSERT INTO settings (key, value) VALUES (?, gen_
 const sessionSigningEpochInitSQL = "INSERT INTO settings (key, value) VALUES (?, gen_random_uuid()::text) ON CONFLICT (key) DO NOTHING"
 
 // declareRecoveryLevelIn declares this release's recovery level in tx, which
-// 00015's start fence requires before any write of the restore_fence row. It
+// the database checks on every write of the restore_fence row. It
 // is a declaration, not a secret: it keeps earlier releases off a database
 // this release ran, and proves nothing else.
 func declareRecoveryLevelIn(tx *gorm.DB) error {

@@ -20,6 +20,9 @@ are in `docs/plan/M7.4-ERASURE-INVENTORY.md` (section numbers below point there)
 - A message's pictures (`messages/<messageID>/…`, DEC-118) are church content tied to the message, not to the author: erasing an account has no step for them, and the message and its author line follow the same rules as before.
 - Deleting an account scrubs the user row to a tombstone and deletes its tokens, calendar link,
   devices and owned throttle keys.
+- After invitation cleanup, `captureErasureSetsIn` can still match the held address through
+  an `invitation.created` audit when both the invitation and acceptance audit are absent.
+  Recovery level 4 fences older source builds before the daily job removes these invitations.
 - `eraseAuditDetailsIn` runs in this order: (1) the six class `UPDATE`s of
   attributable addresses, (1b) S5 (`auditHistoricalActorSQL`: an action that is not a key of
   `auditIPAttribution`, `actor_id` the erased person, `ip` not empty; it reads no metadata or

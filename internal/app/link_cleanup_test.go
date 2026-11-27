@@ -3,10 +3,14 @@ package app
 import (
 	"fmt"
 	"net/http"
+	"os"
+	"os/exec"
+	"strings"
 	"testing"
 	"time"
 
 	"fold/internal/audit"
+	"fold/internal/testdb"
 	"fold/models"
 )
 
@@ -34,6 +38,10 @@ func TestExpiredLinkRetention(t *testing.T) {
 		inv := models.Invitation{InvitedBy: s.admin.ID, Email: "invite@example.com",
 			TokenHash: "invite-" + tc.expires.String(), ExpiresAt: tc.expires}
 		erasureMustCreate(t, db, &inv)
+		if err := audit.Write(db, audit.Entry{Action: audit.InvitationCreated, TargetType: "invitation",
+			TargetID: inv.ID, Meta: map[string]any{"email": inv.Email}}); err != nil {
+			t.Fatal(err)
+		}
 		rows = append(rows, row{"invitations", inv.ID, tc.keep})
 	}
 	for i, tc := range []struct {
@@ -123,8 +131,8 @@ func TestErasureFindsInvitationAuditAfterCleanup(t *testing.T) {
 		name, address, acceptance string
 		accepted, keepRow, scrub  bool
 	}{
-		{"unaccepted at held address", "CURRENT@example.com", "", false, true, true},
-		{"unaccepted at former address", former, "", false, true, false},
+		{"unaccepted at held address", "CURRENT@example.com", "", false, false, true},
+		{"unaccepted at former address", former, "", false, false, false},
 		{"accepted before address change", former, fmt.Sprintf(`{"userId":%d}`, u.ID), true, false, true},
 		{"accepted by prior holder", current, fmt.Sprintf(`{"userId":%d}`, other.ID), true, false, false},
 		{"legacy acceptance without user id", current, `{}`, true, false, false},
@@ -161,14 +169,6 @@ func TestErasureFindsInvitationAuditAfterCleanup(t *testing.T) {
 		}
 		check(t, ids[i], fmt.Sprintf(`{"email": %q, "overLimit": false}`, tc.address))
 	}
-	// Exercise erasure against the data shape after the later cleanup stage.
-	for i, tc := range cases {
-		if !tc.accepted {
-			if err := db.Delete(&models.Invitation{}, ids[i]).Error; err != nil {
-				t.Fatal(err)
-			}
-		}
-	}
 	s.erase(t, u.ID)
 	for i, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -178,5 +178,84 @@ func TestErasureFindsInvitationAuditAfterCleanup(t *testing.T) {
 			}
 			check(t, ids[i], want)
 		})
+	}
+}
+
+func TestInvitationCleanupRequiresLevelFour(t *testing.T) {
+	current, previous := buildFold(t, ""), buildFold(t, "v0.1.1")
+	name := testdb.Fresh(t, false)
+	db, err := testdb.Open(name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	migrate := func(bin string) {
+		t.Helper()
+		if out, err := runFold(t, bin, name, "migrate", "up"); err != nil {
+			t.Fatalf("migrate up: %v, %s", err, out)
+		}
+	}
+	// Run the installed restore check against the same PostgreSQL schema.
+	// In production pg() connects to the staging database through Compose.
+	findPGClients(t, "psql")
+	archiveCheck := func(level string, wantError string) {
+		t.Helper()
+		const check = `
+			source deploy/digitalocean/checks.sh
+			level="$1"; shift
+			client=("$@")
+			pg() { shift; "${client[@]}" -X -d "$FOLD_TEST_STAGE_URL" -v ON_ERROR_STOP=1 "$@"; }
+			check_archive_recovery_level staging "$level"`
+		cmd := exec.Command("bash", append([]string{"-c", check, "restore-check", level}, pgClients["psql"]...)...)
+		cmd.Env = append(os.Environ(), "FOLD_TEST_STAGE_URL="+fenceDatabaseURL(t, db))
+		out, err := cmd.CombinedOutput()
+		if (err != nil) != (wantError != "") || !strings.Contains(string(out), wantError) {
+			t.Fatalf("restore check for level %s: %v, %s", level, err, out)
+		}
+		if countRows(t, db, "settings", "key = ?", restoreFenceKey) != 0 {
+			t.Fatal("the staged archive check created the boot counter")
+		}
+	}
+	migrate(previous)
+	archiveCheck("3", "")
+	inviter := newTestUser(t, &App{DB: db}, "inviter", erasurePW, models.RoleAdmin)
+	const email = "expired@example.com"
+	inv := models.Invitation{InvitedBy: inviter.ID, Email: email, TokenHash: "expired", ExpiresAt: time.Now().Add(-31 * 24 * time.Hour)}
+	erasureMustCreate(t, db, &inv)
+	if err := audit.Write(db, audit.Entry{Action: audit.InvitationCreated, TargetType: "invitation", TargetID: inv.ID, Meta: map[string]any{"email": email}}); err != nil {
+		t.Fatal(err)
+	}
+
+	// A worker that survives a restore can see this older schema even though
+	// its own startup migrated the database it originally connected to.
+	if err := (&App{DB: db}).pruneExpiredLinks(t.Context(), time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if countRows(t, db, "invitations", "id = ?", inv.ID) != 1 {
+		t.Fatal("a current worker pruned an audited invitation on the level-3 database")
+	}
+	migrate(current)
+	const refusal = "this database needs Fold at recovery level 4 or later"
+	archiveCheck("3", refusal)
+	archiveCheck("0", startRefusal)
+	archiveCheck("4", "")
+	old := startFold(t, previous, name)
+	if done, err := old.exitedWith(); !done || err == nil || !strings.Contains(old.out.String(), refusal) {
+		t.Fatalf("v0.1.1 start: exited %v (%v), log: %s", done, err, old.out.String())
+	}
+	if countRows(t, db, "invitations", "id = ?", inv.ID) != 1 {
+		t.Fatal("the invitation was already gone before the first level-4 worker")
+	}
+	t.Setenv("FOLD_WORKERS", "1")
+	t.Setenv("FOLD_JOB_POLL", "100ms")
+	app := startFold(t, current, name)
+	if !app.healthy() {
+		t.Fatal(app.out.String())
+	}
+	deadline := time.Now().Add(15 * time.Second)
+	for countRows(t, db, "invitations", "id = ?", inv.ID) != 0 {
+		if time.Now().After(deadline) {
+			t.Fatalf("the worker left the expired invitation: %s", app.out.String())
+		}
+		time.Sleep(50 * time.Millisecond)
 	}
 }

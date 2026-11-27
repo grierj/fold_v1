@@ -322,8 +322,8 @@ different secrets reject each other's sign-ins and confirmations.
 The first upgrade to a release with the browser-session signing epoch asks
 everyone to sign in again. Later ordinary restarts keep sessions. Use the
 current installed restore tools and an epoch-aware release to end browser
-sessions on restore. Recovery stays at level 3, so a permitted rollback to an
-older release can accept cookies that release previously issued.
+sessions on restore. On a host still at recovery level 3, a permitted rollback
+to a pre-epoch release can accept cookies that release previously issued.
 
 The Compose network is `172.30.0.0/24`, which is the default
 `FOLD_TRUSTED_PROXIES`. Change the subnet and that variable together.
@@ -590,9 +590,9 @@ Run the installed `/opt/fold/restore.sh` as root. On its first use it checks
 that the complete tool set sits beside it (otherwise it stops, names the missing
 file and tells you to run the current `provision.sh`), copies the set into a
 root-owned `/opt/fold/recovery-tools`, and re-runs from there. A rejected
-preflight leaves the installed recovery tools unchanged. Use deploy tools version 7 or later
-for a restore or rollback to expire account links from the dump. See section 6 for how to
-install the release's tools before starting recovery.
+preflight leaves the installed recovery tools unchanged. Use deploy tools version 8 or later
+for a restore or rollback that checks the staged archive's recovery level and
+expires account links from the dump. See section 6 for how to install the release's tools before starting recovery.
 
 **Before you start** (every item is checked before anything stops, unless
 noted):
@@ -641,11 +641,12 @@ In order, `restore.sh`:
    `fold` (it waits up to 120 seconds for a running `backup.sh` dump to finish,
    otherwise it stops with the services still stopped).
 3. Restores the dump into a new database, `fold_restore_<id>`, in one
-   transaction. Before the swap, the tool clears the browser-session signing epoch and
-   expires every unused setup, password-reset and email-change link still live in the dump.
-   Both the verification link sent to the new address and the cancellation link sent to the
-   old address expire. Everyone signs in again with a release that uses the epoch. If either
-   step fails, the original database stays intact. The failed database
+   transaction. Checks the target's recovery level against the staged database's
+   boot fence. Then it clears the browser-session signing epoch and expires the
+   dump's live setup, password-reset and email-change links, including the
+   verification and cancellation links. Everyone signs in again with a release
+   that uses the epoch. If any step fails, the original database stays intact.
+   The failed database
    is dropped and the phase is `collect-failed`; run `--abort` to reopen the
    original, or `--resume` to try again.
 4. Counts the accounts the dump would bring back: the accounts that are deleted
@@ -796,7 +797,7 @@ shows who. Never delete, rename or replace `ops.lock`, `backup.lock` or
 **A lower recovery level is refused on every scripted path.** `provision.sh`,
 a forward `upgrade.sh --image` or `--commit`, `upgrade.sh --rollback` and
 `restore.sh --image` or `--commit` refuse a target below the host's recovery
-level, before any backup, checkout or pin, and name the restore barrier. There
+level before any backup, checkout or pin, and report the required level. There
 is no override. Restore the data with the current release instead (run
 `restore.sh --dump` with no lower `--image` or `--commit`).
 
@@ -888,16 +889,18 @@ Ask people to finish editing before the upgrade and reload their open Fold
 tabs after the smoke checks pass. See the [upgrade notes](../README.md#upgrade-notes)
 for what to do if a save keeps failing in an older tab.
 
-When upgrading to the browser-session signing epoch or to deploy tools version 7
-(account-link expiry on restore), prepare a separate trusted checkout of the release at
-`/root/fold-release`.
+Use the target release's deploy tools when you first upgrade to a release with
+the browser-session signing epoch or account-link expiry on restore, or when
+you upgrade from recovery level 3 or earlier to level 4. Prepare a separate
+trusted checkout of the target release at `/root/fold-release`.
 For a build-based install, leave `/root/fold` at the deployed commit and fetch
 the target into it without checking it out. Run the matching image or build
 command below with `/root/fold-release/deploy/digitalocean/upgrade.sh` in
 place of `/opt/fold/upgrade.sh` and keep `--source-dir /root/fold`. This
 installs the release's tools and lets the script record the deployed commit
 for rollback before it checks out the target. The earlier installed script
-can upgrade the app while retaining its old restore tools.
+can upgrade the app while retaining tools that skip the staged archive's
+recovery-level check or leave account links active before the database swap.
 
 After the upgrade, check both installed copies against the release checkout.
 Each comparison succeeds silently. If any file differs, finish the upgrade from
@@ -913,7 +916,8 @@ the release checkout before restoring a dump.
 )
 ```
 
-For subsequent upgrades, run the installed `/opt/fold/upgrade.sh`. It uses its enforcing copy in
+When the installed tools match the target release's requirements, run
+`/opt/fold/upgrade.sh`. It uses its enforcing copy in
 `/opt/fold/deploy-tools`, checks the target before backup or checkout, and
 runs that copy's provisioner. A target checkout supplies build inputs, never
 the provisioner. A script run by hand from an older checkout can bypass these
@@ -928,18 +932,18 @@ sudo /opt/fold/upgrade.sh \
   --source-dir /root/fold
 ```
 
-For the first upgrade with mirrored images, check out the trusted release that
-introduces `--backup-image` in `/root/fold`. Run its upgrade script so it can
-install the matching tools and recognize the new flag:
+For the first upgrade with mirrored images, use a trusted checkout of the
+target release with `--backup-image` at `/root/fold-release`. Run its upgrade
+script to install the matching tools.
 
 ```bash
-sudo /root/fold/deploy/digitalocean/upgrade.sh \
+sudo /root/fold-release/deploy/digitalocean/upgrade.sh \
   --image registry.example.com/church/fold:x.y.z \
   --backup-image registry.example.com/church/fold-backup:x.y.z \
   --source-dir /root/fold
 ```
 
-Later upgrades can use `/opt/fold/upgrade.sh`. Omitting `--backup-image`
+With the matching tools installed, omitting `--backup-image`
 keeps the saved `FOLD_BACKUP_IMAGE`. Before changing that setting, record its
 previous value, including whether it was unset. If the replacement backup
 image fails, use `sudoedit /opt/fold/.env` before rollback. Restore the
@@ -987,26 +991,39 @@ choosing recovery. Rollback is subject to the recovery floor even after failed
 smoke.
 
 The daily job **Clearing old guest signups, account links and invitations** runs through Fold's
-workers. Find failures in Admin → System. The first release of this job keeps expired, unaccepted
-invitations whose creation audit still contains an email so older binaries can find that email
-during account erasure. Before enabling deletion of those invitations, publish the compatible
-lookup and verify that every release allowed to restore or reuse a database after that deletion
-has the lookup. A scripted rollback restores the pre-upgrade dump.
+workers. Find failures in Admin → System. Starting at recovery level 4, the job removes
+unaccepted invitations 30 days after expiry even when their creation audit contains an email.
+Account erasure finds that email through the audit. An invitation stays if an account request
+references it, a household can still resend it, or its row is the only evidence that someone
+accepted an invitation whose creation audit still has an email.
 
 ### Recovery refusal and interrupted operations
 
-Every scripted deploy, forward upgrade and rollback refuses a target below
-the host's recovery level. Level 1 requires the restore barrier; level 2 also
-requires reason review; level 3 also requires exact visibility consent
-(DEC-158), and a refused rollback names "exact visibility consent (level 3)". The scripts read integer `recoveryPolicy` from an
-image's `/fold version --json` output, or read the one-line
+Every scripted deploy, forward upgrade, restore and rollback checks the host's recovery level.
+Level 1 requires the restore barrier, level 2 adds reason review, and level 3 adds exact visibility
+consent (DEC-158). Level 4 requires invitation audit erasure after cleanup. The scripts read
+integer `recoveryPolicy` from an image's `/fold version --json` output, or read the one-line
 `deploy/recovery-policy` file at a source commit. Missing release metadata means level 0;
 malformed metadata refuses. The host floor is the greater of `recovery-policy-floor`
 and the level of the image its current Compose pin names. There is no override.
 The floor file is recorded only after smoke passes and never decreases.
 
-This tree reports level 3 (`deploy/recovery-policy`). Release 0.1.0 reports level 2 and is
-published, and the next release does not wait for the remaining real-droplet restore checks
+This tree reports level 4. Release 0.1.1 shipped the erasure lookup at level 3, which it shares
+with older source builds that need the invitation row. After applying migration `00020`, every
+level-3 build, including 0.1.1, exits at startup on this database. Running `fold migrate down-one`
+keeps this protection. The recorded pre-upgrade dump still contains the invitations it held
+at backup time. On an upgraded host, restore that dump with the level-4 release and its
+`restore.sh --dump`. The host floor still applies even to a rollback that would use the older dump.
+
+Follow the trusted-checkout steps above to install this release's deploy tools (version 8)
+when upgrading. Use the same tools on a replacement host. After importing the archive
+into staging, they check the archive's own startup fence with the selected target's level.
+If it refuses, the original database and pin are intact, and the site stays closed. Run
+`restore.sh --abort`, then retry with a release that meets the archive's floor.
+A source build from before the restore barrier skips the boot counter if started by hand.
+Use the managed restore for a full dump, including on a fresh host.
+
+The next release does not wait for the remaining real-droplet restore checks
 in [FIRST-CHURCH-CHECKS.md](FIRST-CHURCH-CHECKS.md#live-install-m51-m53) (Grier, 2026-11-24; DEC-165).
 The current-release restore tooling was run on a real droplet on 2026-11-24, with what each
 check still owes recorded there; the local refusal drills do not verify that restore procedure.
@@ -1202,8 +1219,8 @@ make it longer, while someone who left the group still holds that date
 The release that holds migration `00015` saves a visibility change that
 cancels anyone, and every reset of an event's dates, only with the consent of
 the exact change its reviewer was shown. The database refuses startup for
-earlier published releases (DEC-158). Upgrading needs no new step. The
-host's floor becomes 3 once smoke passes.
+releases below level 3 (DEC-158). That release raised the host floor to 3 after smoke passed.
+Migration `00020` raises it again as described under Recovery refusal and interrupted operations.
 
 - **Earlier published releases cannot start on this database.** After this
   release has started once, changing the pin by hand and starting an earlier

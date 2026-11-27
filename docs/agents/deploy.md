@@ -53,10 +53,11 @@ that changes how an operator upgrades, rolls back or restores. The operator-faci
 - The level is integer `recoveryPolicy` from `/fold version --json` in an image, or the one-line
   `deploy/recovery-policy` at a source commit (it equals `recoveryPolicyLevel` in
   `restore_fence.go`). Absent metadata means 0; malformed metadata refuses. Levels: 1 = the restore
-  barrier, 2 = reason review, 3 = exact visibility consent (DEC-158); from level 3 the database also
-  refuses an earlier release's start (`00015`'s start fence), so a refused script is not the only
-  stop.
-- A restored database's first start migrates it, declares level 3 and rotates the visibility
+  barrier, 2 = reason review, 3 = exact visibility consent (DEC-158), 4 = invitation audit erasure
+  after cleanup (PLAN 10.1). Migrations `00015` and `00020` fence writes to the boot counter.
+  Managed restore tests the staged database's fence before pin or swap, including on a fresh
+  host and for targets that predate the counter.
+- A restored database's first start migrates it, declares its recovery level and rotates the visibility
   consent epoch, so every review open before the restore asks once more.
 - A starting instance's boot waits for a visibility confirmation already in flight on another
   instance, and a confirmation that meets a boot's rotation waits for that boot to commit (both
@@ -72,7 +73,9 @@ that changes how an operator upgrades, rolls back or restores. The operator-faci
   there, checks the target before backup or checkout, and runs that copy's provisioner. An older
   checkout's script run by hand can bypass these checks. Installed upgrades keep their frozen
   tools; install newer tools from a newer trusted checkout, subject to the `deploy-tools-version`
-  check.
+  check. For the upgrade to level 4, use the trusted-checkout procedure in
+  [Upgrades and rollback](../DEPLOY-DIGITALOCEAN.md#6-upgrades-and-rollback) to install and verify
+  the tools that check the staged database before the swap.
 - **Releases and the real-droplet restore checks (DEC-165).** Release 0.1.0 reports level 2 and is
   published, and the next release does not wait for the remaining real-droplet restore checks in
   `docs/FIRST-CHURCH-CHECKS.md` (Grier, Nov 24, 2026). Those checks stay owed; local refusal drills
@@ -197,15 +200,15 @@ section at the end of `checks.sh`.
 - `restore.sh --dump` restores into a fresh database swapped in whole and keeps the public site
   closed and background deliveries paused in a worker-free private recovery instance until
   `--reopen`. It never restores into the live `fold` database.
-- During collection, tools version 7 expires the dump's live `account_setup`, `password_reset`,
+- Starting with tools version 7, collection expires the dump's live `account_setup`, `password_reset`,
   `email_verify` and `email_change_cancel` tokens in the same transaction that removes
   `session_signing_epoch` from staging. An error goes through `collect_failed` before the swap.
   This applies to managed rollback too, regardless of the target binary. A queued email-change
   verification cannot rotate an expired row. Setup and reset mail can issue fresh links at delivery.
   `bootRestoreFence` creates a random epoch when the row is absent. The cookie signing key
   comes from that epoch and `SESSION_SECRET`. Ordinary restarts retain the epoch.
-  Recovery stays at level 3. A rollback to a build without this check can accept cookies
-  that the older build previously issued.
+  On a host still at recovery level 3, a permitted rollback to a pre-epoch release can
+  accept cookies that release previously issued.
 - `--uploads` restores the matching uploads archive inside the fence. Before reopen,
   `fold restore settle-uploads` empties erased and unowned avatar folders; active accounts'
   folders remain. A target without the required `restoreUploads` capability is refused.

@@ -391,6 +391,13 @@ if [[ -z "$BASE_IMAGE" ]]; then
 else
   docker image inspect "$BASE_IMAGE" >/dev/null
 fi
+FIXTURE_LEVEL=1
+if (( PREPARE_ONLY )); then
+  # The archive inherits the real server's migrations and recovery fence.
+  FIXTURE_LEVEL="$(image_recovery_level "$BASE_IMAGE")"
+  (( FIXTURE_LEVEL > 0 )) || { echo 'restore drill base image must have recovery level 1 or higher' >&2; exit 1; }
+fi
+FIXTURE_IMAGE="$REGISTRY/fold:$FIXTURE_LEVEL"
 # The real backup image, built from this checkout, under the tag the drill's
 # Compose names. It is local only: the service never pulls.
 docker build -t "fold-deploy-drill-backup:$PROJECT" "$DRILL_ROOT/deploy/backup"
@@ -416,9 +423,9 @@ FROM $BASE_IMAGE
 COPY --from=base /fold /fold-real
 COPY policy /fold
 EOF_DOCKER
-for level in absent 1; do
-  # The level-1 fixture is this checkout's release, which can settle restored uploads.
-  uploads_level=""; [[ "$level" != 1 ]] || uploads_level=1
+for level in absent "$FIXTURE_LEVEL"; do
+  # The same-level fixture can settle restored uploads.
+  uploads_level=""; [[ "$level" == absent ]] || uploads_level=1
   CGO_ENABLED=0 GOOS=linux go build -ldflags "-X main.level=$level -X main.uploads=$uploads_level" -o "$WORK/policy" "$WORK/policy.go"
   docker build -t "$REGISTRY/fold:$level" "$WORK"
   docker push "$REGISTRY/fold:$level"
@@ -459,7 +466,7 @@ done
 curl -fsS --max-time 2 "http://$REGISTRY/v2/" >/dev/null || { echo 'recreated drill registry is not ready' >&2; exit 1; }
 # Build mode deliberately builds from the target commit, not from the tools.
 cat >"$SOURCE/Dockerfile" <<EOF_DOCKER
-FROM $REGISTRY/fold:1
+FROM $FIXTURE_IMAGE
 EOF_DOCKER
 printf 'FROM fold-deploy-drill-backup:%s\n' "$PROJECT" >"$SOURCE/Dockerfile.backup"
 printf 'services:\n  app:\n    build: .\n  backup:\n    build:\n      context: .\n      dockerfile: Dockerfile.backup\n' >"$SOURCE/docker-compose.build.yml"
@@ -470,7 +477,7 @@ git -C "$SOURCE" config core.hooksPath /dev/null
 git -C "$SOURCE" config commit.gpgsign false
 git -C "$SOURCE" add .; git -C "$SOURCE" commit -qm 'legacy fixture with unsafe provisioner'
 LOW_COMMIT="$(git -C "$SOURCE" rev-parse HEAD)"
-printf '1\n' >"$SOURCE/deploy/recovery-policy"
+printf '%s\n' "$FIXTURE_LEVEL" >"$SOURCE/deploy/recovery-policy"
 git -C "$SOURCE" add .; git -C "$SOURCE" commit -qm 'same-level fixture'
 HIGH_COMMIT="$(git -C "$SOURCE" rev-parse HEAD)"
 
@@ -480,10 +487,10 @@ rm "$DIR/docker-compose.yml"
 provision=("$TOOLS/provision.sh" --skip-harden --allow-os --domain groups.example.org --deploy-dir "$DIR" --source-dir "$SOURCE")
 touch "$DIR/drill-smoke-fail"
 rc=0
-"${provision[@]}" --image "$REGISTRY/fold:1" >"$WORK/failed-smoke.log" 2>&1 || rc=$?
+"${provision[@]}" --image "$FIXTURE_IMAGE" >"$WORK/failed-smoke.log" 2>&1 || rc=$?
 [[ "$rc" != 0 && ! -e "$DIR/recovery-policy-floor" ]]
 rm "$DIR/drill-smoke-fail"
-"${provision[@]}" --image "$REGISTRY/fold:1"
+"${provision[@]}" --image "$FIXTURE_IMAGE"
 compose_in "$DIR" exec -T db psql -X -U church -d fold -v ON_ERROR_STOP=1 \
   -c 'CREATE TABLE drill_sentinel(id integer PRIMARY KEY, value text); INSERT INTO drill_sentinel VALUES (1, '\''original'\'')'
 # Seed the enforcing copy before refusal snapshots. Content and metadata of
@@ -492,13 +499,14 @@ mkdir "$DIR/deploy-tools"
 cp "$TOOLS/"* "$DIR/deploy-tools/"
 chmod 700 "$DIR/deploy-tools"
 "${provision[@]}" --allow-onbox-build
-[[ "$(cat "$DIR/recovery-policy-floor")" == 1 ]]
-"${provision[@]}" --image "$REGISTRY/fold:1"
+[[ "$(cat "$DIR/recovery-policy-floor")" == "$FIXTURE_LEVEL" ]]
+"${provision[@]}" --image "$FIXTURE_IMAGE"
 
 if (( PREPARE_ONLY )); then
   jq -n --arg dir "$DIR" --arg source "$SOURCE" --arg project "$PROJECT" --arg registry "$REGISTRY" \
-    --arg lowCommit "$LOW_COMMIT" --arg highCommit "$HIGH_COMMIT" --arg image "$REGISTRY/fold:1" --arg revision "$REVISION" \
-    '{dir:$dir,source:$source,project:$project,registry:$registry,image:$image,revision:$revision,lowCommit:$lowCommit,highCommit:$highCommit}' >"$WORK/restore-drill.json"
+    --arg lowCommit "$LOW_COMMIT" --arg highCommit "$HIGH_COMMIT" --arg image "$FIXTURE_IMAGE" --arg revision "$REVISION" \
+    --argjson fixtureLevel "$FIXTURE_LEVEL" \
+    '{dir:$dir,source:$source,project:$project,registry:$registry,image:$image,revision:$revision,lowCommit:$lowCommit,highCommit:$highCommit,fixtureLevel:$fixtureLevel}' >"$WORK/restore-drill.json"
   echo "restore drill stack prepared: $WORK/restore-drill.json"
   exit 0
 fi
