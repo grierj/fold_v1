@@ -86,7 +86,7 @@ func (a *App) readAdminHousehold(c *gin.Context, holderID, writtenHouseholdID ui
 		}
 		if writtenHouseholdID != 0 {
 			if account.HouseholdID != writtenHouseholdID {
-				return errHouseholdRequired
+				return errHouseholdWriteUnconfirmed
 			}
 			if !householdRelOf(account, true).Adult {
 				return errHouseholdHolder

@@ -362,9 +362,11 @@ or admin household UI in this slice.
 The GET and both POST replies check the admin session, holder eligibility and household link in the
 same snapshot that returns the fields. A GET for an eligible holder with no link returns
 `{"household":null}`. If the admin session ended, the reply is 401. If the holder lost their link
-to the household a POST changed, its reply is `409 household_required`. The add-person reply is
-404 if the person is gone from that household. A refusal at this point leaves the write committed.
-After regaining access, fetch the household again to check the outcome before retrying a POST.
+to the household a POST changed, its reply is `409 household_write_unconfirmed` without household
+data. The add-person reply is 404 if the person is gone from that household. A refusal at this point
+leaves the write committed. A follow-up GET shows the holder's current household. If the holder
+moved, that GET cannot confirm the write to the previous household. Do not replay the POST to check
+its outcome, since it could add the person to the new household.
 A participating request receives the session acknowledgment for the admin judged in the reply
 snapshot on success or an actionable refusal.
 

@@ -28,7 +28,8 @@ func TestAdminHouseholdDelegation(t *testing.T) {
 	if contactCount(t, app, &models.Household{}, "1=1") != 0 || contactCount(t, app, &models.HouseholdAccount{}, "1=1") != 0 || contactCount(t, app, &models.AuditLog{}, "action = ?", audit.HouseholdCreated) != 0 {
 		t.Fatal("GET created household data")
 	}
-	apiDo(t, client, "POST", path+"/people", map[string]any{"firstName": "Adult", "kind": "adult"}, http.StatusConflict)
+	missingHousehold := apiDo(t, client, "POST", path+"/people", map[string]any{"firstName": "Adult", "kind": "adult"}, http.StatusConflict)
+	wantIn(t, "add before household creation", missingHousehold, errHouseholdRequired.Code)
 	apiDo(t, client, "POST", path, map[string]any{"name": "The Family", "address": "1 Oak St"}, http.StatusCreated)
 	apiDo(t, client, "POST", path, map[string]any{"name": "Duplicate"}, http.StatusConflict)
 	var household models.Household
@@ -393,8 +394,8 @@ func TestAdminHouseholdRepliesJudgeAuthorityInTheirSnapshot(t *testing.T) {
 					if route.method == "GET" {
 						wantIn(t, change, raw, later)
 					} else {
-						wantIn(t, change, raw, errHouseholdRequired.Code)
-						wantOut(t, change, raw, later)
+						wantIn(t, change, raw, errHouseholdWriteUnconfirmed.Code)
+						wantOut(t, change, raw, later, `"household"`, `"person"`)
 					}
 				}
 				if want != http.StatusUnauthorized {
