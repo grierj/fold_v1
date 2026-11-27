@@ -79,73 +79,84 @@ load_state() {
   db_name_ok "$DB_NAME" || die "state database name is not a verify database"
 }
 
-# port_owned_by PID PORT succeeds when PID owns the listening socket.
+# A failed socket query is distinct from an unowned port during startup.
 port_owned_by() {
-  ss -Hltnp "sport = :$2" 2>/dev/null | grep -q "pid=$1," && echo yes
+  local listeners
+  listeners="$(ss -Hltnp "sport = :$2")" || return 2
+  [[ "$listeners" == *"pid=$1,"* ]]
 }
 
-# free_port prints an unused TCP port on 127.0.0.1.
 free_port() {
-  local p
+  local p listeners previous="$1"
   for _ in $(seq 1 50); do
     p=$(( (RANDOM % 20000) + 30000 ))
-    ss -Hltn "sport = :$p" | grep -q . || { echo "$p"; return 0; }
+    [[ "$p" != "$previous" ]] || continue
+    listeners="$(ss -Hltn "sport = :$p")" || die "could not inspect listeners on port $p"
+    if [[ -z "$listeners" ]]; then
+      echo "$p"
+      return 0
+    fi
   done
   die "no free port"
 }
 
 cmd_up() {
+  ss -Hltnp >/dev/null || die "cannot inspect listening sockets with ss (iproute2)"
   ensure_db
-  local run db port secret work evidence base url
+  local run db port="" secret work evidence url attempt pid
   run="$(date -u +%Y%m%dT%H%M%SZ)-$$"
   db="fold_verify_$(printf '%s' "$run" | tr 'A-Z-' 'a-z_')"
   db_name_ok "$db" || die "bad database name $db"
   work="$(work_dir "$run")"
   evidence="$(proof_dir "$run")"
   mkdir -p "$work/uploads" "$evidence"
-  port="$(free_port)"
   secret="verify-only-session-secret-0123456789abcdef"
   url="$(url_for "$db")"
   psql_admin -c "CREATE DATABASE \"${db}\""
   printf 'building the SPA and the fold binary\n' >&2
   (cd "$ROOT/web" && npm run build)
   CGO_ENABLED=0 go build -C "$ROOT" -o "$work/fold" .
-  cat >"$work/state.env" <<EOF
-RUN_ID=$run
-PORT=$port
-URL=http://127.0.0.1:$port
-PID=
-DATABASE_URL=$url
-DB_NAME=$db
-WORK=$work
-EVIDENCE=$evidence
-BINARY=$work/fold
-DEV_DATABASE_URL=$DEV_DATABASE_URL
-EOF
-  (
-    cd "$ROOT"
-    export APP_ENV=prod PORT="$port" DATABASE_URL="$url" \
-      SESSION_SECRET="$secret" UPLOAD_DIR="$work/uploads" \
-      FOLD_SETUP_TOKEN=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
-    exec setsid "$work/fold" serve
-  ) >>"$work/server.log" 2>&1 &
-  local pid=$!
-  printf 'PID=%s\n' "$pid" >>"$work/state.env"
-  local i
-  for i in $(seq 1 60); do
-    if curl -sf -o /dev/null "http://127.0.0.1:${port}/healthz"; then
-      printf 'RUN_ID=%s\nURL=http://127.0.0.1:%s\nEVIDENCE=%s\n' "$run" "$port" "$evidence"
-      return 0
+  for attempt in 1 2 3; do
+    if ! port="$(free_port "$port")"; then
+      psql_admin -c "DROP DATABASE \"${db}\"" >&2
+      die "could not select a port for run $run"
     fi
-    if ! kill -0 "$pid" 2>/dev/null; then
-      printf 'server exited; log follows\n' >&2
-      tail -n 40 "$work/server.log" >&2 || true
-      die "server exited before /healthz answered"
-    fi
-    sleep 0.5
+    (
+      cd "$ROOT"
+      export APP_ENV=prod PORT="$port" DATABASE_URL="$url" \
+        SESSION_SECRET="$secret" UPLOAD_DIR="$work/uploads" \
+        FOLD_SETUP_TOKEN=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+      exec setsid "$work/fold" serve
+    ) >"$work/server.log" 2>&1 &
+    pid=$!
+    printf 'RUN_ID=%q\nPORT=%q\nURL=%q\nPID=%q\nDATABASE_URL=%q\nDB_NAME=%q\nWORK=%q\nEVIDENCE=%q\nBINARY=%q\nDEV_DATABASE_URL=%q\n' \
+      "$run" "$port" "http://127.0.0.1:$port" "$pid" "$url" "$db" "$work" "$evidence" "$work/fold" "$DEV_DATABASE_URL" >"$work/state.env"
+    for _ in $(seq 1 60); do
+      if ! kill -0 "$pid" 2>/dev/null; then
+        wait "$pid" || true
+        if (( attempt < 3 )) && grep -qE "Server failed: listen tcp :$port: bind: address already in use$" "$work/server.log"; then
+          printf 'verify-fold: port %s is already in use, retrying\n' "$port" >&2
+          continue 2
+        fi
+        printf 'server exited; log follows\n' >&2
+        tail -n 40 "$work/server.log" >&2 || true
+        die "server exited before /healthz answered"
+      fi
+      if port_owned_by "$pid" "$port"; then
+        if curl -sf --max-time 1 -o /dev/null "http://127.0.0.1:${port}/healthz"; then
+          printf 'RUN_ID=%s\nURL=http://127.0.0.1:%s\nEVIDENCE=%s\n' "$run" "$port" "$evidence"
+          return 0
+        fi
+      elif [[ $? == 2 ]]; then
+        tail -n 40 "$work/server.log" >&2 || true
+        cmd_down "$run" >&2
+        die "could not check listener ownership on port $port"
+      fi
+      sleep 0.5
+    done
+    tail -n 40 "$work/server.log" >&2 || true
+    die "timed out waiting for /healthz on port $port"
   done
-  tail -n 40 "$work/server.log" >&2 || true
-  die "timed out waiting for /healthz on port $port"
 }
 
 cmd_doctor() {
@@ -159,7 +170,7 @@ cmd_doctor() {
   local cmd
   cmd="$(tr '\0' ' ' <"/proc/$PID/cmdline")"
   [[ "$cmd" == *"serve"* ]] || die "pid $PID command is not serve: $cmd"
-  port_owned_by "$PID" "$PORT" >/dev/null || die "pid $PID does not listen on port $PORT"
+  port_owned_by "$PID" "$PORT" || die "could not verify that pid $PID listens on port $PORT"
   local live_url
   live_url="$(tr '\0' '\n' <"/proc/$PID/environ" | sed -n 's/^DATABASE_URL=//p')"
   [[ "$live_url" == "$DATABASE_URL" ]] || die "process DATABASE_URL does not match state"
