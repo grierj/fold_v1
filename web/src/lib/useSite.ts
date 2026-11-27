@@ -25,6 +25,8 @@ interface SiteState {
 
 let state: SiteState = { site: null, error: null, loading: false };
 let generation = 0;
+let pendingRead: Promise<void> | undefined;
+let roomRecheck: Promise<void> | undefined;
 const listeners = new Set<() => void>();
 
 function set(next: SiteState) {
@@ -34,11 +36,11 @@ function set(next: SiteState) {
 
 function load() {
   const mine = ++generation;
-  set({ ...state, error: null, loading: true });
-  Site.get().then(
+  pendingRead = Site.get().then(
     (site) => { if (mine === generation) set({ site, error: null, loading: false }); },
     (cause: unknown) => { if (mine === generation) set({ site: null, error: cause, loading: false }); },
   );
+  set({ ...state, error: null, loading: true });
 }
 
 function subscribe(listener: () => void) {
@@ -58,9 +60,18 @@ export function invalidateSite(saved?: Partial<SiteInfo>) {
   else { generation++; set({ site: null, error: null, loading: false }); }
 }
 
-// Readers that hit the same changed setting share one refresh of the public answer.
+async function waitForSiteRead() {
+  while (state.loading && pendingRead) await pendingRead;
+}
+
+// A read started before the refusal can hold an older switch value. Refused
+// room reads share a new check, skipping any unrelated refresh in flight.
 export function recheckSite() {
-  if (!state.loading) load();
+  if (roomRecheck) return roomRecheck;
+  load();
+  roomRecheck = waitForSiteRead().finally(() => { roomRecheck = undefined; });
+
+  return roomRecheck;
 }
 
 // forgetSite drops the shared answer without asking again, for tests.

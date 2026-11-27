@@ -396,6 +396,36 @@ describe("a household save someone else's change refused", () => {
     }
   });
 
+  it.each(["details", "edit", "add"] as const)("refreshes after an unconfirmed %s write and never resubmits it", async (action) => {
+    const fail = new ApiError(409, "unconfirmed", { code: "household_write_unconfirmed" });
+    const fresh = { ...home, name: "The household after checking", people: [] };
+    mine.mockResolvedValueOnce({ household: home }).mockResolvedValue({ household: fresh });
+    vi.mocked(Households.update).mockRejectedValue(fail);
+    vi.mocked(Households.updatePerson).mockRejectedValue(fail);
+    addPerson.mockRejectedValue(fail);
+    render(<HouseholdCard />);
+
+    if (action === "details") {
+      await userEvent.click(await screen.findByRole("button", { name: "Rename" }));
+      await userEvent.click(screen.getByRole("button", { name: "Save household" }));
+    } else if (action === "edit") {
+      await editFirstName("Kid Smith", "Kit");
+    } else {
+      await userEvent.click(await screen.findByRole("button", { name: "Add a household member" }));
+      await userEvent.type(screen.getByLabelText("First name"), "Sam");
+      await userEvent.click(screen.getByRole("radio", { name: "Adult" }));
+      await userEvent.click(screen.getByRole("button", { name: "Save" }));
+    }
+
+    const line = await screen.findByText(/We couldn't confirm your changes/);
+    await vi.waitFor(() => expect(line).toHaveFocus());
+    expect(screen.getByText(fresh.name)).toBeInTheDocument();
+    expect(screen.queryByRole("form")).not.toBeInTheDocument();
+    expect(mine).toHaveBeenCalledTimes(2);
+    const writer = action === "details" ? Households.update : action === "edit" ? Households.updatePerson : addPerson;
+    expect(writer).toHaveBeenCalledTimes(1);
+  });
+
   it("closes the household form on a conflict and shows the household as stored", async () => {
     const { Households } = await import("../api/households");
     mine.mockResolvedValueOnce({ household: home }).mockResolvedValue({ household: { ...home, name: "The Smiths", address: "2 Elm St", revision: "h-1b" } });

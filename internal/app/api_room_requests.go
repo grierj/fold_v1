@@ -104,6 +104,17 @@ type roomRequestJSON struct {
 }
 
 func (a *App) apiAdminRoomRequests(c *gin.Context) {
+	var out []roomRequestJSON
+	if a.readAdminRoomList(c, "admin room requests", func(tx *gorm.DB) error {
+		var err error
+		out, err = roomRequestsIn(tx)
+		return err
+	}) {
+		c.JSON(http.StatusOK, roomRequestsResponseJSON{Requests: out})
+	}
+}
+
+func roomRequestsIn(tx *gorm.DB) ([]roomRequestJSON, error) {
 	var rows []struct {
 		ID, EventID, RoomID                       uint
 		EventTitle, GroupName, RoomName, Building string
@@ -114,7 +125,7 @@ func (a *App) apiAdminRoomRequests(c *gin.Context) {
 		FirstStartsAt                             time.Time
 		CreatedAt                                 time.Time
 	}
-	if err := a.DB.Raw(`SELECT q.id, q.event_id, e.title AS event_title, coalesce(g.name, '') AS group_name,
+	if err := tx.Raw(`SELECT q.id, q.event_id, e.title AS event_title, coalesce(g.name, '') AS group_name,
 			q.room_id, r.name AS room_name, r.building, q.series, q.requested_by AS requested_by_id, q.created_at,
 			count(*) AS dates, to_char(min(o.original_date), 'YYYY-MM-DD') AS first_date, min(o.starts_at) AS first_starts_at,
 			count(*) FILTER (WHERE EXISTS (SELECT 1 FROM room_bookings c WHERE `+rooms.HeldCondition("c", "b.room_id", "b.occurrence_id", "b.padded_range")+`)) AS busy_dates
@@ -127,8 +138,7 @@ func (a *App) apiAdminRoomRequests(c *gin.Context) {
 		WHERE q.status = ?
 		GROUP BY q.id, e.title, g.name, r.name, r.building
 		ORDER BY q.created_at, q.id`, models.BookingRequested, models.RoomRequestPending).Scan(&rows).Error; err != nil {
-		jsonError(c, http.StatusInternalServerError, "could not list room requests")
-		return
+		return nil, err
 	}
 	var askers []uint
 	for _, r := range rows {
@@ -136,7 +146,10 @@ func (a *App) apiAdminRoomRequests(c *gin.Context) {
 			askers = append(askers, *r.RequestedByID)
 		}
 	}
-	names := publicNamesIn(a.DB, askers)
+	var names publicNames
+	if len(askers) > 0 {
+		lenientReadIn(tx, func(sp *gorm.DB) { names = publicNamesIn(sp, askers) })
+	}
 	out := make([]roomRequestJSON, 0, len(rows))
 	for _, r := range rows {
 		out = append(out, roomRequestJSON{ID: r.ID, EventID: r.EventID, EventTitle: r.EventTitle,
@@ -145,7 +158,7 @@ func (a *App) apiAdminRoomRequests(c *gin.Context) {
 			RequestedBy: names.actorName(r.RequestedByID), Dates: r.Dates, BusyDates: r.BusyDates,
 			FirstDate: r.FirstDate, FirstStartsAt: r.FirstStartsAt, CreatedAt: r.CreatedAt})
 	}
-	c.JSON(http.StatusOK, roomRequestsResponseJSON{Requests: out})
+	return out, nil
 }
 
 var errRequestDecided = errors.New("request decided")

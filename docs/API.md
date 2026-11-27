@@ -61,7 +61,9 @@ fresh read judged. The reader routes that take part are the group page with each
 roster (`GET /groups/:id/members` and a role change's roster reply), the event
 page (`GET /events/:id`), the event visibility preview (`GET /events/:id/visibility-impact`),
 the date page (`GET /events/:id/dates/:date`), the room pickers
-(`GET /events/:id/rooms` and `GET /events/:id/dates/:date/rooms`), the
+(`GET /events/:id/rooms` and `GET /events/:id/dates/:date/rooms`), the admin room
+catalog, request and typed-location lists (`GET /admin/rooms`, `GET /admin/room-requests`
+and `GET /admin/rooms/locations`), the
 manager's exact date (`GET /events/:id/occurrences/:date`) with the retired
 date PUT beside it (refusals only), the guarded edit
 (`POST /events/:id/occurrences/:date/edits`) and `GET /me/household`. Each of
@@ -308,6 +310,13 @@ the account's last name. Any adult account in the household manages it; teen
 accounts get `null` from GET and 403 from the writes. Adding a `child` or
 `teen` person opens a pending guardian link that only an admin can confirm,
 with a note on how it was checked (DEC-32); an `adult` needs no approval.
+
+After a household or person save commits, the reply checks the session, household seat,
+and permission to see the returned fields in the same snapshot as those fields.
+An ended session answers 401. If the adult can no longer manage the household, or
+the person was removed or converted to their own account before the reply, the
+response is 409 `household_write_unconfirmed` without household data. This code
+means the form could not confirm the stored result. The save has already committed.
 
 The household's details and each person's edit name the read they were made from (DEC-174). The household and each
 person in every household answer (`GET /me/household`, the answers of these writes, the admin household routes) carry
@@ -2260,10 +2269,17 @@ They return `401` if the admin can no longer act.
 
 ```
 PUT  /api/v1/admin/settings/rooms {enabled: boolean} → 200 {roomsEnabled}   (admin; audited setting.rooms_enabled_changed)
-GET  /api/v1/admin/rooms            → 200 {rooms: [room]}                 (admin; active first, then building and name)
+GET  /api/v1/admin/rooms            → 200 {rooms: [room], needApproval} | 401 | 403 | 404
 POST /api/v1/admin/rooms            → 201 {room}                          (admin; audited room.created)
 PUT  /api/v1/admin/rooms/:id {…, revision} → 200 {room} | 409 room_changed  (admin; absent fields keep their value; audited room.updated with the changed fields)
 ```
+
+The catalog checks the rooms switch and the current admin session in the same snapshot as
+the approval setting, room notes and revisions. It lists active rooms first, then sorts by
+building and name. A switch turned off before that snapshot gives the usual 404
+`not_found`. A session that ended or lost admin access after middleware gives 401
+`signed_out`. Only a successful participating read acknowledges the admin.
+A failed rooms-switch read returns 500 without acknowledging the request.
 
 An edit names the read it was made from (DEC-171): `revision` is the room's token from `GET /admin/rooms` (each room carries one, read in the same snapshot as its fields) or from the last answer, and it is required on every `PUT`, whatever the body changes. The server locks the room, reads the admin again, then compares: an older, missing or other room's token is 409 `room_changed` and nothing is written (no room change, no audit row). A save that changes nothing writes nothing and answers the revision it named. The answer's `room.revision` is the room after the save; `POST`'s answer carries the new room's. An admin page loaded before this release sends no revision, so each of its room saves is refused with 409 `room_changed`, writing nothing, until the page is loaded again.
 
@@ -2324,7 +2340,7 @@ A usage is a confirmed booking on a scheduled date from the last 12 months or st
 
 ```
 PUT  /api/v1/admin/settings/room-approval {enabled} → 200 {needApproval}
-GET  /api/v1/admin/room-requests → 200 {requests: [roomRequest]}
+GET  /api/v1/admin/room-requests → 200 {requests: [roomRequest]} | 401 | 403 | 404
 POST /api/v1/admin/room-requests/:id/confirm {overlapReason?} → 200 {confirmed, overlapped, lost: [date]} | 404 | 409 already_handled | 409 group_rooms_not_approved
 POST /api/v1/admin/room-requests/:id/reject {reason?} → 200 {} | 404 | 409 already_handled
 ```
@@ -2333,10 +2349,16 @@ Admins only, and 404 while rooms are off. `GET /admin/rooms` also returns `needA
 
 `roomRequest` is `{id, eventId, eventTitle, groupName, roomId, roomName, building, series, requestedBy, dates, busyDates, firstDate, firstStartsAt, createdAt}`; `busyDates` counts its dates another confirmed booking now holds the room on. Confirming makes the free dates confirmed; a busy date is double-booked with `overlapReason`, or without one goes back to the leaders as a date that lost its room (`lost`). Rejecting makes its dates `rejected` (listed in `needsRoom` with `status: "rejected"`), and a series request stops being the series room. Either way the request's task closes, the leaders or hosts get a `room.request_decided` notice, and the decision is audited (`room_request.confirmed`, `room_request.rejected`). A request already decided answers 409 `already_handled` with who handled it. Confirming the request of an event whose group is no longer active answers 409 `group_rooms_not_approved` and changes nothing; rejecting it still works (DEC-147). Re-picking, releasing or cancelling every date of a request withdraws it and closes its task. Picking another series room while its series request waits withdraws that request and closes its task; the new pick waits on a new one (an event has at most one waiting series request). Picking the room that request is for keeps it and its task (DEC-173), and the dates the pick sends join it; deciding it decides every date waiting on it then. A series room a leader or host picked stays unapproved (`events.default_room_pending`) until an admin confirms a request for it: while approval is on, the daily extender and series edits put its new dates on the waiting series request, or open a new one if that was withdrawn, and never confirm them directly. Rejecting a series request stops that series room. Deleting an event withdraws its requests. Changing a date's or a series' room under approval releases the old booking at once (a date has one booking); the new room holds nothing until it is approved.
 
+The room request and typed-location lists read the rooms switch, the current admin session,
+and their results in one read-only snapshot. The request list uses that snapshot for requester
+display names too. If rooms turn off before the snapshot, the list answers the usual 404.
+If the session ends or admin access is lost before the snapshot, the list answers 401.
+A failed rooms-switch read returns 500 without acknowledging the request.
+
 ### Matching old locations (M2.1e)
 
 ```
-GET  /api/v1/admin/rooms/locations → 200 {locations: [{location, dates, events}]}
+GET  /api/v1/admin/rooms/locations → 200 {locations: [{location, dates, events}]} | 401 | 403 | 404
 POST /api/v1/admin/rooms/locations/match {location, roomId} → 200 {booked, busy: [{eventId, eventTitle, date}], busyTotal, series} | 400 | 404
 ```
 

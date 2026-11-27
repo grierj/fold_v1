@@ -23,6 +23,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -1378,7 +1379,7 @@ func isRestoreFenceStatement(sql string) bool {
 // It logs every call (a "---" line, then one argument per line) and answers from
 // FAKE_* variables: FAKE_DOCKER_INFO (ok, down, hang), FAKE_DOCKER_PULL (ok,
 // fail, hang), FAKE_DOCKER_PRESENT=1 (the image is already local),
-// FAKE_DOCKER_ID, FAKE_PGREADY_RC, FAKE_TOOL_RC, FAKE_PG_MAJOR.
+// FAKE_DOCKER_ID, FAKE_PGREADY_RC, FAKE_PGREADY_FIRST_RC, FAKE_TOOL_RC, FAKE_PG_MAJOR.
 //
 // FAKE_STUBBORN (info, pull, probe, tool) makes that call the worst case for a
 // deadline: the process ignores SIGTERM, has a child in its own group that
@@ -1505,6 +1506,13 @@ run)
 		named=
 		for a in "$@"; do [[ $a == -U ]] && named=1; done
 		[[ -n $named ]] || exit 3
+		if [[ -n ${FAKE_PGREADY_FIRST_RC:-} && ! -e $FAKE_DOCKER_DIR/probed ]]; then
+			: >"$FAKE_DOCKER_DIR/probed"
+			exit "$FAKE_PGREADY_FIRST_RC"
+		fi
+		if [[ ${FAKE_PGREADY_RC:-} == 125 ]]; then
+			printf "%s\n\n%s\n" "docker: host networking unavailable" "Run 'docker run --help' for more information" >&2
+		fi
 		exit "${FAKE_PGREADY_RC:-0}"
 	fi
 	if [[ ${FAKE_STUBBORN:-} == tool ]]; then stubborn "$cname"; fi
@@ -1777,7 +1785,9 @@ func TestPGClientWrapperDiagnosesEachStage(t *testing.T) {
 		{name: "tool missing from the image", env: []string{"FAKE_TOOL_RC=127"}, args: []string{"16", "pg_dump", "--version"},
 			wantCode: 72, wantText: "could not start pg_dump"},
 		{name: "database unreachable", env: []string{"FAKE_PGREADY_RC=2"}, args: []string{"16", "pg_dump", url},
-			wantCode: 73, wantText: "localhost port 5433 does not answer from inside the container", wantNoTool: true},
+			wantCode: 73, wantText: "localhost port 5433 does not answer from inside the container after two pg_isready attempts", wantNoTool: true},
+		{name: "host network refused by docker", env: []string{"FAKE_PGREADY_RC=125"}, args: []string{"16", "pg_dump", url},
+			wantCode: 72, wantText: "Docker could not start the pg_isready container (network mode host): docker: host networking unavailable", wantNoTool: true},
 		{name: "bad timeout", env: []string{"FOLD_PG_PULL_TIMEOUT=soon"}, args: []string{"16", "pg_dump", "--version"},
 			wantCode: 74, wantText: "FOLD_PG_PULL_TIMEOUT must be a whole number", wantNoTool: true},
 		{name: "no host", args: []string{"16", "pg_dump", "postgres://app:" + password + "@/db"},
@@ -1996,6 +2006,22 @@ func TestPGClientWrapperProbeNamesAUser(t *testing.T) {
 	out, code, _ = f.wrap(t, []string{"FAKE_PGREADY_RC=3"}, "16", "pg_dump", "postgres://u:p@127.0.0.1:5433/db")
 	if code != 74 || !strings.Contains(out, "made no attempt (exit 3)") || strings.Contains(out, "rejected") {
 		t.Errorf("exit %d: %s", code, out)
+	}
+}
+
+func TestPGClientWrapperRetriesOnlyTheProbe(t *testing.T) {
+	f := newFakeDocker(t, true)
+	out, code, calls := f.wrap(t, []string{"FAKE_PGREADY_FIRST_RC=2", "FAKE_TOOL_RC=5"},
+		"16", "pg_restore", "--exit-on-error", "-d", "postgres://u:p@127.0.0.1:5433/db", "x.dump")
+	if code != 5 {
+		t.Errorf("exit %d: %s\nwant the restore's exit 5 after the second probe answers", code, out)
+	}
+	var runs []string
+	for _, c := range callsFor(calls, "run") {
+		runs = append(runs, c.entrypoint())
+	}
+	if want := []string{"pg_isready", "pg_isready", "pg_restore"}; !slices.Equal(runs, want) {
+		t.Errorf("ran %v, want %v", runs, want)
 	}
 }
 
@@ -2325,7 +2351,7 @@ func TestPGClientWrapperDeadlinesHoldAgainstStubbornCommands(t *testing.T) {
 	}{
 		{"info", "FOLD_PG_INFO_TIMEOUT", []string{"16", "pg_dump", "--version"}, 71, "did not answer within 1s", false},
 		{"pull", "FOLD_PG_PULL_TIMEOUT", []string{"16", "pg_dump", "--version"}, 72, "did not finish within 1s", false},
-		{"probe", "FOLD_PG_INFO_TIMEOUT", []string{"16", "pg_dump", url}, 73, "does not answer", true},
+		{"probe", "FOLD_PG_DISCOVERY_TIMEOUT", []string{"16", "pg_dump", url}, 72, "Docker did not finish running pg_isready for 127.0.0.1 port 5433 within 1s", true},
 		{"tool", "FOLD_PG_DISCOVERY_TIMEOUT", []string{"16", "pg_dump", "--version"}, 72, "did not finish within 1s", true},
 	} {
 		t.Run(tc.stage, func(t *testing.T) {
