@@ -399,9 +399,10 @@ expand-then-contract (`docs/agents/migrations.md`).
 
 Grier's rule. An agent may merge a fold PR, as a normal merge commit, when all of these hold:
 
-1. Every CI check is green (`test`, `web`; branch protection requires them) on a head
-   that contains master's tip. GitHub refuses a PR that is behind master (DEC-146); merge master
-   into it (never rebase), wait for CI again, and then merge.
+1. Every CI check is green on the reviewed head. GitHub requires `test`, `web`, `e2e (1)`,
+   `e2e (2)`, and `e2e (3)`. A checked PR may merge while behind master (DEC-146). If it
+   conflicts, merge master into the branch and rerun CI. For a migration PR, check the proposed
+   merge for duplicate migration numbers.
 2. All five review concerns were reviewed by a separate agent from the one that implemented the
    change, preferably running a different model:
    - **UI, UX, accessibility and copy**: familiar patterns and the shared components, the axe and
@@ -439,7 +440,8 @@ Grier's rule. An agent may merge a fold PR, as a normal merge commit, when all o
    SMS) doesn't block a merge: build it best effort, test what an agent can, and add the check to
    `docs/FIRST-CHURCH-CHECKS.md` in the same PR (DEC-128).
 
-After a merge, merge master into the other open branches (never rebase) and report the merge SHA.
+After a merge, report the merge SHA. Leave other checked PRs on their reviewed heads unless
+they need a change.
 
 ## Rules and what enforces them
 
@@ -475,7 +477,7 @@ table), and a new area gets a new file there and a row in that table, not a row 
 | Tests sit next to their code | `TestTestFilesSitNextToTheirSource` |
 | Source guards read the whole production tree, not a directory glob | `internal/guardkit` tests, `TestContactRequestTextGuardReadsTheRealTree` |
 | Schema changes are new goose files; models match them | `migrations/migrations_test.go`, `TestBaselineFileShape` (see `docs/agents/migrations.md`) |
-| Work reaches master only through a PR with `test` and `web` green on a head containing master's tip | GitHub ruleset on `master` (no bypass actors); `scripts/merge-rules-check.sh` in CI (`TestCIRunsTheMergeRulesCheck`, `TestMergeRulesCheckScript`) |
+| Work reaches master through a reviewed PR that passes the checks listed under [Merging pull requests](#merging-pull-requests) | GitHub's `Master Protections` ruleset has no bypass actors. In CI, `scripts/merge-rules-check.sh` verifies the PR rule, the force-push block, and the five required CI checks (`TestCIRunsTheMergeRulesCheck`, `TestMergeRulesCheckScript`). |
 | `go vet`, `gofmt` and staticcheck are clean | `make lint` in CI |
 | No Python in the serving stack (DEC-151) | `TestNoPythonInServingStack`, `TestPythonGuardScopesToServingStack` |
 | Docs say "recommended", never "supported" | `TestDocsSayRecommendedNotSupported` |

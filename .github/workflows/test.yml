@@ -45,8 +45,7 @@ jobs:
       - name: Contract migration gate
         run: bash scripts/contract-gate.sh
         shell: bash
-      # Master must require up-to-date branches, or two pull requests can
-      # merge the same migration number (DEC-146).
+      # Check master's PR, force-push and required CI protections (DEC-146).
       - name: Merge rules check
         run: bash scripts/merge-rules-check.sh
         shell: bash

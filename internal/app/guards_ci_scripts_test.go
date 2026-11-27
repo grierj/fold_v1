@@ -307,9 +307,7 @@ func TestContractGateWorkflowGuardCatchesMistakes(t *testing.T) {
 	})
 }
 
-// --- Merge rules check (DEC-146): CI must ask GitHub whether master still
-// requires up-to-date branches, so two pull requests cannot merge the same
-// migration number ---
+// The live rules check verifies master's pull request, force-push, and CI requirements (DEC-146).
 
 const mergeRulesStepText = "      - name: Merge rules check\n        run: bash scripts/merge-rules-check.sh\n        shell: bash\n        env:\n          GH_TOKEN: ${{ github.token }}\n"
 
@@ -353,13 +351,14 @@ func TestMergeRulesWorkflowGuardCatchesMistakes(t *testing.T) {
 }
 
 // mergeRulesFixture is a GET /repos/grierj/fold/rules/branches/master answer
-// in the shape GitHub returned on Nov 5, 2026, with strict set as given.
+// with either setting for branch freshness.
 func mergeRulesFixture(strict bool) string {
 	return fmt.Sprintf(`[
   {"type": "deletion", "ruleset_source_type": "Repository", "ruleset_source": "grierj/fold", "ruleset_id": 25847073},
   {"type": "non_fast_forward", "ruleset_source_type": "Repository", "ruleset_source": "grierj/fold", "ruleset_id": 25847073},
   {"type": "required_status_checks", "parameters": {"strict_required_status_checks_policy": %t, "do_not_enforce_on_create": true,
-    "required_status_checks": [{"context": "test", "integration_id": 15368}, {"context": "web", "integration_id": 15368}, {"context": "provision", "integration_id": 15368}]},
+    "required_status_checks": [{"context": "test", "integration_id": 15368}, {"context": "web", "integration_id": 15368}, {"context": "e2e (1)", "integration_id": 15368},
+      {"context": "e2e (2)", "integration_id": 15368}, {"context": "e2e (3)", "integration_id": 15368}]},
    "ruleset_source_type": "Repository", "ruleset_source": "grierj/fold", "ruleset_id": 25847073},
   {"type": "pull_request", "parameters": {"required_approving_review_count": 0, "allowed_merge_methods": ["merge", "squash", "rebase"]},
    "ruleset_source_type": "Repository", "ruleset_source": "grierj/fold", "ruleset_id": 25847073}
@@ -401,23 +400,21 @@ func TestMergeRulesCheckScript(t *testing.T) {
 		code        int
 		want        string
 	}{
-		{"strict rules pass", strict, 0, "master requires pull requests, up-to-date branches"},
-		{"the Nov 5 rules fail", mergeRulesFixture(false), 1, "required status checks are not strict"},
-		{"no strict field", strings.Replace(strict, `"strict_required_status_checks_policy": true, `, "", 1), 1, "required status checks are not strict"},
-		{"strict as a string", strings.Replace(strict, `"strict_required_status_checks_policy": true`, `"strict_required_status_checks_policy": "true"`, 1), 1, "required status checks are not strict"},
+		{"strict rules pass", strict, 0, "master requires pull requests"},
+		{"relaxed rules pass", mergeRulesFixture(false), 0, "master requires pull requests"},
 		{"no pull request rule", strings.Replace(strict, `"type": "pull_request"`, `"type": "creation"`, 1), 1, "no pull_request rule"},
 		{"no non-fast-forward rule", strings.Replace(strict, `"type": "non_fast_forward"`, `"type": "update"`, 1), 1, "no non_fast_forward rule"},
 		{"a required check dropped", strings.Replace(strict, `{"context": "web", "integration_id": 15368}, `, "", 1), 1, "required status check web is not required"},
-		{"no rules at all", "[]", 1, "required status checks are not strict"},
+		{"an e2e shard dropped", strings.Replace(strict, `, {"context": "e2e (3)", "integration_id": 15368}`, "", 1), 1, "required status check e2e (3) is not required"},
+		{"no rules at all", "[]", 1, "no pull_request rule"},
 		{"an error object", `{"message": "Not Found", "status": "404"}`, 1, "not a list of rules"},
 		{"not JSON", "<html>rate limited</html>", 1, "not JSON"},
 		{"an empty answer", "", 1, "not JSON"},
 		{"a blank answer", " \n", 1, "not JSON"},
-		// GitHub combines the rules of every active ruleset: strict in one
-		// rule makes every PR up to date before the checks of any rule count.
-		{"strict in a second ruleset", strings.Replace(mergeRulesFixture(false), "\n]", `,
-  {"type": "required_status_checks", "parameters": {"strict_required_status_checks_policy": true, "required_status_checks": []}, "ruleset_id": 2}
-]`, 1), 0, "up-to-date branches"},
+		{"checks split across rulesets", strings.Replace(
+			strings.Replace(mergeRulesFixture(false), `, {"context": "e2e (3)", "integration_id": 15368}`, "", 1), "\n]", `,
+  {"type": "required_status_checks", "parameters": {"required_status_checks": [{"context": "e2e (3)"}]}, "ruleset_id": 2}
+]`, 1), 0, "all three e2e checks"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
