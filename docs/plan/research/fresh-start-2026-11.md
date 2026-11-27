@@ -315,7 +315,7 @@ same.
 
 | Item | Do | Why, and what it reverses |
 |---|---|---|
-| Restore fence, recovery levels, restore drills | Kill | Replace with a short list of erased ids kept beside the database and never inside a backup. On boot the app scrubs anyone on the list, so `fold restore` cannot bring a person back. A restore done by hand from a whole-disk snapshot rolls the list back too; that limit is stated in the delete dialog and the restore guide, as DEC-158 already states its own. |
+| Restore fence, recovery levels, restore drills | Kill | Replace with a short list of erased people kept beside the database and never inside a backup, keyed by a random identifier that is never reused (not the row number, which a restore can hand to someone new). On boot the app scrubs anyone on the list, so `fold restore` cannot bring a person back. A restore done by hand from a whole-disk snapshot rolls the list back too; that limit is stated in the delete dialog and the restore guide, as DEC-158 already states its own. |
 | Review of free-text "reasons" left by deleted accounts, and its scale tooling | Kill | Do not collect free text about other people in workflows; offer fixed choices. No residue, nothing to review. |
 | Receipts for lost answers (`admin_operation_attempts`, undo receipts as proof) | Kill | Post, redirect, read. A lost answer is a page reload. |
 | Contact requests, grants and audited reveal (DEC-31's workflow half) | Simplify | Leaders never see a teen's contact details and reach teens only through Fold (keep). Adults choose whether their leaders see their email and phone. No request, grant or reveal workflow. |
@@ -351,7 +351,7 @@ same.
 - **Personal data lives in `people` and in columns explicitly tagged as personal.** Everything else
   holds an id. Audit rows and notifications store ids and a kind; the words are rendered when read,
   through the same visibility rules as everything else. Erasure is then: blank the person's row to
-  a tombstone, delete their files and tagged text, add the id to the erased list. One function, one
+  a tombstone, delete their files and tagged text, add their random identifier to the erased list. One function, one
   test that walks the schema for tagged columns.
 - `households`, `guardians`, `groups`, `memberships`, `events`, `occurrences`, `registrations`,
   `attendance`, `rooms`, `bookings`, `messages`, `message_recipients`, `notifications`, `jobs`,
@@ -499,3 +499,39 @@ Kept without change, among the ones that shape the product: DEC-2 to DEC-8, DEC-
 DEC-17, DEC-18, DEC-20, DEC-23, DEC-30, DEC-34 to DEC-36, DEC-42, DEC-52, DEC-57 to DEC-66, DEC-89,
 DEC-139 (1), (4), (5), DEC-140, DEC-142, DEC-143, DEC-151, and the product behaviour of every
 decision whose mechanism changes above.
+
+---
+
+## Addendum, 2026-11-26: what Grier decided
+
+Grier read this brief and chose to start fresh in a new repository. It has a working name for now
+and will take the name Fold again once the repositories are sorted out. His rulings, recorded
+there in `docs/DECISIONS.md`:
+
+- **SQLite, one writer:** accepted. "SQLite is what I started with… I love sqlite."
+- **Push and SMS:** deferred until the first church is live, then ask whether they want push, SMS
+  or neither.
+- **Making something more private removes nobody:** accepted as the provisional starting rule; he
+  expects it to change when a church asks.
+- **One review pass:** accepted, with security as the primary concern because the site is public
+  and strangers type into it.
+- **The tamper-evident audit log is built from the start**, not deferred. This reverses the cut in
+  DEC-140 that section 9 lists as kept. Nobody can view the log unless it is requested for a
+  forensic purpose, and requesting it tells every admin and needs a second admin. The case of a
+  church with one admin is still open.
+- **Sign-in by emailed link:** the link lasts 24 hours; a session lasts a week and is renewed when
+  the person visits again from the same browser.
+- **Caddy stays as the proxy.** Section 5.4 proposed letting the binary obtain its own certificate;
+  he chose Caddy because it handles Let's Encrypt and keeps the project from owning HTTP edge
+  cases. A church therefore runs two containers, not one.
+- **No component framework to start with**, forward-only migrations, and budgets of 35 tables and
+  200 routes: "I would rather have more of these than try to work with less than we need."
+- **A pilot church is named** in the new project's plan.
+
+What is still only proposed there: guests signing in by link, the contact rules, the erased list,
+and the remaining budgets. One correction made here after review: the erased list is keyed by a
+random identifier, not a row number.
+
+The carry-over turned out smaller than section 5.1 says. Only the image, storage, sanitizer,
+provider and event-clock packages copy cleanly (about 3,300 lines); policy, rooms, mail and the
+HTTP middleware need adapting.
