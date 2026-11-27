@@ -114,24 +114,6 @@ func (a *App) loadConversionBatch(tx *gorm.DB, actor *models.User, householdID u
 	return a.loadConversionBatchFor(tx, actor, rel, personIDs, links)
 }
 
-// householdPersonRow is the person id as one read-only snapshot shows it to
-// viewer, so the revision names the fields beside it.
-func (a *App) householdPersonRow(id uint, viewer *models.User) (row householdPersonJSON, err error) {
-	err = a.DB.Transaction(func(tx *gorm.DB) error {
-		var person models.HouseholdPerson
-		if err := tx.First(&person, id).Error; err != nil {
-			return err
-		}
-		batch, err := a.loadConversionBatch(tx, viewer, person.HouseholdID, []uint{person.ID})
-		if err != nil {
-			return err
-		}
-		row, err = a.householdPersonJSONIn(tx, &person, batch)
-		return err
-	}, readSnapshot)
-	return row, err
-}
-
 // loadConversionBatchFor takes a relation the caller already knows, so
 // GET /me/household doesn't read the viewer's account twice (Whittler, PR 111).
 func (a *App) loadConversionBatchFor(tx *gorm.DB, actor *models.User, rel policy.HouseholdRel, personIDs []uint, links map[uint][]models.GuardianLink) (*conversionBatch, error) {

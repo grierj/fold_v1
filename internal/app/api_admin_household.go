@@ -70,7 +70,7 @@ func (a *App) apiAdminGetHousehold(c *gin.Context) {
 // A GET follows the holder's current link. A write may only return the
 // household it changed, even if the holder has since joined another one.
 func (a *App) readAdminHousehold(c *gin.Context, holderID, writtenHouseholdID uint, read func(*gorm.DB, *models.User, uint) error) error {
-	return a.readAdminSnapshot(c, "admin household", func(tx *gorm.DB, admin *models.User) error {
+	return a.readAdminSnapshot(c, "admin household", readAdminIn, func(tx *gorm.DB, admin *models.User) error {
 		var holder models.User
 		if err := tx.First(&holder, holderID).Error; errors.Is(err, gorm.ErrRecordNotFound) {
 			return errAdminTargetGone
