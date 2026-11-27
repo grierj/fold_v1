@@ -7,6 +7,7 @@ import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { beforeEach, expect, it, vi } from "vitest";
 import { Auth } from "../api/auth";
 import { ApiError } from "../api/core";
+import { ERROR_COPY } from "../lib/errors";
 import { ResetPassword } from "./ResetPassword";
 
 const signedIn = vi.fn();
@@ -64,10 +65,12 @@ it("does not send a password that is too short or does not match its confirmatio
   expect(Auth.confirmPasswordReset).not.toHaveBeenCalled();
 });
 
-it("says an expired or used link cannot be used, and keeps the person on the page", async () => {
+it("replaces the password fields with a new reset request when the link has expired", async () => {
   vi.mocked(Auth.confirmPasswordReset).mockRejectedValue(new ApiError(410, "gone", { code: "link_expired" }));
   renderAt("/reset-password?token=old");
   await fillAndSubmit("a long enough password");
-  expect(await screen.findByText("This link has expired or was already used. Request a new one below.")).toBeInTheDocument();
+  expect(await screen.findByRole("link", { name: "Request a new reset link" })).toHaveAttribute("href", "/forgot-password");
+  expect(screen.getByText(ERROR_COPY.link_expired)).toHaveFocus();
+  expect(screen.queryByLabelText("New password")).not.toBeInTheDocument();
   expect(signedIn).not.toHaveBeenCalled();
 });

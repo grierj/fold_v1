@@ -15,7 +15,7 @@
 #                                      (what --resolve printed)
 #   FOLD_PG_INFO_TIMEOUT=20            seconds to wait for the daemon
 #   FOLD_PG_PULL_TIMEOUT=180           seconds for one image pull
-#   FOLD_PG_DISCOVERY_TIMEOUT=60       seconds for `<tool> --version`
+#   FOLD_PG_DISCOVERY_TIMEOUT=60       seconds for each readiness or version check
 #   FOLD_PG_KILL_GRACE=3               seconds between SIGTERM and SIGKILL when a
 #                                      command overruns its limit, or this script
 #                                      is itself told to stop
@@ -61,7 +61,7 @@
 #
 # Exit codes of this script's own diagnostics (anything else is the tool's):
 #   70 no container runtime on PATH      71 the daemon does not answer
-#   72 the image is unusable             73 the database is unreachable from
+#   72 the client container failed       73 the database is unreachable from
 #   74 the arguments cannot be run          the container
 #
 # Written for Bash 3.2 (the macOS /bin/bash): no associative arrays, mapfile,
@@ -600,27 +600,33 @@ if [[ $target == socket ]]; then
 fi
 user=$(id -u):$(id -g)
 
-# 5. A database the container can reach. pg_isready answers 0 (accepting) and
-# 1 (starting up or refusing this connection) when something answers; 2 is silence;
-# 3 is "no attempt made". The container runs as the caller's uid, which has no
-# passwd entry in the image, so libpq cannot name a user of its own and pg_isready
-# exits 3 before it connects. -U names one; the probe does not authenticate, so
-# the name is never checked.
+# 5. The Docker deadline includes startup under load. pg_isready has its own
+# connection timeout and needs -U because the caller's UID may have no passwd entry.
 if [[ $target != none ]]; then
-	rc=0
-	name_container
-	bounded "$info_timeout" docker run --rm --name "$container" "${net[@]}" --user "$user" \
-		${mounts[@]+"${mounts[@]}"} --entrypoint pg_isready "$image_id" -q -U probe -h "$host" -p "$port" -t 10 || rc=$?
+	case $target in
+	socket) where="the Unix socket in $host" ;;
+	*) where="$host port $port" ;;
+	esac
+	for attempt in 1 2; do
+		rc=0
+		name_container
+		bounded "$discovery_timeout" docker run --rm --name "$container" "${net[@]}" --user "$user" \
+			${mounts[@]+"${mounts[@]}"} --entrypoint pg_isready "$image_id" -q -U probe -h "$host" -p "$port" -t 10 || rc=$?
+		[[ $rc -eq 2 && $attempt -eq 1 ]] || break
+		sleep 1
+	done
 	case $rc in
-	0 | 1) ;;
-	2 | 124)
-		case $target in
-		socket) where="the Unix socket in $host" ;;
-		*) where="$host port $port" ;;
-		esac
-		die 73 "the database at $where does not answer from inside the container (network mode ${net[1]}). On Docker Desktop, rootless Docker and Podman the container's localhost is not this machine's: set FOLD_PG_BIN to a directory of PostgreSQL $major client tools, or point the connection at a host or socket directory the container can reach"
+	0 | 1) ;; # A database rejecting connections has still answered the probe.
+	2)
+		die 73 "the database at $where does not answer from inside the container after two pg_isready attempts (network mode ${net[1]}). Set FOLD_PG_BIN to a directory of PostgreSQL $major client tools, or use a host or socket directory the container can reach"
 		;;
-	125 | 126 | 127)
+	124)
+		die 72 "Docker did not finish running pg_isready for $where within ${discovery_timeout}s. Check the Docker daemon, raise FOLD_PG_DISCOVERY_TIMEOUT, or set FOLD_PG_BIN to a directory of PostgreSQL $major client tools"
+		;;
+	125)
+		die 72 "Docker could not start the pg_isready container (network mode ${net[1]}): $(head -n 1 "$work/err" | cut -c1-200). Check Docker's network access or set FOLD_PG_BIN to a directory of PostgreSQL $major client tools"
+		;;
+	126 | 127)
 		die 72 "image $image ($image_id) could not run pg_isready ($(last_line "$work/err")); FOLD_PG_IMAGE must name an image with PostgreSQL $major client tools"
 		;;
 	3) die 74 "pg_isready made no attempt (exit 3): it could not use the connection parameters for $host port $port" ;;

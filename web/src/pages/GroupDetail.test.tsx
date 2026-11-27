@@ -805,22 +805,42 @@ describe("the date editor while other reads are held or fail", () => {
     await userEvent.click(screen.getByRole("menuitem", { name: "Edit this date" }));
   }
 
-  it("a page read that fails while the date's read is held shows nothing of that read; the page's Try again reads the date afresh", async () => {
-    vi.mocked(Groups.get).mockResolvedValue(managing);
+  it("drops a date read that answers as the group read fails, then opens and saves from the retried date read", async () => {
+    const failedPage = deferred<GroupDetailResponse>();
+    const retriedPage = later<GroupDetailResponse>();
     const heldRead = later<OccurrenceResponse>();
-    vi.mocked(Events.managedDate).mockReturnValueOnce(heldRead.promise).mockResolvedValue(forGroup({ occurrence: occurrence({ title: "Fresh title", revision: "r1" }) }));
+    const freshRead = later<OccurrenceResponse>();
+    vi.mocked(Groups.get).mockResolvedValue(managing).mockResolvedValueOnce(managing)
+      .mockReturnValueOnce(failedPage.promise).mockReturnValueOnce(retriedPage.promise);
+    vi.mocked(Events.managedDate).mockReturnValueOnce(heldRead.promise).mockReturnValue(freshRead.promise);
     const store = renderInSession();
     await openEditor();
     expect(await screen.findByText("Loading this date…")).toBeInTheDocument();
-    vi.mocked(Groups.get).mockRejectedValueOnce(new ApiError(500, "SECRET"));
-    // A roster write on the date ends: the page is asked again, and that read fails.
+    expect(Events.managedDate).toHaveBeenCalledExactlyOnceWith(7, "2026-12-01", credential);
     act(() => store.begin("7:2026-12-01")("stored"));
-    expect(await screen.findByText("This date can be edited again once the page loads. What you typed is kept.")).toBeInTheDocument();
-    await act(async () => { heldRead.resolve(forGroup({ occurrence: occurrence({ title: "Held title", revision: "r0" }) })); await heldRead.promise; });
+
+    // Answer the held date read in the microtask that observes the failed page commit, before passive cleanup.
+    const failed = waitFor(() => {
+      expect(screen.getByText("This date can be edited again once the page loads. What you typed is kept.")).toBeInTheDocument();
+      heldRead.resolve(forGroup({ occurrence: occurrence({ title: "Held title", revision: "r0" }) }));
+    });
+
+    failedPage.reject(new ApiError(500, "SECRET"));
+    await failed;
     expect(screen.queryByLabelText("Title")).not.toBeInTheDocument();
     expect(document.body.textContent).not.toContain("Held title");
     expect(document.body.textContent).not.toContain("SECRET");
-    await userEvent.click(await screen.findByRole("button", { name: "Try again" }));
+
+    await userEvent.click(screen.getByRole("button", { name: "Try again" }));
+    expect(Groups.get).toHaveBeenCalledTimes(3);
+    expect(screen.queryByLabelText("Title")).not.toBeInTheDocument();
+    expect(screen.getByText("Loading this date…")).toBeInTheDocument();
+    expect(Events.managedDate).toHaveBeenCalledTimes(2);
+    expect(Events.managedDate).toHaveBeenLastCalledWith(7, "2026-12-01", credential);
+
+    await act(async () => { retriedPage.resolve(managing); });
+    expect(screen.queryByLabelText("Title")).not.toBeInTheDocument();
+    await act(async () => { freshRead.resolve(forGroup({ occurrence: occurrence({ title: "Fresh title", revision: "r1" }) })); });
     expect(await screen.findByLabelText("Title")).toHaveValue("Fresh title");
     await waitFor(() => expect(screen.getByRole("button", { name: "Save this date" })).toBeEnabled());
     await userEvent.type(screen.getByLabelText("Title"), "!");
