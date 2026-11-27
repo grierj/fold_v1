@@ -172,7 +172,8 @@ export function useEditRead(opener: DateOpener, owner: string, open: boolean, on
     latest.current = { opener, onRefused };
   });
 
-  useEffect(() => {
+  // A response can arrive after the host hides the editor but before passive effects clean up.
+  useLayoutEffect(() => {
     if (!open || answered) return;
     let current = true;
     managedRead(latest.current.opener, pinned).then(
