@@ -251,7 +251,7 @@ func (a *App) registerAPIRoutes(r *gin.Engine) {
 	v1.PUT("/admin/timezone", a.apiAuth(), a.apiAdmin(), a.apiSetTimezone)
 	// Rooms (M2.1a): every room route is 404 while rooms are off (9.1).
 	v1.PUT("/admin/settings/rooms", a.apiAuth(), a.roomManager(), a.apiSetRoomsEnabled)
-	v1.GET("/admin/rooms", a.roomsOn(), a.apiAuth(), a.roomManager(), a.apiAdminListRooms)
+	v1.GET("/admin/rooms", a.requireRooms(errRoomRouteHidden), a.apiAuth(), a.roomManager(), a.apiAdminListRooms)
 	v1.POST("/admin/rooms", a.roomsOn(), a.apiAuth(), a.roomManager(), a.apiAdminCreateRoom)
 	v1.PUT("/admin/rooms/:id", a.roomsOn(), a.apiAuth(), a.roomManager(), a.apiAdminUpdateRoom)
 	// Room bookings (M2.1b): whoever runs the event books its dates.
@@ -262,11 +262,11 @@ func (a *App) registerAPIRoutes(r *gin.Engine) {
 	v1.POST("/rooms/check", a.roomsOn(), a.apiAuth(), a.apiCheckRooms)
 	// Approval (M2.1d, DEC-102).
 	v1.PUT("/admin/settings/room-approval", a.roomsOn(), a.apiAuth(), a.roomManager(), a.apiSetRoomApproval)
-	v1.GET("/admin/room-requests", a.roomsOn(), a.apiAuth(), a.roomManager(), a.apiAdminRoomRequests)
+	v1.GET("/admin/room-requests", a.requireRooms(errRoomRouteHidden), a.apiAuth(), a.roomManager(), a.apiAdminRoomRequests)
 	v1.POST("/admin/room-requests/:id/confirm", a.roomsOn(), a.apiAuth(), a.roomManager(), a.apiConfirmRoomRequest)
 	v1.POST("/admin/room-requests/:id/reject", a.roomsOn(), a.apiAuth(), a.roomManager(), a.apiRejectRoomRequest)
 	// Matching old locations (M2.1e, 9.1).
-	v1.GET("/admin/rooms/locations", a.roomsOn(), a.apiAuth(), a.roomManager(), a.apiAdminTypedLocations)
+	v1.GET("/admin/rooms/locations", a.requireRooms(errRoomRouteHidden), a.apiAuth(), a.roomManager(), a.apiAdminTypedLocations)
 	v1.POST("/admin/rooms/locations/match", a.roomsOn(), a.apiAuth(), a.roomManager(), a.apiAdminMatchLocation)
 	// The System page (M3.1b): dead background jobs, for admins.
 	v1.GET("/admin/jobs", a.apiAuth(), a.jobManager(), a.apiAdminDeadJobs)

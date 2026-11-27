@@ -199,6 +199,148 @@ func TestMyHouseholdReadsOneSnapshotAndAcknowledgesIt(t *testing.T) {
 	})
 }
 
+func TestMyHouseholdWriteRepliesJudgeAuthorityInTheirSnapshot(t *testing.T) {
+	const surface = "household write reply"
+	for _, route := range []struct {
+		name, method string
+		status       int
+	}{
+		{"save household", "PUT", http.StatusOK},
+		{"edit person", "PUT", http.StatusOK},
+		{"add person", "POST", http.StatusCreated},
+	} {
+		t.Run(route.name, func(t *testing.T) {
+			f := newHouseholdReadFixture(t)
+			reader := pinnedAs(t, f.reader)
+			write := func() *httptest.ResponseRecorder {
+				path := f.householdPath
+				var body map[string]any
+				switch route.name {
+				case "save household":
+					body = withRevision(map[string]any{"name": "Saved household"}, getMyHousehold(t, reader).Revision)
+				case "edit person":
+					path += "/people/" + itoa(f.child.ID)
+					body = withRevision(map[string]any{"firstName": "Saved child"}, myPersonRevision(t, reader, f.child.ID))
+				case "add person":
+					path += "/people"
+					body = map[string]any{"firstName": "New child", "kind": "child", "careNotes": f.careNote}
+				}
+				return reader.do(route.method, path, body, true)
+			}
+			setRole := func(role string) {
+				gormMust(t, f.app.DB.Model(f.guardian).Update("role", role))
+			}
+			setRole(models.RoleAdmin)
+			const laterNote = "Later snapshot care note"
+			fired := atReaderSeam(f.app, "authorized", surface, func() {
+				gormMust(t, &gorm.DB{Error: f.app.DB.Transaction(func(tx *gorm.DB) error {
+					if err := tx.Model(f.guardian).Update("role", models.RoleMember).Error; err != nil {
+						return err
+					}
+					if err := tx.Model(&f.link).Update("status", models.GuardianRevoked).Error; err != nil {
+						return err
+					}
+					return tx.Model(&models.HouseholdPerson{}).Where("household_id = ?", f.household.ID).Update("care_notes", laterNote).Error
+				})})
+			})
+			w := write()
+			f.app.hooks.readerAuthorized = nil
+			if !fired.Load() || w.Code != route.status {
+				t.Fatalf("a reply judged before the change (fired %t): %d %s", fired.Load(), w.Code, w.Body.String())
+			}
+			wantIn(t, "the reply before the change", w.Body.String(), f.careNote)
+			wantOut(t, "the reply before the change", w.Body.String(), laterNote)
+			wantAck(t, "the reply before the change", w, reader, f.guardian)
+
+			setRole(models.RoleAdmin)
+			var began atomic.Bool
+			f.app.hooks.readerBegin = func(s string) {
+				if s == surface && began.CompareAndSwap(false, true) {
+					setRole(models.RoleMember)
+				}
+			}
+			w = write()
+			f.app.hooks.readerBegin = nil
+			if !began.Load() || w.Code != route.status {
+				t.Fatalf("a reply judged after the change (fired %t): %d %s", began.Load(), w.Code, w.Body.String())
+			}
+			wantOut(t, "the reply after the change", w.Body.String(), `"careNotes"`, f.careNote, laterNote)
+			wantAck(t, "the reply after the change", w, reader, f.guardian)
+
+			oneConnection(t, f.app, oneConnectionPool(t, f.app))
+			w = write()
+			if w.Code != route.status {
+				t.Fatalf("a reply on one connection: %d %s", w.Code, w.Body.String())
+			}
+			wantOut(t, "the reply on one connection", w.Body.String(), `"careNotes"`)
+		})
+	}
+}
+
+func TestMyHouseholdWriteReplyRequiresTheWritersCurrentSeatAndSession(t *testing.T) {
+	for _, erased := range []bool{false, true} {
+		name, status := "removed seat", http.StatusConflict
+		if erased {
+			name, status = "erased account", http.StatusUnauthorized
+		}
+		t.Run(name, func(t *testing.T) {
+			f := newHouseholdReadFixture(t)
+			reader := pinnedAs(t, f.reader)
+			var fired atomic.Bool
+			f.app.hooks.readerBegin = func(surface string) {
+				if surface != "household write reply" || !fired.CompareAndSwap(false, true) {
+					return
+				}
+				if erased {
+					apiDo(t, f.admin, "DELETE", "/api/v1/admin/users/"+itoa(f.guardian.ID), nil, http.StatusOK)
+				} else {
+					gormMust(t, f.app.DB.Where("user_id = ?", f.guardian.ID).Delete(&models.HouseholdAccount{}))
+				}
+			}
+			const saved = "A committed household name"
+			w := reader.do("PUT", f.householdPath, withRevision(map[string]any{"name": saved}, getMyHousehold(t, reader).Revision), true)
+			if !fired.Load() || w.Code != status {
+				t.Fatalf("a reply with a %s (fired %t): %d %s", name, fired.Load(), w.Code, w.Body.String())
+			}
+			wantOut(t, "the refused reply", w.Body.String(), saved, f.careNote, f.householdChildFamily)
+			if erased {
+				wantNoAck(t, "the erased account's reply", w)
+			} else {
+				wantIn(t, "the unseated adult's reply", w.Body.String(), "household_write_unconfirmed")
+				wantAck(t, "the unseated adult's reply", w, reader, f.guardian)
+			}
+			gormMust(t, f.app.DB.First(&f.household, f.household.ID))
+			if f.household.Name != saved {
+				t.Fatalf("the write did not commit before the refusal: %q", f.household.Name)
+			}
+		})
+	}
+}
+
+func TestHouseholdPersonWriteReplyOmitsConvertedPerson(t *testing.T) {
+	f := newHouseholdEditFixture(t)
+	const email = "mary-own@example.com"
+	acceptConversion(t, f.app, f.invite, http.StatusOK)
+	var fired atomic.Bool
+	f.app.hooks.readerBegin = func(surface string) {
+		if surface == "household write reply" && fired.CompareAndSwap(false, true) {
+			approveConversionForEmail(t, f.app, f.admin, email)
+		}
+	}
+	path := "/api/v1/me/household/people/" + itoa(f.mary.ID)
+	w := f.c.do("PUT", path, withRevision(map[string]any{"photoConsent": true}, myPersonRevision(t, f.c, f.mary.ID)), true)
+	if !fired.Load() || w.Code != http.StatusConflict {
+		t.Fatalf("person write reply after conversion (fired %t): %d %s", fired.Load(), w.Code, w.Body.String())
+	}
+	wantIn(t, "the converted person's reply", w.Body.String(), "household_write_unconfirmed")
+	wantOut(t, "the converted person's reply", w.Body.String(), f.mary.FirstName, "birthDate", "careNotes", "accountUserId")
+	var person models.HouseholdPerson
+	gormMust(t, f.app.DB.First(&person, f.mary.ID))
+	if person.ConvertedUserID == nil || !person.PhotoConsent {
+		t.Fatal("the person did not convert after the edit committed")
+	}
+}
+
 // householdEditFixture is a household whose holder and a second adult both
 // manage it: Mary, an adult with an open account invitation and an upcoming
 // sign-up, and Kit, a child with care notes and a confirmed guardian link.
@@ -679,5 +821,41 @@ func TestHouseholdPersonEditOfAConvertedPersonSaysSo(t *testing.T) {
 	wantCode(t, "an edit after the conversion", f.c.do("PUT", path, body, true), http.StatusConflict, "household_person_converted")
 	if after := householdEditState(t, f.app.DB); after != before {
 		t.Fatalf("the refused edits wrote:\n%s\nwant\n%s", after, before)
+	}
+}
+
+func TestHouseholdPersonEditRefusesRemovalAfterPreflight(t *testing.T) {
+	f := newHouseholdEditFixture(t)
+	path := "/api/v1/me/household/people/" + itoa(f.mary.ID)
+	body := withRevision(map[string]any{"firstName": "Maria"}, myPersonRevision(t, f.c, f.mary.ID))
+	held := f.c.doHeld("PUT", path, body)
+	apiDo(t, f.other, "DELETE", path, nil, http.StatusOK)
+	before := householdEditState(t, f.app.DB)
+	want := apiDo(t, f.other, "PUT", path, body, http.StatusNotFound)
+	held.release()
+	if w := held.wait(t); w.Code != http.StatusNotFound || w.Body.String() != want {
+		t.Fatalf("the edit after removal committed: %d %s, want 404 %s", w.Code, w.Body.String(), want)
+	}
+	if after := householdEditState(t, f.app.DB); after != before {
+		t.Fatalf("the refused edit wrote:\n%s\nwant\n%s", after, before)
+	}
+}
+
+func TestHouseholdPersonEditLockedLookupFailureAnswers500(t *testing.T) {
+	f := newHouseholdEditFixture(t)
+	path := "/api/v1/me/household/people/" + itoa(f.mary.ID)
+	body := withRevision(map[string]any{"firstName": "Maria"}, myPersonRevision(t, f.c, f.mary.ID))
+	before := householdEditState(t, f.app.DB)
+	held := f.c.doHeld("PUT", path, body)
+	failures := failStatement(t, f.app, func(tx *gorm.DB) bool {
+		return tx.Statement.Table == "household_people"
+	})
+	held.release()
+	w := held.wait(t)
+	if n := failures.Load(); n != 1 || w.Code != http.StatusInternalServerError || w.Body.String() != serverErrorBody {
+		t.Fatalf("the locked lookup with %d SQL failures: %d %s, want one failure and 500 %s", n, w.Code, w.Body.String(), serverErrorBody)
+	}
+	if after := householdEditState(t, f.app.DB); after != before {
+		t.Fatalf("the failed edit wrote:\n%s\nwant\n%s", after, before)
 	}
 }

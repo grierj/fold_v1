@@ -487,13 +487,7 @@ function DateDetail({ id, date }: { id: string; date: string }) {
     else void series(pending.status, chosen);
   }
 
-  // Messaging capability is asked only while the current answer is a scheduled date, and stays
-  // asked while a refresh of it is in flight rather than again after each one. Any other settled
-  // answer (a tombstone, including one a refresh brings, or not available) turns it off, already in
-  // the render before the effect clears the flag.
-  const [scheduled, setScheduled] = useState(false);
-  useEffect(() => { if (occurrence) setScheduled(true); else if (loaded) setScheduled(false); }, [occurrence, loaded]);
-  const canEmail = useCanEmailEvent(scheduled && (occurrence || !loaded) ? Number(id) : undefined);
+  const canEmail = useCanEmailEvent(occurrence?.eventId, load.dataEpoch);
 
   // The bar's buttons, as the last scheduled read offered them: during this page's own read they stay in
   // place (so focus stays where it was) but answer nothing and show no saved answer.

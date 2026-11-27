@@ -152,6 +152,7 @@ func (a *App) reconcileAccessesBefore(tx *gorm.DB, now time.Time, change contact
 	if change.EventID == 0 || change.SingleDate != nil {
 		return nil
 	}
+	change.CancellationActorID = 0
 	return a.reconcileOccurrenceAccesses(tx, now, change)
 }
 
@@ -162,7 +163,7 @@ func (a *App) reconcileAccessesBefore(tx *gorm.DB, now time.Time, change contact
 func (a *App) reconcileDateAccesses(tx *gorm.DB, occurrenceID uint) (time.Time, error) {
 	q := tx.Where("registrations.user_id IS NOT NULL AND "+registrationAccessLiveSQL).
 		Where("registrations.occurrence_id = ?", occurrenceID)
-	return endInvalidAccesses(tx, q, func() time.Time { return a.now().UTC() })
+	return endInvalidAccesses(tx, q, 0, func() time.Time { return a.now().UTC() })
 }
 
 // Accepted attendance deliberately does not reload issuer authority or blocks.
@@ -177,14 +178,14 @@ func (a *App) reconcileOccurrenceAccesses(tx *gorm.DB, now time.Time, change con
 	case change.GroupID != 0:
 		q = q.Where("registrations.occurrence_id IN (SELECT o.id FROM event_occurrences o JOIN events e ON e.id = o.event_id WHERE e.group_id = ?)", change.GroupID)
 	}
-	_, err := endInvalidAccesses(tx, q, func() time.Time { return now })
+	_, err := endInvalidAccesses(tx, q, change.CancellationActorID, func() time.Time { return now })
 	return err
 }
 
 // endInvalidAccesses locks the live grant rows q selects, in id order, then
 // reads clock and ends every row that clock judges invalid. It returns that
 // clock, read even when no row is live.
-func endInvalidAccesses(tx *gorm.DB, q *gorm.DB, clock func() time.Time) (time.Time, error) {
+func endInvalidAccesses(tx *gorm.DB, q *gorm.DB, cancellationActorID uint, clock func() time.Time) (time.Time, error) {
 	var rows []models.Registration
 	if err := q.Clauses(clause.Locking{Strength: "UPDATE"}).Order("registrations.id").Find(&rows).Error; err != nil {
 		return time.Time{}, err
@@ -211,7 +212,11 @@ func endInvalidAccesses(tx *gorm.DB, q *gorm.DB, clock func() time.Time) (time.T
 		if reason == "" {
 			continue
 		}
-		if err := endRegistrationAccess(tx, row, scopes[row.OccurrenceID], reason, nil, now, ""); err != nil {
+		end := endRegistrationAccess
+		if reason == policy.OccurrenceCancelled && cancellationActorID == *row.UserID {
+			end = endRegistrationAccessQuietly
+		}
+		if err := end(tx, row, scopes[row.OccurrenceID], reason, nil, now, ""); err != nil {
 			return now, err
 		}
 	}

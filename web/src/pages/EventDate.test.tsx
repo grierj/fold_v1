@@ -8,7 +8,7 @@ import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { ApiError } from "../api/core";
 import { Dates, Events } from "../api/events";
 import { Site } from "../api/site";
-import type { Attendee, EventDate, EventDateRead, EventDateAttendee, EventDateSeries, EventDateUsual, EventOccurrence, OccurrenceResponse, RegistrationResponse, SeriesRegistrationResponse } from "../types";
+import type { Attendee, ComposeOptions, EventDate, EventDateRead, EventDateAttendee, EventDateSeries, EventDateUsual, EventOccurrence, OccurrenceResponse, RegistrationResponse, SeriesRegistrationResponse } from "../types";
 import { coverSrc } from "../lib/covers";
 import { invalidateSite } from "../lib/useSite";
 import { occurrence as rosterOccurrence } from "../test/occurrence";
@@ -35,6 +35,14 @@ const registration: RegistrationResponse = { registrationId: 8, userId: 2, event
 const page = () => <MemoryRouter initialEntries={["/events/7/dates/2026-12-01"]}><Routes><Route path="/events/:id/dates/:date" element={<EventDatePage />} /><Route path="/login" element={<p>Sign in first</p>} /></Routes></MemoryRouter>;
 
 function mount() { return render(page()); }
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (cause: unknown) => void;
+  const promise = new Promise<T>((res, rej) => { resolve = res; reject = rej; });
+
+  return { promise, resolve, reject };
+}
 
 // Load the lazy manager module before the first cancellation case starts its DOM query timeout.
 beforeAll(async () => {
@@ -472,6 +480,39 @@ it("offers Email people going for this date to someone who may write to the even
   mount();
   expect(await screen.findByRole("link", { name: "Email people going" })).toHaveAttribute("href", "/messages/new?occurrence=51");
   expect(Messages.options).toHaveBeenCalledWith(7);
+});
+
+it.each(["shown", "pending"])("rechecks the email link after host removal when the earlier check is %s", async (initial) => {
+  actor.canCompose = true;
+  const date = occurrence({ visibility: "public", canManage: true, canDecline: false, canBlock: false });
+  const afterRemoval: ComposeOptions = { canCompose: true, canMessageEveryone: false, pushEnabled: true, groups: [], events: [] };
+  const asHost: ComposeOptions = { ...afterRemoval, events: [{ id: 7, title: date.title, churchWide: true, dates: [] }] };
+  const old = deferred<ComposeOptions>();
+  const fresh = deferred<ComposeOptions>();
+  vi.mocked(Dates.get).mockResolvedValue({ occurrence: date });
+  vi.mocked(Messages.options)
+    .mockReturnValueOnce(initial === "pending" ? old.promise : Promise.resolve(asHost))
+    .mockReturnValueOnce(fresh.promise);
+
+  mount();
+  const link = { name: "Email people going" };
+  expect(await screen.findByRole("heading", { name: date.title })).toBeInTheDocument();
+  await waitFor(() => expect(Messages.options).toHaveBeenCalledExactlyOnceWith(7));
+
+  if (initial === "shown") expect(await screen.findByRole("link", link)).toHaveAttribute("href", "/messages/new?occurrence=51");
+
+  vi.mocked(Dates.get).mockResolvedValue({ occurrence: { ...date, canManage: false } });
+  fireEvent(window, new Event("focus"));
+  expect(await screen.findByRole("heading", { name: date.title })).toBeInTheDocument();
+  expect(screen.queryByRole("region", { name: "Manage this date" })).not.toBeInTheDocument();
+  expect(screen.queryByRole("link", link)).not.toBeInTheDocument();
+  await waitFor(() => expect(vi.mocked(Messages.options).mock.calls).toEqual([[7], [7]]));
+
+  await act(async () => { fresh.resolve(afterRemoval); });
+
+  if (initial === "pending") await act(async () => { old.resolve(asHost); });
+
+  expect(screen.queryByRole("link", link)).not.toBeInTheDocument();
 });
 
 it("doesn't offer it for an event the viewer can't write to, or ask when they can't compose", async () => {
@@ -1404,14 +1445,6 @@ describe("the answer bar", () => {
     await screen.findByRole("heading", { level: 1, name: read.title });
   }
 
-  function deferred<T>() {
-    let resolve!: (value: T) => void;
-    let reject!: (cause: unknown) => void;
-    const promise = new Promise<T>((res, rej) => { resolve = res; reject = rej; });
-
-    return { promise, resolve, reject };
-  }
-
   it("is the one answer group and one status, with the details in the page's flow", async () => {
     await show(member());
     expect(screen.getAllByRole("group", { name: "Your answer" })).toHaveLength(1);
@@ -1752,27 +1785,42 @@ describe("the answer bar", () => {
   });
 
   it("an Undo past its deadline sends nothing, and the timer retires it", async () => {
-    await show(member());
-    vi.mocked(Events.registerSeries).mockResolvedValue(batch({ undoExpiresAt: new Date(Date.now() + 60_000).toISOString() }));
-    await userEvent.click(inBar("Going"));
-    await userEvent.click(within(scopeDialog()).getByRole("button", { name: "All future dates" }));
-    const button = await within(bar()).findByRole("button", { name: "Undo" });
-    const now = Date.now();
-    const clock = vi.spyOn(Date, "now").mockReturnValue(now + 61_000);
-    act(() => { button.click(); });
-    expect(Events.undoSeriesRegistration).not.toHaveBeenCalled();
-    expect(await screen.findByText(/The Undo time has ended\.$/)).toBeInTheDocument();
-    expect(within(bar()).queryByRole("button", { name: "Undo" })).not.toBeInTheDocument();
-    clock.mockRestore();
-    cleanup();
+    const undoWindow = 60_000;
+    const start = new Date("2026-11-26T19:00:00Z");
+    const deadline = new Date(start.getTime() + undoWindow);
+    vi.useFakeTimers();
 
-    await show(member());
-    vi.mocked(Events.registerSeries).mockResolvedValue(batch({ undoExpiresAt: new Date(Date.now() + 400).toISOString() }));
-    await userEvent.click(inBar("Going"));
-    await userEvent.click(within(scopeDialog()).getByRole("button", { name: "All future dates" }));
-    expect(await within(bar()).findByRole("button", { name: "Undo" })).toBeInTheDocument();
-    await waitFor(() => expect(within(bar()).queryByRole("button", { name: "Undo" })).not.toBeInTheDocument(), { timeout: 2000 });
-    expect(screen.getByRole("status")).toHaveTextContent("The Undo time has ended.");
+    try {
+      async function answerSeries() {
+        vi.setSystemTime(start);
+        vi.mocked(Dates.get).mockResolvedValue({ occurrence: member() });
+        vi.mocked(Events.registerSeries).mockResolvedValue(batch({ undoExpiresAt: deadline.toISOString() }));
+        await act(async () => { mount(); });
+        fireEvent.click(inBar("Going"));
+        await act(async () => { fireEvent.click(within(scopeDialog()).getByRole("button", { name: "All future dates" })); });
+
+        return inBar("Undo");
+      }
+
+      const button = await answerSeries();
+      // Move the clock without running the timer so the click reaches the deadline check.
+      vi.setSystemTime(deadline);
+      await act(async () => { button.click(); });
+      expect(Events.undoSeriesRegistration).not.toHaveBeenCalled();
+      expect(screen.getByRole("status")).toHaveTextContent("The Undo time has ended.");
+      expect(within(bar()).queryByRole("button", { name: "Undo" })).not.toBeInTheDocument();
+      cleanup();
+
+      await answerSeries();
+      act(() => { vi.advanceTimersByTime(undoWindow - 1); });
+      expect(inBar("Undo")).toBeVisible();
+      act(() => { vi.advanceTimersByTime(1); });
+      expect(within(bar()).queryByRole("button", { name: "Undo" })).not.toBeInTheDocument();
+      expect(screen.getByRole("status")).toHaveTextContent("The Undo time has ended.");
+      expect(Events.undoSeriesRegistration).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("a timer that fires before the deadline waits for the rest of it, then retires Undo", async () => {

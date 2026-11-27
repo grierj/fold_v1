@@ -184,10 +184,9 @@ export function GroupForm({
                 label="Cover image"
                 initialUrl={initial.imageUrl || undefined}
                 placeholderSrc={coverSrc({ id: initial.coverId })}
-                initialFocal={{ x: initial.coverFocalX, y: initial.coverFocalY }}
+                focal={coverFocal ?? { x: initial.coverFocalX, y: initial.coverFocalY }}
                 maxDim={1600}
-                aspectClass="aspect-video"
-                keyboardFocal
+                aspectClass="aspect-video max-w-sm"
                 onFile={setCoverFile}
                 onFocal={setCoverFocal}
               />

@@ -76,7 +76,7 @@ async function getRoomFeed(id: Id, pinned: Credential | null): Promise<RoomFeedR
 }
 
 export const AdminRooms = {
-  list: () => api<AdminRoomsResponse>("/admin/rooms"),
+  list: () => api<AdminRoomsResponse>("/admin/rooms", { pinned: true }),
   create: (body: RoomInput) => api<RoomResponse>("/admin/rooms", { method: "POST", body }),
   // An edit names the read it was made from (DEC-171): an older one is 409 room_changed.
   update: (id: Id, body: RoomInput, revision: string | undefined) =>
@@ -85,7 +85,7 @@ export const AdminRooms = {
   // Whether leaders' and hosts' bookings wait for an admin (M2.1d, DEC-102).
   setApproval: (enabled: boolean) => api<RoomApprovalResponse>("/admin/settings/room-approval", { method: "PUT", body: { enabled } }),
   // Typed places on upcoming dates without a room, and booking one place's dates into a room (M2.1e).
-  locations: () => api<RoomLocationsResponse>("/admin/rooms/locations"),
+  locations: () => api<RoomLocationsResponse>("/admin/rooms/locations", { pinned: true }),
   matchLocation: (location: string, roomId: number) =>
     api<MatchLocationResponse>("/admin/rooms/locations/match", { method: "POST", body: { location, roomId } }),
   // A room's calendar-feed link (M2.2b): makeFeed returns the link once and
@@ -101,7 +101,7 @@ export const AdminRooms = {
 // series. Confirming makes the free dates confirmed; busy dates are
 // double-booked with overlapReason or go back to the leader (`lost`).
 export const RoomRequests = {
-  list: () => api<RoomRequestsResponse>("/admin/room-requests"),
+  list: () => api<RoomRequestsResponse>("/admin/room-requests", { pinned: true }),
   confirm: (id: Id, overlapReason?: string) =>
     api<RoomRequestConfirmation>(path`/admin/room-requests/${id}/confirm`, { method: "POST", body: overlapReason ? { overlapReason } : {} }),
   reject: (id: Id, reason?: string) =>

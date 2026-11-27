@@ -1,4 +1,4 @@
-import { useEffect, useId, useRef, type KeyboardEvent, type ReactNode } from "react";
+import { useEffect, useId, useLayoutEffect, useRef, type KeyboardEvent, type ReactNode } from "react";
 
 type Option<T extends string> = { id: T; label: ReactNode; accessibleName?: string };
 
@@ -17,6 +17,26 @@ export function Tabs<T extends string>({ label, options, value, onChange, varian
 }) {
   const id = useId();
   const list = useRef<HTMLDivElement>(null);
+  const focusedOnDetach = useRef<T | null>(null);
+
+  // A ref detaches before React removes the focused node from the document.
+  function rememberFocus(node: HTMLElement | null, tab: T) {
+    if (!node) return;
+
+    return () => {
+      if (node.contains(document.activeElement)) focusedOnDetach.current = tab;
+    };
+  }
+
+  useLayoutEffect(() => {
+    const focused = focusedOnDetach.current;
+    focusedOnDetach.current = null;
+
+    if (focused !== null && !options.some((option) => option.id === focused) && document.activeElement === document.body) {
+      list.current?.querySelector<HTMLElement>("[aria-selected=true]")?.focus();
+    }
+  }, [options]);
+
   // A bookmarked tab off the edge of a phone-width row scrolls into view.
   useEffect(() => {
     const row = list.current;
@@ -73,6 +93,7 @@ export function Tabs<T extends string>({ label, options, value, onChange, varian
           aria-selected={value === option.id}
           aria-label={option.accessibleName}
           tabIndex={value === option.id ? 0 : -1}
+          ref={(node) => rememberFocus(node, option.id)}
           onClick={() => onChange(option.id)}
           onKeyDown={(event) => onKeyDown(event, index)}
           className={variant === "chips" ? "chip whitespace-nowrap" : `min-h-11 whitespace-nowrap border-b-2 pb-3 font-medium ${value === option.id
@@ -82,7 +103,8 @@ export function Tabs<T extends string>({ label, options, value, onChange, varian
       </div>
     </nav>
     {options.map((option) => <div key={option.id} role="tabpanel" id={`${id}-panel-${option.id}`}
-      aria-labelledby={`${id}-tab-${option.id}`} hidden={value !== option.id} tabIndex={0}>
+      aria-labelledby={`${id}-tab-${option.id}`} hidden={value !== option.id} tabIndex={0}
+      ref={(node) => rememberFocus(node, option.id)}>
       {value === option.id && children}
     </div>)}
   </>;
