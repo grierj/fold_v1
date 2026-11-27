@@ -44,13 +44,23 @@ test("a wrong password names no account and says what to do", async ({ page }) =
   await shoot(page, "login");
 });
 
-test("an expired reset link offers the next step", async ({ page }) => {
+test("an expired reset link leads to a new request by keyboard", async ({ page }) => {
   await page.goto("/reset-password?token=not-a-real-token");
   await page.getByLabel("New password", { exact: true }).fill("password1234");
   await page.getByLabel(/Confirm/).fill("password1234");
-  await page.getByRole("button", { name: /password/i }).click();
-  await expect(page.getByText("This link has expired or was already used. Request a new one below.")).toBeVisible();
+  await page.keyboard.press("Tab");
+  await expect(page.getByRole("button", { name: "Set new password" })).toBeFocused();
+  await page.keyboard.press("Enter");
+  await expect(page.getByText(/This link has expired or was already used/)).toBeFocused();
+  await page.keyboard.press("Tab");
+  await expect(page.getByRole("link", { name: "Request a new reset link" })).toBeFocused();
   await shoot(page, "reset-link");
+  await page.keyboard.press("Enter");
+  await expect(page).toHaveURL("/forgot-password");
+  await expect(page.getByLabel("Email")).toHaveValue("");
+  await page.getByLabel("Email").fill("nobody-e2e@example.com");
+  await page.keyboard.press("Enter");
+  await expect(page.getByText("If that email has an account, we've sent a link")).toBeVisible();
 });
 
 test("inviting someone who already has an account says so (kept on purpose)", async ({ page }) => {
