@@ -26,11 +26,12 @@ Read this before adding or changing a file in `migrations/`.
 
 ## Two PRs with the same number
 
-Two open PRs can pick the same next number; git merges both without a conflict and goose then
-refuses to boot. Master's ruleset requires a PR to be up to date before it merges (DEC-146), so the
-later PR merges master, fails `TestBaselineFileShape` with "duplicate version" and renumbers its
-file. `TestDuplicateVersionNeverBoots` proves a duplicated tree cannot boot, migrate or pass the
-release smoke.
+Two open PRs can pick the same next number. Git can merge both without a conflict, and goose
+then refuses to boot. A checked PR may merge while behind master (DEC-146), so check the
+proposed merge's migration filenames before merging a PR that changes them. If a number
+collides, merge master into the PR, renumber the new file, and rerun CI. `TestBaselineFileShape`
+detects duplicate versions. `TestDuplicateVersionNeverBoots` verifies the refusal to boot,
+migrate, or pass the release smoke.
 
 If a duplicate reaches master anyway, renumber the file that merged later, in a new PR (never a
 file a tagged release holds), and recreate every database that applied it under the old number:
