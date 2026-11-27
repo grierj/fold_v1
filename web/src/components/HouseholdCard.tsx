@@ -371,6 +371,7 @@ export function HouseholdCard({ showHeading = true }: { showHeading?: boolean })
       const code = errorCode(e);
 
       if (code === "household_person_converted" || code === "household_conversion_unavailable") refused("gone", p, "action");
+      else if (code === "household_conversion_consent") refused("changed", p, "action");
       else setError(errorText(e, "We couldn't remove that person."));
     } finally {
       setActing(false);
