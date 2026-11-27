@@ -823,3 +823,39 @@ func TestHouseholdPersonEditOfAConvertedPersonSaysSo(t *testing.T) {
 		t.Fatalf("the refused edits wrote:\n%s\nwant\n%s", after, before)
 	}
 }
+
+func TestHouseholdPersonEditRefusesRemovalAfterPreflight(t *testing.T) {
+	f := newHouseholdEditFixture(t)
+	path := "/api/v1/me/household/people/" + itoa(f.mary.ID)
+	body := withRevision(map[string]any{"firstName": "Maria"}, myPersonRevision(t, f.c, f.mary.ID))
+	held := f.c.doHeld("PUT", path, body)
+	apiDo(t, f.other, "DELETE", path, nil, http.StatusOK)
+	before := householdEditState(t, f.app.DB)
+	want := apiDo(t, f.other, "PUT", path, body, http.StatusNotFound)
+	held.release()
+	if w := held.wait(t); w.Code != http.StatusNotFound || w.Body.String() != want {
+		t.Fatalf("the edit after removal committed: %d %s, want 404 %s", w.Code, w.Body.String(), want)
+	}
+	if after := householdEditState(t, f.app.DB); after != before {
+		t.Fatalf("the refused edit wrote:\n%s\nwant\n%s", after, before)
+	}
+}
+
+func TestHouseholdPersonEditLockedLookupFailureAnswers500(t *testing.T) {
+	f := newHouseholdEditFixture(t)
+	path := "/api/v1/me/household/people/" + itoa(f.mary.ID)
+	body := withRevision(map[string]any{"firstName": "Maria"}, myPersonRevision(t, f.c, f.mary.ID))
+	before := householdEditState(t, f.app.DB)
+	held := f.c.doHeld("PUT", path, body)
+	failures := failStatement(t, f.app, func(tx *gorm.DB) bool {
+		return tx.Statement.Table == "household_people"
+	})
+	held.release()
+	w := held.wait(t)
+	if n := failures.Load(); n != 1 || w.Code != http.StatusInternalServerError || w.Body.String() != serverErrorBody {
+		t.Fatalf("the locked lookup with %d SQL failures: %d %s, want one failure and 500 %s", n, w.Code, w.Body.String(), serverErrorBody)
+	}
+	if after := householdEditState(t, f.app.DB); after != before {
+		t.Fatalf("the failed edit wrote:\n%s\nwant\n%s", after, before)
+	}
+}

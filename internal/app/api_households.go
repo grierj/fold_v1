@@ -889,6 +889,9 @@ func (a *App) apiUpdateHouseholdPerson(c *gin.Context) {
 			return err
 		}
 		if err := tx.First(person, person.ID).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return errHouseholdPersonGone
+			}
 			return err
 		}
 		if person.HouseholdID != seat.HouseholdID {
