@@ -1,3 +1,4 @@
+import { useMemo } from "react";
 import { useLoad } from "../../lib/useLoad";
 import { useAuth } from "../../auth";
 import { Messages } from "../../api/messages";
@@ -14,15 +15,11 @@ export function composePath(to: { group: number } | { event: number } | { occurr
   return `/messages/new?${key}=${id}`;
 }
 
-// useCanEmailEvent: the viewer may write to this event's people, for a page
-// whose own data says nothing about managing it (the date page). It asks
-// only people who can compose at all, once per event, and only about that
-// event (GET /messages/compose?event=).
-export function useCanEmailEvent(eventId: number | undefined): boolean {
+export function useCanEmailEvent(eventId: number | undefined, dateEpoch: number): boolean {
   const { canCompose } = useAuth();
-  // A failed read means no link: the composer itself decides what the person may do.
-  const load = useLoad(async () => (await Messages.options(eventId!)).events.some((e) => e.id === eventId), [canCompose, eventId], { enabled: canCompose && !!eventId });
-  const can = load.data === true;
+  // A fresh date read can reflect a host change even when the event ID stays the same.
+  const scope = useMemo(() => canCompose && eventId !== undefined ? { eventId, dateEpoch } : null, [canCompose, eventId, dateEpoch]);
+  const load = useLoad(async () => scope !== null && (await Messages.options(scope.eventId)).events.some((e) => e.id === scope.eventId), [], { enabled: scope !== null, scope });
 
-  return can;
+  return load.data === true;
 }
