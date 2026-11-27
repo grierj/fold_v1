@@ -1785,27 +1785,42 @@ describe("the answer bar", () => {
   });
 
   it("an Undo past its deadline sends nothing, and the timer retires it", async () => {
-    await show(member());
-    vi.mocked(Events.registerSeries).mockResolvedValue(batch({ undoExpiresAt: new Date(Date.now() + 60_000).toISOString() }));
-    await userEvent.click(inBar("Going"));
-    await userEvent.click(within(scopeDialog()).getByRole("button", { name: "All future dates" }));
-    const button = await within(bar()).findByRole("button", { name: "Undo" });
-    const now = Date.now();
-    const clock = vi.spyOn(Date, "now").mockReturnValue(now + 61_000);
-    act(() => { button.click(); });
-    expect(Events.undoSeriesRegistration).not.toHaveBeenCalled();
-    expect(await screen.findByText(/The Undo time has ended\.$/)).toBeInTheDocument();
-    expect(within(bar()).queryByRole("button", { name: "Undo" })).not.toBeInTheDocument();
-    clock.mockRestore();
-    cleanup();
+    const undoWindow = 60_000;
+    const start = new Date("2026-11-26T19:00:00Z");
+    const deadline = new Date(start.getTime() + undoWindow);
+    vi.useFakeTimers();
 
-    await show(member());
-    vi.mocked(Events.registerSeries).mockResolvedValue(batch({ undoExpiresAt: new Date(Date.now() + 400).toISOString() }));
-    await userEvent.click(inBar("Going"));
-    await userEvent.click(within(scopeDialog()).getByRole("button", { name: "All future dates" }));
-    expect(await within(bar()).findByRole("button", { name: "Undo" })).toBeInTheDocument();
-    await waitFor(() => expect(within(bar()).queryByRole("button", { name: "Undo" })).not.toBeInTheDocument(), { timeout: 2000 });
-    expect(screen.getByRole("status")).toHaveTextContent("The Undo time has ended.");
+    try {
+      async function answerSeries() {
+        vi.setSystemTime(start);
+        vi.mocked(Dates.get).mockResolvedValue({ occurrence: member() });
+        vi.mocked(Events.registerSeries).mockResolvedValue(batch({ undoExpiresAt: deadline.toISOString() }));
+        await act(async () => { mount(); });
+        fireEvent.click(inBar("Going"));
+        await act(async () => { fireEvent.click(within(scopeDialog()).getByRole("button", { name: "All future dates" })); });
+
+        return inBar("Undo");
+      }
+
+      const button = await answerSeries();
+      // Move the clock without running the timer so the click reaches the deadline check.
+      vi.setSystemTime(deadline);
+      await act(async () => { button.click(); });
+      expect(Events.undoSeriesRegistration).not.toHaveBeenCalled();
+      expect(screen.getByRole("status")).toHaveTextContent("The Undo time has ended.");
+      expect(within(bar()).queryByRole("button", { name: "Undo" })).not.toBeInTheDocument();
+      cleanup();
+
+      await answerSeries();
+      act(() => { vi.advanceTimersByTime(undoWindow - 1); });
+      expect(inBar("Undo")).toBeVisible();
+      act(() => { vi.advanceTimersByTime(1); });
+      expect(within(bar()).queryByRole("button", { name: "Undo" })).not.toBeInTheDocument();
+      expect(screen.getByRole("status")).toHaveTextContent("The Undo time has ended.");
+      expect(Events.undoSeriesRegistration).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("a timer that fires before the deadline waits for the rest of it, then retires Undo", async () => {
