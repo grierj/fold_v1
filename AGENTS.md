@@ -440,7 +440,8 @@ Grier's rule. An agent may merge a fold PR, as a normal merge commit, when all o
    SMS) doesn't block a merge: build it best effort, test what an agent can, and add the check to
    `docs/FIRST-CHURCH-CHECKS.md` in the same PR (DEC-128).
 
-After a merge, merge master into the other open branches (never rebase) and report the merge SHA.
+After a merge, report the merge SHA. Leave other checked PRs on their reviewed heads unless
+they need a change.
 
 ## Rules and what enforces them
 
