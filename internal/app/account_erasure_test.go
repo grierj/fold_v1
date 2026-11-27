@@ -9610,6 +9610,18 @@ func (r *agesRaceRun) do(c *apiClient, method, path string, body any) <-chan htt
 	return ch
 }
 
+func (r *agesRaceRun) awaitErasure(ch <-chan httpResult, who string) {
+	r.t.Helper()
+	select {
+	case result := <-ch:
+		if result.code != http.StatusOK {
+			r.t.Fatalf("%s: HTTP %d %s", who, result.code, result.body)
+		}
+	case <-r.ctx.Done():
+		r.t.Fatalf("%s did not return before the race deadline: %v", who, r.ctx.Err())
+	}
+}
+
 // rollover runs app.rolloverAges(now) as a tracked participant.
 func (r *agesRaceRun) rollover(app *App, now time.Time) <-chan agesRaceRolloverResult {
 	ch := make(chan agesRaceRolloverResult, 1)
@@ -10928,7 +10940,7 @@ func agesRaceTwoErasures(t *testing.T, subjectFirst bool) {
 		t.Fatal("the request changed before the first erasure released the gate")
 	}
 	releaseFirst()
-	agesRaceOK(t, first, "first erasure")
+	w.run.awaitErasure(first, "the first erasure after release")
 	firstSpan := erasureSpan{Start: span.Start, End: time.Now().UTC()}
 	awaitDBSignal(t, secondReached) // the first has committed; the second holds the gate and has not scrubbed
 	if waiter != agesRacePID(secondPID) {
@@ -10956,7 +10968,7 @@ func agesRaceTwoErasures(t *testing.T, subjectFirst bool) {
 		Notices: []agesRaceNoticeWant{agesRaceUpdated(livingID, r, policy.ContactEnded)},
 	}, l0, l1)
 	releaseSecond()
-	agesRaceOK(t, second, "second erasure")
+	w.run.awaitErasure(second, "the second erasure after release")
 	span.End = time.Now().UTC()
 	secondSpan.End = span.End
 
@@ -11314,19 +11326,34 @@ func TestAgesNoteErasureRaceErasureThenRollover(t *testing.T) {
 func TestAgesNoteErasureRaceUnlockedReader(t *testing.T) {
 	const rows = lookupChunk + 1
 	sc := newAgesNoteScene(t, false, rows)
+	uid := sc.erased.ID
+	path := "/api/v1/admin/users/" + itoa(uid)
+	// Reading the review pages is setup for this race. Only the DELETE
+	// runs against the barrier after the first scrub batch.
+	body := sc.ac.withKeptReasons(path, nil)
+	if body == nil {
+		t.Fatal("could not prepare the erasure's reason review")
+	}
+	sc.ac.autoReview = false
+
 	run, states := newAgesRaceRun(t, sc.app)
 	db := run.db
 	rec := recordAgesNoteStatements(t, db)
 	before := sc.state(t)
-	uid := sc.erased.ID
 
 	var erasurePID atomic.Int64
 	hold := agesRaceAfterScrub(uid, lookupChunk)
 	hold.PID = &erasurePID
 	reached, release := run.pause(hold)
 
-	del := run.do(sc.ac, "DELETE", "/api/v1/admin/users/"+itoa(uid), nil)
-	awaitDBSignal(t, reached)
+	del := run.do(sc.ac, "DELETE", path, body)
+	select {
+	case <-reached:
+	case result := <-del:
+		t.Fatalf("erasure returned before the first ages-note batch: HTTP %d %s", result.code, result.body)
+	case <-run.ctx.Done():
+		t.Fatalf("erasure did not reach the first ages-note batch before the race deadline: %v", run.ctx.Err())
+	}
 	ePID := agesRacePID(&erasurePID)
 	requireContactGate(t, db, ePID, true, "the erasure")
 	// The control: the erasure's row locks are real. A reader that asked for a
