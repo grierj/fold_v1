@@ -42,7 +42,7 @@
     "web/src/pages/GuestManage.tsx": 1,
     "web/src/pages/Invite.tsx": 1,
     "web/src/pages/Login.tsx": 1,
-    "web/src/pages/Profile.tsx": 3
+    "web/src/pages/Profile.tsx": 2
   },
   "closeAndReopen": {},
   "danger": {
@@ -55,9 +55,7 @@
     "web/src/components/Notifications.tsx": 2,
     "web/src/lib/notifications.ts": 1
   },
-  "importantOverrides": {
-    "web/src/pages/Profile.tsx": 1
-  },
+  "importantOverrides": {},
   "rawControls": {
     "web/src/components/Layout.tsx": 1,
     "web/src/components/Notifications.tsx": 7

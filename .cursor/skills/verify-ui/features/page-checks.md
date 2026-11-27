@@ -20,6 +20,14 @@ Preconditions: a baseline instance (the seed runs automatically).
 - **One page:** `UI_PAGES=profile node .cursor/skills/verify-ui/drive-ui.mjs`. This produces `profile-390.png`, `profile-768.png` and `profile-1280.png`. Each id in `UI_PAGES` is an exact page id from the table (`profile-household`, `compose-long-name`, `admin-users`).
 - **Read the page, not just the line:** open the 390 screenshots in `$VERIFY_EVIDENCE/ui/` for any page the change touched. The sticky header is part of a full-page capture and can sit in the middle of a long page.
 
+## Profile picture at 390px
+
+1. Open Me, then Profile details. Choose a non-square test picture and capture the preview.
+2. Tab to each focal point slider and press an arrow key. Check that the preview and marker move and the slider still has focus.
+3. Hold the first `PUT /api/v1/me` after changing the horizontal slider. Return to Me and reopen Profile details. Check that the horizontal slider still shows the pending value. Change the vertical slider and capture the pending preview. Release the request, wait for “Picture saved,” and reload. Capture the preview and check both saved coordinates in `GET /api/v1/auth/me`.
+4. Keep focus on a slider and hold its save while replacing the picture in another tab. Release the save and check that the old request is refused. Capture the replacement at its stored position with the equivalent slider focused.
+5. Repeat while removing the picture in the other tab. Capture focus on Choose photo. Repeat a replacement after moving focus to Full name and check that it stays there.
+
 ## Gotchas
 - A page that waits forever usually means a missing seed precondition. Report it; don't remove the page.
 - The axe page list here is wider than `web/e2e/a11y.spec.ts`. A failure on a page that spec doesn't cover is real.

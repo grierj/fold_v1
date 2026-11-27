@@ -3,8 +3,8 @@ import userEvent from "@testing-library/user-event";
 import { beforeEach, expect, it, vi } from "vitest";
 import { ImageUpload } from "./ImageUpload";
 
-const hint = "Tap or click the image to move the focal point. Faces stay centered when cropped.";
-const props = { label: "Cover image", initialFocal: { x: 50, y: 50 }, maxDim: 1600, aspectClass: "aspect-video", onFile: vi.fn(), onFocal: vi.fn() };
+const hint = "Tap the image or use the sliders to move the focal point. Faces stay centered when cropped.";
+const props = { label: "Cover image", focal: { x: 50, y: 50 }, maxDim: 1600, aspectClass: "aspect-video", onFile: vi.fn(), onFocal: vi.fn() };
 
 beforeEach(() => {
   props.onFile.mockReset();
@@ -21,6 +21,7 @@ it("is a compact row with no image: a 64px thumbnail of the placeholder and Choo
   expect(thumb).toHaveAttribute("src", "/patterns/one.svg");
   expect(screen.getByRole("button", { name: "Choose photo" })).toBeInTheDocument();
   expect(screen.queryByText(hint)).not.toBeInTheDocument();
+  expect(screen.queryByRole("slider")).not.toBeInTheDocument();
   expect(screen.queryByText("No image")).not.toBeInTheDocument();
   expect(container.querySelector("[title='Click to set the focal point']")).toBeNull();
   expect(screen.queryByRole("button", { name: "Clear" })).not.toBeInTheDocument();
@@ -40,6 +41,8 @@ it("shows the crop box, its hint and the usual buttons when an image already exi
   const { container } = render(<ImageUpload {...props} initialUrl="/uploads/cover.jpg" placeholderSrc="/patterns/one.svg" />);
   expect(screen.getByText(hint)).toBeInTheDocument();
   expect(container.querySelector("img")).toHaveAttribute("src", "/uploads/cover.jpg");
+  expect(screen.getByRole("slider", { name: "Focal point from left" })).toHaveValue("50");
+  expect(screen.getByRole("slider", { name: "Focal point from top" })).toHaveValue("50");
   expect(screen.getByRole("button", { name: "Choose different image" })).toBeInTheDocument();
   await userEvent.click(container.querySelector("[title='Click to set the focal point']")!);
   expect(props.onFocal).toHaveBeenCalledOnce();
