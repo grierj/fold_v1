@@ -1130,7 +1130,7 @@ func (a *App) apiUpdateEvent(c *gin.Context) {
 	// inside the transaction, so a concurrent edit is never overwritten with
 	// values built from a stale copy. A validation failure is returned as its
 	// answer and rolls back (nothing is written yet).
-	err = a.contactMutation(contactChange{EventID: ev.ID}, func(tx *gorm.DB) error {
+	err = a.contactMutation(contactChange{EventID: ev.ID, CancellationActorID: me.ID}, func(tx *gorm.DB) error {
 		actor, lockedEv, fresh, err := lockManagedEventIn(tx, me, ev.ID)
 		if err != nil {
 			return err
@@ -1653,8 +1653,13 @@ func (a *App) changeDateCancellation(c *gin.Context, restore bool) {
 		fail(c, errSeriesDateInvalid)
 		return
 	}
-	err := a.contactMutation(contactChange{EventID: ev.ID}, func(tx *gorm.DB) error {
-		actor, ev, facts, err := lockManagedEventIn(tx, apiUser(c), ev.ID)
+	me := apiUser(c)
+	change := contactChange{EventID: ev.ID}
+	if !restore {
+		change.CancellationActorID = me.ID
+	}
+	err := a.contactMutation(change, func(tx *gorm.DB) error {
+		actor, ev, facts, err := lockManagedEventIn(tx, me, ev.ID)
 		if err != nil {
 			return err
 		}

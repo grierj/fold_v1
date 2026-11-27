@@ -4008,6 +4008,70 @@ func TestSignedUpCountIncludesGrantHolders(t *testing.T) {
 	}
 }
 
+func TestCancellingAKeptDateSkipsTheActor(t *testing.T) {
+	for _, source := range []string{models.CancelSourceManual, models.CancelSourceSeries} {
+		t.Run(source, func(t *testing.T) {
+			app := testApp(t)
+			admin := newTestUser(t, app, "cancelling admin", "password1234", models.RoleAdmin)
+			attendee := newTestUser(t, app, "departing attendee", "password1234", models.RoleMember)
+			leader := newTestUser(t, app, "group leader", "password1234", models.RoleMember)
+			group := activeGroup(t, app, leader, "Supper club", models.VisibilityPublic, "")
+			manager := loginAPI(t, app, admin.Name, "password1234")
+			first := feedStart(7)
+			event := createFeedEvent(t, manager, group.ID, "Supper", first, "FREQ=WEEKLY;COUNT=2")
+			date := feedDate(first.AddDate(0, 0, 7))
+			var occ models.EventOccurrence
+			gormMust(t, app.DB.Where("event_id = ? AND original_date = ?", event.ID, date).First(&occ))
+			eventPath := "/api/v1/events/" + itoa(event.ID)
+			groupPath := "/api/v1/groups/" + itoa(group.ID)
+			var kept []models.Registration
+			for _, u := range []*models.User{admin, attendee} {
+				addMember(t, app, u, &group, models.MembershipMember)
+				c := loginAPI(t, app, u.Name, "password1234")
+				apiDo(t, c, "PUT", eventPath+"/registrations", map[string]any{"date": date, "status": models.RegGoing}, http.StatusOK)
+				preview := getDeparturePreview(t, c, groupPath+"/departure-preview", http.StatusOK)
+				if w := confirmDeparturePreview(t, c, "POST", groupPath+"/leave", preview, []uint{occ.ID}, ""); w.Code != http.StatusOK {
+					t.Fatalf("%s could not keep the date: %d %s", u.Name, w.Code, w.Body.String())
+				}
+				var r models.Registration
+				gormMust(t, app.DB.Where("occurrence_id = ? AND user_id = ?", occ.ID, u.ID).First(&r))
+				if !r.AccessLive() || r.AccessOrigin != policy.OccurrenceOriginDepartureSelf {
+					t.Fatalf("fixture: %s has no live departure grant", u.Name)
+				}
+				kept = append(kept, r)
+			}
+
+			if count := signedUpCount(t, manager, event.ID, date); count != 1 {
+				t.Fatalf("confirmation counts %d people, want 1", count)
+			}
+			mark := markNotices(t, app)
+			if source == models.CancelSourceManual {
+				apiDo(t, manager, "POST", eventPath+"/cancel", map[string]any{"date": date}, http.StatusOK)
+			} else {
+				apiDo(t, manager, "PUT", eventPath, seriesBody(t, manager, eventPath, map[string]any{"rruleUntil": feedDate(first)}), http.StatusOK)
+			}
+			for _, r := range kept {
+				if grant := loadAccessRow(t, app.DB, r.ID); grant.EndReason != policy.OccurrenceCancelled || grant.EndedAt == nil {
+					t.Fatalf("cancellation did not end the grant: %+v", grant)
+				}
+			}
+			if got := noticesSince(t, app, admin.ID, notify.OccurrenceUpdated, mark.notice); len(got) != 0 {
+				t.Errorf("the actor got %d access-end notices, want 0", len(got))
+			}
+			if got := noticesSince(t, app, attendee.ID, notify.OccurrenceUpdated, mark.notice); len(got) != 1 {
+				t.Errorf("the other attendee got %d access-end notices, want 1", len(got))
+			}
+			drainNotices(t, app)
+			if got := mailSince(t, app, admin.Email, mark); len(got) != 0 {
+				t.Errorf("the actor got %d emails, want 0", len(got))
+			}
+			if got := mailSince(t, app, attendee.Email, mark); len(got) != 1 {
+				t.Errorf("the other attendee got %d emails, want 1", len(got))
+			}
+		})
+	}
+}
+
 // A date kept as Maybe after leaving the group holds a live grant: a date
 // cancel tells its holder through the grant's end and a delete with one
 // event.deleted, so both counts include them, once. An ordinary Maybe with no
