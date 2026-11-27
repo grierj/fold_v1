@@ -112,10 +112,10 @@ cmd_up() {
   mkdir -p "$work/uploads" "$evidence"
   secret="verify-only-session-secret-0123456789abcdef"
   url="$(url_for "$db")"
+  printf 'building the SPA and the fold binary (log: %s/build.log)\n' "$evidence" >&2
+  (cd "$ROOT/web" && npm run build) 2>&1 | tee "$evidence/build.log" >&2
+  CGO_ENABLED=0 go build -C "$ROOT" -o "$work/fold" . 2>&1 | tee -a "$evidence/build.log" >&2
   psql_admin -c "CREATE DATABASE \"${db}\""
-  printf 'building the SPA and the fold binary\n' >&2
-  (cd "$ROOT/web" && npm run build)
-  CGO_ENABLED=0 go build -C "$ROOT" -o "$work/fold" .
   for attempt in 1 2 3; do
     if ! port="$(free_port "$port")"; then
       psql_admin -c "DROP DATABASE \"${db}\"" >&2

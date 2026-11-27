@@ -17,7 +17,7 @@ From the repo root:
 .cursor/skills/verify-fold/verify-fold up
 ```
 
-It needs `ss` from iproute2 and the Node major in `.nvmrc` on PATH (the web build runs first; the build keeps `web/dist/README.txt`, so `git status` stays clean). The command starts the dev Postgres container if it is not already up (`deploy/docker-compose.dev.yml`, database `fold` on `127.0.0.1:5432`). With no Docker, point it at a running Postgres instead: `VERIFY_PG_URL=postgres://<user>:<pass>@127.0.0.1:5432/postgres?sslmode=disable` (any database that role can `CREATE DATABASE` from). Export the same `VERIFY_PG_URL` for every later `verify-fold` command in the run, including `down`. It then creates a new database named `fold_verify_<run>`, builds `web/` and a `CGO_ENABLED=0` binary, and starts `fold serve` in `APP_ENV=prod` (prod refuses `COOKIE_SECURE=false`; browsers still keep the Secure session cookie on plain `http://127.0.0.1`). Uploads go to that run's work directory, not `/data`.
+It needs `ss` from iproute2 and the Node major in `.nvmrc` on PATH (the web build runs first; the build keeps `web/dist/README.txt`, so `git status` stays clean). The command starts the dev Postgres container if it is not already up (`deploy/docker-compose.dev.yml`, database `fold` on `127.0.0.1:5432`). With no Docker, point it at a running Postgres instead: `VERIFY_PG_URL=postgres://<user>:<pass>@127.0.0.1:5432/postgres?sslmode=disable` (any database that role can `CREATE DATABASE` from). Export the same `VERIFY_PG_URL` for every later `verify-fold` command in the run, including `down`. It builds `web/` and a `CGO_ENABLED=0` binary, then creates a new database named `fold_verify_<run>` and starts `fold serve` in `APP_ENV=prod` (prod refuses `COOKIE_SECURE=false`; browsers still keep the Secure session cookie on plain `http://127.0.0.1`). Uploads go to that run's work directory, not `/data`.
 
 `up` picks a port after the build. If Fold reports a bind collision, `up` tries another port, up to two retries. Ready means the launched process owns the port and `GET /healthz` returns 200 with an empty body. The server log line is `Starting server on :<port>`. `up` prints:
 
@@ -75,7 +75,7 @@ Playwright locators in the feature files are the handles to use: role and access
 
 ## Evidence
 
-Proof for a run lives in `/tmp/fold-verify-proof/<RUN_ID>/`. `drive sign-in` writes `sign-in/`:
+Proof for a run lives in `/tmp/fold-verify-proof/<RUN_ID>/`. The launcher prints the path to `build.log` before building. The file keeps the output from both builds, including errors, after `down`. `drive sign-in` writes `sign-in/`:
 
 - `bad-password.png` shows the login form still open with `That email and password don't match. Check them and try again.`
 - `after-login.png` shows the signed-in greeting and the header name `Verify Admin` after a successful login.
