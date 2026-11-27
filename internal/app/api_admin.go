@@ -23,7 +23,7 @@ import (
 
 func (a *App) apiAdminListUsers(c *gin.Context) {
 	out := usersResponseJSON{Users: []userJSON{}}
-	err := a.readAdminSnapshot(c, "admin users", readAdminIn, func(tx *gorm.DB) error {
+	err := a.readAdminSnapshot(c, "admin users", readAdminIn, func(tx *gorm.DB, _ *models.User) error {
 		var users []models.User
 		if err := tx.Order("lower(name), email").Find(&users).Error; err != nil {
 			return err

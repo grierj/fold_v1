@@ -30,7 +30,7 @@ func readAdminIn(tx *gorm.DB, session *models.User) (*models.User, error) {
 
 func (a *App) readAdminSnapshot(c *gin.Context, surface string,
 	authorize func(*gorm.DB, *models.User) (*models.User, error),
-	read func(*gorm.DB) error,
+	read func(*gorm.DB, *models.User) error,
 ) error {
 	var judged sessionJudgment
 	err := decidingSnapshot(a.DB.WithContext(c.Request.Context()), func(tx *gorm.DB) error {
@@ -45,7 +45,7 @@ func (a *App) readAdminSnapshot(c *gin.Context, surface string,
 		if a.hooks.readerAuthorized != nil {
 			a.hooks.readerAuthorized(surface)
 		}
-		return read(tx)
+		return read(tx, admin)
 	})
 	if ackErr := a.acknowledgeDecision(c, judged, err == nil || decidedRefusal(err)); ackErr != nil {
 		return ackErr
@@ -54,7 +54,7 @@ func (a *App) readAdminSnapshot(c *gin.Context, surface string,
 }
 
 func (a *App) readRevisedSetting(c *gin.Context, setting revisedSetting) (value, revision string, err error) {
-	err = a.readAdminSnapshot(c, setting.key, readAdminIn, func(tx *gorm.DB) error {
+	err = a.readAdminSnapshot(c, setting.key, readAdminIn, func(tx *gorm.DB, _ *models.User) error {
 		value, revision, err = a.settingRevisionIn(tx, setting)
 		return err
 	})

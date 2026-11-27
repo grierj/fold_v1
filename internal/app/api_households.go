@@ -303,16 +303,6 @@ func (a *App) householdPersonJSONIn(tx *gorm.DB, person *models.HouseholdPerson,
 	return a.toHouseholdPersonJSON(person, revision, batch)
 }
 
-// toHouseholdJSON is the household id as one read-only snapshot shows it to
-// viewer, so each revision names the fields beside it.
-func (a *App) toHouseholdJSON(id uint, viewer *models.User) (out householdJSON, err error) {
-	err = a.DB.Transaction(func(tx *gorm.DB) error {
-		out, err = a.toHouseholdJSONIn(tx, id, viewer, time.Now().UTC())
-		return err
-	}, readSnapshot)
-	return out, err
-}
-
 // toHouseholdJSONIn is the household as db shows it, with ages, care-note
 // windows and conversions decided at now.
 func (a *App) toHouseholdJSONIn(db *gorm.DB, id uint, viewer *models.User, now time.Time) (householdJSON, error) {

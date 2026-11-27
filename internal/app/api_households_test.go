@@ -719,53 +719,69 @@ func TestHouseholdRevisionsFollowTheirRows(t *testing.T) {
 	}
 }
 
-// The answers of the household writes read each revision in the snapshot that
-// read the fields beside it (toHouseholdJSON, householdPersonRow): an edit
-// committed right after the row was read leaves the answer with the older
-// fields and the older revision, never the older fields with the newer one.
+// An edit committed after a write reply reads its row must leave the reply
+// with the fields and revision from before that edit.
 func TestHouseholdAnswersReadFieldsAndRevisionsInOneSnapshot(t *testing.T) {
 	f := newHouseholdEditFixture(t)
-	seam := func(t *testing.T, table, change string, id uint) *atomic.Bool {
-		var fired atomic.Bool
-		name := "test:household_answer_seam_" + table
+	seam := func(t *testing.T, rows revisionRows, change string, id uint) func(string) {
+		t.Helper()
+		token := func() string {
+			t.Helper()
+			got, err := f.app.rowRevisionIn(f.app.DB, rows, id)
+			if err != nil {
+				t.Fatal(err)
+			}
+			return got
+		}
+		var before string
+		var reading, fired atomic.Bool
+		f.app.hooks.readerBegin = func(surface string) {
+			if surface == "household write reply" {
+				before = token()
+				reading.Store(true)
+			}
+		}
+		t.Cleanup(func() { f.app.hooks.readerBegin = nil })
+		name := "test:household_answer_seam_" + rows.table
 		gormMust(t, &gorm.DB{Error: f.app.DB.Callback().Query().After("gorm:query").Register(name, func(tx *gorm.DB) {
-			if tx.Statement.Table == table && fired.CompareAndSwap(false, true) {
-				if err := f.app.DB.Exec(change, id).Error; err != nil {
-					t.Error(err)
-				}
+			if reading.Load() && tx.Statement.Table == rows.table && fired.CompareAndSwap(false, true) {
+				gormMust(t, f.app.DB.Exec(change, id))
 			}
 		})})
 		t.Cleanup(func() { _ = f.app.DB.Callback().Query().Remove(name) })
-		return &fired
-	}
-	token := func(rows revisionRows, id uint) string {
-		got, err := f.app.rowRevisionIn(f.app.DB, rows, id)
-		if err != nil {
-			t.Fatal(err)
+		return func(got string) {
+			t.Helper()
+			if current := token(); !fired.Load() || got != before || current == before {
+				t.Fatalf("seam fired %t: reply revision %q, before %q, current %q", fired.Load(), got, before, current)
+			}
 		}
-		return got
 	}
 	t.Run("the household", func(t *testing.T) {
-		before := token(householdRevisionRows, f.householdID)
-		fired := seam(t, "households", "UPDATE households SET name = 'Committed meanwhile', updated_at = now() WHERE id = ?", f.householdID)
-		out, err := f.app.toHouseholdJSON(f.householdID, f.holder)
-		if err != nil {
-			t.Fatal(err)
+		check := seam(t, householdRevisionRows, "UPDATE households SET name = 'Committed meanwhile', updated_at = now() WHERE id = ?", f.householdID)
+		body := withRevision(map[string]any{"name": "Saved household name"}, getMyHousehold(t, f.c).Revision)
+		w := f.c.do("PUT", "/api/v1/me/household", body, true)
+		if w.Code != http.StatusOK {
+			t.Fatalf("save household: %d %s", w.Code, w.Body.String())
 		}
-		if !fired.Load() || out.Name == "Committed meanwhile" || out.Revision != before || token(householdRevisionRows, f.householdID) == before {
-			t.Fatalf("fired %t: the answer %q with %q, the token before %q", fired.Load(), out.Name, out.Revision, before)
+		var out householdResponseJSON
+		decodeJSON(t, w, &out)
+		if out.Household.Name != "Saved household name" {
+			t.Fatalf("reply household name %q", out.Household.Name)
 		}
+		check(out.Household.Revision)
 	})
 	t.Run("a person", func(t *testing.T) {
-		before := token(householdPersonRevisionRows, f.kit.ID)
-		fired := seam(t, "household_people", "UPDATE household_people SET care_notes = 'Committed meanwhile', updated_at = now() WHERE id = ?", f.kit.ID)
-		row, err := f.app.householdPersonRow(f.kit.ID, f.holder)
-		if err != nil {
-			t.Fatal(err)
+		check := seam(t, householdPersonRevisionRows, "UPDATE household_people SET care_notes = 'Committed meanwhile', updated_at = now() WHERE id = ?", f.kit.ID)
+		body := withRevision(map[string]any{"careNotes": "Saved care notes"}, myPersonRevision(t, f.c, f.kit.ID))
+		w := f.c.do("PUT", "/api/v1/me/household/people/"+itoa(f.kit.ID), body, true)
+		if w.Code != http.StatusOK {
+			t.Fatalf("save household person: %d %s", w.Code, w.Body.String())
 		}
-		if !fired.Load() || row.CareNotes == nil || *row.CareNotes != "Private allergy note" || row.Revision != before || token(householdPersonRevisionRows, f.kit.ID) == before {
-			t.Fatalf("fired %t: the answer %+v, the token before %q", fired.Load(), row, before)
+		row := householdPersonAnswer(t, w)
+		if row.CareNotes == nil || *row.CareNotes != "Saved care notes" {
+			t.Fatalf("reply person %+v", row)
 		}
+		check(row.Revision)
 	})
 }
 

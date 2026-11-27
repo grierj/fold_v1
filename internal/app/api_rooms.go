@@ -106,7 +106,9 @@ func readRoomAdminIn(tx *gorm.DB, session *models.User) (*models.User, error) {
 }
 
 func (a *App) readAdminRoomList(c *gin.Context, surface string, read func(*gorm.DB) error) bool {
-	err := a.readAdminSnapshot(c, surface, readRoomAdminIn, read)
+	err := a.readAdminSnapshot(c, surface, readRoomAdminIn, func(tx *gorm.DB, _ *models.User) error {
+		return read(tx)
+	})
 	if err != nil {
 		fail(c, err)
 		return false
