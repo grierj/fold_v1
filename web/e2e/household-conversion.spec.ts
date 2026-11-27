@@ -1,5 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
-import { apiAs, email, PASSWORD, signIn } from "./helpers";
+import { apiAs, checkState, email, PASSWORD, signIn } from "./helpers";
 
 // Reads the invitation from the dev mail outbox, so it runs in e2e/run.sh's dev shard (APP_ENV=dev).
 async function latestInvite(page: Page, address: string, previous = ""): Promise<string> {
@@ -32,9 +32,10 @@ async function shoot(page: import("@playwright/test").Page, name: string) {
   await page.setViewportSize({ width: 1280, height: 900 });
 }
 
-test("household adult invitation transfers sign-ups when the account is ready", async ({ page, request }) => {
+test("household adult invitation transfers sign-ups when the account is ready", async ({ page, request, browser, baseURL }) => {
   const kind = "adult";
   test.skip((await request.get("/dev/outbox")).status() !== 200, "Requires E2E_APP_ENV=dev for the mail outbox");
+  test.slow();
   const admin = await apiAs(request, "grier");
   const account = `conversion-${kind}-parent`;
   await admin("POST", "/admin/users", { ageBand: "adult", name: `Conversion ${kind} parent`, email: email(account), password: PASSWORD, role: "member" });
@@ -56,8 +57,24 @@ test("household adult invitation transfers sign-ups when the account is ready", 
   await page.getByRole("button", { name: "Create their own account" }).click();
   const destination = email(`conversion-${kind}-own`);
   await page.getByLabel("Their email address").fill(destination);
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.route("**/api/v1/me/household", (route) => route.abort(), { times: 1 });
   await page.getByRole("button", { name: "Send account invitation" }).click();
+  const notice = page.getByRole("status").filter({ hasText: "Invitation sent for Conversion adult." });
+  await expect(notice).toBeVisible();
+  await expect(notice).toBeFocused();
+  const remove = page.getByRole("button", { name: "Remove Conversion adult" });
+  await expect(remove).toHaveCount(0);
+  await checkState(page, "household-conversion", "invitation-refresh-failed");
+  await page.getByRole("button", { name: "Try again" }).click();
   await expect(page.getByText(`Invitation pending: ${destination}`, { exact: false })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Edit Conversion adult" })).toBeFocused();
+  let confirmation = "";
+  page.once("dialog", async (dialog) => { confirmation = dialog.message(); await dialog.dismiss(); });
+  await remove.click();
+  expect(confirmation).toContain("This also cancels their account invitation.");
+  await checkState(page, "household-conversion", "invitation-refresh-recovered");
+  await page.setViewportSize({ width: 1280, height: 900 });
   await shoot(page, `conversion-${kind}-pending`);
   const first = await latestInvite(page, destination);
   await page.getByRole("button", { name: "Resend invitation", exact: true }).click();
@@ -96,11 +113,28 @@ test("household adult invitation transfers sign-ups when the account is ready", 
   expect(beforeApproval.occurrences[0].myHouseholdRegistrations).toEqual(expect.arrayContaining([expect.objectContaining({ registrationId, personId: person.id, status: "going" })]));
   await page.goto(`/events/${event.id}`);
   await expect(page.getByText(`Conversion ${kind}`, { exact: true }).first()).toBeVisible();
+  const staleContext = await browser.newContext({ baseURL, storageState: await page.context().storageState(), viewport: { width: 390, height: 844 } });
+  const stale = await staleContext.newPage();
+  await stale.goto("/profile/household");
+  const staleRemove = stale.getByRole("button", { name: "Remove Conversion adult" });
+  await expect(staleRemove).toBeEnabled();
   await signIn(page, "grier");
   await page.goto("/admin");
   const card = page.getByRole("group", { name: `Account request from Conversion ${kind}`, exact: true });
   await card.getByRole("button", { name: "Approve" }).click();
   await expect(card).toHaveCount(0);
+  stale.once("dialog", (dialog) => dialog.accept());
+  const deletion = stale.waitForResponse((response) => response.url().endsWith(`/api/v1/me/household/people/${person.id}`) && response.request().method() === "DELETE");
+  await staleRemove.click();
+  const refused = await deletion;
+  expect(refused.status()).toBe(409);
+  expect(await refused.json()).toMatchObject({ code: "household_person_converted" });
+  const line = stale.getByText("Conversion adult. Your last action could not be completed.");
+  await expect(line).toBeFocused();
+  await expect(staleRemove).toHaveCount(0);
+  await expect(stale.getByText("Household teen", { exact: true })).toBeVisible();
+  await checkState(stale, "household-conversion", "converted-remove-refused");
+  await staleContext.close();
   await signIn(page, `conversion-${kind}-own`);
   expect((await page.request.get("/api/v1/auth/me")).status()).toBe(200);
   const updated = await admin("GET", `/events/${event.id}`);
